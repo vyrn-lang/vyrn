@@ -167,7 +167,14 @@ fn loader_sections() -> Vec<Section> {
              project opts into, and PLAN-0125-runtime §3's, which is the \
              compiler's own and no manifest widens",
         ),
-        sec("struct Module {", Shared, "one parsed module awaiting linking"),
+        sec(
+            "struct Module {",
+            Shared,
+            "one parsed module awaiting linking, and the state one load walks \
+             around it — six values threaded as six arguments through a \
+             worklist that calls itself from four places, until RFC-0125 §3 \
+             M6's worklist slice",
+        ),
         sec(
             "pub const RT_PREFIX: &str = \"json$\";",
             Job,
@@ -226,6 +233,16 @@ fn loader_sections() -> Vec<Section> {
             "which type declarations the parser injects into every file",
         ),
         sec(
+            "enum DeclKind {",
+            Shared,
+            "the ONE table of what a module declares, and the one of where each \
+             declaration records its owning module. Six readers wrote the five \
+             lists out to ask it before RFC-0125 §3 M6's table slice — the decl \
+             set, the export set, the privacy candidates, an injected module's \
+             reserved spellings, `link`'s registration and `load_modules`'s \
+             attribution — each with its own copy of which lists a rule skips",
+        ),
+        sec(
             "fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_key: &str) {",
             Job,
             "RFC-0022's import aliasing resolved into the flat namespace before \
@@ -271,11 +288,15 @@ fn loader_sections() -> Vec<Section> {
              twice or referenced without an import",
         ),
         sec(
-            "fn with_file(mut d: Diagnostic, m: &Module, root_key: &str) -> Diagnostic {",
+            "fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {",
             Shared,
             "where a load's diagnostic points: the module's file, the import \
              line a reader has to edit, and the namespace binding a suggestion \
-             would spell",
+             would spell. Since RFC-0125 §3 M6's wording slice there is ONE \
+             statement of the first — `load_modules`, `run_generator` and the \
+             namespace pass each restated it against their own key, and eleven \
+             sites in `link` and `resolve_aliases` spelled a whole \
+             `Diagnostic::error` out to reach a third",
         ),
         sec(
             "fn clash_diagnostics(",
@@ -1027,7 +1048,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4211, 23),
+        ("loader.rs", "the file's own job", 3998, 9),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1036,7 +1057,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("loader.rs", "shared machinery", 543, 0),
+        ("loader.rs", "shared machinery", 665, 1),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2947, 0),
         ("symbols.rs", "a rule stated a second time", 267, 0),

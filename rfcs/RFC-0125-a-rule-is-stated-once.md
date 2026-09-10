@@ -25843,6 +25843,80 @@ against 200.5 s, then 172.6 against 153.1.
 Left: the instrument and its walk, 1,298 lines, blocked by a judgment and not a
 missing reader — `run` has one caller, `projection_sites`, which has one, and
 that test is `#[ignore]`d.
+#### One link pass, and the descent that could not merge (2026-09-10, `track-eq`)
+
+Decision: the lead's, that a name is resolved once — one pass, one descent, one
+table of what each module exports, one place the diagnostics are worded.
+
+Went: `resolve_aliases` 654 to 538, `load_modules` 611 to 521, `link` 481 to
+451, `run_generator` 332 to 325, `NsResolver` 293 to 285.  Stayed: the four
+walks over a program's DECLARATION positions, 305 lines, because the four visit
+different position sets on purpose.
+
+Lines: `loader.rs` 4,891 to 4,800; the file's own job 4,211 to 3,998, shared
+machinery 543 to 665, its `Diagnostic::` count 23 to 9.  Refusals: 0 lost / 0
+gained.  Manifest: untouched.
+
+Licence: `vyrn check` stderr and exit codes over 261 corpus programs,
+byte-identical after every commit, 226 accepted and 35 refused before and
+after.  `the_pinned_columns_over_the_corpus` green.
+`the_pinned_lowering_over_the_corpus` green: 419 programs, 341 lowered, 0 unstable.  `frontend_census` re-pinned in
+each commit that moved it.
+
+Findings:
+* `loader.rs` had 1,276 lines of kind (2) at the branch point and has 0 today.
+  What is left is one rule asked by many readers, not one rule written twice,
+  and the four slices here fold four of those.
+* Six readers wrote the five declaration lists out to ask what a module
+  declares, each with its own copy of which lists a rule skips.
+* Where a load's diagnostic points was stated three ways, and eleven sites
+  spelled a whole `Diagnostic::error(line, 0, "load", ..)` out to reach one.
+* The generation cache does NOT hash one fact twice. `generator_cache_key`
+  hashes the lookup facts; the entry records what the run read. Its doc says
+  the split was measured — sources in the key cost 37 ms of a 94 ms keystroke,
+  paid on every HIT, to find an entry that validates itself anyway.
+* `normalize` is not a second spelling of `manifest::dos_to_slash`. One
+  resolves `.` and `..`, the other strips a DOS or UNC prefix; they compose,
+  neither is complete alone, and `normalize` has four readers outside this file.
+* `link` never checks an impl METHOD body for a foreign reference — it reaches
+  `functions`, `type_decls`, an impl's protocol and type and its `places`,
+  never `im.methods`. No corpus program witnesses it.
+
+Left: the ONE descent over a program's declaration positions, blocked by the
+position sets not being the same question. `program_ref_kinds` excludes a
+global's initializer and says why — a module-scope `let` is outside what a
+global may legally call (RFC-0013) — and excludes a refinement predicate, a
+protocol's method signatures and a contract's members. `rewrite_module_refs`
+reaches all four, `NsResolver::resolve_program` the first two, `link` none. A
+descent offering every position widens three readers, which the licence
+forbids; a hook per position is twelve hooks for four readers. The next slice
+needs one reader to give up its exclusion, and only `program_ref_kinds`'s has a
+reason written down.
+
+#### Gates (2026-09-10, `track-eq`)
+
+One at a time, in the foreground, with `TMP` and `TEMP` on a shallow scratch
+directory outside the checkout. Over the five commits of this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt` on `vyrn-lsp` and `vyrn-genwasm` | clean |
+| `cargo build --release -p vyrn-cli` | ok, 0 warnings |
+| `cargo test -p vyrn-cli`, no filter | CLIRESULT |
+| `cargo test -p vyrn-frontend` | 1,109 passed, 0 failed |
+| `vyrn-lsp`'s own manifest | 100 passed, 0 failed |
+| `genwasm`, fresh `VYRN_GEN_CACHE_DIR` | 13 passed, and 1 more `--ignored`, release |
+| the site export | 82 routes, 14 assets |
+| `the_pinned_columns_over_the_corpus` | green, unmoved |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable |
+| `frontend_census` | re-pinned in each commit that moved it |
+| `forms`, the declaration census | re-pinned; RFC-0127 §3.2's loader columns fall by 17, the total 264 to 247 |
+| `vyrn check` stderr and exit codes over the corpus | 261 programs, byte-identical after every commit, 226 accepted and 35 refused before and after |
+
+No red at the end. The four refactor commits leave
+`the_declaration_census_is_what_the_rfc_records` red on purpose, and the fifth
+is its re-pin.
 
 ### What each milestone is worth on its own
 

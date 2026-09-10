@@ -746,6 +746,31 @@ struct Module {
     injected: Option<&'static str>,
 }
 
+/// The state one load walks: the modules entered so far, which of them are
+/// still loading, the generated-module identities (RFC-0040 §1), the origin
+/// maps, the success-path warnings and the cycle stack.
+///
+/// Six values threaded as six arguments through a worklist that calls itself
+/// from four places. Nothing here belongs to any one of the six alone.
+struct Work {
+    modules: Vec<Module>,
+    /// `false` = loading, `true` = loaded.
+    states: HashMap<String, bool>,
+    /// Generator-import identity (RFC-0040 §1): a resolved-inputs key mapped
+    /// to the banner of the FIRST module synthesized for it. Two imports whose
+    /// path args RESOLVE identically — however they are spelled (`./strings`
+    /// vs `../strings` from a rebased `.vyx` import) — reuse that one module:
+    /// one instance, shared state, no collision.
+    identities: HashMap<String, String>,
+    origins: crate::origin::OriginMaps,
+    /// RFC-0071 M2b: success-path warnings accumulated as modules are entered.
+    /// They travel BESIDE the program, never in place of it — a warning must
+    /// not change an exit code or a byte of program output.
+    warnings: Vec<Diagnostic>,
+    /// The modules on the path to the one being entered, for the cycle report.
+    stack: Vec<String>,
+}
+
 /// The prefix every declaration of an INJECTED runtime module is renamed to
 /// (RFC-0078 M2b). `$` is not an identifier character in Vyrn — the lexer takes
 /// `is_alphanumeric() || '_'` — so no source can spell one of these names. That
@@ -1247,39 +1272,27 @@ fn load_modules(
     if LOAD_DEPTH.with(|d| d.get()) <= 1 {
         crate::floor::forget();
     }
-    let mut modules: Vec<Module> = Vec::new();
-    let mut states: HashMap<String, bool> = HashMap::new(); // false = loading
-    let mut stack: Vec<String> = Vec::new();
-    // Generator-import identity (RFC-0040 §1): a resolved-inputs key
-    // (`name\0resolved-arg\0…`) mapped to the banner of the FIRST module
-    // synthesized for it. Two imports whose path args RESOLVE identically —
-    // however they are spelled (`./strings` vs `../strings` from a rebased `.vyx`
-    // import) — reuse that one module: one instance, shared state, no collision.
-    let mut identities: HashMap<String, String> = HashMap::new();
-    let mut origins = crate::origin::OriginMaps::new();
-    // RFC-0071 M2b: success-path warnings accumulated as modules are entered.
-    // They travel BESIDE the program, never in place of it — a warning must not
-    // change an exit code or a byte of program output.
-    let mut warnings: Vec<Diagnostic> = Vec::new();
+    let mut w = Work {
+        modules: Vec::new(),
+        states: HashMap::new(),
+        identities: HashMap::new(),
+        origins: crate::origin::OriginMaps::new(),
+        warnings: Vec::new(),
+        stack: Vec::new(),
+    };
 
-    #[allow(clippy::too_many_arguments)]
     fn visit(
         key: &str,
         source: Option<&str>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
-        modules: &mut Vec<Module>,
-        states: &mut HashMap<String, bool>,
-        identities: &mut HashMap<String, String>,
-        origins: &mut crate::origin::OriginMaps,
-        warnings: &mut Vec<Diagnostic>,
-        stack: &mut Vec<String>,
+        w: &mut Work,
         root_key: &str,
     ) -> Result<(), Vec<Diagnostic>> {
-        match states.get(key) {
+        match w.states.get(key) {
             Some(true) => return Ok(()), // already loaded
             Some(false) => {
-                let cycle: Vec<&str> = stack.iter().map(|s| s.as_str()).collect();
+                let cycle: Vec<&str> = w.stack.iter().map(|s| s.as_str()).collect();
                 return Err(vec![Diagnostic::error(
                     0,
                     0,
@@ -1289,8 +1302,8 @@ fn load_modules(
             }
             None => {}
         }
-        states.insert(key.to_string(), false);
-        stack.push(key.to_string());
+        w.states.insert(key.to_string(), false);
+        w.stack.push(key.to_string());
 
         let _read = crate::prof::phase("read");
         let text = match source {
@@ -1333,7 +1346,7 @@ fn load_modules(
                 opts.alias_base.as_str()
             };
             let ctx = crate::origin::Context::new(&text, dir_of(importer), project);
-            origins.add_module(key, &text, &ctx);
+            w.origins.add_module(key, &text, &ctx);
             // RFC-0071 M2b, RFC-0099: the same line-scan lifts `//@diag`
             // directives into diagnostics at the severity the generator chose. A
             // page is generated twice (server + client bundle), and a generator
@@ -1358,8 +1371,8 @@ fn load_modules(
                         }
                     }
                     crate::diagnostics::Severity::Warning => {
-                        if !seen(warnings) {
-                            warnings.push(d);
+                        if !seen(&w.warnings) {
+                            w.warnings.push(d);
                         }
                     }
                 }
@@ -1371,11 +1384,11 @@ fn load_modules(
 
         // A `.json` module is a JSON Schema document: synthesize validated
         // type declarations from it (RFC-0010 M2) instead of parsing Vyrn.
-        // Schema modules import nothing themselves.
+        // Schema w.modules import nothing themselves.
         if key.ends_with(".json") {
             let decls = crate::schema::synthesize(&text, None, key)
                 .map_err(|e| vec![Diagnostic::error(0, 0, "load", e)])?;
-            modules.push(Module {
+            w.modules.push(Module {
                 key: key.to_string(),
                 program: Program {
                     imports: Vec::new(),
@@ -1395,20 +1408,20 @@ fn load_modules(
                 gen_source: None,
                 injected: None,
             });
-            stack.pop();
-            states.insert(key.to_string(), true);
+            w.stack.pop();
+            w.states.insert(key.to_string(), true);
             return Ok(());
         }
         // Lex + parse, memoized on the module's TEXT.
         //
         // A keystroke changes one module, but the loader re-parsed every module
-        // reachable from the root: 32 modules and 719 KB for examples/bin, all
+        // reachable from the root: 32 w.modules and 719 KB for examples/bin, all
         // but one of them byte-identical to the previous keystroke. The text is
         // the whole input to lexing and parsing, so its hash is the whole key.
         //
         // Cached BEFORE the per-module attribution below, which depends on `key`
         // and `is_root` rather than on the text, and so must still run — the same
-        // source loaded under two keys yields two different modules from one
+        // source loaded under two keys yields two different w.modules from one
         // parse.
         //
         // Only successes are cached. A parse error's diagnostics are rewritten
@@ -1432,22 +1445,12 @@ fn load_modules(
                 hit
             } else {
                 let _p = crate::prof::phase("parse");
-                let tokens = lexer::lex(&text).map_err(|mut d| {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    vec![d]
-                })?;
+                let tokens = lexer::lex(&text).map_err(|d| vec![in_module(d, key, root_key)])?;
                 let (parsed, errors) = parser::parse_accum(tokens);
                 if !errors.is_empty() {
                     return Err(errors
                         .into_iter()
-                        .map(|mut d| {
-                            if !is_root {
-                                d.file = Some(key.to_string());
-                            }
-                            d
-                        })
+                        .map(|d| in_module(d, key, root_key))
                         .collect());
                 }
                 PARSE_CACHE.with(|c| {
@@ -1486,35 +1489,8 @@ fn load_modules(
         // Attribute decls to this module (root stays `None` so single-file
         // diagnostics render exactly as before).
         if !is_root {
-            for f in &mut program.functions {
-                f.module = Some(key.to_string());
-            }
-            for t in &mut program.type_decls {
-                t.module = Some(key.to_string());
-            }
-            for p in &mut program.protocols {
-                p.module = Some(key.to_string());
-            }
-            // Contracts (RFC-0071) carry their module too: `ContractInfo.module`
-            // is what lets a diagnostic say which library declared the contract
-            // (`contract `Page`, std/ui`).
-            for c in &mut program.contracts {
-                c.module = Some(key.to_string());
-            }
-            // Module state (RFC-0029) carries its owning module too, for
-            // diagnostics and the same-module initializer-call rule.
-            for g in &mut program.globals {
-                g.module = Some(key.to_string());
-            }
-            // Tag tests with their module too (RFC-0015): they still type-check,
-            // but `vyrn test <root>` runs only the root's (`None`-module) tests.
-            for t in &mut program.tests {
-                t.module = Some(key.to_string());
-            }
-            // Tag benches with their module too (RFC-0055): they still type-check,
-            // but `vyrn bench <root>` runs only the root's (`None`-module) benches.
-            for b in &mut program.benches {
-                b.module = Some(key.to_string());
+            for slot in decl_modules_mut(&mut program) {
+                *slot = Some(key.to_string());
             }
         }
 
@@ -1566,13 +1542,8 @@ fn load_modules(
                 idx += 1;
                 continue;
             };
-            let load_err = |msg: String| -> Vec<Diagnostic> {
-                let mut d = Diagnostic::error(line, 0, "load", msg);
-                if !is_root {
-                    d.file = Some(key.to_string());
-                }
-                vec![d]
-            };
+            let load_err =
+                |msg: String| -> Vec<Diagnostic> { vec![load_error(key, root_key, line, msg)] };
             if is_namespace {
                 return Err(load_err(format!(
                     "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
@@ -1594,28 +1565,17 @@ fn load_modules(
         let mut import_targets: Vec<Option<String>> = vec![None; program.imports.len()];
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Path(path) = &imp.source {
-                let target = resolve_spec(path, key, opts).map_err(|e| {
-                    let mut d = Diagnostic::error(imp.line, 0, "load", e);
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    vec![d]
-                })?;
+                let target = resolve_spec(path, key, opts)
+                    .map_err(|e| vec![load_error(key, root_key, imp.line, e)])?;
                 // RFC-0072 M1: an import may not WIDEN audience. Checked here,
                 // before the target is visited, so the first illegal edge is the
                 // one reported rather than whatever its subtree fails at.
-                if let Some(mut d) = audience_objection(key, &target, imp.line, opts)
+                if let Some(d) = audience_objection(key, &target, imp.line, opts)
                     .or_else(|| runtime_fence(key, &target, imp.line, opts))
                 {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    return Err(vec![d]);
+                    return Err(vec![in_module(d, key, root_key)]);
                 }
-                visit(
-                    &target, None, opts, resolver, modules, states, identities, origins, warnings,
-                    stack, root_key,
-                )?;
+                visit(&target, None, opts, resolver, w, root_key)?;
                 import_targets[i] = Some(target);
             }
         }
@@ -1627,7 +1587,15 @@ fn load_modules(
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
                 let (gen_key, gen_source) = run_generator(
-                    key, is_root, name, args, *line, opts, resolver, modules, states, identities,
+                    key,
+                    name,
+                    args,
+                    *line,
+                    opts,
+                    resolver,
+                    &w.modules,
+                    &w.states,
+                    &mut w.identities,
                     root_key,
                 )?;
                 // RFC-0072 M1: a generator import is an IMPORT, and the same rule
@@ -1636,26 +1604,11 @@ fn load_modules(
                 // not (M5), so this edge is the one a `.vyx` widens by living under
                 // `server/` and being mounted from the client root — the SSR half of
                 // a universal page inherits its caller and cannot widen against it.
-                if let Some(mut d) = audience_objection(key, &gen_key, *line, opts) {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    return Err(vec![d]);
+                if let Some(d) = audience_objection(key, &gen_key, *line, opts) {
+                    return Err(vec![in_module(d, key, root_key)]);
                 }
                 if let Some(src) = gen_source {
-                    visit(
-                        &gen_key,
-                        Some(&src),
-                        opts,
-                        resolver,
-                        modules,
-                        states,
-                        identities,
-                        origins,
-                        warnings,
-                        stack,
-                        root_key,
-                    )?;
+                    visit(&gen_key, Some(&src), opts, resolver, w, root_key)?;
                 }
                 import_targets[i] = Some(gen_key);
             }
@@ -1665,12 +1618,12 @@ fn load_modules(
             .map(|t| t.expect("every import resolved"))
             .collect();
 
-        stack.pop();
-        states.insert(key.to_string(), true);
+        w.stack.pop();
+        w.states.insert(key.to_string(), true);
         // A module synthesized by a generator (RFC-0021) keeps its source text
         // (its key is the generator banner) so `vyrn emit-gen` can print it.
         let gen_source = key.starts_with("generated by ").then(|| text.clone());
-        modules.push(Module {
+        w.modules.push(Module {
             key: key.to_string(),
             program,
             import_targets,
@@ -1680,29 +1633,15 @@ fn load_modules(
         Ok(())
     }
 
-    if let Err(mut diags) = visit(
+    if let Err(diags) = visit(
         &root_key,
         Some(root_source),
         opts,
         resolver,
-        &mut modules,
-        &mut states,
-        &mut identities,
-        &mut origins,
-        &mut warnings,
-        &mut stack,
+        &mut w,
         &root_key,
     ) {
-        // RFC-0053: lex/parse/load failures inside a synthesized module are
-        // remapped onto their originating input file, exactly as check/movecheck
-        // diagnostics are on the success path (`lib::load`). Ungoverned lines keep
-        // their generated location.
-        if !origins.is_empty() {
-            for d in &mut diags {
-                origins.remap(d);
-            }
-        }
-        return Err((diags, origins));
+        return Err(failed(diags, w.origins));
     }
 
     // RFC-0078 M2b: the INJECTED imports. `toJson` compiles into a call to
@@ -1720,7 +1659,8 @@ fn load_modules(
     //
     // M4c made this a loop over `RT_MODULES` rather than a second copy of itself,
     // which is the whole reason the codecs cost no new mechanism.
-    let mentioned: HashSet<String> = modules
+    let mentioned: HashSet<String> = w
+        .modules
         .iter()
         .flat_map(|m| program_ref_names(&m.program))
         .collect();
@@ -1744,7 +1684,7 @@ fn load_modules(
         // import. Marking only mention-linked modules left a hand-imported
         // `std/json` with bare `JStr` beside a consumer's own `JStr`, two
         // enums one variant name apart.
-        if !wanted && !states.contains_key(&target) {
+        if !wanted && !w.states.contains_key(&target) {
             continue;
         }
         // The same rule one step further in, and RFC-0081 M2 is what made it
@@ -1754,29 +1694,12 @@ fn load_modules(
         // otherwise fail to load programs that never format a float. A module that
         // is present but broken still fails the load below — this skips only what
         // cannot be read at all.
-        if !states.contains_key(&target) && resolver.read(&target).is_err() {
+        if !w.states.contains_key(&target) && resolver.read(&target).is_err() {
             continue;
         }
-        if !states.contains_key(&target) {
-            if let Err(mut diags) = visit(
-                &target,
-                None,
-                opts,
-                resolver,
-                &mut modules,
-                &mut states,
-                &mut identities,
-                &mut origins,
-                &mut warnings,
-                &mut stack,
-                &root_key,
-            ) {
-                if !origins.is_empty() {
-                    for d in &mut diags {
-                        origins.remap(d);
-                    }
-                }
-                return Err((diags, origins));
+        if !w.states.contains_key(&target) {
+            if let Err(diags) = visit(&target, None, opts, resolver, &mut w, &root_key) {
+                return Err(failed(diags, w.origins));
             }
         }
         // Set AFTER the visit, and whether or not this load performed it: the
@@ -1784,7 +1707,7 @@ fn load_modules(
         // there and the reserved spellings apply to it either way. (They are
         // transparent to a hand importer — `resolve_aliases` rewrites its
         // references along with everything else.)
-        if let Some(m) = modules.iter_mut().find(|m| m.key == target) {
+        if let Some(m) = w.modules.iter_mut().find(|m| m.key == target) {
             m.injected = Some(rt.prefix);
         }
     }
@@ -1795,7 +1718,7 @@ fn load_modules(
     // per-edge one (audience's shape), because the question is what the program
     // NEEDS, and no single import edge knows that.
     if let Some(map) = &opts.artifacts {
-        let graph = floor_graph(&mut modules);
+        let graph = floor_graph(&mut w.modules);
         // RFC-0125 M6, fourth slice: a row a judgment answers cannot be decided
         // here. The judgment reads the named core, which is built from the
         // checker's types, and nothing in this load is checked yet. So the
@@ -1806,23 +1729,35 @@ fn load_modules(
             // A nested generator load (RFC-0021) is not the artifact; only the
             // outermost load may hold a decision for the check that follows it.
             Some(c) if crate::floor::is_judged(&c) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
-                crate::floor::defer(graph, root_key.clone(), map.clone(), origins.clone());
+                crate::floor::defer(graph, root_key.clone(), map.clone(), w.origins.clone());
             }
             _ => {
                 if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
                     if d.file.as_deref() == Some(root_key.as_str()) {
                         d.file = None;
                     }
-                    if !origins.is_empty() {
-                        origins.remap(&mut d);
-                    }
-                    return Err((vec![d], origins));
+                    return Err(failed(vec![d], w.origins));
                 }
             }
         }
     }
 
-    Ok((modules, root_key, origins, warnings))
+    Ok((w.modules, root_key, w.origins, w.warnings))
+}
+
+/// A load's failure: every diagnostic remapped onto the input file a generator
+/// synthesized it from (RFC-0053), exactly as the success path remaps in
+/// `lib::load`. An ungoverned line keeps its generated location.
+fn failed(
+    mut diags: Vec<Diagnostic>,
+    origins: crate::origin::OriginMaps,
+) -> (Vec<Diagnostic>, crate::origin::OriginMaps) {
+    if !origins.is_empty() {
+        for d in &mut diags {
+            origins.remap(d);
+        }
+    }
+    (diags, origins)
 }
 
 /// Guardrails (RFC-0021): a generator's step budget and output-size cap.
@@ -1869,7 +1804,6 @@ thread_local! {
 #[allow(clippy::too_many_arguments)]
 fn run_generator(
     importer: &str,
-    importer_is_root: bool,
     name: &str,
     args: &[Expr],
     line: usize,
@@ -1878,15 +1812,9 @@ fn run_generator(
     modules: &[Module],
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
-    _root_key: &str,
+    root_key: &str,
 ) -> Result<(String, Option<String>), Vec<Diagnostic>> {
-    let err = |msg: String| -> Vec<Diagnostic> {
-        let mut d = Diagnostic::error(line, 0, "load", msg);
-        if !importer_is_root {
-            d.file = Some(importer.to_string());
-        }
-        vec![d]
-    };
+    let err = |msg: String| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, msg)] };
 
     // 1. Arguments must be compile-time constants (RFC-0021).
     let empty = HashMap::new();
@@ -2521,6 +2449,93 @@ fn is_injected(t: &TypeDecl) -> bool {
     t.line == 0
 }
 
+/// Which of a module's five declaration lists a row came from, for the one rule
+/// that needs it: a shared `extern fn` name is skipped only as a FUNCTION.
+#[derive(Clone, Copy, PartialEq)]
+enum DeclKind {
+    Type,
+    Fn,
+    Protocol,
+    Contract,
+    Global,
+}
+
+/// One top-level declaration of a module, as every reader in this file asks
+/// about it.
+struct Decl<'a> {
+    name: &'a str,
+    kind: DeclKind,
+    /// A global is never `export`ed: module state is module-private (RFC-0029),
+    /// so it is not namespace-reachable and cross-module access goes through an
+    /// accessor function.
+    exported: bool,
+    /// A parser-injected builtin type ([`is_injected`]), present in every file.
+    injected: bool,
+    /// An `extern fn` (RFC-0012): a host-ABI contract under its source
+    /// spelling, so no rule here may rename it.
+    is_extern: bool,
+}
+
+/// Every top-level declaration a module states, types first and globals last.
+///
+/// Six readers here asked this and wrote the five lists out to ask it: the decl
+/// set, the export set, the privacy candidates, an injected module's reserved
+/// spellings, [`link`]'s registration and [`load_modules`]'s attribution. A new
+/// declaration form had to reach all six, and each carried its own copy of
+/// which of them a rule skips.
+fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
+    fn d(name: &str, kind: DeclKind, exported: bool) -> Decl<'_> {
+        Decl {
+            name,
+            kind,
+            exported,
+            injected: false,
+            is_extern: false,
+        }
+    }
+    p.type_decls
+        .iter()
+        .map(|t| Decl {
+            injected: is_injected(t),
+            ..d(&t.name, DeclKind::Type, t.exported)
+        })
+        .chain(p.functions.iter().map(|f| Decl {
+            is_extern: f.is_extern,
+            ..d(&f.name, DeclKind::Fn, f.exported)
+        }))
+        .chain(
+            p.protocols
+                .iter()
+                .map(|pr| d(&pr.name, DeclKind::Protocol, pr.exported)),
+        )
+        .chain(
+            p.contracts
+                .iter()
+                .map(|c| d(&c.name, DeclKind::Contract, c.exported)),
+        )
+        .chain(
+            p.globals
+                .iter()
+                .map(|g| d(&g.name, DeclKind::Global, false)),
+        )
+}
+
+/// The owning-module slot of everything a module holds, the two runnable forms
+/// included. Each form needs one: a contract's names the library a diagnostic
+/// blames (RFC-0071), a global's carries the same-module initializer-call rule
+/// (RFC-0029), and a test's or bench's is what makes `vyrn test <root>` run the
+/// root's alone (RFC-0015, RFC-0055). Separate from [`decls`] only because the
+/// borrow is unique.
+fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>> {
+    (p.type_decls.iter_mut().map(|t| &mut t.module))
+        .chain(p.functions.iter_mut().map(|f| &mut f.module))
+        .chain(p.protocols.iter_mut().map(|pr| &mut pr.module))
+        .chain(p.contracts.iter_mut().map(|c| &mut c.module))
+        .chain(p.globals.iter_mut().map(|g| &mut g.module))
+        .chain(p.tests.iter_mut().map(|t| &mut t.module))
+        .chain(p.benches.iter_mut().map(|b| &mut b.module))
+}
+
 /// Resolve import aliasing (RFC-0022) into the flat namespace *before* the
 /// register/visibility/merge machinery, which is deliberately alias-unaware.
 ///
@@ -2546,25 +2561,10 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // 762 KB project, for a set usually read zero times. Filled on first use.
     let mut all_names: HashSet<String> = HashSet::new();
     for m in modules.iter() {
-        let set = module_decls.entry(m.key.clone()).or_default();
-        let mut add = |n: &str| {
-            set.insert(n.to_string());
-        };
-        for t in &m.program.type_decls {
-            add(&t.name);
-        }
-        for f in &m.program.functions {
-            add(&f.name);
-        }
-        for p in &m.program.protocols {
-            add(&p.name);
-        }
-        for c in &m.program.contracts {
-            add(&c.name);
-        }
-        for g in &m.program.globals {
-            add(&g.name);
-        }
+        module_decls
+            .entry(m.key.clone())
+            .or_default()
+            .extend(decls(&m.program).map(|d| d.name.to_string()));
     }
 
     // Exported top-level decl names per module — the surface a namespace import
@@ -2589,29 +2589,11 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 }
             }
         }
-        let set = module_exports.entry(m.key.clone()).or_default();
-        let mut ex = |n: &str, exported: bool| {
-            if exported {
-                set.insert(n.to_string());
-            }
-        };
-        for t in &m.program.type_decls {
-            if t.line != 0 {
-                ex(&t.name, t.exported);
-            }
-        }
-        for f in &m.program.functions {
-            ex(&f.name, f.exported);
-        }
-        for p in &m.program.protocols {
-            ex(&p.name, p.exported);
-        }
-        for c in &m.program.contracts {
-            ex(&c.name, c.exported);
-        }
-        // Globals are never `export`ed (module state is module-private,
-        // RFC-0029 — `export let` does not exist), so they are not
-        // namespace-reachable; cross-module access goes through accessor fns.
+        module_exports.entry(m.key.clone()).or_default().extend(
+            decls(&m.program)
+                .filter(|d| d.exported && !d.injected)
+                .map(|d| d.name.to_string()),
+        );
         for n in module_decls.get(&m.key).into_iter().flatten() {
             *name_module_count.entry(n.clone()).or_insert(0) += 1;
         }
@@ -2622,44 +2604,30 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     let mut ns_bindings: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for m in modules.iter() {
         let mine = module_decls.get(&m.key).cloned().unwrap_or_default();
-        let import_locals: HashSet<String> = m
-            .program
-            .imports
-            .iter()
-            .flat_map(|imp| imp.names.iter())
-            .map(|n| n.local().to_string())
-            .collect();
+        let import_locals = import_locals(&m.program);
         let mut seen_ns: HashSet<String> = HashSet::new();
         let binds = ns_bindings.entry(m.key.clone()).or_default();
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             let Some(ns) = &imp.namespace else { continue };
             let mut ok = true;
             if !seen_ns.insert(ns.clone()) {
-                errors.push(with_file(
-                    Diagnostic::error(
-                        imp.line,
-                        0,
-                        "load",
-                        format!("namespace `{ns}` is bound twice in this module"),
-                    ),
-                    m,
+                errors.push(load_error(
+                    &m.key,
                     root_key,
+                    imp.line,
+                    format!("namespace `{ns}` is bound twice in this module"),
                 ));
                 ok = false;
             }
             if mine.contains(ns) || import_locals.contains(ns) {
-                errors.push(with_file(
-                    Diagnostic::error(
-                        imp.line,
-                        0,
-                        "load",
-                        format!(
-                            "namespace `{ns}` collides with a top-level declaration or import \
-                             of the same name in this module"
-                        ),
-                    ),
-                    m,
+                errors.push(load_error(
+                    &m.key,
                     root_key,
+                    imp.line,
+                    format!(
+                        "namespace `{ns}` collides with a top-level declaration or import \
+                             of the same name in this module"
+                    ),
                 ));
                 ok = false;
             }
@@ -2669,27 +2637,34 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
-    // (target module, original) -> fresh symbol, for co-naming renames.
+    // (target module, original) -> fresh symbol, for every rename apart.
     let mut foreign_renames: HashMap<(String, String), String> = HashMap::new();
-    // Fill `all_names` on the first mint — see the note at its declaration.
-    let ensure_all_names = |all: &mut HashSet<String>, decls: &HashMap<String, HashSet<String>>| {
-        if all.is_empty() {
-            for names in decls.values() {
-                all.extend(names.iter().cloned());
+    // Rename `name`, as `target` declares it, apart from every other name in the
+    // program — once, whichever rule asked. Three do: co-naming (RFC-0022), a
+    // namespaced module's export (RFC-0027) and name privacy (RFC-0046 §3), and
+    // each wrote the fill, the mint and the insert out to ask. `all_names` fills
+    // on the first of them; see the note at its declaration.
+    let mut rename_apart =
+        |renames: &mut HashMap<(String, String), String>, target: &str, name: &str| {
+            let key = (target.to_string(), name.to_string());
+            if renames.contains_key(&key) {
+                return;
             }
-        }
-    };
-    let mint = |original: &str, all: &mut HashSet<String>| -> String {
-        let mut n = 0usize;
-        loop {
-            let cand = format!("{original}__from{n}");
-            if !all.contains(&cand) {
-                all.insert(cand.clone());
-                return cand;
+            if all_names.is_empty() {
+                for names in module_decls.values() {
+                    all_names.extend(names.iter().cloned());
+                }
             }
-            n += 1;
-        }
-    };
+            let mut n = 0usize;
+            let fresh = loop {
+                let cand = format!("{name}__from{n}");
+                if all_names.insert(cand.clone()) {
+                    break cand;
+                }
+                n += 1;
+            };
+            renames.insert(key, fresh);
+        };
 
     // RFC-0078 M2b: an INJECTED module's every declaration is renamed to its
     // reserved spelling, unconditionally rather than on collision. Two things fall
@@ -2728,12 +2703,15 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             .find(|m| &m.key == key)
             .expect("injected module");
         let by_enum = injected_variants.entry(key.clone()).or_default();
-        let mut names: Vec<String> = Vec::new();
+        // Parser-injected builtins are in every module and keep their spelling.
+        let mut names: Vec<String> = decls(&m.program)
+            .filter(|d| !d.injected)
+            .map(|d| d.name.to_string())
+            .collect();
         for t in &m.program.type_decls {
             if t.line == 0 {
-                continue; // parser-injected builtins are in every module
+                continue;
             }
-            names.push(t.name.clone());
             if let Some(vs) = crate::types::declared_variants(&t.base) {
                 let vars = by_enum.entry(format!("{prefix}{}", t.name)).or_default();
                 for v in vs {
@@ -2741,18 +2719,6 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     names.push(v.name.clone());
                 }
             }
-        }
-        for f in &m.program.functions {
-            names.push(f.name.clone());
-        }
-        for p in &m.program.protocols {
-            names.push(p.name.clone());
-        }
-        for c in &m.program.contracts {
-            names.push(c.name.clone());
-        }
-        for g in &m.program.globals {
-            names.push(g.name.clone());
         }
         // No `all_names` bookkeeping: `mint` only ever produces `x__fromN`, which
         // has no `$` in it, so a reserved spelling is unreachable from there —
@@ -2814,31 +2780,23 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     // local, has no such owner and still errors here.
                     let one_name_two_modules = prev.0 != here.0 && prev.1 == here.1;
                     if !one_name_two_modules {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!("`{local}` is imported twice into this module"),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!("`{local}` is imported twice into this module"),
                         ));
                     }
                 }
                 if n.alias.is_some() && mine.contains(&local) {
-                    errors.push(with_file(
-                        Diagnostic::error(
-                            imp.line,
-                            0,
-                            "load",
-                            format!(
-                                "import alias `{local}` clashes with a top-level declaration of \
-                                 the same name in this module"
-                            ),
-                        ),
-                        m,
+                    errors.push(load_error(
+                        &m.key,
                         root_key,
+                        imp.line,
+                        format!(
+                            "import alias `{local}` clashes with a top-level declaration of \
+                                 the same name in this module"
+                        ),
                     ));
                 }
             }
@@ -2847,12 +2805,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             for n in &imp.names {
                 if n.alias.is_some() && mine.contains(&n.original) {
-                    let key = (target.clone(), n.original.clone());
-                    if !foreign_renames.contains_key(&key) {
-                        ensure_all_names(&mut all_names, &module_decls);
-                        let s = mint(&n.original, &mut all_names);
-                        foreign_renames.insert(key, s);
-                    }
+                    rename_apart(&mut foreign_renames, target, &n.original);
                 }
             }
         }
@@ -2885,19 +2838,15 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                         // call as a forbidden direct use.
                         && !(ambiguous_only.contains(orig) && method_surface.contains(orig))
                     {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!(
-                                    "`{orig}` is not in scope — it was imported as `{}`; use \
-                                     that name (or import `{orig}` too)",
-                                    n.local()
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!(
+                                "`{orig}` is not in scope — it was imported as `{}`; use \
+                                     that name (or import `{orig}` too)",
+                                n.local()
+                            ),
                         ));
                     }
                 }
@@ -2930,10 +2879,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         names.sort();
         for name in names {
             if name_module_count.get(name).copied().unwrap_or(0) >= 2 {
-                ensure_all_names(&mut all_names, &module_decls);
-                foreign_renames
-                    .entry((target.clone(), name.clone()))
-                    .or_insert_with(|| mint(name, &mut all_names));
+                rename_apart(&mut foreign_renames, target, name);
             }
         }
     }
@@ -2956,46 +2902,21 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         // (import vs. declaration) the user must resolve — auto-renaming would
         // silently hide it. Renaming stays limited to names invisible outside
         // their module AND not shadowing an in-scope import here.
-        let imported: HashSet<String> = m
-            .program
-            .imports
-            .iter()
-            .flat_map(|imp| imp.names.iter())
-            .map(|n| n.local().to_string())
+        let imported = import_locals(&m.program);
+        // Non-exported top-level decl names. A parser-injected type is the same
+        // in every module and must never be renamed; an `extern fn` names a
+        // host-ABI contract the backends emit under its SOURCE spelling, so
+        // renaming it severs the contract even when several modules restate the
+        // same one (std/rpc's client stubs do). A global is never exported
+        // (RFC-0029), so it is always a candidate.
+        let mut privates: Vec<String> = decls(&m.program)
+            .filter(|d| {
+                !d.injected
+                    && !d.is_extern
+                    && (d.kind == DeclKind::Global || !exported.contains(d.name))
+            })
+            .map(|d| d.name.to_string())
             .collect();
-        // Non-exported top-level decl names (skip parser-injected line-0 types,
-        // which are the same in every module and must never be renamed). Globals
-        // are never exported (RFC-0029), so they are always candidates.
-        let mut privates: Vec<String> = Vec::new();
-        for t in &m.program.type_decls {
-            if t.line != 0 && !exported.contains(&t.name) {
-                privates.push(t.name.clone());
-            }
-        }
-        for f in &m.program.functions {
-            // An `extern fn` is a host-ABI contract, not a namespace member:
-            // the backends emit the import under the SOURCE spelling and the
-            // JS host supplies it by that exact name (`extern:
-            // { vyrnRpcCall: .. }`). Renaming it severs the contract, so an
-            // extern is never a privacy-rename candidate even when several
-            // modules restate the same one (std/rpc's client stubs do).
-            if !f.is_extern && !exported.contains(&f.name) {
-                privates.push(f.name.clone());
-            }
-        }
-        for p in &m.program.protocols {
-            if !exported.contains(&p.name) {
-                privates.push(p.name.clone());
-            }
-        }
-        for c in &m.program.contracts {
-            if !exported.contains(&c.name) {
-                privates.push(c.name.clone());
-            }
-        }
-        for g in &m.program.globals {
-            privates.push(g.name.clone());
-        }
         privates.sort();
         privates.dedup();
         for name in privates {
@@ -3015,10 +2936,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 continue;
             }
             if name_module_count.get(&name).copied().unwrap_or(0) >= 2 {
-                ensure_all_names(&mut all_names, &module_decls);
-                foreign_renames
-                    .entry((m.key.clone(), name.clone()))
-                    .or_insert_with(|| mint(&name, &mut all_names));
+                rename_apart(&mut foreign_renames, &m.key, &name);
             }
         }
     }
@@ -3028,10 +2946,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     for m in modules.iter() {
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             for n in &imp.names {
-                let resolved = foreign_renames
-                    .get(&(target.clone(), n.original.clone()))
-                    .cloned()
-                    .unwrap_or_else(|| n.original.clone());
+                let resolved = resolved_name(&foreign_renames, target, &n.original);
                 if n.alias.is_some() {
                     // The alias resolves to the decl (renamed or original).
                     rewrites
@@ -3057,10 +2972,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             if !imp.names.is_empty() {
                 if let Some(by_enum) = injected_variants.get(target) {
                     for n in &imp.names {
-                        let resolved = foreign_renames
-                            .get(&(target.clone(), n.original.clone()))
-                            .cloned()
-                            .unwrap_or_else(|| n.original.clone());
+                        let resolved = resolved_name(&foreign_renames, target, &n.original);
                         if let Some(vars) = by_enum.get(&resolved) {
                             rewrites
                                 .entry(m.key.clone())
@@ -3087,12 +2999,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         let Some(map) = renames_by_module.get(tm.key.as_str()) else {
             continue;
         };
-        let ns_names: HashSet<String> = ns_bindings
-            .get(&tm.key)
-            .into_iter()
-            .flatten()
-            .map(|(n, _)| n.clone())
-            .collect();
+        let ns_names = ns_names_of(&ns_bindings, &tm.key);
         rename_decls_in_module(&mut tm.program, map, &ns_names);
     }
 
@@ -3128,12 +3035,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // bare import of the resolved decl name so register/visibility stay unaware.
     for m in modules.iter_mut() {
         if let Some(map) = rewrites.get(&m.key) {
-            let ns_names: HashSet<String> = ns_bindings
-                .get(&m.key)
-                .into_iter()
-                .flatten()
-                .map(|(n, _)| n.clone())
-                .collect();
+            let ns_names = ns_names_of(&ns_bindings, &m.key);
             // This module's own variants guard the rewrite (see
             // [`Renamer::variants`]): an alias local or injected spelling that
             // collides with one must not fold the constructor sites.
@@ -3142,10 +3044,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
         for (imp, target) in m.program.imports.iter_mut().zip(&m.import_targets) {
             for n in &mut imp.names {
-                let resolved = foreign_renames
-                    .get(&(target.clone(), n.original.clone()))
-                    .cloned()
-                    .unwrap_or_else(|| n.original.clone());
+                let resolved = resolved_name(&foreign_renames, target, &n.original);
                 n.original = resolved;
                 n.alias = None;
             }
@@ -3303,11 +3202,8 @@ struct NsResolver<'a> {
 
 impl NsResolver<'_> {
     fn err(&mut self, line: usize, msg: String) {
-        let mut d = Diagnostic::error(line, 0, "load", msg);
-        if self.module_key != self.root_key {
-            d.file = Some(self.module_key.clone());
-        }
-        self.errors.push(d);
+        self.errors
+            .push(load_error(&self.module_key, &self.root_key, line, msg));
     }
 
     /// The program-wide symbol a namespace member resolves to (honoring any
@@ -3328,12 +3224,7 @@ impl NsResolver<'_> {
             );
             return None;
         }
-        Some(
-            self.foreign_renames
-                .get(&(target, member.to_string()))
-                .cloned()
-                .unwrap_or_else(|| member.to_string()),
-        )
+        Some(resolved_name(self.foreign_renames, &target, member))
     }
 
     fn resolve_program(&mut self, p: &mut Program) {
@@ -3653,12 +3544,23 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             owner.insert(name.to_string(), (module.to_string(), exported));
         };
 
+    // Every declaration form joins ONE top-level namespace: a contract name is
+    // what `contractOf(Name)` resolves (RFC-0071) and a module-state binding may
+    // not share a name with any other declaration (RFC-0013), so both obey the
+    // ordinary export/import visibility. Impl-flattened methods carry mangled
+    // names (`P__Key__m`) that cannot collide with a user identifier; they are
+    // registered anyway so duplicate impls across modules collide loudly here.
     for m in &modules {
+        for d in decls(&m.program) {
+            if d.injected || (d.kind == DeclKind::Fn && shared_externs.contains(d.name)) {
+                continue;
+            }
+            register(d.name, &m.key, d.exported, &mut clashes);
+        }
         for t in &m.program.type_decls {
             if is_injected(t) {
                 continue;
             }
-            register(&t.name, &m.key, t.exported, &mut clashes);
             if let Some(vs) = crate::types::declared_variants(&t.base) {
                 for v in vs {
                     variant_enum
@@ -3668,34 +3570,13 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 }
             }
         }
-        for f in &m.program.functions {
-            // Impl-flattened methods carry mangled names (`P__Key__m`) that
-            // cannot collide with user identifiers; register them anyway so
-            // duplicate impls across modules collide loudly here.
-            if shared_externs.contains(&f.name) {
-                continue;
-            }
-            register(&f.name, &m.key, f.exported, &mut clashes);
-        }
         for p in &m.program.protocols {
-            register(&p.name, &m.key, p.exported, &mut clashes);
             for sig in &p.methods {
                 method_protocol
                     .entry(sig.name.clone())
                     .or_default()
                     .push((p.name.clone(), m.key.clone()));
             }
-        }
-        // Contracts (RFC-0071) join the same top-level namespace as protocols:
-        // a contract name is what `contractOf(Name)` resolves, so it must be
-        // program-wide unique and obey the ordinary export/import visibility.
-        for c in &m.program.contracts {
-            register(&c.name, &m.key, c.exported, &mut clashes);
-        }
-        // Module-state bindings (RFC-0013) join the top-level namespace: a
-        // global may not share a name with any other top-level declaration.
-        for g in &m.program.globals {
-            register(&g.name, &m.key, false, &mut clashes);
         }
     }
     errors.extend(clash_diagnostics(&clashes, &modules, root_key));
@@ -3733,18 +3614,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 match owner.get(name) {
                     Some((def_module, exported)) if def_module == target => {
                         if !exported {
-                            errors.push(with_file(
-                                Diagnostic::error(
-                                    imp.line,
-                                    0,
-                                    "load",
-                                    format!(
-                                        "`{name}` exists in `{target}` but is not exported — \
-                                         add `export` to its declaration"
-                                    ),
-                                ),
-                                m,
+                            errors.push(load_error(
+                                &m.key,
                                 root_key,
+                                imp.line,
+                                format!(
+                                    "`{name}` exists in `{target}` but is not exported — \
+                                         add `export` to its declaration"
+                                ),
                             ));
                         }
                         // Importing an enum also brings its variants, and a
@@ -3753,18 +3630,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         visible.insert(name.clone());
                     }
                     Some((def_module, _)) if !clashed.contains(name.as_str()) => {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!(
-                                    "`{name}` is not defined in `{target}` (it lives in \
-                                     `{def_module}`)"
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!(
+                                "`{name}` is not defined in `{target}` (it lives in \
+                                     `{def_module}`)"
+                            ),
                         ));
                     }
                     // A clashed name: `clash_diagnostics` already reported the
@@ -3775,15 +3648,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         visible.insert(name.clone());
                     }
                     None => {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!("`{target}` does not define `{name}`"),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!("`{target}` does not define `{name}`"),
                         ));
                     }
                 }
@@ -3878,18 +3747,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         if gen_importer.as_deref() == Some(def_module.as_str()) {
                             return;
                         }
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                line,
-                                0,
-                                "load",
-                                format!(
-                                    "{what} `{name}` is defined in `{def_module}` but not \
-                                     imported here — add it to an `import {{ .. }} from` list"
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            line,
+                            format!(
+                                "{what} `{name}` is defined in `{def_module}` but not \
+                                     imported here — add it to an `import {{ .. }} from` list"
+                            ),
                         ));
                     }
                 }
@@ -3913,18 +3778,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             modules.sort_unstable();
             modules.dedup();
             let list = modules.join("`, `");
-            errors.push(with_file(
-                Diagnostic::error(
-                    line,
-                    0,
-                    "load",
-                    format!(
-                        "{what} `{name}` is defined in `{list}` but not imported here — add \
-                         it to an `import {{ .. }} from` list"
-                    ),
-                ),
-                m,
+            errors.push(load_error(
+                &m.key,
                 root_key,
+                line,
+                format!(
+                    "{what} `{name}` is defined in `{list}` but not imported here — add \
+                         it to an `import {{ .. }} from` list"
+                ),
             ));
         };
 
@@ -4058,12 +3919,23 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     Ok(program)
 }
 
-/// Attach the module's file to a diagnostic unless it is the root.
-fn with_file(mut d: Diagnostic, m: &Module, root_key: &str) -> Diagnostic {
-    if m.key != root_key {
-        d.file = Some(m.key.clone());
+/// Attach `key` to a diagnostic as its file, unless `key` is the root — a root
+/// diagnostic renders without one, exactly as a single-file program's does.
+///
+/// The ONE place a load's diagnostic learns where it points. `load_modules`,
+/// [`run_generator`] and [`NsResolver`] each restated these two lines against
+/// their own key, and `link` and [`resolve_aliases`] reached a third spelling
+/// through a `&Module`.
+fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {
+    if key != root_key {
+        d.file = Some(key.to_string());
     }
     d
+}
+
+/// A load error at `line` of `key`, worded by [`in_module`].
+fn load_error(key: &str, root_key: &str, line: usize, msg: String) -> Diagnostic {
+    in_module(Diagnostic::error(line, 0, "load", msg), key, root_key)
 }
 
 /// The import of `target` a diagnostic should point at, with the module that
@@ -4204,7 +4076,7 @@ fn clash_diagnostics(
                 if rest.len() == 1 { "s" } else { "" }
             )
         });
-        out.push(with_file(d, m, root_key));
+        out.push(in_module(d, &m.key, root_key));
     }
     out
 }
@@ -4330,6 +4202,43 @@ fn type_names(ty: &Type) -> Vec<String> {
 // unlinked root AST that the LSP indexes is untouched, so hover still sees `Y`.
 
 /// A name→name substitution for references (`map.get(n)` or `n` unchanged).
+/// The program-wide symbol `original` names in module `target` once every
+/// rename apart has been decided — `original` itself when no rule renamed it.
+/// Pass 2, pass 4 and [`NsResolver::resolve_member`] each spelled the lookup
+/// and its fallback out.
+fn resolved_name(
+    renames: &HashMap<(String, String), String>,
+    target: &str,
+    original: &str,
+) -> String {
+    renames
+        .get(&(target.to_string(), original.to_string()))
+        .cloned()
+        .unwrap_or_else(|| original.to_string())
+}
+
+/// Every name a module's imports bring into scope — an alias where one is
+/// written, the declaration's own name otherwise. The namespace-collision check
+/// and the name-privacy rule both ask.
+fn import_locals(p: &Program) -> HashSet<String> {
+    p.imports
+        .iter()
+        .flat_map(|imp| imp.names.iter())
+        .map(|n| n.local().to_string())
+        .collect()
+}
+
+/// The namespace names module `key` binds (RFC-0027), which pass 3 and pass 4
+/// each guard their rewrite with.
+fn ns_names_of(binds: &HashMap<String, Vec<(String, String)>>, key: &str) -> HashSet<String> {
+    binds
+        .get(key)
+        .into_iter()
+        .flatten()
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
 fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {
     map.get(n).cloned().unwrap_or_else(|| n.to_string())
 }
