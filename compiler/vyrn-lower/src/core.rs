@@ -2070,13 +2070,32 @@ impl<'a> Builder<'a> {
     /// `value` box, or a projection an `impl` declares (RFC-0120).
     fn lends(&self, e: &Expr) -> bool {
         match e {
-            Expr::Call { name, .. } => self.lends_name(name),
+            Expr::Call { name, args, .. } => {
+                self.lends_name(name) || self.hands_back_a_borrow(name, args)
+            }
             _ => false,
         }
     }
 
+    /// Whether a call whose result IS its argument (`blackBox`, read off the
+    /// signature by `movecheck::hands_back`) hands back a borrow: it does
+    /// when the argument is a place read or a call that lends. An owned
+    /// temporary handed to it is TAKEN instead (`call` marks the position
+    /// `consume`), and the result owns what the argument owned. Either way
+    /// one release stands for the value: owning the result of `blackBox(s)`
+    /// freed `s` twice, and borrowing the result of `blackBox(mk(16))` freed
+    /// the array never.
+    fn hands_back_a_borrow(&self, name: &str, args: &[Expr]) -> bool {
+        vyrn_frontend::movecheck::hands_back(name)
+            && args
+                .first()
+                .is_some_and(|a| is_place_read(a) || self.lends(a))
+    }
+
     /// Whether a call by this name lends: `a[i]` and the seeded element row
     /// it dispatches to, a lending prelude row, the `value` box, a projection.
+    /// A call that hands its argument back is [`Self::lends`]'s question,
+    /// because the answer depends on the argument.
     fn lends_name(&self, name: &str) -> bool {
         name == vyrn_frontend::project::AT
             || name == vyrn_frontend::project::ELEM
@@ -3234,25 +3253,8 @@ impl<'a> Builder<'a> {
         };
         !vyrn_frontend::ast::is_panic(name)
             && !name.starts_with('@')
-            && !self.lends_name(name)
-            && !self.hands_back(name)
+            && !self.lends(e)
             && !self.constructs(name)
-    }
-
-    /// Whether a seeded row's result IS one of its arguments: a return type
-    /// that is the same bare type parameter as a parameter's.
-    ///
-    /// `blackBox` is the row, written so an optimizer cannot see through it
-    /// (RFC-0055). No body spelling can say this — `prelude::lends` answers
-    /// for a row whose body yields a place INSIDE a parameter — so it is read
-    /// off the signature, exactly as `movecheck::arg_verdict` reads it. A
-    /// user function cannot reach here: rule 3 refuses returning a borrow.
-    fn hands_back(&self, name: &str) -> bool {
-        let Some(f) = prelude::signature(name) else {
-            return false;
-        };
-        matches!(&f.ret, Type::Param(r)
-            if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
     }
 
     /// Whether `name` constructs a sum value out of its arguments: a user
@@ -3942,10 +3944,11 @@ impl<'a> Builder<'a> {
             return false;
         }
         // A producer whose result IS its argument (`blackBox`) built nothing
-        // this frame may free — the seeded row hands the same bare type
-        // parameter back, which no body spelling says.
-        if let Expr::Call { name, .. } = e {
-            if mc::hands_back(name) {
+        // this frame may free when it hands back a borrow. When it was handed
+        // an owned temporary it took it (`call` marks the position
+        // `consume`), and the result is the one name that frees it.
+        if let Expr::Call { name, args, .. } = e {
+            if self.hands_back_a_borrow(name, args) {
                 return false;
             }
         }
@@ -5177,7 +5180,7 @@ impl<'a> Builder<'a> {
         // because a later reader that needs a third case has no other way to
         // ask (RFC-0125 §3 M3, the callee slice).
         let mut kind = Callee::Reserved;
-        let caps: Vec<Capability> =
+        let mut caps: Vec<Capability> =
             if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
                 kind = Callee::Fn;
                 f.params.iter().map(|p| p.capability).collect()
@@ -5250,7 +5253,20 @@ impl<'a> Builder<'a> {
         // A call drains its arguments' temporaries after it runs, unless its
         // result points into one of them: a lending call leaves them to the
         // call or operator above (both backends' `call` drain).
-        let drains = !self.lends_name(name);
+        let lends_here = self.lends_name(name) || self.hands_back_a_borrow(name, args);
+        if vyrn_frontend::movecheck::hands_back(name)
+            && !lends_here
+            && !caps.is_empty()
+            && args
+                .first()
+                .is_some_and(|a| self.ty_of(a).is_ok_and(|t| self.owns(&t)))
+        {
+            // The result is the argument, so the argument's owner is the
+            // result's: the temporary is taken and released once, as the
+            // result.
+            caps[0] = Capability::Consume;
+        }
+        let drains = !lends_here;
         if drains {
             self.drain += 1;
         }
