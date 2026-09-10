@@ -852,22 +852,13 @@ jobs:
         # explicit `set -eu` plus the non-empty check below is the belt; this is
         # the braces.
         shell: bash
-    # WHAT THIS GATE PROVES TODAY: that every bench in the corpus still builds,
-    # runs and produces a report. NOT that nothing regressed.
-    #
-    # `bench/baseline.json` is still a placeholder (`placeholder: true`, empty
-    # `benches`), so `--compare` reports every bench `new` and exits 0. And the
-    # loop compares ONE example's benches against the whole-corpus baseline, so
-    # once a baseline IS seeded every other example's entries come back
-    # `missing-from-run` on every iteration — a verdict `bench_verdicts`
-    # deliberately does not count as a regression (`vyrn-cli/src/main.rs`), which
-    # is right here and means a DELETED bench is invisible to this loop. Seeding
-    # the baseline turns the regression half on; catching a deleted bench needs
-    # the comparison to be whole-corpus rather than per-example, and is not
-    # something `continue-on-error` or a threshold can fix.
-    #
-    # `continue-on-error` is deliberately GONE all the same: a step that cannot
-    # fail for an unrelated reason either is not worth running.
+    # The gate compares this push against the commit it replaced, both timed on
+    # this runner in this run, program by program, base and head interleaved.
+    # A regression is a bench whose min exceeds the base's min by the threshold
+    # on the same host. The recorded `bench/baseline.json` is still measured and
+    # printed as the trend, and reseeded from the artifact below, but it no
+    # longer fails the job: the fleet's spread between runners was failing four
+    # rows a run that no commit had touched.
     steps:
       # actions/checkout@v4
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -896,27 +887,62 @@ jobs:
       - name: Populate ~/.vyrn/tools from vyrn.lock
         if: steps.wasm-tools.outputs.cache-hit != 'true'
         run: compiler/target/debug/vyrn update --locked
-      - name: Run benches + compare to baseline
+      # `github.event.before` is the main head this push replaced; on a merge
+      # commit that is the line before the merge. The baseline is measured
+      # HERE, on the same runner in the same run, so the fleet's spread (one
+      # label, several CPU generations, a 39x range on one row) cancels
+      # instead of failing the gate.
+      - name: Check out the commit before this push, for a same-host baseline
+        # actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.before }}
+          path: base
+      - name: Build the base vyrn
+        working-directory: base/compiler
+        run: cargo build --quiet -p vyrn-cli
+      - name: Run benches, base and head interleaved, and compare on this host
         working-directory: compiler
         run: |
           set -eu
-          vyrn=target/debug/vyrn
+          head=target/debug/vyrn
+          base=../base/compiler/target/debug/vyrn
           corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
-          # A discovery pattern that stops matching must fail, not iterate zero
-          # times: an empty loop reports the same green as a clean corpus.
           [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
           echo "bench corpus:"; echo "$corpus"
-          mkdir -p ../bench/out
-          regressed=0
+          mkdir -p ../bench/out ../bench/base
+          # Base and head alternate per program, so both see the same thermal
+          # and neighbour state; a program the base cannot bench (new, or one it
+          # refused) is reported and skipped, not a regression.
           for f in $corpus; do
             stem=$(basename "$f" .vyrn)
             echo "== $stem =="
-            # The trend record, and the raw material the seedable baseline is
-            # assembled from below. Always produced, always uploaded.
-            "$vyrn" bench "$f" --json > "../bench/out/$stem.json"
-            # The gate. A nonzero exit here fails the job.
-            "$vyrn" bench "$f" --compare ../bench/baseline.json \
-              --threshold "$BENCH_THRESHOLD" --ungate ../bench/ungated.txt || regressed=1
+            if [ -f "../base/${f#../}" ]; then
+              "$base" bench "../base/${f#../}" --json > "../bench/base/$stem.json" || { echo "base could not bench $stem; skipped"; rm -f "../bench/base/$stem.json"; }
+            else
+              echo "$stem is new since the base; nothing to compare"
+            fi
+            "$head" bench "$f" --json > "../bench/out/$stem.json"
+          done
+          # One baseline document over the base run, the same merge the
+          # seedable baseline gets below.
+          python3 - <<'PY'
+          import glob, json
+          rs = [json.load(open(p)) for p in sorted(glob.glob('../bench/base/*.json'))]
+          doc = {'backend': rs[0]['backend'], 'opt': rs[0]['opt'], 'benches': [b for r in rs for b in r['benches']]} if rs else {'backend': 'native', 'opt': 'O2', 'benches': []}
+          json.dump(doc, open('../bench/base/baseline.json', 'w'), indent=2)
+          print('same-host baseline:', len(doc['benches']), 'benches')
+          PY
+          regressed=0
+          for f in $corpus; do
+            stem=$(basename "$f" .vyrn)
+            echo "== $stem, against the same host =="
+            "$head" bench "$f" --compare ../bench/base/baseline.json --threshold "$BENCH_THRESHOLD" --ungate ../bench/ungated.txt || regressed=1
+          done
+          echo
+          echo "== against the recorded baseline (the trend; informational, never fails) =="
+          for f in $corpus; do
+            "$head" bench "$f" --compare ../bench/baseline.json --threshold "$BENCH_THRESHOLD" --ungate ../bench/ungated.txt || true
           done
           exit $regressed
       - name: Assemble a seedable baseline
