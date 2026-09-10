@@ -769,9 +769,10 @@ fn movecheck_sections() -> Vec<Section> {
         sec(
             "enum Borrow {",
             Shared,
-            "what a borrow is, for the walk's own reading of a place. The \
-             SENTENCES left with row 24: `core::BorrowKind::what` and \
-             `::fixes` word a borrow now, and nothing outside the kernel does",
+            "the two states the walk reads a place in — lent, and a \
+             projection. The SENTENCES left with row 24: \
+             `core::BorrowKind::what` and `::fixes` word a borrow now, and \
+             nothing outside the kernel does",
         ),
         sec(
             "pub fn root_of(path: &str) -> &str {",
@@ -1079,7 +1080,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1365, 0),
+        ("movecheck.rs", "shared machinery", 1357, 0),
         ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");

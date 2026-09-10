@@ -941,24 +941,17 @@ struct MoveCheck<'a> {
 
 /// A binding that names a value somebody else owns (RFC-0089 rule 2).
 ///
-/// The variants exist for the diagnostic, not for the rule: every borrow is
-/// refused in the same three positions, and each variant names a different fix.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// Two states, because the walk asks two questions and no more: is this name a
+/// borrow at all, and is the borrow a PROJECTION. There were four, one per
+/// fix a menu offered, and each carried the name that fix had to spell. The
+/// menus left with the refusals: `core::BorrowKind::what` and `::fixes` word a
+/// borrow now, and nothing outside the kernel does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Borrow {
-    /// A `read` or `share` parameter — the caller still owns it. Carries the
-    /// PARAMETER's name, which is not always the name at the offending line: a
-    /// local inherits the borrow (`let t = s`), and Phase 9 recorded that the
-    /// menu then offered ``declare the parameter `t: consume ..` `` for a `t`
-    /// that is a local. `vyrn fix` never applies that entry, so it was wording
-    /// and not correctness — and wording a reader has to see through.
-    Read(String),
-    /// A `modify` parameter — exclusive in-place access, still the caller's.
-    /// Carries the parameter's name, for [`Borrow::Read`]'s reason.
-    Modify(String),
-    /// A `for` variable over a container the loop does NOT own, carrying that
-    /// container's name so the diagnostic can spell the consuming form. A loop
+    /// A `read`, `modify` or `share` parameter, or a `for` variable over a
+    /// container the loop does NOT own. The caller still owns it, and a loop
     /// over a `consume`d container or over a temporary binds an owner instead.
-    Element(String),
+    Lent,
     /// A local bound to a field or element read: `let t = r.s`. A place owns its
     /// contents (rule 4), so reading one out does not take it.
     Projection,
@@ -1006,8 +999,7 @@ impl MoveCheck<'_> {
                     match p.capability {
                         Capability::Consume => None,
                         _ if !self.decl.owns_heap(&p.ty) => None,
-                        Capability::Modify => Some(Borrow::Modify(p.name.clone())),
-                        _ => Some(Borrow::Read(p.name.clone())),
+                        _ => Some(Borrow::Lent),
                     },
                 );
             }
@@ -1060,7 +1052,7 @@ impl MoveCheck<'_> {
 
     /// Whether `name` names a borrow here.
     fn borrow_of(&self, name: &str) -> Option<Borrow> {
-        self.borrows.borrow().get(name).cloned().flatten()
+        self.borrows.borrow().get(name).copied().flatten()
     }
 
     /// The type of `e` here, or `None` where nothing names it.
@@ -1113,7 +1105,7 @@ impl MoveCheck<'_> {
                 let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                 self.enter();
                 for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
-                    self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                    self.bind(b, tys.get(i).cloned().flatten(), borrow);
                 }
                 // A block arm (RFC-0118) yields nothing to have a type.
                 let t = arm.body.as_expr().and_then(|e| self.type_of(e));
@@ -1388,7 +1380,7 @@ impl MoveCheck<'_> {
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                     self.enter();
                     for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
-                        self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                        self.bind(b, tys.get(i).cloned().flatten(), borrow);
                     }
                     // A block arm (RFC-0118) is never a return value.
                     let r = arm.body.as_expr().and_then(|e| self.returned_borrow(e));
@@ -1753,7 +1745,7 @@ impl MoveCheck<'_> {
                     // Recording it is the point: an unrecorded binder falls
                     // through to whatever the enclosing scope calls that name
                     // (`own.rs`'s shadowing lesson).
-                    self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                    self.bind(b, tys.get(i).cloned().flatten(), borrow);
                 }
                 let then_div = self.block(then_block, scope);
                 self.exit();
@@ -1788,7 +1780,7 @@ impl MoveCheck<'_> {
                 let borrow = (!*consuming
                     && self.iterable_is_a_place(iter)
                     && elem.as_ref().is_some_and(|t| self.decl.owns_heap(t)))
-                .then(|| Borrow::Element(place_path(iter).map(|(r, _)| r).unwrap_or_default()));
+                .then_some(Borrow::Lent);
                 // RFC-0092 M5, census "U4's price". `for k in m.keys()` walks a
                 // TEMPORARY, and until here nothing released it. It is Phase
                 // 10a's row for an `if let` over a temporary, at the second
@@ -1917,7 +1909,7 @@ impl MoveCheck<'_> {
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                     for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
                         scope.last_mut().unwrap().insert(b.to_string());
-                        self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                        self.bind(b, tys.get(i).cloned().flatten(), borrow);
                     }
                     match &arm.body {
                         ArmBody::Expr(body) => self.expr(body, scope),
