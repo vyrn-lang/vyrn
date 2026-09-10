@@ -6496,7 +6496,13 @@ impl<'p> Fn_<'_, 'p> {
                     None => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
                 }
             }
+            // A record literal names its type; `applied_record` solves the
+            // parameters an unannotated generic literal leaves open.
+            Expr::StructLit { name, fields, line } => self.applied_record(name, fields, *line)?,
             Expr::Call { name, args, .. } => match name.as_str() {
+                // `blackBox(x)` is `x` (RFC-0055): a bench body that ends in it
+                // yields the argument's type.
+                "blackBox" if args.len() == 1 => self.peek(&args[0], line)?,
                 // `@at` is `vyrn_frontend::project::AT` and `@slot` is
                 // `vyrn_frontend::project::ELEM`, both spelled out because a
                 // match pattern cannot name them through the path.
