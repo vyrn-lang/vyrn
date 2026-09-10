@@ -10352,6 +10352,72 @@ ran and are green: `columns`'s pinned diagnostics over 419 programs and
 pass `vyrn check` runs is touched by this slice — the only change outside a test
 host and `vyrn-play` is the worklist, which `vyrn check` does not reach.
 
+#### The arm census, and the first arm to go (2026-09-10, `track-ek`)
+Decision: an arm is retired on its count over the whole gate list, not over
+`examples/`, and `VYRN_NO_CORE_WALK` takes back the arms that still exist, not
+the emitter before the driver. Mine, on the count below.
+Went: `Stmt::Continue`'s arm, eight emitting lines and one `Br`. Stayed:
+`Stmt::Break`'s 8, because the core states no inlined projection's rows at the
+call site; the other eighteen, because the rows carry no `ForIn`, `IfLet` or
+`Drop`, and 10,842 of 21,766 bodies wait on an undeclared callee.
+Lines: `direct.rs` 17,592 to 17,675 — the tally 67, the retirement 16.
+`coredrive.rs` 520 to 535. Refusals: 0 lost, 0 gained. Manifest: untouched.
+Licence: `VYRN_FORM_TALLY` over the whole gate list once, 2,431,620 lines, the
+table below. `coredrive` 963 of 21,722 bodies whole, 168 of 170 byte-identical
+either way, the arm 0 and the rows 9. The wasm manifest green over 176
+examples. `kernel` 27,650 accepted, 0 refused, 0 unlowered. `lowered_dump` 419
+programs, 341 lowered, 0 unstable. `cargo test -p vyrn-cli` 648 passed.
+`emitter_census` re-pinned: mapping 6,790 to 6,791 lines and 596 to 595
+hand-emitted instructions, shared machinery 2,498 to 2,580.
+Findings: `VYRN_NO_CORE_WALK` set `Fn_::core` to `None` for a whole body, so the
+licence's own second walk read every arm and none could go; pointed at the arms
+that still exist, every program is still compared byte for byte. Two hosts
+compile with no core and `hosts.rs` sees neither. `direct.rs`'s own test module
+calls `compile(` where every marker reads `direct::compile(`, and emitted 225
+`Stmt::Break` occurrences where a host with a core emits 8; `vyrn-cli`'s
+unit-test binary emitted 17, because `main.rs` names the install line inside a
+function its own tests never call. RFC-0127 §3.1 does not move: a total match
+still names a retired form, so only the instruction count falls.
+Left: the other nineteen arms, blocked by a core row each — `ForIn` a loop the
+pass makes up, `IfLet` an `St::Switch` the screen refuses, `Drop` an `St::Row`,
+and every expression form the statement that holds it.
+
+##### Every arm, and who reached it
+
+`VYRN_FORM_TALLY=<file>` makes each compile append the form, the function, the
+count, whether the core walk was on, and the command. `coredrive` emits every
+program twice and its second walk is `VYRN_NO_CORE_WALK=1`, so its halves are
+apart here; every other reader compiles the way `vyrn run` does.
+
+| form | with a core | core-off walk only | the readers, largest first |
+|---|---|---|---|
+| `Expr::Var` | 4,563,688 | 363,459 | `semantics` 651,812, the vyx apps 361,127, `coredrive` 315,310 |
+| `Expr::Binary` | 2,616,460 | 211,467 | `semantics` 400,810, the vyx apps 198,979, `coredrive` 182,594 |
+| `Expr::Int` | 1,649,176 | 179,426 | `semantics` 275,540, `coredrive` 119,115, `lowered` 112,220 |
+| `Stmt::Let` | 674,714 | 78,867 | `semantics` 97,338, the vyx apps 48,323, `coredrive` 47,084 |
+| `Stmt::If` | 577,112 | 46,053 | `semantics` 83,992, the vyx apps 46,589, `coredrive` 39,436 |
+| `Stmt::Expr` | 486,901 | 36,198 | `semantics` 79,544, `coredrive` 34,915, `lowered` 32,914 |
+| `Stmt::Return` | 406,433 | 37,923 | `semantics` 49,376, the vyx apps 38,988, `coredrive` 26,459 |
+| `Expr::Str` | 378,427 | 9,653 | the vyx apps 60,432, `coredrive` 16,521, `vyrn serve` 15,750 |
+| `Stmt::Assign` | 320,940 | 57,029 | `semantics` 36,142, the vyx apps 28,347, `coredrive` 20,895 |
+| `Expr::Byte` | 259,322 | 12,323 | the `charcount` oracles 50,971, `semantics` 28,074 |
+| `Stmt::While` | 232,624 | 15,609 | `semantics` 36,084, `coredrive` 16,735, the vyx apps 16,326 |
+| `Expr::Bool` | 105,661 | 12,511 | `semantics` 14,254, the vyx apps 11,270, `coredrive` 6,896 |
+| `Expr::Unary` | 51,247 | 3,948 | `semantics` 8,602, `coredrive` 3,794, `lowered` 3,574 |
+| `Stmt::ForIn` | 32,437 | 1,057 | the vyx apps 4,937, `coredrive` 1,749, `vyrn-lsp` 1,527 |
+| another statement | 28,929 | 1,977 | `semantics` 3,164, `coredrive` 2,223, `lowered` 2,115 |
+| `Stmt::Drop` | 10,391 | 444 | the vyx apps 1,739, `lowered` 605, `coredrive` 601 |
+| `Expr::Float` | 3,157 | 1,186 | `lowered` 396, `coredrive` 396, `nbody` 126 |
+| `Stmt::IfLet` | 2,627 | 156 | the vyx apps 286, `coredrive` 186, `lowered` 183 |
+| `Stmt::Break` | 298 | 3,080 | `vyrn-codegen`'s tests 225, `vyrn-cli`'s tests 17, `lowered` 8, `coredrive` 8, then `jchain`, `jsonplace` and `tryplace` |
+| `Stmt::Continue` | **0** | 14 | none — retired |
+
+An expression form is downstream of a statement: its arm goes when every
+statement holding it is core-carried. `Stmt::ForIn`, `Stmt::IfLet`, `Stmt::Drop`
+and `another statement` read 0 core rows over the corpus, so each needs a row
+first — a loop the pass makes up, an `St::Switch` the statement screen refuses,
+and an `St::Row` the driver must place.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
