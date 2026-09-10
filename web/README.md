@@ -183,8 +183,7 @@ wasm each global is one LLVM `internal global` (`zeroinitializer`) whose
 initializer runs in a synthesized `@__vyrn_globals_init` called from
 `vyrn_entry` *before* `main`; the interpreter seeds a persistent frame the same
 way. Stores validate like any value boundary; module state is never dropped
-(safe-leak), can't be `consume`d or `drop`ped, and any function that reads or
-writes a global is not spawn-safe (transitively — shared state by definition).
+(safe-leak), and can't be `consume`d or `drop`ped.
 
 [examples/eventloop.vyrn](../examples/eventloop.vyrn) drives the handlers in a
 deterministic in-`main` loop, so it is a normal three-way parity citizen

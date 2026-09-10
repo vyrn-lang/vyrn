@@ -134,7 +134,7 @@ functions, methods, types, and variants (imported symbols are excluded).
 `let p = o.copy()` shows `p: Outer`, and `let mut o = Outer { .. }` shows
 nothing, because the line already names the type. An annotation, a record
 literal, and a literal value are all evidence enough; a call, a `match`, a
-`spawn`, a field read, and an element read are not. A binding whose type is an
+field read, and an element read are not. A binding whose type is an
 anonymous enum is hinted with the variant arms hover writes (`{ A(Int64) | B }`)
 — one renderer, so the two surfaces cannot disagree. A `.vyx` `<script>` gets
 the same hints: its bindings are mapped out of the synthesized module and back
