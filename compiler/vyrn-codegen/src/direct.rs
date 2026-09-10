@@ -345,6 +345,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // else. The guard lives as long as the emit, so a record made here is not
     // left behind for whatever `Program` next lands at this address.
     let _decided = vyrn_lower::core::decide(program);
+    let _tally = Tally;
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -2371,12 +2372,7 @@ fn lower_body(
         dest_used: false,
         call_dest: None,
         owner,
-        // `VYRN_NO_CORE_WALK=1` takes the AST walk back for the whole body,
-        // which is how the two are compared (`compiler/vyrn-cli/tests/coredrive.rs`).
-        core: (!core_walk_off())
-            .then(|| vyrn_lower::core::body_of(&f.name))
-            .flatten()
-            .map(std::rc::Rc::new),
+        core: vyrn_lower::core::body_of(&f.name).map(std::rc::Rc::new),
         core_at: HashMap::new(),
         core_w: Walked::default(),
     };
@@ -2516,6 +2512,7 @@ fn lower_body(
     let from_core = cx_fn
         .core
         .clone()
+        .filter(|_| !core_walk_off())
         .filter(|core| cx_fn.core_walkable(core, stmts));
     WALKS.with(|w| {
         let (from, all) = w.get();
@@ -4367,7 +4364,7 @@ impl<'p> Fn_<'_, 'p> {
         if self.core_took(m, b, s)? {
             return Ok(());
         }
-        count(stmt_form(s), false);
+        count_in(stmt_form(s), &self.owner);
         match s {
             Stmt::Let {
                 name,
@@ -5125,15 +5122,12 @@ impl<'p> Fn_<'_, 'p> {
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
             }
+            // Retired, and its flag in `FORMS` says so: the core states every
+            // `continue`, and this arm read zero over the corpus and every gated
+            // suite. The match is exhaustive, so what stands here is the answer
+            // for a `continue` the core did not state, which is a defect there.
             Stmt::Continue { line } => {
-                let &(_, cont, regions) = self
-                    .loops
-                    .last()
-                    .ok_or_else(|| gap("`continue` outside a loop", *line))?;
-                self.emit_releases(m, b, ExitKind::Continue, s as *const Stmt as usize)?;
-                self.exit_regions_above(b, regions, true);
-                let d = self.br_to(cont);
-                b.ins(&Instruction::Br(d));
+                return unsupported("a `continue` the core did not state", *line)
             }
             // `region { .. }` (RFC-0004 §4). An arena scope, and in this backend
             // that is a counter and its trap — see `region_exit` for why the arena
@@ -5860,7 +5854,7 @@ impl<'p> Fn_<'_, 'p> {
     /// temporary is handed back at whatever depth it was made.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         if let Some(f) = expr_form(e) {
-            count(f, false);
+            count_in(f, &self.owner);
         }
         let t = self.expr_inner(m, b, e)?;
         if self.cx.arg_drop_row(e as *const Expr as usize) {
@@ -16209,27 +16203,33 @@ fn expr_name(e: &Expr) -> String {
 /// how many occurrences the ARM emitted and how many the core's rows did, so a
 /// form whose first number is zero over the whole corpus is one whose arm has
 /// no reader left.
-pub const FORMS: [&str; 20] = [
-    "Stmt::Let",
-    "Stmt::Assign",
-    "Stmt::Return",
-    "Stmt::If",
-    "Stmt::Expr",
-    "Stmt::While",
-    "Stmt::ForIn",
-    "Stmt::Break",
-    "Stmt::Continue",
-    "Stmt::IfLet",
-    "Stmt::Drop",
-    "a statement of another form",
-    "Expr::Int",
-    "Expr::Byte",
-    "Expr::Bool",
-    "Expr::Float",
-    "Expr::Str",
-    "Expr::Var",
-    "Expr::Unary",
-    "Expr::Binary",
+///
+/// The flag beside each name says whether the AST dispatch still EMITS that
+/// form. It is `false` for a form the core states and the dispatch only
+/// refuses, and it is the retirement schedule's one home: `VYRN_NO_CORE_WALK`
+/// reads it, because the walk that switch takes back is the arms that still
+/// exist and not the emitter before the driver.
+pub const FORMS: [(&str, bool); 20] = [
+    ("Stmt::Let", true),
+    ("Stmt::Assign", true),
+    ("Stmt::Return", true),
+    ("Stmt::If", true),
+    ("Stmt::Expr", true),
+    ("Stmt::While", true),
+    ("Stmt::ForIn", true),
+    ("Stmt::Break", true),
+    ("Stmt::Continue", false),
+    ("Stmt::IfLet", true),
+    ("Stmt::Drop", true),
+    ("a statement of another form", true),
+    ("Expr::Int", true),
+    ("Expr::Byte", true),
+    ("Expr::Bool", true),
+    ("Expr::Float", true),
+    ("Expr::Str", true),
+    ("Expr::Var", true),
+    ("Expr::Unary", true),
+    ("Expr::Binary", true),
 ];
 
 thread_local! {
@@ -16287,6 +16287,81 @@ fn expr_form(e: &Expr) -> Option<usize> {
         Expr::Binary { .. } => 19,
         _ => return None,
     })
+}
+
+/// Where the arm tally is appended, or `None` when nothing asked for one.
+///
+/// Read once. The AST dispatch asks per statement, and an environment lookup
+/// there is one system call for every statement the process emits.
+fn tally_at() -> Option<&'static std::path::Path> {
+    static AT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    AT.get_or_init(|| std::env::var_os("VYRN_FORM_TALLY").map(std::path::PathBuf::from))
+        .as_deref()
+}
+
+thread_local! {
+    /// Per form and owner, how many occurrences the AST arm emitted since the
+    /// last flush — RFC-0125 §3 M3, the occurrence slice.
+    ///
+    /// [`COUNTS`] is one run of one process. This one names the FUNCTION each
+    /// occurrence is in and goes to a file, so "which gate reaches this arm" is
+    /// answered over the whole gate list and not over one suite.
+    static WHO: std::cell::RefCell<std::collections::BTreeMap<(usize, String), usize>> =
+        std::cell::RefCell::new(std::collections::BTreeMap::new());
+}
+
+/// Count one occurrence of `form` that the AST arm emitted, in `owner`.
+fn count_in(form: usize, owner: &str) {
+    count(form, false);
+    if tally_at().is_some() {
+        let owner = if owner.is_empty() {
+            "(the globals initializer)"
+        } else {
+            owner
+        };
+        WHO.with(|w| *w.borrow_mut().entry((form, owner.to_string())).or_default() += 1);
+    }
+}
+
+/// Appends what the AST arms emitted while it lived: the form, the owner, the
+/// count, and the command that ran, one line each.
+///
+/// A guard rather than a call at the end of [`compile_inner`], because a
+/// compile that fails emits arms too and its `?` leaves by another door.
+struct Tally;
+
+impl Drop for Tally {
+    fn drop(&mut self) {
+        let Some(at) = tally_at() else { return };
+        let who = WHO.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        if who.is_empty() {
+            return;
+        }
+        static ARGV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let argv = ARGV.get_or_init(|| std::env::args().collect::<Vec<_>>().join(" "));
+        // A compile with the core turned off is the licence's own second walk
+        // and not a reader of the arm, so the tally says which it was.
+        let walk = if core_walk_off() {
+            "no-core-walk"
+        } else {
+            "core"
+        };
+        let mut out = String::new();
+        for ((form, owner), n) in who {
+            out.push_str(&format!(
+                "{}\t{owner}\t{n}\t{walk}\t{argv}\n",
+                FORMS[form].0
+            ));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(at)
+        {
+            use std::io::Write;
+            let _ = f.write_all(out.as_bytes());
+        }
+    }
 }
 
 /// Whether the AST walk is asked for even where the core's rows carry the body
@@ -16386,13 +16461,21 @@ impl<'p> Fn_<'_, 'p> {
         let Some(body) = self.core.clone() else {
             return Ok(false);
         };
+        let form = stmt_form(s);
+        // `VYRN_NO_CORE_WALK=1` takes the AST walk back, and what it can take
+        // back is the arms that still exist: a retired form has none, so the
+        // rows emit it either way and the comparison stays byte for byte over
+        // every program (`compiler/vyrn-cli/tests/coredrive.rs`).
+        if core_walk_off() && FORMS[form].1 {
+            return Ok(false);
+        }
         let Some(run) = self.core_run(&body, s) else {
             return Ok(false);
         };
         let mut w = std::mem::take(&mut self.core_w);
         let r = self.core_stmts(m, b, &body, &mut w, &run);
         self.core_w = w;
-        count(stmt_form(s), true);
+        count(form, true);
         r.map(|()| true)
     }
 
