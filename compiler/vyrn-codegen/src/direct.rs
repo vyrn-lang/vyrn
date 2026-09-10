@@ -3479,25 +3479,12 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
-    ///
-    /// The single rule both drop paths read — `own`'s automatic block-exit release
-    /// and an explicit `drop x` — so the two cannot free different sets. It is the
-    /// same set the textual backend's [`crate::Gen::emit_drop`] frees, minus the
-    /// `Stream`, which reaches its release through the stream lowering rather than
-    /// through `own`.
-    /// Whether releasing this `Array<T>` releases its elements too (RFC-0092
-    /// M2). `own` decides, and this asks it — the same answer the textual
-    /// backend reads, including the stop for a self-referring element.
-    fn array_releases_elems(&self, arr: &Type) -> bool {
-        matches!(self.cx.owned.release_kind(arr), Some(DropKind::Deep(_)))
-    }
-
-    /// Whether `own` gives `ty` a walking release rather than a buffer one.
-    /// [`Fn_::array_releases_elems`] under its general name, for the `Map` and
-    /// `SmallArray` rows RFC-0092 M3 adds.
+    /// Whether `own` gives `ty` a walking release rather than a buffer one:
+    /// RFC-0092 M2's element row for an `Array`, M3's for a `Map` and a
+    /// `SmallArray`. `own` decides and this asks it, including the stop for a
+    /// self-referring element, whose walk has no bottom.
     fn deep_row(&self, ty: &Type) -> bool {
-        self.array_releases_elems(ty)
+        matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_)))
     }
 
     /// The address of a `SmallArray`'s live slots: the inline block while
@@ -3527,50 +3514,47 @@ impl<'p> Fn_<'_, 'p> {
         Ok(base)
     }
 
+    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
+    ///
+    /// [`vyrn_frontend::declared::Owned::release_kind`]'s row, and nothing
+    /// else. The row says what a release MEANS — a call the type declared, a
+    /// buffer, a walk — and this adds the byte offsets, which are `layout`'s
+    /// and which no pass above this crate can state.
+    ///
+    /// The spelling matters, and this is the one place it does. A declared row
+    /// is keyed by the type's NAME, so it is asked of `ty`. Every other row is
+    /// asked of the SUBSTITUTED type: a generic body's `Array<T>` has a
+    /// `Param` element and `own` answers `Deep` for one, because inside that
+    /// body the element is unknowable — an emitter has the instance in hand
+    /// and is owed the instance's row.
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
-        // A declared row (RFC-0086 M1) answers before any built-in shape does,
-        // and it is keyed by the type's NAME — which resolving away would lose.
         if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
             return Ok(Some(Rel::Call(f, ty.clone())));
         }
         let t = self.cx.resolve(ty);
-        Ok(match &t {
-            Type::Str => Some(Rel::Str),
-            Type::Stream(i) => Some(Rel::Stream((**i).clone())),
-            // An `Array<T>` gives back its buffer, and its ELEMENTS too where
-            // `own` says so (RFC-0092 M2, census U4). The question is asked of
-            // `own` rather than re-derived from the element, so the guards that
-            // answer live in one file — including the one that stops a
-            // self-referring element type, whose walk has no bottom. The element
-            // walk needs an address, so that answer is `Deep` and the
-            // buffer-only one stays a `Buffers`.
-            Type::Array(_) | Type::Map(..) | Type::SmallArray(..) if self.deep_row(&t) => {
-                Some(Rel::Deep(t.clone(), Vec::new()))
-            }
-            Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
-            Type::Map(..) => {
-                let l = self.layout_of(&t, line)?;
-                Some(Rel::Buffers(vec![l.fields[0], l.fields[1], l.fields[4]]))
-            }
-            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it is
-            // null until the array spills, which is exactly the case `free`
+        let bufs = |which: &[usize]| -> Result<Rel, String> {
+            let l = self.layout_of(&t, line)?;
+            Ok(Rel::Buffers(which.iter().map(|i| l.fields[*i]).collect()))
+        };
+        Ok(match self.cx.owned.release_kind(&t) {
+            Some(DropKind::Release(f, _)) => Some(Rel::Call(f, t.clone())),
+            Some(DropKind::FreeStr) => Some(Rel::Str),
+            Some(DropKind::FreeArr) => Some(bufs(&[0])?),
+            Some(DropKind::FreeMap) => Some(bufs(&[0, 1, 4])?),
+            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it
+            // is null until the array spills, which is exactly the case `free`
             // refuses. The inline slots need no reclamation.
-            Type::SmallArray(..) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[2]])),
-            // Phase 5: an aggregate owns its places. Phase 10b: a stored `fn`
-            // value owns its capture block, which is one allocation whatever the
-            // tag — so it needs no registry to release, only to copy.
-            //
-            // RFC-0092 M3 adds the record, the user enum and the fixed
-            // `[N x T]`. Whether they go is `own`'s answer, asked rather than
-            // re-derived: it carries the stop for a type that reaches itself,
-            // whose walk has no bottom.
-            Type::Fn(..) if self.owns_heap(&t) => Some(Rel::Deep(t, Vec::new())),
-            Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)
-                if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_))) =>
-            {
-                Some(Rel::Deep(t, Vec::new()))
-            }
-            _ => None,
+            Some(DropKind::FreeSmallArr) => Some(bufs(&[2])?),
+            // The element walk needs an address, which is why this answer is a
+            // `Deep` and the buffer-only ones are a `Buffers`.
+            Some(DropKind::Deep(d)) => Some(Rel::Deep(d, Vec::new())),
+            // A `Stream<T>` is the one shape with no row: it reaches its
+            // release through the stream lowering (RFC-0075 M2b), and a row
+            // here would release it twice.
+            Some(DropKind::CloseStream) | None => match t {
+                Type::Stream(i) => Some(Rel::Stream(*i)),
+                _ => None,
+            },
         })
     }
 
@@ -3689,7 +3673,7 @@ impl<'p> Fn_<'_, 'p> {
             // The elements first, then the buffer they live in — the reverse of
             // the order `copy_at` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.
-            Type::Array(inner) if self.array_releases_elems(&self.cx.resolve(ty)) => {
+            Type::Array(inner) if self.deep_row(&self.cx.resolve(ty)) => {
                 let l = self.layout_of(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -3700,7 +3684,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
                 b.ins(&Instruction::LocalSet(data));
-                self.rel_each(m, b, data, n, stride, &inner, line)?;
+                self.each(m, b, true, data, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(data));
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
@@ -3719,7 +3703,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(n));
                 let base = self.sa_base(b, a, ty, line)?;
-                self.rel_each(m, b, base, n, stride, &inner, line)?;
+                self.each(m, b, true, base, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word_at(l.fields[2])))
                     .ins(&Instruction::Call(self.cx.rt.free));
@@ -3746,7 +3730,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
                     if !(ik && i == 0) {
-                        self.rel_each(m, b, buf, n, stride, &elem, line)?;
+                        self.each(m, b, true, buf, n, stride, &elem, line)?;
                     }
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
@@ -3803,7 +3787,7 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.rel_each(m, b, a, count, stride, &inner, line)
+                self.each(m, b, true, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
             // this walk has something to give back for. One walk since RFC-0126
@@ -5752,24 +5736,10 @@ impl<'p> Fn_<'_, 'p> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<(), String> {
-        if decl.predicate.is_none() {
-            return Ok(());
-        }
-        let held = self.park_for_predicate(b, decl, line)?;
         let name = vyrn_frontend::ctor::ctor_name(&decl.name);
-        let Some(sig) = self.cx.sigs.get(&name) else {
-            return unsupported(
-                &format!(
-                    "a `where` clause on `{}` with no constructor in the link",
-                    decl.name
-                ),
-                line,
-            );
-        };
-        let index = sig.index;
-        b.ins(&Instruction::LocalGet(held));
-        b.ins(&Instruction::Call(index));
-        b.ins(&Instruction::LocalGet(held));
+        if let Some(held) = self.call_generated(b, decl, &name, "constructor", line)? {
+            b.ins(&Instruction::LocalGet(held));
+        }
         Ok(())
     }
 
@@ -5790,15 +5760,32 @@ impl<'p> Fn_<'_, 'p> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<Option<u32>, String> {
+        let name = vyrn_frontend::ctor::pred_name(&decl.name);
+        self.call_generated(b, decl, &name, "predicate", line)
+    }
+
+    /// Park the value on the stack and hand it to the generated function
+    /// `name`, giving back the local it was parked in — or `None`, stack
+    /// untouched, for a type with no refinement.
+    ///
+    /// The two callers above are the same three instructions over two
+    /// `what` is the one word the two callers' refusals differ by.
+    fn call_generated(
+        &mut self,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        name: &str,
+        what: &str,
+        line: usize,
+    ) -> Result<Option<u32>, String> {
         if decl.predicate.is_none() {
             return Ok(None);
         }
         let held = self.park_for_predicate(b, decl, line)?;
-        let name = vyrn_frontend::ctor::pred_name(&decl.name);
-        let Some(sig) = self.cx.sigs.get(&name) else {
+        let Some(sig) = self.cx.sigs.get(name) else {
             return unsupported(
                 &format!(
-                    "a `where` clause on `{}` with no predicate in the link",
+                    "a `where` clause on `{}` with no {what} in the link",
                     decl.name
                 ),
                 line,
@@ -12277,24 +12264,33 @@ impl<'p> Fn_<'_, 'p> {
         nb
     }
 
-    /// Release each of the first `count` elements of `buf` — the mirror of
-    /// [`Fn_::copy_each`], and RFC-0092 M2's half of census U4.
+    /// Walk the first `count` elements of `buf`, releasing each or giving each
+    /// a copy of its own — one loop, both directions, the way
+    /// [`Fn_::rel_body`] and [`Fn_::copy_body`] are one walk per type.
     ///
-    /// The gate is the element's own release ROW, not whether it reaches heap. A
-    /// record reaches two Strings and has no row until M3, and walking into one
-    /// here would free fields no rule says the array owns. A row is the proof;
-    /// `owns_heap` is only a reachability question.
-    fn rel_each(
+    /// The two gates are different questions and neither contains the other. A
+    /// release is gated on the element's own release ROW, which is `own`'s
+    /// proof that the container owns the element; walking into an element with
+    /// no row would free places no rule says the array owns. A copy is gated on
+    /// reachability, because a copy of a value that reaches heap has to
+    /// duplicate what it reaches whether or not anything releases it.
+    fn each(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        rel: bool,
         buf: u32,
         count: u32,
         stride: u32,
         elem: &Type,
         line: usize,
     ) -> Result<(), String> {
-        if self.cx.owned.release_kind(elem).is_none() {
+        let walks = if rel {
+            self.cx.owned.release_kind(elem).is_some()
+        } else {
+            self.owns_heap(elem)
+        };
+        if !walks {
             return Ok(());
         }
         let i = b.local(ValType::I32);
@@ -12320,59 +12316,11 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalSet(p));
-        self.rel_at(m, b, p, elem, line)?;
-        b.ins(&Instruction::LocalGet(i));
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalSet(i));
-        let back = self.br_to(again);
-        b.ins(&Instruction::Br(back));
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        Ok(())
-    }
-
-    /// Replace each of the first `count` elements of `buf` with a deep copy of
-    /// itself. No loop is emitted at all when the element owns no heap.
-    fn copy_each(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        buf: u32,
-        count: u32,
-        stride: u32,
-        elem: &Type,
-        line: usize,
-    ) -> Result<(), String> {
-        if !self.owns_heap(elem) {
-            return Ok(());
+        if rel {
+            self.rel_at(m, b, p, elem, line)?;
+        } else {
+            self.copy_at(m, b, p, elem, line)?;
         }
-        let i = b.local(ValType::I32);
-        let p = b.local(ValType::I32);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::LocalSet(i));
-        let out = self.depth;
-        b.ins(&Instruction::Block(BlockType::Empty));
-        self.depth += 1;
-        let again = self.depth;
-        b.ins(&Instruction::Loop(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(i));
-        b.ins(&Instruction::LocalGet(count));
-        b.ins(&Instruction::I32GeU);
-        let leave = self.br_to(out);
-        b.ins(&Instruction::BrIf(leave));
-        b.ins(&Instruction::LocalGet(buf));
-        b.ins(&Instruction::LocalGet(i));
-        if stride != 1 {
-            b.ins(&Instruction::I32Const(stride as i32));
-            b.ins(&Instruction::I32Mul);
-        }
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalSet(p));
-        self.copy_at(m, b, p, elem, line)?;
         b.ins(&Instruction::LocalGet(i));
         b.ins(&Instruction::I32Const(1));
         b.ins(&Instruction::I32Add);
@@ -12448,7 +12396,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[1])));
                 b.ins(&Instruction::I64Store(at(l.fields[2])));
-                self.copy_each(m, b, nb, n, stride, &inner, line)
+                self.each(m, b, false, nb, n, stride, &inner, line)
             }
             // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
             // header copy is the whole copy of its storage.
@@ -12494,7 +12442,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(base));
                 self.depth -= 1;
                 b.ins(&Instruction::End);
-                self.copy_each(m, b, base, n, stride, &inner, line)
+                self.each(m, b, false, base, n, stride, &inner, line)
             }
             Type::Map(kt, vt) => {
                 // String keys are dup'd per entry; Int64 keys copy with the
@@ -12537,7 +12485,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
                     if !(ik && i == 0) {
-                        self.copy_each(m, b, nb, n, stride, &elem, line)?;
+                        self.each(m, b, false, nb, n, stride, &elem, line)?;
                     }
                 }
                 // The index is copied rather than rebuilt: it holds POSITIONS,
@@ -12582,7 +12530,7 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(m, b, a, count, stride, &inner, line)
+                self.each(m, b, false, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
             // whose declared type owns something. The tag is the variant's
@@ -14597,7 +14545,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
             b.ins(&Instruction::LocalSet(buf));
             if mk == MapKey::Str {
-                self.copy_each(m, b, buf, len, 4, &Type::Str, line)?;
+                self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
             }
             let off = b.alloc(al.size, al.align);
             b.slot(off + al.fields[0]);
@@ -14970,7 +14918,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(len));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(m, b, buf, count, stride, inner, line)?;
+                self.each(m, b, false, buf, count, stride, inner, line)?;
                 let off = b.alloc(al.size, al.align);
                 b.slot(off + al.fields[0]);
                 b.ins(&Instruction::LocalGet(buf));

@@ -259,10 +259,12 @@ fn sections() -> Vec<Section> {
         sec(
             "fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {",
             Decision, Neither,
-            "the frame-size refusal and the call-depth counter — a check the \
-             emitter inserts and a limit it enforces. The language states the \
-             depth (`vyrn_frontend::trap`); the counter and its comparison are \
-             the emitter's",
+            "the frame-size refusal: a check the emitter inserts, against a limit \n             the language states (`vyrn_frontend::trap::FRAME_LIMIT`). The size \n             it compares is the sum of the frame's aggregate locals, which is \n             this crate's layout, so what a core row could take is the refusal \n             and not the comparison",
+        ),
+        sec(
+            "fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {",
+            Mapping, Neither,
+            "the call counter: a load, a compare and a store at the one site that \n             has the frame in hand, and the one trap row that goes through \n             `trapAt` directly, because the prologue stands before the block a \n             check branches out to. `PLAN-0125-runtime.md` §6 step 9 priced the \n             runtime pair and left this here",
         ),
         sec(
             "fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {",
@@ -305,21 +307,28 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {",
+            Mapping, Neither,
+            "§2.3's \"`drop` to a call\", and that call's body. `rel_for` reads \n             [`Owned::release_kind`]'s row and adds the byte offsets, `rel_at` \n             emits the call, and `rel_body` is the body, written once per type. \n             It DERIVED the row a second time from the type's shape until the \n             release slice; what is left is the shape, and a shape here is a \n             list of byte offsets",
+        ),
+        sec(
+            "fn store_bufs(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, bool)>, String> {",
             Decision, Neither,
-            "what releasing a type MEANS, derived here from the type's shape: a \
-             recursive walk over records, elements, payloads and buffers. §2.3 \
-             says a drop is a call, and since the two-shape-walks slice it IS \
-             one — `rel_at` emits a call and this walk is that function's body, \
-             written once per type. What is still filed here is the SHAPE, \
-             because every step of it is a byte offset and a byte offset is \
-             `layout.rs`'s: no pass above this crate can state it",
+            "which buffers a STORE hands back — a deliberate subset of the release \n             row, taken here rather than named by the core's store row. \n             `St::Store` states WHETHER a store releases; nothing states what \n             it releases, and the three exceptions a store leaves alone are a \n             rule this file states by itself",
         ),
         sec(
             "fn addr_local(&mut self, b: &mut Frame, p: Place, off: u32) -> u32 {",
+            Mapping, Neither,
+            "an address in a local, and the snapshot a store takes through it: the \n             loads before the store, under a tag test where a payload box needs \n             one — typed loads at computed addresses, which is §2.3",
+        ),
+        sec(
+            "fn store_boxes(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, Type)>, String> {",
             Decision, Neither,
-            "the snapshot family: which buffers a store overwrites and must free \
-             first, read off the type here rather than named by the core's store \
-             row",
+            "the second half of the store's subset rule: the sums a value holds, \n             whose reclamation needs a tag and so cannot be a flat offset. The \n             same walk and the same blocker as `store_bufs`",
+        ),
+        sec(
+            "fn free_snap(&mut self, b: &mut Frame, snap: &[(u32, bool)]) {",
+            Mapping, Neither,
+            "the snapshot handed back after the store that replaced it: one call \n             each",
         ),
         sec(
             "fn region_enter(&mut self, b: &mut Frame) {",
@@ -352,16 +361,18 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn coerce(",
-            Decision, Neither,
-            "THE COERCION LADDER — §2.7 deletes it in both backends. Which \
-             conversions are implicit is a typing rule, and the emitter \
-             re-decides it here",
+            Mapping, Neither,
+            "the wasm for the rung `crate::coerce_plan` placed — one arm per rung, \n             and no guard chain. The ladder was three statements of one rule \n             and RFC-0125 §3 M6 made it the plan's; the RFC's own after-table \n             records this site as stating no rung. It was filed as the ladder \n             until the census slice, which is one file with two censuses \n             disagreeing about it",
         ),
         sec(
             "fn proven(&self, e: &Expr, to: &Type) -> bool {",
             Decision, Source,
-            "what a validated type is, and the check inserted at every value \
-             boundary. §2.3: it \"does not know what a validated type is\"",
+            "whether a crossing needs its check at all — RFC-0020's containment \n             escape, read off the SOURCE. The predicate is stated once \n             (`vyrn_frontend::finite::string_flow_proven`); what is decided \n             here is that this expression is the one to ask it about, which a \n             `Coerce` row in the core would carry instead",
+        ),
+        sec(
+            "fn emit_validation(",
+            Mapping, Neither,
+            "the check itself, which is a CALL: the value is parked in a local and \n             handed to the program's own generated constructor or predicate \n             (`vyrn_frontend::ctor`). This emitter lowered the `where` clause \n             itself until RFC-0125 §3 M6's fourth slice",
         ),
         sec(
             "fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {",
@@ -818,8 +829,8 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 6797, 595),
-        ("a decision §2.3 says it must not make", 2212, 356),
+        ("the mapping §2.3 names", 7727, 715),
+        ("a decision §2.3 says it must not make", 1230, 213),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
         ("the wasm format", 334, 0),
@@ -898,10 +909,10 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 46, 6012, 0, 0),
+        ("neither", 51, 6079, 0, 0),
         ("the core's rows", 5, 2075, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
-        ("the source, and the core has no row", 10, 2015, 88, 0),
+        ("the source, and the core has no row", 10, 1896, 88, 0),
         ("both, for two questions", 15, 7498, 104, 138),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
