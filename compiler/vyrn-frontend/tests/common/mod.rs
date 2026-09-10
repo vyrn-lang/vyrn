@@ -9,6 +9,12 @@
 /// the split `vyrn run` makes for a program and `Resident::call_body` makes for
 /// a test body.
 pub fn run_compiled(program: &vyrn_frontend::ast::Program) -> Result<i64, String> {
+    // As `vyrn run` does, which is the whole claim above: the placer into
+    // `own::analyze`, the kernel's refusals, the must-use and effect judgments.
+    // HERE rather than in each caller because a caller can forget one and three
+    // did — `remote_tests`' two, and `run_with`, which installed the generation
+    // engine alone. `tests/hosts.rs` counts a host per file and cannot see that.
+    vyrn_lower::install();
     let bytes = vyrn_codegen::direct::compile(program)?;
     let out = vyrn_cli::wasmrun::run(
         &bytes,

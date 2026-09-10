@@ -20,8 +20,8 @@
 //! Every `.rs` file under `compiler/`, with its comment lines dropped, is
 //! searched for two families of marker:
 //!
-//!   - it COMPILES: it names `direct::compile`, `direct::compile_gen_host`,
-//!     `direct::wat`, or the frontend tests' `run_compiled` helper.
+//!   - it COMPILES: it names `direct::compile`, `direct::compile_gen_host` or
+//!     `direct::wat`.
 //!   - it RUNS GENERATORS: it names `vyrn_genwasm::install()`, so it is a
 //!     process that assembles an engine of its own and has to assemble the
 //!     whole one.
@@ -30,13 +30,12 @@
 //! compiles with, so a host that appears, disappears or changes side fails
 //! [`the_host_table_is_what_the_sources_say`].
 //!
-//! # What a marker cannot see
-//!
-//! This census is per FILE, and a file with several run paths can install on
-//! one and not on another. `loader_run.rs` was such a file: `tests::run_multi`
-//! installed and `remote_tests`'s two callers of `run_compiled` did not. The
-//! answer is not a finer marker, which would be a parser; it is that the helper
-//! every path goes through installs, so a path cannot forget.
+//! A file that reaches a backend only through `common::run_compiled` is NOT a
+//! host: the helper is, and it installs, so its callers cannot forget. That is
+//! also the answer to what a per-FILE marker cannot see. `loader_run.rs` had
+//! three run paths and installed on one — `tests::run_multi` did,
+//! `remote_tests`' two callers and `run_with` did not — and no marker short of
+//! a parser separates them. One helper that installs does.
 
 use std::path::{Path, PathBuf};
 
@@ -54,29 +53,15 @@ use Core::{Installed, None_};
 /// Every host, and the core it compiles with.
 const HOSTS: &[(&str, Core)] = &[
     ("compiler/vyrn-cli/src/main.rs", Installed),
-    (
-        "compiler/vyrn-cli/src/wasmrun.rs",
-        None_("`probe_bytes` compiles the resident probe for this file's own two tests"),
-    ),
+    ("compiler/vyrn-cli/src/wasmrun.rs", Installed),
     ("compiler/vyrn-cli/tests/coredrive.rs", Installed),
     ("compiler/vyrn-cli/tests/coretables.rs", Installed),
     ("compiler/vyrn-cli/tests/effects.rs", Installed),
     ("compiler/vyrn-cli/tests/kernel.rs", Installed),
     ("compiler/vyrn-cli/tests/lowered.rs", Installed),
     ("compiler/vyrn-cli/tests/typed.rs", Installed),
-    (
-        "compiler/vyrn-frontend/tests/common/mod.rs",
-        None_("`run_compiled`, the helper three frontend suites compile through"),
-    ),
-    (
-        "compiler/vyrn-frontend/tests/contracts_api.rs",
-        None_("the cross-check program runs through `run_compiled`"),
-    ),
+    ("compiler/vyrn-frontend/tests/common/mod.rs", Installed),
     ("compiler/vyrn-frontend/tests/isolation.rs", Installed),
-    (
-        "compiler/vyrn-frontend/tests/jsondec_run.rs",
-        None_("every decoder program runs through `run_compiled`"),
-    ),
     ("compiler/vyrn-frontend/tests/loader_run.rs", Installed),
     ("compiler/vyrn-frontend/tests/semantics.rs", Installed),
     (
@@ -95,7 +80,6 @@ const COMPILES: &[&str] = &[
     "direct::compile(",
     "direct::compile_gen_host(",
     "direct::wat(",
-    "run_compiled(",
 ];
 
 /// A file assembles a generation engine, so it assembles a compiler.
@@ -106,6 +90,21 @@ const INSTALL: &str = "vyrn_lower::install()";
 
 /// This census, which names every marker above and is not a host.
 const SELF: &str = "compiler/vyrn-cli/tests/hosts.rs";
+
+#[test]
+fn the_only_thing_that_compiles_without_a_core_is_not_a_process() {
+    let without: Vec<&str> = HOSTS
+        .iter()
+        .filter_map(|(p, c)| matches!(c, None_(_)).then_some(*p))
+        .collect();
+    assert_eq!(
+        without,
+        ["compiler/vyrn-genwasm/src/lib.rs"],
+        "a host compiles with no core. Its emitter is the AST dispatch alone and \
+         its refusals are not the kernel's, so it is a second compiler with a \
+         second, weaker rule"
+    );
+}
 
 #[test]
 fn the_host_table_is_what_the_sources_say() {

@@ -743,7 +743,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1133, 0),
         ("shared machinery", 1485, 21),
-        ("tests", 852, 2),
+        ("tests", 856, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
