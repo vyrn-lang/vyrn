@@ -468,7 +468,7 @@ export fn chapters() -> Array<Chapter> {
             lede: "A `gen fn` is ordinary Vyrn that runs while the program compiles and returns Vyrn source. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way. None of them is a compiler feature.",
             sections: [
                 section("genfn", "A generator writes a module", [
-                    "A generator is a function marked <code>gen</code>. It returns a <code>String</code> of Vyrn source. It may read files through <code>readFile</code> and <code>listDir</code>, scoped to the paths its caller passed in, and it may not write, spawn, or reach an <code>extern</code>.",
+                    "A generator is a function marked <code>gen</code>. It returns a <code>String</code> of Vyrn source. It may read files through <code>readFile</code> and <code>listDir</code>, scoped to the paths its caller passed in, and it may not write, use module state, or reach an <code>extern</code>.",
                     "This one writes a lookup table. It takes no input, so its answer is the same on every machine — which is the property a build has to have.",
                     "There is no run link on this block. A generator is not a program: it needs the file that imports it, and the playground takes one source.",
                 ], ["gentiny"]),

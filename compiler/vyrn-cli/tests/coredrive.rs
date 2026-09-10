@@ -296,16 +296,14 @@ fn rhs(r: &Rhs, note: &mut impl FnMut(usize)) {
         }
         // Since the callee slice the row says WHO: a function this program
         // declares is one the emitter's own table answers for, and only the
-        // other eight kinds — and a `spawn`, and a write-back — are still
-        // waiting on a row.
+        // other eight kinds, and a write-back, are still waiting on a row.
         Rhs::Call {
             args,
             kind,
-            spawn,
             write_back,
             ..
         } => {
-            if *kind != Callee::Fn || *spawn || *write_back {
+            if *kind != Callee::Fn || *write_back {
                 note(4);
             }
             for (v, _) in args {

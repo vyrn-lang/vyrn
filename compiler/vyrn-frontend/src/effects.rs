@@ -41,11 +41,9 @@ pub enum Effect {
     Extern,
     /// A stream is handed to the serving host (RFC-0074 M3a).
     Serve,
-    /// A task is started (RFC-0004 §Q4): a call the core marks `spawn`.
-    Spawn,
     /// A module-state binding is read or written (RFC-0013). No atom: the
     /// core spells it as a global place, and the body that names one carries
-    /// the effect — the same shape `spawn` has.
+    /// the effect.
     ModuleState,
     /// The path may end in a trap.
     Trap,
@@ -55,7 +53,7 @@ pub enum Effect {
 }
 
 impl Effect {
-    pub const ALL: [Effect; 15] = [
+    pub const ALL: [Effect; 14] = [
         Effect::Alloc,
         Effect::ReadInput,
         Effect::WriteOutput,
@@ -67,7 +65,6 @@ impl Effect {
         Effect::Random,
         Effect::Extern,
         Effect::Serve,
-        Effect::Spawn,
         Effect::ModuleState,
         Effect::Trap,
         Effect::GenOnly,
@@ -87,7 +84,6 @@ impl Effect {
             Effect::Random => "random",
             Effect::Extern => "extern",
             Effect::Serve => "serve",
-            Effect::Spawn => "spawn",
             Effect::ModuleState => "module-state",
             Effect::Trap => "trap",
             Effect::GenOnly => "gen-only",
@@ -106,12 +102,6 @@ pub struct Effects(u16);
 
 impl Effects {
     pub const PURE: Effects = Effects(0);
-
-    /// What a spawned callee may do (RFC-0004 §Q4: isolated means no I/O and
-    /// no shared state; RFC-0125 §3 M6 finding 1): allocate and trap. A
-    /// task's result is heap it owns, and a trap in a task is the task's.
-    pub const SPAWN_ALLOWS: Effects =
-        Effects((1 << Effect::Alloc as u16) | (1 << Effect::Trap as u16));
 
     pub fn of(e: Effect) -> Effects {
         Effects(1 << e as u16)
@@ -243,7 +233,6 @@ impl Effect {
             | Effect::Random
             | Effect::Extern
             | Effect::Serve
-            | Effect::Spawn
             | Effect::ModuleState => false,
         }
     }
@@ -315,7 +304,6 @@ mod tests {
             s.minus(Effects::of(Effect::Alloc)),
             Effects::of(Effect::Trap)
         );
-        assert_eq!(Effects::SPAWN_ALLOWS.to_string(), "alloc, trap");
     }
 
     /// The generation fence's whole list is the `gen` column now, so this pins

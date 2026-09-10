@@ -5008,7 +5008,7 @@ where
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// The RFC-0025 worker gate: `--workers` requires a module-state-free `handle`
-/// (transitively — the existing isolation analysis answers the question).
+/// (transitively — the module-state analysis answers the question).
 /// Prints the refusal naming the offending call path and returns the exit code
 /// when parallel serving is unsound; `None` means workers are fine. Other
 /// effects (`print`, file I/O) are deliberately allowed — each log/output line

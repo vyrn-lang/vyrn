@@ -285,7 +285,6 @@ fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
             }
         }
         Type::Array(a)
-        | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)

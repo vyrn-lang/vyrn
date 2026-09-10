@@ -71,7 +71,6 @@ fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {
 /// `every_method_builtin_is_reserved_or_shadowable` is the check.
 pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     ("toString", "@str"),
-    ("join", "@join"),
     // The collection surface (RFC-0011, and the surface redesign that made it
     // method form). `xs.push(v)` appends and `xs[i]` / `xs.at(i)` reads an
     // element. Both were removed in their free verb spellings, so the internal
@@ -169,7 +168,7 @@ pub fn method_builtin(name: &str) -> Option<&'static str> {
 /// were simply never on the table.
 ///
 /// A name in [`crate::checker::RESERVED`] can never be given back, because no
-/// declaration may take one. That is what makes `toString`, `join`, `pop` and
+/// declaration may take one. That is what makes `toString`, `pop` and
 /// `swapRemove` mean the builtin and nothing else, and it is why the check
 /// beside this one accepts either half.
 ///
@@ -2917,13 +2916,6 @@ impl Parser {
             "Unit" => Type::Unit,
             // A logger handle (RFC-0008), e.g. `fn f(l: Logger)`.
             "Logger" => Type::Logger,
-            // A concurrent task's result handle.
-            "Task" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                self.eat(&Tok::Gt)?;
-                Type::Task(Box::new(inner))
-            }
             // `Stream<T>` (RFC-0075) — a linear sequence: disposed exactly once,
             // checked by movecheck rather than by anything here.
             "Stream" => {
@@ -4095,8 +4087,8 @@ impl Parser {
                     self.eat(&Tok::RParen)?;
                     // Method-form builtins ([`METHOD_BUILTINS`]) map to their
                     // internal spellings: `x.toString()` renders via the
-                    // `@str` machinery and `t.join()` awaits via `@join`. The
-                    // bare free-function forms (`toString(x)`, `join(t)`) never
+                    // `@str` machinery. The bare free-function form
+                    // (`toString(x)`) never
                     // reach this arm, so the checker reports them with a
                     // migration hint.
                     //
@@ -4397,25 +4389,6 @@ impl Parser {
             // this only fires inside a `let` init, an argument, a return value, a
             // branch of another `if`/`match`, etc. The `if` token is consumed.
             Tok::If => self.if_expr(line),
-            // `spawn f(args)` — a concurrent task over a pure function.
-            Tok::Spawn => {
-                let name = self.expect_ident()?;
-                self.eat(&Tok::LParen)?;
-                let saved = self.no_struct;
-                self.no_struct = false;
-                let mut args = Vec::new();
-                while *self.peek() != Tok::RParen {
-                    args.push(self.expr()?);
-                    if *self.peek() == Tok::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.no_struct = saved;
-                self.eat(&Tok::RParen)?;
-                Ok(Expr::Spawn { name, args, line })
-            }
             Tok::Ident(mut name) => {
                 // Tagged template `tag"...\{e}..."` (RFC-0007): an identifier
                 // directly followed — on the same line — by an interpolated
@@ -5349,18 +5322,6 @@ mod tests {
         assert!(
             errs.iter()
                 .any(|e| e.message.contains("`-> consume T` is spelled `-> T`")),
-            "{errs:?}"
-        );
-    }
-
-    #[test]
-    fn the_retired_place_spelling_names_its_replacement() {
-        let src = "type Ring = { data: Array<Int64> }\n\
-                   impl Index for Ring { place at(read self, i: Int64) -> Int64 { yield self.data[i] } }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (_, errs) = parse_accum(lex(src).unwrap());
-        assert!(
-            errs.iter().any(|e| e.message.contains("retired spelling")),
             "{errs:?}"
         );
     }

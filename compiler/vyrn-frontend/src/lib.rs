@@ -26,7 +26,6 @@ pub mod floor;
 pub mod fmt;
 pub mod gen;
 pub mod hash;
-pub mod isolation;
 pub mod jsondec;
 pub mod jsonenc;
 pub mod lexer;
@@ -213,14 +212,6 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     // built from the types the check has only just supplied. Last, so the
     // refusal is the one this program earns and not a second answer on top of
     // a type error. A no-op for every load that decided for itself.
-    if diags.is_empty() {
-        // RFC-0125 §3 M6, the isolation slice: RFC-0004 §Q4's spawn rule, which
-        // is the effect judgment's inclusion check and one signature test. Here
-        // for the floor's reason and not a second one — the judgment reads the
-        // named core, which the check has only just made buildable.
-        let _p = prof::phase("isolation");
-        diags.extend(isolation::refusals(program));
-    }
     if diags.is_empty() {
         let _p = prof::phase("floor");
         diags.extend(floor::decide(program));

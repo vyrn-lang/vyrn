@@ -90,7 +90,7 @@ pub struct Program {
 ///
 /// Both are checked exactly like a Unit-returning function body under a
 /// synthetic unspellable name (`test@<index>` / `bench@<index>`) so
-/// movecheck/ownership/spawn analyses apply unchanged, and both are held in a
+/// movecheck and ownership analyses apply unchanged, and both are held in a
 /// [`Program`] field of their own so `run`/`build`/`emit-ir` never walk them: a
 /// shipped binary contains no tests and no benches, and the string pool and the
 /// regex collection skip both fields by construction.
@@ -190,7 +190,7 @@ pub fn is_surface_builtin(name: &str) -> bool {
 /// crates — the ordinal map below, the checker's effect lists, the interpreter's
 /// dispatch, both code generators, and the editor's index. A sixth level added
 /// to some of them and not others is a level that logs but does not count as an
-/// effect, so `spawn` would let it cross a task boundary.
+/// effect, so a generator could log where the checker says it cannot.
 ///
 /// The ORDER is the meaning: the index is the ordinal a `logging { level: .. }`
 /// block compares against, so this is a list and not a set.
@@ -529,7 +529,6 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
             }
         }
         Type::Array(a)
-        | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)
@@ -697,7 +696,7 @@ pub struct Function {
     /// `export extern fn ..` — a Vyrn function ADDITIONALLY exported to JS on the
     /// wasm target (RFC-0012 M2). Unlike an `is_extern` import this is a *normal*
     /// function in every respect: it has a body that is fully checked, runs under
-    /// the interpreter, participates in spawn-purity analysis by that body, and
+    /// the interpreter, is analyzed by that body, and
     /// is a plain `define` in codegen — it only gains a `wasm-export-name`
     /// attribute so wasm-ld exports it under its Vyrn name. `is_extern` and
     /// `is_export_extern` are mutually exclusive (import vs. exported impl); the
@@ -710,7 +709,7 @@ pub struct Function {
     /// which case the loader runs it in the compiler's interpreter to synthesize a
     /// module. Because it can run at generation time, the checker holds every `gen
     /// fn` (and its transitive callees) to the **comptime-purity** discipline —
-    /// the spawn-isolation sibling: no `extern`, `spawn`, module state,
+    /// the isolation discipline: no `extern`, module state,
     /// `writeFile`, `readLine`, `args`, or logging sinks.
     pub is_gen: bool,
     /// `mut fn ..` — this procedure changes state (RFC-0074 M4a). A declaration,
@@ -983,9 +982,6 @@ pub enum Type {
     /// `unfold`/`channel` are what make it pull-based; nothing in the obligation
     /// depends on which, which is why the checking half could land first.
     Stream(Box<Type>),
-    /// A handle to a concurrent task's result (RFC-0004 §Q4). Lowers to the
-    /// result type `T` itself (a deterministic fork-join needs no boxing).
-    Task(Box<Type>),
     /// A logger handle (RFC-0008). An opaque value obtained from `logger(name)`;
     /// the five level methods (`trace`/`debug`/`info`/`warn`/`error`) are called
     /// on it. Lowers to a `ptr` (its name string).
@@ -1117,7 +1113,6 @@ impl Type {
         "ConstInt",
         "Map",
         "Stream",
-        "Task",
         "Logger",
         "Fn",
         "Lazy",
@@ -1156,7 +1151,6 @@ impl Type {
             Type::ConstInt(_) => "ConstInt",
             Type::Map(..) => "Map",
             Type::Stream(_) => "Stream",
-            Type::Task(_) => "Task",
             Type::Logger => "Logger",
             Type::Fn(..) => "Fn",
             Type::Lazy(_) => "Lazy",
@@ -1238,7 +1232,6 @@ impl std::fmt::Display for Type {
             Type::ConstInt(n) => write!(f, "{n}"),
             Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Type::Stream(t) => write!(f, "Stream<{t}>"),
-            Type::Task(t) => write!(f, "Task<{t}>"),
             Type::Logger => write!(f, "Logger"),
             Type::Fn(params, ret) => {
                 let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
@@ -1527,14 +1520,6 @@ pub enum Expr {
         entries: Vec<(Expr, Expr)>,
         line: usize,
     },
-    /// `spawn f(args)` — run a *pure* function as a concurrent task, yielding a
-    /// `Task<T>` (RFC-0004 §Q4). The callee must be isolated (no I/O, no shared
-    /// mutable state); the result is deterministic regardless of scheduling.
-    Spawn {
-        name: String,
-        args: Vec<Expr>,
-        line: usize,
-    },
     /// A lambda literal: `x -> expr`, `(x, y) -> expr` or `x -> { block }`
     /// (RFC-0110; the `|x| expr` spelling is retired and the parser reports it).
     /// The parameters are untyped in the literal — their types flow from the
@@ -1715,7 +1700,6 @@ impl Expr {
             | Expr::TryConstruct { line, .. }
             | Expr::ArrayLit { line, .. }
             | Expr::MapLit { line, .. }
-            | Expr::Spawn { line, .. }
             | Expr::Consume { line, .. }
             | Expr::Lambda { line, .. } => *line,
         }
@@ -1981,7 +1965,6 @@ macro_rules! body_scope_descent {
                 // callee — including one the namespace pass just removed. An
                 // array literal's elements are the same list under another name.
                 Expr::Call { args, .. }
-                | Expr::Spawn { args, .. }
                 | Expr::TryConstruct { args, .. }
                 | Expr::ArrayLit { elems: args, .. } => {
                     for a in args {
@@ -2372,8 +2355,8 @@ pub fn mentions(e: &Expr, name: &str) -> bool {
 ///
 /// This is RFC-0095 M3. the must-use walk read a statement's expressions with
 /// [`mentions`] alone, which answers "some path", and then treated the answer
-/// as a disposal on every path — so `match p { Some(n) => t.join(), None => 0 }`
-/// discharged a task the `None` path abandons. The `if` STATEMENT never had
+/// as a disposal on every path — so `match p { Some(n) => close(h), None => 0 }`
+/// discharged a handle the `None` path abandons. The `if` STATEMENT never had
 /// the hole: `scan` walks its two blocks and merges them. The merge is
 /// unchanged; what changed is that a branching EXPRESSION now reaches it.
 pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
@@ -2392,7 +2375,6 @@ pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
         Expr::Consume { place, .. } => paths(place, name),
         Expr::Binary { lhs, rhs, .. } => seq(paths(lhs, name), paths(rhs, name)),
         Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
         | Expr::TryConstruct { args, .. }
         | Expr::ArrayLit { elems: args, .. } => args
             .iter()

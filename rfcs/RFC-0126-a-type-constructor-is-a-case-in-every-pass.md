@@ -92,7 +92,7 @@ order.
 
 ## 3. The census: what each constructor costs
 
-1,426 mentions in six files for 33 constructors — it was 2,517 in seven, and
+1,403 mentions in six files for 32 constructors — it was 2,517 in seven, and
 the seventh was `interp.rs` (RFC-0125 §3 M5); the sixth column was the text-IR
 emitter and is now the shared lowering alone, which is where the other 499 went
 (RFC-0125 §3 M4). It was 1,612 until RFC-0125 §3 M6's size slices. The first
@@ -137,7 +137,6 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
 | `Type::Map` | 20 | 3 | 16 | 7 | 6 | 4 | 56 |
 | `Type::Stream` | 14 | 1 | 9 | 7 | 1 | 1 | 33 |
-| `Type::Task` | 9 | 1 | 4 | 7 | 1 | 1 | 23 |
 | `Type::Logger` | 0 | 1 | 2 | 1 | 2 | 1 | 7 |
 | `Type::Fn` | 26 | 5 | 23 | 10 | 1 | 0 | 65 |
 | `Type::Lazy` | 7 | 1 | 1 | 9 | 0 | 0 | 18 |
@@ -236,14 +235,13 @@ be chosen first; the row says what.
 | `Type::ConstInt` | the `8` in a type argument | RFC-0056 | decide | the parser could read the literal at the type-argument site and never build the node; then its two refusals become parse errors, and a parse error stops the file where a checker error accumulates (RFC-0006) — decide whether those two diagnostics may become fatal |
 | `Type::Map` | `Map<K, V>` | RFC-0028 | stays | measured: RFC-0082 M3 withdrew Map over Array at 18x on the interpreter. The three KEY kinds are a representation split, not a surface one — the constructor is already one |
 | `Type::Stream` | a linear sequence | RFC-0075 | stays | not `Array` any more: since M2b it is a six-word tagged header over two producers, with a `Val::Stream` of its own (§6) |
-| `Type::Task` | a task handle | RFC-0025 | stays | `spawn` produces it and `join` consumes it; erasing it erases the obligation to join |
 | `Type::Logger` | a logger handle | RFC-0008 | decide | eleven mentions and five methods over what is a pointer to a name string; `impl` blocks make a library `Logger` expressible (RFC-0080, RFC-0084) — decide where RFC-0008's level filtering lives if the five methods become ordinary functions |
 | `Type::Fn` | a function value | RFC-0023 | stays | defunctionalized to `{ tag, payload }` (RFC-0037); the constructor `Lazy` desugars into |
 | `Type::Lazy` | a deferred field | RFC-0085 | desugar | `Type::Fn([], T)` — `types::resolve` answers exactly that already; §5.1 says what stops the deletion |
 | `Type::Never` | the bottom type | RFC-0079 | stays | `assignable(Never, _)` holds and the reverse does not; no other constructor has that rule |
 | `Type::Err` | the recovery sentinel | RFC-0006 | stays | 138 of its 141 mentions are the checker carrying on after an error it already reported |
 
-Of the 33 rows, 5 say `desugar`, 6 say `decide` and 22 say `stays`.
+Of the 32 rows, 5 say `desugar`, 6 say `decide` and 21 say `stays`.
 
 ---
 
@@ -1491,7 +1489,7 @@ less than seven did. **Not taken.**
 gives every arm a width guard and deletes no rule. **Not taken.**
 
 **5.5 — `Option`/`Result`.** §5.5 says "not taken as a slice", and §8.15
-superseded it: M5 shipped on 2026-09-04, `ast::Type` has 33 constructors, and
+superseded it: M5 shipped on 2026-09-04, `ast::Type` had 33 constructors, and
 §8.16 closed the defect the collapse left. No step of §5.5 remains. The item is
 in this list to be closed, not to be re-priced.
 

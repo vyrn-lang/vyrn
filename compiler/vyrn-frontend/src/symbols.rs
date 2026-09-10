@@ -3543,7 +3543,6 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
         .into_iter()
         .flatten()
         .collect(),
-        Type::Task(_) => vec![by_name("join")].into_iter().flatten().collect(),
         _ => Vec::new(),
     }
 }

@@ -49,7 +49,7 @@ native binary an extern *call* traps with canonical wording (``error:
 extern `name` is not available on this target``, byte-identical between
 the two — asserted by the parity harness's `WASM_ONLY` list; declaring is
 fine everywhere, and `KNOWN_DIVERGENT` stays empty). Extern calls are
-never spawn-safe (a host effect), and the signature domain is checked
+a host effect, and the signature domain is checked
 (scalars + String only). See `examples/externdemo.vyrn` +
 `web/externdemo.html`. **JS interop stage 2 ships too (RFC-0012 M2)**:
 `export extern fn vyrnAdd(a: Int64, b: Int64) -> Int64 { … }` is a normal,
@@ -78,8 +78,8 @@ order, before `main` (native/wasm run them in a synthesized
 `@__vyrn_globals_init` called from `vyrn_entry`; the interpreter seeds a
 persistent frame). They validate on every store like any value boundary, are
 never dropped (module lifetime, safe-leak), can't be `consume`d or `drop`ped,
-and any function that touches one is not spawn-safe (module state is shared by
-definition) — transitively. `examples/eventloop.vyrn` drives the handlers in a
+and any function that touches one carries the module-state effect,
+transitively. `examples/eventloop.vyrn` drives the handlers in a
 deterministic in-`main` loop so it is a normal three-way parity citizen; the
 live version is `web/eventloop.html`, where a timer renders the count and a
 button calls `reset()`. Next on the browser path: the long-range goal is
@@ -122,7 +122,7 @@ regions), invalid-IR shapes (dead `ret`, `phi void`, unpooled predicate
 strings), interp/native numeric divergences (wrapping overflow semantics,
 sized-int operand truncation, Float64 refinements, NaN, division traps),
 validated-type soundness holes (nominal predicated records, match-arm
-laundering, `modify` width subtyping, generic capability checks, spawn purity
+laundering, `modify` width subtyping, generic capability checks, purity
 through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
 A follow-up closed the rest of that review's deferred list: the `?`
 propagate path now frees in-scope owned temporaries exactly like `return`
@@ -211,7 +211,7 @@ calls stream), `readFile(p) -> Result<String, String>`, `writeFile(p, c) ->
 Result<Bool, String>` — plus the byte layer: `readFileBytes(p) ->
 Result<Array<UInt8>, String>`, `bytes(s) -> Array<UInt8>` (now a true
 i8-stride byte array), and `stringFromBytes(b)` with the pinned round-trip law
-`stringFromBytes(bytes(s)) == Ok(s)`. All are effects (spawn-forbidden, never
+`stringFromBytes(bytes(s)) == Ok(s)`. All are effects (never
 constant). **Error payloads are canonical Vyrn wording, never OS text** —
 ``Err("cannot read `p`")``, ``Err("`p` is not valid UTF-8")``, ``Err("`p`
 contains a NUL byte")`` (NUL is valid UTF-8 but cannot live in a
@@ -225,7 +225,7 @@ into all three backends, every run's cwd is `examples/`, and wasmtime gets
 
 **Testing (RFC-0015)**: a Vyrn user finally has somewhere to put a test.
 `test "name" { .. }` is a top-level declaration — a named block checked exactly
-like a `Unit`-returning function body (locals, `print`, spawn rules, ownership,
+like a `Unit`-returning function body (locals, `print`, ownership,
 move-checking all apply, under a synthetic unspellable `test@<index>` name), so
 every existing analysis catches bugs inside a test unchanged. Two builtins are
 legal **only** inside a test: `assert(cond: Bool)` traps the test with
@@ -255,8 +255,8 @@ whose arguments are compile-time constants: `import { t, TransKey } from
 i18n("./locales")`. The loader runs the call in the interpreter and links the
 returned `String` as a synthesized module through the ordinary pipeline —
 checker, backends, parity, and the LSP stay module-unaware, as always. A `gen
-fn` and its transitive callees are held to a **comptime-purity** analysis (the
-spawn-isolation sibling): no `extern`/`spawn`/module-state/`writeFile`/
+fn` and its transitive callees are held to a **comptime-purity** analysis:
+no `extern`/module-state/`writeFile`/
 `readLine`/`args`, so *same inputs ⇒ same output* mechanically. Its permitted,
 mediated inputs — `readFile`, the new `listDir`, and **`moduleInterface(path)`**
 (the `schemaOf`-generalized-to-a-module reflection primitive that makes typed
@@ -517,34 +517,12 @@ none blocks the core loop.
 - `modify` capability — a parameter changed in place, visible to the caller
   (by-reference / call-by-value-result; the argument must be a `mut` variable).
 
-### Concurrency (RFC-0004 §Q4, parallel since RFC-0025)
-- **Structured fork-join** — `spawn f(args) -> Task<T>` / `t.join()`. The compiler
-  *proves* a spawned function is isolated (no I/O, no shared mutable state,
-  transitively), so tasks are data-race-free and the result is schedule-independent
-  — which is what keeps interpreter == native. `share` is the concurrent-read
-  capability.
-- **A task is owned (RFC-0095 M1).** `Task<T>` is linear: `t.join()` consumes it
-  and yields the result, `drop t` waits for it and discharges it without taking
-  the result, and a task that is never discharged is refused. The frame, the task
-  record and the operating-system handle go back at that one site — census §10,
-  which was 81 bytes and one handle per spawn. **An arm is a path (M3):** the
-  must-use walk merges the arms of a `match` and of an `if` used as an
-  expression, so a join in one arm and nothing in the other is refused — the
-  limit `Stream` had carried since RFC-0075, closed for every must-use type at
-  once. The same milestone gave `for x in consume xs` the release RFC-0092 M5
-  left open: the loop is the buffer's last owner and hands it back at every exit.
-- **Real threads natively (RFC-0025).** The native binary runs each task on an
-  OS thread (Win32/pthreads, entirely inside the C shim: the IR packs arguments
-  into a heap frame and passes a per-callee thunk symbol to `__vyrn_spawn`;
-  `join` blocks and reads the frame — no Vyrn-level function pointer exists,
-  preserving RFC-0023's invariant). The interpreter and wasm stay eager/
-  sequential — byte-identical by isolation, so the parity corpus runs with zero
-  exclusions (`examples/parallel.vyrn` is an ordinary citizen). A trapping task
-  performs the canonical trap protocol from its own thread (same wording, exit
-  1, printed once); unjoined tasks are joined at process exit. Wall-clock: 8 ×
-  `fib(36)` ≈ 4.6× faster than `VYRN_SEQUENTIAL_SPAWN=1` (the documented
-  sequential escape hatch) on a 12-core machine, identical output. The region
-  arena stack became `thread_local` so tasks may use `region { .. }`.
+### Concurrency (retired 2026-09-11)
+- **`spawn f(args)` and `Task<T>` left the language.** On every engine a spawn
+  ran the callee eagerly at the spawn point, so the form promised a concurrency
+  none of the three delivered. What stays is `vyrn serve --workers N`
+  (RFC-0025), a pool of instances behind an HTTP host, which never used the
+  form. RFC-0004 §Q4 and RFC-0025 carry a retirement line each.
 - **The heap** — dynamic strings (`a + b` concatenation, `s.byteLength`),
   malloc-backed. (`String.length` was removed by RFC-0058: a string is UTF-8
   bytes, so the count you want is `byteLength` or `charCount()`, and you must

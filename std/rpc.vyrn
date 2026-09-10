@@ -141,7 +141,7 @@ fn isNamedType(spelling: String, iface: ModuleInterface) -> Bool {
 /// what `toJson`/`fromJson` accept, and reflection now carries its verdict — so
 /// this is the same predicate that governs the generated code, not a second one
 /// that could drift from it. It is what makes the check TOTAL: a record whose
-/// field is a `fn`, a `Task` or a `Map<String, Task<..>>` is a perfectly nameable
+/// field is a `fn` or a `Map<String, fn(..)>` is a perfectly nameable
 /// type that cannot be encoded, and before this it passed the rule and failed
 /// inside the generated module instead.
 ///

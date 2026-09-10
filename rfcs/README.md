@@ -81,7 +81,7 @@ claim is true — is written down in the test's own header.
 | [0022](RFC-0022-ergonomics.md) | Ergonomics Batch | Implemented |
 | [0023](RFC-0023-function-values.md) | Function Values, Monomorphized (Closures v1) | Implemented |
 | [0024](RFC-0024-enums-on-the-wire.md) | Payload Enums on the Wire (Codec v2) | Implemented |
-| [0025](RFC-0025-worker-threads.md) | Worker Threads: Parallel `spawn`, Concurrent `serve` | Implemented |
+| [0025](RFC-0025-worker-threads.md) | Worker Threads: Parallel `spawn`, Concurrent `serve` | Implemented in part: `--workers` ships, `spawn` retired 2026-09-11 |
 | [0026](RFC-0026-ui.md) | The UI Layer: `std/html`, Pages, Components, Compiled Reactivity | Implemented (M1–M4) |
 | [0027](RFC-0027-import-namespace.md) | `import * as ns`: Namespaced Imports | Implemented |
 | [0028](RFC-0028-map.md) | `Map<String, V>`: The Dictionary Type | Implemented |
@@ -181,8 +181,8 @@ claim is true — is written down in the test's own header.
 | [0123](RFC-0123-the-arc-closes-its-gaps.md) | the arc closes its gaps | Implemented; staged tolerance, protocol-declared projections, chained receivers, and the writable name weighed and closed "not yet" |
 | [0124](RFC-0124-work-that-happens-once.md) | work that happens once | Implemented; generation-side at-most-once evaluation for provably effect-free nullary functions (referential transparency with its hypothesis screened, not assumed) — site export 16.7 s → 13.8 s; runtime once-only recorded as module state's answered question |
 | [0125](RFC-0125-a-rule-is-stated-once.md) | a rule is stated once | Draft; a named, place-based core, a kernel of three judgments, one emitter and a runtime in Vyrn — M1 (places) is the measured gate, and the probe that motivates it is in §1.4 |
-| [0126](RFC-0126-a-type-constructor-is-a-case-in-every-pass.md) | a type constructor is a case in every pass | Census closed, and its first collapse taken through M5: `ast::Type` is 33 constructors and 2,288 mentions in the seven files that decide, `Option<T>` IS `| None | Some(T)`, and RFC-0125 §2.8's array and Map candidates were already refused with numbers by RFC-0082 |
-| [0127](RFC-0127-a-form-is-an-arm-in-every-walk.md) | a form is an arm in every walk | Census closed; the rest of the surface priced — 38 statement, expression and pattern forms (1,777 mentions in nine files), 9 declarations, 24 keywords and 13 contextual words — with five ranked collapses, one taken (`test` and `bench` share a carrier) and the number that stopped each of the others |
+| [0126](RFC-0126-a-type-constructor-is-a-case-in-every-pass.md) | a type constructor is a case in every pass | Census closed, and its first collapse taken through M5: `ast::Type` is 32 constructors and 2,288 mentions in the seven files that decide, `Option<T>` IS `| None | Some(T)`, and RFC-0125 §2.8's array and Map candidates were already refused with numbers by RFC-0082 |
+| [0127](RFC-0127-a-form-is-an-arm-in-every-walk.md) | a form is an arm in every walk | Census closed; the rest of the surface priced — 37 statement, expression and pattern forms (1,758 mentions in nine files), 9 declarations, 23 keywords and 13 contextual words — with five ranked collapses, one taken (`test` and `bench` share a carrier) and the number that stopped each of the others |
 
 ## The other documents here
 

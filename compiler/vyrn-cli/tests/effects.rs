@@ -342,9 +342,6 @@ fn run_corpus() {
     // set is EMPTY, so the call through such a name cannot run.
     let mut empty_sets: Vec<String> = Vec::new();
     let mut empty_calls = 0usize;
-    // Every spawn site, and the ones whose callee's set is outside the rule.
-    let mut spawn_sites = 0usize;
-    let mut spawn_outside: Vec<String> = Vec::new();
     // RFC-0125 §3 M6, fourth slice: the rows that MOVED into the judgment,
     // counted on their own. A moved row must answer as the pass answered,
     // function by function, or the refusal changed when the derivation did.
@@ -708,18 +705,6 @@ fn run_corpus() {
         let judged = effects::judge(&refs, &mut resolve, &mut through);
         through_calls += judged.through.len();
         empty_calls += judged.empty.len();
-        spawn_sites += judged.spawns.len();
-        for sp in &judged.spawns {
-            if !sp.outside().is_pure() {
-                spawn_outside.push(format!(
-                    "{file}:{} spawn {}(..) in {} — {}",
-                    sp.line,
-                    sp.callee,
-                    refs[sp.body].name,
-                    sp.outside()
-                ));
-            }
-        }
         // A call nobody could attribute, with the program and line it is on
         // and the reason (RFC-0125 §3 M6, finding 14). Two reasons only: the
         // callee is a name of the body whose function type no collected
@@ -941,13 +926,6 @@ fn run_corpus() {
     for (e, n) in &per_effect {
         eprintln!("  effect {n:5}  {}", e.name());
     }
-    eprintln!(
-        "  spawn:      {spawn_sites} sites judged, {} outside `alloc, trap`",
-        spawn_outside.len()
-    );
-    for s in &spawn_outside {
-        eprintln!("  spawn outside the rule: {s}");
-    }
     eprintln!("  floor:");
     for (k, n) in &floor_kinds {
         eprintln!("    {n:5}  {k:?}");
@@ -1036,17 +1014,10 @@ fn run_corpus() {
             eprintln!("  module {m}: {e}");
         }
     }
-    // The ratchet: the disagreements, by function, and the spawn sites
-    // outside the rule. It may fall, never rise. 1 when the first slice
+    // The ratchet: the disagreements, by function. It may fall, never rise. 1 when the first slice
     // landed (`listdir.vyrn`'s `main`, whose `listDir` the floor had no row
     // for — RFC-0125 §3 M6 finding 6); 0 since the second slice.
     const RATCHET: usize = 0;
-    assert!(
-        spawn_outside.is_empty(),
-        "{} spawn sites whose callee's effects are outside the rule the checker accepted; the first: {}",
-        spawn_outside.len(),
-        spawn_outside[0]
-    );
     assert!(
         disagreements.len() <= RATCHET,
         "{} functions where a pass and the effect judgment disagree, more than the {RATCHET} recorded; \

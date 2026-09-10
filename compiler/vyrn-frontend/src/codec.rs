@@ -869,7 +869,6 @@ mod tests {
             Type::ConstInt(8),
             Type::Map(b(Type::Str), b(Type::Int)),
             Type::Stream(b(Type::Int)),
-            Type::Task(b(Type::Int)),
             Type::Logger,
             Type::Fn(vec![Type::Int], b(Type::Unit)),
             Type::Lazy(b(Type::Int)),
@@ -1119,13 +1118,13 @@ mod tests {
         assert!(encodable(&nested, &types).is_ok());
         assert!(decodable(&nested, &types).is_ok());
 
-        // A non-codable value type (a `Task`) makes the whole map non-codable,
-        // and the offender is named.
+        // A non-codable value type (a stored `fn`) makes the whole map
+        // non-codable, and the offender is named.
         let bad = Type::Map(
             Box::new(Type::Str),
-            Box::new(Type::Task(Box::new(Type::Int))),
+            Box::new(Type::Fn(vec![Type::Int], Box::new(Type::Unit))),
         );
-        assert_eq!(encodable(&bad, &types).unwrap_err(), "Task");
+        assert_eq!(encodable(&bad, &types).unwrap_err(), "fn(Int64)");
     }
 
     /// The decode-side `expected` phrase for a map value is `object` (a Map IS a
@@ -1211,7 +1210,6 @@ fn type_display(ty: &Type) -> String {
         // a `Result` names itself and an `Option` spells its payload the same
         // way, whichever way the sum was built.
         _ if crate::types::result_payloads(ty).is_some() => "Result".to_string(),
-        Type::Task(_) => "Task".to_string(),
         Type::Logger => "Logger".to_string(),
         Type::ArrayN(inner, n) => format!("Array<{}, {}>", type_display(inner), n),
         _ if crate::types::option_payload(ty).is_some() => format!(

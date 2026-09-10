@@ -453,10 +453,6 @@ pub enum Rhs {
     Call {
         callee: String,
         args: Vec<(Val, Capability)>,
-        /// `spawn callee(..)`: the call runs as a task. The effect judgment
-        /// reads the marker (RFC-0125 §2.2, the fourth effect); the linear
-        /// judgment and the emitters see an ordinary call.
-        spawn: bool,
         /// Argument 0 is the receiver of a rebuilding builtin passed by name
         /// (`out.push(v)`): the call hands the buffer back through its result
         /// and the store after it puts it back, so the take changes no owner.
@@ -1056,14 +1052,9 @@ impl Body {
             Rhs::Read(p) => format!("read {}", self.place(p)),
             Rhs::Take(p) => format!("take {}", self.place(p)),
             Rhs::Call {
-                callee,
-                args,
-                spawn,
-                kind,
-                ..
+                callee, args, kind, ..
             } => format!(
-                "{}{} {callee}({})",
-                if *spawn { "spawn " } else { "" },
+                "{} {callee}({})",
                 format!("{kind:?}").to_lowercase(),
                 args.iter()
                     .map(|(v, c)| format!("{:?} {}", c, self.val(v)).to_lowercase())
@@ -4750,19 +4741,6 @@ impl<'a> Builder<'a> {
                 }
                 Ok(Rhs::Make(Ctor::Map, vs))
             }
-            // A `spawn` is a call that runs as a task, so its arguments are
-            // the callee's parameters: a `read` parameter is read, and only a
-            // `consume` one is taken. Attributing every argument to a
-            // `consume` refused `rfcs/bench-0104/p-spawn.vyrn`, which hands
-            // the same `read` array to both halves on purpose (RFC-0125 §3
-            // M3, the default slice).
-            Expr::Spawn { name, args, line } => {
-                let mut r = self.call(name, args, *line, self.produced(e), out)?;
-                if let Rhs::Call { spawn, .. } = &mut r {
-                    *spawn = true;
-                }
-                Ok(r)
-            }
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -5033,7 +5011,6 @@ impl<'a> Builder<'a> {
             Rhs::Call {
                 callee: success,
                 args: vec![(sv.clone(), Capability::Consume)],
-                spawn: false,
                 write_back: false,
                 // A variant constructor: it puts the payload into the value.
                 kind: Callee::Ctor,
@@ -5330,7 +5307,6 @@ impl<'a> Builder<'a> {
         Ok(Rhs::Call {
             callee: name.to_string(),
             args: vs,
-            spawn: false,
             write_back,
             kind,
             ret,
@@ -5372,9 +5348,7 @@ fn mentions_in_lambda<'e>(
         fn expr(&mut self, e: &'e Expr, _: &std::collections::HashSet<String>) -> bool {
             match e {
                 Expr::Var { .. } => self.vars.push(e),
-                Expr::Call { name, .. } | Expr::Spawn { name, .. } => {
-                    self.calls.push(name.as_str())
-                }
+                Expr::Call { name, .. } => self.calls.push(name.as_str()),
                 _ => {}
             }
             true
@@ -6513,9 +6487,6 @@ fn discharged(l: &Linear) -> String {
     match l {
         Linear::Stream => "discharged, not leaked — a stream is consumed, forwarded or closed \
              on every path, and that lowering frees it"
-            .to_string(),
-        Linear::Task => "discharged, not leaked — a task is joined, forwarded or dropped on \
-             every path, and that lowering frees it"
             .to_string(),
         Linear::Declared(by) => format!(
             "discharged, not leaked — `{by}` declares `impl MustUse`, so it is handed on or \

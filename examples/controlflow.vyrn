@@ -2,7 +2,7 @@
 /// `if let`/`while let`, `%`), a byte-identical three-way parity citizen that also
 /// exercises the drop/leak matrix: owned locals freed on every loop exit path,
 /// a `break` inside an `if let`, a `continue` under a `region`, and a loop inside
-/// a spawned (pure) task.
+/// a callee.
 
 /// Module state drained by the `while let` below.
 let mut remaining: Int64 = 4
@@ -17,8 +17,8 @@ fn nextDown() -> Option<Int64> {
     return Some(remaining)
 }
 
-/// A pure function with its own loop + early `return` — run via `spawn` to cover
-/// the "spawn-body loop" row of the matrix. Returns the first multiple of `k` in
+/// A pure function with its own loop + early `return`, which covers the
+/// "callee-body loop" row of the matrix. Returns the first multiple of `k` in
 /// `1..=limit`, or 0.
 fn firstMultiple(limit: Int64, k: Int64) -> Int64 {
     let mut i = 1
@@ -100,9 +100,8 @@ fn main() -> Int64 {
     }
     print(acc)
 
-    // A loop inside a spawned pure task.
-    let t = spawn firstMultiple(20, 7)
-    print(t.join())
+    // A loop inside a callee.
+    print(firstMultiple(20, 7))
 
     return 0
 }

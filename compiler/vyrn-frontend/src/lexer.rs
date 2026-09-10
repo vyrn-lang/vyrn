@@ -52,7 +52,6 @@ pub enum Tok {
     Where,
     Match,
     Region,
-    Spawn,
     Break,
     Continue,
 
@@ -254,7 +253,6 @@ keywords! {
     "where" => Tok::Where,
     "match" => Tok::Match,
     "region" => Tok::Region,
-    "spawn" => Tok::Spawn,
     "break" => Tok::Break,
     "continue" => Tok::Continue,
 }

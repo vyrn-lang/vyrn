@@ -1197,7 +1197,6 @@ pub fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
     f(ty);
     match ty {
         Type::Array(a)
-        | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)
@@ -1252,7 +1251,6 @@ pub fn type_depth(ty: &Type) -> usize {
     }
     1 + match ty {
         Type::Array(a)
-        | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
         | Type::Lazy(a)
@@ -1371,7 +1369,6 @@ fn size_go(
     let d = depth + 1;
     let ok = match t {
         Type::Array(a)
-        | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
         | Type::Lazy(a)
@@ -1453,7 +1450,6 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             Box::new(substitute(k, subst)),
             Box::new(substitute(v, subst)),
         ),
-        Type::Task(inner) => Type::Task(Box::new(substitute(inner, subst))),
         // A `Stream<T>` (RFC-0075) substitutes like the `Array<T>` it lowers to.
         // M1 never needed this because `fromArray` was the only producer and it
         // was always called at a concrete element type; M2's `map<T, U>(s:
@@ -2006,7 +2002,6 @@ mod struct_key_tests {
                     Type::ArrayN(b(), 8),
                     Type::SmallArray(b(), 4),
                     Type::Stream(b()),
-                    Type::Task(b()),
                     Type::Lazy(b()),
                     Type::App("P".into(), vec![t.clone()]),
                     Type::App("Q".into(), vec![t.clone()]),
@@ -2561,11 +2556,6 @@ pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
             Type::Fn(ap, ar) if ap.is_empty() => solve_param(p, ar, subst),
             _ => {}
         },
-        Type::Task(p) => {
-            if let Type::Task(a) = aty {
-                solve_param(p, a, subst);
-            }
-        }
         // The compile-time record transformers (RFC-0002 §7). The checker
         // expands one before codegen sees it, so these arms are the rule
         // written down rather than a path anything takes today.

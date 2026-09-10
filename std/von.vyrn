@@ -1161,7 +1161,7 @@ fn joinNames(names: Array<String>) -> String {
 /// The Vyrn keywords a JSON key must not be, since a record field is an
 /// identifier and these do not lex as one.
 fn isKeyword(s: String) -> Bool {
-    let kws = ["fn", "let", "mut", "if", "else", "while", "for", "in", "drop", "protocol", "import", "export", "impl", "self", "return", "true", "false", "type", "where", "match", "region", "spawn", "break", "continue"]
+    let kws = ["fn", "let", "mut", "if", "else", "while", "for", "in", "drop", "protocol", "import", "export", "impl", "self", "return", "true", "false", "type", "where", "match", "region", "break", "continue"]
     for k in kws {
         if k == s {
             return true

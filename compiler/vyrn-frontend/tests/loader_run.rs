@@ -654,23 +654,6 @@ mod tests {
     }
 
     #[test]
-    fn spawning_a_cross_module_stateful_fn_is_refused() {
-        // RFC-0029 keeps RFC-0013's spawn isolation module-agnostic: a function
-        // reaching ANY module's state (here the imported store's) is not
-        // spawn-safe, so spawning it is refused.
-        let store = "let mut count: Int64 = 0 \
-                     export fn bump() -> Int64 { count = count + 1 return count }";
-        let root = "import { bump } from \"./store\" \
-                    fn worker() -> Int64 { return bump() } \
-                    fn main() -> Int64 { let h = spawn worker() return h.join() }";
-        let e = run_multi(root, &[("store.vyrn", store)]).unwrap_err();
-        assert!(
-            e.contains("is not allowed") && e.contains("isolated"),
-            "{e}"
-        );
-    }
-
-    #[test]
     fn two_modules_with_a_private_same_named_helper_link_cleanly() {
         // RFC-0046 §3: a non-exported decl is invisible outside its module, so
         // two modules may each carry a private `helper` without colliding — the

@@ -20,7 +20,7 @@ export fn currentCount() -> Int64 {
     return count
 }
 
-/// Mutate the shared count. Reaching this from a `handle`/`spawn` is what the
+/// Mutate the shared count. Reaching this from a `handle` is what the
 /// isolation analyses key on — module-agnostic, so it gates the same whether
 /// the state lives in the root or here.
 export fn bump() {

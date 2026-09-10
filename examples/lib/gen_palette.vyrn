@@ -6,7 +6,7 @@
 /// and run like any other code, so it is a normal three-way parity citizen.
 ///
 /// A `gen fn` is comptime-pure: it may read (mediated `readFile`/`listDir`) but
-/// not write, spawn, use module state, or call an `extern`.
+/// not write, use module state, or call an `extern`.
 
 import { chars } from "std/text"
 

@@ -55,10 +55,6 @@ pub fn install() {
     // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);
-    // RFC-0125 M6, the isolation slice: RFC-0004 §Q4's spawn rule, stated by
-    // the same judgment over the same core instead of by two fixpoints over the
-    // AST call graph.
-    vyrn_frontend::isolation::install_judge(effects::spawn_refusals);
 }
 pub use core::{refuses as kernel_refuses, take_refusals};
 pub use render::render;
@@ -135,7 +131,6 @@ impl Node<'_> {
                 Expr::TryConstruct { .. } => "tryconstruct",
                 Expr::ArrayLit { .. } => "array",
                 Expr::MapLit { .. } => "map",
-                Expr::Spawn { .. } => "spawn",
                 Expr::Lambda { .. } => "lambda",
                 Expr::Consume { .. } => "consume",
             },
@@ -1043,7 +1038,7 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
             // the worklist nowhere else — a non-generic one is a root already,
             // which is why `examples/fallible.vyrn` never showed the gap and
             // `examples/falliblegeneric.vyrn` does (RFC-0126 §8.16).
-            if matches!(e, Expr::Call { .. } | Expr::Spawn { .. } | Expr::Try { .. }) {
+            if matches!(e, Expr::Call { .. } | Expr::Try { .. }) {
                 w.calls.push((callee.as_str(), solved.clone()));
             }
             chain.push(solved);
@@ -1091,7 +1086,7 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
             };
             desugar(e, method, args, d, chain, w);
         }
-        Expr::Call { args, .. } | Expr::TryConstruct { args, .. } | Expr::Spawn { args, .. } => {
+        Expr::Call { args, .. } | Expr::TryConstruct { args, .. } => {
             for a in args {
                 kids.push(expr(a, d, chain, w));
             }
