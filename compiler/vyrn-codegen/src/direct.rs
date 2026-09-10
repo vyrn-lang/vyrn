@@ -16618,11 +16618,17 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     b.ins(&Instruction::LocalSet(l));
                     w.at[*n as usize] = Some((place, info.ty.clone()));
-                    // A binding the READER wrote goes on the scope too, so a
-                    // statement the AST arm emits after this one finds it
+                    // A binding a `Stmt::Let` wrote goes on the scope too, so
+                    // a statement the AST arm emits after this one finds it
                     // exactly where that arm would have put it (RFC-0125 §3
-                    // M3, the interleave slice).
-                    if !info.source.starts_with('@') {
+                    // M3, the interleave slice). The question is the ROW's —
+                    // [`vyrn_lower::core::NameInfo::binding`] is the node the
+                    // plan keys the binding by, and a temporary this pass
+                    // minted has none. The spelling is not the question: a
+                    // projection inlined at its access site renames its own
+                    // bindings to `@b<tag>.<name>`, and the statements after
+                    // them still name them.
+                    if info.binding.is_some() {
                         self.scope
                             .push((info.source.clone(), place, info.ty.clone()));
                     }

@@ -2085,6 +2085,85 @@ impl<'a> Builder<'a> {
             .find(|p| p.name == name)
     }
 
+    /// A projection's body, stated as rows AT the access site — RFC-0091 M2,
+    /// RFC-0120, and RFC-0125 §2.3.
+    ///
+    /// A projection is never flattened into `Program::functions` and is
+    /// inlined where it is called, so a row keyed to its own parameters can
+    /// stand for no site: at a site the parameters are the caller's
+    /// expressions. So the site is where the rows are written. The tree is
+    /// [`vyrn_frontend::project::site`]'s, the same one the checker typed
+    /// (`Checker::record_desugar`) and every backend walks, so each row lands
+    /// on the node an emitter asks about.
+    ///
+    /// `None` leaves the site as it was, and says which of four:
+    ///
+    /// - No compile scope is open. Outside one every caller expands for
+    ///   itself and leaks the tree, which the LSP pays per keystroke — the
+    ///   condition `movecheck`'s facts walk puts on the store form, for the
+    ///   same reason.
+    /// - No projection answers for this receiver's type: a builtin
+    ///   container, whose expansion is the identity, or a type this walk
+    ///   cannot name.
+    /// - The OPTIONAL kind (RFC-0122). Its body splits into four parts at a
+    ///   miss test, its consumer is an `if let`, and
+    ///   [`vyrn_frontend::project::optional_inline`] mints a different tree.
+    /// - The receiver has no recorded type, so the tree cannot be keyed.
+    fn inlined(
+        &mut self,
+        method: &str,
+        recv: &'a Expr,
+        args: &'a [Expr],
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Option<Rhs>, Gap> {
+        if !vyrn_frontend::project::memo_open() {
+            return Ok(None);
+        }
+        let Ok(rty) = self.ty_of(recv) else {
+            return Ok(None);
+        };
+        // By the RECEIVER's type, not by the name alone: two `impl`s may
+        // declare a projection of one name, and only one of them answers
+        // here. The lookup is the same one `project::site` repeats below,
+        // and the kind it reads decides whether this site is inlinable at
+        // all.
+        let Some(f) = vyrn_frontend::project::lookup_in(&self.program.impls, &rty, method) else {
+            return Ok(None);
+        };
+        if vyrn_frontend::project::is_optional(f) {
+            return Ok(None);
+        }
+        let p = match vyrn_frontend::project::site(
+            &self.program.impls,
+            Some(&rty),
+            method,
+            recv,
+            args,
+            line,
+        ) {
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(None),
+            Err(e) => return gap_d("a projection this site cannot inline", &e, line),
+        };
+        for s in &p.prologue {
+            self.stmt(s, out)?;
+        }
+        // The yielded place is a BORROW of the receiver, which is what the
+        // declared `-> read T` says. Reading it through `Builder::place`
+        // rather than as an ordinary right-hand side is the difference
+        // between a borrow and a take: `Builder::rhs`'s field arm answers
+        // `Rhs::Take` where the field owns heap, and that takes the yield OUT
+        // of the receiver. A yield that is no place is `check_places`'s
+        // refusal ("a place and not a value"), so a shape that reaches the
+        // gap here is a defect in that rule rather than a value to lower.
+        if !is_place_read(&p.place) {
+            return gap_d("a projection whose yield is not a place", method, line);
+        }
+        let place = self.place(&p.place, out)?;
+        Ok(Some(Rhs::Read(place)))
+    }
+
     /// Whether a value is a borrow: a name whose type owns heap and which
     /// the body does not own (RFC-0089 rule 2).
     fn borrows(&self, v: &Val) -> bool {
@@ -4987,6 +5066,11 @@ impl<'a> Builder<'a> {
             };
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
+        }
+        if let (Callee::Projection, Some(recv)) = (kind, args.first()) {
+            if let Some(r) = self.inlined(name, recv, &args[1..], line, out)? {
+                return Ok(r);
+            }
         }
         let mut vs = Vec::new();
         let mut temps_to_drop = Vec::new();

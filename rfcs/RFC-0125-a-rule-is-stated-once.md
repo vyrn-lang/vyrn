@@ -10352,6 +10352,32 @@ ran and are green: `columns`'s pinned diagnostics over 419 programs and
 pass `vyrn check` runs is touched by this slice — the only change outside a test
 host and `vyrn-play` is the worklist, which `vyrn check` does not reach.
 
+#### A projection's rows are stated at the call site (2026-09-10, `track-em`)
+Decision: the core states an inlined projection's rows at the site and the emitter reads them; `track-eh`'s, refused on the type of `Lowered::places`, whose rows name the projection's own parameters and so can stand for no site.
+Went: projection call rows in the core 18 to 5, thirteen sites inlined (`jchain` 3, `jsonplace` 2, `namedplace` 3, `protoplace` 5); `Stmt::Break` on the AST arm 8 to 4, `jsonplace` emptied and `jchain` 3 to 1; `Stmt::Let` on the arm 39,756 to 39,748 against the rows' 35,597 to 35,605.
+Stayed: the `Stmt::Break` arm at 4, because two payers are left and each is a slice of its own, both under Left.
+Lines: `core.rs` 6,466 to 6,550. `direct.rs` 17,592 to 17,598. `coredrive.rs` 520 to 591. `project.rs` 1,590, unmoved, which is the slice's own argument: three of the four walks were at the site already.
+Refusals: 0 lost / 0 gained. Manifest: 1 row, `jchain.vyrn`. `main`'s frame grows by the inlined bindings, so the document's release moves from an inlined two-branch walk at offset 208 to `call 22` at offset 312, and two release functions swap monomorphization order; 14 frees before, 13 after.
+Licence:
+- `kernel --ignored`: 177 programs, 27,650 accepted, 0 refused, 0 unlowered, unmoved.
+- `coredrive --ignored`: 963 of 21,722 bodies whole, 168 of 170 byte-identical, the same two programs at the same byte counts; both tables re-pinned.
+- the residue ratchet: engine 172 clean and 3 leaking, route the same, 0 failed, the baseline held.
+- `vyrn check` over `examples/` against `89548998`: 209 programs, every byte identical, 33 refused either way.
+- `lowered_dump` 419 programs, 341 lowered, 0 unstable, byte-identical; `columns` unmoved; `lowered` 24,122 instances and 1,409,955 rows.
+- `effects --ignored` 30,198 judged, 0 unattributed. `route --ignored` 2. `coretables`, `typed`, `fixtures`, `testsweep` green.
+- `cargo test -p vyrn-cli` 648 passed, 46 ignored, 0 failed; `vyrn-frontend` 1,114; the rest of the workspace 47; `vyrn-lsp` 100; `vyrn-genwasm` 3; `memory` 9; `vyrn doc --verify` 41 files.
+- red for a missing input, not this slice: the site export and `site/export.vyrn`'s release-tag block both read `site/data/history.json`, which the workflow generates from a full-depth checkout. 27 of 28 site files pass, 34 of 35 blocks.
+Findings:
+- the driver put a binding on the AST scope by its SPELLING, and an inline renames a projection's bindings to `@b<tag>.<name>`; the question is `NameInfo::binding`, and `jchain` did not compile until the arm asked that.
+- a yielded place is READ, not taken: `Builder::rhs`'s field arm answers `Rhs::Take` where the field owns heap, which takes the yield out of the receiver.
+- `project::site` and `project::optional_site` leak two trees for one site, so the optional kind cannot inline through the plain door.
+- the inline is guarded by `project::memo_open`: `core::augment` runs inside `own::analyze`, which the editor runs per keystroke, and would leak a tree per site per keystroke.
+- `Lowered::places` stays. Its one reader is the effect judgment, `effects::with_judgment` and the same walk in `tests/effects.rs`, and outside a compile scope the core states the call row by design.
+- the lowering pin did NOT move, against the brief's prediction: `lowered_dump` prints `Lowered`, and this slice changes the core body built from an instance.
+Left:
+- `tryplace`'s 3 `break`, blocked by the core stating `project::optional_inline`'s four-part split at the site and the consuming `if let` as the `St::If` the emitter emits; that moves the plan's arm rows, so the ratchet is its licence.
+- `jchain`'s 1 `break`, blocked by `@at` on a user container: the emitter inlines `Json`'s `at` and then inlines `field` from the clone inside that expansion. Measured, inlining `@at` in the core takes the arm to 0 and refuses `slots.vyrn:35` with "`people[]` may not be stored into `people`", because the read states `people.vals[i]` while `parser::place_receiver`'s write-back still states `people[i]`. The payer is `atSet` inlined at `Stmt::IndexSet` in the same slice.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

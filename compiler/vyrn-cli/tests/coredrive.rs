@@ -106,16 +106,38 @@ const CONT: usize = 8;
 /// arm emitted, for every program where either is not zero. The residue the
 /// next slice on this line has to empty, program by program and not as one sum.
 ///
-/// Every one is `project::site`: a projection's body is INLINED at its caller,
-/// so the rows for the `break` in `std/json`'s `field` and `tryField` are in
-/// their own core body and not in the caller's. The other rewrite that put an
-/// exit out of the core's reach, `project::iterate_loop`'s clone of a user
-/// container's loop body, is off this table since the exits slice —
-/// `own::ReleasePlan::key_of` maps a clone back to the node the core keyed.
-const PIN: [(&str, usize, usize); 3] = [
-    ("jchain.vyrn", 3, 0),
-    ("jsonplace.vyrn", 2, 0),
-    ("tryplace.vyrn", 3, 0),
+/// Every one is a projection's body INLINED at its caller, and the two rows
+/// have different payers. `tryplace.vyrn`'s three are the OPTIONAL kind
+/// (RFC-0122), whose tree `project::optional_inline` mints and whose consumer
+/// is an `if let` — see [`CALLS`]. `jchain.vyrn`'s one is
+/// `doc.field("items")[1]`, where the emitter inlines `Json`'s `at` and then
+/// inlines `field` from the CLONE of the receiver that expansion holds, so the
+/// `break` stands on a node the core never saw; the core would have to inline
+/// `a[i]` on a user container too, and the store side of that is `atSet`.
+///
+/// The other rewrite that put an exit out of the core's reach,
+/// `project::iterate_loop`'s clone of a user container's loop body, is off this
+/// table since the exits slice — `own::ReleasePlan::key_of` maps a clone back
+/// to the node the core keyed.
+const PIN: [(&str, usize, usize); 2] = [("jchain.vyrn", 1, 0), ("tryplace.vyrn", 3, 0)];
+
+/// Per program and callee: the projection CALL rows the core still states.
+///
+/// A projection is inlined at its access site (RFC-0091 M2, RFC-0120), so a
+/// [`Callee::Projection`] row is a site the core did NOT inline — its rows
+/// are in the projection's own body ([`vyrn_lower::Lowered::places`]) keyed to
+/// the projection's own parameters, and at a site those parameters are the
+/// caller's expressions, so no row there can stand for this call. That is what
+/// the eight `break` occurrences on the AST arm were: the emitter inlines and
+/// the core did not.
+///
+/// Every row left is the OPTIONAL kind (RFC-0122): its body splits into four
+/// parts at a miss test, its consumer is an `if let`, and
+/// `project::optional_inline` mints a tree of its own — a second inline, and
+/// the payer for the three `break` occurrences [`PIN`] still names.
+const CALLS: [(&str, &str, usize); 2] = [
+    ("tryplace.vyrn", "tryAt", 2),
+    ("tryplace.vyrn", "tryField", 3),
 ];
 
 /// The shapes `examples/` does not write, emitted both ways here so the licence
@@ -240,6 +262,37 @@ fn walk(ss: &[St], note: &mut impl FnMut(usize)) {
     }
 }
 
+/// Every projection call this body still states, by callee name — the census
+/// [`CALLS`] pins.
+fn projection_calls(ss: &[St], out: &mut Vec<String>) {
+    fn of(r: &Rhs, out: &mut Vec<String>) {
+        if let Rhs::Call {
+            callee,
+            kind: Callee::Projection,
+            ..
+        } = r
+        {
+            out.push(callee.clone());
+        }
+    }
+    for s in ss {
+        match s {
+            St::Let(_, r) | St::Do { rhs: r, .. } => of(r, out),
+            St::If { then, els, .. } => {
+                projection_calls(then, out);
+                projection_calls(els, out);
+            }
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => projection_calls(b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    projection_calls(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn rhs(r: &Rhs, note: &mut impl FnMut(usize)) {
     match r {
         Rhs::Val(v) => val(v, note),
@@ -347,6 +400,7 @@ fn run() {
     let mut forms = [(0usize, 0usize); vyrn_codegen::direct::FORMS.len()];
     let mut differ: Vec<String> = Vec::new();
     let mut exits: Vec<(String, usize, usize)> = Vec::new();
+    let mut calls: std::collections::BTreeMap<(String, String), usize> = Default::default();
     let mut same = 0usize;
     for path in corpus() {
         let Ok(program) = load(&path) else { continue };
@@ -369,6 +423,11 @@ fn run() {
                     }
                     if c == CLASSES.len() - 1 {
                         carried.insert(body.name.clone());
+                    }
+                    let mut names = Vec::new();
+                    projection_calls(&body.stmts, &mut names);
+                    for n in names {
+                        *calls.entry((name.clone(), n)).or_default() += 1;
                     }
                 }
             }
@@ -448,11 +507,23 @@ fn run() {
     for (what, brk, cont) in &shapes {
         eprintln!("  {brk:4} break   {cont:4} continue   {what}");
     }
+    eprintln!("the projection calls the core still states, rather than inlining:");
+    for ((program, callee), n) in &calls {
+        eprintln!("  {n:4}  {callee}   {program}");
+    }
     let named_exits: Vec<(&str, usize, usize)> =
         exits.iter().map(|(n, b, c)| (n.as_str(), *b, *c)).collect();
     assert_eq!(
         named_exits, PIN,
         "a `break` or a `continue` reaches the AST arm somewhere the record does not name"
+    );
+    let named_calls: Vec<(&str, &str, usize)> = calls
+        .iter()
+        .map(|((p, c), n)| (p.as_str(), c.as_str(), *n))
+        .collect();
+    assert_eq!(
+        named_calls, CALLS,
+        "the core states a projection call somewhere the record does not name"
     );
     assert_eq!(
         shapes, SHAPE_PIN,
