@@ -3482,25 +3482,12 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
-    ///
-    /// The single rule both drop paths read — `own`'s automatic block-exit release
-    /// and an explicit `drop x` — so the two cannot free different sets. It is the
-    /// same set the textual backend's [`crate::Gen::emit_drop`] frees, minus the
-    /// `Stream`, which reaches its release through the stream lowering rather than
-    /// through `own`.
-    /// Whether releasing this `Array<T>` releases its elements too (RFC-0092
-    /// M2). `own` decides, and this asks it — the same answer the textual
-    /// backend reads, including the stop for a self-referring element.
-    fn array_releases_elems(&self, arr: &Type) -> bool {
-        matches!(self.cx.owned.release_kind(arr), Some(DropKind::Deep(_)))
-    }
-
-    /// Whether `own` gives `ty` a walking release rather than a buffer one.
-    /// [`Fn_::array_releases_elems`] under its general name, for the `Map` and
-    /// `SmallArray` rows RFC-0092 M3 adds.
+    /// Whether `own` gives `ty` a walking release rather than a buffer one:
+    /// RFC-0092 M2's element row for an `Array`, M3's for a `Map` and a
+    /// `SmallArray`. `own` decides and this asks it, including the stop for a
+    /// self-referring element, whose walk has no bottom.
     fn deep_row(&self, ty: &Type) -> bool {
-        self.array_releases_elems(ty)
+        matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_)))
     }
 
     /// The address of a `SmallArray`'s live slots: the inline block while
@@ -3530,50 +3517,49 @@ impl<'p> Fn_<'_, 'p> {
         Ok(base)
     }
 
+    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
+    ///
+    /// [`vyrn_frontend::declared::Owned::release_kind`]'s row, and nothing
+    /// else. The row says what a release MEANS — a call the type declared, a
+    /// buffer, a walk — and this adds the byte offsets, which are `layout`'s
+    /// and which no pass above this crate can state. It derived the row a
+    /// second time until RFC-0125 §3 M3's release slice, from the same type
+    /// shapes, asking `own` on two different spellings depending on the arm.
+    ///
+    /// The spelling matters and this is the one place it does. A declared row
+    /// is keyed by the type's NAME, so it is asked of `ty`. Every other row is
+    /// asked of the SUBSTITUTED type: a generic body's `Array<T>` has a
+    /// `Param` element and `own` answers `Deep` for one, because inside that
+    /// body the element is unknowable — an emitter has the instance in hand
+    /// and is owed the instance's row.
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
-        // A declared row (RFC-0086 M1) answers before any built-in shape does,
-        // and it is keyed by the type's NAME — which resolving away would lose.
         if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
             return Ok(Some(Rel::Call(f, ty.clone())));
         }
         let t = self.cx.resolve(ty);
-        Ok(match &t {
-            Type::Str => Some(Rel::Str),
-            Type::Stream(i) => Some(Rel::Stream((**i).clone())),
-            // An `Array<T>` gives back its buffer, and its ELEMENTS too where
-            // `own` says so (RFC-0092 M2, census U4). The question is asked of
-            // `own` rather than re-derived from the element, so the guards that
-            // answer live in one file — including the one that stops a
-            // self-referring element type, whose walk has no bottom. The element
-            // walk needs an address, so that answer is `Deep` and the
-            // buffer-only one stays a `Buffers`.
-            Type::Array(_) | Type::Map(..) | Type::SmallArray(..) if self.deep_row(&t) => {
-                Some(Rel::Deep(t.clone(), Vec::new()))
-            }
-            Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
-            Type::Map(..) => {
-                let l = self.layout_of(&t, line)?;
-                Some(Rel::Buffers(vec![l.fields[0], l.fields[1], l.fields[4]]))
-            }
-            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it is
-            // null until the array spills, which is exactly the case `free`
+        let bufs = |which: &[usize]| -> Result<Rel, String> {
+            let l = self.layout_of(&t, line)?;
+            Ok(Rel::Buffers(which.iter().map(|i| l.fields[*i]).collect()))
+        };
+        Ok(match self.cx.owned.release_kind(&t) {
+            Some(DropKind::Release(f, _)) => Some(Rel::Call(f, t.clone())),
+            Some(DropKind::FreeStr) => Some(Rel::Str),
+            Some(DropKind::FreeArr) => Some(bufs(&[0])?),
+            Some(DropKind::FreeMap) => Some(bufs(&[0, 1, 4])?),
+            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it
+            // is null until the array spills, which is exactly the case `free`
             // refuses. The inline slots need no reclamation.
-            Type::SmallArray(..) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[2]])),
-            // Phase 5: an aggregate owns its places. Phase 10b: a stored `fn`
-            // value owns its capture block, which is one allocation whatever the
-            // tag — so it needs no registry to release, only to copy.
-            //
-            // RFC-0092 M3 adds the record, the user enum and the fixed
-            // `[N x T]`. Whether they go is `own`'s answer, asked rather than
-            // re-derived: it carries the stop for a type that reaches itself,
-            // whose walk has no bottom.
-            Type::Fn(..) if self.owns_heap(&t) => Some(Rel::Deep(t, Vec::new())),
-            Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)
-                if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_))) =>
-            {
-                Some(Rel::Deep(t, Vec::new()))
-            }
-            _ => None,
+            Some(DropKind::FreeSmallArr) => Some(bufs(&[2])?),
+            // The element walk needs an address, which is why this answer is a
+            // `Deep` and the buffer-only ones are a `Buffers`.
+            Some(DropKind::Deep(d)) => Some(Rel::Deep(d, Vec::new())),
+            // A `Stream<T>` is the one shape with no row: it reaches its
+            // release through the stream lowering (RFC-0075 M2b), and a row
+            // here would release it twice.
+            Some(DropKind::CloseStream) | None => match t {
+                Type::Stream(i) => Some(Rel::Stream(*i)),
+                _ => None,
+            },
         })
     }
 
@@ -3692,7 +3678,7 @@ impl<'p> Fn_<'_, 'p> {
             // The elements first, then the buffer they live in — the reverse of
             // the order `copy_at` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.
-            Type::Array(inner) if self.array_releases_elems(&self.cx.resolve(ty)) => {
+            Type::Array(inner) if self.deep_row(&self.cx.resolve(ty)) => {
                 let l = self.layout_of(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
