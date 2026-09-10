@@ -904,10 +904,40 @@ fn check_accum_inner(
             let opaque =
                 |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
-                // A projection requirement (RFC-0123 M2) is satisfied by a
-                // `places` member, matched on the same terms a method is —
-                // and the receiver capability carries the result's too, since
-                // the parser made them equal on both sides.
+                let want =
+                    || render_method_sig(&sig.name, sig.recv, &sig.params, &sig.param_caps, &sig.ret);
+                // Does the member the impl provides have the signature the
+                // protocol declared, and how does it read? Both members that can
+                // satisfy a requirement are matched on these terms — a method,
+                // and a projection since RFC-0123 M2 — so the rule is read here
+                // and the two arms below say only which member they looked in.
+                //
+                // `self` is implicit in the declaration and the first parameter
+                // of the member the parser built, whose type is the impl's own
+                // head — so its TYPE is dropped rather than compared. Its
+                // CAPABILITY is compared: a bounded generic types `x.m(..)` from
+                // the protocol, so an impl free to take `modify self` where the
+                // protocol says `self` would mutate through a borrow with
+                // nothing at the call site to say so.
+                let provided = |f: &crate::ast::Function| {
+                    let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                    let got_caps: Vec<Capability> =
+                        f.params.iter().skip(1).map(|p| p.capability).collect();
+                    let recv = f
+                        .params
+                        .first()
+                        .map(|p| p.capability)
+                        .unwrap_or(Capability::Read);
+                    let agrees = got.len() == sig.params.len()
+                        && (sig.ret == f.ret || opaque(&sig.ret))
+                        && recv == sig.recv
+                        && got_caps == sig.param_caps
+                        && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                    (
+                        agrees,
+                        render_method_sig(&f.name, recv, &got, &got_caps, &f.ret),
+                    )
+                };
                 if sig.result_cap.is_some() {
                     let Some(f) = imp.places.iter().find(|m| m.name == sig.name) else {
                         out.push(cerr_at!(
@@ -918,30 +948,12 @@ fn check_accum_inner(
                              all required",
                             imp.protocol,
                             imp.ty,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
+                            want(),
                             imp.protocol
                         ));
                         continue;
                     };
-                    let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
-                    let got_caps: Vec<Capability> =
-                        f.params.iter().skip(1).map(|p| p.capability).collect();
-                    let f_recv = f
-                        .params
-                        .first()
-                        .map(|p| p.capability)
-                        .unwrap_or(Capability::Read);
-                    let agrees = got.len() == sig.params.len()
-                        && (sig.ret == f.ret || opaque(&sig.ret))
-                        && f_recv == sig.recv
-                        && got_caps == sig.param_caps
-                        && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                    let (agrees, got) = provided(f);
                     if !agrees {
                         out.push(cerr_at!(
                             f.line,
@@ -950,14 +962,8 @@ fn check_accum_inner(
                              `{}`, this provides `{}`",
                             f.name,
                             imp.protocol,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
-                            render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                            want(),
+                            got
                         ));
                     }
                     continue;
@@ -971,38 +977,13 @@ fn check_accum_inner(
                              holding a `T: {}` may call it",
                         imp.protocol,
                         imp.ty,
-                        render_method_sig(
-                            &sig.name,
-                            sig.recv,
-                            &sig.params,
-                            &sig.param_caps,
-                            &sig.ret
-                        ),
+                        want(),
                         imp.protocol,
                         imp.protocol
                     ));
                     continue;
                 };
-                // `self` is implicit in the declaration and the first parameter
-                // of the method the parser built, whose type is the impl's own
-                // head — so its TYPE is dropped rather than compared. Its
-                // CAPABILITY is compared: a bounded generic types `x.m(..)` from
-                // the protocol, so an impl free to take `modify self` where the
-                // protocol says `self` would mutate through a borrow with
-                // nothing at the call site to say so.
-                let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
-                let got_caps: Vec<Capability> =
-                    f.params.iter().skip(1).map(|p| p.capability).collect();
-                let f_recv = f
-                    .params
-                    .first()
-                    .map(|p| p.capability)
-                    .unwrap_or(Capability::Read);
-                let agrees = got.len() == sig.params.len()
-                    && (sig.ret == f.ret || opaque(&sig.ret))
-                    && f_recv == sig.recv
-                    && got_caps == sig.param_caps
-                    && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                let (agrees, got) = provided(f);
                 if !agrees {
                     out.push(cerr_at!(
                         f.line,
@@ -1011,14 +992,8 @@ fn check_accum_inner(
                              provides `{}`",
                         render_impl_head(imp),
                         imp.protocol,
-                        render_method_sig(
-                            &sig.name,
-                            sig.recv,
-                            &sig.params,
-                            &sig.param_caps,
-                            &sig.ret
-                        ),
-                        render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                        want(),
+                        got
                     ));
                 }
             }
@@ -2914,22 +2889,13 @@ impl<'a> Checker<'a> {
     /// f<T>`) reads as rigid — the two are the same type wherever the shadowing
     /// literal type-checks, so the reading costs nothing.
     fn mentions_open_param(&self, ty: &Type) -> bool {
-        let cur = self.cur_fn.borrow();
-        let rigid = self.generics.get(cur.as_str());
-        let mut found = false;
-        walk_type(ty, &mut |t| {
-            if let Type::Param(n) = t {
-                if !rigid.is_some_and(|ps| ps.contains(n)) {
-                    found = true;
-                }
-            }
-        });
-        found
+        !self.open_params(ty).is_empty()
     }
 
     /// The parameters [`Self::mentions_open_param`] finds, by name, in the order
-    /// they occur and without repeats. For the one diagnostic that has to NAME
-    /// them (see [`Self::stored_fn_named`]); every other reader wants the bool.
+    /// they occur and without repeats. The rule itself is here: the reader that
+    /// has to NAME them wants the list (see [`Self::stored_fn_named`]), every
+    /// other reader wants the bool above.
     fn open_params(&self, ty: &Type) -> Vec<String> {
         let cur = self.cur_fn.borrow();
         let rigid = self.generics.get(cur.as_str());
