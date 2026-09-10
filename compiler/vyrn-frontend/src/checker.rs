@@ -2448,27 +2448,8 @@ impl<'a> Checker<'a> {
                  `if let Some(x) = ..{name}(..)`; the miss is the `else` arm"
             ));
         }
-        if args.len() - 1 != f.params.len() - 1 {
-            return Err(cerr!(
-                line,
-                "projection `{name}` expects {} argument(s) besides `self`, got {}",
-                f.params.len() - 1,
-                args.len() - 1
-            ));
-        }
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        self.unify(&imp.ty, &recv, &mut subst, line)?;
-        for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
-            let want = crate::types::substitute(&p.ty, &subst);
-            let got = self.expr(arg, scope, Some(&want), Some(fn_ret))?;
-            if !self.coercible(&got, &want) {
-                return Err(cerr!(
-                    line,
-                    "projection `{name}` argument is {got}, expected {want}"
-                ));
-            }
-            self.prove_coercion(arg, &want, line)?;
-        }
+        let subst =
+            self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
         if recording() {
             if let Ok(Some(p)) = crate::project::optional_site(
                 self.impl_blocks,
@@ -2533,30 +2514,49 @@ impl<'a> Checker<'a> {
             ));
         }
         let recv = recv.clone();
+        let subst = self.solve_projection_call(imp, f, method, &recv, args, scope, fn_ret, line)?;
+        Ok(Some(crate::types::substitute(&f.ret, &subst)))
+    }
+
+    /// A projection call against the projection it names: the arity besides
+    /// `self`, the impl head solved against the receiver, and every argument at
+    /// the type that solution gives it. Both readers ask — the access site and
+    /// the `if let` an optional projection is tested by — and each reads its own
+    /// result through the substitution this answers with.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_projection_call(
+        &self,
+        imp: &crate::ast::ImplBlock,
+        f: &crate::ast::Function,
+        name: &str,
+        recv: &Type,
+        args: &[Expr],
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<HashMap<String, Type>, Diagnostic> {
         if args.len() - 1 != f.params.len() - 1 {
             return Err(cerr!(
                 line,
-                "projection `{method}` expects {} argument(s) besides `self`, got {}",
+                "projection `{name}` expects {} argument(s) besides `self`, got {}",
                 f.params.len() - 1,
                 args.len() - 1
             ));
         }
-        // Solve `impl<T> .. for Ring<T>` against the receiver, so a projection
-        // declared `-> T` answers with the element type at this call.
         let mut subst: HashMap<String, Type> = HashMap::new();
-        self.unify(&imp.ty, &recv, &mut subst, line)?;
+        self.unify(&imp.ty, recv, &mut subst, line)?;
         for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
             let want = crate::types::substitute(&p.ty, &subst);
             let got = self.expr(arg, scope, Some(&want), fn_ret)?;
             if !self.coercible(&got, &want) {
                 return Err(cerr!(
                     line,
-                    "projection `{method}` argument is {got}, expected {want}"
+                    "projection `{name}` argument is {got}, expected {want}"
                 ));
             }
             self.prove_coercion(arg, &want, line)?;
         }
-        Ok(Some(crate::types::substitute(&f.ret, &subst)))
+        Ok(subst)
     }
 
     /// Solve `impl<T> .. for Slots<T>` against the receiver, and read `ty`
