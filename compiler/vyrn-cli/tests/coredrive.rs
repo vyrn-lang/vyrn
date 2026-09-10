@@ -92,13 +92,11 @@ const CLASSES: [&str; 8] = [
 /// is what [`SHAPES`] is for: a shape the corpus does not write is emitted
 /// beside it, both ways, and counted into the same table.
 ///
-/// The exits slice named two readers of `Stmt::Continue`'s arm in
-/// `vyrn-frontend/tests/semantics.rs` and neither is one. Both are in [`SHAPES`]
-/// and both read zero. The reason it gave for the zeros — that the file
-/// compiles without `vyrn_lower::install()`, so the placer never runs and every
-/// statement falls to the arm — has been false since that file installed the
-/// lowering, and what the zeros mean here is not measured. The arm stays until
-/// something measures it.
+/// `Stmt::Continue`'s zero was measured over the whole gate list by the
+/// occurrence slice and its arm is retired, so the column reads zero here
+/// because there is no arm left to reach. `Stmt::Break`'s does not: it stands
+/// at 8 over this corpus and at 298 over the gate list, and [`PIN`] names the
+/// three programs this walk sees.
 const BREAK: usize = 7;
 const CONT: usize = 8;
 
@@ -491,9 +489,10 @@ fn run() {
     // the count that says what an AST arm still costs is per FORM: how many
     // occurrences the arm emitted, and how many the core's rows did.
     eprintln!("what each form of the AST dispatch still emits:");
-    for (i, what) in vyrn_codegen::direct::FORMS.iter().enumerate() {
+    for (i, (what, arm_exists)) in vyrn_codegen::direct::FORMS.iter().enumerate() {
         let (arm, core) = forms[i];
-        eprintln!("  {arm:8} the arm   {core:8} the core's rows   {what}");
+        let retired = if *arm_exists { "" } else { "   (retired)" };
+        eprintln!("  {arm:8} the arm   {core:8} the core's rows   {what}{retired}");
     }
     eprintln!("where a `break` or a `continue` still reaches the AST arm:");
     for (name, brk, cont) in &exits {
@@ -529,6 +528,14 @@ fn run() {
         shapes, SHAPE_PIN,
         "a shape off the corpus reaches the AST arm a different number of times"
     );
+    // A retired form has no arm to reach. The flag in `FORMS` is the schedule's
+    // one home and this is what keeps it true over the corpus: a form marked
+    // retired whose arm emits anything is an arm that came back.
+    for (i, (what, arm_exists)) in vyrn_codegen::direct::FORMS.iter().enumerate() {
+        if !arm_exists {
+            assert_eq!(forms[i].0, 0, "the retired arm for {what} emitted again");
+        }
+    }
     // The forms whose arm the rows have started to relieve. An arm goes when
     // its first number reaches zero, and this pin says which eight are on that
     // road: a form that drops off the list has lost a reader the record has to
@@ -537,7 +544,7 @@ fn run() {
         .iter()
         .enumerate()
         .filter(|(i, _)| forms[*i].1 > 0)
-        .map(|(_, w)| *w)
+        .map(|(_, w)| w.0)
         .collect();
     assert_eq!(
         carrying,
