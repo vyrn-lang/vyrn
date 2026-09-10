@@ -795,7 +795,16 @@ fn every_bench_program_times_on_the_native_route() {
     );
     let mut failed = Vec::new();
     for f in &corpus {
-        let out = vyrn().arg("bench").arg(f).arg("--json").output().unwrap();
+        // Audited: a bench body is the one body no other gate reaches, and
+        // one that leaks or frees twice exits 135 or 134 here instead of
+        // dying of `out of memory` on the runner with the least memory.
+        let out = vyrn()
+            .arg("bench")
+            .arg(f)
+            .arg("--json")
+            .env("VYRN_LEAK_CHECK", "1")
+            .output()
+            .unwrap();
         if !out.status.success() {
             failed.push(format!("{}:\n{}", f.display(), norm(&out.stderr)));
         }

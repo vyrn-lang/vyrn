@@ -26551,6 +26551,55 @@ thin forms (`share`, `lazy`, `place`, `TryConstruct`, `while let`, `spawn`,
 in the driver, 165 lines, behind `vyrn why` needing a project that does not
 load.
 
+**A bench body frees what it makes (2026-09-10, the bench gate).** The first
+run of the same-host bench gate on `main` died in `membench` with the runtime's
+`out of memory` on one runner and passed on the next. `VYRN_LEAK_CHECK=1 vyrn
+bench` said why: no local of any bench body was ever released. `push 1000`
+leaked 84,483 blocks (692 MB) in one run and `membench` peaked at 2.9 GB, under
+the runner's memory on one host and over it on another. No gate had ever
+audited a bench body: the ratchet runs `main`, and `vyrn bench` does not.
+
+Decision: the bench face is a test host while it builds, as `bodies_wasm`
+already was, and a call whose result IS its argument (`blackBox`) owns what
+its argument owned.
+
+Went: the checker refused `blackBox` in the lifted bodies during the
+lowering's record, so the record lost every node under it, the core could
+not lower the body (`an expression the checker did not type: field`), and the
+emitter placed no release. `set_test_host(true)` around the build closes it.
+Three rules in the core then had their first reader. (1) `blackBox(s)` owned
+its result and released `s` twice (`double or foreign free`). (2) After the
+result became a borrow, `blackBox(mk(16))` released the array never: an owned
+temporary handed to a hands-back call is now taken (`call` marks the position
+`consume`) and the result is the one name that frees it; a place read or a
+lending call handed to it stays a borrow (`hands_back_a_borrow`). (3)
+`arg_released` refused the drop key for every hands-back call, so the
+emitter never saw the drop the core stated; it refuses it only for a borrow
+now. `discards` asks `lends(e)`, the expression-aware question, and the core's
+own copy of `hands_back` is deleted for `movecheck`'s.
+
+Stayed: `prelude::lends` and `movecheck::hands_back`, each stated once.
+
+Lines: `core.rs` +38 −26, `main.rs` +10.
+
+Refusals: none moved; the kernel corpus is unchanged.
+
+Manifest: unchanged; `blackBox` is legal only in a bench or test body, and the
+manifest hashes builds.
+
+Licence: `VYRN_LEAK_CHECK=1 vyrn bench <f> --json` over the 17 bench programs
+of `examples/`: 17 clean, 0 leaking, 0 double frees (before: 15 leaking). Eleven
+reductions under `C:/wtcoretmp2/leak/` pinned each rule.
+
+Findings: a bench body was the last body no audit reached. `push 1000` is
+5,807 ns after the fix against 6,958 before and 541 on the text-IR route, so
+the leak was not the route's cost; that finding is `perf-push`'s.
+
+Left: the per-row peak memory of `membench` was measured by sampling a
+process and is not a number the tree can reproduce. The corpus timing test
+(`benching.rs`, ignored, run by CI's native bench harness step) runs audited
+now, so the audit is the gate.
+
 ## Open questions
 
 1. **The kernel's own trust.** It is a few hundred lines and it is the trusted
