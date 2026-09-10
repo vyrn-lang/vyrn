@@ -3689,7 +3689,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
                 b.ins(&Instruction::LocalSet(data));
-                self.rel_each(m, b, data, n, stride, &inner, line)?;
+                self.each(m, b, true, data, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(data));
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
@@ -3708,7 +3708,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(n));
                 let base = self.sa_base(b, a, ty, line)?;
-                self.rel_each(m, b, base, n, stride, &inner, line)?;
+                self.each(m, b, true, base, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word_at(l.fields[2])))
                     .ins(&Instruction::Call(self.cx.rt.free));
@@ -3735,7 +3735,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
                     if !(ik && i == 0) {
-                        self.rel_each(m, b, buf, n, stride, &elem, line)?;
+                        self.each(m, b, true, buf, n, stride, &elem, line)?;
                     }
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
@@ -3792,7 +3792,7 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.rel_each(m, b, a, count, stride, &inner, line)
+                self.each(m, b, true, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
             // this walk has something to give back for. One walk since RFC-0126
@@ -5744,24 +5744,10 @@ impl<'p> Fn_<'_, 'p> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<(), String> {
-        if decl.predicate.is_none() {
-            return Ok(());
-        }
-        let held = self.park_for_predicate(b, decl, line)?;
         let name = vyrn_frontend::ctor::ctor_name(&decl.name);
-        let Some(sig) = self.cx.sigs.get(&name) else {
-            return unsupported(
-                &format!(
-                    "a `where` clause on `{}` with no constructor in the link",
-                    decl.name
-                ),
-                line,
-            );
-        };
-        let index = sig.index;
-        b.ins(&Instruction::LocalGet(held));
-        b.ins(&Instruction::Call(index));
-        b.ins(&Instruction::LocalGet(held));
+        if let Some(held) = self.call_generated(b, decl, &name, "constructor", line)? {
+            b.ins(&Instruction::LocalGet(held));
+        }
         Ok(())
     }
 
@@ -5782,15 +5768,32 @@ impl<'p> Fn_<'_, 'p> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<Option<u32>, String> {
+        let name = vyrn_frontend::ctor::pred_name(&decl.name);
+        self.call_generated(b, decl, &name, "predicate", line)
+    }
+
+    /// Park the value on the stack and hand it to the generated function
+    /// `name`, giving back the local it was parked in — or `None`, stack
+    /// untouched, for a type with no refinement.
+    ///
+    /// The two callers above are the same three instructions over two
+    /// generated bodies, and `what` is the one word their refusal differs by.
+    fn call_generated(
+        &mut self,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        name: &str,
+        what: &str,
+        line: usize,
+    ) -> Result<Option<u32>, String> {
         if decl.predicate.is_none() {
             return Ok(None);
         }
         let held = self.park_for_predicate(b, decl, line)?;
-        let name = vyrn_frontend::ctor::pred_name(&decl.name);
-        let Some(sig) = self.cx.sigs.get(&name) else {
+        let Some(sig) = self.cx.sigs.get(name) else {
             return unsupported(
                 &format!(
-                    "a `where` clause on `{}` with no predicate in the link",
+                    "a `where` clause on `{}` with no {what} in the link",
                     decl.name
                 ),
                 line,
@@ -12269,24 +12272,33 @@ impl<'p> Fn_<'_, 'p> {
         nb
     }
 
-    /// Release each of the first `count` elements of `buf` — the mirror of
-    /// [`Fn_::copy_each`], and RFC-0092 M2's half of census U4.
+    /// Walk the first `count` elements of `buf`, releasing each or giving each
+    /// a copy of its own — one loop, both directions, the way
+    /// [`Fn_::rel_body`] and [`Fn_::copy_body`] are one walk per type.
     ///
-    /// The gate is the element's own release ROW, not whether it reaches heap. A
-    /// record reaches two Strings and has no row until M3, and walking into one
-    /// here would free fields no rule says the array owns. A row is the proof;
-    /// `owns_heap` is only a reachability question.
-    fn rel_each(
+    /// The two gates are not the same question and neither is the other's.
+    /// A release is gated on the element's own release ROW: a record reaches
+    /// two Strings and has no row until RFC-0092 M3, and walking into one here
+    /// would free fields no rule says the array owns. A copy is gated on
+    /// reachability, because copying a value that reaches heap and has no row
+    /// still has to duplicate what it reaches.
+    fn each(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        rel: bool,
         buf: u32,
         count: u32,
         stride: u32,
         elem: &Type,
         line: usize,
     ) -> Result<(), String> {
-        if self.cx.owned.release_kind(elem).is_none() {
+        let walks = if rel {
+            self.cx.owned.release_kind(elem).is_some()
+        } else {
+            self.owns_heap(elem)
+        };
+        if !walks {
             return Ok(());
         }
         let i = b.local(ValType::I32);
@@ -12312,59 +12324,11 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalSet(p));
-        self.rel_at(m, b, p, elem, line)?;
-        b.ins(&Instruction::LocalGet(i));
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalSet(i));
-        let back = self.br_to(again);
-        b.ins(&Instruction::Br(back));
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        Ok(())
-    }
-
-    /// Replace each of the first `count` elements of `buf` with a deep copy of
-    /// itself. No loop is emitted at all when the element owns no heap.
-    fn copy_each(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        buf: u32,
-        count: u32,
-        stride: u32,
-        elem: &Type,
-        line: usize,
-    ) -> Result<(), String> {
-        if !self.owns_heap(elem) {
-            return Ok(());
+        if rel {
+            self.rel_at(m, b, p, elem, line)?;
+        } else {
+            self.copy_at(m, b, p, elem, line)?;
         }
-        let i = b.local(ValType::I32);
-        let p = b.local(ValType::I32);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::LocalSet(i));
-        let out = self.depth;
-        b.ins(&Instruction::Block(BlockType::Empty));
-        self.depth += 1;
-        let again = self.depth;
-        b.ins(&Instruction::Loop(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(i));
-        b.ins(&Instruction::LocalGet(count));
-        b.ins(&Instruction::I32GeU);
-        let leave = self.br_to(out);
-        b.ins(&Instruction::BrIf(leave));
-        b.ins(&Instruction::LocalGet(buf));
-        b.ins(&Instruction::LocalGet(i));
-        if stride != 1 {
-            b.ins(&Instruction::I32Const(stride as i32));
-            b.ins(&Instruction::I32Mul);
-        }
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalSet(p));
-        self.copy_at(m, b, p, elem, line)?;
         b.ins(&Instruction::LocalGet(i));
         b.ins(&Instruction::I32Const(1));
         b.ins(&Instruction::I32Add);
@@ -12440,7 +12404,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[1])));
                 b.ins(&Instruction::I64Store(at(l.fields[2])));
-                self.copy_each(m, b, nb, n, stride, &inner, line)
+                self.each(m, b, false, nb, n, stride, &inner, line)
             }
             // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
             // header copy is the whole copy of its storage.
@@ -12486,7 +12450,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(base));
                 self.depth -= 1;
                 b.ins(&Instruction::End);
-                self.copy_each(m, b, base, n, stride, &inner, line)
+                self.each(m, b, false, base, n, stride, &inner, line)
             }
             Type::Map(kt, vt) => {
                 // String keys are dup'd per entry; Int64 keys copy with the
@@ -12529,7 +12493,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
                     if !(ik && i == 0) {
-                        self.copy_each(m, b, nb, n, stride, &elem, line)?;
+                        self.each(m, b, false, nb, n, stride, &elem, line)?;
                     }
                 }
                 // The index is copied rather than rebuilt: it holds POSITIONS,
@@ -12574,7 +12538,7 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(m, b, a, count, stride, &inner, line)
+                self.each(m, b, false, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
             // whose declared type owns something. The tag is the variant's
@@ -14589,7 +14553,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
             b.ins(&Instruction::LocalSet(buf));
             if mk == MapKey::Str {
-                self.copy_each(m, b, buf, len, 4, &Type::Str, line)?;
+                self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
             }
             let off = b.alloc(al.size, al.align);
             b.slot(off + al.fields[0]);
@@ -14962,7 +14926,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(len));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(m, b, buf, count, stride, inner, line)?;
+                self.each(m, b, false, buf, count, stride, inner, line)?;
                 let off = b.alloc(al.size, al.align);
                 b.slot(off + al.fields[0]);
                 b.ins(&Instruction::LocalGet(buf));
