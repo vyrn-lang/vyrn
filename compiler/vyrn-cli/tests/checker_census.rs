@@ -333,7 +333,10 @@ fn sections() -> Vec<Section> {
             "fn check_type_decl(&self, t: &TypeDecl) -> Result<(), Diagnostic> {",
             Refusal,
             "what a type declaration may say: the `where` predicate's shape, \
-             the transformer bases, the record and enum forms",
+             the transformer bases, the record and enum forms. One reading of \
+             the predicate rule answers both places it is written — a record's \
+             cross-field one and a scalar's refinement — and the wrapper \
+             aliases are one row rather than two",
         ),
         sec(
             "fn param_has_bound(&self, t: &str, bound: &str) -> bool {",
@@ -731,7 +734,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("the typing judgment", 3398, 140),
-        ("a rule the checker states", 1486, 58),
+        ("a rule the checker states", 1469, 55),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 2883, 157),
         ("shared machinery", 2183, 29),

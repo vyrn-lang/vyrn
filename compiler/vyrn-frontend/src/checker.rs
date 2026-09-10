@@ -904,8 +904,9 @@ fn check_accum_inner(
             let opaque =
                 |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
-                let want =
-                    || render_method_sig(&sig.name, sig.recv, &sig.params, &sig.param_caps, &sig.ret);
+                let want = || {
+                    render_method_sig(&sig.name, sig.recv, &sig.params, &sig.param_caps, &sig.ret)
+                };
                 // Does the member the impl provides have the signature the
                 // protocol declared, and how does it read? Both members that can
                 // satisfy a requirement are matched on these terms — a method,
@@ -3473,34 +3474,9 @@ impl<'a> Checker<'a> {
                 self.ensure_no_stream(&f.ty, t.line, "a record field")?;
                 self.ensure_type_exists(&f.ty, t.line)?;
             }
-            if let Some(pred) = &t.predicate {
-                if consteval::contains_call(pred) {
-                    return Err(cerr!(
-                        t.line,
-                        "cross-field predicate for `{}` may not contain calls (v0.1)",
-                        t.name
-                    ));
-                }
-                // The predicate sees every field in scope, by name.
-                let mut scope = Scope::closed();
-                for f in fields {
-                    scope[0].insert(
-                        f.name.clone(),
-                        Binding {
-                            ty: f.ty.clone(),
-                            mutable: false,
-                        },
-                    );
-                }
-                let pty = self.expr(pred, &scope, None, None)?;
-                if self.base(&pty) != Type::Bool {
-                    return Err(cerr!(
-                        t.line,
-                        "cross-field predicate for `{}` must be Bool, found {pty}",
-                        t.name
-                    ));
-                }
-            }
+            // The predicate sees every field in scope, by name.
+            let binds = fields.iter().map(|f| (f.name.clone(), f.ty.clone()));
+            self.check_predicate(t, "cross-field", binds)?;
             return Ok(());
         }
         // Enum declaration (RFC-0002 §4).
@@ -3519,40 +3495,28 @@ impl<'a> Checker<'a> {
             }
             return Ok(());
         }
-        // A transparent alias to a built-in generic wrapper: `type DeleteResult =
-        // Result<Bool, String>` / `type Maybe = Option<Int64>`. Allowed so a
-        // codable `Result`/`Option` can be named and handed to `fromJson`/
-        // `jsonSchema` by name (RFC-0024's RPC ripple). No `where` clause (its
-        // payloads carry their own refinements); the payload types must exist.
-        if crate::types::is_sum_alias(&t.base) {
-            if t.predicate.is_some() {
-                return Err(cerr!(
-                    t.line,
-                    "a `{}` alias cannot have a `where` clause",
-                    if crate::types::result_payloads(&t.base).is_some() {
-                        "Result"
-                    } else {
-                        "Option"
-                    }
-                ));
+        // A transparent alias to a built-in generic wrapper or collection: `type
+        // DeleteResult = Result<Bool, String>`, `type Maybe = Option<Int64>`,
+        // `type Bag = Map<String, Int64>`. Allowed so a codable one can be named
+        // and handed to `fromJson`/`jsonSchema` by name (RFC-0024's RPC ripple,
+        // RFC-0028, RFC-0011). No `where` clause — the payloads and elements
+        // carry their own refinements — and the types inside must exist.
+        let wrapper = match &t.base {
+            b if crate::types::is_sum_alias(b) => {
+                Some(match crate::types::result_payloads(b).is_some() {
+                    true => "Result",
+                    false => "Option",
+                })
             }
-            self.ensure_type_exists(&t.base, t.line)?;
-            return Ok(());
-        }
-        // A transparent alias to a `Map`/`Array` (RFC-0028/RFC-0011), so a codable
-        // collection can be named and handed to `fromJson`/`jsonSchema` by name
-        // (the same rationale as the `Result`/`Option` aliases above). No `where`
-        // clause; the element/value types must exist.
-        if matches!(t.base, Type::Map(..) | Type::Array(_) | Type::ArrayN(..)) {
+            Type::Map(..) => Some("Map"),
+            Type::Array(_) | Type::ArrayN(..) => Some("Array"),
+            _ => None,
+        };
+        if let Some(noun) = wrapper {
             if t.predicate.is_some() {
                 return Err(cerr!(
                     t.line,
-                    "a `{}` alias cannot have a `where` clause",
-                    if matches!(t.base, Type::Map(..)) {
-                        "Map"
-                    } else {
-                        "Array"
-                    }
+                    "a `{noun}` alias cannot have a `where` clause"
                 ));
             }
             self.ensure_type_exists(&t.base, t.line)?;
@@ -3593,32 +3557,52 @@ impl<'a> Checker<'a> {
             ));
         }
         // `String` refinements are allowed (e.g. `value.byteLength >= 3`); like all
-        // predicates they must be call-free and const-analyzable (checked below).
-        if let Some(pred) = &t.predicate {
-            if consteval::contains_call(pred) {
-                return Err(cerr!(
-                    t.line,
-                    "refinement predicate for `{}` may not contain calls (v0.1)",
-                    t.name
-                ));
-            }
-            // Predicate is checked in an environment where `value` has the base type.
-            let mut scope = Scope::closed();
-            scope[0].insert(
-                "value".into(),
-                Binding {
-                    ty: t.base.clone(),
-                    mutable: false,
-                },
-            );
-            let pty = self.expr(pred, &scope, None, None)?;
-            if self.base(&pty) != Type::Bool {
-                return Err(cerr!(
-                    t.line,
-                    "refinement predicate for `{}` must be Bool, found {pty}",
-                    t.name
-                ));
-            }
+        // predicates they must be call-free and const-analyzable.
+        //
+        // The predicate is checked in an environment where `value` has the base
+        // type.
+        self.check_predicate(
+            t,
+            "refinement",
+            std::iter::once(("value".to_string(), t.base.clone())),
+        )
+    }
+
+    /// A type declaration's `where` predicate, wherever it is written: it may
+    /// contain no call, and it must be Bool in a scope holding `binds` and
+    /// nothing else.
+    ///
+    /// `kind` is the adjective the two refusals name it by — a record's
+    /// predicate is cross-field and sees its fields, a scalar's is a refinement
+    /// and sees `value` — and it is the whole of what the two spellings of this
+    /// rule differed in.
+    fn check_predicate(
+        &self,
+        t: &TypeDecl,
+        kind: &str,
+        binds: impl Iterator<Item = (String, Type)>,
+    ) -> Result<(), Diagnostic> {
+        let Some(pred) = &t.predicate else {
+            return Ok(());
+        };
+        if consteval::contains_call(pred) {
+            return Err(cerr!(
+                t.line,
+                "{kind} predicate for `{}` may not contain calls (v0.1)",
+                t.name
+            ));
+        }
+        let mut scope = Scope::closed();
+        for (name, ty) in binds {
+            scope[0].insert(name, Binding { ty, mutable: false });
+        }
+        let pty = self.expr(pred, &scope, None, None)?;
+        if self.base(&pty) != Type::Bool {
+            return Err(cerr!(
+                t.line,
+                "{kind} predicate for `{}` must be Bool, found {pty}",
+                t.name
+            ));
         }
         Ok(())
     }
