@@ -167,11 +167,14 @@ pub const ATOMS: &[(&str, Effect)] = &[
     ("readLine", Effect::ReadInput),
     ("print", Effect::WriteOutput),
     ("writeStdout", Effect::WriteOutput),
-    ("trace", Effect::WriteOutput),
-    ("debug", Effect::WriteOutput),
-    ("info", Effect::WriteOutput),
-    ("warn", Effect::WriteOutput),
-    ("error", Effect::WriteOutput),
+    // The five log levels, under the spelling a call site carries: the
+    // parser's method sugar turns `log.info(m)` into `@info(log, m)`, and the
+    // surface word is an ordinary identifier a program may declare.
+    ("@trace", Effect::WriteOutput),
+    ("@debug", Effect::WriteOutput),
+    ("@info", Effect::WriteOutput),
+    ("@warn", Effect::WriteOutput),
+    ("@error", Effect::WriteOutput),
     ("readFile", Effect::FsRead),
     ("readFileBytes", Effect::FsRead),
     ("writeFile", Effect::FsWrite),
@@ -279,7 +282,10 @@ pub fn gen_refusal(name: &str) -> Option<String> {
     Some(match atom(name) {
         Some(Effect::Clock) => "reads the clock".to_string(),
         Some(Effect::Random) => "reads entropy".to_string(),
-        _ => format!("calls `{name}`"),
+        // The name a reader can WRITE. An `@` spelling is the sugar's internal
+        // one (`@info` is what `log.info(..)` carries), and a refusal that
+        // printed it would name something no source can lex — PR #120's lesson.
+        _ => format!("calls `{}`", crate::parser::method_surface(name)),
     })
 }
 
@@ -317,8 +323,16 @@ mod tests {
     #[test]
     fn the_gen_column_answers_by_row_and_by_override() {
         // finding 4: one effect, one cell. `print` is refused with the rest.
-        for n in ["print", "writeStdout", "trace", "error"] {
+        for n in ["print", "writeStdout"] {
             assert_eq!(gen_refusal(n).as_deref(), Some(&*format!("calls `{n}`")));
+        }
+        // A log level is keyed by the spelling its call site carries, and the
+        // reason names the word the program wrote.
+        for n in ["trace", "error"] {
+            assert_eq!(
+                gen_refusal(&format!("@{n}")).as_deref(),
+                Some(&*format!("calls `{n}`"))
+            );
         }
         // finding 13: the reason is the row, not "the extern".
         assert_eq!(

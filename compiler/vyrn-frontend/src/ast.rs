@@ -195,29 +195,35 @@ pub fn is_surface_builtin(name: &str) -> bool {
 /// The ORDER is the meaning: the index is the ordinal a `logging { level: .. }`
 /// block compares against, so this is a list and not a set.
 ///
-/// THREE SITES DELIBERATELY STILL SPELL THE FIVE OUT, and they are not
+/// TWO SITES DELIBERATELY STILL SPELL THE FIVE OUT, and they are not
 /// duplication:
 ///
-/// - `interp.rs`'s dispatch arm and `vyrn-codegen/src/direct.rs`'s two arms are
-///   READ AS DATA by `vyrn-frontend/tests/primitives.rs`, which scans both files
-///   for literals to enumerate what each engine implements and compares that to
-///   RFC-0078's census. A predicate is invisible to a text scan.
-/// - `checker.rs`'s `RESERVED` and `SPAWN_FORBIDDEN`, and the lattice's `gen` column, hold
-///   the five among dozens of unrelated names, where splicing a const array in
-///   costs more than it saves. `every_log_level_is_reserved_and_forbidden_where_effects_are`
-///   compares them to this table instead.
+/// - `vyrn-codegen/src/direct.rs`'s arm is READ AS DATA by
+///   `vyrn-frontend/tests/primitives.rs`, which scans that file for literals to
+///   enumerate what the backend implements and compares that to RFC-0078's
+///   census. A predicate is invisible to a text scan.
+/// - `parser.rs`'s [`crate::parser::METHOD_BUILTINS`] pairs each level with the
+///   internal spelling its call site carries, among two dozen unrelated names.
+///   `every_log_level_is_a_method_builtin_and_an_effect` compares that table to
+///   this one.
+///
+/// The five words are NOT reserved. A row is matched by name, so the sugar
+/// produces `@info` and the row is seeded under that (RFC-0125 §3 M6, the
+/// levels slice); a module that declares or imports `info` gets the word back.
 pub const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
 
-/// Whether `name` is one of the five log levels.
-pub fn is_log_level(name: &str) -> bool {
-    LOG_LEVELS.contains(&name)
-}
-
 /// The ordinal of a log-level name (RFC-0008), `trace` lowest → `error` highest.
-/// Shared by the config-block parser, the interpreter, and the codegen so they
-/// filter identically. Returns `None` for an unknown name.
+/// Shared by the config-block parser and the codegen so they filter
+/// identically. Returns `None` for an unknown name.
 pub fn log_level_ordinal(name: &str) -> Option<usize> {
     LOG_LEVELS.iter().position(|l| *l == name)
+}
+
+/// The ordinal of the INTERNAL spelling a log call site carries — `@info` is 2.
+/// `None` for every other name, which is how a backend tells a log call from
+/// any other call without a second table.
+pub fn log_internal(name: &str) -> Option<usize> {
+    log_level_ordinal(name.strip_prefix('@')?)
 }
 
 /// A top-level module-state binding (RFC-0013): `let [mut] name [: Type] = init`.

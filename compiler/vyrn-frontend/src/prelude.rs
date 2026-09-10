@@ -826,6 +826,30 @@ fn rows() -> Vec<Function> {
             &[],
         ),
     ]
+    .into_iter()
+    // ---- the five log levels (RFC-0008) ---------------------------------
+    // One `row(..)`, five names. `log.info(m)` carries `@info` from the
+    // parser's method sugar, so the LEVEL is in the name and the row is the
+    // same signature five times over — written once here rather than five
+    // times, for the reason every other table in this file is written once.
+    //
+    // The internal spelling is what makes the rows sound. A row is matched by
+    // NAME, so a seeded `info` would attach this contract to a user's `fn
+    // info(..)` by spelling alone; `@info` is unlexable, and
+    // `every_seeded_name_is_reserved_or_unspellable` is the check. The five
+    // surface words are ordinary identifiers again, and
+    // [`crate::parser::unshadow_method_builtins`] gives each back to any
+    // module that declares or imports it.
+    .chain(crate::ast::LOG_LEVELS.iter().map(|lvl| {
+        row(
+            &format!("@{lvl}"),
+            &[],
+            &[("l", Read, Type::Logger), ("m", Read, Str)],
+            Unit,
+            &[],
+        )
+    }))
+    .collect()
 }
 
 /// Every seeded row, built once.
@@ -895,14 +919,13 @@ pub fn capability(name: &str, i: usize) -> Option<Capability> {
     // to read a capability from, and without that answer a call-result
     // receiver's temporary had no verdict and leaked — exit-residue round
     // twenty-three. `@charCount` has a row now and the row says it.)
-    // A log method (RFC-0008) writes its message to the sink and keeps
-    // nothing — the same seam as `@charCount`: the four level names have no
-    // seeded row and no user declaration, so an interpolated message
-    // temporary (`log.error("\{i.path}: \{i.message}")`) had no verdict and
-    // leaked one rendered String per record (exit-residue round thirty-nine).
-    if crate::ast::is_log_level(name) && i == 1 {
-        return Some(Capability::Read);
-    }
+    // (A log method's exception stood here beside `@charCount`'s until the
+    // levels got their rows. It said the message is `read`, because the five
+    // level names had no row to read a capability from, and without that
+    // answer an interpolated message temporary — `log.error("\{i.path}:
+    // \{i.message}")` — had no verdict and leaked one rendered String per
+    // record, exit-residue round thirty-nine. `@info` has a row and the row
+    // says it.)
     // The codec forms (RFC-0009) parse or render what they are given and
     // keep nothing — the same seam again: no seeded row, no user
     // declaration, so `fromJson(T, httpInput(..))` and `toJson(f(..))` gave

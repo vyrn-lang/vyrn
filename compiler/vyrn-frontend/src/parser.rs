@@ -122,6 +122,19 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // the two names a future `std/arrays` predicate would most want.
     ("anyTrue", "@anyTrue"),
     ("allTrue", "@allTrue"),
+    // `log.info("..")` and the other four levels (RFC-0008). These five were
+    // RESERVED — five common English words no program could use for a function
+    // of its own — because a seeded row is matched by NAME and a user `fn
+    // info(..)` would have inherited the log contract. The internal spelling is
+    // the answer the record's third one: `@info` is unlexable, the row is
+    // seeded under it, and the five words go back to any module that wants
+    // them. [`crate::ast::LOG_LEVELS`] is the table these pair with, and
+    // `every_log_level_is_a_method_builtin_and_an_effect` holds the two equal.
+    ("trace", "@trace"),
+    ("debug", "@debug"),
+    ("info", "@info"),
+    ("warn", "@warn"),
+    ("error", "@error"),
 ];
 
 /// The surface spelling of an internal method-builtin name, for a DIAGNOSTIC.

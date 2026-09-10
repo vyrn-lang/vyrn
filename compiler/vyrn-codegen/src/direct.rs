@@ -7884,16 +7884,17 @@ impl<'p> Fn_<'_, 'p> {
             // emits no `write_all` at all, which is why a disabled log site costs
             // nothing on any engine. Making it a runtime comparison would turn a
             // deleted call into a branch — RFC-0078's census names that mistake.
-            // (The five spellings are RESERVED by the checker, so no user function
-            // can reach this arm — the same reason the textual backend needs no
-            // guard either.)
-            // Literal for the same reason as the interpreter's arm:
+            // (The five spellings are the parser's own, so no user function can
+            // reach this arm: `log.info(m)` carries `@info` and a module that
+            // declares `info` gets the surface word back before this.)
+            // Literal rather than [`vyrn_frontend::ast::log_internal`]:
             // `primitives.rs` greps THIS FILE for each census name to decide
-            // whether the direct backend covers it.
-            "trace" | "debug" | "info" | "warn" | "error" if args.len() == 2 => {
+            // whether the direct backend covers it, and a predicate is
+            // invisible to a text scan.
+            "@trace" | "@debug" | "@info" | "@warn" | "@error" if args.len() == 2 => {
                 self.expr_as(m, b, &args[0], &Type::Logger)?;
                 self.expr_as(m, b, &args[1], &Type::Str)?;
-                if log_level_ordinal(name).unwrap_or(0) < self.cx.log_level {
+                if log_internal(name).unwrap_or(0) < self.cx.log_level {
                     // Below the threshold: the two values are the only thing this
                     // site leaves behind, and `Unit` means nobody consumes them.
                     b.ins(&Instruction::Drop);
@@ -9250,7 +9251,7 @@ impl<'p> Fn_<'_, 'p> {
         // Interned AT the use site, the way M2m interns a DFA table: `Module::data`
         // shares identical contents, so five sites at one level get one string
         // without anything having gone looking for them.
-        let prefix = format!("[{}] ", level.to_uppercase());
+        let prefix = format!("[{}] ", level.trim_start_matches('@').to_uppercase());
         let (at, plen) = (self.cx.rt.intern(m, &prefix), prefix.len() as i32);
         let colon = self.cx.rt.intern(m, ": ");
         let nl = self.cx.rt.intern(m, "\n");

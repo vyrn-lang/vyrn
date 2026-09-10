@@ -332,11 +332,13 @@ pub const RESERVED: &[&str] = &[
     "lineAt",
     "colAt",
     "moduleInterface",
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error",
+    // RFC-0125 §3 M6's levels slice removed five rows here: `trace`, `debug`,
+    // `info`, `warn` and `error`. Each was reserved so a seeded row could be
+    // keyed by the name a call site carries, and the cost was five common
+    // English words that no program could use for a function of its own. The
+    // sugar carries `@info` now, the row is seeded under that, and
+    // [`crate::parser::METHOD_BUILTINS`] hands the surface word back to any
+    // module that declares or imports it.
     "value",
     "list",
     "schemaOf",
@@ -6962,36 +6964,6 @@ impl<'a> Checker<'a> {
             return Ok(Type::Unit);
         }
 
-        // built-in log methods: <level>(Logger, String) -> Unit. Written
-        // subject-first via method sugar: `log.info("..")`.
-        if crate::ast::is_log_level(name) {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`{name}` takes a Logger and a String, got {} argument(s)",
-                    args.len()
-                ));
-            }
-            let l = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-            if matches!(l, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if l != Type::Logger {
-                return Err(cerr!(
-                    line,
-                    "`{name}` must be called on a Logger (e.g. `log.{name}(..)`), \
-                     found {l}"
-                ));
-            }
-            let m = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(m, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if m != Type::Str {
-                return Err(cerr!(line, "`{name}` message must be a String, found {m}"));
-            }
-            return Ok(Type::Unit);
-        }
         // (RFC-0125 §3 M6 deleted the sixteen arms whose whole behaviour was the
         // arity, the parameter types and the result of a row in
         // `prelude::rows`: the ten input/output builtins (`args`, `readLine`,
@@ -7023,11 +6995,10 @@ impl<'a> Checker<'a> {
         // signature. Four more names had no row at all, and the seed extension
         // in the same milestone gave them one: `logger`, `lineAt`, `colAt` and
         // `@charCount` are typed by their rows too, and `@charCount`'s row
-        // retired a hand-written exception in `prelude::capability`. The four
-        // log levels are the family that could NOT follow them — a row is
-        // keyed by name, `trace`/`debug`/`info`/`warn`/`error` are not
-        // reserved, and a user `fn info(..)` would inherit the row. Reserving
-        // five common words to save 28 lines is a language decision.
+        // retired a hand-written exception in `prelude::capability`. The five
+        // log levels followed once the sugar carried an unlexable name: their
+        // rows are keyed `@trace`..`@error`, so the five surface words went
+        // back to programs and the second hand-written exception went too.
 
         // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
         // reflection over a module's exported surface. It is generation-ONLY —
@@ -10439,38 +10410,39 @@ pub fn fn_calls(b: &Block) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
 
-    /// Every log level is reserved, and every log level is an effect.
+    /// Every log level reaches one internal name, and that name is an effect.
     ///
-    /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside `RESERVED`,
-    /// mixed among dozens of unrelated builtin names. It cannot read
-    /// [`ast::LOG_LEVELS`] directly, because splicing a const array into an
-    /// array literal costs more than it saves and would make a readable list
-    /// unreadable.
+    /// The five words used to be spelled out inside `RESERVED`. They are
+    /// ordinary identifiers again (M6's levels slice), and what makes a level
+    /// call a level is the spelling its call site carries: the parser's method
+    /// sugar maps `info` to `@info`, the row is seeded under that, and the
+    /// effect atom is keyed by it. Three tables, one per file, and none can
+    /// splice `ast::LOG_LEVELS` into an array literal without making a readable
+    /// list unreadable.
     ///
     /// So this compares them instead. A sixth level added to `ast::LOG_LEVELS`
-    /// and to the dispatch, but not to that list, is a level that logs while
-    /// counting as neither an effect nor a reserved word. The other two lists
-    /// this test guarded are gone: the generation fence reads the lattice's
-    /// `write-output` row (M6's fifth slice) and so does the spawn rule (M6's
-    /// isolation slice), so the last two clauses ask the lattice.
+    /// and to the dispatch, but not to the method table, is a level a program
+    /// cannot write; one missing from the lattice is a level that logs while
+    /// counting as no effect at all.
     #[test]
-    fn every_log_level_is_reserved_and_forbidden_where_effects_are() {
-        let missing: Vec<&str> = crate::ast::LOG_LEVELS
-            .iter()
-            .copied()
-            .filter(|lvl| !RESERVED.contains(lvl))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "RESERVED does not hold every log level — missing: {}",
-            missing.join(", ")
-        );
+    fn every_log_level_is_a_method_builtin_and_an_effect() {
         for lvl in crate::ast::LOG_LEVELS {
+            let internal = crate::parser::method_builtin(lvl)
+                .unwrap_or_else(|| panic!("`{lvl}` is not a method-form builtin"));
+            assert_eq!(
+                crate::ast::log_internal(internal),
+                crate::ast::log_level_ordinal(lvl),
+                "`{lvl}` maps to `{internal}`, which is not its internal spelling"
+            );
             assert!(
-                crate::effects::gen_refusal(lvl).is_some(),
+                crate::prelude::signature(internal).is_some(),
+                "`{internal}` has no seeded row"
+            );
+            assert!(
+                crate::effects::gen_refusal(internal).is_some(),
                 "`{lvl}` is a log level a `gen fn` may call"
             );
-            let e = crate::effects::atom(lvl).expect("a log level is an atom");
+            let e = crate::effects::atom(internal).expect("a log level is an atom");
             assert!(
                 !crate::effects::Effects::SPAWN_ALLOWS.has(e),
                 "`{lvl}` is a log level a task may call"
@@ -12549,6 +12521,13 @@ mod tests {
     fn comptime_forbidden_names_are_reserved() {
         for (n, _) in crate::effects::ATOMS {
             if crate::effects::gen_allows(n) {
+                continue;
+            }
+            // A name no source can spell is nobody's to shadow, exactly as in
+            // the test above: the runtime's own primitives and the compiler's
+            // `@`-spelled internals, which the five log levels joined when
+            // their rows were seeded.
+            if n.contains('$') || n.starts_with('@') {
                 continue;
             }
             assert!(

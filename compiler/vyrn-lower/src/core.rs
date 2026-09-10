@@ -4954,16 +4954,16 @@ impl<'a> Builder<'a> {
                 kind = Callee::Ctor;
                 vec![Capability::Consume; args.len()]
             } else if vyrn_frontend::checker::RESERVED.contains(&name)
-                || vyrn_frontend::ast::is_log_level(name)
                 || vyrn_frontend::ast::is_surface_builtin(name)
             {
-                // A reserved name with no prelude row (`fromJson`, `value`,
-                // a generation-time surface builtin, a log level): its
-                // capabilities are the prelude's answer where it has one, and
-                // `read` elsewhere. The four surface builtins are one list
+                // A reserved name with no prelude row (`fromJson`, `value`, a
+                // generation-time surface builtin): its capabilities are the
+                // prelude's answer where it has one, and `read` elsewhere. The
+                // four surface builtins are one list
                 // (`ast::SURFACE_BUILTINS`); naming two of them here left
                 // `std/vyx`'s `vyxRegion` with no core (RFC-0125 §3 M6,
-                // finding 12).
+                // finding 12). The log levels stood here too, and their rows
+                // took them to the branch above.
                 (0..args.len())
                     .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
                     .collect()

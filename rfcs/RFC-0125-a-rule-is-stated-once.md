@@ -25253,6 +25253,105 @@ engine's preopened directory, so its output path has to be inside the checkout;
 `out/` is gitignored and is the one the workflow uses. Its five subdirectories
 must exist first, as the file's own doc comment says.
 
+#### The five log levels lose their words and keep their rows (2026-09-10, `track-ej`)
+
+The first of the three the open question §"What is left in `Checker::call`"
+left for the language to answer. The user answered it on 2026-09-10 and took
+the record's THIRD answer: the five levels are not reserved, the sugar produces
+a spelling nobody can write, and the row is keyed by that.
+
+**What the block was.** 28 lines and 3 refusals in `Checker::call`, one arm for
+`trace`/`debug`/`info`/`warn`/`error` together, checking an arity, a receiver
+type and a message type — the three things a row states. What blocked the row
+was that a row is matched by NAME and
+`every_seeded_name_is_reserved_or_unspellable` is what makes that sound. The
+five words were in `RESERVED` to satisfy it, and the cost was five common
+English words no program could use for a function of its own.
+
+**What it is now.** `parser::METHOD_BUILTINS` pairs each level with `@` plus its
+own name, exactly as it pairs `push` with `@push`, so `log.info(m)` carries
+`@info` from the parser's method sugar. `prelude::rows` seeds one `row(..)` over
+`ast::LOG_LEVELS` — `(l: read Logger, m: read String) -> Unit`, five names, one
+statement — and the fall-through types every log call against it. The five
+surface words left `RESERVED` and are ordinary identifiers again;
+`parser::unshadow_method_builtins` hands each back to any module that declares
+or imports it, which is the half of the table that already existed for
+`remove`.
+
+**The second hand-written exception went with the block.**
+`prelude::capability` held one for the levels beside `@charCount`'s: it said the
+message is `read`, because five names with no row have no capability to read,
+and without that answer an interpolated message temporary leaked one rendered
+String per record (exit-residue round thirty-nine). The row says it now.
+
+**Four sites are keyed by the internal spelling, and one predicate replaced two
+tables.** `effects::ATOMS` names `@trace`..`@error`; `direct.rs`'s arm spells
+the five out as literals, because `primitives.rs` greps that file to decide
+whether the backend covers a census name and a predicate is invisible to a text
+scan; `vyrn-lower/src/core.rs` lost its `is_log_level` clause, because a name
+with a row takes the branch above it; and `ast::is_log_level` is gone, replaced
+by `ast::log_internal`, which is `log_level_ordinal` of the name with its `@`
+stripped. `effects::gen_refusal` now prints `parser::method_surface(name)`, so
+its "calls `info`" clause names the word a reader can write rather than the
+internal one — PR #120's lesson, and it would have leaked `@info` into a
+generation fence diagnostic.
+
+**Nothing in the corpus declared one of the five.** The count was taken before
+the change and it is zero, which it had to be: `RESERVED` refused the
+declaration. What the slice buys is every program written after it.
+
+**The refusals, before and after.** Three witnessed, because the corpus reaches
+none of them.
+
+| the program | before | after |
+|---|---|---|
+| `log.info("a", "b")` | ``` `info` takes a Logger and a String, got 3 argument(s) ``` | ``` `info` expects 2 argument(s), got 3 ``` |
+| `x.info("hi")`, `x: Int64` | ``` `info` must be called on a Logger (e.g. `log.info(..)`), found Int64 ``` | ``` `info` argument 1 expects Logger, found Int64 ``` |
+| `log.info(3)` | ``` `info` message must be a String, found Int64 ``` | ``` `info` argument 2 expects String, found Int64 ``` |
+
+Each is the row stating what the arm stated, in the generic wording every other
+row-typed builtin now uses, and each names `info` rather than `@info` because
+the fall-through shows a call site's name with its `@` stripped.
+
+**One refusal is deliberately gone**, and it is the feature: ``` `info` is a
+reserved name ``` at a declaration. `fn info(x: Int64) -> Int64` compiles, and a
+module that declares it means its own `info` in method form too.
+
+**The numbers.**
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,090 | 15,069 | −21 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 1,172 | 1,195 | +23 |
+| `compiler/vyrn-frontend/src/parser.rs` | 7,011 | 7,024 | +13 |
+| `compiler/vyrn-frontend/src/ast.rs` | 2,019 | 2,025 | +6 |
+| `compiler/vyrn-frontend/src/effects.rs` | 342 | 356 | +14 |
+| `compiler/vyrn-codegen/src/direct.rs` | 17,592 | 17,593 | +1 |
+| `Checker::call`'s arms | 2,883 lines, 157 refusals | 2,854, 154 | −29, −3 |
+| `checker::RESERVED` | 95 names | 90 | −5 |
+| hand-written exceptions in `prelude::capability` | 2 | 1 | −1 |
+
+The slice costs 36 lines and buys five words back, one fewer statement of the
+log contract, and one fewer hand-written capability exception. The rows and the
+table entries are longer than the arm they replace; what they are not is a
+second statement of a rule.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 465 programs, byte-identical against the branch point, 125 refused before and after — 0 lost, 0 gained |
+| the three refusals the corpus never reaches | witnessed under both binaries, table above |
+| `cargo test -p vyrn-frontend` | 718 + 194 + 110 + the rest, 0 failed |
+| `cargo test -p vyrn-cli` | 646 passed, 0 failed |
+| the `vyrn-lsp` suite | 100 passed |
+| `every_seeded_name_is_reserved_or_unspellable` | green — `@trace`..`@error` are unspellable |
+
+`checker_census.rs`, `emitter_census.rs`, `parser_census.rs` and RFC-0126's cost
+table are re-pinned in this commit. RFC-0126's `Type::Logger` row moved a
+mention from the checker to the prelude and its total is unchanged; `Type::Str`,
+`Type::Unit` and `Type::Err` each lost the mentions the arm carried.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
