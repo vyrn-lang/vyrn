@@ -1,4 +1,4 @@
-/// Compile-time JSON Schema — `jsonSchema(TypeName)` renders a declared type as a
+/// Compile-time JSON Schema — `jsonSchema<TypeName>()` renders a declared type as a
 /// JSON Schema (draft 2020-12) document, computed from the type's `where` predicate
 /// and structure *at compile time*. Like `schemaOf` (see reflection.vyrn) it is not
 /// runtime reflection — Vyrn erases types — so the interpreter and native backend
@@ -20,11 +20,11 @@ type Username = String where value.byteLength >= 3 && value.byteLength <= 16
 type User = { handle: Username, age: Age, nick: Option<String> }
 
 fn main() -> Int64 {
-    print(jsonSchema(Age))
-    print(jsonSchema(Port))
-    print(jsonSchema(Even))
-    print(jsonSchema(Ratio))
-    print(jsonSchema(Username))
-    print(jsonSchema(User))
+    print(jsonSchema<Age>())
+    print(jsonSchema<Port>())
+    print(jsonSchema<Even>())
+    print(jsonSchema<Ratio>())
+    print(jsonSchema<Username>())
+    print(jsonSchema<User>())
     return 0
 }

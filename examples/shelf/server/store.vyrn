@@ -138,7 +138,7 @@ test "listBooks returns the three seed books (state owned by this module)" {
 
 test "an invalid AddBookReq is rejected by fromJson with accumulated Issues" {
     let before = listBooks()
-    match fromJson(AddBookReq, "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}") {
+    match fromJson<AddBookReq>("{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}") {
         Valid(req) => assertEq("should not validate", "did"),
         Invalid(issues) => assert(issues.length >= 1),
     }

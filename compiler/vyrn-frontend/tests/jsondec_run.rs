@@ -82,7 +82,7 @@ fn run_json(src: &str) -> Result<i64, String> {
 fn a_tuple_payload_off_the_wire_arity_is_refused_even_all_option() {
     let src = "type E = | P(Option<Int64>, Option<Int64>) \
                fn issues(s: String) -> Int64 { \
-                   return match fromJson(E, s) { \
+                   return match fromJson<E>(s) { \
                        Valid(_) => 0, \
                        Invalid(is) => is.length, \
                    }; } \

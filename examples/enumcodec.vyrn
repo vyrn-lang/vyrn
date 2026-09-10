@@ -43,14 +43,14 @@ fn roundShape(s: Shape) -> Int64 {
 }
 
 fn decodeShape(s: String) -> Int64 {
-    return match fromJson(Shape, s) {
+    return match fromJson<Shape>(s) {
         Valid(sh) => roundShape(sh),
         Invalid(issues) => report(issues),
     }
 }
 
 fn decodeLookup(s: String) -> Int64 {
-    return match fromJson(Lookup, s) {
+    return match fromJson<Lookup>(s) {
         Valid(_) => 0,
         Invalid(issues) => report(issues),
     }

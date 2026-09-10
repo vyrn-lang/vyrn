@@ -1371,6 +1371,20 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
+        /// Explicit type arguments (RFC-0125 §3 M6): `fromJson<Shape>(s)`.
+        ///
+        /// Empty for every call that does not write them, which is almost all
+        /// of them — a generic's type arguments are solved from its arguments,
+        /// and this is what a caller writes when they cannot be. `schemaOf`,
+        /// `jsonSchema` and `fromJson` are the three signatures in the language
+        /// whose type parameter appears nowhere in their parameters, so they
+        /// are the reason this exists; any generic may be written this way.
+        ///
+        /// The checker seeds the solve with these and then infers the rest, so
+        /// a partial list is legal and an over-long one is refused. The
+        /// backends re-solve from the arguments as they always have, and read
+        /// these only where the arguments cannot answer.
+        type_args: Vec<Type>,
         line: usize,
     },
     /// `match scrutinee { Some(x) => e, None => e }` — an expression yielding a

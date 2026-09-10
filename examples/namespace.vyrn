@@ -44,7 +44,7 @@ fn main() -> Int64 {
     print(shapes.origin().x + metrics.origin()) // 100
 
     // Type-name argument through a namespace.
-    let parsed = fromJson(shapes.Point, "{\"x\":10,\"y\":20}")
+    let parsed = fromJson<shapes.Point>("{\"x\":10,\"y\":20}")
     print(match parsed {
         Valid(pt) => pt.x + pt.y,
         Invalid(iss) => 0 - 1,

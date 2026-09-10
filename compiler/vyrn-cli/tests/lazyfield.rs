@@ -133,7 +133,7 @@ fn a_lazy_field_encodes_but_does_not_decode() {
     let out = check(
         "decode",
         "type B = { title: String, body: lazy String }\n\
-         fn main() -> Int64 { let r = fromJson(B, \"{}\")\n return 0 }\n",
+         fn main() -> Int64 { let r = fromJson<B>(\"{}\")\n return 0 }\n",
     );
     assert!(out.contains("cannot decode into `B`"), "{out}");
 
@@ -155,7 +155,7 @@ fn the_schema_shows_the_forced_type() {
     let stdout = run(
         "schema",
         "type B = { title: String, body: lazy Int64 }\n\
-         fn main() -> Int64 { print(jsonSchema(B))\n return 0 }\n",
+         fn main() -> Int64 { print(jsonSchema<B>())\n return 0 }\n",
     );
     assert!(
         stdout.contains("\"body\":{\"type\":\"integer\"}"),

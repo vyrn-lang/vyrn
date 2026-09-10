@@ -829,7 +829,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4211, 23),
+        ("loader.rs", "the file's own job", 4235, 23),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -851,7 +851,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 829, 0),
-        ("project.rs", "the file's own job", 1008, 0),
+        ("project.rs", "the file's own job", 1009, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -861,7 +861,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
         ),
         ("project.rs", "shared machinery", 273, 0),
-        ("project.rs", "tests", 309, 0),
+        ("project.rs", "tests", 310, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
 }

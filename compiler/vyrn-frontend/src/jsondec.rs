@@ -97,6 +97,7 @@ fn spell(ty: &Type) -> String {
 /// no engine holds a JSON decoder.
 pub fn decode_expr(target: &Type, src: crate::ast::Expr, line: usize) -> crate::ast::Expr {
     crate::ast::Expr::Call {
+        type_args: Vec::new(),
         name: top_name(target),
         args: vec![src],
         line,

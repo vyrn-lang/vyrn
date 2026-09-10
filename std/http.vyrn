@@ -1714,7 +1714,7 @@ gen fn httpProcedure(f: FnInfo, iface: ModuleInterface, base: String) -> String 
     let call = f.name + "__real"
     if f.params.length == 1 {
         let reqType = f.params[0].spelling
-        out = out + "    return match fromJson(" + reqType + ", httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
+        out = out + "    return match fromJson<" + reqType + ">(httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
         if f.ret == "" {
             out = out + "        Valid(input) => " + run + "Unit(input),\n"
             out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"

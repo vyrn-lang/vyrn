@@ -25352,6 +25352,142 @@ table are re-pinned in this commit. RFC-0126's `Type::Logger` row moved a
 mention from the checker to the prelude and its total is unchanged; `Type::Str`,
 `Type::Unit` and `Type::Err` each lost the mentions the arm carried.
 
+#### A call site can write its type arguments (2026-09-10, `track-ej`)
+
+The second of the three the open question §"What is left in `Checker::call`"
+left for the language, and the only one that needed a feature rather than a
+row. The user answered it on 2026-09-10 and took the WIDE answer:
+`fromJson<T>(s)`, `schemaOf<T>()`, `jsonSchema<T>()`.
+
+**What the block was.** 77 lines and 11 refusals for three names that each took
+a TYPE where a value goes. `schemaOf(Shape)` put a declaration name in argument
+position, so the arm had to do the arity itself, decide by hand whether the
+expression was an `Expr::Var` naming a declared type, and answer the result;
+`prelude::rows` spelled all three parameters `Unit` and said on each row that
+the type was inert, because no parameter type this language writes is honest
+about a type name. `fromJson` had no row at all — the audit table in
+`prelude.rs` held it back with "`T` is the first ARGUMENT — a type name, not a
+value. No signature says 'the type my caller wrote'."
+
+**The language could not spell an explicit type argument, so that is what was
+built.** `fn f<T: Show>` has always had a binder; a CALL had no way to write
+one. `Expr::Call` carries a `type_args: Vec<Type>`, empty for every call that
+writes none, and `parser::call_type_args` fills it.
+
+**The parse is speculative, and the rule is the narrowest one that admits the
+form.** `<` after a callee is ambiguous with less-than. A comma-separated type
+list, closed by `>`, with `(` IMMEDIATELY after the `>`, is a type argument
+list; anything else rewinds the cursor and leaves the `<` to the binary
+operator. The cursor is the whole of the parser's state at an expression
+boundary, so the rewind is one assignment, and no diagnostic is raised on the
+failed attempt — the type parser's error belongs to whoever re-reads the tokens
+as an expression. The one shape that reads differently now is `a < b > (c)`,
+which compares a `Bool` against a value and has no meaning in this language. The
+whole corpus was `vyrn check`ed with the parser change alone, before any row
+moved: **465 of 465 byte-identical**.
+
+**The checker seeds the solve.** The written types go into `subst` in
+declaration order and the arguments infer what is left, so a partial list is
+legal, a list longer than the binder is refused, and a call that writes none
+reads exactly as it did. Two general refusals came with it — a type argument on
+a callee that declares no type parameters, and one too many — and every written
+type gets the answer every other type spelling gets, which is what stops
+`schemaOf<Nope>()` from passing `vyrn check` and failing in the emitter. Any
+generic may be written this way; the three builtins are simply the only
+signatures in the language whose type parameter appears in no parameter.
+
+**The rows are ordinary now, but for one bound.** `jsonSchema<T>() -> String`,
+`schemaOf<T>() -> Schema`, `fromJson<T>(s: read String) -> Validation<T>`. The
+one rule of the arm a signature cannot carry is that `fromJson`'s target must be
+decodable, so it is a BOUND — [`prelude::DECODABLE`], read the way `HEAPLESS`
+is, refused in the arm's own words because the sentence names the OFFENDING part
+of the type rather than the whole of it.
+
+**One arm survives, six lines, and it is not a rule the row states.** The three
+are REWRITTEN at their call site, not called: two fold to a compile-time literal
+and `fromJson` expands to the decoder generated for its target. So both emitters
+need the target AT THE NODE, and the node carries it only where the caller wrote
+it — an expected type would answer the checker and leave the emitters with
+nothing. One sentence covers the three, and it names the new spelling rather
+than letting the row answer "expects 1 argument(s), got 2", which tells a reader
+nothing about what to write.
+
+**Two things the AST field rippled into, and both were real.**
+
+**One. A type argument is a type, so the loader must rewrite it.** Both body
+walkers — the namespace resolver and the privacy renamer — rewrote types in
+signatures and in `let` annotations and had never seen one inside an expression.
+`fromJson<shapes.Point>(s)` and `fromJson<api.CreateReq>(s)` came back as *not a
+codable type*, because the spelling had not been resolved to the declaration.
+Three corpus programs caught it: `examples/namespace.vyrn` and the `bin` and
+`shelf` clients.
+
+**Two. `fromJson` answers a type now, so the audit table lost a row.** It was
+held back from the declared reading because no signature could name what it
+gives back. `Validation<T>` names it, and `prelude::returns` hands it over like
+`@push`'s `Array<T>`.
+
+**The migration.** 87 call sites in 29 files: `examples/` (18 files),
+`std/` (8), `site/` (2), `compiler/vyrn-cli/tests/boundaries/` (1), plus 29 in
+the compiler's own test sources and 7 in `compiler/vyrn-cli/tests/`. Eight of
+`std/`'s are inside GENERATORS that build Vyrn source as text —
+`std/rpc`, `std/connect`, `std/graphql`, `std/http` and `std/openapi` all emit
+`fromJson<T>(body)` now. `std/storage`'s `load(TypeName, path)` keeps its
+surface, because it is `std/storage`'s and not the language's; its desugar in
+`parser.rs` converts the name to the type argument once.
+
+**The numbers.**
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,105 | 15,113 | +8 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 1,205 | 1,246 | +41 |
+| `compiler/vyrn-frontend/src/parser.rs` | 7,024 | 7,110 | +86 |
+| `compiler/vyrn-frontend/src/ast.rs` | 2,025 | 2,039 | +14 |
+| `compiler/vyrn-frontend/src/loader.rs` | 4,891 | 4,915 | +24 |
+| `compiler/vyrn-codegen/src/direct.rs` | 17,593 | 17,606 | +13 |
+| `Checker::call`'s arms | 2,833 lines, 150 refusals | 2,778, 140 | −55, −10 |
+| rows with an inert `Unit` parameter | 4 | 1 | −3 |
+| names the audit holds back from the declared reading | 4 | 3 | −1 |
+
+The slice ADDS 186 lines, and it should: it is a language feature. What it
+deletes is the last statement of "this parameter is a type name" — three rows
+that spelled `Unit` and 55 lines of `Checker::call` that read `args[0]` as a
+declaration.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus, parser change alone | 465 programs, byte-identical, 125 refused |
+| `vyrn check` stderr over the corpus, whole slice and migration | 465 programs, byte-identical, 125 refused — 0 lost, 0 gained |
+| the seven refusals the corpus never reaches | pinned in `tests/refusals.rs`, table below |
+| `cargo test -p vyrn-frontend` | 0 failed |
+| `cargo test -p vyrn-cli` | 0 failed |
+
+| the program | before | after |
+|---|---|---|
+| `fromJson(Pt, "{}")` | typed | ``` `fromJson` names its target as a type argument — write `fromJson<Pt>(s)` ``` |
+| `schemaOf(Pt)` | typed | ``` `schemaOf` names its target as a type argument — write `schemaOf<Pt>()` ``` |
+| `jsonSchema(Pt)` | typed | ``` `jsonSchema` names its target as a type argument — write `jsonSchema<Pt>()` ``` |
+| `fromJson<Bad>("{}")` | ``` `fromJson` cannot decode into `Bad` (not a codable type) ``` | the same sentence, from the bound |
+| `schemaOf<Nope>()` | — | `` unknown type `Nope` `` |
+| `f<Int64>(1)` on a concrete `f` | — | ``` `f` declares no type parameters, so it takes no type arguments ``` |
+| `id<Int64, Bool>(1)` | — | ``` `id` takes 1 type argument(s), got 2 ``` |
+
+The refusals GAINED are the last four, and every one is the old spelling of
+this decision or a mistake about the new one, which is what the licence allows.
+The refusals LOST are the arm's six wordings for "that is not a type name" and
+its three arity sentences: three are re-stated by the arm above with the new
+spelling named, three become `unknown type`, and three become the row's own
+arity sentence.
+
+`checker_census.rs`, `parser_census.rs`, `emitter_census.rs`, `cli_census.rs`,
+`frontend_census.rs`, RFC-0126's cost table and RFC-0127's form table are all
+re-pinned in this commit. `Expr::Var` loses five mentions in the checker (the
+three arms that read a type name out of argument position) and `Expr::Call`
+gains one in the parser.
+
 #### The union `print` and `toString` take is a bound (2026-09-10, `track-ej`)
 
 The third of the three the open question §"What is left in `Checker::call`"

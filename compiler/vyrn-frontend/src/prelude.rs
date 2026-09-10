@@ -104,12 +104,14 @@
 //! binding. The audit is now the whole of [`crate::checker::RESERVED`], and
 //! every name that ALLOCATES a result this language can spell has a row below.
 //!
-//! Five names allocate and are still held back. Each is held for a reason
-//! about the TYPE, never about the fact:
+//! Four names allocate and are still held back. Each is held for a reason
+//! about the TYPE, never about the fact. `fromJson` was the fifth: its target
+//! was the first ARGUMENT, so no signature could say "the type my caller
+//! wrote". RFC-0125 §3 M6 made it a type PARAMETER, and the row says
+//! `Validation<T>` like any other generic:
 //!
 //! | name | it answers | why no row |
 //! |---|---|---|
-//! | `fromJson` | `Validation<T>` | `T` is the first ARGUMENT — a type name, not a value. No signature says "the type my caller wrote". |
 //! | `value` | `Value` | It boxes the caller's buffer rather than copying it (`box_payload` of the lowered argument), so it LENDS, and a row would double free. The LENDING is stated in [`lends`] since RFC-0125 §3 M3's type slice; the absence of a row no longer states it. |
 //! | `@list` | `Array<E>` | `E` is the argument's element type, which one row cannot name any more than `at` can. |
 //! | `pullAt` | `Option<T>` | The element type comes from the expected type; the checker refuses the call without an annotation, so the binding is already named. |
@@ -205,6 +207,7 @@ fn row(
                 true => Vec::new(),
                 false => vec![Stmt::Return {
                     value: Some(Expr::Call {
+                        type_args: Vec::new(),
                         name: ELEM.to_string(),
                         args: place
                             .iter()
@@ -247,6 +250,17 @@ fn row(
 /// refusal is worded for it rather than by the generic "does not satisfy"
 /// sentence, because a reader cannot write what the generic one would print.
 pub const HEAPLESS: &str = "@Heapless";
+
+/// The bound that says **this type can be decoded into from JSON**.
+///
+/// `fromJson<T>(s)`'s target is `crate::codec::decodable`'s answer, which is a
+/// fact about the type ARGUMENT rather than about the signature, and it is the
+/// one thing the row cannot otherwise say. Unlexable for [`HEAPLESS`]'s reason:
+/// no source can write it, so no program can declare a protocol of that name.
+/// The refusal is worded for it — it names the OFFENDING part of the type, not
+/// the whole of it, which is what the deleted arm printed and what a reader
+/// needs.
+pub const DECODABLE: &str = "@Decodable";
 
 /// A row with a bound on one of its type parameters.
 fn bounded(mut f: Function, tp: &str, bound: &str) -> Function {
@@ -721,21 +735,44 @@ fn rows() -> Vec<Function> {
         // `@str`'s is, so the parameter is spelled `Unit` and is inert for the
         // same reason.
         row("toJson", &[], &[("x", Read, Unit)], Str, &[]),
-        // `jsonSchema(T)` and `schemaOf(T)` take a TYPE NAME, not a value, so the
-        // parameter is inert here too — the checker's arm is what refuses
-        // anything but a declared name. Both fold to a compile-time literal, and
-        // a literal is data-segment storage whose release is a no-op:
-        // `__vyrn_str_free` returns on `cap == 0` (RFC-0089 M1a) and a `Schema`
-        // is a record of such strings. The rows are here because the READING
-        // must be able to name the type either way — a reading that answers for
-        // some sites and not others is the fork RFC-0094 removed.
-        row("jsonSchema", &[], &[("t", Read, Unit)], Str, &[]),
+        // `jsonSchema<T>()` and `schemaOf<T>()` name their target as a TYPE
+        // ARGUMENT (RFC-0125 §3 M6). They spelled it as a value parameter until
+        // then — `schemaOf(Shape)`, with `Shape` in argument position — so the
+        // parameter type was inert, spelled `Unit`, and a 77-line arm of
+        // `Checker::call` did the whole of the arity, the "is that a type", and
+        // the result for all three. A type parameter says it, and the ordinary
+        // call path types the call.
+        //
+        // Both fold to a compile-time literal, and a literal is data-segment
+        // storage whose release is a no-op: `__vyrn_str_free` returns on `cap
+        // == 0` (RFC-0089 M1a) and a `Schema` is a record of such strings. The
+        // rows are here because the READING must be able to name the type
+        // either way — a reading that answers for some sites and not others is
+        // the fork RFC-0094 removed.
+        row("jsonSchema", &["T"], &[], Str, &[]),
         row(
             "schemaOf",
+            &["T"],
             &[],
-            &[("t", Read, Unit)],
             Type::Named("Schema".to_string()),
             &[],
+        ),
+        // `fromJson<T>(s)` decodes a String into a `Validation<T>` (RFC-0018).
+        // The row is ordinary in every column but one: the target must be a
+        // type this language can decode INTO, which is a property of the type
+        // argument and not of the signature, so it is a BOUND — [`DECODABLE`],
+        // read the way [`HEAPLESS`] is. That is the one rule of the deleted arm
+        // a row could not carry.
+        bounded(
+            row(
+                "fromJson",
+                &["T"],
+                &[("s", Read, Str)],
+                Type::App("Validation".to_string(), vec![t()]),
+                &[],
+            ),
+            "T",
+            DECODABLE,
         ),
         // ---- the input I/O results (RFC-0014, RFC-0044) ---------------------
         // Every one allocates on the host side and hands the buffer over. The
@@ -1169,9 +1206,13 @@ mod tests {
         ] {
             assert_eq!(of(name), ty, "`{name}` answers the wrong type");
         }
-        // The five held back. A row appearing here later is a decision, and it
+        // `fromJson` stood in the list below until RFC-0125 §3 M6 gave it a
+        // type parameter: its target was the first ARGUMENT, so no signature
+        // could name what it answers. It names it now.
+        assert_eq!(of("fromJson"), "Validation<T>");
+        // The rest held back. A row appearing here later is a decision, and it
         // has to be made at the table in the module comment.
-        for held in ["fromJson", "value", "@list", "pullAt"] {
+        for held in ["value", "@list", "pullAt"] {
             assert!(
                 !rets.iter().any(|(k, _)| *k == held),
                 "`{held}` is held back by the audit and may not answer for a call"

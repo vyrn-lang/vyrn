@@ -17,15 +17,15 @@ fn report(is: Array<Issue>) -> String {
 }
 
 fn main() -> Int64 {
-    match fromJson(User, "{ \"name\": \"ada\", \"age\": 900 }") {
+    match fromJson<User>("{ \"name\": \"ada\", \"age\": 900 }") {
         Valid(u) => print("ok"),
         Invalid(is) => print(report(is)),
     }
-    match fromJson(User, "{ \"name\": 7 }") {
+    match fromJson<User>("{ \"name\": 7 }") {
         Valid(u) => print("ok"),
         Invalid(is) => print(report(is)),
     }
-    match fromJson(User, "{ not json") {
+    match fromJson<User>("{ not json") {
         Valid(u) => print("ok"),
         Invalid(is) => print(report(is)),
     }

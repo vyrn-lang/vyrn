@@ -4455,7 +4455,12 @@ impl<'a> Builder<'a> {
                 }
                 Ok(Rhs::Read(Place::Field(Box::new(place), field.clone())))
             }
-            Expr::Call { name, args, line } if name == "panic" || name == "@panicAt" => {
+            Expr::Call {
+                name,
+                args,
+                line,
+                type_args: _,
+            } if name == "panic" || name == "@panicAt" => {
                 let r = self.call(name, args, *line, self.produced(e), out)?;
                 out.push(St::Do {
                     rhs: r,
@@ -4465,7 +4470,12 @@ impl<'a> Builder<'a> {
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque)))
             }
-            Expr::Call { name, args, line } => self.call(name, args, *line, self.produced(e), out),
+            Expr::Call {
+                name,
+                args,
+                line,
+                type_args: _,
+            } => self.call(name, args, *line, self.produced(e), out),
             Expr::TryConstruct { name, args, .. } => {
                 let mut vs = Vec::new();
                 for a in args {

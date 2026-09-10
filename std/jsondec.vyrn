@@ -1,6 +1,6 @@
 /// std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
 ///
-/// `fromJson(T, s)` is two halves, exactly as `toJson` is (RFC-0078 M2b):
+/// `fromJson<T>(s)` is two halves, exactly as `toJson` is (RFC-0078 M2b):
 ///
 ///   read(s)          -> a `Json` tree                 [std/jsonread — not typed]
 ///   decode(tree, T)  -> a value of T, plus `Issue`s   [needs the compiler]

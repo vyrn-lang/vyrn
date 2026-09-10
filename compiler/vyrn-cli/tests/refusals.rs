@@ -2941,3 +2941,64 @@ fn the_structural_census_as_a_table() {
         );
     }
 }
+
+/// The three reflection builtins name their target as a TYPE ARGUMENT
+/// (RFC-0125 §3 M6), and the old spelling put it in argument position.
+///
+/// A program written before that change is refused with a sentence that names
+/// the new spelling, because the row's own answer — "expects 1 argument(s), got
+/// 2" — says nothing about what to write. The bound is here too: it is the one
+/// rule of the deleted 77-line arm that a signature cannot carry.
+#[test]
+fn the_reflection_builtins_name_their_target_as_a_type_argument() {
+    let root = std::env::temp_dir().join(format!("vyrn-typearg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    const HEAD: &str = "type Pt = { x: Int64 }\ntype Bad = { f: fn(Int64) -> Int64 }\n";
+    for (stem, body, says) in [
+        (
+            "fromjson-old",
+            "fn main() -> Int64 { let v = fromJson(Pt, \"{}\")\n return 0 }",
+            "`fromJson` names its target as a type argument — write `fromJson<Pt>(s)`",
+        ),
+        (
+            "schemaof-old",
+            "fn main() -> Int64 { let s = schemaOf(Pt)\n return 0 }",
+            "`schemaOf` names its target as a type argument — write `schemaOf<Pt>()`",
+        ),
+        (
+            "jsonschema-old",
+            "fn main() -> Int64 { print(jsonSchema(Pt))\n return 0 }",
+            "`jsonSchema` names its target as a type argument — write `jsonSchema<Pt>()`",
+        ),
+        (
+            "fromjson-uncodable",
+            "fn main() -> Int64 { let v = fromJson<Bad>(\"{}\")\n return 0 }",
+            "`fromJson` cannot decode into `Bad` (not a codable type)",
+        ),
+        (
+            "typearg-unknown",
+            "fn main() -> Int64 { let s = schemaOf<Nope>()\n return 0 }",
+            "unknown type `Nope`",
+        ),
+        (
+            "typearg-on-a-concrete-callee",
+            "fn f(x: Int64) -> Int64 { return x }\n\
+             fn main() -> Int64 { print(f<Int64>(1))\n return 0 }",
+            "`f` declares no type parameters, so it takes no type arguments",
+        ),
+        (
+            "too-many-type-args",
+            "fn id<T>(x: T) -> T { return x }\n\
+             fn main() -> Int64 { print(id<Int64, Bool>(1))\n return 0 }",
+            "`id` takes 1 type argument(s), got 2",
+        ),
+    ] {
+        let file = format!("{stem}.vyrn");
+        std::fs::write(root.join(&file), format!("{HEAD}{body}\n")).unwrap();
+        let (ok, err) = refusal_in(root.clone(), &file, false);
+        assert!(!ok, "{stem} is accepted:\n{err}");
+        assert_eq!(split_head(&err).1, says, "{stem}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

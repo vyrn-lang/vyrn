@@ -539,8 +539,8 @@ extension.
 | Dictionary syntax | `["k": v]` and `[:]` (RFC-0028) |
 | Schema | the type declaration |
 | Constraints | `where` clauses (RFC-0003) |
-| Schema export | `schemaOf(T)` → JSON Schema, byte-exact round-trip (RFC-0010 M2) |
-| A reader | `fromJson(T, s) -> Validation<T>` (RFC-0018) |
+| Schema export | `schemaOf<T>()` → JSON Schema, byte-exact round-trip (RFC-0010 M2) |
+| A reader | `fromJson<T>(s) -> Validation<T>` (RFC-0018) |
 | Accumulated errors | `Array<Issue>` with key, path, message (RFC-0009) |
 | Canonical formatting | `vyrn fmt` (RFC-0017) |
 | A lexer usable from library code | `lex()` (RFC-0054) |
@@ -764,8 +764,8 @@ load. Failures do not stop at the first one: they accumulate into
 `Array<Issue>` with `key`, `path` and `message` (RFC-0009), exactly like
 `fromJson`. A configuration file with four mistakes reports four mistakes.
 
-**`schemaOf(T)` makes the schema story free.** A VON file's schema is a Vyrn
-type; `schemaOf(T)` renders it as JSON Schema for anything outside the Vyrn
+**`schemaOf<T>()` makes the schema story free.** A VON file's schema is a Vyrn
+type; `schemaOf<T>()` renders it as JSON Schema for anything outside the Vyrn
 world, and `import type { T } from "./x.schema.json"` goes the other way. A
 VON file can therefore be checked against a schema that was authored in
 JSON Schema by a team that has never heard of Vyrn.
@@ -840,7 +840,7 @@ What the rewrite bought, concretely:
 - `main` and `server` are `Option<RelPath>`. Omitting both is
   representable; misspelling `serverr` is not.
 - The comment above `audience` cannot be written in `vyrn.json` at all.
-- The manifest's schema is a published type. `schemaOf(Manifest)` gives
+- The manifest's schema is a published type. `schemaOf<Manifest>()` gives
   editors JSON-Schema completion for anyone still writing `vyrn.json`.
 
 ### 2.7 Worked example 2 — a server config with real constraints

@@ -36,7 +36,7 @@ let mut issueLine: String = ""
 let mut idText: String = "7"
 
 fn parseId(s: String) -> Int64 {
-    return match fromJson(IntId, s) {
+    return match fromJson<IntId>(s) {
         Valid(n) => n,
         Invalid(issues) => 0,
     }
@@ -142,7 +142,7 @@ export extern fn removeUser(arg: String) {
 /// Render a raw server 422 body (the raw-payload demo). A body that is not an
 /// issue bag surfaces the decode issues instead.
 export extern fn showServerIssues(arg: String) {
-    match fromJson(IssueBag, arg) {
+    match fromJson<IssueBag>(arg) {
         Valid(bag) => setIssues(renderIssues(bag.issues)),
         Invalid(issues) => setIssues(renderIssues(rpcIssuesFrom(issues))),
     }

@@ -532,6 +532,7 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
 
 fn call(name: &str, args: Vec<Expr>) -> Expr {
     Expr::Call {
+        type_args: Vec::new(),
         name: name.to_string(),
         args,
         line: 0,

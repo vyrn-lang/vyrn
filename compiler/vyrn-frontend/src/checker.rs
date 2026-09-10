@@ -2219,7 +2219,7 @@ struct Checker<'a> {
     /// type expressions but build their function tables once, from a `&Program`.
     /// So the checker collects, and `lib::load_warned` synthesizes the encoders.
     json_types: RefCell<Vec<Type>>,
-    /// RFC-0078 M3: the target type of every `fromJson(T, s)` in the program, for
+    /// RFC-0078 M3: the target type of every `fromJson<T>(s)` in the program, for
     /// the same reason and synthesized at the same point — the decoders.
     json_dec_types: RefCell<Vec<Type>>,
 }
@@ -2249,6 +2249,11 @@ struct DeclaredCall<'a> {
     /// typed once, and it is solved rather than coerced, because the impl was
     /// selected BY it.
     recv: Option<&'a Type>,
+    /// The type arguments the CALLER wrote (RFC-0125 §3 M6):
+    /// `fromJson<Shape>(s)`. They seed the solve in declaration order, and the
+    /// arguments infer whatever is left, so a partial list is legal. Empty for
+    /// every call that writes none, and for a dispatched or synthesized one.
+    written: &'a [Type],
 }
 
 /// What an enum variant name resolves to.
@@ -3713,6 +3718,9 @@ impl<'a> Checker<'a> {
             // collection an operation forgets or overwrites without releasing
             // it. Unlexable, so only a seeded row can carry it.
             crate::prelude::HEAPLESS => !crate::declared::owns_heap(&base, self.types),
+            // `fromJson<T>`'s target (RFC-0125 §3 M6): the whole of what its
+            // deleted arm checked that a signature cannot say.
+            crate::prelude::DECODABLE => crate::codec::decodable(&base, self.types).is_ok(),
             // The union `print` and `@str` take, stated once (RFC-0125 §3 M6,
             // the `Show` slice). It was written out in two arms of
             // [`Self::call`], each testing [`crate::types::renders`] and then
@@ -5170,9 +5178,12 @@ impl<'a> Checker<'a> {
                 }
                 self.binop_type(*op, l, r, *line)
             }
-            Expr::Call { name, args, line } => {
-                self.call(name, args, *line, scope, expected, fn_ret)
-            }
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                line,
+            } => self.call(name, args, type_args, *line, scope, expected, fn_ret),
             Expr::Match {
                 scrutinee,
                 arms,
@@ -5751,6 +5762,7 @@ impl<'a> Checker<'a> {
                 self.call(
                     &crate::types::impl_method_name(FALLIBLE, &key, "success"),
                     std::slice::from_ref(expr),
+                    &[],
                     line,
                     scope,
                     None,
@@ -6794,7 +6806,7 @@ impl<'a> Checker<'a> {
         let Some(m) = self.show_dispatch(t) else {
             return Ok(false);
         };
-        self.call(&m, args, line, scope, Some(&Type::Str), fn_ret)?;
+        self.call(&m, args, &[], line, scope, Some(&Type::Str), fn_ret)?;
         Ok(true)
     }
 
@@ -6802,6 +6814,7 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
         args: &[Expr],
+        written: &[Type],
         line: usize,
         scope: &Scope,
         expected: Option<&Type>,
@@ -7496,7 +7509,7 @@ impl<'a> Checker<'a> {
                     .contains(&(crate::types::COPY.to_string(), key.clone()))
                 {
                     let mangled = crate::types::impl_method_name(crate::types::COPY, &key, "copy");
-                    return self.call(&mangled, args, line, scope, expected, fn_ret);
+                    return self.call(&mangled, args, &[], line, scope, expected, fn_ret);
                 }
             }
             let mut owned_seen = std::collections::HashSet::new();
@@ -7621,29 +7634,30 @@ impl<'a> Checker<'a> {
         {
             return self.vector_call(name, args, line, scope, fn_ret);
         }
-        // built-in: schemaOf(TypeName) -> Schema — compile-time reflection of a
-        // validated type's `where` predicate (RFC-0003). The argument is a *type
-        // name*, not a value; the bounds are extracted from the type declaration.
-        if name == "schemaOf" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`schemaOf` takes 1 argument (a type name), got {}",
-                    args.len()
-                ));
-            }
-            match &args[0] {
-                Expr::Var { name: tn, .. } if self.types.contains_key(tn) => {
-                    return Ok(Type::Named("Schema".to_string()))
+        // The three reflection builtins are REWRITTEN at their call site, not
+        // called: `schemaOf<T>()` and `jsonSchema<T>()` fold to a compile-time
+        // literal, and `fromJson<T>(s)` expands to the decoder generated for
+        // `T`. So both emitters need the target AT THE NODE, and the node
+        // carries it only where the caller wrote it — an expected type would
+        // answer the checker and leave the emitters with nothing. One sentence
+        // for the three, where the 77-line arm that read `args[0]` as a type
+        // name stood (RFC-0125 §3 M6).
+        if written.is_empty() && matches!(name, "schemaOf" | "jsonSchema" | "fromJson") {
+            // The OLD spelling put the target in argument position. Name the
+            // new one rather than letting the row answer "expects 0
+            // argument(s), got 1", which says nothing about what to write.
+            let was = match args.first() {
+                Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => tn.clone(),
+                _ => "Type".to_string(),
+            };
+            return Err(cerr!(
+                line,
+                "`{name}` names its target as a type argument — write `{name}<{was}>({})`",
+                match name {
+                    "fromJson" => "s",
+                    _ => "",
                 }
-                Expr::Var { name: tn, .. } => {
-                    return Err(cerr!(
-                        line,
-                        "`schemaOf` needs a declared type name; `{tn}` is not a type"
-                    ))
-                }
-                _ => return Err(cerr!(line, "`schemaOf` needs a type name")),
-            }
+            ));
         }
         // built-in: contractOf(ContractName) -> ContractInfo — compile-time
         // reflection of a module contract (RFC-0071). Shaped exactly like
@@ -7676,28 +7690,6 @@ impl<'a> Checker<'a> {
                 _ => return Err(cerr!(line, "`contractOf` needs a contract name")),
             }
         }
-        // built-in: jsonSchema(TypeName) -> String — compile-time rendering of a
-        // declared type as a JSON Schema (draft 2020-12) document. Like `schemaOf`,
-        // the argument is a *type name*; the string is computed from the declaration.
-        if name == "jsonSchema" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`jsonSchema` takes 1 argument (a type name), got {}",
-                    args.len()
-                ));
-            }
-            match &args[0] {
-                Expr::Var { name: tn, .. } if self.types.contains_key(tn) => return Ok(Type::Str),
-                Expr::Var { name: tn, .. } => {
-                    return Err(cerr!(
-                        line,
-                        "`jsonSchema` needs a declared type name; `{tn}` is not a type"
-                    ))
-                }
-                _ => return Err(cerr!(line, "`jsonSchema` needs a type name")),
-            }
-        }
         // built-in: toJson(x) -> String (RFC-0018) — encode any *codable* value
         // to canonical JSON. Pure (not constant: kept out of consteval), never
         // traps. The argument's type must be encodable (scalars, validated
@@ -7724,47 +7716,6 @@ impl<'a> Checker<'a> {
             // in the linked program by the time an engine lowers this call.
             self.json_types.borrow_mut().push(at);
             return Ok(Type::Str);
-        }
-        // built-in: fromJson(TypeName, s) -> Validation<T> (RFC-0018) —
-        // type-directed decode (the `schemaOf`/`jsonSchema` precedent: the first
-        // argument is a *type name*). Never traps; every problem is an `Issue`
-        // accumulated into the returned `Validation<T>`.
-        if name == "fromJson" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`fromJson` takes 2 arguments (a type name and a String), got {}",
-                    args.len()
-                ));
-            }
-            let tn = match &args[0] {
-                Expr::Var { name: tn, .. } if self.types.contains_key(tn) => tn.clone(),
-                Expr::Var { name: tn, .. } => {
-                    return Err(cerr!(
-                        line,
-                        "`fromJson` needs a declared type name; `{tn}` is not a type"
-                    ))
-                }
-                _ => return Err(cerr!(line, "`fromJson` needs a type name")),
-            };
-            let target = Type::Named(tn.clone());
-            if let Err(off) = crate::codec::decodable(&target, self.types) {
-                return Err(cerr!(
-                    line,
-                    "`fromJson` cannot decode into `{off}` (not a codable type)"
-                ));
-            }
-            let sty = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
-            if !matches!(sty, Type::Str | Type::Err) {
-                return Err(cerr!(
-                    line,
-                    "`fromJson`'s second argument must be a String, found {sty}"
-                ));
-            }
-            // RFC-0078 M3: record the target so its decoder exists in the linked
-            // program by the time an engine lowers this call.
-            self.json_dec_types.borrow_mut().push(target.clone());
-            return Ok(Type::App("Validation".to_string(), vec![target]));
         }
         // built-in: value(x) -> Value — box a scalar into the interpolation value
         // type (RFC-0007). What a tagged template's holes desugar to.
@@ -8051,6 +8002,7 @@ impl<'a> Checker<'a> {
                             caps: Some(&caps),
                             bounds: None,
                             recv: Some(&recv),
+                            written: &[],
                         },
                         args,
                         scope,
@@ -8087,6 +8039,7 @@ impl<'a> Checker<'a> {
                             caps: self.caps.get(mangled.as_str()),
                             bounds: self.all_bounds.get(mangled.as_str()),
                             recv: Some(&recv),
+                            written: &[],
                         },
                         args,
                         scope,
@@ -8236,6 +8189,7 @@ impl<'a> Checker<'a> {
                 caps: self.caps.get(name).or(seeded_caps.as_ref()),
                 bounds: self.all_bounds.get(name).or(seeded_bounds),
                 recv: None,
+                written,
             },
             args,
             scope,
@@ -8283,9 +8237,39 @@ impl<'a> Checker<'a> {
             ));
         }
 
+        // A type argument the CALLER wrote is refused where the callee declares
+        // none — `f<Int64>(x)` on a concrete `f` is a mistake about `f`, and
+        // saying nothing would make the annotation look honoured.
+        if !d.written.is_empty() && d.type_params.is_none_or(|tps| tps.is_empty()) {
+            return Err(cerr!(
+                line,
+                "`{shown}` declares no type parameters, so it takes no type arguments"
+            ));
+        }
         // Generic call: infer the type parameters from the argument types.
         if let Some(type_params) = d.type_params {
             let mut subst: HashMap<String, Type> = HashMap::new();
+            // The written type arguments seed the solve, in declaration order
+            // (RFC-0125 §3 M6). Everything below then infers what is left, so a
+            // partial list is legal and a call that writes none reads exactly as
+            // it did. A parameter the arguments cannot reach — `fromJson<T>`'s,
+            // whose `T` is in the RESULT — has no other source, and this is it.
+            if d.written.len() > type_params.len() {
+                return Err(cerr!(
+                    line,
+                    "`{shown}` takes {} type argument(s), got {}",
+                    type_params.len(),
+                    d.written.len()
+                ));
+            }
+            for (tp, ty) in type_params.iter().zip(d.written) {
+                // A written type argument is a type the program named, so it
+                // gets the answer every other type spelling gets. Without it
+                // `schemaOf<Nope>()` passed `vyrn check` and failed in the
+                // emitter, which is the check/build fork RFC-0096 M3 removed.
+                self.ensure_type_exists(ty, line)?;
+                subst.insert(tp.clone(), ty.clone());
+            }
             let mut atys: Vec<Type> = vec![Type::Err; args.len()];
             // Pass 1: the ordinary (non-`fn`) arguments bind the type parameters
             // that flow IN (e.g. `T` from `xs: Array<T>`). This must run before the
@@ -8451,6 +8435,18 @@ impl<'a> Checker<'a> {
                             // rather than as a protocol a type failed. The
                             // sentence is theirs, with the hint that told a
                             // reader what to write.
+                            // The offending PART of the type, which is what
+                            // the deleted arm printed and what sends a reader
+                            // to the field that cannot cross.
+                            if b == crate::prelude::DECODABLE {
+                                let off = crate::codec::decodable(concrete, self.types)
+                                    .err()
+                                    .unwrap_or_else(|| concrete.to_string());
+                                return Err(cerr!(
+                                    line,
+                                    "`{shown}` cannot decode into `{off}` (not a codable type)"
+                                ));
+                            }
                             if b == crate::types::SHOW {
                                 return Err(cerr!(
                                     line,
@@ -8463,6 +8459,16 @@ impl<'a> Checker<'a> {
                             ));
                         }
                     }
+                }
+            }
+            // RFC-0078 M3: `fromJson<T>` needs `T`'s decoder in the linked
+            // program before any engine lowers the call, and the solve is the
+            // one place `T` is known. Its own arm recorded it until the row
+            // replaced the arm (RFC-0125 §3 M6); the recording is not a rule
+            // and had nowhere else to go.
+            if d.key == "fromJson" {
+                if let Some(t) = subst.get("T") {
+                    self.json_dec_types.borrow_mut().push(t.clone());
                 }
             }
             let rty = crate::types::substitute(ret, &subst);
@@ -9136,7 +9142,13 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 match e {
-                    Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+                    Expr::Call {
+                        name,
+                        args,
+                        line,
+                        type_args: _,
+                    }
+                    | Expr::Spawn { name, args, line } => {
                         // Passing a captured binding to a `consume` parameter
                         // would move it out of the enclosing scope from inside
                         // the lambda — forbidden. The argument is checked before
@@ -11420,7 +11432,7 @@ mod tests {
     fn payload_enum_is_codable() {
         let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit \
                    fn f(s: Shape) -> String { return toJson(s) } \
-                   fn g(s: String) -> Validation<Shape> { return fromJson(Shape, s) } \
+                   fn g(s: String) -> Validation<Shape> { return fromJson<Shape>(s) } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
@@ -11429,7 +11441,7 @@ mod tests {
     fn result_is_codable_and_named_aliases_work() {
         let src = "type R = Result<Bool, String> \
                    fn f(x: R) -> String { return toJson(x) } \
-                   fn g(s: String) -> Validation<R> { return fromJson(R, s) } \
+                   fn g(s: String) -> Validation<R> { return fromJson<R>(s) } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
@@ -11450,7 +11462,7 @@ mod tests {
     #[test]
     fn validation_stays_non_codable() {
         let src = "fn f(s: String) -> String { \
-                       let v = fromJson(Issue, s) \
+                       let v = fromJson<Issue>(s) \
                        return toJson(v) } \
                    fn main() -> Int64 { return 0 }";
         let e = check_src(src).unwrap_err();
@@ -11461,7 +11473,7 @@ mod tests {
     fn option_of_result_is_codable() {
         let src = "type Wrap = { r: Option<Result<Int64, String>> } \
                    fn f(w: Wrap) -> String { return toJson(w) } \
-                   fn g(s: String) -> Validation<Wrap> { return fromJson(Wrap, s) } \
+                   fn g(s: String) -> Validation<Wrap> { return fromJson<Wrap>(s) } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
@@ -13991,8 +14003,8 @@ mod tests {
     fn map_alias_is_codable_by_name() {
         let src = "type M = Map<String, Int64>\n\
              fn main() -> Int64 {\n\
-             let v = fromJson(M, \"{}\")\n\
-             print(jsonSchema(M))\n\
+             let v = fromJson<M>(\"{}\")\n\
+             print(jsonSchema<M>())\n\
              return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }

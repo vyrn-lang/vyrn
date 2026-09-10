@@ -1,6 +1,6 @@
 /// JSON Schema type imports (RFC-0010 M2): `import type { .. }` from a
 /// `.json` file synthesizes validated Vyrn types from a JSON Schema document —
-/// the exact inverse of `jsonSchema(T)`. Constraints become `where` clauses
+/// the exact inverse of `jsonSchema<T>()`. Constraints become `where` clauses
 /// (auto-validated at every boundary, like any validated type), `required`
 /// steers `Option<T>`, and `$defs` entries are importable too. A schema using
 /// a keyword Vyrn can't express is a compile-time error, never a silently
@@ -24,6 +24,6 @@ fn main() -> Int64 {
 
     // Round-trip: re-emitting the imported type reproduces the schema's
     // property constraints exactly.
-    print(jsonSchema(User))
+    print(jsonSchema<User>())
     return 0
 }

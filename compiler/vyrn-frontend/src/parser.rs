@@ -486,6 +486,7 @@ pub fn place_receiver(
             });
             let index = Expr::Var { name: idx, line };
             let load = Expr::Call {
+                type_args: Vec::new(),
                 name: "@at".to_string(),
                 args: vec![
                     Expr::Var {
@@ -2414,6 +2415,57 @@ impl Parser {
     /// on its own type variable, which is most of what a generic impl is for.
     /// Returns empty when no `<` follows.
     #[allow(clippy::type_complexity)]
+    /// The explicit type arguments of a call — `fromJson<Shape>(s)` — or an
+    /// empty list where the callee is followed by anything else.
+    ///
+    /// **`<` after a callee is ambiguous with less-than, so this is a
+    /// SPECULATIVE parse.** A binder position (`fn f<T>`) has no ambiguity: the
+    /// grammar is already inside a declaration. A call site is an expression,
+    /// and `f < g` is a comparison. The rule is the narrowest one that admits
+    /// the form: a comma-separated type list, closed by `>`, with `(`
+    /// IMMEDIATELY after the `>`. Anything else rewinds the cursor and leaves
+    /// the `<` to the binary operator, so no program that parsed before parses
+    /// differently — except `a < b > (c)`, which is a comparison of a `Bool`
+    /// against a value and has no meaning in this language.
+    ///
+    /// The cursor is the whole of the parser's state at an expression boundary,
+    /// so rewinding is one assignment. Nothing is recorded and no diagnostic is
+    /// raised on the failed attempt: the type parser's error belongs to whoever
+    /// re-reads these tokens as an expression.
+    fn call_type_args(&mut self) -> Vec<Type> {
+        if *self.peek() != Tok::Lt {
+            return Vec::new();
+        }
+        let saved = self.pos;
+        self.advance();
+        let mut out = Vec::new();
+        loop {
+            match self.type_() {
+                Ok(t) => out.push(t),
+                Err(_) => {
+                    self.pos = saved;
+                    return Vec::new();
+                }
+            }
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let closes = *self.peek() == Tok::Gt
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.tok),
+                Some(Tok::LParen)
+            );
+        if closes && !out.is_empty() {
+            self.advance(); // the `>`
+            return out;
+        }
+        self.pos = saved;
+        Vec::new()
+    }
+
     fn type_param_binder(
         &mut self,
     ) -> Result<(Vec<String>, std::collections::HashMap<String, Vec<String>>), Diagnostic> {
@@ -3348,6 +3400,7 @@ impl Parser {
                     MatchArm {
                         pattern: Pattern::Other,
                         body: ArmBody::Expr(Expr::Call {
+                            type_args: Vec::new(),
                             name: "panic".to_string(),
                             args: vec![Expr::Str(msg.clone())],
                             line,
@@ -4071,7 +4124,14 @@ impl Parser {
                         }
                         _ => name,
                     };
-                    return Ok(Expr::Call { name, args, line });
+                    // Method form takes no explicit type arguments: the
+                    // receiver is the first one and it is always concrete.
+                    return Ok(Expr::Call {
+                        name,
+                        args,
+                        type_args: Vec::new(),
+                        line,
+                    });
                 } else if *self.peek() == Tok::LBrace
                     && !self.no_struct
                     && matches!(&e, Expr::Var { .. })
@@ -4106,6 +4166,7 @@ impl Parser {
                 self.no_struct = saved;
                 self.eat(&Tok::RBracket)?;
                 return Ok(Expr::Call {
+                    type_args: Vec::new(),
                     name: "@at".to_string(),
                     args: vec![e, idx],
                     line,
@@ -4388,6 +4449,7 @@ impl Parser {
                 if fallible {
                     self.advance(); // consume `?`
                 }
+                let type_args = self.call_type_args();
                 if *self.peek() == Tok::LParen {
                     // call / construction
                     self.advance();
@@ -4412,7 +4474,12 @@ impl Parser {
                     Ok(if fallible {
                         Expr::TryConstruct { name, args, line }
                     } else {
-                        Expr::Call { name, args, line }
+                        Expr::Call {
+                            name,
+                            args,
+                            type_args,
+                            line,
+                        }
                     })
                 } else if *self.peek() == Tok::LBrace && !self.no_struct {
                     // struct literal: `Name { field: expr, ... }`
@@ -4452,6 +4519,7 @@ impl Parser {
             // but the lexer can never produce a leading `@`, so user source
             // hitting the bare `str`/`concat` names gets the migration hint.
             pieces.push(Expr::Call {
+                type_args: Vec::new(),
                 name: "@str".to_string(),
                 args: vec![e],
                 line,
@@ -4466,6 +4534,7 @@ impl Parser {
         let mut acc = iter.next().unwrap();
         for p in iter {
             acc = Expr::Call {
+                type_args: Vec::new(),
                 name: "@concat".to_string(),
                 args: vec![acc, p],
                 line,
@@ -4538,6 +4607,7 @@ impl Parser {
         for src in &exprs {
             let e = self.parse_hole(src, line, col)?;
             values.push(Expr::Call {
+                type_args: Vec::new(),
                 name: "value".to_string(),
                 args: vec![e],
                 line,
@@ -4550,6 +4620,7 @@ impl Parser {
         // `@list` is the internal spelling of the removed `list` builtin (see
         // `@str`/`@concat` above): produced only by desugaring, never lexable.
         let wrap = |e| Expr::Call {
+            type_args: Vec::new(),
             name: "@list".to_string(),
             args: vec![e],
             line,
@@ -4567,6 +4638,7 @@ impl Parser {
             });
         }
         Ok(Expr::Call {
+            type_args: Vec::new(),
             name: tag,
             args: vec![wrap(parts_lit), wrap(values_lit)],
             line,
@@ -4624,6 +4696,7 @@ impl Parser {
             });
         };
         let code_text = |s: &str| Expr::Call {
+            type_args: Vec::new(),
             name: "@codeText".to_string(),
             args: vec![Expr::Str(s.to_string())],
             line,
@@ -4636,6 +4709,7 @@ impl Parser {
                 let ctx = self.hole_context(&parts, &exprs, i);
                 let value = self.parse_hole(&exprs[i], line, col)?;
                 let splice = Expr::Call {
+                    type_args: Vec::new(),
                     name: "@codeSplice".to_string(),
                     args: vec![value, Expr::Int(ctx)],
                     line,
@@ -4814,8 +4888,23 @@ impl Parser {
     /// names are `@`-prefixed so they can never collide with a user identifier.
     fn storage_desugar(name: &str, args: &[Expr], line: usize) -> Option<Expr> {
         let call = |n: &str, a: Vec<Expr>| Expr::Call {
+            type_args: Vec::new(),
             name: n.to_string(),
             args: a,
+            line,
+        };
+        // `load(TypeName, path)`'s first argument is a type NAME in argument
+        // position, which is the shape RFC-0125 §3 M6 took off `fromJson`. The
+        // two helpers keep it — they are `std/storage`'s surface and not the
+        // language's — so the desugar converts it here, once, to the type
+        // argument `fromJson<T>(s)` now takes.
+        let decode = |t: &Expr, text: Expr| Expr::Call {
+            name: "fromJson".to_string(),
+            args: vec![text],
+            type_args: match t {
+                Expr::Var { name, .. } => vec![Type::Named(name.clone())],
+                _ => Vec::new(),
+            },
             line,
         };
         let var = |n: &str| Expr::Var {
@@ -4830,7 +4919,7 @@ impl Parser {
             ("load", 2) => {
                 let decoded = Expr::Match {
                     stmt_pos: false,
-                    scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
+                    scrutinee: Box::new(decode(&args[0], var("@t"))),
                     arms: vec![
                         MatchArm {
                             pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
@@ -4866,7 +4955,7 @@ impl Parser {
                 let default = args[2].clone();
                 let decoded = Expr::Match {
                     stmt_pos: false,
-                    scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
+                    scrutinee: Box::new(decode(&args[0], var("@t"))),
                     arms: vec![
                         MatchArm {
                             pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),

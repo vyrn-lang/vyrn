@@ -118,6 +118,7 @@ fn wrap_ph(ty: &Type) -> String {
 /// BINDING, and block exit already releases those identically everywhere.
 pub fn encode_expr(arg: crate::ast::Expr, ty: &Type, line: usize) -> crate::ast::Expr {
     crate::ast::Expr::Call {
+        type_args: Vec::new(),
         name: wrap_name(ty),
         args: vec![arg],
         line,
