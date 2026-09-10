@@ -7951,7 +7951,7 @@ where it is, which is what catches a deletion that deleted prose.
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,808 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
-| shared machinery | 2,580 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
+| shared machinery | 2,582 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
 | tests | 326 | 0 | the file's own unit tests |
 
 The whole table, section by section, is what
@@ -25218,6 +25218,102 @@ three matches agreed arm for arm, so the one statement is what all of them
 already did. A disagreement would have been the finding and there was none.
 Slice two moves a sentence no corpus program reaches, and slice one moves no
 compiler code at all.
+
+#### The editor's locals come from the pass that types them (2026-09-10, `track-en`)
+
+Rank 2 of the frontend census, and the section it named `Twice` was 267 lines.
+`symbols.rs` walked every function body a second time to build the editor's
+local index, beside the walk the checker was already making. It had to: a
+binder carried a name and no POSITION, so the second walk went to the token
+stream and guessed where each one was spelled. The census wrote down the
+condition that would delete it, "a checker that recorded a binder's column",
+and this is that.
+
+`ast::Binder` is a name with the line and column the reader spelled it at.
+`Param` carries both; `Stmt::Let` and `Stmt::ForIn` carry a column, because the
+grammar puts each on its statement's line. `Pattern::Variant`, `Success` and
+`Failure` bind a `Binder` rather than a `String`, which lets `project.rs` drop
+its two pattern-binder helpers and takes a four-arm match off both emitters.
+`body_scope_descent!` — the one descent every body walk shares — reports each
+binding site through a new `bind` hook, so the list of binding forms stays
+where it is declared. `checker::local_index` reads that hook and keys the type
+the check decided by the binder's own position. `symbols::index_locals`,
+`Lets`, `collect_lets` and `binder_pos` are gone; `symbols::LocalBinding` is a
+re-export of the checker's row. The index is still a descent of its own, over
+the same bodies. What it no longer is, is a reader: it names no binding form,
+reads no token stream and guesses no position.
+
+**A binder inside an interpolation hole has no position either.** A hole is
+re-lexed as its own source, so its tokens count lines and columns from the
+hole. `Parser::binder_pos` is the one place a binder's position is taken and it
+answers `(0, 0)` there, which is what the seven sites that take one now call.
+No corpus program binds a name inside a hole, so the pin cannot see this rule
+and one program stands for it: take the rule out and
+`a_binder_inside_an_interpolation_is_not_a_local` indexes the hole's `let t` at
+line 1, column 18, inside the signature of the function above it.
+
+**The guess was wrong 168 times, and the pin is how we know.**
+`the_pinned_binders_over_the_corpus` prints every local `analyze` gives over
+the 419 corpus programs. 12,706 rows before, 12,538 after, and every row that
+moved moved to a better place.
+
+| the pin over 419 programs | rows |
+|---|---|
+| before | 12,706 |
+| removed: a duplicate, because an impl method is walked twice | 136 |
+| removed: a phantom, because the guess landed on a USE | 32 |
+| after | 12,538 |
+| moved: a parameter, from `fn` line and no column to its own | 254 |
+| moved: a binder, from a use to the token that binds it | 7 |
+| gained a type: an arm, `if let` or lambda binder | 950 |
+| lost a type | 0 |
+
+A signature that spans lines is why 254 parameters had no column: the guess
+read only the function's own line. A same-named use in an earlier arm's body is
+why 32 rows were phantoms — `JBool(b) => JBool(b)` indexed the second `b` as
+well as the first. `std/ui.vyrn`'s `gen fn uiEmitChromeImport(.., gen: String,
+..)` is the pick of them: the parameter named `gen` resolved to the `gen`
+KEYWORD, column 1.
+
+**The last row cost a second pass over this slice.** The first cut took every
+type from the check alone, and the check is bounded: it stops accumulating, and
+a body it never reached decided nothing. 583 rows went untyped that had a type
+before — 503 parameters, 80 annotated `let`s — over 69 of the 419 programs, all
+of them files that do not link on their own. The type was never the check's to
+give in those rows; the reader wrote it down. `bind` carries the declared type
+now and `local_index` falls back to it, which is what the deleted walk did.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/symbols.rs` | 4,676 | 4,381 | −295 |
+| `compiler/vyrn-frontend/src/checker.rs` | 15,090 | 15,267 | +177 |
+| `compiler/vyrn-frontend/src/ast.rs` | 2,019 | 2,179 | +160 |
+| `compiler/vyrn-frontend/src/parser.rs` | 7,011 | 7,075 | +64 |
+| `compiler/vyrn-frontend/src/project.rs` | 1,590 | 1,575 | −15 |
+| `compiler/vyrn-frontend/src`, all of it | 62,239 | 62,138 | −101 |
+| symbols.rs, "a rule stated a second time" | 267 | 0 | −267 |
+| binding forms the editor names for itself | 5 | 0 | −5 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr and exit code over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `symbols_api::the_pinned_columns_over_the_corpus` | byte-identical |
+| `symbols_api::the_pinned_binders_over_the_corpus` | the table above, every row accounted for |
+| the kernel corpus | 177 programs, 27,650 accepted, 0 refused, 0 unlowered — the same |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 176 examples hashed, no byte moved |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 100 passed, 0 failed, 5 ignored |
+| `cargo test -p vyrn-cli`, no filter | 87 binaries, 648 passed, 0 failed, 46 ignored |
+| `cargo test -p vyrn-frontend` | 11 binaries, 1,115 passed, 0 failed, 5 ignored |
+
+`checker_census`, `emitter_census`, `frontend_census`, `parser_census`, `forms`
+and `refusals` are re-pinned in the same commit. RFC-0127 §3.1 loses the editor
+column on five forms and a shared mention on all four patterns, because those
+readers stopped matching on them.
+
 
 
 ### The surface collapse — RFC-0126 §8, one line per step

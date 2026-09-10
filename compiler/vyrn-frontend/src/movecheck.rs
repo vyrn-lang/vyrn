@@ -2015,8 +2015,8 @@ impl MoveCheck<'_> {
                 scope.push(HashSet::new());
                 self.enter();
                 for p in params {
-                    scope.last_mut().unwrap().insert(p.clone());
-                    self.bind(p, None, None);
+                    scope.last_mut().unwrap().insert(p.name.clone());
+                    self.bind(&p.name, None, None);
                 }
                 // Rule 3 reaches closures (exit-residue round nine): a
                 // lambda's result is its CALLER's, and a captured heap value

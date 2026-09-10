@@ -26,8 +26,8 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
-    ArmBody, BinOp, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program,
-    Stmt, Type, UnOp,
+    ArmBody, BinOp, Binder, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern,
+    Program, Stmt, Type, UnOp,
 };
 use vyrn_frontend::declared::Owned;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -2848,6 +2848,7 @@ impl<'a> Builder<'a> {
                 body,
                 line,
                 consuming,
+                col: _,
             } => {
                 let ity = self.ty_of(iter)?;
                 let ety = match self.elem_ty(&ity, *line) {
@@ -3540,7 +3541,13 @@ impl<'a> Builder<'a> {
                     vs[at]
                         .payload
                         .first()
-                        .map(|t| vec![(n.clone(), t.clone(), vyrn_frontend::own::binder_key(n))])
+                        .map(|t| {
+                            vec![(
+                                n.name.clone(),
+                                t.clone(),
+                                vyrn_frontend::own::binder_key(&n.name),
+                            )]
+                        })
                         .unwrap_or_default()
                 }
                 _ => return gap("a `??` pattern on a scrutinee with no two tags", line),
@@ -3556,7 +3563,7 @@ impl<'a> Builder<'a> {
                     names
                         .iter()
                         .zip(var.payload.iter().cloned())
-                        .map(|(n, t)| (n.clone(), t, vyrn_frontend::own::binder_key(n)))
+                        .map(|(n, t)| (n.name.clone(), t, vyrn_frontend::own::binder_key(&n.name)))
                         .collect()
                 }
                 _ => return gap("a variant pattern on a non-enum", line),
@@ -4144,7 +4151,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|p| {
                         vars.iter()
-                            .find(|v| matches!(v, Expr::Var { name, .. } if name == p))
+                            .find(|v| matches!(v, Expr::Var { name, .. } if *name == p.name))
                             .and_then(|v| self.types.get(&(*v as *const Expr as usize)))
                             .cloned()
                             .unwrap_or(Type::Unit)
@@ -4196,8 +4203,8 @@ impl<'a> Builder<'a> {
             self.body.params.push(m);
         }
         for (p, pt) in params.iter().zip(ptys) {
-            let m = self.name(p, pt, false, *line);
-            self.scope.push((p.clone(), m));
+            let m = self.name(&p.name, pt, false, *line);
+            self.scope.push((p.name.clone(), m));
             self.body.params.push(m);
         }
         let mut stmts = Vec::new();
@@ -4241,7 +4248,7 @@ impl<'a> Builder<'a> {
         mentions_in_lambda(body, &mut vars, &mut calls);
         let mut caps = Vec::new();
         for (name, n) in &self.scope {
-            if params.contains(name) || caps.contains(&Val::Name(*n)) {
+            if params.iter().any(|p| p.name == *name) || caps.contains(&Val::Name(*n)) {
                 continue;
             }
             if vyrn_frontend::ast::mentions_place(e, name) || calls.contains(&name.as_str()) {
@@ -4762,7 +4769,7 @@ impl<'a> Builder<'a> {
                 let mut fail = Vec::new();
                 let mark = self.scope.len();
                 let fb = self.bind_pattern(
-                    &Pattern::Failure("@err".into()),
+                    &Pattern::Failure(Binder::synthetic("@err")),
                     &ity,
                     consuming,
                     *line,
@@ -4781,7 +4788,7 @@ impl<'a> Builder<'a> {
                 let mut ok = Vec::new();
                 let mark = self.scope.len();
                 let ob = self.bind_pattern(
-                    &Pattern::Success("@ok".into()),
+                    &Pattern::Success(Binder::synthetic("@ok")),
                     &ity,
                     consuming,
                     *line,

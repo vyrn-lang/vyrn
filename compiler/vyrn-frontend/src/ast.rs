@@ -753,12 +753,80 @@ pub enum Capability {
     Share,
 }
 
+/// A name a binding form introduces, and where the reader spelled it.
+///
+/// `col` is the 1-based column of the NAME in Unicode scalar values, `0` when a
+/// desugar made the binder and no source token spells it — the convention
+/// [`Function::col`] and [`ImplBlock::col`] already follow. The editor is the
+/// only reader: it indexes a local by its position, and a binder with no column
+/// never becomes one (a phantom local is worse than a missing one).
+///
+/// The line rides here because a binder's own line is not always its node's: a
+/// `match` arm is spelled below the `match`. A `let` and a `for` variable are
+/// the exception — the grammar puts each on its statement's line — so those two
+/// carry a column and nothing else. A [`Param`] carries both, for the same
+/// reason an arm does: a signature spans lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Binder {
+    pub name: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// The flavour of a binding a body makes.
+///
+/// The editor shows it — a `let` hovers as a `let`, a loop variable as a `for`
+/// — and it is the AST's because the descent is: `body_scope_descent!` names
+/// every binding form already, to keep its scope stack, so a reader indexing
+/// binding SITES reads the kind off the hook rather than writing the list of
+/// forms out again (RFC-0125 §3 M6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalKind {
+    /// A function parameter (`fn area(s: Shape)` -> `s`). Not a body's binding,
+    /// so no descent reports it; a reader of a signature does.
+    Param,
+    /// `let [mut] name [: Type] = value` — and every binder that reads like
+    /// one: a pattern binder, a lambda parameter.
+    Let { mutable: bool },
+    /// `for name in iter { .. }` — the loop variable.
+    ForVar,
+}
+
+impl Binder {
+    /// A binder no source token spells — a desugar's.
+    pub fn synthetic(name: impl Into<String>) -> Self {
+        Binder {
+            name: name.into(),
+            line: 0,
+            col: 0,
+        }
+    }
+}
+
+impl std::ops::Deref for Binder {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for Binder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
 /// A single parameter (name + capability + declared type).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub capability: Capability,
     pub ty: Type,
+    /// 1-based line of the parameter's NAME — its own, not the function's: a
+    /// signature spans lines. `0` for a synthesized parameter.
+    pub line: usize,
+    /// 1-based column of the parameter's NAME — see [`Binder::col`].
+    pub col: usize,
 }
 
 /// The v0.1 type universe. Structural records and unions (RFC-0002) are not
@@ -1207,6 +1275,8 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
         line: usize,
+        /// 1-based column of the bound NAME — see [`Binder::col`].
+        col: usize,
     },
     /// `name = value;` (only legal for `mut` bindings)
     Assign {
@@ -1272,6 +1342,8 @@ pub enum Stmt {
     /// array (`Array<T>` or `Array<T, N>`); `name` takes the element type `T`.
     ForIn {
         var: String,
+        /// 1-based column of the loop variable's NAME — see [`Binder::col`].
+        col: usize,
         iter: Expr,
         body: Block,
         line: usize,
@@ -1475,7 +1547,7 @@ pub enum Expr {
     /// declared `fn` type takes one, and `std/stream.vyrn` writes three.
     /// Captures outer locals by read.
     Lambda {
-        params: Vec<String>,
+        params: Vec<Binder>,
         body: LambdaBody,
         line: usize,
     },
@@ -1542,18 +1614,18 @@ pub enum Pattern {
     /// RFC-0126 §8, `Some(x)`, `None`, `Ok(x)` and `Err(e)` too. The parser
     /// spells all of them one way; the SCRUTINEE decides what a name means, as
     /// it always did for a declared enum.
-    Variant(String, Vec<String>),
+    Variant(String, Vec<Binder>),
     /// The tag-1 arm — `Some` *or* `Ok`, whichever the scrutinee turns out to
     /// be. Unspellable in source; produced only by the `??` desugar (RFC-0079),
     /// which runs in the parser and so has no type information to choose with.
     /// This is the same trick `Expr::Try` plays for `?`, moved into `Pattern` so
     /// `??` can reach `match` and inherit its drops, ownership, validation and
     /// short-circuiting instead of restating any of them.
-    Success(String),
+    Success(Binder),
     /// The tag-0 arm — `None` *or* `Err`. Carries a binder so a `Result`'s error
     /// payload is bound rather than dropped on the floor; on the `Option` path
     /// the checker binds nothing, since there is no payload.
-    Failure(String),
+    Failure(Binder),
     /// The default arm: matches ANY value, binds nothing. Unspellable in
     /// source; produced only by the refutable-`let` desugar (RFC-0121), whose
     /// `match` must be exhaustive over an enum the parser cannot see the
@@ -1575,9 +1647,26 @@ impl Pattern {
     /// [`Pattern::Failure`]), so a reader that indexes source positions finds
     /// nothing for one and must not invent a phantom local.
     pub fn bindings(&self) -> Vec<&str> {
+        self.binders()
+            .into_iter()
+            .map(|b| b.name.as_str())
+            .collect()
+    }
+
+    /// The binders this pattern introduces, with their columns.
+    pub fn binders(&self) -> Vec<&Binder> {
         match self {
             Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-            Pattern::Variant(_, binds) => binds.iter().map(String::as_str).collect(),
+            Pattern::Variant(_, binds) => binds.iter().collect(),
+            Pattern::Other => Vec::new(),
+        }
+    }
+
+    /// The same binders, mutably — what a rename walk rewrites.
+    pub fn binders_mut(&mut self) -> Vec<&mut Binder> {
+        match self {
+            Pattern::Success(b) | Pattern::Failure(b) => vec![b],
+            Pattern::Variant(_, binds) => binds.iter_mut().collect(),
             Pattern::Other => Vec::new(),
         }
     }
@@ -1724,6 +1813,29 @@ macro_rules! body_scope_descent {
                 let _ = (e, locals);
             }
 
+            /// One name this body binds, at the position it is spelled, and the
+            /// type the source declares for it.
+            ///
+            /// The walk below names every binding form already — that is what
+            /// the scope stack is — so a reader that indexes binding SITES
+            /// takes them from here rather than restating the list. A binder a
+            /// desugar made carries no column; the reader decides what to do
+            /// with it.
+            ///
+            /// `declared` is `Some` only for an annotated `let`: it is the one
+            /// binding form whose type the source states, and it is the answer
+            /// a reader has for a body no pass reached.
+            fn bind(
+                &mut self,
+                name: &str,
+                line: usize,
+                col: usize,
+                kind: $crate::ast::LocalKind,
+                declared: Option<&$crate::ast::Type>,
+            ) {
+                let _ = (name, line, col, kind, declared);
+            }
+
             /// One `match` arm's pattern, at the `match`'s line, before that
             /// arm's own bindings join the scope.
             fn arm_pattern(
@@ -1754,8 +1866,23 @@ macro_rules! body_scope_descent {
             use $crate::ast::Stmt;
             v.stmt(&$($mut_)? *s, locals);
             match s {
-                Stmt::Let { name, value, .. } => {
+                Stmt::Let {
+                    name,
+                    value,
+                    mutable,
+                    ty,
+                    line,
+                    col,
+                    ..
+                } => {
                     $ex(value, locals, v);
+                    v.bind(
+                        name.as_str(),
+                        *line,
+                        *col,
+                        $crate::ast::LocalKind::Let { mutable: *mutable },
+                        ty.as_ref(),
+                    );
                     // In scope for subsequent statements (and shadows a
                     // like-named export, namespace or renamed decl from here on).
                     if V::SCOPED {
@@ -1791,6 +1918,15 @@ macro_rules! body_scope_descent {
                     ..
                 } => {
                     $ex(scrutinee, locals, v);
+                    for b in pattern.binders() {
+                        v.bind(
+                            b.name.as_str(),
+                            b.line,
+                            b.col,
+                            $crate::ast::LocalKind::Let { mutable: false },
+                            None,
+                        );
+                    }
                     let mut inner = locals.clone();
                     if V::SCOPED {
                         for b in pattern.bindings() {
@@ -1809,9 +1945,15 @@ macro_rules! body_scope_descent {
                     $blk(body, &mut inner, v);
                 }
                 Stmt::ForIn {
-                    var, iter, body, ..
+                    var,
+                    iter,
+                    body,
+                    line,
+                    col,
+                    ..
                 } => {
                     $ex(iter, locals, v);
+                    v.bind(var.as_str(), *line, *col, $crate::ast::LocalKind::ForVar, None);
                     let mut inner = locals.clone();
                     if V::SCOPED {
                         inner.insert(var.clone());
@@ -1872,6 +2014,15 @@ macro_rules! body_scope_descent {
                     for arm in arms {
                         let mut inner = locals.clone();
                         v.arm_pattern(&$($mut_)? arm.pattern, l, &inner);
+                        for b in arm.pattern.binders() {
+                            v.bind(
+                                b.name.as_str(),
+                                b.line,
+                                b.col,
+                                $crate::ast::LocalKind::Let { mutable: false },
+                                None,
+                            );
+                        }
                         if V::SCOPED {
                             for b in arm.pattern.bindings() {
                                 inner.insert(b.to_string());
@@ -1904,10 +2055,19 @@ macro_rules! body_scope_descent {
                 // A lambda's params are new locals: they shadow a decl exactly
                 // as a `let` does (RFC-0023).
                 Expr::Lambda { params, body, .. } => {
+                    for p in params.iter() {
+                        v.bind(
+                            p.name.as_str(),
+                            p.line,
+                            p.col,
+                            $crate::ast::LocalKind::Let { mutable: false },
+                            None,
+                        );
+                    }
                     let mut inner = locals.clone();
                     if V::SCOPED {
-                        for p in params {
-                            inner.insert(p.clone());
+                        for p in params.iter() {
+                            inner.insert(p.name.clone());
                         }
                     }
                     match body {

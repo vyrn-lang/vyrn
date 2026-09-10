@@ -74,7 +74,7 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
 /// does not suppress errors in the others. Inside a single function body the
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
-/// Like [`check_accum_with_let_types`], but reuses the diagnostics of modules
+/// Like [`check_accum_with_binders`], but reuses the diagnostics of modules
 /// that have not changed since the last call.
 ///
 /// `module_hashes` is `module key -> content hash` from the load that produced
@@ -89,15 +89,18 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
 /// The ROOT module carries no key (`module: None`), so the file being edited is
 /// never reused — only the libraries behind it.
 ///
-/// Returns diagnostics and inferred `let` types. It deliberately does NOT return
-/// [`StoredFnEffects`]: those accumulate during body checks, and a reused body
-/// contributes none. Callers that need effects must use the full check.
+/// Returns diagnostics and the root module's bindings. It deliberately does NOT
+/// return [`StoredFnEffects`]: those accumulate during body checks, and a reused
+/// body contributes none. Callers that need effects must use the full check.
+///
+/// The bindings are complete for all that: a reused body is a library's, and the
+/// root — the file being edited — is never reused.
 pub fn check_accum_reusing(
     program: &Program,
     module_hashes: &std::collections::HashMap<String, String>,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _, _, _) = check_accum_inner(program, Some(module_hashes));
-    (out, let_types)
+) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+    let (out, binders, _, _, _) = check_accum_inner(program, Some(module_hashes));
+    (out, binders)
 }
 
 thread_local! {
@@ -262,11 +265,147 @@ fn signature_fingerprint(
     h
 }
 
-pub fn check_accum_with_let_types(
+/// A local binding — a parameter, a `let`, a `for`-in variable, a pattern
+/// binder or a lambda parameter — scoped to one function body.
+///
+/// The editor indexes these for hover, go-to-definition, completion and
+/// highlight. It used to make them itself, in a second walk over every body
+/// beside this pass, because a binder carried no POSITION and the checker
+/// recorded no binding (RFC-0125 §3 M6). A binder carries its column now
+/// ([`crate::ast::Binder`]), the one descent every body walk shares reports
+/// each binding site, and this pass supplies the type it decided.
+#[derive(Debug, Clone)]
+pub struct LocalBinding {
+    pub name: String,
+    pub kind: LocalKind,
+    /// The binding's type: what the check decided, else what the source
+    /// declares. `None` for a binding that has neither — an unannotated `let`
+    /// in a body the check did not reach.
+    pub ty: Option<Type>,
+    /// 1-based line the NAME is spelled on.
+    pub line: usize,
+    /// 1-based name column.
+    pub col: usize,
+    /// 1-based name end column.
+    pub end_col: usize,
+    /// The enclosing function's declaration line (scopes the binding).
+    pub fn_line: usize,
+}
+
+/// The flavour of a [`LocalBinding`] — the descent's, so the list of binding
+/// forms has one home.
+pub use crate::ast::LocalKind;
+
+crate::body_scope_descent!(BinderIndex, index_block, index_stmt, index_expr);
+
+/// The editor's local index for one function body: every binder the descent
+/// reports, with the type this pass decided for it.
+///
+/// Nothing here asks what is in scope — a binder's own position is the whole
+/// answer — so the scope stack is off.
+struct LocalIndex<'a> {
+    types: &'a HashMap<(usize, usize), Type>,
+    fn_line: usize,
+    out: &'a mut Vec<LocalBinding>,
+}
+
+impl LocalIndex<'_> {
+    fn row(
+        &mut self,
+        name: &str,
+        kind: LocalKind,
+        line: usize,
+        col: usize,
+        declared: Option<&Type>,
+    ) {
+        // A desugar's binder is unspellable and carries no column. Inventing a
+        // position for one puts a phantom local in the editor, which is worse
+        // than a missing one.
+        if col == 0 {
+            return;
+        }
+        self.out.push(LocalBinding {
+            name: name.to_string(),
+            kind,
+            // The check is bounded: it stops accumulating, and a body it never
+            // reached decided nothing. A parameter and an annotated `let` are
+            // still typed there, because the source says so.
+            ty: self
+                .types
+                .get(&(line, col))
+                .cloned()
+                .or_else(|| declared.cloned()),
+            line,
+            col,
+            end_col: col + name.chars().count(),
+            fn_line: self.fn_line,
+        });
+    }
+}
+
+impl BinderIndex<'_> for LocalIndex<'_> {
+    const SCOPED: bool = false;
+
+    fn bind(
+        &mut self,
+        name: &str,
+        line: usize,
+        col: usize,
+        kind: LocalKind,
+        declared: Option<&Type>,
+    ) {
+        self.row(name, kind, line, col, declared);
+    }
+}
+
+/// Every binding the ROOT module makes, in source order.
+///
+/// `types` is what the check decided, keyed by a binder's position; a binder
+/// with no row there falls back to the type the source declares for it. That is
+/// how a program the check never reached — a parse error stops it — still has
+/// an index, and a typed one wherever the reader wrote a type down.
+///
+/// The functions are the ones the editor scopes a cursor to (`symbols::fn_lines`
+/// — the top-level functions and the impl methods). A projection body and a
+/// `test` block bind names too, and neither is on that list, so a local in one
+/// would never resolve to a cursor; they wait for it.
+pub(crate) fn local_index(
     program: &Program,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _, _, _) = check_accum_full(program);
-    (out, let_types)
+    types: &HashMap<(usize, usize), Type>,
+) -> Vec<LocalBinding> {
+    let mut out = Vec::new();
+    let methods = program.impls.iter().flat_map(|i| i.methods.iter());
+    for f in program.functions.iter().chain(methods) {
+        if f.module.is_some() {
+            continue;
+        }
+        let mut v = LocalIndex {
+            types,
+            fn_line: f.line,
+            out: &mut out,
+        };
+        for p in &f.params {
+            v.row(&p.name, LocalKind::Param, p.line, p.col, Some(&p.ty));
+        }
+        index_block(&f.body, &mut HashSet::new(), &mut v);
+    }
+    // Source order, and one row per spelled POSITION. Two things put two rows
+    // on one token. An impl method is walked twice, because `parse_accum`
+    // flattens every one it can name into `functions` and the chain above reads
+    // `impls` for the few it cannot. And the refutable `let` (RFC-0121) makes
+    // one `let` per binder over a `match`, so the arm binder that reaches `a`
+    // in `let Pair(a, b) = v` is the same token the `let` binds. The arm's row
+    // is pushed first — the descent walks a `let`'s value before its name — and
+    // a stable sort keeps it, which is the right one: a pattern binder is never
+    // `mut`.
+    out.sort_by_key(|b| (b.fn_line, b.line, b.col));
+    out.dedup_by_key(|b| (b.line, b.col));
+    out
+}
+
+pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+    let (out, binders, _, _, _) = check_accum_full(program);
+    (out, binders)
 }
 
 /// The stored-function-value facts (RFC-0037) the `--workers` gate needs:
@@ -543,13 +682,13 @@ pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<T
     (out, json, jdec)
 }
 
-/// The full checking pass: diagnostics, the inferred-`let`-type table, and the
+/// The full checking pass: diagnostics, the root module's bindings, and the
 /// RFC-0037 stored-function-value collection.
 fn check_accum_full(
     program: &Program,
 ) -> (
     Vec<Diagnostic>,
-    HashMap<(usize, String), Type>,
+    Vec<LocalBinding>,
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
@@ -616,7 +755,7 @@ fn check_accum_inner(
     reuse: Option<&std::collections::HashMap<String, String>>,
 ) -> (
     Vec<Diagnostic>,
-    HashMap<(usize, String), Type>,
+    Vec<LocalBinding>,
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
@@ -1213,7 +1352,8 @@ fn check_accum_inner(
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
         in_loop: RefCell::new(false),
-        let_types: RefCell::new(HashMap::new()),
+        binder_types: RefCell::new(HashMap::new()),
+        in_root: std::cell::Cell::new(false),
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
         in_test: RefCell::new(false),
@@ -1459,12 +1599,12 @@ fn check_accum_inner(
         arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
     };
-    let let_types = checker.let_types.borrow().clone();
+    let binders = local_index(program, &checker.binder_types.borrow());
     let mut json_types = checker.json_types.borrow().clone();
     json_types.dedup_by_key(|t| format!("{t:?}"));
     let mut json_dec_types = checker.json_dec_types.borrow().clone();
     json_dec_types.dedup_by_key(|t| format!("{t:?}"));
-    (out, let_types, effects, json_types, json_dec_types)
+    (out, binders, effects, json_types, json_dec_types)
 }
 
 /// Check every `place` projection body (RFC-0091 M2).
@@ -1830,11 +1970,11 @@ fn check_named_blocks(
 
 /// Type-check the program, returning **all** problems found across functions
 /// and types as structured [`Diagnostic`]s. Thin shim over
-/// [`check_accum_with_let_types`] that drops the inferred-`let`-type table (the
+/// [`check_accum_with_binders`] that drops the editor's local index (the
 /// CLI/`diagnostics()` path doesn't need it). See that function for the
-/// bounded accumulation behavior and the retained `let`/`for`-var types.
+/// bounded accumulation behavior and the recorded bindings.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    check_accum_with_let_types(program).0
+    check_accum_with_binders(program).0
 }
 
 /// Type-check the program, returning the first problem found (rendered as the
@@ -1912,18 +2052,16 @@ impl Recorded {
     }
 }
 
-/// One check that both reports and records: the diagnostics, the inferred-`let`
-/// table and what the checker decided about every node, from a single pass.
-fn recording_check(
-    program: &Program,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>, Recorded) {
+/// One check that both reports and records: the diagnostics, the root module's
+/// bindings and what the checker decided about every node, from a single pass.
+fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
     RECORD.with(|r| *r.borrow_mut() = Recorded::new());
     PENDING_SUBST.with(|p| *p.borrow_mut() = None);
     RECORDING.with(|c| c.set(true));
-    let (diags, let_types, _, _, _) = check_accum_full(program);
+    let (diags, binders, _, _, _) = check_accum_full(program);
     RECORDING.with(|c| c.set(false));
     let made = RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()));
-    (diags, let_types, made)
+    (diags, binders, made)
 }
 
 /// Type-check `program` and return what the checker decided about every node.
@@ -1937,7 +2075,7 @@ pub fn record(program: &Program) -> Recorded {
 /// **The analysis's own check, recording as it goes** — RFC-0125 §3 M3, the one
 /// check.
 ///
-/// [`check_accum_with_let_types`] and [`record`] are the same pass over the same
+/// [`check_accum_with_binders`] and [`record`] are the same pass over the same
 /// program asked for two different halves of one answer, and an editor ran both:
 /// the analysis checked, and the lowering the placer runs then checked again to
 /// learn the type of every node. This is that pass, asked once, with both halves
@@ -1948,12 +2086,10 @@ pub fn record(program: &Program) -> Recorded {
 /// nothing for it, and a record with holes in it is not a record. Reuse and
 /// recording are alternatives, and the caller picks by whether the record has a
 /// reader — see `symbols.rs`, where a host with no placer keeps the memo.
-pub fn check_accum_recording(
-    program: &Program,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (diags, let_types, made) = recording_check(program);
+pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+    let (diags, binders, made) = recording_check(program);
     hold(program, std::rc::Rc::new(made));
-    (diags, let_types)
+    (diags, binders)
 }
 
 thread_local! {
@@ -2108,13 +2244,17 @@ struct Checker<'a> {
     /// which a binding is "outer" — a heap value must not be assigned there, or
     /// it would dangle when the region frees at block exit.
     region_floor: RefCell<Vec<usize>>,
-    /// Inferred (or declared) type of each `let` binding and each `for`-in loop
-    /// variable that checked cleanly, keyed by `(line, name)`. Populated as a
-    /// side effect of checking so the symbol-query layer can show `let x: Int`
-    /// on hover for an unannotated `let x = 5` (the checker computes the type
-    /// either way; this just retains it). Best-effort: a binding after a
-    /// same-function error isn't reached, so it simply won't appear here.
-    let_types: RefCell<HashMap<(usize, String), Type>>,
+    /// The type of every binding this check decided, keyed by the position the
+    /// binder is spelled at. It is what the editor shows on hover, so an
+    /// unannotated `let x = 5` reads `let x: Int64` — the checker computes the
+    /// type either way and this retains it. Best-effort by nature: a binding
+    /// inside a statement that did not type has no row, and the index shows it
+    /// with no type rather than losing it.
+    binder_types: RefCell<HashMap<(usize, usize), Type>>,
+    /// Whether the function being checked is the root module's. Only the root
+    /// is retained: the editor indexes the file being edited, and two modules
+    /// share a position.
+    in_root: std::cell::Cell<bool>,
     /// Inside-body error sink (RFC-0006 accumulation). Cleared per function;
     /// `block` pushes a statement's error here and continues to the next
     /// statement instead of `?`-aborting the whole body, so every statement-level
@@ -3917,6 +4057,25 @@ impl<'a> Checker<'a> {
         self.function_body(f, &f.body)
     }
 
+    /// Retain the type of one binding for the editor, at the position its
+    /// binder is spelled.
+    ///
+    /// A binder with no column is a desugar's — no source token spells it, so
+    /// no reader asks about it. A binder outside the root module has no reader
+    /// either: the editor indexes the file being edited, and two modules share
+    /// a position. The FIRST answer stands, because a desugar re-types a copy
+    /// of a body this pass already typed.
+    fn bind_seen(&self, ty: Option<Type>, line: usize, col: usize) {
+        let Some(ty) = ty else { return };
+        if col == 0 || !self.in_root.get() {
+            return;
+        }
+        self.binder_types
+            .borrow_mut()
+            .entry((line, col))
+            .or_insert(ty);
+    }
+
     /// Check `f` with `body` as its body. The two are the same node for an
     /// ordinary function; they differ for a `test` (RFC-0015) or a `bench`
     /// (RFC-0055), whose head is synthetic and whose body is the REAL node
@@ -3928,6 +4087,7 @@ impl<'a> Checker<'a> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
         *self.in_gen.borrow_mut() = in_gen_of(f);
+        self.in_root.set(f.module.is_none());
         self.errors.borrow_mut().clear();
         // Module state (RFC-0013) sits BELOW every frame: a local (param/let/for)
         // with the same name shadows a global, since `lookup` walks frames from
@@ -3938,6 +4098,7 @@ impl<'a> Checker<'a> {
             // A `modify` parameter is mutable inside the body (that is the point);
             // others are read-only bindings.
             let mutable = p.capability == Capability::Modify;
+            self.bind_seen(Some(p.ty.clone()), p.line, p.col);
             scope.last_mut().unwrap().insert(
                 p.name.clone(),
                 Binding {
@@ -4042,7 +4203,17 @@ impl<'a> Checker<'a> {
     /// not the declared/element type (the check that computes it failed).
     fn recover_binding(&self, stmt: &Stmt, scope: &mut Scope) {
         match stmt {
-            Stmt::Let { name, mutable, .. } => {
+            Stmt::Let {
+                name,
+                mutable,
+                ty,
+                line,
+                col,
+                ..
+            } => {
+                // The annotation is still the reader's answer on hover when the
+                // initializer did not type.
+                self.bind_seen(ty.clone(), *line, *col);
                 scope.last_mut().unwrap().insert(
                     name.clone(),
                     Binding {
@@ -4078,6 +4249,7 @@ impl<'a> Checker<'a> {
                 ty,
                 value,
                 line,
+                col,
             } => {
                 if let Some(declared) = ty {
                     self.ensure_type_exists(declared, *line)?;
@@ -4100,9 +4272,7 @@ impl<'a> Checker<'a> {
                 let bty = ty.clone().unwrap_or(vty);
                 // Retain it for the symbol-query layer so hovering an
                 // unannotated `let x = 5` shows `let x: Int`.
-                self.let_types
-                    .borrow_mut()
-                    .insert((*line, name.clone()), bty.clone());
+                self.bind_seen(Some(bty.clone()), *line, *col);
                 scope.last_mut().unwrap().insert(
                     name.clone(),
                     Binding {
@@ -4378,11 +4548,9 @@ impl<'a> Checker<'a> {
                 // hover, exactly as `match` arm bindings would be.
                 scope.push(HashMap::new());
                 for (name, ty) in &binders {
-                    self.let_types
-                        .borrow_mut()
-                        .insert((*line, name.clone()), ty.clone());
+                    self.bind_seen(Some(ty.clone()), name.line, name.col);
                     scope.last_mut().unwrap().insert(
-                        name.clone(),
+                        name.name.clone(),
                         Binding {
                             ty: ty.clone(),
                             mutable: false,
@@ -4428,6 +4596,7 @@ impl<'a> Checker<'a> {
                 iter,
                 body,
                 line,
+                col,
                 ..
             } => {
                 let ity = self.expr(iter, scope, None, Some(ret))?;
@@ -4474,9 +4643,7 @@ impl<'a> Checker<'a> {
                 // Bind the loop variable (immutable, element-typed) in a scope
                 // frame that wraps the body, so it is not visible after the loop.
                 // Retain the element type so `for s in arr` hovers as `for s: Int`.
-                self.let_types
-                    .borrow_mut()
-                    .insert((*line, var.clone()), elem.clone());
+                self.bind_seen(Some(elem.clone()), *line, *col);
                 scope.push(HashMap::new());
                 scope.last_mut().unwrap().insert(
                     var.clone(),
@@ -5890,8 +6057,9 @@ impl<'a> Checker<'a> {
             if !bind.is_empty() {
                 inner.push(HashMap::new());
                 for (bname, pty) in bind.iter().zip(&ev.payload) {
+                    self.bind_seen(Some(pty.clone()), bname.line, bname.col);
                     inner.last_mut().unwrap().insert(
-                        bname.clone(),
+                        bname.name.clone(),
                         Binding {
                             ty: pty.clone(),
                             mutable: false,
@@ -6025,7 +6193,7 @@ impl<'a> Checker<'a> {
         sty: &Type,
         pattern: &Pattern,
         line: usize,
-    ) -> Result<Vec<(String, Type)>, Diagnostic> {
+    ) -> Result<Vec<(Binder, Type)>, Diagnostic> {
         if let Type::Enum(evs) = self.base(sty) {
             let (vname, binds) = match pattern {
                 Pattern::Variant(n, b) => (n.clone(), b.clone()),
@@ -6050,7 +6218,7 @@ impl<'a> Checker<'a> {
             }
             return Ok(binds.into_iter().zip(ev.payload.iter().cloned()).collect());
         }
-        let (tag, bind): (&str, Option<String>) = match pattern {
+        let (tag, bind): (&str, Option<Binder>) = match pattern {
             // §8's one spelling again: the name, and what it binds.
             Pattern::Variant(v, binds) => {
                 sum_arm_arity(v, binds.len(), line)?;
@@ -8588,8 +8756,9 @@ impl<'a> Checker<'a> {
                 let mut inner = scope.clone();
                 inner.push(HashMap::new());
                 for (pn, pty) in params.iter().zip(&ptys) {
+                    self.bind_seen(Some(pty.clone()), pn.line, pn.col);
                     inner.last_mut().unwrap().insert(
-                        pn.clone(),
+                        pn.name.clone(),
                         Binding {
                             ty: pty.clone(),
                             mutable: false,
@@ -8598,7 +8767,7 @@ impl<'a> Checker<'a> {
                 }
                 // Enforce the capture rules: a lambda may not assign to, `drop`, or
                 // `consume` a captured (outer) binding — it captures by read.
-                let mut locals: HashSet<String> = params.iter().cloned().collect();
+                let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
                 self.check_lambda_body_captures(body, scope, &mut locals, *lline)?;
                 // Type-check the body and infer its result type.
                 let ret_known = !matches!(ret, Type::Param(_));
@@ -8786,8 +8955,9 @@ impl<'a> Checker<'a> {
         let mut inner = scope.clone();
         inner.push(HashMap::new());
         for (pn, pty) in params.iter().zip(ptys) {
+            self.bind_seen(Some(pty.clone()), pn.line, pn.col);
             inner.last_mut().unwrap().insert(
-                pn.clone(),
+                pn.name.clone(),
                 Binding {
                     ty: pty.clone(),
                     mutable: false,
@@ -8795,7 +8965,7 @@ impl<'a> Checker<'a> {
             );
         }
         // RFC-0023 capture rules verbatim: read-only, no nested lambda literal.
-        let mut locals: HashSet<String> = params.iter().cloned().collect();
+        let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         self.check_lambda_body_captures(body, scope, &mut locals, *line)?;
         // Calls through OTHER stored fn values inside this body belong to this
         // lambda's own effect summary (the body runs wherever the value is
@@ -8844,7 +9014,7 @@ impl<'a> Checker<'a> {
         // params/binders plus every enclosing LOCAL binding. Every frame is a
         // local one — module state is not a frame any more, it is the
         // fall-through [`Scope`] takes when the frames run out.
-        let mut local_names: HashSet<String> = params.iter().cloned().collect();
+        let mut local_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         if let LambdaBody::Block(b) = body {
             collect_binders_block(b, &mut local_names);
         }
@@ -9543,7 +9713,14 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::MapLit { .. } => "[..:..]".to_string(),
         Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
         Expr::Consume { place, .. } => format!("consume {}", pred_summary(place)),
-        Expr::Lambda { params, .. } => format!("|{}| ..", params.join(", ")),
+        Expr::Lambda { params, .. } => format!(
+            "|{}| ..",
+            params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

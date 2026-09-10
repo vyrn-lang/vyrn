@@ -345,6 +345,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
         ty: Some(Type::Str),
         value: argv(0),
         line: 0,
+        col: 0,
     }];
     for f in p.functions.iter().filter(|f| dispatchable(f)) {
         body.push(Stmt::If {
@@ -509,7 +510,7 @@ fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function
 /// is unreachable and `0` is there to give the `match` a type rather than to be
 /// read. Anything else would have declined before the wrapper is built.
 fn at_type(e: Expr, ty: &Type) -> Expr {
-    use vyrn_frontend::ast::{ArmBody, MatchArm, Pattern};
+    use vyrn_frontend::ast::{ArmBody, Binder, MatchArm, Pattern};
     if *ty == Type::Str {
         return e;
     }
@@ -518,7 +519,7 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
         scrutinee: Box::new(call("parse", vec![e])),
         arms: vec![
             MatchArm {
-                pattern: Pattern::Variant("Some".into(), vec!["v".into()]),
+                pattern: Pattern::Variant("Some".into(), vec![Binder::synthetic("v")]),
                 body: ArmBody::Expr(var("v")),
             },
             MatchArm {
@@ -562,6 +563,8 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
         name: n.to_string(),
         capability: vyrn_frontend::ast::Capability::Read,
         ty: Type::Str,
+        line: 0,
+        col: 0,
     };
     // `fn <entry>(arg) -> T { @reflect(kind, arg); return <decode T>() }`.
     let mut entry =
@@ -704,6 +707,7 @@ impl Decoders {
                         ty: Some(Type::Int),
                         value: call(vyrn_codegen::GEN_NEXT_INT, vec![]),
                         line: 0,
+                        col: 0,
                     },
                     Stmt::Let {
                         name: "xs".into(),
@@ -714,6 +718,7 @@ impl Decoders {
                             line: 0,
                         },
                         line: 0,
+                        col: 0,
                     },
                     Stmt::Let {
                         name: "i".into(),
@@ -721,6 +726,7 @@ impl Decoders {
                         ty: Some(Type::Int),
                         value: Expr::Int(0),
                         line: 0,
+                        col: 0,
                     },
                     Stmt::While {
                         cond: Expr::Binary {

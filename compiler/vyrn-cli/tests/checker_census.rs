@@ -117,9 +117,9 @@ fn sections() -> Vec<Section> {
              what makes the reuse above sound",
         ),
         sec(
-            "pub fn check_accum_with_let_types(",
+            "pub struct LocalBinding {",
             Shared,
-            "the entry points a caller uses",
+            "the editor's local index: the row, the descent that reports every              binding site, and the entry points a caller uses",
         ),
         sec(
             "pub const RESERVED: &[&str] = &[",
@@ -730,11 +730,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3462, 140),
+        ("the typing judgment", 3457, 140),
         ("a rule the checker states", 1477, 54),
         ("the checker's part in a rewrite stated elsewhere", 455, 14),
         ("one arm per form, type constructor or builtin", 2778, 140),
-        ("shared machinery", 2216, 30),
+        ("shared machinery", 2398, 30),
         ("tests", 4666, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");

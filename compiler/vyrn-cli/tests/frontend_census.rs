@@ -501,18 +501,6 @@ fn symbols_sections() -> Vec<Section> {
              the DECLARATION it stands for, in its own file, at its own line",
         ),
         sec(
-            "fn index_locals(",
-            Twice,
-            "a second walk over every body, for the binder POSITIONS the checker \
-             does not record. The types are the checker's — `let_types` is \
-             passed in — the descent is `ast::body_scope_descent!`'s, and WHICH \
-             names a pattern binds is `ast::Pattern::bindings` since RFC-0125 \
-             §3 M6's binder slice. What is stated twice is the PASS and the \
-             binding forms it knows, beside `checker::Scope`. A checker that \
-             recorded a binder's column would delete it, and its AST nodes \
-             carry a line and no column",
-        ),
-        sec(
             "fn with_doc(detail: &str, doc: &Option<String>) -> String {",
             Job,
             "the detail line every hover shows, one renderer per declaration \
@@ -1059,8 +1047,8 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("loader.rs", "shared machinery", 665, 1),
         ("loader.rs", "tests", 137, 0),
-        ("symbols.rs", "the file's own job", 2947, 0),
-        ("symbols.rs", "a rule stated a second time", 267, 0),
+        ("symbols.rs", "the file's own job", 2944, 0),
+        ("symbols.rs", "a rule stated a second time", 0, 0),
         ("symbols.rs", "a path only a deleted route reached", 0, 0),
         (
             "symbols.rs",
@@ -1068,9 +1056,9 @@ fn the_frontend_census_is_what_the_rfc_records() {
             198,
             0,
         ),
-        ("symbols.rs", "shared machinery", 435, 0),
+        ("symbols.rs", "shared machinery", 410, 0),
         ("symbols.rs", "tests", 829, 0),
-        ("project.rs", "the file's own job", 1089, 0),
+        ("project.rs", "the file's own job", 1074, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (

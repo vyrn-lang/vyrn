@@ -919,7 +919,7 @@ impl BodyVisit<'_> for BoundNames<'_> {
 
     fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
         if let Expr::Lambda { params, .. } = e {
-            self.0.extend(params.iter().cloned());
+            self.0.extend(params.iter().map(|p| p.name.clone()));
         }
         true
     }
@@ -940,11 +940,7 @@ fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
 
 /// The names a refutable pattern binds.
 fn pattern_names(p: &Pattern) -> Vec<String> {
-    match p {
-        Pattern::Success(n) | Pattern::Failure(n) => vec![n.clone()],
-        Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::Other => Vec::new(),
-    }
+    p.bindings().into_iter().map(String::from).collect()
 }
 
 /// Walk a block collecting append targets and banned names. `strict` marks a
