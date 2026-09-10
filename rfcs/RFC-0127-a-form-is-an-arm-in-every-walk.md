@@ -271,7 +271,7 @@ rows.
 So of the nine passes the brief named, two cost nothing per form, and the census
 can say so as a fact rather than as a claim.
 
-### 3.4 The 24 keywords and the 14 contextual words
+### 3.4 The 24 keywords and the 13 contextual words
 
 124 mentions in three files for the keywords. The spellings and the tokens are
 read out of the lexer's `keywords!` table, which is the same anchor
@@ -315,7 +315,7 @@ The third was `lex`'s own copy of the spelling table, which went when RFC-0125
 there are not two. **A keyword is nearly free. The FORM behind it is what
 costs**, and §3.1 is where the language's weight is.
 
-46 mentions in four files for the contextual words — the words the lexer hands
+45 mentions in four files for the contextual words — the words the lexer hands
 back as identifiers and the parser reads by position.
 
 | word | lexer | parser | checker | fmt | all four |
@@ -331,15 +331,14 @@ back as identifiers and the parser reads by position.
 | `as` | 0 | 2 | 0 | 0 | 2 |
 | `extern` | 0 | 3 | 2 | 0 | 5 |
 | `lazy` | 0 | 1 | 0 | 0 | 1 |
-| `place` | 0 | 1 | 0 | 0 | 1 |
 | `logging` | 0 | 2 | 0 | 0 | 2 |
 | `contract` | 0 | 1 | 0 | 0 | 1 |
 
 A contextual word costs less than a keyword and buys back a name a user may
-bind. `place` is the cheapest kind of survivor: RFC-0120 retired the spelling
-and the parser keeps one mention of it, which is the migration refusal RFC-0094
-calls a teaching hint. `yield`, its twin in that retired pair, has no row —
-nothing in the compiler names it — and §6 is what that costs the editor.
+bind. `place` had the cheapest row of all, one parser mention, and it left on
+2026-09-11 with `yield`, its twin in the pair RFC-0120 retired. Neither has a row
+now, because nothing in the compiler names either, and §6 is what that cost the
+editor.
 
 ---
 
@@ -569,16 +568,17 @@ All five now say what the code does, and each cites the RFC that changed it.
 
 ### 6.2 The editor grammar colours `yield`, which nothing in the compiler names
 
-`yield` has no row in §3.4 because it earns none: zero in the lexer, zero in the
-parser, zero in the checker, zero in the formatter. RFC-0120 retired
-`place`/`yield` for the result capability, and the parser kept ONE mention — of
-`place`, to report the migration — because a member that begins `place <name>`
-deserves a sentence instead of "expected `fn`". Nothing kept `yield`.
+Neither `place` nor `yield` has a row in §3.4, because neither earns one: zero in
+the lexer, zero in the parser, zero in the checker, zero in the formatter.
+RFC-0120 retired `place`/`yield` for the result capability. The parser kept ONE
+mention, of `place`, to report the migration, until 2026-09-11: the corpus census
+showed that nothing in `std/`, in `examples/` or on the site ever wrote the
+spelling that sentence taught.
 
-`editor/vscode/vyrn.tmLanguage.json` kept a contextual rule for it, so a line
-beginning with the word `yield` was coloured as language syntax in every `.vyrn`
-file. The rule is deleted. `place` keeps its rule, and the census is what
-separates the two: one has a mention and the other has none.
+`editor/vscode/vyrn.tmLanguage.json` kept a contextual rule for each, so a line
+beginning with `yield`, and a member beginning `place name(`, were coloured as
+language syntax in every `.vyrn` file. Both rules are deleted. The census is the
+rule: a word the compiler does not name is not coloured.
 
 This is the third copy of the keyword surface to be held against the lexer.
 `editor/vscode/test/grammar.test.mjs` holds the reserved words;

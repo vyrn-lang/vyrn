@@ -1762,23 +1762,6 @@ impl Parser {
                 self.eat_semi();
                 continue;
             }
-            // `place name(..) { yield .. }` was RFC-0091 M2's spelling for a
-            // projection; RFC-0120 retired it for the result capability. The
-            // detection stays (a member beginning `place <name>`) so the old
-            // form gets its own sentence instead of "expected `fn`".
-            if matches!(self.peek(), Tok::Ident(w) if w == "place")
-                && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_))
-            {
-                return Err(Diagnostic::error(
-                    self.line(),
-                    self.col(),
-                    "parse",
-                    "`place`/`yield` is the retired spelling of a projection (RFC-0120) — \
-                     write `fn name(read self, ..) -> read T { .. return <place> }` \
-                     (`modify` for the writable form)"
-                        .to_string(),
-                ));
-            }
             let (mut m, place_cap) = self.impl_method(&ty)?;
             m.type_params = type_params.clone();
             m.type_bounds = type_bounds.clone();

@@ -118,7 +118,7 @@ const CONTEXTUAL_COLUMNS: &[(&str, &[&str])] = &[
 /// them.
 const CONTEXTUAL_WORDS: &[&str] = &[
     "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "extern", "lazy",
-    "place", "logging", "contract",
+    "logging", "contract",
 ];
 
 /// The verdict vocabulary of RFC-0127 §4, which is RFC-0126 §4's. Three words,
@@ -927,7 +927,7 @@ fn count_tokens(tokens: &[vyrn_frontend::lexer::Token], into: &mut Uses) {
                         && matches!(tokens.get(i + 2).map(|n| &n.tok), Some(Tok::LBrace))
                 }
                 "logging" => matches!(after, Some(Tok::LBrace)),
-                "lazy" | "place" => matches!(after, Some(Tok::Ident(_))),
+                "lazy" => matches!(after, Some(Tok::Ident(_))),
                 "from" => i > 0 && matches!(after, Some(Tok::Str(_) | Tok::Ident(_))),
                 "as" => i > 0 && matches!(after, Some(Tok::Ident(_))),
                 "panic" => matches!(after, Some(Tok::LParen)),
@@ -1125,11 +1125,11 @@ fn nothing_in_the_corpus_writes_these() {
 /// Nothing in `std/`, `examples/`, `site/`, the CLI's fixtures or the docs
 /// writes these.
 ///
-/// One row, and it is a retirement working: RFC-0120 replaced `place at(..)`
-/// with `-> read T`, and what is left of the word is the migration refusal
-/// RFC-0094 calls a teaching hint (RFC-0127 §3.4 counts that one parser
-/// mention). Nothing else the language spells is unwritten.
-const ZERO_IN_THE_CORPUS: &[&str] = &["word place"];
+/// Empty, and that is the measurement. The last row was `place`: RFC-0120 had
+/// replaced `place at(..)` with `-> read T`, and the parser kept one mention to
+/// give the retired spelling its own sentence. The sentence taught nobody,
+/// because nobody wrote the spelling. Everything the language spells is written.
+const ZERO_IN_THE_CORPUS: &[&str] = &[];
 
 /// Only a compiler test writes these; no program does. Empty, and that is the
 /// measurement: no form is kept alive by its own fixture.
