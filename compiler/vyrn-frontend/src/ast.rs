@@ -1542,6 +1542,27 @@ pub enum Pattern {
     Other,
 }
 
+impl Pattern {
+    /// The names this pattern binds, in the order it binds them — `Some(x)`,
+    /// `Ok(e)`, `Circle(w, h)`.
+    ///
+    /// The rule was three matches before RFC-0125 §3 M6: `movecheck`'s for the
+    /// ownership walk, the checker's for the purity walk, and `symbols`' for the
+    /// editor's binder index. It lives on the type it is a fact about, so a
+    /// fourth pattern form reaches all three readers or none.
+    ///
+    /// A desugar's binder is `@`-prefixed and unspellable ([`Pattern::Success`],
+    /// [`Pattern::Failure`]), so a reader that indexes source positions finds
+    /// nothing for one and must not invent a phantom local.
+    pub fn bindings(&self) -> Vec<&str> {
+        match self {
+            Pattern::Success(b) | Pattern::Failure(b) => vec![b],
+            Pattern::Variant(_, binds) => binds.iter().map(String::as_str).collect(),
+            Pattern::Other => Vec::new(),
+        }
+    }
+}
+
 impl Stmt {
     /// The source line this statement starts on.
     ///
@@ -1752,7 +1773,7 @@ macro_rules! body_scope_descent {
                     $ex(scrutinee, locals, v);
                     let mut inner = locals.clone();
                     if V::SCOPED {
-                        for b in $crate::movecheck::pattern_bindings(pattern) {
+                        for b in pattern.bindings() {
                             inner.insert(b.to_string());
                         }
                     }
@@ -1832,7 +1853,7 @@ macro_rules! body_scope_descent {
                         let mut inner = locals.clone();
                         v.arm_pattern(&$($mut_)? arm.pattern, l, &inner);
                         if V::SCOPED {
-                            for b in $crate::movecheck::pattern_bindings(&arm.pattern) {
+                            for b in arm.pattern.bindings() {
                                 inner.insert(b.to_string());
                             }
                         }

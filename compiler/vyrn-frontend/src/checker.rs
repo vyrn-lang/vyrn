@@ -394,8 +394,8 @@ pub const RESERVED: &[&str] = &[
 
 /// Where a name a program may still write has gone.
 ///
-/// Two things happened to a builtin spelling, and a reader needs a different
-/// sentence for each.
+/// Three things put a name in front of a reader who cannot resolve it, and each
+/// needs a different sentence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gone {
     /// RFC-0094 M2 took the name out of [`RESERVED`] and it is an ordinary
@@ -405,6 +405,14 @@ pub enum Gone {
     /// The free-function spelling was REMOVED, because the surface says the
     /// same thing another way. The sentence is what to write instead.
     Removed(&'static str),
+    /// A DESUGAR writes this name, so a reader is told about a call they never
+    /// wrote. The sentence names the spelling they DID write before it names
+    /// the import, and it is true for both readers — the one who wrote the
+    /// sugar and the one who wrote the primitive without importing it.
+    Desugared {
+        module: &'static str,
+        sugar: &'static str,
+    },
 }
 
 impl Gone {
@@ -415,6 +423,10 @@ impl Gone {
                 format!("`{name}` is `{m}`'s — add `import {{ {name} }} from \"{m}\"`")
             }
             Gone::Removed(s) => (*s).to_string(),
+            Gone::Desugared { module, sugar } => format!(
+                "`{name}` is `{module}`'s, and `{sugar}` writes through it — add \
+                 `import {{ {name} }} from \"{module}\"`"
+            ),
         }
     }
 }
@@ -451,6 +463,17 @@ pub const MOVED_TO_STD: &[(&str, Gone)] = &[
     ("base64Decode", Gone::Module("std/codecs")),
     ("urlEncode", Gone::Module("std/codecs")),
     ("urlDecode", Gone::Module("std/codecs")),
+    // `save(path, value)` is `writeAtomic(path, toJson(value))` after
+    // `parser::storage_desugar` (RFC-0044), so a module that never imported the
+    // primitive was told "call to unknown function `writeAtomic`" about a call
+    // it did not write.
+    (
+        "writeAtomic",
+        Gone::Desugared {
+            module: "std/storage",
+            sugar: "save(path, value)",
+        },
+    ),
     // The removed free-function spellings. Each fires for the BARE
     // user-written name only: the desugaring and the method forms carry the
     // unspellable `@`-prefixed internal names (`@str`, `@concat`, `@list`,
@@ -1700,9 +1723,9 @@ fn let_borrows_from(e: &Expr, roots: &std::collections::HashSet<String>) -> bool
                 return true;
             }
         }
-        let binders = pattern_binders(&arm.pattern);
+        let binders = arm.pattern.bindings();
         crate::project::is_place(body)
-            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r))
+            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r.as_str()))
     })
 }
 
@@ -10158,22 +10181,6 @@ fn sum_arm_arity(name: &str, binds: usize, line: usize) -> Result<(), Diagnostic
     Ok(())
 }
 
-/// The names a pattern binds — `Some(x)`, `Ok(e)`, `Circle(w, h)`.
-///
-/// A match arm's binder shadows a module global for the length of that arm, and
-/// nothing used to collect these: `JArr(items) => emitArr(items)` in `std/json`
-/// read as a reference to some *other* module's `items` state, so a project that
-/// happened to name a global `items` made every generator reaching `emit`
-/// impure. Naming a binder after a global in a module it cannot see is not a
-/// purity violation; it is a coincidence.
-fn pattern_binders(p: &Pattern) -> Vec<String> {
-    match p {
-        Pattern::Success(n) | Pattern::Failure(n) => vec![n.clone()],
-        Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::Other => Vec::new(),
-    }
-}
-
 /// The purity walk's line at each site: a name that a global answers to and no
 /// local shadows is a reference, whether it is read, written, dropped or called.
 struct GlobalRef<'a> {
@@ -11748,7 +11755,10 @@ mod tests {
     fn every_moved_name_is_gone_from_reserved() {
         for (n, g) in MOVED_TO_STD {
             match g {
-                Gone::Module(_) => assert!(
+                // A desugared name is an ordinary export of its module, so it
+                // follows the `Module` rule: reserve it and the import line the
+                // sentence names could not be written.
+                Gone::Module(_) | Gone::Desugared { .. } => assert!(
                     !RESERVED.contains(n),
                     "`{n}` is both reserved and said to live in a std module"
                 ),

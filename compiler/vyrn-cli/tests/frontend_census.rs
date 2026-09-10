@@ -5,10 +5,10 @@
 //! a census already: the checker (`tests/checker_census.rs`), the ownership pass
 //! (`tests/refusals.rs`), the emitter (`tests/emitter_census.rs`) and the CLI
 //! (`tests/cli_census.rs`). Nobody had counted `vyrn-frontend` outside the
-//! checker, and it is 30,000 lines with the checker taken out. This is the same
-//! measurement for the three largest of the rest: `loader.rs` (5,363),
-//! `symbols.rs` (4,801) and `project.rs` (1,791) — 11,955 lines, a fifth of the
-//! crate.
+//! checker, and it is 47,000 lines with the checker taken out. This is the same
+//! measurement for the three largest of the rest: `loader.rs` (4,891),
+//! `symbols.rs` (4,676) and `project.rs` (1,590) — 11,157 lines, a fifth of what
+//! is left. They were 11,955 when this census was written.
 //!
 //! # The method, which is `checker_census.rs`'s, which is `refusals.rs`'s
 //!
@@ -144,12 +144,12 @@ fn loader_sections() -> Vec<Section> {
              and a remote key's immutable base",
         ),
         sec(
-            "pub fn builtin_alias_exports(spec: &str) -> Option<&'static [&'static str]> {",
-            Copy,
-            "the fixed export lists of `std/result` and `std/option` (RFC-0062) \
-             — the same six names `symbols::BUILTIN_TYPES_AND_CTORS` carries, \
-             split across two module names here. A test compares the two, which \
-             is what a copy costs when it cannot be deleted",
+            "pub fn builtin_alias_exports(spec: &str) -> Option<Vec<&'static str>> {",
+            Job,
+            "what `std/result` and `std/option` export (RFC-0062) — a filter \
+             over `symbols::BUILTIN_TYPES_AND_CTORS` since RFC-0125 §3 M6's \
+             table slice, where it was a second spelling of those six names, \
+             split across two module names, and a test compared the two",
         ),
         sec(
             "pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String> {",
@@ -327,8 +327,9 @@ fn loader_sections() -> Vec<Section> {
             "fn program_ref_names(p: &Program) -> HashSet<String> {",
             Job,
             "the program-wide reference sets the alias check and the runtime \
-             injection both ask for. It READS the walk above rather than writing \
-             a fourth one, which is what the other two rows should do",
+             injection both ask for. It reads `fn_body_ref_names` rather than \
+             walking a body itself, and since RFC-0125 §3 M6's body slices \
+             every walk in this file reads `body_scope_descent!`",
         ),
         sec(
             "fn rename_decls_in_module(p: &mut Program, map: &HashMap<String, String>, ns: &HashSet<String>) {",
@@ -410,12 +411,14 @@ fn symbols_sections() -> Vec<Section> {
              names, and where it is declared",
         ),
         sec(
-            "static BUILTIN_TYPES_AND_CTORS: &[(&str, SymbolKind, &str)] = &[",
-            Copy,
-            "the six builtin sum names with their hover text. ONE TABLE inside \
-             this file — the completion loop and the colouring list are filters \
-             over it — but the same six names are `loader::builtin_alias_exports` \
-             too, split across two module names, and a test compares them",
+            "pub(crate) static BUILTIN_TYPES_AND_CTORS: &[(&str, &str, SymbolKind, &str)] = &[",
+            Job,
+            "the six builtin sum names, the alias module each belongs to, and \
+             the hover text for each. ONE TABLE, and since RFC-0125 §3 M6's \
+             table slice all four readers are filters over it: the completion \
+             loop, the colouring list, the hover lookup, and \
+             `loader::builtin_alias_exports`, which carried the module column \
+             as a split list of its own",
         ),
         sec(
             "fn enclosing_fn_line(analysis: &Analysis, cursor_line: usize) -> Option<usize> {",
@@ -480,11 +483,12 @@ fn symbols_sections() -> Vec<Section> {
             Twice,
             "a second walk over every body, for the binder POSITIONS the checker \
              does not record. The types are the checker's — `let_types` is \
-             passed in — and since RFC-0125 §3 M6's third slice the descent is \
-             `ast::body_scope_descent!`'s, so what is stated twice is the PASS \
-             and the binding forms it knows, beside `checker::Scope` and \
-             `pattern_binders`. A checker that recorded a binder's column would \
-             delete this",
+             passed in — the descent is `ast::body_scope_descent!`'s, and WHICH \
+             names a pattern binds is `ast::Pattern::bindings` since RFC-0125 \
+             §3 M6's binder slice. What is stated twice is the PASS and the \
+             binding forms it knows, beside `checker::Scope`. A checker that \
+             recorded a binder's column would delete it, and its AST nodes \
+             carry a line and no column",
         ),
         sec(
             "fn with_doc(detail: &str, doc: &Option<String>) -> String {",
@@ -825,28 +829,28 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4192, 23),
+        ("loader.rs", "the file's own job", 4211, 23),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
             "loader.rs",
             "a copy of a table another module carries",
-            15,
+            0,
             0,
         ),
         ("loader.rs", "shared machinery", 543, 0),
         ("loader.rs", "tests", 137, 0),
-        ("symbols.rs", "the file's own job", 2912, 0),
-        ("symbols.rs", "a rule stated a second time", 272, 0),
+        ("symbols.rs", "the file's own job", 2947, 0),
+        ("symbols.rs", "a rule stated a second time", 267, 0),
         ("symbols.rs", "a path only a deleted route reached", 0, 0),
         (
             "symbols.rs",
             "a copy of a table another module carries",
-            228,
+            198,
             0,
         ),
         ("symbols.rs", "shared machinery", 435, 0),
-        ("symbols.rs", "tests", 861, 0),
+        ("symbols.rs", "tests", 829, 0),
         ("project.rs", "the file's own job", 1008, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),

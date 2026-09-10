@@ -1157,6 +1157,21 @@ fn a_moved_builtin_without_a_std_root_names_its_module() {
     assert!(e.contains("`hexEncode` is `std/codecs`'s"), "{e}");
 }
 
+/// `save` desugars to `writeAtomic` (RFC-0044), so a module that never imported
+/// the primitive used to be told "call to unknown function `writeAtomic`" about
+/// a call it did not write. The sentence names the spelling the reader DID
+/// write, and then the import that fixes it.
+#[test]
+fn the_save_sugar_names_itself_when_its_primitive_is_missing() {
+    let e = run("type C = { n: Int64 }\nfn main() -> Int64 { save(\"c\", C { n: 1 }) return 0 }")
+        .unwrap_err();
+    assert!(e.contains("`save(path, value)` writes through it"), "{e}");
+    assert!(
+        e.contains("add `import { writeAtomic } from \"std/storage\"`"),
+        "{e}"
+    );
+}
+
 #[test]
 fn string_iteration_sums_bytes() {
     // 'a'(97) + 'b'(98) + 'c'(99) = 294.

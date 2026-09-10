@@ -24585,6 +24585,283 @@ which is surface, not duplication.
 78 lines are match arms inside `real_main` and a census cannot tile below an
 item. Pulling each into a function would let the next census price them; nothing
 in this track needed that, so nothing did it.
+#### The frontend census, re-read at the branch point — and four slices (2026-09-10, `track-eg`)
+
+The 2026-09-08 record counted `loader.rs`, `symbols.rs` and `project.rs` and
+ranked five items. Seven tracks landed between that count and this one, so the
+first thing this track did was read the census against the tree rather than
+against the ranking. The tiling still holds — every anchor names one line, every
+line is in one section — and the numbers were right. Two READERS had gone stale,
+which is the failure mode a ranked list has: a test checks the counts and
+nothing checks the prose.
+
+**What the ranked list looks like now.**
+
+| rank | what | lines then | lines now | where it went |
+|---|---|---|---|---|
+| 1 | the scope-aware body walk, three times in `loader.rs` | ~946 | 0 | done, 2026-09-08's body slices. `loader.rs`'s twice kind is empty |
+| 2 | `symbols::index_locals` — a second walk over every body | 360 | 267 | the descent and the pattern rule are read now; the rest is the blocker below |
+| 3 | `symbols::BuiltinMethod` — the builtin method table | 156 | 156 | untouched. Fourteen of its thirty-four names still have no seeded row |
+| 4 | `symbols::MACRO_BUILTINS` — thirty names of `checker::RESERVED` | 42 | 42 | untouched. Still needs the column on `RESERVED` |
+| 5 | `loader::builtin_alias_exports` beside `symbols::BUILTIN_TYPES_AND_CTORS` | 45 | 0 | done, below. The split was a column |
+
+**The injected runtime module table was already stated once, and the census
+says so.** It is not on the ranked list and it does not need one. `RT_MODULES`
+is one row per module and `routed_builtin` is a scan over it. `MEM_PREFIX`,
+`RUNTIME_PREFIX` and `routed_builtin` are READ by `vyrn-lower` and
+`vyrn-codegen`, never copied. `is_injected` is one line with three callers and
+no second statement. The table's one deliberate redundancy — a route's reserved
+spelling written out rather than composed — is measured, documented, and guarded
+by `every_route_is_spelled_with_its_modules_prefix`. M4c did this work.
+
+**The two stale readers.** `loader::program_ref_names` said it reads the shared
+walk "which is what the other two rows should do"; both rows do it now.
+The module header counted the three files at 11,955 lines and `vyrn-frontend`
+outside the checker at 30,000; they are 11,157 and 47,000.
+
+**The two tables, with a reader against every part.** Printed from the test
+(`cargo test -p vyrn-cli --test frontend_census -- --ignored --nocapture
+the_frontend_census_as_a_table`), so the prose and the tree cannot drift by
+one edit. `project.rs` is unchanged by this track and its table stands where
+the 2026-09-08 record left it.
+
+**`loader.rs` — 4,891 lines.**
+
+| section | lines | diagnostics | kind | what it is |
+|---|---|---|---|---|
+| `pub trait ModuleResolver` | 79 | 0 | shared machinery | the module head and the one interface a host implements — read a specifier's source, list a directory, read and write the generation cache |
+| `fn bump_gen_runs()` | 31 | 0 | shared machinery | the generation counters and the two budgets a test lowers |
+| `pub struct MapResolver(pub HashMap<String, String>);` | 178 | 0 | shared machinery | the three resolvers this crate ships: the in-memory one tests load a corpus through, the filesystem one every program that loads a project off a disk uses (it was written out in the driver, seven CLI suites, this crate's move-check tests, its `lspbench` example, its contracts test and the language server), and the recording one RFC-0031's `moduleInterface` wraps a real resolver in |
+| `pub(crate) fn normalize(path: &str) -> String` | 73 | 0 | the file's own job | a path normalised, and the specifier a resolved key would be written as from a given directory (RFC-0031) |
+| `fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String` | 32 | 0 | the file's own job | the file name a `panic` in this module reports — derived from the project's shape so two machines bake the same bytes |
+| `fn stamp_panic_sites(program: &mut Program, file: &str)` | 16 | 0 | the file's own job | every `panic(msg)` becomes `@panicAt(msg, "file:line")`. A rewrite the parser could not do — only the loader knows the module's file — and it is the ONE walk in this file that does not restate the walk: it calls `project::walk_program` |
+| `fn dir_of(resolved: &str) -> &str` | 86 | 0 | the file's own job | the generated module's banner and the remote key: the directory part, the separator no path can hold, the importer a banner names, and a remote key's immutable base |
+| `pub fn builtin_alias_exports(spec: &str) -> Option<Vec<&'static str>>` | 19 | 0 | the file's own job | what `std/result` and `std/option` export (RFC-0062) — a filter over `symbols::BUILTIN_TYPES_AND_CTORS` since RFC-0125 §3 M6's table slice, where it was a second spelling of those six names, split across two module names, and a test compared the two |
+| `pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String>` | 87 | 0 | the file's own job | an import specifier written inside a module becomes a module key. Public so the editor reuses the loader's exact resolution rather than drifting from it |
+| `pub struct LoadOptions` | 24 | 0 | shared machinery | what a load was asked for |
+| `fn audience_objection` | 107 | 2 | the file's own job | the two import fences: RFC-0072's declared audience, which a project opts into, and PLAN-0125-runtime §3's, which is the compiler's own and no manifest widens |
+| `struct Module` | 16 | 0 | shared machinery | one parsed module awaiting linking |
+| `pub const RT_PREFIX: &str = "json$";` | 241 | 0 | the file's own job | the runtime-module table (RFC-0078 M2b, RFC-0125 §2.4): one row per module a builtin's implementation lives in, its reserved prefix, the builtins it routes and the ones a desugar spells. M4c made it a table rather than a second copy of itself, which is why adding a builtin costs one entry |
+| `pub fn generated_modules` | 18 | 0 | the file's own job | the synthesized source behind `vyrn emit-gen` |
+| `pub fn load` | 120 | 1 | the file's own job | the entry points, and what a load hands back besides the program: the origin maps, the warnings and the module graph the symbol indexer would otherwise recompute by loading a second time |
+| `fn floor_graph(modules: &mut [Module]) -> crate::floor::Graph` | 89 | 0 | the file's own job | the graphs a load already built, handed to the capability floor (RFC-0103) and to `vyrn deps` |
+| `fn load_modules` | 611 | 6 | the file's own job | the worklist: resolve, read, parse, fence, run the generators, inject the runtime modules a mention needs. The largest single thing in the file |
+| `const GEN_FUEL: u64 = 20_000_000;` | 32 | 0 | shared machinery | the generator's three guardrails: fuel, output size, nesting depth |
+| `fn run_generator` | 332 | 1 | the file's own job | one `gen fn` run in the mediated sandbox (RFC-0021), cache lookup and all |
+| `fn generator_cache_key` | 325 | 0 | the file's own job | the generation cache: the lookup key, the recorded inputs a hit re-hashes, the entry format and the per-user tag that tells this compiler's entries from files something else left there |
+| `fn is_injected(t: &TypeDecl) -> bool` | 7 | 0 | shared machinery | which type declarations the parser injects into every file |
+| `fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_key: &str)` | 654 | 5 | the file's own job | RFC-0022's import aliasing resolved into the flat namespace before the register/merge machinery, which is deliberately alias-unaware, and the co-naming rename that frees a foreign name for a local stub |
+| `macro_rules! type_head_descent` | 100 | 0 | shared machinery | the ONE descent over a `Type`, written by a macro so that the collector's shared borrow and the three rewriters' unique ones are spellings of one arm list (RFC-0125 §3 M6). It was four fourteen-arm matches until then, the fourth in `parser.rs`; the hook is on the NODE so that one of them can replace what it visits, and `type_heads`/`type_heads_mut` are the head-name reading the other three want |
+| `crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);` | 9 | 0 | shared machinery | the two expansions of the ONE descent over a `Block`. The arm list itself is `ast::body_scope_descent!` since RFC-0125 §3 M6's second body slice, because seven more readers wanted it and the AST is where it is declared; this file states which two borrows it needs and nothing else. It was three thirty-five-arm walks — `scope_*`, `rewrite_*` and `NsResolver::walk_*` — until the first slice, and the three had already drifted over an `Ok(x) =>` arm's binding |
+| `struct NsResolver<'a>` | 293 | 1 | the file's own job | RFC-0027's `ns.member` pass. Both its descents are read, not written, since RFC-0125 §3 M6 — the type one from `type_head_descent`, the body one from `body_scope_descent`. What is left is the pass itself: what a namespace member resolves to, and the receiver argument it deletes at a call |
+| `fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>>` | 481 | 5 | the file's own job | the link: register every module's declarations in one flat namespace, decide visibility, merge, and refuse a name defined twice or referenced without an import |
+| `fn with_file(mut d: Diagnostic, m: &Module, root_key: &str) -> Diagnostic` | 51 | 0 | shared machinery | where a load's diagnostic points: the module's file, the import line a reader has to edit, and the namespace binding a suggestion would spell |
+| `fn clash_diagnostics` | 100 | 2 | the file's own job | two linked modules declaring one name — one diagnostic per PAIR, at an import of one of them, rather than one per name at a line the user never wrote |
+| `fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)>` | 101 | 0 | the file's own job | every name a body references that could name a declaration, minus the locals in scope — the link-time visibility check's question. The walk is `body_scope_descent`'s since RFC-0125 §3 M6, where it was the FIRST of three copies of it; what stays here is the collector's own line at a site, and the namespace sugar it records under a dotted spelling. The checker's `Scope`/`shadows_here`/`lookup` still states the scope rule a second time for a different reader |
+| `fn type_names(ty: &Type) -> Vec<String>` | 19 | 0 | the file's own job | every named or applied type head inside a type. Three lines over the shared descent since RFC-0125 §3 M6, where it was one of three copies of that descent |
+| `fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String` | 16 | 0 | shared machinery | a name substitution, and the variant names a module declares itself |
+| `fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>)` | 8 | 0 | the file's own job | every referenced type name rewritten through a map — the same shared descent, assigning where `type_names` clones |
+| `pub(crate) fn rewrite_names(p: &mut Program, map: &HashMap<String, String>)` | 233 | 0 | the file's own job | every reference to a declaration name rewritten through a map. The walk is `body_scope_descent`'s since RFC-0125 §3 M6, where it was the SECOND of three copies of it and its own comment said so — "the same walk `fn_body_ref_names` uses". What stays here is the substitution, and the three things it must not fold: a namespace receiver, a local, and the module's own enum constructor |
+| `fn program_ref_names(p: &Program) -> HashSet<String>` | 123 | 0 | the file's own job | the program-wide reference sets the alias check and the runtime injection both ask for. It reads `fn_body_ref_names` rather than walking a body itself, and since RFC-0125 §3 M6's body slices every walk in this file reads `body_scope_descent!` |
+| `fn rename_decls_in_module(p: &mut Program, map: &HashMap<String, String>, ns: &HashSet<String>)` | 43 | 0 | the file's own job | every rename a module needs, applied in ONE walk rather than one walk per rename (RFC-0125 §3 M4: `std/runtime` is 1,951 lines in every program, and the per-rename form was quadratic in it) |
+| `mod tests` | 137 | 0 | tests | the file's own unit tests |
+
+**`symbols.rs` — 4,676 lines.**
+
+| section | lines | diagnostics | kind | what it is |
+|---|---|---|---|---|
+| `pub enum SymbolKind` | 258 | 0 | shared machinery | the module head and the whole data model one keystroke produces: the symbols, the tokens, the local bindings, the memory notes, the namespaces, a resolution and a completion |
+| `pub fn analyze(source: &str) -> Analysis` | 35 | 0 | the file's own job | the two entry points, one over a bare file and one over a linked project |
+| `fn adopt_foreign(mut d: Diagnostic) -> Diagnostic` | 12 | 0 | shared machinery | a diagnostic from another file, shown against this one |
+| `fn analyze_inner` | 372 | 0 | the file's own job | one keystroke: lex, parse, link, check, and index everything the editor asks for afterwards. Since RFC-0125 §3 M3 it ASKS the checker for the type of every node and the type of every `let` rather than deciding either itself, and it asks `movecheck` for the ownership refusals — so this is the reading, not a second judgment |
+| `fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote>` | 36 | 0 | the file's own job | the ownership notes a hover shows, read off `own::analyze` — the same table `vyrn why --memory` reports, filtered the same way |
+| `fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis` | 25 | 0 | shared machinery | what a lex or parse failure hands back |
+| `fn keyword_text(t: &Tok) -> Option<String>` | 15 | 0 | the file's own job | the source spelling of a keyword or operator token, READ off `lexer::token_name_and_text` since RFC-0125 §3 M6. It was a thirty-four-line copy of twenty-four of that table's eighty arms, and it had already lost `import`, `export`, `break` and `continue` |
+| `fn backtick_tokens(msg: &str) -> Vec<&str>` | 19 | 0 | shared machinery | the text inside each backtick-quoted span of a message |
+| `fn pin_diagnostics` | 72 | 0 | the file's own job | a line-only diagnostic pinned to the column of the token it backtick-quotes, so the editor squiggles the name rather than the line |
+| `pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolution>` | 184 | 0 | the file's own job | hover and go-to-definition: what the identifier under the cursor names, and where it is declared |
+| `pub(crate) static BUILTIN_TYPES_AND_CTORS: &[(&str, &str, SymbolKind, &str)]` | 35 | 0 | the file's own job | the six builtin sum names, the alias module each belongs to, and the hover text for each. ONE TABLE, and since RFC-0125 §3 M6's table slice all four readers are filters over it: the completion loop, the colouring list, the hover lookup, and `loader::builtin_alias_exports`, which carried the module column as a split list of its own |
+| `fn enclosing_fn_line(analysis: &Analysis, cursor_line: usize) -> Option<usize>` | 49 | 0 | shared machinery | the function a cursor line falls in, and whether a position is at module scope |
+| `pub fn completions(analysis: &Analysis) -> Vec<Completion>` | 29 | 0 | the file's own job | what a bare cursor offers |
+| `pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<Completion>` | 138 | 0 | the file's own job | what a `.` offers: the receiver's fields, its impl methods, its protocol members, and the builtin methods its type answers to |
+| `pub fn string_literal_completions` | 319 | 0 | the file's own job | the completions inside a string literal: a `.vyx` class name, the CSS rule behind it, and the finite string type a position expects |
+| `fn receiver_before_dot(analysis: &Analysis, line: usize, col: usize) -> Option<String>` | 43 | 0 | the file's own job | the receiver before the dot, and its type — read off the local index, which is filled from the checker's answers |
+| `fn decl_lines(program: &ast::Program) -> Vec<usize>` | 51 | 0 | shared machinery | the declaration lines a search is bounded by, and the column a name occupies on its line |
+| `fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]) -> Vec<Symbol>` | 165 | 0 | the file's own job | the root module's declarations, indexed with their kind, their detail line and their doc |
+| `fn index_imported_symbols` | 140 | 0 | the file's own job | the declarations the root imports, indexed from the linked program so hover and go-to-definition cross a file boundary |
+| `fn index_namespaces` | 153 | 0 | the file's own job | RFC-0027's namespace bindings and the exports each reaches |
+| `pub(crate) struct OriginIndex` | 138 | 0 | the file's own job | RFC-0073 M3's symbol map: a symbol a generator baked in resolves to the DECLARATION it stands for, in its own file, at its own line |
+| `fn index_locals` | 267 | 0 | a rule stated a second time | a second walk over every body, for the binder POSITIONS the checker does not record. The types are the checker's — `let_types` is passed in — the descent is `ast::body_scope_descent!`'s, and WHICH names a pattern binds is `ast::Pattern::bindings` since RFC-0125 §3 M6's binder slice. What is stated twice is the PASS and the binding forms it knows, beside `checker::Scope`. A checker that recorded a binder's column would delete it, and its AST nodes carry a line and no column |
+| `fn with_doc(detail: &str, doc: &Option<String>) -> String` | 329 | 0 | the file's own job | the detail line every hover shows, one renderer per declaration form: a local, a function, a global, a protocol member, a field, a type, a variant |
+| `pub fn type_to_string(ty: &Type) -> String` | 21 | 0 | shared machinery | a type spelled for a reader — the AST's own `Display`, with the richer per-variant arm rendering an enum hover wants |
+| `pub struct DocExport` | 147 | 0 | the file's own job | RFC-0065's `vyrn doc` model: an exported declaration's rendered signature and its `///` block, plus the module header doc |
+| `pub enum SemKind` | 53 | 0 | the file's own job | the semantic-token model the editor colours by |
+| `static MACRO_BUILTINS: &[&str]` | 42 | 0 | a copy of a table another module carries | thirty builtin free-function names, every one of them a row of `checker::RESERVED`. Its own comment says what it is: "Kept in sync with the checker's `RESERVED` list." It is not the whole of `RESERVED` — the method builtins, the type names, the contextual words and the sum constructors are excluded — so deleting it needs `RESERVED` to carry the column that says which is which |
+| `fn is_constructor_builtin(name: &str) -> bool` | 57 | 0 | the file's own job | the semantic tokens themselves: a symbol kind mapped to a colour, and every token classified |
+| `pub struct InlayHint` | 66 | 0 | the file's own job | the inferred types an inlay hint shows |
+| `pub struct RefRange` | 277 | 0 | the file's own job | find-references and rename: every occurrence of the name under the cursor, locals scoped to their function and declarations to the whole file |
+| `fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemMods)>` | 144 | 0 | the file's own job | one arm per way a token can be classified, in the order the editor needs them tried |
+| `struct BuiltinMethod` | 156 | 0 | a copy of a table another module carries | thirty-four builtin METHOD names with their hover text, and the per-receiver-type dispatch that decides which a `.` offers. Its own comment says the dispatch "mirrors the receiver-type dispatch in the checker's `call()`", and since RFC-0125 §3 M6 that dispatch is the seeded rows of `prelude.rs` — a row's parameter 0 IS the receiver type. The hover prose is this file's own and has no home on a row yet, which is what the deletion costs |
+| `mod tests` | 829 | 0 | tests | the file's own unit tests |
+
+##### The four slices taken (2026-09-10)
+
+**One: the projection guard moves to where the kernel is installed.**
+`movecheck::rfc0092_projection_sites_over_the_corpus` was red at the branch
+point — `left: 1, right: 0` on "an element store came back" — and not in the
+gate list. The site is `examples/mapkeyborrowed.vyrn:21`, `m[ks[i]] = i` on a
+borrowed array element.
+
+The measurement was wrong and the code was right. That file is the corpus's
+witness for this very rule: `vyrn-cli/tests/refusals.rs` pins it refused with
+"`ks[i]` may not be stored into `m`", so its site is the rule working. The
+guard could not see that from `vyrn-frontend`. The sentence is
+`vyrn_lower::kernel`'s, `vyrn-frontend` sits below `vyrn-lower`, and a `--lib`
+test there cannot install the judgment that writes it — `own::kernel_refusals`
+answers an empty list when nothing filled the slot. It counted LINKED roots and
+called them accepted.
+
+It is `vyrn-cli/tests/projections.rs` now. It installs the placer and the
+generator engine, skips every root the whole compiler refuses, and reads the
+sites off the linked program before the synthesis, so the JSON encoders
+`check_and_synthesize` appends are not counted as a reader's sites.
+
+| the measurement | in `vyrn-frontend` | in `vyrn-cli` |
+|---|---|---|
+| files walked | 303 | 303 |
+| accepted | 290 (linked, not checked) | 271 |
+| would not link | 6 | 1 |
+| refused | not asked | 31 |
+| stores over a heap type | 0 | 0 |
+| element stores over a heap type | 1 | 0 |
+| returns over a heap type | 0 | 0 |
+| element returns over a heap type | 0 | 0 |
+
+The unlinkable count falls from six to one because `vyrn_genwasm::install()` is
+what the generator examples need, and the frontend cannot call it either. So the
+move widens the corpus as well as correcting it. It runs in 142 s and is in the
+gate list.
+
+**Two: the `save` sugar names itself when its primitive is missing.**
+`save(path, value)` becomes `writeAtomic(path, toJson(value))` in the parser
+(RFC-0044). A module that never imported the primitive was told "call to unknown
+function `writeAtomic`" — a call the reader did not write and a name they had no
+reason to know.
+
+The migration table already exists for this shape and already knows how to write
+an import line, so the sentence is a row in it. `Gone` gains a third variant
+because a third thing puts an unresolvable name in front of a reader: a desugar
+wrote it. The sentence is true for both readers, the one who wrote the sugar and
+the one who wrote the primitive without importing it.
+
+```
+`writeAtomic` is `std/storage`'s, and `save(path, value)` writes through it
+— add `import { writeAtomic } from "std/storage"`
+```
+
+This slice ADDS 23 lines to `checker.rs` rather than deleting, and the reason is
+that it is a diagnostic and not a deletion. The corpus is silent about it: a
+corpus program that reached the row would not compile.
+
+**Three: the alias modules read the table that describes their names.**
+`Result`, `Ok`, `Err`, `Option`, `Some`, `None` were in two shapes.
+`symbols::BUILTIN_TYPES_AND_CTORS` carried the six with a kind and a hover line;
+`loader::builtin_alias_exports` carried the same six split across the two module
+names that spell them (RFC-0062). A test compared the lists, which is what a copy
+costs when nobody folds it.
+
+The split IS a column. Each row names its module now and the loader's function is
+the filter, so there is one list to disagree with itself and the test goes with
+the copy. The table stays in the editor's file because the hover prose is the
+bulk of it and has nowhere else to be, and because that is the direction
+`keyword_text` already reads in: the reader goes to the table.
+
+**Four: a pattern says what it binds, and the three askers read it.**
+`movecheck::pattern_bindings` and `checker::pattern_binders` were the same four
+arms twice, one returning `&str` and one cloning. `symbols::Lets::arm_pattern`
+wrote a third destructuring to reach the payload names it positions. Three
+statements of one fact about one type, and `ast::body_scope_descent!` had to
+reach across into `movecheck` to ask.
+
+`ast::Pattern::bindings` is the whole rule now. What the editor keeps is its own
+question: WHERE a binder is spelled. The variant head and the earlier payloads
+are the token-stream anchor that tells a binding site from a use, and no other
+reader wants it. The crate root's `pub use movecheck::pattern_bindings` goes too
+— its comment named codegen's lambda capture analysis as the reader and codegen
+has not called it for some time.
+
+**What the form census says about slice four.** RFC-0127's table counts every
+mention of every AST form per pass, and it moved by exactly what the fold
+deleted: `Pattern::Variant` 27 -> 25, `Pattern::Success` 21 -> 18,
+`Pattern::Failure` 15 -> 12, `Pattern::Other` 13 -> 10 — one arm out of the
+checker, one out of the move check, and one out of the editor for the three
+unspellable forms. 935 mentions -> 924. It is re-pinned in a commit of its own
+rather than the fold's, which is a rule this track broke and is recording.
+
+Two numbers in §3.1's prose were already stale when this track read them, and
+they are not this track's to fix: the range reads "13 to 129" where the table
+says 10 to 120, and §3.1.1's floor table reads `Stmt::Continue` at 15 and
+`Stmt::Let` at 34 where the census table says 14 and 31. The guard pins the main
+table and the total and nothing else, which is how the prose beside it drifted.
+Only the sentence this track made false was corrected.
+
+**What is left in `index_locals`, and it is the blocker the M6 record named.**
+267 lines. The descent is `ast::body_scope_descent!`'s and the pattern rule is
+`ast::Pattern::bindings`', so what is stated a second time is the PASS and the
+list of binding forms it knows, beside `checker::Scope`. A `bind` hook on the
+descent was priced and refused: `Stmt::Let` is the only site that carries
+`mutable`, the annotation and the synthetic-temporary skip, so the visitor keeps
+that arm whatever the hook does, and the hook would carry the form list into
+`ast.rs` to delete two arms. What deletes the section is `Recorded` carrying a
+binder's COLUMN, and the checker's AST nodes carry a line and no column. That is
+a parser question and this milestone is not the place.
+
+##### The numbers
+
+| measure | at `fb7fd95e` | after the four |
+|---|---|---|
+| `loader.rs` | 4,887 | 4,891 |
+| `symbols.rs` | 4,708 | 4,676 |
+| `project.rs` | 1,590 | 1,590 |
+| `checker.rs` | 15,080 | 15,090 |
+| `movecheck.rs` | 3,144 | 2,965 |
+| `ast.rs` | 1,998 | 2,019 |
+| `lib.rs` | 276 | 272 |
+| the three census files together | 11,185 | 11,157 |
+| the census's `Twice` kind | 272 | 267 |
+| the census's `Copy` kind | 243 | 198 |
+| the census's `Dead` kind | 0 | 0 |
+| statements of what a pattern binds | 3 | 1 |
+| statements of what the alias modules export | 2 | 1 |
+
+`movecheck.rs` falls 179 lines because the guard left the crate; 11 of them are
+the pattern rule and 168 are the measurement, which is now 215 lines of
+`vyrn-cli/tests/projections.rs`.
+
+##### The licence
+
+Every slice, before and after, over the same corpus. The baseline is `fb7fd95e`
+with the checker slice set aside as a patch, built release, run over every
+`.vyrn` under `examples/`, `site/`, `std/` and `compiler/vyrn-cli/tests/` with
+`VYRN_STD` and `VYRN_WEB` set, whole stderr and the exit code per file.
+
+| the measurement | count |
+|---|---|
+| programs checked | 419 |
+| accepted under both binaries | 340 |
+| refused under both binaries | 79 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+| `vyrn check` stderr, bytes differing | 0 |
+| `the_pinned_columns_over_the_corpus`, diagnostics | 3,245 |
+| `the_pinned_columns_over_the_corpus`, lines differing | 0 |
+
+Zero was the expectation for slices three and four: the two lists agreed and the
+three matches agreed arm for arm, so the one statement is what all of them
+already did. A disagreement would have been the finding and there was none.
+Slice two moves a sentence no corpus program reaches, and slice one moves no
+compiler code at all.
+
 
 ### The surface collapse — RFC-0126 §8, one line per step
 
