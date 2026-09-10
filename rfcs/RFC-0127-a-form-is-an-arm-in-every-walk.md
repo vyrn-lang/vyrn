@@ -212,19 +212,19 @@ one's.
 
 ### 3.2 The 9 declarations
 
-264 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
+247 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
 `ast.rs` by the test, so a tenth declaration form fails the census until it has
 a row.
 
 | declaration | parser | loader | checker | project | shared | editor | cli | all seven |
 |---|---|---|---|---|---|---|---|---|
-| `imports` | 1 | 19 | 0 | 0 | 0 | 5 | 1 | 26 |
-| `type_decls` | 2 | 16 | 4 | 1 | 0 | 14 | 0 | 37 |
-| `functions` | 2 | 18 | 16 | 1 | 1 | 12 | 14 | 64 |
-| `protocols` | 1 | 11 | 7 | 0 | 0 | 8 | 0 | 27 |
-| `contracts` | 0 | 11 | 4 | 0 | 0 | 0 | 0 | 15 |
+| `imports` | 1 | 18 | 0 | 0 | 0 | 5 | 1 | 25 |
+| `type_decls` | 2 | 14 | 4 | 1 | 0 | 14 | 0 | 35 |
+| `functions` | 2 | 14 | 16 | 1 | 1 | 12 | 14 | 60 |
+| `protocols` | 1 | 8 | 7 | 0 | 0 | 8 | 0 | 24 |
+| `contracts` | 0 | 7 | 4 | 0 | 0 | 0 | 0 | 11 |
 | `impls` | 1 | 7 | 13 | 3 | 0 | 6 | 0 | 30 |
-| `globals` | 1 | 12 | 14 | 1 | 2 | 2 | 0 | 32 |
+| `globals` | 1 | 9 | 14 | 1 | 2 | 2 | 0 | 29 |
 | `tests` | 0 | 6 | 2 | 1 | 1 | 1 | 5 | 16 |
 | `benches` | 0 | 6 | 2 | 1 | 1 | 1 | 6 | 17 |
 
@@ -233,6 +233,13 @@ those sixteen were the language's prelude, pushed one declaration at a time; it
 is a Vyrn source file the compiler embeds since RFC-0125 §3 M6, and the parser
 extends from it once. The row is the cheapest measurement of that move: nothing
 about the surface changed, and 14 mentions went.
+
+**The loader's six columns fell by 17 at RFC-0125 §3 M6's table slice.** Six
+readers in `loader.rs` wrote the five declaration lists out to ask what a
+module declares, and one more wrote all seven out to stamp each with its
+module. `loader::decls` and `loader::decl_modules_mut` state the two lists
+once, so a tenth declaration form now costs the loader two mentions rather
+than seven.
 
 `imports` is the only row with a zero in the checker, and that is RFC-0010
 working: the loader consumes an import and the checker never sees one.
