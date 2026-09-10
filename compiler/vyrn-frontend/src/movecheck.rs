@@ -195,6 +195,28 @@ enum Want {
 struct Run {
     projections: Vec<ProjectionSite>,
     fnval_clear: HashSet<String>,
+    /// The three things a [`Want::Lets`] run produces, for [`lets_outputs`].
+    arities: HashSet<usize>,
+    sigs: HashSet<String>,
+    stores: Vec<String>,
+}
+
+/// Everything one [`Want::Lets`] walk produces, one sorted line per row.
+///
+/// Three kinds of row and no fourth: the arity of a lambda whose signature the
+/// declaration does not name, the signature key of one it does, and the
+/// projection store whose desugared group the walk descends into instead of the
+/// index and the value. READER: `compiler/vyrn-cli/tests/letswalk.rs`, which
+/// prints these over the corpus so the walk can be rewritten against them
+/// (RFC-0125 Section 3 M3).
+pub fn lets_outputs(program: &Program) -> Vec<String> {
+    let r = run(program, Want::Lets);
+    let mut out: Vec<String> = r.arities.iter().map(|n| format!("arity {n}")).collect();
+    out.extend(r.sigs.iter().map(|k| format!("sig {k}")));
+    out.extend(r.stores);
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Whether the producer of an argument HANDS ITS ARGUMENT BACK — `blackBox`,
@@ -784,6 +806,7 @@ fn run(program: &Program, want: Want) -> Run {
         typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
+        stores: RefCell::new(Vec::new()),
     };
     let mut projections = Vec::new();
     // A projection site is stamped with the module of the body it was found in,
@@ -875,6 +898,9 @@ fn run(program: &Program, want: Want) -> Run {
     Run {
         projections,
         fnval_clear,
+        arities: lambda_arities,
+        sigs: lambda_sigs,
+        stores: mc.stores.into_inner(),
     }
 }
 
@@ -937,6 +963,8 @@ struct MoveCheck<'a> {
     /// measurement is a mode, not a second walk: the two places that would refuse
     /// are the two places that record.
     projections: Option<RefCell<Vec<ProjectionSite>>>,
+    /// Every projection store this walk descended into, for [`lets_outputs`].
+    stores: RefCell<Vec<String>>,
 }
 
 /// A binding that names a value somebody else owns (RFC-0089 rule 2).
@@ -1632,6 +1660,9 @@ impl MoveCheck<'_> {
                             if std::env::var_os("VYRN_PROJ_DUMP").is_some() {
                                 eprintln!("proj-store walked: {name} line {line}");
                             }
+                            self.stores
+                                .borrow_mut()
+                                .push(format!("store {name}:{line}"));
                             self.block(blk, scope);
                             return false;
                         }

@@ -711,6 +711,11 @@ fn movecheck_sections() -> Vec<Section> {
             "what a run is for, and one run's outputs",
         ),
         sec(
+            "pub fn lets_outputs(program: &Program) -> Vec<String> {",
+            Job,
+            "the three rows one `Want::Lets` walk produces. READER:              `compiler/vyrn-cli/tests/letswalk.rs`, which prints them over the              corpus so the walk can be rewritten against them",
+        ),
+        sec(
             "pub fn hands_back(name: &str) -> bool {",
             Job,
             "the producer screens and the verdict for one argument temporary. \
@@ -1071,7 +1076,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("project.rs", "shared machinery", 273, 0),
         ("project.rs", "tests", 309, 0),
-        ("movecheck.rs", "the file's own job", 1084, 0),
+        ("movecheck.rs", "the file's own job", 1102, 0),
         ("movecheck.rs", "a rule stated a second time", 0, 0),
         ("movecheck.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1080,7 +1085,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1357, 0),
+        ("movecheck.rs", "shared machinery", 1370, 0),
         ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
