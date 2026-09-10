@@ -1,14 +1,15 @@
 //! The structural census of the rest of `vyrn-frontend` — RFC-0125 §3 M6, the
 //! size strand.
 //!
-//! §2.7 counts the WHOLE compiler toward 40,000–45,000 lines. Four files carry
-//! a census already: the checker (`tests/checker_census.rs`), the ownership pass
-//! (`tests/refusals.rs`), the emitter (`tests/emitter_census.rs`) and the CLI
-//! (`tests/cli_census.rs`). Nobody had counted `vyrn-frontend` outside the
-//! checker, and it is 47,000 lines with the checker taken out. This is the same
-//! measurement for the three largest of the rest: `loader.rs` (4,891),
-//! `symbols.rs` (4,676) and `project.rs` (1,590) — 11,157 lines, a fifth of what
-//! is left. They were 11,955 when this census was written.
+//! §2.7 counts the WHOLE compiler toward 40,000–45,000 lines. Three other files
+//! carry a census: the checker (`tests/checker_census.rs`), the emitter
+//! (`tests/emitter_census.rs`) and the CLI (`tests/cli_census.rs`). Nobody had
+//! counted `vyrn-frontend` outside the checker, and it is 47,000 lines with the
+//! checker taken out. This is the same measurement for the four largest of the
+//! rest: `loader.rs`, `symbols.rs`, `project.rs` and `movecheck.rs`. The three
+//! stood at 11,955 lines when this census was written; `movecheck.rs` joined it
+//! from `tests/refusals.rs`, whose kind-only tiling of the same file it
+//! replaces, so one file is counted in one place.
 //!
 //! # The method, which is `checker_census.rs`'s, which is `refusals.rs`'s
 //!
@@ -674,11 +675,219 @@ fn project_sections() -> Vec<Section> {
 }
 
 /// The three files, with their sections.
+/// `movecheck.rs` — the ownership pass, RFC-0125 §2.7's delete key. It states
+/// no refusal of its own since RFC-0125 §3 M3's plumbing slice, so what is left
+/// is a driver, a memo, the rows the core reads and one walk that fills them.
+/// The sections, in file order.
+fn movecheck_sections() -> Vec<Section> {
+    use Kind::*;
+    vec![
+        sec(
+            "pub struct ProjectionSite {",
+            Job,
+            "the module head and RFC-0092's projection record. READER: \
+             `compiler/vyrn-cli/tests/projections.rs`, the regression guard \
+             `track-eg` moved out of this file — the kernel refuses these, so \
+             the guard asserts the corpus records none",
+        ),
+        sec(
+            "pub struct ArgTemp {",
+            Job,
+            "one call-argument position whose argument BUILT the value it \
+             hands over, and what a callee does with it. READER: \
+             `vyrn_lower::core`, which mints the row at the call it lowers",
+        ),
+        sec(
+            "pub struct Facts {",
+            Job,
+            "the fn-value signatures whose whole target set reads every \
+             position, and the key they meet under. READERS: `own::analyze` \
+             calls `facts`, and `vyrn_lower::core` asks `fn_sig_key` at a call \
+             through a fn value, where no capability row answers",
+        ),
+        sec(
+            "enum Want {",
+            Shared,
+            "what a run is for, and one run's outputs",
+        ),
+        sec(
+            "pub fn hands_back(name: &str) -> bool {",
+            Job,
+            "the producer screens and the verdict for one argument temporary. \
+             READER: `vyrn_lower::core` asks all four at the position it is \
+             lowering, so the rule is read at a position rather than copied to \
+             one",
+        ),
+        sec(
+            "fn views(name: &str) -> bool {",
+            Job,
+            "the lending builtins and the projection names, read off \
+             `prelude::signature` and the program's own `impl` places. \
+             READERS: `lends_result` above, which the core asks, and the walk",
+        ),
+        sec(
+            "fn in_source_order(diags: &mut [Diagnostic]) {",
+            Job,
+            "the one driver every tool uses, and the order a file's refusals \
+             come out in. READERS: `check_and_synthesize` (`lib.rs`), which is \
+             what `vyrn check` runs, and `symbols::analyze_inner`, which is \
+             what a keystroke runs",
+        ),
+        sec(
+            "pub fn comptime<T>(f: impl FnOnce() -> T) -> T {",
+            Job,
+            "the generator screen: a `gen fn`'s own program is checked without \
+             the kernel's list. READERS: `loader::run_generator` sets it, \
+             `vyrn_lower::lib` reads it",
+        ),
+        sec(
+            "pub type Verdict = Vec<(Option<String>, usize, String, String)>;",
+            Job,
+            "the kernel's per-body judgment memo (RFC-0125 §3 M3, the memo \
+             slice): the cache, its key, the declaration fingerprint it \
+             answers under and the tally. READERS: `vyrn_lower::core` opens it \
+             per analysis, `vyrn-lsp` arms it, `tests/kernel.rs` counts bodies \
+             with it",
+        ),
+        sec(
+            "fn subject(message: &str) -> Option<&str> {",
+            Shared,
+            "the binding a refusal is about, read off the sentence's first \
+             backtick — the suppression key `refusals` merges the two lists on",
+        ),
+        sec(
+            "fn run(program: &Program, want: Want) -> Run {",
+            Shared,
+            "the one walk: the capability tables, every body, the drains, and \
+             round forty-six's meet over the fn-value signatures",
+        ),
+        sec(
+            "struct MoveCheck<'a> {",
+            Shared,
+            "the pass's state: the scope stacks, the sinks, the recorded rows",
+        ),
+        sec(
+            "enum Borrow {",
+            Shared,
+            "the two states the walk reads a place in — lent, and a \
+             projection. The SENTENCES left with row 24: \
+             `core::BorrowKind::what` and `::fixes` word a borrow now, and \
+             nothing outside the kernel does",
+        ),
+        sec(
+            "pub fn root_of(path: &str) -> &str {",
+            Job,
+            "the base name of a place path. READERS: `vyrn_lower::core` at a \
+             loop variable's borrow, and `subject` above",
+        ),
+        sec(
+            "impl MoveCheck<'_> {",
+            Shared,
+            "one body, with its parameters and its return type",
+        ),
+        sec(
+            "    fn enter(&self) {",
+            Shared,
+            "the two scope stacks, read as one environment",
+        ),
+        sec(
+            "fn walk_writeback(&self, target: &str, value: &Expr, scope: &mut Vec<HashSet<String>>) {",
+            Shared,
+            "the store whose value hands the place back, which records no take",
+        ),
+        sec(
+            "    fn borrow_of(&self, name: &str) -> Option<Borrow> {",
+            Shared,
+            "the borrow table and the type reading",
+        ),
+        sec(
+            "    fn store(",
+            Shared,
+            "what a store records: the projection instrument's store half",
+        ),
+        sec(
+            "    fn borrow_from(&self, value: &Expr) -> Option<Borrow> {",
+            Shared,
+            "the borrow status a `let` of a value gives its binding — the \
+             borrow table's producer, and no refusal of its own",
+        ),
+        sec(
+            "    fn payload_binding(",
+            Shared,
+            "what a pattern's binders name, and whether an iterable is a place",
+        ),
+        sec(
+            "    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {",
+            Shared,
+            "the first borrow a returned expression yields — the projection \
+             instrument's return half",
+        ),
+        sec(
+            "    fn note_returned_projection(&self, e: &Expr, line: usize) {",
+            Job,
+            "RFC-0092's instrument. READER: `projection_sites`, and through it \
+             `tests/projections.rs`",
+        ),
+        sec(
+            "fn block(&self, b: &Block, scope: &mut Vec<HashSet<String>>) -> bool {",
+            Shared,
+            "a block, and whether it diverges",
+        ),
+        sec(
+            "fn stmt(&self, s: &Stmt, scope: &mut Vec<HashSet<String>>) -> bool {",
+            Shared,
+            "the walk over statements: it writes the two records in the same \
+             arm it walks",
+        ),
+        sec(
+            "fn expr(&self, e: &Expr, scope: &mut Vec<HashSet<String>>) {",
+            Shared,
+            "the walk over expressions: the same traversal does both jobs",
+        ),
+        sec(
+            "pub fn mentions_place(e: &Expr, base: &str) -> bool {",
+            Job,
+            "whether a stored value mentions the place it is stored into. \
+             READERS: `vyrn_lower::core` at five stores and \
+             `vyrn_codegen::direct` at four",
+        ),
+        sec(
+            "pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {",
+            Job,
+            "what an expression names, and on which of its paths. READERS: \
+             `vyrn_lower::typed`'s must-use judgment asks all three of \
+             `sub_blocks`, `stmt_mentions` and `paths`; `checker.rs` asks \
+             `mentions` for the second `modify` argument",
+        ),
+        sec(
+            "fn store_path(e: &Expr) -> Option<String> {",
+            Shared,
+            "the place an expression names, as the store arms spell it",
+        ),
+        sec(
+            "fn sinks(decl: &Declared, name: &str, i: usize) -> bool {",
+            Shared,
+            "whether a builtin's parameter takes its argument for good — read \
+             off `prelude::signature` and `prelude::rebuilds`, where the rule \
+             is stated once for this pass and the core alike",
+        ),
+        sec(
+            "pub fn element_path(e: &Expr) -> Option<(String, String)> {",
+            Job,
+            "the place spellings every rule above compares. READERS: \
+             `vyrn_lower::core`, `vyrn_codegen::direct` and `checker.rs` all \
+             ask `place_path`; the core asks `element_path` beside it",
+        ),
+        sec("mod tests {", Tests, "the pass's own unit tests"),
+    ]
+}
+
 fn files() -> Vec<(&'static str, Vec<Section>)> {
     vec![
         ("loader.rs", loader_sections()),
         ("symbols.rs", symbols_sections()),
         ("project.rs", project_sections()),
+        ("movecheck.rs", movecheck_sections()),
     ]
 }
 
@@ -862,6 +1071,17 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("project.rs", "shared machinery", 273, 0),
         ("project.rs", "tests", 309, 0),
+        ("movecheck.rs", "the file's own job", 1084, 0),
+        ("movecheck.rs", "a rule stated a second time", 0, 0),
+        ("movecheck.rs", "a path only a deleted route reached", 0, 0),
+        (
+            "movecheck.rs",
+            "a copy of a table another module carries",
+            0,
+            0,
+        ),
+        ("movecheck.rs", "shared machinery", 1357, 0),
+        ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
 }

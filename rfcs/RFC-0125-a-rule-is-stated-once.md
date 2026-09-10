@@ -25603,6 +25603,190 @@ engine's preopened directory, so its output path has to be inside the checkout;
 `out/` is gitignored and is the one the workflow uses. Its five subdirectories
 must exist first, as the file's own doc comment says.
 
+#### What `movecheck.rs` is, with a reader against every part (2026-09-10, `track-ei`)
+
+`track-dt` censused this file by KIND — is this a rule the kernel gives, a rule
+only the checker gives, a menu, a row, machinery — and every rule kind has been
+empty since the plumbing slice. A census whose rule columns all read zero
+measures nothing, so the first slice asked the frontend census's question
+instead: who READS this section. The tiling moves out of `tests/refusals.rs`
+and into `tests/frontend_census.rs` beside `loader.rs`, `symbols.rs` and
+`project.rs`, with a reader named against every part and the diagnostic column
+that says what the three empty kind columns were saying. `movecheck.rs` holds
+no `Diagnostic::error` and no `Diagnostic::warning`, and the census asserts it.
+One file is now counted in one place.
+
+**The count found two sections with no reader at all, and three more dead
+things inside sections that had one.** Each is a slice below. Nothing here is a
+rule moving to another pass: every rule left this file before this track, and
+what this track deletes is what the rules left behind.
+
+| slice | what went | lines |
+|---|---|---|
+| the site record | RFC-0089 Phase 4a's `OwningSite`, `owning_sites`, `Want::Sites`, the sink, thirteen `site(..)` calls, `capture_site`, `lambda_base`, six tests, `root_var`, `Scopes::frame_of`, `Scopes::depth` | 322 |
+| the walk's dead state | `reads` and `read_of`, `arm_binders`, `continue_seen`, `param_ix` | 84 |
+| the call arm | three of its four branches, and `names_a_constructor` | 65 |
+| the store record | the three `projections.is_some()` guards become one screen at the top | +3 |
+| the borrow | four variants with three `String` payloads become two variants, `Copy` | 8 |
+
+**The site record was an instrument that outlived its measurement.**
+`owning_sites` answered one question — how many places Phase 4b's analysis has
+to be CORRECT at — and 4b enforces at every one of them. The count was spent
+the day it did. What stood was a mode on the walk, a sink, thirteen calls
+threaded through `stmt` and `expr`, a capture instrument with the lambda frame
+stack it needed, and six tests, one of them an ignored corpus measurement no
+gate runs. Its only readers were its own tests. `root_var` fell with the
+`Field` arm's capture bookkeeping, and `Scopes::frame_of` and `Scopes::depth`
+in `declared.rs` fell with `capture_site`, their only caller.
+
+**Four pieces of walk state were written at every body and read nowhere.** A
+`reads` stack in lockstep with `borrows`, an `arm_binders` stack pushed and
+popped at every match arm and every `if let`, a `continue_seen` flag every loop
+saved and restored around its body, and a `param_ix` map built per body. Each
+one's reader was a refusal: the menu that named where a borrow was bound,
+`check_handover`, `check_loop_reuse`, and the exclusivity rule. Every reader
+left and the state stayed. `enter` and `bind` push two stacks now, not three.
+
+**Three of the four branches at a call argument had nothing in them.** The
+`consume` branch was `if let Expr::Var { name: v, .. } = arg { if
+!self.names_a_constructor(v) {} }` — an `if` with an empty body. The
+constructor branch computed a place path, a borrow and a refusal verdict,
+discarded all three, and `continue`d a loop with nothing after the chain. The
+write-back branch was a comment. Every one of the three is a rule the kernel
+states now: the take at a `consume` parameter, the borrow a constructor
+position refuses (row 19), and the receiver a rebuilding row hands back (row
+26). So the chain is the one condition it always was, and a constructor call
+stops paying a `place_path`, a `borrow_of` and a `type_of` per argument for an
+answer nothing reads.
+
+**`store` was already a mode and did not say so.** Its three remaining
+statements were each inside `if self.projections.is_some()`. With the
+instrument off it read an element path, asked the checker for a type, read a
+place path, looked a borrow up and returned having recorded nothing — and both
+walks a compile runs are that case, because `refusals` runs `own::analyze`,
+which runs the facts walk, and neither records a projection. The screen moves
+to the top of the function, where it names what the body is. **This is not a
+speed change and is not claimed as one**: interleaved, best of seven, three
+programs per run, 66 ms before and 65 ms after, with a noise band of 25 ms.
+
+**A borrow has two states.** `Borrow` had four variants and three of them
+carried a `String`: the name a menu had to spell. Not one payload is read, and
+`Read`, `Modify` and `Element` are never told apart — the walk asks
+`borrow_of(..).is_some()` and, in `note_returned_projection`, `b !=
+Borrow::Projection`. So the enum says what the walk reads, `Lent` or
+`Projection`, and it is `Copy`: four pattern binders and the scope lookup stop
+cloning, and a `for` over a place stops calling `place_path` to build a name
+nobody asks for.
+
+**The licence, for every slice.** `vyrn check` over the whole corpus — 280
+roots under `examples/`, `std/`, `site/` and `site/app/`, plus the 34 programs
+of `tests/refusals` and the 9 of `tests/unlicensed`, 323 programs, whole
+standard error and every exit code — is byte-identical against the branch
+point, **0 refusals lost / 0 gained**. `vyrn why --memory` over the 209 roots
+of `examples/` is byte-identical. Both were run after each of the five code
+slices, not once at the end.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 323 | 323 |
+| refused | 77 | 77 |
+| `vyrn check`, whole stderr and every exit code | — | byte-identical |
+| `vyrn why --memory`, 209 roots | — | byte-identical |
+| the residue ratchet | engine 172 clean / 3 leaking, route 172 clean / 3 leaking, 0 failed | the same |
+| the kernel corpus | 177 programs, 27,637 instances accepted, 0 refused, 0 unlowered | the same |
+| `projections --ignored`: store / element store / element return / return | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| the same, the scalar sites the rule does not reach | 42, 83, 3, 33 | 42, 83, 3, 33 |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable | byte-identical |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | 176 examples, `rfcs/census/wasm-sha256.tsv` untouched | |
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 2,965 to **2,489**;
+`compiler/vyrn-cli/tests/refusals.rs` 2,943 to **2,523**;
+`compiler/vyrn-frontend/src/declared.rs` down 13.
+
+**The censuses.** The frontend census gains `movecheck.rs` and grows by the
+tiling it took over. Per kind: the file's own job 1,050 to **1,084** — the
+module head moves into `ProjectionSite`'s section when `OwningSite`'s goes —
+shared machinery 1,551 to **1,357**, tests 207 to **48**, a path only a deleted
+route reached 157 to **0**, and the two other kinds still zero. The three
+census headers that named `tests/refusals.rs` for this file —
+`checker_census.rs`, `emitter_census.rs`, `cli_census.rs` — are re-pinned. The
+form census (RFC-0127 §3.1) moves by 12 mentions over eight rows, 925 to
+**913**.
+
+**One rule of this repository was broken, and it is worth saying so.** A census
+the change moves is re-pinned in the commit that moves it. Three of the five
+code slices each moved the same eight rows of the form census's `movecheck`
+column, so those three commits leave
+`the_form_census_is_what_the_rfc_records` red and a sixth commit fixes it. The
+intermediate counts are not values anybody would pin: the arm mentions were on
+their way from 925 to 913 and stopped nowhere on purpose.
+
+#### What `movecheck.rs` is now, and what blocks the rest (2026-09-10, `track-ei`)
+
+2,489 lines in eight parts and its tests. Every part has a reader outside the
+file. The two that could still go name exactly what stops them.
+
+| part | lines | reader | blocker |
+|---|---|---|---|
+| the refusal driver — `refusals`, `in_source_order`, `subject` | 128 | `check_and_synthesize` (`lib.rs`), which is `vyrn check`; `symbols::analyze_inner`, which is a keystroke | none. It is the one entry point a tool uses, and RFC-0125 §3 M3's accumulation slice put it here on purpose |
+| the generator screen — `comptime`, `in_comptime` | 19 | `loader::run_generator` sets it, `vyrn_lower::lib` reads it | none |
+| the judgment memo — `Verdict` through `declaration_fingerprint` | 221 | `vyrn_lower::core` opens it per analysis, `vyrn-lsp` arms it, `tests/kernel.rs` counts bodies with it | none |
+| the argument rows — `ArgTemp`, `ArgVerdict`, `hands_back`, `call_may_forward`, `lends_result`, `arg_verdict`, `views` | 226 | `vyrn_lower::core`, at the position it is lowering | none. They are READ at a position rather than copied to one, which is the shape §2.7 asks for |
+| the fn-value meet — `Facts`, `facts`, `fn_sig_key` | 33 | `own::analyze` calls `facts`; the core asks `fn_sig_key` at a call through a fn value, where no capability row answers | none |
+| the path algebra — `root_of`, `mentions_place`, `sub_blocks`, `stmt_mentions`, `mentions`, `paths`, `element_path`, `place_path`, `store_path`, `index_text` | 353 | `vyrn_lower::core`, `vyrn_codegen::direct`, `checker.rs`, and `vyrn_lower::typed`'s must-use judgment | it is not a rule and it is stated once. It is in the wrong FILE — how this language spells a place is the AST's fact, not the move check's — and moving it is a rename, not a deletion |
+| RFC-0092's instrument — `ProjectionSite`, `projection_sites`, `note_projection`, `note_returned_projection`, `returned_borrow`, `store` | 261 | `compiler/vyrn-cli/tests/projections.rs`, which is in the gate list | **the guard is independent of the rule it guards, and that is the whole of its worth.** The kernel refuses a projection store; this counts what the corpus still has. Delete it and the kernel is its own guard. The witness is `examples/mapkeyborrowed.vyrn`: the element store the instrument reads back is the one the kernel refuses, so a hole in the kernel's screen would be invisible to every other gate |
+| the walk — `run`, `Want`, `MoveCheck`, `Borrow`, `impl MoveCheck`, `enter`, `walk_writeback`, `borrow_of`, `type_of`, `borrow_from`, `payload_binding`, `block`, `stmt`, `expr`, `sinks` | 1,200 | itself: it fills the meet and the instrument above | **it is two walks in one, and neither output is a rule.** Verified by reading every write it makes: on `Want::Lets` the only things it produces are the lambda arities and the typed-lambda signature keys the meet needs, and the calls into `crate::project::store_index` that build the `a[i] = v` desugar in `project`'s memo. On `Want::Projections` it produces the instrument's rows and nothing else. A `Want::Lets` walk needs no borrow table, no return type and no divergence answer; it needs the descent `ast::body_scope_descent!` already states, the declared parameter type at a call, and the type of a local for the desugar. Splitting it is a rewrite and not a deletion, so it is the next track's slice and not this one's |
+| the file's own tests | 48 | | |
+
+Two numbers size what is left. The walk is 1,200 of the file's 2,489 lines, and
+261 more are the instrument it fills for one ignored test. The other six parts
+— 780 lines — are read by the core, the emitter, the checker, the loader, the
+language server and the driver, and none of them states a rule twice.
+
+#### Gates (2026-09-10, `track-ei`)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Over the six commits of
+this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok, 0 warnings |
+| `cargo test -p vyrn-cli`, no filter | 644 passed, 0 failed, 45 ignored |
+| `kernel` `--ignored`, release | 1, 59 s — 177 programs, 27,637 instances accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 25 s — 13,514 switch sites, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 31 s — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2, 33 s — 30,185 functions judged, 0 unattributed |
+| `fixtures` `--ignored`, release | 1, 28 s |
+| `testsweep` `--ignored`, release | 1, 53 s |
+| `projections` `--ignored`, release | 1, 65 s — 303 files, 271 accepted, 0 store / 0 element store / 0 element return / 0 return, the four scalar counts unmoved |
+| `coredrive` `--ignored`, release | 1, 83 s — 170 programs, 21,753 bodies, 168 of 170 byte-identical either way |
+| `cargo test -p vyrn-frontend` | 1,108 passed, 0 failed, 3 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,155 passed, 0 failed |
+| `vyrn-lsp`'s own manifest | 100 passed, 0 failed |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2, 328 s |
+| the residue ratchet `--ignored`, release | 1, 345 s — engine 172 clean and 3 leaking, route the same, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 176 examples, `rfcs/census/wasm-sha256.tsv` untouched |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 32 s |
+| `vyrn doc --std -o docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable |
+| `the_pinned_columns_over_the_corpus` | green, unmoved |
+| `the_pinned_columns_of_the_refusal_corpora` | green, unmoved |
+| `frontend_census`, `forms` | re-pinned, and named above |
+| `refusals`, `checker_census`, `emitter_census`, `cli_census`, `lowered`, `lowered_dump`, `rfc_index` | green |
+| `vyrn check` stderr and exit codes over the corpus | 323 programs, byte-identical against the branch point, 77 refused before and after |
+| `vyrn why --memory` over `examples/` | 209 programs, byte-identical against the branch point |
+
+No red at the end. Three commits of the six leave
+`the_form_census_is_what_the_rfc_records` red on purpose, and the sixth is its
+re-pin — see the record above.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the

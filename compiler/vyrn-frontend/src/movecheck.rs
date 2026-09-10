@@ -14,9 +14,7 @@
 //!
 //! **This pass carries types** (RFC-0089 M2, Phase 4a). It keeps a
 //! [`crate::declared`] type environment beside its scope stack and can answer
-//! `owns_heap` at every binding, argument, return, store, iterable and capture —
-//! see [`owning_sites`]. The [`streams`] sub-module below is the one part still
-//! name-based and typeless.
+//! `owns_heap` at every binding, argument, return, store, iterable and capture.
 //!
 //! **It enforces RFC-0089 rules 1–3** (Phase 4b, completed by 4b-2). Three
 //! families of error, on top of the `consume` family above:
@@ -46,44 +44,6 @@ use crate::ast::*;
 use crate::declared::{Declared, Scopes};
 use crate::diagnostics::Diagnostic;
 use crate::own::DropKind;
-
-/// One place a value crosses a boundary RFC-0089 rule 1 governs: a binding, an
-/// argument, a return, a store, a `for` iterable or a lambda capture.
-///
-/// Phase 4a records these and enforces nothing. The count is what sizes 4b: it
-/// is how many places 4b's analysis has to be *correct* at, which is a much
-/// larger number than the places today's analysis reports on.
-#[derive(Clone, Debug)]
-pub struct OwningSite {
-    /// Which boundary — `bind`, `arg`, `return`, `assign`, `assign-global`,
-    /// `field`, `element`, `iterate`, `literal` or `capture`.
-    pub kind: &'static str,
-    pub line: usize,
-    /// The type moved, or `?` where the declared-types reading cannot name it.
-    pub ty: String,
-    /// Whether the value is read out of a **named place** (a variable or a
-    /// field) rather than produced fresh. A place read is what rule 1 turns into
-    /// a move, so this is the half of the count 4b must get right; a fresh value
-    /// has no earlier owner and can only transfer.
-    pub place: bool,
-}
-
-impl OwningSite {
-    /// Whether the declared-types reading could not name the type. 4b has to
-    /// decide what an unknown means, and `own.rs`'s answer — leak, never a wrong
-    /// free — is not available to it: a skipped move is a use-after-free.
-    pub fn unknown(&self) -> bool {
-        self.ty == "?"
-    }
-}
-
-/// Every [`OwningSite`] in `program`.
-///
-/// Runs the same walk [`check_accum`] runs, with recording on, and discards the
-/// diagnostics. 4a answers the question at every site; 4b enforces on the answer.
-pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
-    run(program, Want::Sites).sites
-}
 
 /// One place RFC-0092's rule reaches: a **projection** — a field, an element or
 /// a pattern binder over a place — read out and put somewhere the frame does not
@@ -226,7 +186,6 @@ pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) ->
 /// for it — so neither record is built unless somebody asked.
 #[derive(PartialEq, Clone, Copy)]
 enum Want {
-    Sites,
     Lets,
     /// RFC-0092 M0: record every projection the rule would refuse, refuse none.
     Projections,
@@ -234,7 +193,6 @@ enum Want {
 
 /// One run's outputs.
 struct Run {
-    sites: Vec<OwningSite>,
     projections: Vec<ProjectionSite>,
     fnval_clear: HashSet<String>,
 }
@@ -819,15 +777,9 @@ fn run(program: &Program, want: Want) -> Run {
                 .collect(),
         )),
         ret: RefCell::new(Type::Unit),
-        reads: RefCell::new(Scopes::new(HashMap::new())),
-        lambda_base: RefCell::new(Vec::new()),
-        arm_binders: RefCell::new(Vec::new()),
-        continue_seen: std::cell::Cell::new(false),
-        sites: (want == Want::Sites).then(|| RefCell::new(Vec::new())),
         cur_fn: RefCell::new(String::new()),
         writeback: RefCell::new(None),
         lets: want == Want::Lets,
-        param_ix: RefCell::new(HashMap::new()),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
@@ -921,7 +873,6 @@ fn run(program: &Program, want: Want) -> Run {
         }
     }
     Run {
-        sites: mc.sites.map(RefCell::into_inner).unwrap_or_default(),
         projections,
         fnval_clear,
     }
@@ -951,35 +902,8 @@ struct MoveCheck<'a> {
     /// see [`MoveCheck::enter`]. A borrow is second-class: observable, passable,
     /// but never stored, captured or returned.
     borrows: RefCell<Scopes<Option<Borrow>>>,
-    /// What each borrow READS — the place's path and the binding's line — in
-    /// lockstep with `borrows`. The fix for a borrow a rebuilding call takes
-    /// is a `.copy()` where the borrow is bound. A write to that place ends
-    /// the borrow, and the kernel is the pass that says so now (RFC-0125 §3
-    /// M3, row 05).
-    reads: RefCell<Scopes<Option<(String, usize)>>>,
     /// The return type of the function being checked, for rule 3.
     ret: RefCell<Type>,
-    /// The frame depth at each enclosing lambda's parameter frame. A name that
-    /// resolves BELOW the innermost of these is a capture, not a local.
-    lambda_base: RefCell<Vec<usize>>,
-    /// The pattern binders of each open `match`/`if let` arm, innermost last.
-    /// A binder over an owned scrutinee binds a [`Borrow::Projection`], but the
-    /// fact it names is not "this frame still owns the aggregate" — the
-    /// scrutinee handed the payload up and the arm's value carries it out. A
-    /// `let t = d.title` binds the same row with the dangerous meaning, so
-    /// [`MoveCheck::check_handover`] tells them apart by this mark.
-    arm_binders: RefCell<Vec<HashSet<String>>>,
-    /// Set when the walk under a loop body reached a `continue`. `continue`
-    /// starts the NEXT iteration rather than leaving the loop, so it must not
-    /// count as the divergence [`MoveCheck::check_loop_reuse`] may skip on —
-    /// a body every path of which LEAVES (`break`/`return`/`panic`) runs at
-    /// most once; one that continues does not. Each loop saves and resets it
-    /// around its body walk, so an inner loop's `continue` stays the inner
-    /// loop's.
-    continue_seen: std::cell::Cell<bool>,
-    /// Where recorded [`OwningSite`]s go, or `None` on the ordinary check path —
-    /// which is what keeps a build and a keystroke paying for nothing.
-    sites: Option<RefCell<Vec<OwningSite>>>,
     /// The declaring `Stmt::Let` of every name in scope, in lockstep with `vars`
     /// — 0 for a parameter, a loop variable, a pattern binder or a lambda
     /// parameter. **Every** binder is recorded, so an inner `let s` shadowing an
@@ -998,8 +922,6 @@ struct MoveCheck<'a> {
     /// call-graph sets went (RFC-0125 §3 M3, the wrapped lend), which made a
     /// sink stand in for a mode.
     lets: bool,
-    /// The index of each parameter of the function under check.
-    param_ix: RefCell<HashMap<String, usize>>,
     /// Round forty-six: the arity of every lambda the walk met. A lambda has
     /// no capability rows and no retention rows, so a signature any lambda
     /// could inhabit (matched by arity — the declared reading does not type
@@ -1019,24 +941,17 @@ struct MoveCheck<'a> {
 
 /// A binding that names a value somebody else owns (RFC-0089 rule 2).
 ///
-/// The variants exist for the diagnostic, not for the rule: every borrow is
-/// refused in the same three positions, and each variant names a different fix.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// Two states, because the walk asks two questions and no more: is this name a
+/// borrow at all, and is the borrow a PROJECTION. There were four, one per
+/// fix a menu offered, and each carried the name that fix had to spell. The
+/// menus left with the refusals: `core::BorrowKind::what` and `::fixes` word a
+/// borrow now, and nothing outside the kernel does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Borrow {
-    /// A `read` or `share` parameter — the caller still owns it. Carries the
-    /// PARAMETER's name, which is not always the name at the offending line: a
-    /// local inherits the borrow (`let t = s`), and Phase 9 recorded that the
-    /// menu then offered ``declare the parameter `t: consume ..` `` for a `t`
-    /// that is a local. `vyrn fix` never applies that entry, so it was wording
-    /// and not correctness — and wording a reader has to see through.
-    Read(String),
-    /// A `modify` parameter — exclusive in-place access, still the caller's.
-    /// Carries the parameter's name, for [`Borrow::Read`]'s reason.
-    Modify(String),
-    /// A `for` variable over a container the loop does NOT own, carrying that
-    /// container's name so the diagnostic can spell the consuming form. A loop
+    /// A `read`, `modify` or `share` parameter, or a `for` variable over a
+    /// container the loop does NOT own. The caller still owns it, and a loop
     /// over a `consume`d container or over a temporary binds an owner instead.
-    Element(String),
+    Lent,
     /// A local bound to a field or element read: `let t = r.s`. A place owns its
     /// contents (rule 4), so reading one out does not take it.
     Projection,
@@ -1064,12 +979,6 @@ impl MoveCheck<'_> {
     /// node addresses are the reclamation key (Phase 4c).
     fn body(&self, params: &[Param], ret: &Type, body: &Block) {
         let f_params = params;
-        *self.param_ix.borrow_mut() = f_params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.name.clone(), i))
-            .collect();
-
         let mut scope: Vec<HashSet<String>> =
             vec![f_params.iter().map(|p| p.name.clone()).collect()];
         // Module state is the outermost frame, the parameters the next one — the
@@ -1090,45 +999,31 @@ impl MoveCheck<'_> {
                     match p.capability {
                         Capability::Consume => None,
                         _ if !self.decl.owns_heap(&p.ty) => None,
-                        Capability::Modify => Some(Borrow::Modify(p.name.clone())),
-                        _ => Some(Borrow::Read(p.name.clone())),
+                        _ => Some(Borrow::Lent),
                     },
                 );
             }
         }
         *self.ret.borrow_mut() = ret.clone();
-        self.lambda_base.borrow_mut().clear();
         self.block(body, &mut scope);
     }
 
-    /// Push a frame on ALL THREE stacks. They are read as one environment — a
-    /// name's type, whether it is a borrow, and where it was declared — so they
-    /// are never entered apart.
+    /// Push a frame on BOTH stacks. They are read as one environment — a name's
+    /// type and whether it is a borrow — so they are never entered apart.
     fn enter(&self) {
         self.vars.borrow_mut().enter();
         self.borrows.borrow_mut().enter();
-        self.reads.borrow_mut().enter();
     }
 
     fn exit(&self) {
         self.vars.borrow_mut().exit();
         self.borrows.borrow_mut().exit();
-        self.reads.borrow_mut().exit();
     }
 
     /// Bind `name` with its type and its borrow status.
     fn bind(&self, name: &str, ty: Option<Type>, borrow: Option<Borrow>) {
         self.vars.borrow_mut().bind(name, ty);
         self.borrows.borrow_mut().bind(name, borrow);
-        self.reads.borrow_mut().bind(name, None);
-    }
-
-    /// The place a borrow of `value` reads, when the value spells one: `h.meta`,
-    /// `xs[i]`, or a whole borrowed name.
-    fn read_of(value: &Expr) -> Option<String> {
-        place_path(value)
-            .or_else(|| element_path(value))
-            .map(|(_, path)| path)
     }
 
     /// Every name `e` reads, so a `return` or a `spawn` can give up all of them.
@@ -1155,25 +1050,9 @@ impl MoveCheck<'_> {
         *self.writeback.borrow_mut() = None;
     }
 
-    /// Whether `name` is a NULLARY constructor rather than a binding.
-    ///
-    /// `None`, `Nothing`, `Leaf` — a variant with no payload parses as a bare
-    /// name, and a bare name is what every rule about ownership keys on. It is
-    /// a value with no owner: nothing binds it, nothing releases it, and two
-    /// mentions of it are two values (RFC-0126 §8.8). Reading it as a binding
-    /// made `take(None)` twice a use after a take.
-    ///
-    /// The builtins are named beside the declared ones because `Option` and
-    /// `Result` are not `Type::Enum` declarations, so `Declared::constructs`
-    /// does not answer for their variants.
-    fn names_a_constructor(&self, name: &str) -> bool {
-        self.decl.constructs(name)
-            || matches!(name, "None" | "Some" | "Ok" | "Err" | "Success" | "Failure")
-    }
-
     /// Whether `name` names a borrow here.
     fn borrow_of(&self, name: &str) -> Option<Borrow> {
-        self.borrows.borrow().get(name).cloned().flatten()
+        self.borrows.borrow().get(name).copied().flatten()
     }
 
     /// The type of `e` here, or `None` where nothing names it.
@@ -1226,7 +1105,7 @@ impl MoveCheck<'_> {
                 let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                 self.enter();
                 for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
-                    self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                    self.bind(b, tys.get(i).cloned().flatten(), borrow);
                 }
                 // A block arm (RFC-0118) yields nothing to have a type.
                 let t = arm.body.as_expr().and_then(|e| self.type_of(e));
@@ -1285,11 +1164,21 @@ impl MoveCheck<'_> {
         line: usize,
         outlives: bool,
     ) {
+        // Everything the four screens here used to guard — a scalar copies, a
+        // borrow does not move, a projection does not move — decided a
+        // `Consumed` entry, and it went with the table (RFC-0125 §3 M3, the
+        // table slice). What is left is RFC-0092's instrument, and an
+        // instrument is a MODE: the check walk and the facts walk record
+        // nothing, so they ask nothing. The screen is here rather than at the
+        // ten call sites because every one of them would need it.
+        if self.projections.is_none() {
+            return;
+        }
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
         if let Some((_, path)) = element_path(value) {
-            if self.projections.is_some() && outlives {
+            if outlives {
                 let ty = self.type_of(value);
                 self.note_projection("elem-store", &path, into(), ty, line);
             }
@@ -1300,19 +1189,12 @@ impl MoveCheck<'_> {
         let Some((root, path)) = place_path(value) else {
             return;
         };
-        // RFC-0092 M0's instrument, kept as M1's regression guard: it records
-        // what the branch below now refuses, so a site that reappears is counted.
-        // Recorded BEFORE the `owns_heap` guard, so a scalar field is counted and
-        // told apart rather than lost.
-        if self.projections.is_some() && path != root && outlives && self.borrow_of(&root).is_none()
-        {
+        // Recorded BEFORE the `owns_heap` guard, so a scalar field is counted
+        // and told apart rather than lost.
+        if path != root && outlives && self.borrow_of(&root).is_none() {
             let ty = self.type_of(value);
             self.note_projection("store", &path, into(), ty, line);
         }
-        // Everything the four screens below this used to guard — a scalar
-        // copies, a borrow does not move, a projection does not move — decided
-        // a `Consumed` entry, and it went with the table (RFC-0125 §3 M3, the
-        // table slice). What is left of this walk is the instrument.
     }
 
     /// The borrow status a `let` of `value` gives its binding.
@@ -1498,7 +1380,7 @@ impl MoveCheck<'_> {
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                     self.enter();
                     for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
-                        self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                        self.bind(b, tys.get(i).cloned().flatten(), borrow);
                     }
                     // A block arm (RFC-0118) is never a return value.
                     let r = arm.body.as_expr().and_then(|e| self.returned_borrow(e));
@@ -1592,46 +1474,6 @@ impl MoveCheck<'_> {
         });
     }
 
-    /// Record one site RFC-0089 rule 1 governs. `declared` overrides the
-    /// expression's own type, for a `let` that carries an annotation.
-    ///
-    /// A no-op unless [`owning_sites`] asked for the record, so the ordinary
-    /// check path never asks `owns_heap` at all.
-    fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>) {
-        let Some(sink) = &self.sites else { return };
-        // A literal has no earlier owner, so nothing about it can be a move. The
-        // filter is here rather than at each call site because every one of them
-        // would need it.
-        if declared.is_none()
-            && matches!(
-                e,
-                Expr::Str(_) | Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_)
-            )
-        {
-            return;
-        }
-        let ty = match declared {
-            Some(t) => Some(t.clone()),
-            None => self.type_of(e),
-        };
-        let place = matches!(e, Expr::Var { .. } | Expr::Field { .. });
-        match ty {
-            Some(t) if self.decl.owns_heap(&t) => sink.borrow_mut().push(OwningSite {
-                kind,
-                line,
-                ty: t.to_string(),
-                place,
-            }),
-            None => sink.borrow_mut().push(OwningSite {
-                kind,
-                line,
-                ty: "?".to_string(),
-                place,
-            }),
-            Some(_) => {}
-        }
-    }
-
     /// Returns whether this block **diverges** — every path out of it leaves via
     /// `return`/`break`/`continue` (RFC-0060). A statement after a diverging one
     /// is unreachable, so it is not checked (use-after-move there is not an
@@ -1673,7 +1515,6 @@ impl MoveCheck<'_> {
                 // initializer yields — read against the PRE-binding environment,
                 // so `let x = x + b` resolves the old `x`.
                 let bty = ty.clone().or_else(|| self.type_of(value));
-                self.site("bind", *line, value, bty.as_ref());
                 // The `a[i].f = v` desugar's round-trip temp is exempt from
                 // rule 2: the place is read out, mutated, and written straight
                 // back to where it came from, so it is not a store of a borrow
@@ -1705,12 +1546,7 @@ impl MoveCheck<'_> {
                     *line,
                     hoisted.is_some(),
                 );
-                let is_borrow = borrow.is_some();
                 self.bind(name, bty, borrow);
-                if is_borrow {
-                    let read = Self::read_of(value).map(|p| (p, *line));
-                    self.reads.borrow_mut().bind(name, read);
-                }
                 scope.last_mut().unwrap().insert(name.clone());
                 false
             }
@@ -1722,12 +1558,6 @@ impl MoveCheck<'_> {
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
                 // so 4b treats a store into it differently from a local's.
                 let global = self.globals.contains(name) && !Self::in_scope(scope, name);
-                self.site(
-                    if global { "assign-global" } else { "assign" },
-                    *line,
-                    value,
-                    None,
-                );
                 let into = || {
                     if global {
                         format!("module state `{name}`")
@@ -1750,11 +1580,7 @@ impl MoveCheck<'_> {
                     // record still holds and releases again — `out = v` inside
                     // `if let Some(v) = o` is the same store one keyword over.
                     // One question, asked at both spellings.
-                    let read = b
-                        .as_ref()
-                        .and_then(|_| Self::read_of(value).map(|p| (p, *line)));
                     self.borrows.borrow_mut().rebind(name, b);
-                    self.reads.borrow_mut().rebind(name, read);
                 }
                 false
             }
@@ -1764,7 +1590,6 @@ impl MoveCheck<'_> {
                 value,
                 line,
             } => {
-                self.site("field", *line, value, None);
                 self.walk_writeback(&format!("{name}.{field}"), value, scope);
                 self.store(
                     value,
@@ -1813,7 +1638,6 @@ impl MoveCheck<'_> {
                     }
                 }
                 self.expr(index, scope);
-                self.site("element", *line, value, None);
                 self.expr(value, scope);
                 self.store(value, &|| format!("`{name}`"), *line, true);
                 // A map takes its KEY. Both backends write the key pointer into
@@ -1845,7 +1669,6 @@ impl MoveCheck<'_> {
             }
             Stmt::Return { value, line } => {
                 if let Some(e) = value {
-                    self.site("return", *line, e, None);
                     self.expr(e, scope);
                     self.note_returned_projection(e, *line);
                 }
@@ -1854,14 +1677,7 @@ impl MoveCheck<'_> {
             // `break`/`continue` (RFC-0060) consume nothing but terminate the
             // path — code after them in the same block is unreachable.
             Stmt::Break { .. } => true,
-            // A `continue` also diverges here, but it jumps to the NEXT
-            // iteration: the loop body re-runs. Marking it is what stops the
-            // loop arms from counting it as the "runs at most once"
-            // divergence that skips the next-iteration reuse check.
-            Stmt::Continue { .. } => {
-                self.continue_seen.set(true);
-                true
-            }
+            Stmt::Continue { .. } => true,
             Stmt::If {
                 cond,
                 then_block,
@@ -1929,13 +1745,9 @@ impl MoveCheck<'_> {
                     // Recording it is the point: an unrecorded binder falls
                     // through to whatever the enclosing scope calls that name
                     // (`own.rs`'s shadowing lesson).
-                    self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                    self.bind(b, tys.get(i).cloned().flatten(), borrow);
                 }
-                let binders: HashSet<String> =
-                    pattern.bindings().into_iter().map(str::to_string).collect();
-                self.arm_binders.borrow_mut().push(binders);
                 let then_div = self.block(then_block, scope);
-                self.arm_binders.borrow_mut().pop();
                 self.exit();
                 scope.pop();
                 let else_div = match else_block {
@@ -1946,9 +1758,7 @@ impl MoveCheck<'_> {
             }
             Stmt::While { cond, body, .. } => {
                 self.expr(cond, scope);
-                let outer_continue = self.continue_seen.replace(false);
                 let _ = self.block(body, scope);
-                self.continue_seen.set(outer_continue);
                 false
             }
             // A `for` loop consumes like a `while`: the iterable is read once,
@@ -1957,11 +1767,10 @@ impl MoveCheck<'_> {
                 var,
                 iter,
                 body,
-                line,
                 consuming,
+                ..
             } => {
                 self.expr(iter, scope);
-                self.site("iterate", *line, iter, None);
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
                 // RFC-0089 rule 2: the loop variable is a borrow only while the
                 // container outlives the loop. A `consume`d container is the
@@ -1971,7 +1780,7 @@ impl MoveCheck<'_> {
                 let borrow = (!*consuming
                     && self.iterable_is_a_place(iter)
                     && elem.as_ref().is_some_and(|t| self.decl.owns_heap(t)))
-                .then(|| Borrow::Element(place_path(iter).map(|(r, _)| r).unwrap_or_default()));
+                .then_some(Borrow::Lent);
                 // RFC-0092 M5, census "U4's price". `for k in m.keys()` walks a
                 // TEMPORARY, and until here nothing released it. It is Phase
                 // 10a's row for an `if let` over a temporary, at the second
@@ -2007,16 +1816,9 @@ impl MoveCheck<'_> {
                 // exit gives back the visited and the unvisited elements alike,
                 // each exactly once.
                 self.enter();
-                let is_borrow = borrow.is_some();
                 self.bind(var, elem, borrow);
-                if is_borrow {
-                    let read = place_path(iter).map(|(_, p)| (format!("{p}[..]"), *line));
-                    self.reads.borrow_mut().bind(var, read);
-                }
-                let outer_continue = self.continue_seen.replace(false);
                 let _ = self.block(body, scope);
                 self.exit();
-                self.continue_seen.set(outer_continue);
                 false
             }
             // A `panic(..)` statement diverges (RFC-0079), which here means
@@ -2044,42 +1846,10 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Record a lambda capture: a name read inside a lambda that resolves to a
-    /// frame BELOW the lambda's own parameter frame.
-    ///
-    /// It counts mentions, not distinct names — a value captured and read twice
-    /// is two sites, because 4b checks each read.
-    fn capture_site(&self, name: &str, line: usize) {
-        if self.sites.is_none() {
-            return;
-        }
-        let inside = match self.lambda_base.borrow().last() {
-            Some(&base) => base,
-            None => return,
-        };
-        let (frame, ty) = {
-            let v = self.vars.borrow();
-            (v.frame_of(name), v.get(name).cloned().flatten())
-        };
-        if frame.is_some_and(|f| f < inside) {
-            self.site(
-                "capture",
-                line,
-                &Expr::Var {
-                    name: name.to_string(),
-                    line,
-                },
-                ty.as_ref(),
-            );
-        }
-    }
-
     fn expr(&self, e: &Expr, scope: &mut Vec<HashSet<String>>) {
         match e {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-            Expr::Var { name, line } => {
-                self.capture_site(name, *line);
-            }
+            Expr::Var { .. } => {}
             Expr::Unary { expr, .. } => self.expr(expr, scope),
             Expr::Binary { lhs, rhs, .. } => {
                 self.expr(lhs, scope);
@@ -2093,12 +1863,9 @@ impl MoveCheck<'_> {
             // A place chain asks ONE consumption question, of the whole path.
             // Walking into the root instead would ask it of `er` and refuse
             // `er.next` after `consume er.node`, which is the case RFC-0093
-            // exists to allow. The root still gets its capture bookkeeping.
+            // exists to allow.
             Expr::Field { expr, .. } => match place_path(e) {
-                Some(_) => {
-                    let (root, rline) = root_var(e);
-                    self.capture_site(root, rline);
-                }
+                Some(_) => {}
                 None => {
                     // RFC-0114 R1′ was recorded here: a receiver with no
                     // name — `.byteLength` on a String temporary, `.length`
@@ -2122,14 +1889,12 @@ impl MoveCheck<'_> {
             // where the record owns it, exactly as an argument does.
             Expr::StructLit { name, fields, line } => {
                 for (f, v) in fields {
-                    self.site("literal", *line, v, None);
                     self.expr(v, scope);
                     self.store(v, &|| format!("the field `{name}.{f}`"), *line, true);
                 }
             }
             Expr::TryConstruct { name, args, line } => {
                 for a in args {
-                    self.site("literal", *line, a, None);
                     self.expr(a, scope);
                     self.store(a, &|| format!("`{name}`"), *line, true);
                 }
@@ -2142,19 +1907,10 @@ impl MoveCheck<'_> {
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
-                    let binders: Vec<String> = arm
-                        .pattern
-                        .bindings()
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect();
-                    for (i, b) in binders.iter().enumerate() {
-                        scope.last_mut().unwrap().insert(b.clone());
-                        self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                    for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
+                        scope.last_mut().unwrap().insert(b.to_string());
+                        self.bind(b, tys.get(i).cloned().flatten(), borrow);
                     }
-                    self.arm_binders
-                        .borrow_mut()
-                        .push(binders.iter().map(|b| b.to_string()).collect());
                     match &arm.body {
                         ArmBody::Expr(body) => self.expr(body, scope),
                         // The statements walk as statements, inside the same
@@ -2163,7 +1919,6 @@ impl MoveCheck<'_> {
                             self.block(b, scope);
                         }
                     }
-                    self.arm_binders.borrow_mut().pop();
                     self.exit();
                     scope.pop();
                 }
@@ -2217,79 +1972,29 @@ impl MoveCheck<'_> {
                             }
                         }
                     }
-                    self.site("arg", *line, arg, None);
                     self.expr(arg, scope);
-                    if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
-                        // A NULLARY constructor is a value with no owner, not a
-                        // name (RFC-0126 §8.8): `take(None)` twice hands the
-                        // callee two values, and reading the second as a use of
-                        // the first refused a program every engine runs.
-                        if let Expr::Var { name: v, .. } = arg {
-                            if !self.names_a_constructor(v) {}
-                        }
-                    } else if self.decl.constructs(name) {
-                        // A variant constructor is a literal that reads like a
-                        // call: the value it builds holds the argument and
-                        // outlives the call, exactly as an array literal does.
-                        // A whole OWNED name moves in; a PROJECTION or a
-                        // borrowed name is REFUSED (exit-residue rounds seven
-                        // and ten): the constructor position was the one door
-                        // a borrow could smuggle through into a value the
-                        // machinery releases as owned — `JStr(sel.key)` freed
-                        // the selection key under `q.sels`, and admitting
-                        // constructor-built argument temporaries at all
-                        // requires the door closed. The store rule's `.copy()`
-                        // menu applies, exactly as it does everywhere else.
-                        // A `consume` take is a TRANSFER — the hole machinery
-                        // accounts the field, and the constructed value owns
-                        // what it took — so only a bare projection or borrow
-                        // is refused.
-                        let taken = matches!(arg, Expr::Consume { .. });
-                        if let Some((root, path)) = place_path(arg) {
-                            let borrowed = self.borrow_of(&root).is_some();
-                            // A borrow put into a constructor is the kernel's
-                            // refusal now (RFC-0125 §3 M3, row 19), and this
-                            // pass records nothing beside it: the value the
-                            // constructor makes holds the argument and
-                            // outlives the call, and the door refuses it.
-                            let refused = !taken
-                                && (path != root || borrowed)
-                                && self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t));
-                            if !refused && root == path {
-                                // Round thirty-three: the move enters the
-                                // consumption map, exactly as `store()`'s
-                                // does — rule 1 refuses reuse, and Rule N's
-                                // recorder can finally SEE a constructor take
-                                // on one branch (`ops.push(Set(newAttrs))`
-                                // under an `if` leaked the untaken path's
-                                // value, std/html's whole differ). A scalar
-                                // copies, exactly as everywhere else.
-                                // A compiler-synthesized `@`-name is its
-                                // template's business, not rule 1's.
-                                if root.starts_with('@')
-                                    || !self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t))
-                                {
-                                    continue;
-                                }
-                            }
-                        }
-                    } else if self.sinks(name, i)
-                        && i == 0
-                        && store_path(arg).as_deref() == self.writeback.borrow().as_deref()
+                    // A builtin whose parameter declares `consume` takes its
+                    // argument, and rule 1 governs the take exactly as it
+                    // governs `xs = [.., v]`. Three positions stand aside, and
+                    // each is somebody else's rule now:
+                    //
+                    //   * a `consume` parameter of a declared function, which
+                    //     the kernel takes at the call;
+                    //   * a variant constructor's argument, which the kernel
+                    //     refuses when it is a borrow or a projection and takes
+                    //     when it is a whole owned name (RFC-0125 §3 M3, row
+                    //     19);
+                    //   * the receiver of a write-back statement
+                    //     (`xs = xs.push(v)`), which the call hands back into
+                    //     the same place, so nothing moves. Whether that
+                    //     receiver was itself a borrow is the kernel's question
+                    //     at the `let` (row 26).
+                    if caps.and_then(|c| c.get(i)) != Some(&Capability::Consume)
+                        && !self.decl.constructs(name)
+                        && self.sinks(name, i)
+                        && !(i == 0
+                            && store_path(arg).as_deref() == self.writeback.borrow().as_deref())
                     {
-                        // The receiver of a write-back statement (`xs = xs.push(v)`,
-                        // `s.dense.push(i)`): the call takes the buffer and hands
-                        // it back through the result, into the same place, so
-                        // rule 1 has nothing to record. Whether the receiver is
-                        // a borrow — `let mut mt = h.meta` then `mt.push(x)`
-                        // rebuilds a buffer `h.meta` still owns — is the
-                        // KERNEL's question now (RFC-0125 §3 M3, row 26): it
-                        // asks it of the value, at the `let` where the borrow
-                        // was read, with the same menu.
-                    } else if self.sinks(name, i) {
-                        // A builtin whose parameter declares `consume`. Rule 1
-                        // governs it exactly as it governs `xs = [.., v]`, which
-                        // is what it means.
                         self.store(
                             arg,
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),
@@ -2301,7 +2006,6 @@ impl MoveCheck<'_> {
             }
             Expr::ArrayLit { elems, line } => {
                 for e in elems {
-                    self.site("literal", *line, e, None);
                     self.expr(e, scope);
                     self.store(e, &|| "the array literal".to_string(), *line, true);
                 }
@@ -2309,7 +2013,6 @@ impl MoveCheck<'_> {
             Expr::MapLit { entries, line } => {
                 for (k, v) in entries {
                     self.expr(k, scope);
-                    self.site("literal", *line, v, None);
                     self.expr(v, scope);
                     self.store(k, &|| "the map literal".to_string(), *line, true);
                     self.store(v, &|| "the map literal".to_string(), *line, true);
@@ -2336,11 +2039,6 @@ impl MoveCheck<'_> {
                     scope.last_mut().unwrap().insert(p.clone());
                     self.bind(p, None, None);
                 }
-                // Everything read below this frame is a capture (RFC-0089's
-                // no-retain rule is about exactly these).
-                self.lambda_base
-                    .borrow_mut()
-                    .push(self.vars.borrow().depth() - 1);
                 // Rule 3 reaches closures (exit-residue round nine): a
                 // lambda's result is its CALLER's, and a captured heap value
                 // returned raw hands out storage the capture block still owns
@@ -2355,15 +2053,13 @@ impl MoveCheck<'_> {
                         self.block(b, scope);
                     }
                 }
-                self.lambda_base.borrow_mut().pop();
                 self.exit();
                 scope.pop();
             }
             // `spawn f(args)` moves arguments exactly like a direct call: a
             // `consume` parameter takes ownership across the task boundary.
-            Expr::Spawn { args, line, .. } => {
+            Expr::Spawn { args, .. } => {
                 for arg in args {
-                    self.site("arg", *line, arg, None);
                     self.expr(arg, scope);
                 }
             }
@@ -2743,19 +2439,6 @@ pub fn place_path(e: &Expr) -> Option<(String, String)> {
     }
 }
 
-/// The root variable of a place chain, with its own line.
-///
-/// [`MoveCheck::expr`]'s `Field` arm asks the consumption question of the whole
-/// path, so the capture bookkeeping the root would have got from the recursive
-/// walk is done here instead.
-fn root_var(e: &Expr) -> (&str, usize) {
-    match e {
-        Expr::Field { expr, .. } => root_var(expr),
-        Expr::Var { name, line } => (name, *line),
-        _ => ("", 0),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2801,165 +2484,6 @@ mod tests {
                 Some(Capability::Consume)
             );
             assert!(!sinks(&decl, name, 0));
-        }
-    }
-
-    // ---- RFC-0089 Phase 4a: the site census ------------------------------
-
-    fn sites_of(src: &str) -> Vec<OwningSite> {
-        let p = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        owning_sites(&p)
-    }
-
-    fn kinds(src: &str, kind: &str) -> Vec<String> {
-        sites_of(src)
-            .into_iter()
-            .filter(|s| s.kind == kind)
-            .map(|s| s.ty)
-            .collect()
-    }
-
-    #[test]
-    fn a_binding_of_an_owning_value_is_a_site() {
-        // The annotation answers where the initializer cannot: `[]` is three
-        // shapes, and only `Array<Int64>` says which.
-        let src = "fn main() -> Int64 { let a: Array<Int64> = [] return 0 }";
-        assert_eq!(kinds(src, "bind"), vec!["Array<Int64>"]);
-        // A scalar is not a site at all, and neither is a literal.
-        assert!(sites_of("fn main() -> Int64 { let i = 1 return i }").is_empty());
-    }
-
-    #[test]
-    fn an_argument_a_return_and_a_store_are_sites() {
-        let src = "type R = { s: String } \
-                   fn take(s: String) -> String { return s } \
-                   fn main() -> Int64 { let mut r = R { s: \"\" } let t = take(\"a\" + \"b\") \
-                   r.s = t return 0 }";
-        assert_eq!(kinds(src, "arg"), vec!["String"]);
-        assert_eq!(kinds(src, "return"), vec!["String"]);
-        assert_eq!(kinds(src, "field"), vec!["String"]);
-    }
-
-    #[test]
-    fn a_loop_variable_takes_its_element_type() {
-        // Without `elem_of` every loop variable is unknown, and so is everything
-        // read out of one after it.
-        let src = "fn main() -> Int64 { let xs: Array<String> = [] \
-                   for x in xs { print(x) } return 0 }";
-        assert_eq!(kinds(&src.to_string(), "iterate"), vec!["Array<String>"]);
-        assert_eq!(kinds(src, "arg"), vec!["String"]);
-    }
-
-    #[test]
-    fn a_capture_is_a_site_and_a_parameter_is_not() {
-        // The lambda's own parameter resolves in the lambda's frame; `s` does not.
-        let src = "fn apply(f: fn(String) -> Int64, x: String) -> Int64 { return f(x) } \
-                   fn main() -> Int64 { let s = \"a\" + \"b\" \
-                   return apply(p -> p.byteLength + s.byteLength, \"c\") }";
-        assert_eq!(kinds(src, "capture"), vec!["String"]);
-    }
-
-    #[test]
-    fn a_pattern_payload_takes_the_scrutinee_s_type() {
-        // 4a recorded this binder as UNKNOWN and left 4b to decide what an
-        // unknown means. 4b names it instead: an `Option<String>` matched by
-        // `Some(v)` binds a `String`, so the site is typed rather than guessed
-        // at. The widening is movecheck-only — `own.rs` decides `free` with the
-        // reading it had.
-        let src = "fn main() -> Int64 { let o: Option<String> = None \
-                   match o { Some(v) => print(v), None => print(\"\") } return 0 }";
-        let sites = sites_of(src);
-        assert!(sites.iter().all(|s| !s.unknown()), "{sites:?}");
-        assert_eq!(kinds(src, "arg"), vec!["String"]);
-    }
-
-    /// RFC-0089 Phase 4a's deliverable: how many places Phase 4b's analysis has
-    /// to be **correct** at, over the whole corpus.
-    ///
-    /// It parses each file ALONE — no loader, no linking — for the same reason
-    /// the M0 gate does: one number per source line rather than one per import
-    /// graph. A cross-module call's return type is therefore unknown here, which
-    /// is why the unknown column is an upper bound.
-    ///
-    /// Ignored by default: it reads the repository, so it is a measurement, not
-    /// a unit test. Run it with
-    /// `cargo test -p vyrn-frontend movecheck::tests::rfc0089 -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn rfc0089_owning_sites_over_the_corpus() {
-        let mut files = Vec::new();
-        crate::own::tests::sources("examples", &mut files);
-        crate::own::tests::sources("std", &mut files);
-        files.sort();
-
-        let mut per_file: Vec<(String, usize, usize, usize)> = Vec::new();
-        let mut by_kind: BTreeMap<&'static str, [usize; 4]> = BTreeMap::new();
-        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
-        let (mut total, mut places, mut unknowns, mut parsed) = (0, 0, 0, 0);
-        // An unknown that reads a NAMED PLACE is the dangerous cell: it is where
-        // a move can be missed. An unknown that is a call result is mostly this
-        // measurement's own artifact — a file parsed alone cannot see an imported
-        // function's return type.
-        let mut unknown_places = 0;
-
-        for path in &files {
-            let Ok(src) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let Ok(tokens) = crate::lexer::lex(&src) else {
-                continue;
-            };
-            let (program, errs) = crate::parser::parse_accum(tokens);
-            if !errs.is_empty() {
-                continue;
-            }
-            parsed += 1;
-            let sites = owning_sites(&program);
-            let (mut p, mut u) = (0, 0);
-            for s in &sites {
-                let row = by_kind.entry(s.kind).or_default();
-                row[0] += 1;
-                if s.place {
-                    row[1] += 1;
-                    p += 1;
-                }
-                if s.unknown() {
-                    row[2] += 1;
-                    u += 1;
-                    if s.place {
-                        row[3] += 1;
-                        unknown_places += 1;
-                    }
-                } else {
-                    *by_type.entry(s.ty.clone()).or_default() += 1;
-                }
-            }
-            total += sites.len();
-            places += p;
-            unknowns += u;
-            if !sites.is_empty() {
-                let name = path.file_name().unwrap().to_string_lossy().to_string();
-                per_file.push((name, sites.len(), p, u));
-            }
-        }
-
-        per_file.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        println!("corpus: {} files ({parsed} parsed)", files.len());
-        println!("sites: {total} — {places} read a named place, {unknowns} of unknown type");
-        println!("unknown AND a named place: {unknown_places}");
-        println!("by kind (kind: total, place, unknown, unknown+place)");
-        for (k, r) in &by_kind {
-            println!("  {k:>14}: {:>5} {:>5} {:>5} {:>5}", r[0], r[1], r[2], r[3]);
-        }
-        println!("by type");
-        let mut types: Vec<_> = by_type.into_iter().collect();
-        types.sort_by(|a, b| b.1.cmp(&a.1));
-        for (t, c) in types.iter().take(20) {
-            println!("  {c:>5}  {t}");
-        }
-        println!("per file (file: total, place, unknown)");
-        for (f, t, p, u) in &per_file {
-            println!("  {t:>5} {p:>5} {u:>5}  {f}");
         }
     }
 }

@@ -797,19 +797,6 @@ impl<T> Scopes<T> {
         }
     }
 
-    /// The index of the frame that binds `name`, innermost first.
-    ///
-    /// A lambda capture is exactly "resolves to a frame below the lambda's own",
-    /// so the frame index is what tells a capture from a local.
-    pub fn frame_of(&self, name: &str) -> Option<usize> {
-        self.0.iter().rposition(|frame| frame.contains_key(name))
-    }
-
-    /// How many frames are on the stack.
-    pub fn depth(&self) -> usize {
-        self.0.len()
-    }
-
     /// Drop every frame above the first `n`, so one outermost frame (module
     /// state, say) is built once and reused for every function body.
     pub fn truncate(&mut self, n: usize) {
