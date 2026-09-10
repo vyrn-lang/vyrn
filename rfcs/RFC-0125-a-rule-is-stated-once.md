@@ -26600,6 +26600,55 @@ process and is not a number the tree can reproduce. The corpus timing test
 (`benching.rs`, ignored, run by CI's native bench harness step) runs audited
 now, so the audit is the gate.
 
+**The one route's cost on the store-heavy rows (2026-09-10, `perf-push`).**
+
+Decision: the receiver's address is the runtime's `dst` as well as its `src`,
+because step 6 already states that every array function reads all of `src`
+before it stores.
+
+Went: `arr_recv`'s destination slot, and with it the write-back copy in
+`push`, `reserve`, `clear`, `append` and `copyFrom`. Stayed: the two runtime
+calls per push, because the runtime is a module and a call is what a module
+costs; and wasm2c's call-depth counter, because it is the native binary's only
+stack-exhaustion trap.
+
+Lines: `direct.rs` 17,658 to 17,660. Refusals: 0 lost / 0 gained. Manifest:
+138 rows of 178, every program that pushes.
+
+Licence: `cargo test -p vyrn-cli` 646 passed, 0 failed. The residue ratchet,
+both engines, 172 clean / 3 leaking / 0 failed — the baseline. `VYRN_LEAK_CHECK=1
+vyrn bench --check` over `benching`, `membench`, `smallarray` and `revcomp`,
+exit 0 each. `VYRN_WASM_MANIFEST=check` green after `write`. `cargo fmt --all
+--check` and the LSP's, clean.
+
+Findings: min ns, one machine, one day. The columns are `b412ca52` before the
+text-IR route went, `d0a316d3` with the bench-body leak fixed, and this commit.
+
+| bench | pre-cg | main | here |
+|---|---|---|---|
+| `benching.vyrn` "push 1000" | 541 | 5,712 | 2,577 |
+| `revcomp.vyrn` "2000000 bases" | 1,997,400 | 21,451,200 | 10,363,500 |
+| `smallarray.vyrn` "array push16" | 73 | 111 | 51 |
+| `smallarray.vyrn` "array indexed sum" | 76 | 296 | 238 |
+| `smallarray.vyrn` "smallarray push16" | 61 | 141 | 142 |
+| `smallarray.vyrn` "smallarray indexed sum" | 116 | 337 | 336 |
+
+The cause was measured on the generated C, not read. One `push` cost three
+calls: `arrPush`, `free`, and a `memmove` of the 24-byte header out of the
+temp. Removing the temp took the row 6.52 to 3.47 us; spelling the same copy
+as three loads and stores took it to 5.08, so the temp and not the `memmove`
+carried the cost. Removing `free` moved nothing (7.47, slower, layout). The
+two `SmallArray` rows do not share the cause: `sa_push` is a second emitter
+and it is untouched.
+
+Left: wasm2c's `FUNC_PROLOGUE` counts call depth on Windows, where the signal
+handler is not available. It is worth 3.47 to 1.89 us on this row. Turning it
+off needs `WASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION`, and that deletes
+the trap that catches a recursion the language's own counter does not count —
+an emitted drop over a long list, which no frame budget bounds. Blocked by
+that question, not by the flag. Left with it: the remaining 4.8x on "push
+1000", which is two runtime calls per element against inline code.
+
 ## Open questions
 
 1. **The kernel's own trust.** It is a few hundred lines and it is the trusted
