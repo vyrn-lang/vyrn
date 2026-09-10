@@ -1058,22 +1058,6 @@ impl MoveCheck<'_> {
         *self.writeback.borrow_mut() = None;
     }
 
-    /// Whether `name` is a NULLARY constructor rather than a binding.
-    ///
-    /// `None`, `Nothing`, `Leaf` — a variant with no payload parses as a bare
-    /// name, and a bare name is what every rule about ownership keys on. It is
-    /// a value with no owner: nothing binds it, nothing releases it, and two
-    /// mentions of it are two values (RFC-0126 §8.8). Reading it as a binding
-    /// made `take(None)` twice a use after a take.
-    ///
-    /// The builtins are named beside the declared ones because `Option` and
-    /// `Result` are not `Type::Enum` declarations, so `Declared::constructs`
-    /// does not answer for their variants.
-    fn names_a_constructor(&self, name: &str) -> bool {
-        self.decl.constructs(name)
-            || matches!(name, "None" | "Some" | "Ok" | "Err" | "Success" | "Failure")
-    }
-
     /// Whether `name` names a borrow here.
     fn borrow_of(&self, name: &str) -> Option<Borrow> {
         self.borrows.borrow().get(name).cloned().flatten()
@@ -1994,77 +1978,28 @@ impl MoveCheck<'_> {
                         }
                     }
                     self.expr(arg, scope);
-                    if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
-                        // A NULLARY constructor is a value with no owner, not a
-                        // name (RFC-0126 §8.8): `take(None)` twice hands the
-                        // callee two values, and reading the second as a use of
-                        // the first refused a program every engine runs.
-                        if let Expr::Var { name: v, .. } = arg {
-                            if !self.names_a_constructor(v) {}
-                        }
-                    } else if self.decl.constructs(name) {
-                        // A variant constructor is a literal that reads like a
-                        // call: the value it builds holds the argument and
-                        // outlives the call, exactly as an array literal does.
-                        // A whole OWNED name moves in; a PROJECTION or a
-                        // borrowed name is REFUSED (exit-residue rounds seven
-                        // and ten): the constructor position was the one door
-                        // a borrow could smuggle through into a value the
-                        // machinery releases as owned — `JStr(sel.key)` freed
-                        // the selection key under `q.sels`, and admitting
-                        // constructor-built argument temporaries at all
-                        // requires the door closed. The store rule's `.copy()`
-                        // menu applies, exactly as it does everywhere else.
-                        // A `consume` take is a TRANSFER — the hole machinery
-                        // accounts the field, and the constructed value owns
-                        // what it took — so only a bare projection or borrow
-                        // is refused.
-                        let taken = matches!(arg, Expr::Consume { .. });
-                        if let Some((root, path)) = place_path(arg) {
-                            let borrowed = self.borrow_of(&root).is_some();
-                            // A borrow put into a constructor is the kernel's
-                            // refusal now (RFC-0125 §3 M3, row 19), and this
-                            // pass records nothing beside it: the value the
-                            // constructor makes holds the argument and
-                            // outlives the call, and the door refuses it.
-                            let refused = !taken
-                                && (path != root || borrowed)
-                                && self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t));
-                            if !refused && root == path {
-                                // Round thirty-three: the move enters the
-                                // consumption map, exactly as `store()`'s
-                                // does — rule 1 refuses reuse, and Rule N's
-                                // recorder can finally SEE a constructor take
-                                // on one branch (`ops.push(Set(newAttrs))`
-                                // under an `if` leaked the untaken path's
-                                // value, std/html's whole differ). A scalar
-                                // copies, exactly as everywhere else.
-                                // A compiler-synthesized `@`-name is its
-                                // template's business, not rule 1's.
-                                if root.starts_with('@')
-                                    || !self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t))
-                                {
-                                    continue;
-                                }
-                            }
-                        }
-                    } else if self.sinks(name, i)
-                        && i == 0
-                        && store_path(arg).as_deref() == self.writeback.borrow().as_deref()
+                    // A builtin whose parameter declares `consume` takes its
+                    // argument, and rule 1 governs the take exactly as it
+                    // governs `xs = [.., v]`. Three positions stand aside, and
+                    // each is somebody else's rule now:
+                    //
+                    //   * a `consume` parameter of a declared function, which
+                    //     the kernel takes at the call;
+                    //   * a variant constructor's argument, which the kernel
+                    //     refuses when it is a borrow or a projection and takes
+                    //     when it is a whole owned name (RFC-0125 §3 M3, row
+                    //     19);
+                    //   * the receiver of a write-back statement
+                    //     (`xs = xs.push(v)`), which the call hands back into
+                    //     the same place, so nothing moves. Whether that
+                    //     receiver was itself a borrow is the kernel's question
+                    //     at the `let` (row 26).
+                    if caps.and_then(|c| c.get(i)) != Some(&Capability::Consume)
+                        && !self.decl.constructs(name)
+                        && self.sinks(name, i)
+                        && !(i == 0
+                            && store_path(arg).as_deref() == self.writeback.borrow().as_deref())
                     {
-                        // The receiver of a write-back statement (`xs = xs.push(v)`,
-                        // `s.dense.push(i)`): the call takes the buffer and hands
-                        // it back through the result, into the same place, so
-                        // rule 1 has nothing to record. Whether the receiver is
-                        // a borrow — `let mut mt = h.meta` then `mt.push(x)`
-                        // rebuilds a buffer `h.meta` still owns — is the
-                        // KERNEL's question now (RFC-0125 §3 M3, row 26): it
-                        // asks it of the value, at the `let` where the borrow
-                        // was read, with the same menu.
-                    } else if self.sinks(name, i) {
-                        // A builtin whose parameter declares `consume`. Rule 1
-                        // governs it exactly as it governs `xs = [.., v]`, which
-                        // is what it means.
                         self.store(
                             arg,
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),

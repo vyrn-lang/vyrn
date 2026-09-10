@@ -795,9 +795,9 @@ fn movecheck_sections() -> Vec<Section> {
             "the store whose value hands the place back, which records no take",
         ),
         sec(
-            "    fn names_a_constructor(&self, name: &str) -> bool {",
+            "    fn borrow_of(&self, name: &str) -> Option<Borrow> {",
             Shared,
-            "a nullary constructor, the borrow table, and the type reading",
+            "the borrow table and the type reading",
         ),
         sec(
             "    fn store(",
@@ -1079,7 +1079,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1427, 0),
+        ("movecheck.rs", "shared machinery", 1362, 0),
         ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
