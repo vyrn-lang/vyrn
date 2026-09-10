@@ -406,14 +406,17 @@ enum InstRule {
 // than firing zero times — §3 M2's own precedent, applied to itself for the
 // second time.
 //
-// The SOLVER that replaced it is gone too (RFC-0125 §3 M3, the queue's reader).
-// `lower_with` read the placed release rows to queue those instances, and over
-// the corpus that queued 13 of them — every one an `Owned__Slots__release<T>`
-// — while the emitted wasm was byte-identical without them. With one emitter,
-// a declared release is emitted through the ordinary call path
-// (`direct.rs`'s `Rel::Call` parks the receiver and calls), which reaches the
-// body the way any written call does. So the worklist owes it nothing, and the
-// queue stopped reading a table §2.7 deletes.
+// The SOLVER that replaced it was deleted and is BACK (RFC-0125 §3 M3, the
+// hosts slice). `lower_with` reads the placed release rows to queue those
+// instances; the deletion measured that removing it moved no emitted byte and
+// concluded the worklist owed it nothing. The byte measurement was right and
+// the conclusion was not, and this file is why: it never called
+// `vyrn_lower::install`, so it had no placer, no placed release rows and no
+// instances to miss. Green here was not evidence. With the line in place the
+// backend monomorphizes 7 `Owned__Slots__release<T>` bodies of its own at
+// release sites the SOURCE never wrote, which is the note below, and RFC-0125
+// §2.3 puts that decision above the emitter. `vyrn-lower` already models the
+// teardown's generic declared release as an instantiation for the same reason.
 
 /// Which rule, if any, explains `a` against `b`. `None` means the gate fails.
 ///
@@ -578,6 +581,11 @@ fn gate() {
     // engine rather than the frontend's (RFC-0125 §3 M5). Without this every one
     // of them fails to link and the gate silently measures a smaller corpus.
     vyrn_genwasm::install();
+    // The lowering this gate compares a backend against has to be IN this
+    // process. Without it the placer never runs, `core::BODIES` stays empty and
+    // the backend answers every question here from the AST alone: the gate then
+    // measures one compiler against itself.
+    vyrn_lower::install();
     let mut t = Tally::default();
     // The residue, by the engine that answered and the kind of expression —
     // the axis RFC-0101 §3 M2c classified by hand and this milestone re-measured
@@ -1117,18 +1125,20 @@ fn gate() {
     // share of the residue is the class RFC-0101 §2.3 assigns to the backend on
     // purpose: the type of a release receiver or of a dispatched call the
     // emitter builds at an emit site, which is a fact about a wasm local rather
-    // than about a program. It was 299 while two clones were live, 109 once
-    // both were measured away, 72 once `peek` stopped deriving types and
-    // started reading the checker's record, and 46 once the driver started
-    // asking the core through `own::ReleasePlan::key_of` — a cloned loop body's
-    // statements are the rows' now, so no arm asks about their nodes. It is not
-    // waiting for a mechanism, and a milestone that drives it to zero is moving
-    // a decision INTO the form that §2.3 puts in the backend. Both bounds fail
-    // loudly rather than one: a rise means a new engine-built tree, a fall
-    // means §2.3 moved.
+    // than about a program. It is not waiting for a mechanism, and a milestone
+    // that drives it to zero is moving a decision INTO the form that §2.3 puts
+    // in the backend. Both bounds fail loudly rather than one: a rise means a
+    // new engine-built tree, a fall means §2.3 moved.
+    //
+    // IT IS 68, AND THE SERIES BEFORE IT WAS A DIFFERENT COMPILER. 299, 109, 72
+    // and 46 were all read in a process that never called `vyrn_lower::install`
+    // — no placer, no rows, and the AST dispatch answering everything. The 46
+    // was attributed to the driver asking the core; the driver did not run here
+    // at all. The band is the width the old one had, around the number this
+    // gate reads now that it compiles the way `vyrn run` compiles.
     assert!(
-        (32..=64).contains(&t.peek_off),
-        "`peek` answered {} questions about AST no instantiation holds. RFC-0125 §3 M3          measured this class at 46 and §2.3 owns every one of them; outside          32..64 the class has changed and the RFC's §2.3 leaves need re-reading",
+        (48..=96).contains(&t.peek_off),
+        "`peek` answered {} questions about AST no instantiation holds. RFC-0125 §3 M3          measured this class at 68 with the lowering installed and §2.3 owns every          one of them; outside 48..96 the class has changed and the RFC's §2.3          leaves need re-reading",
         t.peek_off
     );
 

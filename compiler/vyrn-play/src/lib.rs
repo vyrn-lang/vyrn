@@ -249,12 +249,20 @@ mod std_modules {
 /// The resolver holds `std/` and nothing else. A relative import has nowhere to
 /// go and says so; `std/` resolves against a root of `std`, which is what makes
 /// the keys `build.rs` wrote the ones the loader asks for.
+///
+/// THE LOWERING IS INSTALLED HERE, and this is the one place both entry points
+/// pass through. Without it the placer never runs, `core::BODIES` stays empty
+/// and the emitter's AST dispatch is the whole compiler — a second, weaker
+/// compiler on a shipping surface. A program `vyrn run` refuses, the page
+/// refuses, in the same sentence. The call writes five slots and is idempotent,
+/// so it costs a load nothing worth measuring.
 fn load(
     src: &str,
 ) -> (
     Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>,
     Vec<Diagnostic>,
 ) {
+    vyrn_lower::install();
     let opts = LoadOptions {
         std_root: Some("std".into()),
         aliases: Default::default(),
@@ -511,6 +519,82 @@ mod tests {
         let json = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), n) })
             .into_owned();
         assert!(json.contains("exceeds the input buffer"), "{json}");
+    }
+
+    /// The `main` `site/app/guidecode.vyrn` adds to every block, so what this
+    /// compiles is what the run link carries.
+    const MAIN_TAIL: &str = "\nfn main() -> Int64 {\n    print(demo())\n    return 0\n}\n";
+
+    /// Every guide program, as the page hands it over: the file plus the `main`
+    /// `guidecode.vyrn` appends.
+    ///
+    /// Skipped for the two reasons that file skips them (`guidePlayable`): a
+    /// block that imports a SIBLING is not one program, and the playground
+    /// takes one; a block with no `demo` is not what the appended `main` calls.
+    /// The generator chapter writes one of each.
+    fn guide_programs() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site/guide");
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(&dir).expect("read site/guide") {
+            let p = e.expect("a guide entry").path();
+            if p.extension().is_none_or(|x| x != "vyrn") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&p).expect("read a guide program");
+            if src.contains("from \"./") || !src.contains("fn demo(") {
+                continue;
+            }
+            let id = p.file_stem().expect("a stem").to_string_lossy().to_string();
+            out.push((id, format!("{src}{MAIN_TAIL}")));
+        }
+        out.sort();
+        out
+    }
+
+    /// The playground compiles every program the book offers to run.
+    ///
+    /// `site/app/guide.vyrn` already runs each of these while the site builds,
+    /// but through `vyrn run`. This asserts the PLAYGROUND agrees, and the
+    /// playground is a different process with a different compiler assembled in
+    /// it — which is the whole reason the corpus is worth running twice.
+    ///
+    /// `VYRN_PLAY_DUMP` writes each answer to that directory, one file per
+    /// program, so two runs can be compared byte for byte.
+    #[test]
+    fn every_runnable_guide_program_compiles_in_the_playground() {
+        let dump = std::env::var("VYRN_PLAY_DUMP").ok();
+        if let Some(d) = &dump {
+            std::fs::create_dir_all(d).expect("the dump directory");
+        }
+        let mut refused = Vec::new();
+        for (id, src) in guide_programs() {
+            let checked = check_json(&src);
+            let bytes = compile_result(&src);
+            let is_module = bytes.starts_with(b"\0asm");
+            if let Some(d) = &dump {
+                let body = if is_module {
+                    format!("module {} bytes, {:016x}", bytes.len(), sum(&bytes))
+                } else {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                };
+                std::fs::write(
+                    std::path::Path::new(d).join(format!("{id}.txt")),
+                    format!("check: {checked}\ncompile: {body}\n"),
+                )
+                .expect("write a dump");
+            }
+            if !is_module {
+                refused.push(format!("{id}: {}", String::from_utf8_lossy(&bytes)));
+            }
+        }
+        assert!(refused.is_empty(), "{}", refused.join("\n"));
+    }
+
+    /// FNV-1a over a module, so a dump names the bytes without holding them.
+    fn sum(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h: u64, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3)
+        })
     }
 
     #[test]

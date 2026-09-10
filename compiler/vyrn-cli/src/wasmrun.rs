@@ -1178,6 +1178,10 @@ fn main() -> Int64 {
         };
         let mut program =
             vyrn_frontend::load(PROBE, "probe.vyrn", &opts, &files).expect("the probe loads");
+        // The probe is compiled the way `real_main` compiles: without this the
+        // placer never runs and the resident instance measured here is one no
+        // `vyrn serve` ever holds.
+        vyrn_lower::install();
         let diags = vyrn_frontend::check_and_synthesize(&mut program);
         assert!(diags.is_empty(), "the probe checks: {diags:?}");
         vyrn_codegen::direct::compile(&program).expect("the probe compiles")

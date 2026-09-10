@@ -10086,6 +10086,271 @@ and its subdirectories to exist before it runs. It reports every miss as `FAIL
 <path>: cannot write` and exits 1. The workflow's checkout has them from an
 earlier step; a fresh worktree does not.
 
+**Six processes compiled with no core, and a census found them by what they
+call (2026-09-10, `track-eh`).** `vyrn_lower::install()` is the line that makes
+a process the compiler. It puts `core::augment` into `own::analyze`
+(`own::install_placer`), the kernel's refusals and the must-use judgment into
+the one list a file's refusals come out in, and the effect judgment into the
+floor and the isolation rule. A process without it runs a different compiler:
+the placer never runs, `core::BODIES` stays empty, `Fn_::core` is `None` for
+every function, and the AST dispatch is the whole emitter. The slice before this
+one found one suite in that position and five live defects behind the omission.
+Nobody had counted who else was. `compiler/vyrn-cli/tests/hosts.rs` counts them,
+and it finds a host by what the file CALLS — `direct::compile`,
+`direct::compile_gen_host`, `direct::wat` or `vyrn_genwasm::install()`, with
+comment lines dropped so a doc mention is not a host.
+
+| `hosts` | entries | with the line | without |
+|---|---|---|---|
+| when the census was written | 17 | 10 | 7 |
+| after the three installs | **15** | **14** | **1** |
+
+**The seven, and why one of them is right.** `vyrn-cli/src/wasmrun.rs`,
+`vyrn-cli/tests/lowered.rs`, `vyrn-frontend/tests/common/mod.rs`,
+`vyrn-frontend/tests/contracts_api.rs`, `vyrn-frontend/tests/jsondec_run.rs` and
+`vyrn-play/src/lib.rs` are the six processes. `vyrn-genwasm/src/lib.rs` is the
+seventh match and is not one: it compiles a generator inside the process that
+installed it, and that process is counted here on its own. It is the only entry
+the census still marks without a core, and
+`the_only_thing_that_compiles_without_a_core_is_not_a_process` is the assertion
+that keeps it the only one.
+
+**Two entries left the table rather than being exempted.** A file that reaches a
+backend only through `common::run_compiled` is not a host, because the helper
+is. `contracts_api.rs` and `jsondec_run.rs` go for that reason, and
+`run_compiled(` comes out of the marker list with them. That is also the answer
+to what a per-FILE marker cannot see: `loader_run.rs` had three run paths and
+installed on one — `tests::run_multi` did, `remote_tests`' two callers and
+`run_with` did not — and no marker short of a parser separates them. One helper
+that installs does.
+
+**The playground shipped modules that never free.** `vyrn-play` reached
+`vyrn-lower` transitively through `vyrn-codegen` and never called `install`, so
+the page's emitter was the AST dispatch alone: a second, weaker compiler on a
+shipping surface. The decision is that a program `vyrn run` refuses, the page
+refuses, in the same sentence. Over the 23 guide programs the book offers to
+run, no program that compiled stops compiling and every `check` answer is byte
+for byte what it was — not one diagnostic gained or lost — while every one of
+the 23 MODULES changed, and every one grew, from 18 bytes (`benches`,
+`firstfn`) to 1,055 (`html`).
+
+**The growth is the release rows, and the page was emitting the placer's
+absence.** `site/guide/hello.vyrn` with the book's `main`:
+
+| how it was compiled | bytes | sha |
+|---|---|---|
+| the playground, before | 1,766 | `cc5176c19d727756` |
+| `vyrn build`, `VYRN_NO_PLACER=1` | 1,766 | `cc5176c19d727756` |
+| the playground, after | **1,911** | **`6e7d6f215cab5afe`** |
+| `vyrn build` | 1,911 | `6e7d6f215cab5afe` |
+
+In the wat, `main` before is `call demo`, `call print`, return; after it is
+`call demo`, `call print`, `sub 8`, `call release`, and the release function
+itself is a function the module did not have. What it costs, best of three,
+whole process, release: `hello` 115 ms to 200 ms, `html` 128 ms to 336 ms. That
+is the placer over the standard library's closure, and `vyrn run` has always
+paid it. The corpus test is new: `site/app/guide.vyrn` already runs every one of
+these blocks through `vyrn run` while the site builds, and nothing asked whether
+the PLAYGROUND agreed. `VYRN_PLAY_DUMP` writes each answer to a directory, which
+is how the table above was read. The generator chapter's two blocks are skipped
+for the reasons `guidecode.vyrn`'s `guidePlayable` skips them: one imports a
+sibling, and one has no `demo`.
+
+**The gate that watches the worklist was green because it was blind.**
+`tests/lowered.rs` asserts "the lowering is the worklist" and installed only the
+generation engine. With no placer there are no placed release rows, so the
+backend never monomorphizes a release, so the set difference it compares was
+empty by construction. With the line in it, the backend instantiates 7 bodies
+the lowering does not have, and every one is an `Owned__Slots__release<T>`:
+`Int64`, `String` and five record shapes, first seen in `autorelease`, `genref`,
+`tryplace`, `slots`, `tree` and `freelist`.
+
+**The lowering's side is the right one, and RFC-0125 §2.3 is why.**
+`direct.rs`'s `Rel::Call` parks the receiver and calls the ordinary call path,
+which monomorphizes a generic release for a call site the SOURCE never wrote.
+That is a body only a backend knows about, and §2.3 puts the decision above the
+emitter. `vyrn-lower` already models the teardown's generic declared release as
+an instantiation for exactly that reason; a placed one is the same rule at the
+same kind of exit. So `dispatched` comes back. It was deleted on a measurement
+that was correct and a conclusion that was not: removing it moved no emitted
+byte, which is true and is not evidence about the worklist, because the only
+gate that watches the worklist could not see the rows.
+
+**What the restore moves.**
+
+| | before | after |
+|---|---|---|
+| the kernel corpus, accepted | 27,637 | **27,650** |
+| refused, unlowered | 0, 0 | 0, 0 |
+| `lowered`'s instances | 24,109 | **24,122** |
+| its rows | 1,409,630 | **1,409,955** |
+| backend answers compared | 897,960 | **898,155** |
+| emitted, and the lowering does not have | 13 | **0** |
+| off-program answers | 1,231 | **985** |
+
+**The `peek` floor is re-pinned, and the series behind it was a different
+compiler.** `peek`'s share of the off-program residue — the class RFC-0101 §2.3
+assigns to a backend on purpose — reads 68 with the core, against a band of
+`32..=64` around 46. 299, 109, 72 and 46 were all read in this process with no
+placer, and the 46 was attributed to the driver asking the core when the driver
+never ran here at all. The band is `48..=96`, the width the old one had, around
+the number the gate reads now that it compiles the way `vyrn run` compiles.
+
+**The 13 instances are 13 bodies and nothing else, measured from both sides.**
+With `dispatched`'s two lines backed out of `vyrn-lower` and everything else at
+this head, `coredrive` reads 21,753 bodies against 21,766, and the whole
+difference is in one class: bodies waiting on a layout, 3,112 against 3,125.
+Every other line of the report is identical — the whole-body count, all
+twenty-one form counts, the per-program `break` table, the two differing
+programs and their byte counts. `VYRN_WASM_MANIFEST=check` is green over 176
+examples either way, so the byte measurement the deletion made still holds from
+the other side.
+
+**The line goes in the helper, not in each caller.** `common::run_compiled` is
+what the `vyrn-frontend` suites compile through and its own doc says "as
+`vyrn run` does". It did not install, and three paths would each have had to
+remember: `loader_run.rs`'s `remote_tests` calls it twice with nothing
+installed, and `run_with` installs the generation engine alone.
+`wasmrun.rs`'s `probe_bytes` is the other host — it compiles the resident probe
+for the `vyrn serve` cost measurement, with no placer, a resident instance no
+`vyrn serve` holds. Nothing moves behind either: `contracts_api` 21,
+`jsondec_run` 1, `loader_run` 110 and the two `wasmrun` tests are the same
+counts, all green. These suites assert what a program RETURNS, so a release row
+changes the module and no assertion sees it. That is why they hid nothing here,
+and it is the same property that would let them hide something later.
+
+**The lines.**
+
+| file | before | after |
+|---|---|---|
+| `vyrn-cli/tests/hosts.rs` | 0 | **180** |
+| `vyrn-lower/src/lib.rs` | 1,424 | **1,476** |
+| `vyrn-play/src/lib.rs` | 520 | **604** |
+| `vyrn-cli/tests/lowered.rs` | 1,430 | **1,440** |
+| `vyrn-frontend/tests/common/mod.rs` | 33 | **39** |
+| `vyrn-cli/src/wasmrun.rs` | 1,275 | **1,279** |
+
+This slice adds and deletes nothing else. The 180 are a census that did not
+exist, the 52 in `vyrn-lower` are `dispatched` and the paragraph that says what
+it does not reach, the 84 in `vyrn-play` are the corpus test, and the rest are
+one line each with the sentence that says why it is there. What the slice buys
+is not lines: it is one compiler on every surface that compiles, a worklist that
+names the release it places, and a gate that can see the rows it compares.
+
+**The censuses.** `hosts` is new, with both of its tables pinned.
+`cli_census`'s structural count moves `("tests", 852, 2)` to
+`("tests", 856, 2)`. `lowered`'s `peek` floor moves `32..=64` to `48..=96`.
+`coredrive`, `emitter_census`, `forms`, `frontend_census`, `refusals`,
+`checker_census`, `coretables` and the wasm hash table are unmoved.
+
+**A number in the record above is corrected here.** The validation slice's
+licence paragraph read "986 of 21,722 whole bodies are unchanged". 986 is the
+reading from before the surface collapse and it was carried, not re-measured.
+`coredrive` reads **963 of 21,722** at this head and reads 963 with the worklist
+restore backed out, so the fall is not this slice's and the paragraph now
+carries the number the gate prints.
+
+**What is left on this line.** `Stmt::Break` stands at 8 and every one is
+`project::site`: a projection's body inlined at its caller, whose rows are in
+the projection's own core body. `jchain.vyrn` has 3, `jsonplace.vyrn` 2 and
+`tryplace.vyrn` 3. No mapping in `direct.rs` reaches them, because it maps a
+node to a node and this needs a body to a body. The payer is the core stating an
+inlined projection's rows at the call site, or the emitter reading the
+projection's own `Body`, and neither is written.
+
+**A sentence in `coredrive` was true when it was written and is not now.** The
+note beside the exits table said the two shapes the exits slice named read zero
+because `vyrn-frontend/tests/semantics.rs` compiles with no core. That file
+installed the lowering in `6e739f24`, before this branch, and the sentence went
+with it. What the two zeros mean is not measured here, so the note says that and
+nothing more. `Stmt::Continue`'s arm stays either way, which is what the exits
+slice's own third finding decided.
+
+**`Stmt::Break`'s eight, and the decision the next slice needs, written before
+it is built.** The residue is a projection's body inlined at its caller. Two
+ways to reach it were on the table.
+
+- The CORE states the inlined projection's rows at the call site.
+- The EMITTER reads the projection's own `Body` and maps it to the inline.
+
+**The core's is the one, and the emitter's does not survive its own type.**
+`Lowered::places` holds every `impl` projection's body with its rows, outside
+every instantiation, and its own doc states the shape of the problem: "a
+projection is never flattened into `Program::functions`, so no instance covers
+it and no worklist reaches it — and the core still lowers an access site as a
+CALL by the projection's own name". Those rows name the projection's OWN
+parameters as places. At a site the parameters are gone: `project::inline`
+substitutes the caller's receiver and arguments into a clone, so a row that
+names `self` would have to stand for an expression the caller wrote, and no row
+can. The emitter would have to rewrite the rows per site, which is the same
+expansion the core would do, done in a backend — the decision RFC-0125 §2.3 puts
+above the emitter. So the emitter's reading is refused on its type, before any
+measurement.
+
+**The reach is short and the licence is not, and this slice does not take it.**
+The core lowers a projection access as `Callee::Projection`, one arm of one call
+path, and stating the inlined rows instead means walking `project::site`'s tree
+there. Three of the four walks are at the site already: `project::inline`
+hygiene-renames the projection's bindings into the CALLER's namespace,
+`Checker::record_desugar` types every inlined node, and the release plan keys
+its rows by those same nodes — `own::Memo::open`'s note says a per-inline tag
+that disagreed between two readings made `examples/genref.vyrn` leak a block.
+The core is the walk that is not there. What stops this slice is what the change
+then owes. The kernel judges linearity over the rows it rewrites, so the kernel
+corpus, the wasm manifest with every moved row named from `wasm2wat`, the
+residue ratchet on both engines and `coredrive`'s two differing programs are all
+in the licence, and `Lowered::places` — a root that exists because "the core
+still lowers an access site as a CALL" — has to be re-read in the same pass. The
+effect judgment is the same line's and gains from it: §3 M6's finding 14 is
+twenty calls it could not attribute, and the cause it names is this call-by-name.
+That is a milestone's licence under an arm's count, and the arm is 8.
+
+#### The hosts slice's gates (2026-09-10)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. The corpus suites ran in
+debug and the release-only ones as marked.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and `vyrn-lsp`'s and `vyrn-genwasm`'s own manifests | clean, clean, clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 647 passed, 44 ignored, 0 failed, over 86 binaries |
+| `kernel` `--ignored` | 1, 130 s — 177 programs, 27,650 instances accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored` | 1, 169 s |
+| `typed` `--ignored` | 1, 204 s |
+| `effects` `--ignored` | 2, 184 s |
+| `fixtures` `--ignored` | 1, 150 s |
+| `testsweep` `--ignored` | 1, 334 s |
+| `coredrive` `--ignored`, release | 1, 51 s — 963 of 21,722 bodies whole, 168 of 170 programs byte-identical, `Stmt::Break` 8 over three programs |
+| `hosts` | 2 — 15 entries, 14 with the line, `vyrn-genwasm` the one without |
+| `emitter_census`, plain and `--ignored` | 3 and 1 |
+| `forms` and `surface`, plain and `--ignored` | 8 and 2, 3 and 1 |
+| `frontend_census`, `cli_census`, plain and `--ignored` | 2 and 1, 2 and 1 |
+| `checker_census`, `refusals`, `lowered`, `lowered_dump`, `columns` | 2, 21, 3, 6, 1 plain and 1, 3, 1, 1, 1 ignored |
+| `vyrn-frontend` | 1,114 passed, 5 ignored |
+| the workspace less `vyrn-cli` | 1,161 passed, 12 ignored |
+| `vyrn-lsp`'s own manifest | 100 passed, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `vyrn-play`'s own tests, release | 13 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2, 393 s |
+| the residue ratchet `--ignored`, release | 1, 440 s — the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 144 s, 176 examples, and `rfcs/census/wasm-sha256.tsv` is untouched |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn fmt --check` over the site's sources | clean |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 26 files, none short of its file's declared count |
+
+**One gate is reported as not run.** `vyrn check` over `examples/` compared
+against the branch point needs a binary built at the branch point, and no
+worktree here holds one. The two pins that state the same fact in test form both
+ran and are green: `columns`'s pinned diagnostics over 419 programs and
+`lowered_dump`'s pinned lowering over the same corpus, both byte-identical. No
+pass `vyrn check` runs is touched by this slice — the only change outside a test
+host and `vyrn-play` is the worklist, which `vyrn check` does not reach.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
@@ -24956,7 +25221,70 @@ its record.
   generic impl's `success` row as a type when it is a variable, so the
   copied-out payload leaked. One example, one manifest row. RFC-0126 §8.16.
 
-#### The arm's blocker was a missing line, and five defects were behind it (2026-09-10, `track-ee`)
+#### A validated binding lost its check, and the driver was the reason (2026-09-10, `track-ee`)
+
+**The safety strand's finding, and it goes first because it is the only one of
+this track's six that a program could not see.** The other five refuse to
+compile. This one compiled, ran, and answered with a value its own type forbids.
+
+`Age` is `Int64 where value >= 18`. Both of these returned 5, on the compiled
+route, at the branch point:
+
+| program | the compiled route | every other engine |
+|---|---|---|
+| `let mut x = 30  x = x - 25  let a: Age = x  return a` | returns 5 | `validation failed for `Age`` |
+| `let mut a: Age = 20  a = a - 15  return a` | returns 5 | `validation failed for `Age`` |
+
+That is the annotated `let` itself and every later store into the binding. It is
+two of the boundaries RFC-0079 and M2d put a check at, and both were silent.
+
+**The cause is one clause reading the wrong type.** `Fn_::core_walkable` stands
+the whole-body walk down at a name whose type needs a check, and the clause that
+says so reads `NameInfo::ty`. `core::Builder`'s `let` arm names a binding by the
+type of its VALUE (`let ty = self.ty_of(value)?`), not by the annotation, so
+`let a: Age = 20` reaches that clause as `Int64`. The clause was written to
+refuse a `where` type and its own comment says so — "a `where` type (RFC-0079)
+is a `check` row the core does not carry, which is the census's row 7" — and it
+had never refused one. It was a rule stated in a comment and not in the code,
+which is the defect this RFC is named after, in the file that states the rule.
+
+The per-STATEMENT screen was right all along. `Fn_::core_run`'s `Stmt::Let` arm
+reads the annotation off the AST and refuses a type that is not a core scalar,
+with a comment that spells out the reason. The two screens ask the same question
+at two scales and only one of them asked it.
+
+**The fix asks the AST, where the reader wrote it.** `core_walkable` takes the
+function's block and refuses a body in which any `let` is annotated with a type
+that carries a `where` clause. `Fn_::checks` is the one place that says what
+carries one — `Type::Named(n)` under this instance's substitution, whose
+declaration has a predicate — which is the same test `Fn_::emit_validation`
+gates on and `join_ty` asks.
+
+**Not one emitted byte moves.** `VYRN_WASM_MANIFEST=check` is green over 176
+examples with `rfcs/census/wasm-sha256.tsv` untouched, and `coredrive`'s
+per-form counts and its 963 of 21,722 whole bodies are unchanged: no example
+writes an annotated `where` `let` in a frame the rows carried. So no row of the
+manifest is named here, because none moved.
+
+**The witnesses.** Two, both through the real path and both in the gate list.
+`an_annotated_let_validates_a_value_the_checker_cannot_prove` in
+`vyrn-frontend/tests/semantics.rs` runs the first program and asserts the trap;
+the store is the boundary sweep's own second case, which had been failing on
+`unwrap_err` of `Ok(5)` from the moment the install landed. Both are compared
+byte for byte in `coredrive`'s shape table as well, where the two walks emit the
+same module for each. Against the emitter at the branch point they fail; after,
+they pass.
+
+**Why no test held this before.** `direct.rs`'s own
+`a_validated_type_is_checked_wherever_it_is_reached` is the sharpest case in the
+repository. It asserts on `let a: Age = n` — the exact shape — and it passed
+throughout, because it looks for the trap message in the module's data and the
+message is the constructor's own `panic` string, present whether or not anything
+calls it, and because that test compiles with no lowering installed and so never
+ran the walk that dropped the check. The test names both hazards in its own doc
+comment and was caught by neither.
+
+#### The arm's blocker was a missing line, and four more defects behind it (2026-09-10, `track-ee`)
 
 The exits slice left `Stmt::Continue`'s arm at zero occurrences over the corpus
 and named two readers off it, both in `vyrn-frontend/tests/semantics.rs`: a
@@ -24985,33 +25313,13 @@ of the `region` block, which `core_stmts` has emitted since the driver slice.
 | a `for` over an array literal | 0 | **0** |
 | a `continue` under a `region` | 0 | **0** |
 
-##### Five defects were behind that line, and four are compile failures
+##### Four more defects were behind that line, and all four are compile failures
 
-Every one of the five is the DRIVER's. Each compiles and runs correctly under
-`VYRN_NO_CORE_WALK=1` and failed with the driver on, which is what makes the
-missing install the thing that hid them: `examples/` writes none of these shapes
-and the file that writes all of them compiles with no core at all.
-
-**A `where` type was refused by the type the value had.** `Fn_::core_walkable`
-stands the whole-body walk down at a name whose type needs a check, and the
-clause that says so reads `NameInfo::ty`. The core names a `let` by the type of
-its VALUE (`core::Builder`'s `let` arm takes `self.ty_of(value)`), so `let a: Age
-= 20` reaches that clause as `Int64`. No `where` type was ever refused by it,
-the body was emitted from rows that state no check, and TWO boundaries lost
-theirs:
-
-| program | before | every other engine |
-|---|---|---|
-| `let mut x = 30  x = x - 25  let a: Age = x  return a` | returns 5 | `validation failed for `Age`` |
-| `let mut a: Age = 20  a = a - 15  return a` | returns 5 | `validation failed for `Age`` |
-
-`Age` is `Int64 where value >= 18`. This is the one defect of the five that is
-not a compile failure: the program ran, and it ran holding a value its type
-forbids. The screen asks the AST for the annotation now, which is where the
-reader wrote it and where the AST arm reads it to emit the check.
-`Fn_::core_run` already asked the same question per statement; this is the same
-question per body, and `Fn_::checks` is the one place that says what carries a
-check.
+The fifth is the record above. Every one is the DRIVER's: each compiles and runs
+correctly under `VYRN_NO_CORE_WALK=1` and failed with the driver on, which is
+what makes the missing install the thing that hid them. `examples/` writes none
+of these shapes and the file that writes all of them compiles with no core at
+all.
 
 **A String is a type a literal carries and a name does not.** The scalar screen
 is asked of NAMES — `core_scalar(&info.ty)`, in `core_walkable` and in
@@ -25041,22 +25349,52 @@ local`. Every `let` of an `if` expression failed to compile. `core_readable`
 asks for a name the reader wrote, which is the AST arm's local and is always
 placed; a temporary is this walk's to bind, never to store into.
 
-##### The four stale programs, and what they were stale about
+##### The four stale programs, and whether the refusal that stops them is right
 
-With the install in place, four of this file's programs stop compiling and the
-CLI refuses them today: `fn mk(s: String) -> Name { return Name(s) }` stores a
-`read` parameter into a constructor. Each takes the value now
-(`s: consume String`), which is the second fix line the refusal itself prints.
-The fact each test asserts is unchanged and 193 pass.
+With the install in place, four of this file's programs stop compiling. All four
+are one shape:
+
+```
+type Name = String where value.byteLength >= 3
+fn mk(s: String) -> Name { return Name(s) }
+```
+
+and the refusal is the kernel's:
+
+```
+`s` may not be stored into `Name(..)` — it is a `read` parameter
+  fix: declare the parameter `s: consume ..` if this function should own it
+  fix: `s.copy()` if both sides need a value
+```
+
+**The refusal is right, and the rule is RFC-0089 rule 2.** A parameter is the
+CALLER's; `read` is the default and says the callee does not own what it is
+handed. `Name(..)` is a constructor whose value owns its payload, so storing `s`
+into it would give one `String` buffer two owners, and both would release it —
+which is the double free `kernel.rs`'s own header names, with a probe beside it
+(`rfcs/probes-0125/take-out-of-a-read-parameter.vyrn`). The refusal is not about
+the `where` clause and not about validation: the same program with a plain
+`type Name = String` alias is refused in the same words for the same reason.
+Nothing here is a finding, and no test edit is hiding one.
+
+**These programs were never accepted by the language.** They were accepted by
+this file, which ran no kernel, and the CLI refuses each of them today at the
+branch point. So the tests were asserting validation behaviour on programs a
+user cannot write.
+
+**Which of the two fixes.** The refusal offers both, and they mean different
+things. `s.copy()` allocates a second buffer and leaves the caller's alone;
+`consume` moves the caller's in. A constructor that KEEPS the value wants the
+move, and a writer would write the move, so each `mk` takes its argument now.
+The copy would also have passed, and would have made the test assert on a
+program with an allocation nobody asked for.
+
+The fact each test asserts is unchanged. 194 pass.
 
 ##### The licence
 
-Every emitted byte is the same for the first commit and for the last: the
-validation slice moves no row of `rfcs/census/wasm-sha256.tsv` and no per-form
-count of `coredrive`, because no example writes an annotated `where` `let` in a
-frame the rows carried.
-
-The two screens move two rows, and both are the same shape, read off `wasm2wat`.
+The validation slice moves no byte and the record above says so. The two screens
+move two rows, and both are the same shape, read off `wasm2wat`.
 One function each in `ifexpr.vyrn` and `strpredbytes.vyrn` returns a String
 literal through an `if` join. Each stands down at the literal screen now, and
 the AST walk writes what it has always written for that shape:
@@ -25164,11 +25502,21 @@ projection's own `Body`, and neither is written. This track did not reach it.
 
 `coredrive` gains the shape table, its pin, and the sentence saying what a zero
 in the per-program table means; its differing-program pin falls from three names
-to two. The emitter census's line counts move with `direct.rs`. RFC-0127 §3's
-form census and §3.1.1's floor do not move, because no arm went. `coretables`,
-`refusals`, `checker_census`, `lowered`, `lowered_dump`, RFC-0126 §3's surface
-census and the kernel corpus are unmoved. `rfcs/census/wasm-sha256.tsv` moves two
-rows, explained above.
+to two.
+
+Three censuses move because `direct.rs` does, and they are re-pinned in one
+commit that says which change each number is worth. The emitter census's mapping
+kind goes 6,743 to 6,790 with the hand-emitted instruction count unmoved at 596;
+its read class `the core's rows` 2,075 to 2,078 lines and `both, for two
+questions` 7,443 to 7,487, with the form count 103 to 104 and the row count 137
+to 138. RFC-0127 §3's form census reads `Stmt::Let` in `wasm` at 8 against 7 —
+the annotation the validation screen asks the AST for — and its row sums to 32.
+RFC-0126 §3's surface census reads `Type::Named` in `wasm` at 10 against 9, for
+`Fn_::checks`, and its row sums to 69.
+
+RFC-0127 §3.1.1's floor does not move, because no arm went. `coretables`,
+`refusals`, `checker_census`, `lowered`, `lowered_dump` and the kernel corpus
+are unmoved. `rfcs/census/wasm-sha256.tsv` moves two rows, explained above.
 
 ##### Gates (2026-09-07, the two slices)
 
@@ -25211,7 +25559,7 @@ things these two slices touch.
 #### Gates (2026-09-10, `track-ee`)
 
 The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
-at a shallow scratch directory outside the checkout. Over the five commits of
+at a shallow scratch directory outside the checkout. Over the seven commits of
 this track together.
 
 | gate | result |
@@ -25227,7 +25575,7 @@ this track together.
 | `fixtures` `--ignored`, release | 1, 28 s |
 | `testsweep` `--ignored`, release | 1, 81 s |
 | `coredrive` `--ignored`, release | 1, 38 s — seven shapes, 168 of 170 programs byte-identical either way |
-| `cargo test -p vyrn-frontend` | 1,113 passed, 0 failed, 5 ignored |
+| `cargo test -p vyrn-frontend` | 1,114 passed, 0 failed, 5 ignored |
 | the workspace less `vyrn-cli`, `--skip _natively` | 1,160 passed, 0 failed |
 | `vyrn-lsp`'s own manifest | 100 passed, 0 failed |
 | `vyrn-genwasm`'s own tests | 3 |
@@ -25239,6 +25587,7 @@ this track together.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 26 files |
+| `semantics` against the emitter at the branch point | 188 passed, 6 failed — one witness per defect; 194 pass after |
 | `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable, byte-identical |
 | `the_pinned_columns_over_the_corpus` | green, unmoved |
 | `emitter_census`, `forms`, `surface` | 3, 8, 3 — re-pinned, and named above |

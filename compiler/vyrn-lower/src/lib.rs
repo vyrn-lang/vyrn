@@ -677,7 +677,8 @@ fn build<'a>(
             })
             .collect();
 
-        let calls = std::mem::take(&mut w.calls);
+        let mut calls = std::mem::take(&mut w.calls);
+        calls.extend(dispatched(&releases, &by_name));
         follow(
             &func.name,
             calls,
@@ -707,6 +708,57 @@ fn build<'a>(
         bodies: outside,
         places,
     }
+}
+
+/// The calls the LANGUAGE writes at this body's exits — RFC-0101 M5.
+///
+/// A placed [`Release`] whose kind is [`DropKind::Release`] IS a call: the
+/// source never writes it, the release walk places it, and a flattened
+/// `impl<T> Owned for Slots<T>` is a generic function, so which body it reaches
+/// depends on the receiver. The step carries that receiver, so the parameters
+/// are solved here from the same rule a written call is solved by
+/// ([`vyrn_frontend::types::solve_param`], one matcher), and the instance comes
+/// from the step rather than from a guess about where a release happens.
+///
+/// **Why the emitter reaching the body is not enough.** `direct.rs`'s
+/// `Rel::Call` parks the receiver and calls the ordinary call path, which
+/// monomorphizes the release for a call site the SOURCE never wrote. That is a
+/// body only a backend knows about, and RFC-0125 §2.3 puts the decision above
+/// it: the lowering is the worklist. The teardown's generic declared release is
+/// already modeled as an instantiation for exactly this reason, four hundred
+/// lines up; a placed one is the same rule at the same kind of exit.
+///
+/// **What it does not reach**, stated rather than left to be found: a generic
+/// declared release reached only from INSIDE a [`DropKind::Deep`] walk — an
+/// `Array<Slots<Int64>>` — is a call this cannot see, because the walk over a
+/// type's places is the encoder's and §2.3 keeps the encoder in the backend.
+/// The corpus has none; one would fail `tests/lowered.rs` as a missing
+/// instantiation rather than hide under a rule, which is the failure that file
+/// prefers.
+fn dispatched<'f>(
+    releases: &[Release],
+    by_name: &HashMap<&str, &'f Function>,
+) -> Vec<(&'f str, HashMap<String, Type>)> {
+    let mut out = Vec::new();
+    for r in releases {
+        let DropKind::Release(f, recv) = &r.kind else {
+            continue;
+        };
+        let Some(target) = by_name.get(f.as_str()) else {
+            continue;
+        };
+        if target.type_params.is_empty() {
+            // Not generic: a root of the worklist already, like every other
+            // non-generic function.
+            continue;
+        }
+        let mut solved: HashMap<String, Type> = HashMap::new();
+        if let Some(p) = target.params.first() {
+            vyrn_frontend::types::solve_param(&p.ty, recv, &mut solved);
+        }
+        out.push((target.name.as_str(), solved));
+    }
+    out
 }
 
 /// `?` on a `Fallible` operand writes TWO calls and the checker records ONE.

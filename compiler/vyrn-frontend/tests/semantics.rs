@@ -1280,6 +1280,25 @@ fn validation_trap_message_is_canonical() {
     assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
 }
 
+/// The ANNOTATION's own boundary, with a value the checker cannot prove.
+///
+/// Its own test rather than a case of the boundary sweep below, because that
+/// sweep's second assertion is a store into a binding of the same type: the two
+/// failed together, and a case behind a failing assertion witnesses nothing.
+///
+/// `let mut a: Age = 20` is a constant the checker proves, so it emits no check
+/// and says nothing about this boundary. `core::Builder` names a `let` by the
+/// type of its VALUE, so the emitter's whole-body screen read `Int64` where the
+/// reader wrote `Age`, took a body whose rows state no check, and this returned
+/// 5.
+#[test]
+fn an_annotated_let_validates_a_value_the_checker_cannot_prove() {
+    let src = "type Age = Int64 where value >= 18 \
+                   fn main() -> Int64 { let mut x = 30 x = x - 25 \
+                   let a: Age = x return a }";
+    assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
+}
+
 #[test]
 fn auto_validation_traps_dynamic_violations_at_each_boundary() {
     // Argument boundary.
