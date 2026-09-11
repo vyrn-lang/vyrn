@@ -131,7 +131,7 @@ fn claudeHref(slug: String, title: String) -> String {
          `<h2>`s above are rendered from, so the two cannot disagree. Every
          fragment here is checked against the ids the page carries by the link
          gate in `site/export.vyrn`. -->
-    <aside class="onpage">
+    <aside class="onpage" v-if="data.chapter.sections.length >= 3">
         <p class="eyebrow">On this page</p>
         <a v-for="s in data.chapter.sections" :key="s.anchor" :href="sectionHref(s)">{{ s.heading }}</a>
     </aside>
