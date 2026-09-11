@@ -146,7 +146,7 @@ Do not optimize on a guess. A micro-optimization that the numbers do not license
 - Never run two cargo commands at the same time in one worktree. Run every gate in the foreground with a timeout and wait for it.
 - Never poll a log with repeated tool calls (`grep -c`, `tail`). A foreground command blocks until it ends, under a ten-minute cap, so split a longer run into suites that fit; a background command wakes you with a notification when it ends. Between the two, end your turn and wait. Every poll is a tool call against a budget that is shared by every agent on the account.
 - Never pipe a test suite's output. Redirect it to a file and read the file. A suite's leaked child holds the pipe open, and the run looks hung for as long as you wait.
-- Never write a polling or wait loop, in a script or by hand, and never an `until … sleep` loop through the Monitor tool either. Run the command under a timeout in the foreground and read its exit code; or run it in the background and do nothing until the harness notifies you. A loop outlives the agent that wrote it, and six loops on one file were found on this machine.
+- Never write a polling or wait loop, in a script or by hand, and never an `until ... sleep` loop through the Monitor tool either. Run the command under a timeout in the foreground and read its exit code; or run it in the background and do nothing until the harness notifies you. A loop outlives the agent that wrote it, and six loops on one file were found on this machine.
 - A track runs every command in the foreground under `timeout`, in pieces that fit the ten-minute cap: a warm release build is two minutes, a `--test` group is under ten, and the whole CLI suite is run as groups. A track never uses the Bash tool's `run_in_background` option: a teammate is not woken when its background command ends (three tracks stood idle for half an hour twice on 2026-09-11, each after a build that had finished in under a minute), and the only thing left is to poll, which is forbidden. Nor `&`, `nohup`, or a marker file: the same silence. A tool call whose purpose is to pass time (`echo`, `test -f done`, `sleep`) is a poll; three agents on three days have written one, and each was found by the user.
 - A background process is a process tree. Stop it by its tree, then list what is still alive under your worktree before you start the next command.
 - Kill only a process whose command line names your own worktree. Eight tracks and other sessions share this machine; a cargo process you cannot match to your own command is someone else's.
@@ -176,7 +176,7 @@ Report every gate with its result. A red gate is reported as red, with the outpu
 
 ## Writing for developers
 
-This applies to every sentence a developer reads: records, comments, docs, commit messages, pull requests, diagnostics, and this file. The sources are ASD-STE100 Simplified Technical English, Orwell's six rules, and the GOV.UK style guide.
+This applies to every sentence a developer reads: records, comments, docs, commit messages, pull requests, diagnostics, and this file. The sources are ASD-STE100 Simplified Technical English, Orwell's six rules, the GOV.UK style guide, Google's developer style guide, Diataxis, and the Rust API guidelines on documentation. The reader is the next contributor: fluent in Rust, Vyrn and the domain, with the merged tree and none of your session. Spend words only on what that reader cannot get from the code.
 
 ### Sentences
 
@@ -185,15 +185,24 @@ This applies to every sentence a developer reads: records, comments, docs, commi
 - Use the present tense for what the code does. Use the imperative for an instruction.
 - State the condition before the instruction: "If the gate is red, stop."
 - Lead with the answer. The first sentence of a paragraph is its conclusion.
+- Lead with the subject. "Use X to", not "You can use X to"; "the queue is full", not "there is a full queue".
+- Use the strong verb. "Decide", not "make a decision"; "validates", not "is responsible for validation".
+- State a fact positively. "Cannot", not "is not able to". A double negative in a contract is a defect.
 
 ### Words
 
 - Use the short word. Use "use", not "utilize"; "start", not "commence"; "before", not "prior to"; "enough", not "sufficient".
 - Use one word for one thing. Keep the project's nouns: kernel, core, row, census, licence, ratchet, refusal, witness.
 - Cut every word that does no work: "in order to", "it is important to note", "very", "just", "simply", "basically", "as needed".
+- Name the condition or cut the qualifier. "Where appropriate", "if necessary" and "as required" say nothing.
+- Do not open a sentence with a transition adverb: "Furthermore", "Moreover", "Additionally", "Therefore", "Notably". Two sentences in order carry their own link. If they need one, use "so", "but" or "because".
+- No praise of the code: "robust", "elegant", "powerful", "comprehensive", "seamless", "gracefully". Say what it does.
+- Count only what is true. A list of three needs three distinct facts; do not invent the third.
+- No chat residue and no placeholder: "Certainly", "Let's", "In summary", "Hope this helps", "[INSERT]", "TODO: fix".
 - No metaphor you have seen in print. No jargon a domain peer would not use. No foreign phrase where an English one exists.
 - No hedging without a named uncertainty. "Blocks when the queue is full", not "may sometimes block".
 - Plain ASCII punctuation in code and repo docs. No decorative unicode, no emoji.
+- Terseness has a floor. Keep the articles and connectives a reader needs on the first pass, and vary sentence length. "Returns config. Throws on fail." is a tell of its own.
 - Break any of these rules before you write something barbarous.
 
 ### Structure
@@ -202,15 +211,37 @@ This applies to every sentence a developer reads: records, comments, docs, commi
 - A list holds parallel facts. Connected reasoning stays in prose.
 - One document, one mode: a reference describes, a how-to instructs, an explanation reasons. Do not mix them.
 - One fact, one home. Reference by a stable handle; do not restate.
+- Rank handles by stability: a symbol name or an issue number, then a file path, then a URL. Never a line number or "the function above".
+- Put a doc next to the code it describes. A far-off page is not in view when the code changes.
 - Do not copy a value the code owns into prose. Reference the symbol.
+- Every paragraph adds a fact. A paragraph that restates its heading or the previous sentence in new words is deleted.
 
-### Comments and docs
+### Comments
 
+- The altitude test. A comment sits above the line (the why, what the block does, a gloss of opaque code) or below it (a unit, a range, what empty means, who frees). A comment a reader could write from the line alone is deleted.
+- Prefer clearer code to a comment. A name, a constant, a type, an assertion or a test stays honest when a comment would not. Never apologize for confusing code in a comment; fix the code.
+- Comment the surprise. Where a line looks wrong or removable but must stay, say why, name the issue or the record, and say not to remove it.
+- State a protocol that spans calls or files at both ends: call order, state that must hold, a lock held on entry, a dependency on distant code.
+- A module or a type gets a doc that names its purpose, its entry points, its invariants and its usage protocol. A function-only doc leaves these facts no home.
+- Write the interface doc before the body of a non-trivial item. A contract that is hard to state is a design defect, not a prose one.
 - Describe the present state. History lives in git and in the records, not in the code.
-- No changelog, date, author, or banner in source. No commented-out code.
+- No word that dates the prose: "currently", "now", "new", "recently", "used to", "no longer", "previously". Two paths that coexist today are present state: describe the split and name the trigger that removes one.
+- Record the invariant behind a fix, not the fix. "A quantity is never negative; CSV imports carry negatives (#N)", not "fixed crash on negative quantity".
+- No changelog, date, author, or banner in source. No closing-brace label. No commented-out code.
 - A `TODO` names a tracked issue or it is not written.
 - Touch only the comments your change makes false. Retightening prose you did not change is a separate task.
+- When you do clean up, classify before you cut. Protect a why, a constraint, a workaround, an ordering, an invariant, a precision: tighten the words, never drop the fact. Delete whole a restatement, a banner, a journal, throat-clearing, commented-out code. When unsure, keep the fact and cut the words.
 - Verify every claim against the code. A wrong comment is worse than none.
+
+### Docs on public items
+
+- The first sentence stands alone and states what the item does, in the third person present: "Returns the cached items". Doc tools show only that sentence. No "This function", no mid-sentence period.
+- Document the contract, not the implementation: inputs, outputs, side effects, errors, invariants. Mention the mechanism only when it changes use: complexity, allocation, thread-safety.
+- Say what the signature cannot: units, ranges, inclusive or exclusive bounds, what empty means, what a special value means, who owns and who frees. Do not restate a parameter's name or type.
+- Document every real failure and only those: `# Errors`, `# Panics` and `# Safety` in Rust; the refusal sentence or the trap in Vyrn. An invented section is worse than none.
+- Separate what the caller must guarantee from what the item guarantees on return.
+- A non-trivial public item gets an example that compiles and runs, with `?` and not `unwrap`.
+- Length is a ceiling: an inline comment one or two lines; a doc on a clear item one sentence, or none; a typical doc the summary line and the sections that carry content; a module doc one short paragraph. A tautology is fixed by a better name or by the one non-obvious fact.
 
 ### Records and reports
 
@@ -225,4 +256,5 @@ This applies to every sentence a developer reads: records, comments, docs, commi
 3. The licence is in the record with its numbers.
 4. The gate table is complete and honest.
 5. No comment restates its line. No doc is longer than its item deserves.
-6. The tree is clean, every file is LF, and nothing is pushed.
+6. The changed prose is grepped for the tells: transition adverbs, praise words, dating words, chat residue, bytes above 0x7F. Then read it back as a maintainer who rejects performed prose, and flatten the most performed sentence to its fact.
+7. The tree is clean, every file is LF, and nothing is pushed.
