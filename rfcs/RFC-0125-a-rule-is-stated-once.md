@@ -26687,6 +26687,58 @@ implemented. `ZERO_IN_THE_CORPUS` is empty for the first time: every form,
 keyword, operator and contextual word the language spells is now written by a
 program.
 Left: nothing of the three. `--workers` keeps RFC-0025's name and its gate.
+**The one route's cost on the SmallArray rows (2026-09-11, `sa-route`).**
+
+Decision: `sa_push` writes through the receiver's address, the rule the push
+route already states for `Array`. The emitter reads the whole header before it
+stores, so the temp it wrote through bought nothing.
+
+Went: `sa_push`'s fresh header copy, and the frame slot that held it. Stayed:
+the state branch on every element access, because it is what a small buffer
+is; and the self-copy the assignment still emits, because clang proves
+`memmove(p, p, n)` is a no-op and the row does not pay for it.
+
+Lines: `direct.rs` 17,660 to 17,650. Refusals: 0 lost / 0 gained. Manifest: 2
+rows of 176 — `copy.vyrn` and `smallarray.vyrn`, the two examples that push
+onto a `SmallArray`.
+
+Licence: `cargo test -p vyrn-cli` 85 targets, 0 failed. `VYRN_LEAK_CHECK=1
+vyrn bench examples/smallarray.vyrn --json` exit 0. `VYRN_WASM_MANIFEST=check`
+green after `write`. Interpreter and native output byte-identical on
+`copy.vyrn`, `ownedcontainer.vyrn` and `smallarray.vyrn`. `cargo fmt --all
+--check` and the LSP's, clean. `examples/benching.vyrn` "push 1000" 2,586 ns,
+unmoved.
+
+Findings: min ns, one machine, best of three interleaved runs. The `main`
+column is the brief's; `here` and the column before it were measured in one
+session.
+
+| bench | pre-cg | main | after the push route | here |
+|---|---|---|---|---|
+| `smallarray.vyrn` "smallarray push16" | 61 | 141 | 142 | 17 |
+| `smallarray.vyrn` "smallarray indexed sum" | 116 | 337 | 343 | 207 |
+| `smallarray.vyrn` "array push16" | 73 | 111 | 51 | 51 |
+| `smallarray.vyrn` "array indexed sum" | 76 | 296 | 253 | 240 |
+
+The cause was measured on the generated C. Each push emitted two
+`memory_copy` of 152 bytes: `sa_push` copied the header into a frame slot, and
+the assignment copied it back. 152 bytes is `{ i64 len, i64 cap, ptr data, [16
+x i64] inline }`, so the copy grew with `N` where `Array`'s stayed at 24. The
+row is now 3.6x FASTER than the text-IR route, because the temp was an opaque
+barrier as well as a cost: with it gone clang keeps the header in registers
+across the loop. The bench's own comment is now wrong on one point — the
+`SmallArray` read row beats the `Array` one, 207 against 240.
+
+What did NOT move: the read loop. "smallarray indexed sum" minus "smallarray
+push16" is 190 ns for 1,024 reads; "array indexed sum" minus "array push16" is
+189 ns for the same count. The two are the same loop cost to within noise, so
+the residue on those rows is not the `SmallArray` state branch. Pre-cg the
+same subtraction gives 55 ns and 3 ns, which is under one load per read: LLVM
+vectorized the text-IR form and cannot vectorize the wasm2c one, where every
+access carries its own bounds check and a memory-base indirection.
+
+Left: that read loop, on both rows, blocked by the bounds-check shape wasm2c
+emits per access, not by anything `SmallArray` states.
 
 ## Open questions
 

@@ -14601,20 +14601,10 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let l = self.layout_of(aty, line)?;
         let stride = self.stride(inner, line)? as i32;
-        // A fresh copy of the header, because `push` yields a new value and must
-        // not write through the one it was handed.
-        let src = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(src));
-        let off = b.alloc(l.size, l.align);
-        b.slot(off);
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(l.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        // The receiver's address is the destination, the rule RFC-0125's push
+        // route states for `Array`: this emitter reads the whole header before
+        // it stores, so a temp to write through buys nothing.
         let hdr = b.local(ValType::I32);
-        b.slot(off);
         b.ins(&Instruction::LocalSet(hdr));
 
         let (len, cap, base) = self.sa_parts(b, hdr, &l, n);
@@ -14694,7 +14684,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Add);
         b.ins(&Instruction::I64Store(at(l.fields[0])));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(hdr));
         Ok(aty.clone())
     }
 
