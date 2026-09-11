@@ -204,6 +204,14 @@ impl Owned {
         self_referring_past(ty, &self.types, &|n| self.impls.contains_key(n))
     }
 
+    /// Whether `name` IS a declared `release` body. A consume-match inside
+    /// one must not free its payload boxes: the CALLER of a declared release
+    /// walks them afterward (`release_enum` with `payloads` false), and that
+    /// is the one place the walk and the match would meet twice.
+    pub fn is_release_fn(&self, name: &str) -> bool {
+        self.impls.values().any(|f| f == name)
+    }
+
     /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
     ///
     /// A **declared** row wins over the seed, so `impl Owned for T` is what `T`
@@ -213,60 +221,6 @@ impl Owned {
     ///
     /// The match has no `_` arm on purpose. A new [`Type`] variant does not get
     /// to be silently unreclaimed; it has to say so.
-    /// Whether releasing a value of `ty` could CALL a declared `impl Owned`
-    /// release — the per-type question a coarse "does ANY type declare one"
-    /// gate approximated (the upgrade the record-producer gate's comment
-    /// named). A walk that cannot reach a declaration is silent whatever it
-    /// frees, so a receiver temporary of such a type may die at its last
-    /// read without user-visible timing. Conservative where it cannot see:
-    /// a type variable, a stored `fn`, a `lazy` capture block and a task all
-    /// answer yes.
-    pub fn reaches_declared(&self, ty: &Type) -> bool {
-        let mut seen: std::collections::HashSet<String> = Default::default();
-        self.reaches_declared_in(ty, &mut seen)
-    }
-
-    fn reaches_declared_in(&self, ty: &Type, seen: &mut std::collections::HashSet<String>) -> bool {
-        if let Some(k) = crate::types::type_key(ty) {
-            if self.impls.contains_key(&k) {
-                return true;
-            }
-            if !seen.insert(k) {
-                // A cycle without a declaration on it: this path is done.
-                return false;
-            }
-        }
-        match crate::types::resolve(ty, &self.types) {
-            Type::Array(t)
-            | Type::ArrayN(t, _)
-            | Type::SmallArray(t, _)
-            | Type::Stream(t)
-            | Type::Partial(t) => self.reaches_declared_in(&t, seen),
-            Type::Merge(a, b) => {
-                self.reaches_declared_in(&a, seen) || self.reaches_declared_in(&b, seen)
-            }
-            Type::Map(k, v) => {
-                self.reaches_declared_in(&k, seen) || self.reaches_declared_in(&v, seen)
-            }
-            Type::Record(fields) => fields.iter().any(|f| self.reaches_declared_in(&f.ty, seen)),
-            Type::Enum(vs) => vs
-                .iter()
-                .flat_map(|v| v.payload.iter())
-                .any(|p| self.reaches_declared_in(p, seen)),
-            Type::App(_, args) => args.iter().any(|a| self.reaches_declared_in(a, seen)),
-            Type::Param(_) | Type::Fn(..) | Type::Lazy(_) => true,
-            _ => false,
-        }
-    }
-
-    /// Whether `name` IS a declared `release` body. A consume-match inside
-    /// one must not free its payload boxes: the CALLER of a declared release
-    /// walks them afterward (`release_enum` with `payloads` false), and that
-    /// is the one place the walk and the match would meet twice.
-    pub fn is_release_fn(&self, name: &str) -> bool {
-        self.impls.values().any(|f| f == name)
-    }
-
     pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
         if let Some(f) = crate::types::type_key(ty).and_then(|k| self.impls.get(&k)) {
             return Some(DropKind::Release(f.clone(), ty.clone()));
@@ -1003,11 +957,6 @@ impl Declared {
     /// such a function's owned result contains none of its read arguments.
     pub fn is_function(&self, name: &str) -> bool {
         self.rets.contains_key(name)
-    }
-
-    /// See [`crate::declared::Owned::reaches_declared`].
-    pub fn reaches_declared(&self, ty: &Type) -> bool {
-        self.owned.reaches_declared(ty)
     }
 
     /// The type of `e` — **the checker's**, read off its record.
