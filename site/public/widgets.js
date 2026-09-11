@@ -862,8 +862,15 @@ function armHeroEditor(root) {
   const outPane = $("[data-play-out]", root);
   if (!runBtn || !src) return;
   let armed = false;
+  // Two facts, not one. `armed` says the module is loading or loaded;
+  // `runOnReady` says a reader has pressed Run and is owed a run. One latch for
+  // both lost the press of anyone who hovered or tabbed into the plate first:
+  // that armed with `thenRun` false, and the Run press that followed returned
+  // at the latch, so readiness replayed nothing.
+  let runOnReady = false;
 
   const arm = (thenRun) => {
+    runOnReady = runOnReady || thenRun;
     if (armed) return;
     armed = true;
     // Editable from the moment the reader has asked for it, and not before: a
@@ -874,7 +881,7 @@ function armHeroEditor(root) {
     import("./play.js").then(
       ({ mountPlay }) => {
         if (!root.isConnected) return;
-        mountPlay(root, { onReady: () => thenRun && runBtn.click() });
+        mountPlay(root, { onReady: () => runOnReady && runBtn.click() });
       },
       (err) => {
         // HONEST WHEN IT CANNOT RUN (RFC-0106 M3, fourth round). This used to

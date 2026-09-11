@@ -125,8 +125,17 @@ async function writeClipboard(text) {
 /// away and back builds a new page, and a worker left behind would keep a 16 MB
 /// instance and a message handler alive over a DOM that is gone.
 let worker = null;
+/// The kill timer belongs to the worker it would kill, so it lives beside it
+/// and dies with it. Held per-mount, a second `Run`, a `Reset` or a
+/// Ctrl-Enter left the first run's timeout armed over a worker that was
+/// already gone: it fired five seconds later, terminated whatever was running
+/// by then, and overwrote a finished run's output with "Stopped after 5
+/// seconds."
+let runTimer = null;
 
 function stopWorker() {
+  clearTimeout(runTimer);
+  runTimer = null;
   if (worker) {
     worker.terminate();
     worker = null;
@@ -164,7 +173,6 @@ export function mountPlay(root, opts = {}) {
 
   let play = null;
   let checkTimer = null;
-  let runTimer = null;
 
   // -----------------------------------------------------------------------
 
@@ -316,7 +324,6 @@ export function mountPlay(root, opts = {}) {
   }
 
   function finish(label) {
-    clearTimeout(runTimer);
     runBtn.disabled = false;
     setLabel(runBtn, "Run", "idle");
     status.textContent = label;
