@@ -124,8 +124,6 @@ fn let_stmts<'a>(body: &'a Block, out: &mut Vec<&'a Stmt>) {
     }
 }
 
-const DOC: &str = "type Doc = { title: String, body: String } \
-                   fn mk(a: String) -> Doc { return Doc { title: a + \"t\", body: a + \"b\" } } ";
 
 #[test]
 fn frees_non_escaping_temporary() {

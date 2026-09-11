@@ -2076,7 +2076,6 @@ fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     /// What `views` and `sinks` answer, now that both read a signature.
     ///
