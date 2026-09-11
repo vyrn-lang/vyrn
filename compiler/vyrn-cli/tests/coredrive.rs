@@ -25,7 +25,7 @@
 
 use std::path::PathBuf;
 use vyrn_frontend::ast::Program;
-use vyrn_lower::core::{Body, Callee, Op, Place, Rhs, St, Val};
+use vyrn_lower::core::{Body, Callee, Rhs, St};
 
 struct Fs;
 
@@ -212,48 +212,23 @@ fn scalar(t: &vyrn_frontend::ast::Type) -> bool {
 
 fn class_of(body: &Body) -> usize {
     let mut worst = CLASSES.len() - 1;
-    let mut note = |c: usize| worst = worst.min(c);
-    walk(&body.stmts, &mut note);
-    worst
-}
-
-fn walk(ss: &[St], note: &mut impl FnMut(usize)) {
-    for s in ss {
-        match s {
-            St::Let(_, r) => rhs(r, note),
-            St::Store { place, value, .. } => {
-                at(place, note);
-                val(value, note);
-            }
-            St::Drop(..) | St::Row { .. } => note(5),
-            St::If {
-                cond, then, els, ..
-            } => {
-                val(cond, note);
-                walk(then, note);
-                walk(els, note);
-            }
-            // Since the loop slice the exit is the row's: the pass makes up
-            // the two-way branch and the `break` at the head of the loop it
-            // desugared, and the walk emits wasm's conditional branch for it.
-            St::Loop { body: b, .. } => walk(b, note),
-            St::Block { body, .. } => walk(body, note),
-            St::Break { .. } | St::Continue { .. } | St::Trap => {}
-            St::Return { value, .. } => {
-                if let Some(v) = value {
-                    val(v, note);
-                }
-            }
-            St::Switch { on, arms, .. } => {
-                note(2);
-                val(on, note);
-                for a in arms {
-                    walk(&a.body, note);
-                }
-            }
-            St::Do { rhs: r, .. } => rhs(r, note),
-        }
+    for tag in vyrn_lower::core::gaps(body) {
+        // The tag is the core's, stated once in `core::gaps`; the ranking is
+        // this census's. A tag with no class here is a row shape the core
+        // learned to state and nobody ranked.
+        let c = match tag.split(':').next().unwrap() {
+            "Opaque" => 0,
+            "Lambda" => 1,
+            "Switch" => 2,
+            "Read" | "Take" | "Make" => 3,
+            "Call" => 4,
+            "Drop" | "Row" => 5,
+            "Prim" => 6,
+            other => panic!("the core states a gap this census does not rank: {other}"),
+        };
+        worst = worst.min(c);
     }
+    worst
 }
 
 /// Every projection call this body still states, by callee name — the census
@@ -283,80 +258,6 @@ fn projection_calls(ss: &[St], out: &mut Vec<String>) {
                 }
             }
             _ => {}
-        }
-    }
-}
-
-fn rhs(r: &Rhs, note: &mut impl FnMut(usize)) {
-    match r {
-        Rhs::Val(v) => val(v, note),
-        Rhs::Read(p) | Rhs::Take(p) => {
-            note(3);
-            at(p, note);
-        }
-        // Since the callee slice the row says WHO: a function this program
-        // declares is one the emitter's own table answers for, and only the
-        // other eight kinds, and a write-back, are still waiting on a row.
-        Rhs::Call {
-            args,
-            kind,
-            write_back,
-            ..
-        } => {
-            if *kind != Callee::Fn || *write_back {
-                note(4);
-            }
-            for (v, _) in args {
-                val(v, note);
-            }
-        }
-        Rhs::Prim(
-            Op::Bin(vyrn_frontend::ast::BinOp::And | vyrn_frontend::ast::BinOp::Or),
-            vs,
-            _,
-        ) => {
-            note(6);
-            for v in vs {
-                val(v, note);
-            }
-        }
-        Rhs::Prim(Op::Closure, vs, _) => {
-            note(1);
-            for v in vs {
-                val(v, note);
-            }
-        }
-        Rhs::Prim(_, vs, _) => {
-            for v in vs {
-                val(v, note);
-            }
-        }
-        Rhs::Make(_, vs) => {
-            note(3);
-            for v in vs {
-                val(v, note);
-            }
-        }
-    }
-}
-
-fn val(v: &Val, note: &mut impl FnMut(usize)) {
-    if matches!(v, Val::Lit(vyrn_lower::core::Lit::Opaque)) {
-        note(0);
-    }
-}
-
-fn at(p: &Place, note: &mut impl FnMut(usize)) {
-    match p {
-        Place::Name(_) | Place::Global(_) => {}
-        Place::Field(b, _) => at(b, note),
-        Place::Elem(b, i) => {
-            at(b, note);
-            val(i, note);
-        }
-        Place::Key(b, k) => {
-            at(b, note);
-            val(k, note);
         }
     }
 }
