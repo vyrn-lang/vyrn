@@ -1,4 +1,4 @@
-// State that outlives the run it belongs to.
+// State that outlives the run it belongs to, and a press the page owes a reader.
 //
 // The playground's kill timer was held per-mount and cleared only by the path
 // that finished a run, so a second `Run`, a Ctrl-Enter or a `Reset` left the
@@ -6,8 +6,12 @@
 // running by then and wrote "Stopped after 5 seconds." over a run that had
 // already succeeded.
 //
-// This is not reachable from node: it needs a DOM, a Worker and a clock. What
-// this file checks is the rule the fix states, in the one place it is stated.
+// The hero editor used one latch for two facts: arming and the replayed press.
+// A reader who hovered or tabbed into the plate armed it with no press owed,
+// and the Run press that followed returned at the latch.
+//
+// Neither is reachable from node: both need a DOM, a Worker and a clock. What
+// this file checks is the rule each fix states, in the one place it is stated.
 //
 // Run: node --test site/test/playlifecycle.test.mjs
 import { test } from "node:test";
@@ -17,11 +21,11 @@ import { fileURLToPath } from "node:url";
 const root = new URL("../../", import.meta.url);
 const read = (p) => readFile(fileURLToPath(new URL(p, root)), "utf8");
 
-const playJs = await read("site/public/play.js");
+const [playJs, widgetsJs] = await Promise.all([read("site/public/play.js"), read("site/public/widgets.js")]);
 
 // The text of a function, from its `function <name>(` to the `\n}` that closes
-// it. Every function in this file is written at the column its body is closed
-// at, so the first line-initial `}` ends it.
+// it. Every function in these two files is written at the column its body is
+// closed at, so the first line-initial `}` ends it.
 function body(src, name) {
   const at = src.indexOf(`function ${name}(`);
   if (at < 0) throw new Error(`${name} is gone from the file this test checks`);
@@ -50,5 +54,20 @@ test("the kill timer is module state, so one mount cannot hide another's", () =>
   }
   if (playJs.indexOf("let runTimer") > playJs.indexOf("function stopWorker(")) {
     throw new Error("runTimer is declared after stopWorker rather than beside the worker it belongs to");
+  }
+});
+
+test("the hero editor replays a Run press that arrived after hover or focus armed it", () => {
+  const arm = body(widgetsJs, "armHeroEditor");
+  const owed = arm.indexOf("runOnReady = runOnReady || thenRun");
+  const latch = arm.indexOf("if (armed) return;");
+  if (owed < 0) {
+    throw new Error("armHeroEditor tracks no run-on-ready flag, so one latch again serves arming and the replay");
+  }
+  if (latch < 0 || owed > latch) {
+    throw new Error("the press is recorded after the arming latch returns, which is where it was being dropped");
+  }
+  if (!arm.includes("onReady: () => runOnReady && runBtn.click()")) {
+    throw new Error("readiness replays `thenRun` again, which is false for the hover and focus arming");
   }
 });
