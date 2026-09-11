@@ -25339,6 +25339,80 @@ readers stopped matching on them.
 
 
 
+### M7 — every body lowers whole
+
+§2.1 states the core: every value has a name, every access is a place, and
+every surface form is a desugar into thirteen node kinds. M2 built it as a
+statement-level IR whose rows point at AST expression leaves, and M3 made the
+emitter read those rows. The AST walk stayed for what the rows do not state.
+This milestone finishes §2.1. It is not a new RFC, because the design is
+stated above and a second statement of it would be this document's own
+defect; what is left is migration, and migration is a milestone.
+
+**The measure** is one number: bodies lowered whole, read by `coredrive`
+(`compiler/vyrn-cli/tests/coredrive.rs --ignored`). At the start it reads
+963 of 21,722. The milestone is done when it reads all of them, and the two
+deletions below can start on no smaller number.
+
+**Gate:** the wasm manifest byte-identical, or re-written in the commit that
+moves a row with the rows named; the refusal corpus 0 lost / 0 gained; the
+residue ratchet; the bench gate; `coredrive`'s byte-identical count not lower
+than before the change.
+
+**Step 0, the inventory (`core-inventory`).** One instrument, stated once in
+`core.rs` beside `VYRN_FORM_TALLY`: `VYRN_GAP_TALLY=<file>` appends, for every
+body the lowering does not take whole, the first gap and all its gaps. Over the
+whole gate list it gives two tables in `rfcs/census/core-gaps.md`: bodies by
+first gap, and bodies unlocked by each gap family closed alone. The second
+table is the partition of the tracks below, and the milestone's order.
+
+**A track is one family.** A family is what one change to `core.rs` states
+and one reading in `direct.rs` consumes. The track's brief is the same for
+every family:
+
+1. The core states the form: a row of §2.1's thirteen, or a desugar in the
+   parser to a form the core already states. A desugar is taken first when the
+   surface form is sugar, because it costs no row and `vyrn emit-lowered`
+   prints it.
+2. The emitter reads the form from the core's rows and nowhere else.
+3. The AST arm for the form goes when `VYRN_FORM_TALLY` reads zero for it over
+   the gate list, the way `Stmt::Continue` went in `track-ek`; its flag in
+   `FORMS` turns false in the same commit.
+4. The record carries bodies whole before and after, the arms retired, and
+   the gate.
+
+**Order.** Largest family first by bodies unlocked, sugar families before row
+families at equal size. The inventory's table (b) gives the order at the start:
+a scalar conversion makes 16,816 bodies whole alone and takes the count from
+13.9 to 35.0 per cent, then a layout made, a short circuit, a builtin
+operation, a layout read, the row that names no value, a release the driver
+places, the receiver handed back, and the tag, which together reach 99.6 per
+cent; four small families are the rest. Three of them are sugar: the short
+circuit, the handed-back receiver, and the nullary constructor as a value. A family that needs a decision the kernel has not made
+gets its decision paragraph in this section before its track starts. The one
+known at the start is the undeclared callee: `track-ek` counted 10,842 bodies
+that wait on `Rhs::Call` for a callee no declared function of the program
+names, which is the builtins, the methods and the projections. The decision
+for it is §2.1's: a builtin is a call with a specification row, a method is a
+call after dispatch, a projection is a call after RFC-0120's resolution, and
+none of the three is a node kind of its own.
+
+**Two deletions, after the measure reads all.** First, the AST walk in
+`direct.rs` goes with `VYRN_NO_CORE_WALK` and `FORMS`, because nothing reaches
+it; `emitter_census` re-pins to what the core's reader costs. Second, the
+checker as a pass: `track-er` measured `Checker::stmt` and `Checker::expr` at
+66 rules, 64 of them stated only there, and the typed judgment
+(`vyrn-lower/src/typed.rs`) takes them one at a time with each refusal
+sentence pinned before and after, until the checker's walk over a body is the
+judgment's reader and nothing else. The 65,000 lines between the count at the
+close of 2026-09-10 and §2.7's target are these two walks.
+
+**What is out.** No optimization in the emitter (§2.3). No surface change:
+a track that finds a form the core cannot state without a new surface rule
+records it and stops, and the rule is decided here first.
+
+---
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
@@ -26489,8 +26563,10 @@ lose the arms'.
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
 emitters. M4 makes the runtime one file. M5 makes `run` compiled and CI
-minutes into seconds. M6 makes every remaining rule one rule. Any of them can
-be the last one landed and the language is better than before it.
+minutes into seconds. M6 makes every remaining rule one rule. M7 makes the
+core the one statement of every body, and the AST walk and the checker's pass
+go with it. Any of them can be the last one landed and the language is better
+than before it.
 
 ---
 
