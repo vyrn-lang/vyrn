@@ -267,7 +267,7 @@ fn sections() -> Vec<Section> {
             "the call counter: a load, a compare and a store at the one site that \n             has the frame in hand, and the one trap row that goes through \n             `trapAt` directly, because the prologue stands before the block a \n             check branches out to. `PLAN-0125-runtime.md` §6 step 9 priced the \n             runtime pair and left this here",
         ),
         sec(
-            "fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {",
+            "fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {",
             Shared, Source,
             "RFC-0037's defunctionalisation: the copy helper and the dispatcher \
              a stored closure is called through",
@@ -829,13 +829,13 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 7710, 710),
-        ("a decision §2.3 says it must not make", 1227, 213),
+        ("the mapping §2.3 names", 7724, 712),
+        ("a decision §2.3 says it must not make", 1239, 214),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4651, 961),
-        ("the wasm format", 334, 0),
-        ("shared machinery", 2587, 77),
-        ("tests", 313, 0),
+        ("the wasm format", 343, 0),
+        ("shared machinery", 2672, 88),
+        ("tests", 314, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
     assert_eq!(
@@ -909,11 +909,11 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 51, 5969, 0, 0),
-        ("the core's rows", 5, 2075, 0, 21),
+        ("neither", 51, 5988, 0, 0),
+        ("the core's rows", 5, 2088, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
-        ("the source, and the core has no row", 10, 1889, 81, 0),
-        ("both, for two questions", 15, 7433, 102, 139),
+        ("the source, and the core has no row", 10, 1958, 81, 0),
+        ("both, for two questions", 15, 7453, 103, 140),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
     assert_eq!(
