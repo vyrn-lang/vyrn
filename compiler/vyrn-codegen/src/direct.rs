@@ -10155,20 +10155,28 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalSet(p));
             for (i, (src, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
+                // The snapshot OWNS its heap (RFC-0114 §25 round three, the
+                // textual backend's rule, mirrored here in round fifty-seven):
+                // a heap capture READ OUT OF A PLACE is duplicated into the
+                // block, which is what lets the release twin walk it and the
+                // captured binding keep releasing its own value at block exit.
+                //
+                // A capture the source MINTS is already the block's, and
+                // duplicating it orphans what was minted. That is the one such
+                // source: a `fn`-typed parameter inside a specialization has no
+                // slot, so reading its name BUILDS the aggregate (RFC-0023 ×
+                // RFC-0037, [`Fn_::fnval_binding`]) rather than reading one.
+                let dup = self.owns_heap(ty)
+                    && !matches!(src, Expr::Var { name, .. } if self.fn_binds.contains_key(name));
                 b.ins(&Instruction::LocalGet(p));
                 if bl.fields[i] != 0 {
                     b.ins(&Instruction::I32Const(bl.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                 }
                 self.expr_as(m, b, src, ty)?;
-                // The snapshot OWNS its heap (RFC-0114 §25 round three, the
-                // textual backend's rule, mirrored here in round fifty-seven):
-                // a heap capture is DUPLICATED into the block, which is what
-                // lets the release twin walk it and the captured binding keep
-                // releasing its own value at block exit.
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
-                        if self.owns_heap(ty) {
+                        if dup {
                             self.copy_stack(m, b, ty, line)?;
                         }
                         b.ins(&store_of(&self.cx.ll(ty)));
@@ -10179,7 +10187,7 @@ impl<'p> Fn_<'_, 'p> {
                             src_mem: 0,
                             dst_mem: 0,
                         });
-                        if self.owns_heap(ty) {
+                        if dup {
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalGet(p));
                             if bl.fields[i] != 0 {

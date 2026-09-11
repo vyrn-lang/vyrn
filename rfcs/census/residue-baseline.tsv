@@ -37,7 +37,7 @@ blockarms	clean
 branchtypes	clean
 bytecount	clean
 bytesrange	clean
-capturefn	leak	2
+capturefn	clean
 clearkeep	clean
 clidemo	clean
 clifail	other
