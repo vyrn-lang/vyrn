@@ -1537,8 +1537,8 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
 /// An empty answer means the rows carry the body end to end. A tag names the
 /// family one form track closes: `Call:<who>:<name>` for a callee the
 /// emitter's function table does not answer, `Make:<what>` for a layout,
-/// `Read`, `Take`, `Lambda`, `Switch`, `Drop`, `Row`, `Prim:And`, `Prim:Or`,
-/// `Opaque`. `tests/coredrive.rs` ranks the tags into its classes, and
+/// `Read`, `Take`, `Lambda`, `Switch`, `Drop`, `Row` and `Opaque`.
+/// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
@@ -1626,10 +1626,6 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
         }
         Rhs::Prim(Op::Closure, vs, _) => {
             out.push("Lambda".into());
-            vals(vs, out);
-        }
-        Rhs::Prim(Op::Bin(op @ (BinOp::And | BinOp::Or)), vs, _) => {
-            out.push(format!("Prim:{op:?}"));
             vals(vs, out);
         }
         Rhs::Prim(_, vs, _) => vals(vs, out),
@@ -4830,6 +4826,57 @@ impl<'a> Builder<'a> {
         r
     }
 
+    /// `a && b` as `if a { b } else { false }`, and `a || b` as
+    /// `if a { true } else { b }` (RFC-0125 M7). The result is a `Bool`
+    /// temporary each edge stores into, which is the shape an `if` expression
+    /// takes. The type is not read off the node because the checker refuses
+    /// any operand but `Bool`.
+    fn short_circuit(
+        &mut self,
+        op: BinOp,
+        lhs: &'a Expr,
+        rhs: &'a Expr,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Rhs, Gap> {
+        let res = self.temp(Type::Bool, line);
+        let store = |value| St::Store {
+            place: Place::Name(res),
+            value,
+            old: Old::Nothing,
+            line,
+            site: Site::None,
+            releases: false,
+        };
+        // The left operand runs where the expression does, and the emitter
+        // drains its temporaries at the operator (`Fn_::binary`).
+        self.drain += 1;
+        let cond = self.read_val(lhs, out)?;
+        let mark = self.after.len();
+        let mut taken = Vec::new();
+        let v = self.read_val(rhs, &mut taken)?;
+        taken.push(store(v));
+        // A temporary the right operand read is released on the edge that
+        // made it: no other path evaluates it.
+        for t in self.after.split_off(mark) {
+            taken.push(St::Drop(t, Site::None, 0));
+        }
+        self.drain -= 1;
+        let decided = vec![store(Val::Lit(Lit::Bool(op == BinOp::Or)))];
+        let (then, els) = if op == BinOp::And {
+            (taken, decided)
+        } else {
+            (decided, taken)
+        };
+        out.push(St::If {
+            cond,
+            then,
+            els,
+            site: 0,
+        });
+        Ok(Rhs::Val(Val::Name(res)))
+    }
+
     fn rhs_inner(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         match e {
             // The five forms are named again here, and only here, because the
@@ -4845,7 +4892,13 @@ impl<'a> Builder<'a> {
                 vec![self.read_val(expr, out)?],
                 self.produced(e),
             )),
-            Expr::Binary { op, lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, line } => {
+                // `&&` and `||` are control flow. A prim row names both
+                // operands and states no branch, so the row could not say that
+                // the right one does not run when the left decides.
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    return self.short_circuit(*op, lhs, rhs, *line, out);
+                }
                 // An operator drains its operands' temporaries in both
                 // compiled backends (`binary`, `gen_binary`).
                 self.drain += 1;

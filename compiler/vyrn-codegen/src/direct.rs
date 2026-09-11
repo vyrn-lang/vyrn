@@ -17293,17 +17293,6 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, v, &t, line)?;
                 self.un_ins(b, u, &t, line)
             }
-            // `&&` and `||` short-circuit, and the row states them as prims
-            // that read both operands — the linear judgment is the same either
-            // way and the operator is what tells a reader the second read may
-            // not happen (the operation slice's first finding). An honest row
-            // is control flow, which is `St::If` over a temporary and moves
-            // bytes; until it exists this walk stands down rather than
-            // evaluating an operand the AST walk does not.
-            (Op::Bin(BinOp::And | BinOp::Or), _) => unsupported(
-                "`&&` or `||` from the core's row, which states no branch",
-                line,
-            ),
             (Op::Bin(o), [l, r]) => {
                 let lt = self.core_ty(body, l, &Type::Int);
                 let lt = self.cx.resolve(&lt);
@@ -17567,9 +17556,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => core_val_readable(body, v),
-            // `&&` and `||` are stated as prims and emit a branch; the row states
-            // no branch, so the walk stands down at them.
-            Rhs::Prim(Op::Bin(BinOp::And | BinOp::Or), ..) | Rhs::Prim(Op::Closure, ..) => false,
+            Rhs::Prim(Op::Closure, ..) => false,
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_val_readable(body, v)),
             // A write-back stores the receiver the call handed back, which is
             // more than a `call`.
