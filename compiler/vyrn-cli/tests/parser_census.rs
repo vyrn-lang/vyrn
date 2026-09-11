@@ -372,9 +372,7 @@ fn parser_sections() -> Vec<Section> {
         sec(
             "fn parse_capability(&mut self) -> Capability {",
             Twice,
-            "a parameter's capability, `share` included. The same table, third \
-             statement — and the only one of the three that carries the fourth \
-             word",
+            "a parameter's capability. The same table, third statement",
         ),
         sec(
             "fn enum_type(&mut self) -> Result<Type, Diagnostic> {",
@@ -534,8 +532,7 @@ fn parser_sections() -> Vec<Section> {
         sec(
             "fn primary(&mut self) -> Result<Expr, Diagnostic> {",
             Grammar,
-            "the atoms: every literal, the array and map literals, `spawn`, \
-             `match`, `if`, a call, a struct literal, and the tag lookahead \
+            "the atoms: every literal, the array and map literals, `match`, `if`, a call, a struct literal, and the tag lookahead \
              that sends an identifier with a string against it to one of the \
              three template desugars",
         ),
@@ -846,15 +843,15 @@ fn the_parser_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3522, 52),
+        ("parser.rs", "the grammar's own arm", 3479, 51),
         ("parser.rs", "a desugar the parser states", 1043, 7),
-        ("parser.rs", "a table stated a second time", 234, 1),
+        ("parser.rs", "a table stated a second time", 232, 1),
         ("parser.rs", "recovery and the diagnostic sentences", 174, 2),
         ("parser.rs", "shared machinery", 244, 1),
-        ("parser.rs", "tests", 1960, 0),
-        ("lexer.rs", "the grammar's own arm", 578, 11),
+        ("parser.rs", "tests", 1948, 0),
+        ("lexer.rs", "the grammar's own arm", 577, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
-        ("lexer.rs", "a table stated a second time", 164, 0),
+        ("lexer.rs", "a table stated a second time", 163, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
         ("lexer.rs", "shared machinery", 221, 2),
         ("lexer.rs", "tests", 239, 0),

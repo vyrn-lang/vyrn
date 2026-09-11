@@ -205,7 +205,6 @@ fn kind(e: &Expr) -> &'static str {
         Expr::TryConstruct { .. } => "TryConstruct",
         Expr::ArrayLit { .. } => "ArrayLit",
         Expr::MapLit { .. } => "MapLit",
-        Expr::Spawn { .. } => "Spawn",
         Expr::Lambda { .. } => "Lambda",
         Expr::Consume { .. } => "Consume",
     }
@@ -461,7 +460,6 @@ fn deep(t: &Type, decls: &HashMap<String, TypeDecl>, depth: usize) -> Type {
     match &t {
         Type::Array(a) => Type::Array(d(a)),
         Type::Stream(a) => Type::Stream(d(a)),
-        Type::Task(a) => Type::Task(d(a)),
         Type::ArrayN(a, n) => Type::ArrayN(d(a), *n),
         Type::SmallArray(a, n) => Type::SmallArray(d(a), *n),
         Type::Map(a, b) => Type::Map(d(a), d(b)),
@@ -532,9 +530,7 @@ fn defaulted(a: &Type, b: &Type) -> bool {
             return true;
         }
         match (a, b) {
-            (Type::Array(x), Type::Array(y))
-            | (Type::Stream(x), Type::Stream(y))
-            | (Type::Task(x), Type::Task(y)) => walk(x, y),
+            (Type::Array(x), Type::Array(y)) | (Type::Stream(x), Type::Stream(y)) => walk(x, y),
             (Type::ArrayN(x, _), Type::ArrayN(y, _))
             | (Type::SmallArray(x, _), Type::SmallArray(y, _)) => walk(x, y),
             (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),

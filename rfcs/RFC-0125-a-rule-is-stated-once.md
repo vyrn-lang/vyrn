@@ -17896,7 +17896,6 @@ whether it allocated. `pure` is the bottom.
 | `random` | `hostRandomSeed` | `random_get`; `environ_get` for `VYRN_FIXED_SEED` | yes | yes | yes | no (finding 13) |
 | `extern` | every other extern declaration, resolved by name | the `vyrn` namespace | trap | no instantiation | yes | no |
 | `serve` | `serveStream` | — | trap | trap | trap | no |
-| `spawn` | no name: the marker the core keeps on a spawned call (§2.1; the spawn flag of a core call, second slice) | — | yes | yes, eager | yes, eager | no |
 | `module-state` | no name: a read or a write of a global place, which is how the core spells a module-state binding (RFC-0013) | — | yes | yes | yes | no |
 | `trap` | `panic`, `@panicAt`, `assert`, `assertEq`, `runtime$trap`, `mem$trap`; and the core's trap statement | `proc_exit` | yes | yes | yes | yes |
 | `gen-only` | `moduleInterface`, `contractOf`, `lex`, `render`, `raw`, `rawAt`, `@codeText`, `@codeSplice` | — | no | no | no | yes |
@@ -26648,6 +26647,46 @@ the trap that catches a recursion the language's own counter does not count —
 an emitted drop over a long list, which no frame budget bounds. Blocked by
 that question, not by the flag. Left with it: the remaining 4.8x on "push
 1000", which is two runtime calls per element against inline code.
+
+**Three thin forms leave (2026-09-11, `thin-forms`).**
+Decision: the lead's, on the counts below. A form that no program writes, or that
+delivers nothing it promises, leaves the language.
+Went: the `share` capability (one parser word, four passes, both highlighters);
+the retired `place name(..)` member form's detection and sentence, 17 lines in
+`parser.rs`; `spawn f(args)` and everything that existed only for it, which is
+`Tok::Spawn`, `Expr::Spawn`, `Type::Task`, `Linear::Task`, `Effect::Spawn`,
+`Effects::SPAWN_ALLOWS`, the `@join` builtin and its seeded row, the emitter's
+`spawn` and `@join` blocks, the `Rhs::Call::spawn` marker, `Spawned` and
+`spawn_refusals` in the effect judgment, and `vyrn_frontend::isolation` whole.
+Stayed: `lazy` (30 uses across `std/stream`, `std/ui`, `std/vyx`, `std/http`,
+`std/graphql`), because the corpus writes it; `region` (24 uses), because it is
+the memory model's arena; `while let` (12 uses, one compiler line, a parser
+desugar), because it costs one line; `Type?(args)` (24 uses), because `std/cli`
+validates by construction; `vyrn serve --workers N`, because it is a pool of
+instances and never used the form.
+Lines: `compiler/*/src` 97,056 to 96,112. `vyrn-frontend` 61,825 to 61,317,
+`vyrn-lower` 12,669 to 12,476, `vyrn-codegen` 22,562 to 22,319. The three
+commits are -6, -17 and -921.
+Refusals: 0 lost that any program can reach, 0 gained. `share x: T` and
+`place at(..)` now get the parser's ordinary sentences. Nine isolation refusals
+and one unlicensed row (`u12b`, the `spawn` spelling of row 12, whose rule row
+12 states) left with their form; row 12 itself is unchanged.
+Manifest: written. 2 rows deleted (`concurrency.vyrn`, `parallel.vyrn`, the two
+programs that existed to demonstrate the form); 3 rows moved, and each is a file
+this branch edited: `branchtypes.vyrn` and `controlflow.vyrn` write the plain
+call now, and `vondemo.vyrn` compiles `std/von.vyrn`, whose keyword list lost
+`spawn`. The other 169 rows are byte-identical.
+Licence: `cargo build --release -p vyrn-cli` 0 new warnings; `cargo test
+-p vyrn-frontend -p vyrn-lower -p vyrn-codegen` green; `cargo test -p vyrn-cli`
+green; `VYRN_WASM_MANIFEST=check` after `write`, explained above; the residue
+ratchet unchanged; `tests/benching.rs -- --ignored` unchanged.
+Findings: `spawn f(a)` IS `f(a)` on all three engines, and the emitter's own doc
+said so: "all three engines run one schedule". The form promised a concurrency
+none of the three delivered, and RFC-0025's worker threads were never
+implemented. `ZERO_IN_THE_CORPUS` is empty for the first time: every form,
+keyword, operator and contextual word the language spells is now written by a
+program.
+Left: nothing of the three. `--workers` keeps RFC-0025's name and its gate.
 
 ## Open questions
 

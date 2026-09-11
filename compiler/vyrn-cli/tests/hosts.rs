@@ -3,7 +3,7 @@
 //! `vyrn_lower::install()` is what puts `core::augment` into `own::analyze`
 //! (`own::install_placer`), the kernel's refusals into the one list a file's
 //! refusals come out in, the must-use judgment into the same list, and the
-//! effect judgment into the floor and the isolation rule. A process that does
+//! effect judgment into the floor. A process that does
 //! not call it runs a DIFFERENT compiler: the placer never runs, `core::BODIES`
 //! stays empty, `Fn_::core` is `None` for every function, and the emitter's AST
 //! dispatch is the whole of it. Its refusals are the ones `movecheck.rs` still
@@ -63,7 +63,6 @@ const HOSTS: &[(&str, Core)] = &[
     ("compiler/vyrn-cli/tests/projections.rs", Installed),
     ("compiler/vyrn-cli/tests/typed.rs", Installed),
     ("compiler/vyrn-frontend/tests/common/mod.rs", Installed),
-    ("compiler/vyrn-frontend/tests/isolation.rs", Installed),
     ("compiler/vyrn-frontend/tests/loader_run.rs", Installed),
     ("compiler/vyrn-frontend/tests/semantics.rs", Installed),
     (

@@ -87,10 +87,8 @@ enum Why {
     View,
     /// **Control.** M4b(3)'s finding: Vyrn has no `panic` and no `abort`, so no
     /// Vyrn implementation of a *trapping* builtin can be observationally equal.
-    /// `@join` is the same shape one step over — an expression that waits for
-    /// another task is not something the language can spell either. The second
-    /// open language question was this row's, and RFC-0079 M1 answered it: `panic`
-    /// is now a row here itself, which is what makes it the only irreducible one.
+    /// The second open language question was answered by RFC-0079 M1: `panic`
+    /// is a row here itself, which is what makes it the only irreducible one.
     /// `slice` leaves at M3 by returning its failure instead of trapping.
     Control,
     /// **Compiler-directed.** Needs the static type of an arbitrary expression,
@@ -254,7 +252,6 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@panicAt", Control, "census U5: `panic` carrying the site it is written at"),
     ("assert", Control, "RFC-0015: traps the current test"),
     ("assertEq", Control, "RFC-0015: traps, rendering both sides"),
-    ("@join", Control, "waits for a task (the interpreter's are eager, so identity)"),
     // ---- Compiler-directed ---------------------------------------------------
     ("toJson", Compiler, "the walk needs the argument's static type; the writer is std/json"),
     ("fromJson", Compiler, "as `toJson`; the reader is std/jsonread + std/jsondec"),

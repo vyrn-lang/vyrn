@@ -445,7 +445,6 @@ pub const RESERVED: &[&str] = &[
     "alen",
     "str",
     "parse",
-    "join",
     "logger",
     // RFC-0094 M2 removed eleven rows here: `contains`, `startsWith`,
     // `endsWith`, `slice`, `chars` and the six codecs. Each was reserved so the
@@ -618,7 +617,7 @@ pub const MOVED_TO_STD: &[(&str, Gone)] = &[
     // The removed free-function spellings. Each fires for the BARE
     // user-written name only: the desugaring and the method forms carry the
     // unspellable `@`-prefixed internal names (`@str`, `@concat`, `@list`,
-    // `@join`, `@push`, `@at`), which no source can lex.
+    // `@push`, `@at`), which no source can lex.
     (
         "str",
         Gone::Removed("`str(x)` was removed; render a value with `x.toString()`"),
@@ -637,10 +636,6 @@ pub const MOVED_TO_STD: &[(&str, Gone)] = &[
             "`list([..])` was removed; write the array literal `[..]` \
              directly where an `Array<T>` is expected",
         ),
-    ),
-    (
-        "join",
-        Gone::Removed("`join(t)` was removed; await a task's result with `t.join()`"),
     ),
     (
         "toString",
@@ -738,7 +733,6 @@ fn render_method_sig(
         Capability::Read => t,
         Capability::Modify => format!("modify {t}"),
         Capability::Consume => format!("consume {t}"),
-        Capability::Share => format!("share {t}"),
     };
     let mut ps = vec![word(recv, "self".to_string())];
     ps.extend(params.iter().enumerate().map(|(i, t)| {
@@ -915,14 +909,6 @@ fn check_accum_inner(
             }
         }
     }
-
-    // RFC-0004 §Q4's spawn-isolation rule used to be a monotone fixpoint over
-    // the call graph here, and a second fixpoint after the check for calls
-    // through a stored function value. It is `vyrn_lower::effects` now, stated
-    // once over the named core and reached through `crate::isolation`
-    // (RFC-0125 §3 M6, the isolation slice). What stays at a `spawn` site is
-    // the shape of the call: the callee must exist, must not be a `gen fn`,
-    // and must take no function value.
 
     // Protocol registries (RFC-0002 §5): map each method name to its protocol +
     // signature, and record which (protocol, type-key) pairs are implemented.
@@ -1574,7 +1560,7 @@ fn check_accum_inner(
     // 6. Check test bodies (RFC-0015) and bench bodies (RFC-0055) — one walk,
     //    twice. Each is checked as a Unit-returning function body under a
     //    synthetic unspellable name (`test@<index>`, `bench@<index>`), so every
-    //    existing analysis (movecheck runs separately; ownership, spawn purity,
+    //    existing analysis (movecheck runs separately; ownership, purity,
     //    region) applies unchanged. Neither is registered in `sigs`, so user
     //    code can never call one. Duplicate names within a single file are
     //    rejected here (a better message than a parse error).
@@ -2216,7 +2202,6 @@ struct Checker<'a> {
     /// binding reads its consume discipline here, since a `Type::Fn` carries
     /// none of its own.
     caps_by_sig: &'a HashMap<String, Vec<Capability>>,
-    /// Functions that may be run as a concurrent task (`spawn`) — isolated/pure.
     types: &'a HashMap<String, TypeDecl>,
     /// Module contracts (RFC-0071): name -> declaration. Comptime-only — used to
     /// validate member types and to resolve `contractOf(Name)`.
@@ -2792,7 +2777,6 @@ impl<'a> Checker<'a> {
             | Type::Array(t)
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
-            | Type::Task(t)
             | Type::Stream(t) => deeper(&t),
             Type::Map(k, v) => deeper(&k).or_else(|| deeper(&v)),
             Type::Record(fs) => fs.iter().find_map(|f| deeper(&f.ty)),
@@ -2839,7 +2823,6 @@ impl<'a> Checker<'a> {
                 Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
-                | Type::Task(i)
                 | Type::Partial(i)
                 | Type::Stream(i)
                 | Type::Lazy(i)
@@ -2896,8 +2879,8 @@ impl<'a> Checker<'a> {
 
     /// Whether `ty` transitively contains a function-value type (RFC-0037),
     /// resolving named types (cycle-safe). Used to keep function values out of
-    /// the positions that stay illegal: `extern`/`gen` signatures, `Task`
-    /// payloads, and nested function signatures.
+    /// the positions that stay illegal: `extern`/`gen` signatures and nested
+    /// function signatures.
     fn contains_fn(&self, ty: &Type) -> bool {
         self.reaches(ty, &|t| match t {
             // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
@@ -3400,18 +3383,6 @@ impl<'a> Checker<'a> {
                      takes an integer argument"
                 ))
             }
-            // A `Task` cannot hold a function value (RFC-0037 defers it): a
-            // task result slot has no dispatcher to receive one yet.
-            Type::Task(inner) => {
-                if self.contains_fn(inner) {
-                    return Err(cerr!(
-                        line,
-                        "a `Task` cannot hold a function value \
-                         (RFC-0037 defers it)"
-                    ));
-                }
-                self.ensure_type_exists(inner, line)?
-            }
             // `Map<K, V>` (RFC-0028, RFC-0117): a key is `String`, `Int64`,
             // or a user type that is heapless all the way down and declares
             // `impl Hashable` (M2). A validated string type is a legal key
@@ -3455,7 +3426,7 @@ impl<'a> Checker<'a> {
             // `Option`/`Result`, enum payloads, returns, and module state.
             // Its own parameter and return types must not themselves carry a
             // function type (no higher-order-of-higher-order), and the
-            // still-illegal positions (`extern`/`gen` signatures, `Task`,
+            // still-illegal positions (`extern`/`gen` signatures and
             // codec/schema) are rejected at their own sites with named
             // diagnostics.
             Type::Fn(ptys, ret) => {
@@ -4185,7 +4156,7 @@ impl<'a> Checker<'a> {
                     // Record and continue: the next statement is checked too.
                     self.errors.borrow_mut().push(msg);
                     // Cascade-free recovery: a `let`/`for` that failed still
-                    // binds its name to `Type::Err`, so later uses don't spawn
+                    // binds its name to `Type::Err`, so later uses do not raise
                     // "unknown variable" diagnostics — they flow through
                     // permissively (see `assignable`/`unify`/`binop_type`).
                     self.recover_binding(stmt, scope);
@@ -4734,20 +4705,9 @@ impl<'a> Checker<'a> {
                 {
                     return Ok(false);
                 }
-                // RFC-0095 M1. A `Task<T>` is linear, and `drop t` is how a path
-                // that does not want the result discharges it: it waits for the
-                // task, releases the result by its type, and gives back the
-                // frame, the record and the operating-system handle. `Task<Unit>`
-                // passes with the rest — the handle is there whatever `T` is,
-                // which is why this arm is a type match and not an `owns_heap`
-                // question.
                 if matches!(
                     t,
-                    Type::Str
-                        | Type::Array(_)
-                        | Type::SmallArray(..)
-                        | Type::Map(..)
-                        | Type::Task(_)
+                    Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
                 ) || (crate::types::is_sum_alias(&t)
                     && crate::declared::owns_heap(&t, &self.types))
                 {
@@ -4794,7 +4754,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a value of this type can carry a heap allocation (a dynamic
-    /// `String`, an `Array` buffer, a `Task` payload, or a
+    /// `String`, an `Array` buffer, or a
     /// record/enum/Option/Result that transitively contains one).
     /// Used by the `region` escape guard.
     ///
@@ -5396,53 +5356,6 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 Ok(Type::option(Type::Named(name.clone())))
-            }
-            Expr::Spawn { name, args, line } => {
-                let (params, ret) = self
-                    .sigs
-                    .get(name)
-                    .ok_or_else(|| cerr!(line, "cannot spawn unknown function `{name}`"))?;
-                // A `gen fn`'s body is never emitted by any backend (that is
-                // what keeps `Code` out of them), so a task could not run it
-                // even though a pure generator passes every spawn-safety test
-                // below. Same refusal the function-value position makes.
-                if self.gen_fns.contains(name) {
-                    return Err(cerr!(
-                        line,
-                        "cannot `spawn {name}(..)`: a `gen fn` runs at \
-                         generation time and cannot be spawned — its body is \
-                         never emitted (RFC-0021)"
-                    ));
-                }
-                // A spawned callee cannot take function-value parameters: its
-                // per-callee thunk carries plain data only (RFC-0037 keeps the
-                // v1 rejection, now with a named diagnostic).
-                if params.iter().any(|p| self.contains_fn(p)) {
-                    return Err(cerr!(
-                        line,
-                        "cannot `spawn {name}(..)`: a spawned function \
-                         may not take function-value parameters (RFC-0037)"
-                    ));
-                }
-                if params.len() != args.len() {
-                    return Err(cerr!(
-                        line,
-                        "`{name}` expects {} argument(s), got {}",
-                        params.len(),
-                        args.len()
-                    ));
-                }
-                for (arg, pty) in args.iter().zip(params) {
-                    let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-                    if !self.coercible(&aty, pty) {
-                        return Err(cerr!(
-                            line,
-                            "`spawn {name}` argument expects {pty}, found {aty}"
-                        ));
-                    }
-                    self.prove_coercion(arg, pty, *line)?;
-                }
-                Ok(Type::Task(Box::new(ret.clone())))
             }
             Expr::ArrayLit { elems, line } => {
                 // `type Nums = Array<Int64>` is a supported spelling, so the
@@ -6983,7 +6896,7 @@ impl<'a> Checker<'a> {
                 // fn-typed binding that is not a v1 parameter — the params frame
                 // is index 1, above the body's outermost frame) is dispatched over the
                 // signature's collected sources, so record (caller, signature)
-                // for the extended spawn/workers fixpoint. v1 parameter calls
+                // for the extended workers fixpoint. v1 parameter calls
                 // keep their caller-site attribution untouched.
                 let frame = scope.iter().rposition(|f| f.contains_key(name));
                 if frame != Some(1) {
@@ -8924,7 +8837,7 @@ impl<'a> Checker<'a> {
     /// alias), the capture discipline is RFC-0023's verbatim (captures are a
     /// by-value read-only snapshot at this evaluation site), and the source is
     /// recorded for defunctionalization (one enum variant per source) along
-    /// with the effect summary the spawn/workers analyses need.
+    /// with the effect summary the workers analysis needs.
     fn stored_fn_lambda(
         &self,
         expr: &Expr,
@@ -9132,7 +9045,7 @@ impl<'a> Checker<'a> {
         self.arg_sources.borrow_mut().push(StoredSource {
             sig: self.base(sig),
             named: named.map(str::to_string),
-            // The spawn fields are the spawn analysis's, and it reads
+            // The stored-value fields are the workers analysis's, and it reads
             // `sources` alone; the judgment reads the two a frame is keyed by
             // (see `StoredFnEffects::arg_sources`).
             lambda: lambda_line.map(|line| StoredLambda {
@@ -9254,8 +9167,7 @@ impl<'a> Checker<'a> {
                         args,
                         line,
                         type_args: _,
-                    }
-                    | Expr::Spawn { name, args, line } => {
+                    } => {
                         // Passing a captured binding to a `consume` parameter
                         // would move it out of the enclosing scope from inside
                         // the lambda — forbidden. The argument is checked before
@@ -9475,16 +9387,6 @@ impl<'a> Checker<'a> {
             // so `type Feed = Stream<Paste>` unifies like the stream it is.
             Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
                 Type::Stream(a) => self.unify(inner, &a, subst, line),
-                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
-            },
-            // A generic `Task<T>` binds `T` the way `Stream<T>` does, and for
-            // the same reason: `@join`'s row is `(self: consume Task<T>) -> T`,
-            // so without this arm every `t.join()` reported "argument expects
-            // Task<T>, found Task<Int64>". The arm was missing because no rule
-            // had ever unified against a `Task` — `@join` was hand-written and
-            // read the payload out of the type itself (RFC-0125 §3 M6).
-            Type::Task(inner) => match crate::types::resolve(aty, self.types) {
-                Type::Task(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic `SmallArray<T, N>` binds `T` from the element type; `N`
@@ -9711,7 +9613,6 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::TryConstruct { name, .. } => format!("{name}?(..)"),
         Expr::ArrayLit { .. } => "[..]".to_string(),
         Expr::MapLit { .. } => "[..:..]".to_string(),
-        Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
         Expr::Consume { place, .. } => format!("consume {}", pred_summary(place)),
         Expr::Lambda { params, .. } => format!(
             "|{}| ..",
@@ -9841,38 +9742,10 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
     }
 }
 
-/// The probe's line at each site: a `spawn` is the answer, wherever it stands.
-struct Spawns(bool);
-
-impl BodyVisit<'_> for Spawns {
-    const SCOPED: bool = false;
-
-    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
-        // A spawn hides from the comptime-purity probe just as well behind a
-        // lambda literal as behind a call, so the walk descends into one.
-        if matches!(e, Expr::Spawn { .. }) {
-            self.0 = true;
-        }
-        !self.0
-    }
-}
-
-/// Whether a block uses `spawn` anywhere (including nested blocks) — used by the
-/// comptime-purity analysis (RFC-0021): a generator may not spawn.
-///
-/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6. It was two
-/// arm lists whose catch-alls entered neither a map literal nor a `consume`, so
-/// a `spawn` under either was invisible to the probe.
-fn contains_spawn(b: &Block) -> bool {
-    let mut v = Spawns(false);
-    body_block(b, &mut HashSet::new(), &mut v);
-    v.0
-}
-
-/// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
+/// Comptime-purity analysis (RFC-0021). Every
 /// `gen fn` — and everything it transitively calls — must be pure enough to run
 /// deterministically in the compiler's interpreter at generation time: no
-/// `extern`, `spawn`, module state, or an atom the lattice's `gen` column
+/// `extern`, module state, or an atom the lattice's `gen` column
 /// refuses ([`crate::effects::gen_refusal`]). Because a `gen fn` may be *used* as an
 /// import target anywhere it is
 /// visible, the restriction is enforced on EVERY `gen fn` unconditionally (v1:
@@ -9928,9 +9801,6 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
     };
     // A function's own (non-transitive) purity violation, if any.
     let direct = |f: &Function| -> Option<String> {
-        if contains_spawn(&f.body) {
-            return Some("uses `spawn`".to_string());
-        }
         if touches_globals(f, &global_names) {
             return Some("reads or writes module state".to_string());
         }
@@ -9944,7 +9814,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         }
         None
     };
-    const HINT: &str = "generators run at compile time — they may not use `extern`, `spawn`, \
+    const HINT: &str = "generators run at compile time — they may not use `extern`, \
                         module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, \
                         the clock, entropy, or logging sinks";
     // Whether a function violates purity on its own, and the call edges out of
@@ -10004,7 +9874,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
 }
 
 /// Whether a function reads or writes any module-state binding (RFC-0013), so it
-/// cannot be spawned. A local (param / `let` / `for`-var) with the same name
+/// touches module state. A local (param / `let` / `for`-var) with the same name
 /// shadows the global and does not count. Slightly conservative: a name both
 /// shadowed and used as a global in disjoint scopes is treated as a touch.
 /// One source that flows into a stored function value (RFC-0037): a named
@@ -10021,7 +9891,7 @@ pub struct StoredSource {
 }
 
 /// A lambda source's effect summary (RFC-0037), computed where the literal is
-/// checked — the spawn/workers analyses union these over a signature's sources.
+/// checked — the workers analysis unions these over a signature's sources.
 #[derive(Debug, Clone)]
 pub struct StoredLambda {
     /// The function whose body lexically contains the literal.
@@ -10046,7 +9916,7 @@ pub struct StoredFnEffects {
     /// A list of its own, and not part of [`sources`](Self::sources), because
     /// the two positions are different things: a stored value carries a
     /// defunctionalization tag and one enum variant, and an argument carries
-    /// neither. The spawn and `--workers` analyses read `sources` alone, so
+    /// neither. The `--workers` analysis reads `sources` alone, so
     /// their verdicts do not move. What reads BOTH is the effect judgment
     /// (RFC-0125 §2.2): a parameter's call reaches whatever a caller handed
     /// it, whichever route the value took. Before this list, whether a source
@@ -10055,7 +9925,7 @@ pub struct StoredFnEffects {
     /// not — which is RFC-0125 §3 M6's finding 14.
     ///
     /// Only `sig`, `named` and a lambda's `defined_in`/`line` are filled: the
-    /// rest of [`StoredLambda`] is the spawn analysis's, and the spawn
+    /// rest of [`StoredLambda`] is the workers analysis's, and the analysis
     /// analysis does not read this list.
     pub arg_sources: Vec<StoredSource>,
     /// `(function, signature)` for each call through a stored fn value.
@@ -10085,9 +9955,9 @@ pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
                 && ap.iter().zip(bp).all(|(x, y)| fn_sigs_match(x, y))
                 && fn_sigs_match(ar, br)
         }
-        (Type::Array(x), Type::Array(y))
-        | (Type::Task(x), Type::Task(y))
-        | (Type::Stream(x), Type::Stream(y)) => fn_sigs_match(x, y),
+        (Type::Array(x), Type::Array(y)) | (Type::Stream(x), Type::Stream(y)) => {
+            fn_sigs_match(x, y)
+        }
         (Type::Map(x1, x2), Type::Map(y1, y2)) => fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2),
         // The two built-in sums, read through their payloads (RFC-0126 §8.15):
         // a nested `Param` matches loosely through a payload the way it does
@@ -10119,7 +9989,7 @@ pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
 /// Returns the shortest call chain `root -> .. -> offender` plus the name of
 /// a touched global, or `None` when the whole call tree is module-state-free.
 ///
-/// Deliberately narrower than spawn-safety: `print`, logging, and file I/O
+/// Deliberately narrow: `print`, logging, and file I/O
 /// are thread-compatible host effects (each access-log/output line stays
 /// atomic) and do NOT gate workers — only shared mutable state does.
 pub fn module_state_use(
@@ -10150,7 +10020,7 @@ pub fn module_state_use(
         .map(|f| (f.name.as_str(), f))
         .collect();
     // Surface method names expand to every registered impl, exactly like the
-    // spawn-safety fixpoint — otherwise a global-touching impl reached through
+    // workers fixpoint — otherwise a global-touching impl reached through
     // a protocol method call would hide from the walk.
     let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
     for imp in &program.impls {
@@ -10348,7 +10218,7 @@ impl BodyVisit<'_> for GlobalRef<'_> {
             // namespace.
             //
             // A lambda body (RFC-0023) that reads module state makes the
-            // enclosing call chain non-spawn-safe, and the walk descends into
+            // enclosing call chain stateful, and the walk descends into
             // one, so the effect is attributed to the instantiation site.
             Expr::Call { name, .. } => self.hit(name, locals),
             _ => {}
@@ -10454,13 +10324,6 @@ impl BodyVisit<'_> for InitRules<'_> {
                 ));
                 false
             }
-            Expr::Spawn { name, .. } => {
-                self.fail(cerr!(
-                    line,
-                    "initializer of `{own_name}` may not `spawn {name}` — a                      module-state initializer runs before `main` (no user calls)"
-                ));
-                false
-            }
             // A module-state initializer is an expression, and a block arm
             // exists only in statement position — unreachable, and refused
             // rather than assumed.
@@ -10489,7 +10352,7 @@ impl BodyVisit<'_> for InitRules<'_> {
 /// may not read a global declared later (or itself), and it may call only
 /// literals/operators/built-ins, constructors, and functions IMPORTED from
 /// another module (which initialize first). A same-module ordinary function,
-/// any `extern`, a protocol method, or a `spawn` is rejected. Returns the first
+/// any `extern` or a protocol method is rejected. Returns the first
 /// violation.
 ///
 /// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; every arm
@@ -10527,8 +10390,8 @@ fn init_restrictions(
 // thing about a body — and not to type it — is an impl of this trait.
 crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 
-/// The collector's line at each site: a call, a spawn and a `try`-construct
-/// each name what they reach, and no other form does.
+/// The collector's line at each site: a call and a `try`-construct each name
+/// what they reach, and no other form does.
 struct Calls<'a>(&'a mut HashSet<String>);
 
 impl BodyVisit<'_> for Calls<'_> {
@@ -10539,12 +10402,9 @@ impl BodyVisit<'_> for Calls<'_> {
         // A call inside a lambda body (RFC-0023) is attributed to the enclosing
         // function — that is the monomorphization site, so a lambda that
         // performs I/O (or, via `global_ref_expr`, reads module state) makes the
-        // enclosing function non-spawn-safe. The walk descends into one, so
+        // enclosing function stateful. The walk descends into one, so
         // there is nothing to say here about it.
-        if let Expr::Call { name, .. }
-        | Expr::TryConstruct { name, .. }
-        | Expr::Spawn { name, .. } = e
-        {
+        if let Expr::Call { name, .. } | Expr::TryConstruct { name, .. } = e {
             self.0.insert(name.clone());
         }
         true
@@ -10597,11 +10457,6 @@ mod tests {
             assert!(
                 crate::effects::gen_refusal(internal).is_some(),
                 "`{lvl}` is a log level a `gen fn` may call"
-            );
-            let e = crate::effects::atom(internal).expect("a log level is an atom");
-            assert!(
-                !crate::effects::Effects::SPAWN_ALLOWS.has(e),
-                "`{lvl}` is a log level a task may call"
             );
         }
     }
@@ -11449,16 +11304,6 @@ mod tests {
         assert_eq!(global, "hits");
     }
 
-    // ---- stored function values: spawn / workers pins (RFC-0037) ---------
-
-    #[test]
-    fn spawned_function_may_not_take_fn_parameters() {
-        let src = "fn hof(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
-             fn main() -> Int64 { let t = spawn hof(x -> x)  return t.join() }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("may not take function-value parameters"), "{e}");
-    }
-
     #[test]
     fn workers_gate_walks_through_stored_values() {
         // The definer (`make`) never touches state itself; the offending global
@@ -11656,20 +11501,6 @@ mod tests {
         let e = check_src(src).unwrap_err();
         assert!(
             e.contains("not comptime-pure") && e.contains("`print`"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn gen_fn_using_spawn_is_rejected() {
-        let e = check_src(
-            "fn sq(x: Int64) -> Int64 { return x * x } \
-             gen fn g() -> String { let t = spawn sq(2) return \"\" } \
-             fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(
-            e.contains("not comptime-pure") && e.contains("spawn"),
             "{e}"
         );
     }
@@ -11917,7 +11748,7 @@ mod tests {
             .collect();
         assert_eq!(
             removed,
-            vec!["str", "concat", "len", "list", "join", "toString", "push", "at", "alen", "array"]
+            vec!["str", "concat", "len", "list", "toString", "push", "at", "alen", "array"]
         );
     }
 
@@ -12013,27 +11844,6 @@ mod tests {
                            Missing => 1, Corrupt(iss) => 2, Loaded(x) => x.n } } \
                    fn main() -> Int64 { return describe(load(Rec, \"p\")) }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
-
-    /// `unify` had no `Task` arm until RFC-0125 §3 M6, because no rule had ever
-    /// unified against one — `@join` was hand-written and read the payload out
-    /// of the type itself. Its row is the first signature that names a `Task`,
-    /// and without the arm every `t.join()` reported "argument expects
-    /// `Task<T>`, found `Task<Int64>`".
-    #[test]
-    fn a_task_binds_its_payload_through_a_signature() {
-        let src = "fn work() -> Int64 { return 7 } \
-                   fn main() -> Int64 { let t = spawn work() return t.join() }";
-        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
-
-    /// `@join`'s row is `(self: consume Task<T>) -> T`, so the receiver is
-    /// refused by the unify against `Task<T>` — the sentence the row gives, in
-    /// place of the block's "`.join()` needs a Task" (RFC-0125 §3 M6).
-    #[test]
-    fn rejects_join_of_non_task() {
-        let e = check_src("fn main() -> Int64 { let x = 5; return x.join(); }").unwrap_err();
-        assert!(e.contains("expected Task<T>, found Int64"), "{e}");
     }
 
     // ---- extern (RFC-0012 M1) --------------------------------------------
@@ -12627,57 +12437,13 @@ mod tests {
         assert!(e.contains("must be declared `mut`"), "{e}");
     }
 
-    /// The hand-written name list this file still has, checked against the
-    /// lattice.
-    ///
-    /// There were two, and the second was `SPAWN_FORBIDDEN` — the few names the
-    /// compiler owns that a task may not reach. It was meaningless outside
-    /// `RESERVED`: it was consulted by name, so an entry the compiler did not
-    /// own would forbid whatever user function shared the spelling, and an
-    /// entry that LEFT `RESERVED` would keep forbidding it silently. The list
-    /// is gone (RFC-0125 §3 M6, the isolation slice) and the effect judgment
-    /// states the rule, so what stands is the direction that outlived it: every
-    /// atom the isolation rule refuses is a name the compiler owns.
-    #[test]
-    fn the_atoms_a_task_may_not_reach_are_names_the_compiler_owns() {
-        for (n, e) in crate::effects::ATOMS {
-            if crate::effects::Effects::SPAWN_ALLOWS.has(*e) {
-                continue;
-            }
-            // The generation vocabulary is not a task's: a `gen fn` cannot be
-            // spawned at all, and the fence refuses these names by row wherever
-            // they are reached. `lex` and `render` are not `RESERVED`, and
-            // making them so is RFC-0094 M2's question and not this one.
-            if *e == crate::effects::Effect::GenOnly {
-                continue;
-            }
-            // A name no source can spell is nobody's to shadow: the runtime's
-            // own primitives and the compiler's `@`-spelled internals. A
-            // host-boundary name (RFC-0103 M2) is a DECLARATION the runtime
-            // shim answers on every target, so a program that spells it means
-            // the atom.
-            if n.contains('$')
-                || n.starts_with('@')
-                || crate::trap::host_boundary_extern(n).is_some()
-            {
-                continue;
-            }
-            assert!(
-                RESERVED.contains(n),
-                "`{n}` is an atom a task may not reach but is not a name the compiler \
-                 owns — a user function spelled that way would be judged as the atom"
-            );
-        }
-    }
-
-    /// The same check for the second forbid list, and it had none (RFC-0094 M1).
+    /// Every atom the generation fence refuses is a name the compiler owns.
     ///
     /// The asymmetry is not a tidiness point: it is the exact shape that let
     /// `get` rot out of `movecheck`'s view list. One list was updated when a
     /// builtin was deleted, a second was not, and a `Slots<String>` leaked
-    /// silently for two milestones. `SPAWN_FORBIDDEN` has been pinned since
-    /// `afree` left; the generation fence's list read the same way and was
-    /// pinned by nothing. The list is gone and the fence reads the lattice's
+    /// silently for two milestones. The generation fence's list read the same
+    /// way and was pinned by nothing. The list is gone and the fence reads the lattice's
     /// `gen` column, so this asks the column instead.
     #[test]
     fn comptime_forbidden_names_are_reserved() {
@@ -12711,7 +12477,7 @@ mod tests {
         // user call this reading serves (RFC-0125 §3 M6): the checker holds
         // `m(x, 1, 2, 3)` by the time it types the call, and subtracting one
         // for a receiver would be the hand-written exception this milestone
-        // deletes. The same trade `@join`'s row made.
+        // deletes.
         assert!(e.contains("`m` expects 2 argument(s), got 4"), "{e}");
     }
 
@@ -13164,10 +12930,6 @@ mod tests {
                 "`list([..])` was removed",
             ),
             (
-                "fn main() -> Int64 { let n = 5; return join(n); }",
-                "`join(t)` was removed",
-            ),
-            (
                 "fn main() -> Int64 { let s = toString(1); return 0; }",
                 "`toString` is a method",
             ),
@@ -13225,13 +12987,6 @@ mod tests {
                        let xs: Array<Int64> = [1, 2, 3] \
                        let n = take([4, 5]) \
                        return xs.length + n + make().length }";
-        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
-
-    #[test]
-    fn task_join_method_awaits() {
-        let src = "fn sq(n: Int64) -> Int64 { return n * n } \
-                   fn main() -> Int64 { let t = spawn sq(6); return t.join() }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
@@ -13546,15 +13301,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("read itself"), "{e}");
-    }
-
-    #[test]
-    fn local_shadowing_a_global_may_be_spawned() {
-        // A local `hits` shadows the global inside `pure`, so `pure` is isolated.
-        let ok = "let mut hits = 0\n\
-                  fn pure() -> Int64 { let hits = 5 return hits + 1 }\n\
-                  fn main() -> Int64 { let t = spawn pure() return t.join() }";
-        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
     }
 
     #[test]
@@ -15014,18 +14760,6 @@ mod tests {
         assert!(e.contains("unknown type `NoSuchType`"), "{e}");
     }
 
-    /// A pure `gen fn` passes every spawn-safety test, but no backend emits
-    /// its body — spawning it would reference a function nothing lowered.
-    #[test]
-    fn spawn_refuses_a_gen_fn() {
-        let e = check_src(
-            "gen fn five() -> Int64 { return 5 } \
-             fn main() -> Int64 { let t = spawn five() return t.join() }",
-        )
-        .unwrap_err();
-        assert!(e.contains("cannot `spawn five(..)`"), "{e}");
-    }
-
     /// A generic call passes its parameter type as the argument's expectation,
     /// exactly as the concrete path does — so a context-dependent literal
     /// (`Ok(1)`) types from the parameter instead of failing to infer.
@@ -15037,16 +14771,11 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
-    /// The comptime-purity probe descends into lambda bodies: a spawn behind
-    /// a stored lambda is a spawn the generator can run.
+    /// The comptime-purity probe descends into lambda bodies: an effect behind
+    /// a stored lambda is an effect the generator can run.
     #[test]
-    fn comptime_purity_sees_a_spawn_inside_a_lambda() {
-        let src = "fn sq(x: Int64) -> Int64 { return x * x } \
-                   fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(2) } \
-                   gen fn g() -> String { \
-                   let n = apply(x -> { let t = spawn sq(x) return t.join() }) \
-                   return \"\" } \
-                   fn main() -> Int64 { return 0 }";
+    fn comptime_purity_sees_an_effect_inside_a_lambda() {
+        let src = "fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(2) }                    gen fn g() -> String {                    let n = apply(x -> { print(x) return x })                    return \"\" }                    fn main() -> Int64 { return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("not comptime-pure"), "{e}");
     }

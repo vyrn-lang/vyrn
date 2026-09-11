@@ -209,15 +209,6 @@ pub enum Linear {
     /// The seeded row: a `Stream<T>`, consumed with `for … in`, forwarded by
     /// returning it, or released with `close(s)`.
     Stream,
-    /// The other seeded row (RFC-0095 M1): a `Task<T>`, joined with `t.join()`,
-    /// which yields the result, forwarded by returning it, or released with
-    /// `drop t`, which waits for the task and then throws the result away.
-    ///
-    /// A task owns a frame, a record and an operating-system handle, and the
-    /// handle is why the obligation is worth its line: bytes are a leak a
-    /// program can live with, and a per-process handle ceiling is a server that
-    /// stops.
-    Task,
     /// A declared `impl MustUse for T` row. The value is handed on by name — to
     /// a call, or to the return — or released with `drop t`, which runs whatever
     /// `impl Owned for T` declared.

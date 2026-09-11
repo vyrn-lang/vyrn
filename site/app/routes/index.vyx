@@ -103,7 +103,7 @@ type Tab = { id: String, label: String, block: String, caption: String }
 fn tabs() -> Array<Tab> {
     return [
         Tab { id: "types", label: "Types carry rules", block: "validated", caption: "The rule is part of the type, and the compiler proves what it can." },
-        Tab { id: "own", label: "Ownership is a word", block: "regions", caption: "read, modify, consume, share — written on the parameter, and no lifetimes." },
+        Tab { id: "own", label: "Ownership is a word", block: "regions", caption: "read, modify, consume — written on the parameter, and no lifetimes." },
         Tab { id: "records", label: "Records and enums", block: "records", caption: "A shape, a choice, and no inheritance." },
         Tab { id: "html", label: "A view is a function", block: "html", caption: "The server renders the tree; the browser gets the same one." },
         Tab { id: "gen", label: "Generators are libraries", block: "genuse", caption: "It runs while you compile, and emits Vyrn." },

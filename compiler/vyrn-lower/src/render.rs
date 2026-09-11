@@ -184,7 +184,7 @@ fn names(node: Node) -> Option<String> {
             // bytes ARE the decision and nothing else on the line says them.
             Expr::Str(v) => format!("{v:?}"),
             Expr::Var { name, .. } => name.clone(),
-            Expr::Call { name, .. } | Expr::Spawn { name, .. } => name.clone(),
+            Expr::Call { name, .. } => name.clone(),
             Expr::StructLit { name, .. } | Expr::TryConstruct { name, .. } => name.clone(),
             Expr::Field { field, .. } => format!(".{field}"),
             Expr::Binary { op, .. } => format!("{op:?}"),

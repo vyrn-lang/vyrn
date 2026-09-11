@@ -1,7 +1,7 @@
 /// JS interop (RFC-0012, milestone 2) — `export extern fn` exports.
 ///
 /// An `export extern fn` is a NORMAL Vyrn function (body fully checked, runnable
-/// under the interpreter and the native binary, spawn-analyzed by its body) that
+/// under the interpreter and the native binary, analyzed by its body) that
 /// is ADDITIONALLY exported to JS on the wasm target. `_start` still runs `main`
 /// once; afterwards the host page can call the exported functions on the live
 /// module instance — see `web/externdemo.html`.

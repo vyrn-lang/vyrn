@@ -188,7 +188,6 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
         | Expr::TryConstruct { .. }
         | Expr::ArrayLit { .. }
         | Expr::MapLit { .. }
-        | Expr::Spawn { .. }
         // A take is a move, and nothing that moves is a compile-time constant.
         | Expr::Consume { .. }
         | Expr::Lambda { .. } => None,
@@ -216,7 +215,7 @@ impl BodyVisit<'_> for Calls {
             // argument), and a block arm (RFC-0118) cannot appear in one
             // either — statement position only. Both count as a call, so a
             // hole here refuses rather than folds.
-            Expr::Call { .. } | Expr::Spawn { .. } | Expr::Lambda { .. } => self.0 = true,
+            Expr::Call { .. } | Expr::Lambda { .. } => self.0 = true,
             Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
                 self.0 = true
             }

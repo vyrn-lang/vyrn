@@ -28,11 +28,6 @@ three times, and `vyrn run` compiles.
   and **built-in bounds** `Eq`/`Ord`/`Num` (RFC-0002 §6).
 - **Capabilities** (RFC-0004): `consume` (move checking) and `modify` (a parameter
   changed in place, visible to the caller via call-by-value-result).
-- **Structured concurrency**: `spawn f(args) -> Task<T>` / `join` — a deterministic
-  fork-join. The compiler *proves* a spawned function is isolated (no I/O, no shared
-  mutable state, transitively), so it's data-race-free; `share` = concurrent read.
-  A `Task<T>` is linear (RFC-0095): the join consumes it, `drop t` waits and
-  discharges it, and its frame, record and OS handle go back at that one site.
 - **Heap + deterministic reclamation** (RFC-0004 §4, no GC): dynamic strings
   (`concat`/`len`), a `region { .. }` block that frees a whole group of
   allocations at exit (escaping a heap value from a region is a compile error),
@@ -106,7 +101,7 @@ import { palette } from "./lib/gen_palette"
 import { colorCount, firstTheme } from palette("./data")   // runs at compile time
 ```
 
-A `gen fn` is comptime-pure (no `extern`/`spawn`/module-state/`writeFile`); it
+A `gen fn` is comptime-pure (no `extern`/module-state/`writeFile`); it
 may read via mediated, path-scoped `readFile`/`listDir`/`moduleInterface`.
 Generation is deterministic and cached (`~/.vyrn/cache/gen`), so rebuilds and the
 LSP hit the cache. `vyrn emit-gen <file>` dumps the synthesized source.

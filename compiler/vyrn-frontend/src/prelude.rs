@@ -595,24 +595,6 @@ fn rows() -> Vec<Function> {
         // three-name `match` in `movecheck` used to.
         row("unboxStream", &["T"], &[("a", Read, Int)], stm(t()), &[]),
         // ---- the task primitive (RFC-0095 M1) -------------------------------
-        // `t.join()` awaits a task and takes it for good, which is a `consume`
-        // receiver and nothing else. The fact lived as a property of the WALK
-        // until now: every mention of a linear binding is a disposal there, so
-        // `join` consumed by being written, and no line said it.
-        //
-        // Rule 1 stands aside here for the reason it stands aside for `close`
-        // — see [`crate::movecheck::sinks`]. What a row cannot carry is the rest
-        // of `join`'s contract: which producer pairs with it (`spawn` is a
-        // keyword, not a callable name) and the disposal menu the diagnostic
-        // prints. Both stay hand-written, and both are about a NAME rather than
-        // about a signature.
-        row(
-            "@join",
-            &["T"],
-            &[("self", Consume, Type::Task(Box::new(t())))],
-            t(),
-            &[],
-        ),
         // ---- the four return types (RFC-0094, `declared::builtin_returns`) ---
         // Each of these was a row in a second list that recorded ONE fact: what
         // the call gives back. A row here already carries that fact, so the
@@ -1233,7 +1215,6 @@ mod tests {
             ("close", 0),
             ("boxStream", 0),
             ("serveStream", 0),
-            ("@join", 0),
         ] {
             assert_eq!(
                 capability(name, i),

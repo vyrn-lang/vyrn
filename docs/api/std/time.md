@@ -39,8 +39,8 @@ fn now() -> Instant
 ```
 
 The current wall-clock instant (UTC epoch millis). HOST EFFECT: reads the
-clock, so it is forbidden in generators/comptime and cannot cross a `spawn`
-boundary (exactly like `print`/file I/O).
+clock, so it is forbidden in generators/comptime (exactly like `print` and
+file I/O).
 
 ## monotonic
 

@@ -1815,14 +1815,9 @@ impl<'b> Kernel<'b> {
                 }
                 _ => "a value".to_string(),
             },
-            // RFC-0125 §3 M3, the containment slice: a spawned call is named
-            // `spawn f(..)`, as `movecheck` names it. The taker is the task,
-            // and a reader who wrote `spawn` is told so.
-            Rhs::Call { callee, spawn, .. } => format!(
-                "`{}{}(..)`",
-                if *spawn { "spawn " } else { "" },
-                callee.trim_start_matches('@')
-            ),
+            Rhs::Call { callee, .. } => {
+                format!("`{}(..)`", callee.trim_start_matches('@'))
+            }
             Rhs::Take(_) => "`consume`".to_string(),
             Rhs::Make(..) => "a literal".to_string(),
             Rhs::Read(_) | Rhs::Prim(..) => String::new(),

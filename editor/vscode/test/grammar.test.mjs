@@ -12,12 +12,12 @@
 // reserved fails here too.
 //
 // CONTEXTUAL WORDS ARE NOT KEYWORDS and are deliberately not compared. `as`,
-// `gen`, `extern`, `lazy`, `place`, `read`, `modify`, `test`, `bench`, `from`
-// and `logging` are identifiers the parser recognises by position; the grammar
-// matches each with its own lookahead in `#contextual-keywords`. `yield` was
-// among them and is gone: RFC-0120 retired `place`/`yield`, the parser kept one
-// mention of `place` for the migration refusal and none of `yield`, and
-// RFC-0127 §6.2 is the census that measured the difference.
+// `gen`, `extern`, `lazy`, `read`, `modify`, `test`, `bench`, `from` and
+// `logging` are identifiers the parser recognises by position; the grammar
+// matches each with its own lookahead in `#contextual-keywords`. `place` and
+// `yield` were among them and are gone: RFC-0120 retired the pair, and the
+// compiler now names neither, so the grammar colours neither. RFC-0127 §6.2 is
+// the census that measured the difference.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

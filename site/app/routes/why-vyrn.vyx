@@ -72,13 +72,6 @@ fn capabilities() -> Array<Capability> {
             refuses: "Naming the value again after the call is a compile error — that is the whole meaning of the word.",
             html: vyrnHtml("capConsume"),
         },
-        Capability {
-            id: "share",
-            word: "share",
-            means: "The value is shared.",
-            refuses: "The compiler enforces what sharing permits, rather than trusting a comment that says it is safe.",
-            html: vyrnHtml("capShare"),
-        },
     ]
 }
 </script>
@@ -106,12 +99,12 @@ fn capabilities() -> Array<Capability> {
 
         <section class="band" id="ownership">
             <p class="eyebrow">ownership is declared</p>
-            <h2>Four words, and no lifetime syntax</h2>
+            <h2>Three words, and no lifetime syntax</h2>
             <p>A parameter says what the function intends. Nothing is inferred, so there is nothing to fight.</p>
             <div class="plate" data-tabs>
                 <div class="plate-head">
-                    <span class="pill">The four words</span>
-                    <span class="eyebrow">read, modify, consume, share</span>
+                    <span class="pill">The three words</span>
+                    <span class="eyebrow">read, modify, consume</span>
                 </div>
                 <div class="tabs">
                     <button type="button" v-for="c in capabilities()" :key="c.id" :data-tab="c.id">{{ c.word }}</button>
@@ -124,7 +117,7 @@ fn capabilities() -> Array<Capability> {
                              compiler stops you doing is the pane's own claim —
                              the whole reason the tab exists — and `.cap` is what
                              the census counts against THE RULE's ceiling of one
-                             disclosure per plate. Four panes were four. The
+                             disclosure per plate. Three panes are three. The
                              plate's real caption is the one under them. -->
                         <p class="refuses">{{ c.refuses }}</p>
                     </div>

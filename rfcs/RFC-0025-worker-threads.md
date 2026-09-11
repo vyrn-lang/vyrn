@@ -1,6 +1,11 @@
 # RFC-0025 — Worker Threads: Parallel `spawn` and a Concurrent `serve`
 
-- **Status:** Implemented (see "As landed" at the end for the resolved details)
+- **Status:** Implemented in part. **`spawn` and `Task<T>` left the language on
+  2026-09-11**: every engine ran a spawned call eagerly at the spawn point, so
+  the form delivered no parallelism, and no program outside the two examples
+  written to demonstrate it used one. `vyrn serve --workers N` stays and is
+  what this RFC still describes. Read every `spawn` below as history.
+  (See "As landed" at the end for the resolved details)
 - **Depends on:** RFC-0004 (the isolation analysis — the whole safety story),
   RFC-0016 (`serve` and its async decision, which named this follow-up)
 - **The promise being kept:** "when concurrency comes to the server it will

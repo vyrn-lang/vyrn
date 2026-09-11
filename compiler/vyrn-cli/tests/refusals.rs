@@ -615,14 +615,6 @@ fn counterexamples() -> Vec<Uncovered> {
             "spelling",
         ),
         covered(
-            "u12b_module_state_to_a_spawned_consume_parameter.vyrn",
-            "12",
-            "module state `names` may not be passed to a `consume` parameter via `spawn \
-             take(..)` — nothing may take ownership of module state (it lives for the whole \
-             module and is never dropped)",
-            "spelling",
-        ),
-        covered(
             "u25_consume_inside_a_loop_heapless.vyrn",
             "25",
             "`x` is consumed by `take(..)` inside a loop, so it would be used again on the \
@@ -682,8 +674,8 @@ fn the_licence_is_per_program_and_these_are_the_counterexamples() {
 /// They lived in `movecheck.rs`'s test module and asked `vyrn_frontend::check`
 /// alone, which no longer states this rule. Each names something OTHER than
 /// the rule — a region's shadowing `let`, a lambda block's, a `break` path, a
-/// `spawn`, a method's `consume` parameter, a `test` body, a `drop` — and each
-/// used the refusal to see it, so the deletion would have taken seven readings
+/// method's `consume` parameter, a `test` body, a `drop` — and each
+/// used the refusal to see it, so the deletion would have taken six readings
 /// of the walk with it. They are asked of the whole compiler here instead.
 #[test]
 fn the_shapes_rule_ones_unit_tests_pinned_are_still_refused() {
@@ -724,13 +716,6 @@ fn the_shapes_rule_ones_unit_tests_pinned_are_still_refused() {
             format!(
                 "{T} fn main() -> Int64 {{ let x = T {{ id: 1 }} \
                  for i in [0, 1] {{ let a = take(x) break }} return take(x) }}"
-            ),
-        ),
-        (
-            "a spawn",
-            format!(
-                "{T} fn main() -> Int64 {{ let x = T {{ id: 1 }} \
-                 let t = spawn take(x) let z = take(x) return t.join() + z }}"
             ),
         ),
         (
@@ -1304,10 +1289,7 @@ fn the_shapes_row_twenty_fives_unit_tests_pinned_are_still_refused() {
 /// `consume` parameter. The pass asked that question of eight spellings of the
 /// same argument — a whole parameter, a `read` receiver, a field of one, an
 /// element, a name bound to an element, a pattern binder, a loop variable, an
-/// `if` arm — and each unit test used the refusal to see a spelling. A ninth,
-/// a SPAWNED call, is not here: through the whole compiler the isolation rule
-/// refuses `spawn take(ys)` first, because a callee that releases is not pure.
-/// The taker's own words for one are the core's (`spawn f(..)`). The
+/// `if` arm — and each unit test used the refusal to see a spelling. The
 /// kernel asks it of the value, so the spelling is no longer a case; the
 /// spellings are pinned here instead, with the menus, because a menu is the
 /// surface knowledge a reader acts on.

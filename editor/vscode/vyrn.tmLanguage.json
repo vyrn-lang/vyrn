@@ -126,7 +126,6 @@
         { "match": "\\bas\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
         { "match": "\\b(gen|extern)\\b(?=\\s+fn\\b)", "name": "keyword.control.vyrn" },
         { "match": "(?<=:\\s)lazy\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
-        { "match": "\\bplace\\b(?=\\s+[a-z_][A-Za-z0-9_]*\\s*\\()", "name": "keyword.control.vyrn" },
         { "match": "\\b(read|modify)\\b(?=\\s+self\\b)", "name": "keyword.control.vyrn" },
         { "match": "\\bfrom\\b(?=\\s*(\\\"|[A-Za-z_][A-Za-z0-9_]*\\s*\\())", "name": "keyword.control.vyrn" },
         { "match": "\\blogging\\b(?=\\s*\\{)", "name": "keyword.control.vyrn" }
@@ -134,7 +133,7 @@
     },
     "keywords": {
       "name": "keyword.control.vyrn",
-      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|break|continue|true|false|type|where|match|region|spawn|import|export)\\b"
+      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|break|continue|true|false|type|where|match|region|import|export)\\b"
     },
     "function-calls": {
       "comment": "A lowerCamelCase identifier directly before `(` is a function/method call (or the name in `fn name(...)`) — entity.name.function → yellow in Dark+, distinct from plain variables. PascalCase constructors (Circle(1), Some(x)) are NOT matched here: #types is included earlier and wins, keeping variants teal. Keywords are also included earlier, so `if (...)` stays a keyword.",

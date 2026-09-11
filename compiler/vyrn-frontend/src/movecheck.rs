@@ -6,7 +6,7 @@
 //! enforced by the compiler, rather than through `&`/move mechanics. It runs as
 //! a separate pass after type checking, so the type checker stays unaware of it.
 //!
-//! `Read`/`Modify`/`Share` impose no restriction in v0.1 (they are surface-only);
+//! `Read`/`Modify` impose no restriction in v0.1 (they are surface-only);
 //! only `Consume` moves. Analysis is flow-sensitive: `if` merges branches with
 //! "may-consume" (a value consumed on either path is consumed afterward), a
 //! reassignment revives a variable, and consuming a pre-loop variable inside a
@@ -2035,13 +2035,6 @@ impl MoveCheck<'_> {
                 self.exit();
                 scope.pop();
             }
-            // `spawn f(args)` moves arguments exactly like a direct call: a
-            // `consume` parameter takes ownership across the task boundary.
-            Expr::Spawn { args, .. } => {
-                for arg in args {
-                    self.expr(arg, scope);
-                }
-            }
         }
     }
 }
@@ -2115,11 +2108,10 @@ mod tests {
             "a rebuilding row takes its receiver"
         );
         assert!(!sinks(&decl, "@at", 0), "a lookup takes nothing");
-        // The four linear ones declare `consume` too, and the must-use walk
-        // owns them — see [`sinks`]. `@join` is the fourth (RFC-0095 M1): a
-        // `Task<T>` is linear exactly as a `Stream<T>` is, so the obligation on
-        // the TYPE refuses a second join and rule 1 stands aside.
-        for name in ["close", "boxStream", "serveStream", "@join"] {
+        // The three linear ones declare `consume` too, and the must-use walk
+        // owns them: the obligation on the TYPE refuses a second discharge and
+        // rule 1 stands aside.
+        for name in ["close", "boxStream", "serveStream"] {
             assert_eq!(
                 crate::prelude::capability(name, 0),
                 Some(Capability::Consume)

@@ -3112,7 +3112,6 @@ macro_rules! type_head_descent {
                     }
                 }
                 Type::Array(a)
-                | Type::Task(a)
                 | Type::Stream(a)
                 | Type::Partial(a)
                 | Type::ArrayN(a, _)
@@ -4157,8 +4156,7 @@ impl BodyVisit<'_> for RefNames {
                 args,
                 line,
                 type_args: _,
-            }
-            | Expr::Spawn { name, args, line } => {
+            } => {
                 let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
                     sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
@@ -4370,8 +4368,7 @@ impl BodyVisitMut for Renamer<'_> {
                     *name = ren(self.map, name);
                 }
             }
-            Expr::Spawn { name, .. }
-            | Expr::TryConstruct { name, .. }
+            Expr::TryConstruct { name, .. }
             | Expr::StructLit { name, .. }
             | Expr::Var { name, .. } => {
                 if !locals.contains(name) {

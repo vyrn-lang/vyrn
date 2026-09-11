@@ -119,7 +119,6 @@ and [`examples/fallible.vyrn`](examples/fallible.vyrn).
 | Arrays, maps, places, in-place element stores | [`arrays.vyrn`](examples/arrays.vyrn), [`mapdemo.vyrn`](examples/mapdemo.vyrn), [`placeorder.vyrn`](examples/placeorder.vyrn) |
 | Strings, templates, regex, UTF-8 bytes | [`strings.vyrn`](examples/strings.vyrn), [`templates.vyrn`](examples/templates.vyrn), [`regex.vyrn`](examples/regex.vyrn) |
 | Pull streams, linear and lazy | [`stream.vyrn`](examples/stream.vyrn), [`streamops.vyrn`](examples/streamops.vyrn) |
-| Structured concurrency: `spawn` / `join` | [`concurrency.vyrn`](examples/concurrency.vyrn), [`parallel.vyrn`](examples/parallel.vyrn) |
 | Portable SIMD | [`simd.vyrn`](examples/simd.vyrn), [`simdint.vyrn`](examples/simdint.vyrn) |
 | Modules, namespaces, remote imports | [`modules.vyrn`](examples/modules.vyrn), [`namespace.vyrn`](examples/namespace.vyrn) |
 | Reflection, JSON Schema in and out | [`reflection.vyrn`](examples/reflection.vyrn), [`jsonschema.vyrn`](examples/jsonschema.vyrn), [`schemaimport.vyrn`](examples/schemaimport.vyrn) |

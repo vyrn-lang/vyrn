@@ -11,8 +11,7 @@ directory, so the rename stays intra-device), then rename the temp over
 `path`. A failure at the write step leaves `path` UNTOUCHED (the old data is
 intact — the tear a bare `writeFile` would cause is gone). Byte-for-byte a
 successful `writeAtomic` leaves `path` exactly as `writeFile` would; only
-the crash window differs. HOST EFFECT (forbidden in generators/comptime,
-cannot cross a `spawn` boundary).
+the crash window differs. HOST EFFECT (forbidden in generators/comptime).
 
 **Concurrency:** the temp carries a per-call seed — `<path>.tmp.<seed>` — so
 two processes saving the same target write DIFFERENT temps and each rename

@@ -5136,40 +5136,6 @@ impl<'p> Fn_<'_, 'p> {
             }
             Stmt::Drop { name, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
-                // RFC-0095 M1. A task is linear, and `drop t` is the discharge
-                // that does not want the result. `rel_for` does not answer for a
-                // `Task` — an automatic block-exit row would free what the join
-                // already freed — so the release is emitted here, exactly as the
-                // textual backend emits it.
-                //
-                // There is no wait: this target has no threads, so the thunk ran
-                // at the spawn point and the box holds a finished result. What is
-                // left is the half a `Task<Int64>` makes invisible — the RESULT
-                // is released by its type before the box goes, because a dropped
-                // `Task<String>` has a String in that box and nothing else will
-                // ever free it.
-                if let Type::Task(inner) = self.cx.resolve(&ty) {
-                    let box_ = b.local(ValType::I32);
-                    // A `Task` is one word, so it is a scalar: a local holds the
-                    // box address itself, and every other place holds it at an
-                    // address (`Rel::Str` reads its own place the same way).
-                    match place {
-                        Place::Local(l) => {
-                            b.ins(&Instruction::LocalGet(l));
-                        }
-                        _ => {
-                            place
-                                .addr(b, 0)
-                                .ok_or_else(|| gap("a Task with no place", *line))?;
-                            b.ins(&Instruction::I32Load(word()));
-                        }
-                    }
-                    b.ins(&Instruction::LocalSet(box_));
-                    self.rel_at(m, b, box_, &inner, *line)?;
-                    b.ins(&Instruction::LocalGet(box_));
-                    b.ins(&Instruction::Call(self.cx.rt.free));
-                    return Ok(());
-                }
                 if let Some(r) = self.rel_for(&ty, *line)? {
                     self.emit_rel(m, b, place, &r, *line)?;
                 }
@@ -6165,21 +6131,19 @@ impl<'p> Fn_<'_, 'p> {
             } => {
                 self.call_dest = hint;
                 self.call(m, b, name, args, type_args, *line)?
-            }
-            Expr::Spawn { name, args, line } => self.spawn(m, b, name, args, *line)?,
-            // No catch-all. The arms above cover `Expr` exhaustively, and the
-            // `other => unsupported(..)` that used to sit here was dead — it
-            // printed an `unreachable_patterns` warning on every build of the
-            // workspace, which is the kind that teaches a reader to stop reading
-            // warnings.
-            //
-            // Deleting it also moves the obligation to where it belongs: a new
-            // `Expr` variant now fails to COMPILE here, instead of silently
-            // reaching a runtime "unsupported" that says the backend is missing a
-            // lowering. RFC-0077's ladder reached 87 of 87 with exactly one such
-            // hole (`extern`, excluded from the run comparison so nothing ever
-            // built it), and a non-exhaustive match is the cheapest way to not
-            // repeat that. `expr_name` keeps its three other callers.
+            } // No catch-all. The arms above cover `Expr` exhaustively, and the
+              // `other => unsupported(..)` that used to sit here was dead — it
+              // printed an `unreachable_patterns` warning on every build of the
+              // workspace, which is the kind that teaches a reader to stop reading
+              // warnings.
+              //
+              // Deleting it also moves the obligation to where it belongs: a new
+              // `Expr` variant now fails to COMPILE here, instead of silently
+              // reaching a runtime "unsupported" that says the backend is missing a
+              // lowering. RFC-0077's ladder reached 87 of 87 with exactly one such
+              // hole (`extern`, excluded from the run comparison so nothing ever
+              // built it), and a non-exhaustive match is the cheapest way to not
+              // repeat that. `expr_name` keeps its three other callers.
         })
     }
 
@@ -8687,60 +8651,6 @@ impl<'p> Fn_<'_, 'p> {
                 self.expr_as(m, b, &args[0], &to)?;
                 return Ok(to);
             }
-            // `t.join()` (RFC-0025). The task already ran, at the spawn point, so
-            // there is nothing to wait for: this is a read out of its heap box.
-            //
-            // Since RFC-0095 M1 the join CONSUMES the task, so the box goes back
-            // here — the wasm half of "free the frame, free the record, close the
-            // handle", of which this target has only the first: there are no
-            // threads, so `VTask` is the box and there is no handle. The read
-            // happens before the free, and a second `t.join()` is a compile
-            // error, so nothing reads the box afterwards.
-            "@join" if args.len() == 1 => {
-                let t = self.expr(m, b, &args[0])?;
-                let Type::Task(inner) = self.cx.resolve(&t) else {
-                    // The checker admits nothing else; keep the textual backend's
-                    // defensive identity rather than inventing a diagnostic.
-                    return Ok(t);
-                };
-                // The box's address, kept: every arm below consumes it off the
-                // stack, and the free needs it again.
-                let box_ = b.local(ValType::I32);
-                b.ins(&Instruction::LocalTee(box_));
-                match self.cx.repr(&inner, line)? {
-                    Repr::Scalar(_) => {
-                        b.ins(&load_of(&self.cx.ll(&inner), 0, self.cx.signed(&inner)));
-                    }
-                    // A copy, where the LLVM backend emits `load {ll}`. Handing
-                    // out the box's own address would make a joined aggregate an
-                    // alias into the task's result — M2l's `get` hazard, one
-                    // container along. Since M1 it would also be a read of freed
-                    // memory, because the box goes back three instructions later.
-                    Repr::Agg(l) => {
-                        let src = b.local(ValType::I32);
-                        b.ins(&Instruction::LocalSet(src));
-                        let off = b.alloc(l.size, l.align);
-                        b.slot(off);
-                        b.ins(&Instruction::LocalGet(src));
-                        b.ins(&Instruction::I32Const(l.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                        b.slot(off);
-                    }
-                    // A Unit task has no result to read, but it still has a box:
-                    // the `Task` was a value and has to be consumed.
-                    Repr::Unit => {
-                        b.ins(&Instruction::Drop);
-                    }
-                }
-                // The result is already an operand (or a slot address of this
-                // frame's own), so freeing the box now cannot invalidate it.
-                b.ins(&Instruction::LocalGet(box_));
-                b.ins(&Instruction::Call(self.cx.rt.free));
-                return Ok(*inner);
-            }
             "@has" | "@remove" if args.len() == 2 => {
                 return self.map_method(m, b, name, args, line)
             }
@@ -9234,8 +9144,7 @@ impl<'p> Fn_<'_, 'p> {
     /// need to be: three are interned constants of known length, and the other two
     /// are the `ptr`s a `String` is. Concatenating first would cost three `malloc`s
     /// out of an allocator that never frees, to save four calls that are the same
-    /// syscall either way. There is nothing to interleave with — RFC-0008 bars
-    /// logging from a spawned task.
+    /// syscall either way.
     ///
     /// The two `String`s are parked in scratch locals because each `write_all`
     /// consumes three operands, so the second value cannot wait on the stack under
@@ -10413,100 +10322,6 @@ impl<'p> Fn_<'_, 'p> {
             _ => return Ok(None),
         }
         Ok(Some(Type::Int))
-    }
-
-    /// `spawn f(args)` (RFC-0025) — and the whole reason this backend needs no
-    /// function table after all.
-    ///
-    /// M2a's pre-flight measured nine function-addresses-as-values over the
-    /// corpus and concluded "there IS a function table, and it is `spawn`". All
-    /// nine are the *textual* emitter's `call @__vyrn_spawn(ptr @__vyrn_task_*,
-    /// ptr)`, and the half of that finding which is about wasm is wrong. Read what
-    /// the retired C shim did with the pointer on this target: wasm has no
-    /// threads, so its `__vyrn_spawn` called
-    /// `thunk(frame)` **inline** and returns a `VTask` holding the frame. The
-    /// pointer is formed and consumed in one C statement, and it exists only
-    /// because the LLVM path routes an eager call through a C function that cannot
-    /// know the callee.
-    ///
-    /// A spawn site names its callee statically, so emitting that eager path here
-    /// forms no pointer at all: no table, no element segment, no `ref.func`, no
-    /// `call_indirect`. `spawn f(a)` IS `f(a)`, at the spawn point, in argument
-    /// order — which is also literally what the interpreter does (`interp.rs`,
-    /// `Expr::Spawn`), so all three engines run one schedule.
-    ///
-    /// What survives of the machinery is the **frame**: a `Task<T>` outlives the
-    /// shadow-stack frame that made it, so the result is boxed on the heap and
-    /// the `Task` is that address — the shim's `VTask { frame }` minus the thunk
-    /// field it no longer needs. Since RFC-0095 M1 the box is freed by whichever
-    /// construct discharges the task, `t.join()` or `drop t`, because a task is
-    /// linear and there is exactly one of them.
-    ///
-    /// Isolation is NOT enforced here, and must not be: the checker proves it
-    /// transitively (`checker.rs`, `spawn_safe`) for every engine, so a second
-    /// opinion in one backend would be a rule free to disagree with itself.
-    /// `__vyrn_join_all` has nothing to do either — eager means every spawned task
-    /// has already run by the time `main` returns, which is why the shim's wasm
-    /// arm defines it empty.
-    fn spawn(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        // A spawn callee is always a user function — the checker resolves the name
-        // in its own `sigs` and admits nothing else. Guarded before routing
-        // through [`Fn_::call`], which matches builtin spellings first: without
-        // this, a user function named like a builtin would spawn the builtin while
-        // the textual backend (whose `prep_spawn_target` looks only at `funcs`)
-        // spawned the function.
-        if !self.cx.sigs.contains_key(name) && !self.cx.generics.contains_key(name) {
-            return unsupported(
-                &format!("`spawn {name}(..)` of something not a function"),
-                line,
-            );
-        }
-        // Everything a call needs — argument coercion, generic instantiation, the
-        // hidden destination for an aggregate return — is `call`'s, so a spawned
-        // call and a plain one cannot diverge in how they pass arguments.
-        let ret = self.call(m, b, name, args, &[], line)?;
-        let boxed = b.local(ValType::I32);
-        match self.cx.repr(&ret, line)? {
-            Repr::Scalar(v) => {
-                let l = self.layout_of(&ret, line)?;
-                let held = b.local(v);
-                b.ins(&Instruction::LocalSet(held));
-                b.ins(&Instruction::I64Const(l.size as i64));
-                b.ins(&Instruction::Call(self.cx.rt.malloc));
-                b.ins(&Instruction::LocalTee(boxed));
-                b.ins(&Instruction::LocalGet(held));
-                b.ins(&store_of(&self.cx.ll(&ret)));
-            }
-            Repr::Agg(l) => {
-                let src = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::I64Const(l.size as i64));
-                b.ins(&Instruction::Call(self.cx.rt.malloc));
-                b.ins(&Instruction::LocalTee(boxed));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
-            // A `Task<Unit>` still has to be a value: one word, so `join` has a
-            // pointer to drop rather than a `Task` with no representation.
-            Repr::Unit => {
-                b.ins(&Instruction::I64Const(8));
-                b.ins(&Instruction::Call(self.cx.rt.malloc));
-                b.ins(&Instruction::LocalSet(boxed));
-            }
-        }
-        b.ins(&Instruction::LocalGet(boxed));
-        Ok(Type::Task(Box::new(ret)))
     }
 }
 
@@ -12609,7 +12424,7 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             // A handle names something; copying it names the same thing.
-            Type::Task(_) | Type::Lazy(_) => Ok(()),
+            Type::Lazy(_) => Ok(()),
             other => unsupported(&format!("`copy` of `{other}`"), line),
         }
     }
@@ -15348,7 +15163,7 @@ fn observes(e: &Expr, name: &str) -> bool {
         &mut |x| {
             if matches!(
                 x,
-                Expr::Call { .. } | Expr::Spawn { .. } | Expr::Lambda { .. } | Expr::Try { .. }
+                Expr::Call { .. } | Expr::Lambda { .. } | Expr::Try { .. }
             ) {
                 hit = true;
             }
@@ -15406,9 +15221,7 @@ fn header_invariant(cond: &Expr, body: &Block, name: &str) -> bool {
             {
                 true
             }
-            Expr::Call { args, .. }
-            | Expr::Spawn { args, .. }
-            | Expr::TryConstruct { args, .. } => !args.iter().any(|a| {
+            Expr::Call { args, .. } | Expr::TryConstruct { args, .. } => !args.iter().any(|a| {
                 is_var(a, name) || matches!(a, Expr::Consume { place, .. } if is_var(place, name))
             }),
             Expr::Consume { place, .. } => !is_var(place, name),
@@ -16168,7 +15981,6 @@ fn expr_name(e: &Expr) -> String {
         Expr::TryConstruct { .. } => "a fallible construction",
         Expr::ArrayLit { .. } => "an array literal",
         Expr::MapLit { .. } => "a map literal",
-        Expr::Spawn { .. } => "`spawn`",
         Expr::Lambda { .. } => "a lambda",
         _ => "this expression",
     }
@@ -17228,18 +17040,16 @@ impl<'p> Fn_<'_, 'p> {
             // no branch, so the walk stands down at them.
             Rhs::Prim(Op::Bin(BinOp::And | BinOp::Or), ..) | Rhs::Prim(Op::Closure, ..) => false,
             Rhs::Prim(_, vs, _) => vs.iter().all(core_val_readable),
-            // A `spawn` runs the call as a task and a write-back stores the
-            // receiver the call handed back; both are more than a `call`.
+            // A write-back stores the receiver the call handed back, which is
+            // more than a `call`.
             Rhs::Call {
                 callee,
                 args,
-                spawn,
                 write_back,
                 kind,
                 ..
             } => {
-                !spawn
-                    && !write_back
+                !write_back
                     && args.iter().all(|(v, _)| core_val_readable(v))
                     && self
                         .core_sig(callee, *kind)
@@ -17623,14 +17433,6 @@ mod tests {
                 "a numeric conversion",
                 "fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let x: Int32 = match o { Some(n) => Int32(n), None => Int32(0) } return 0 }",
             ),
-            // `t.join()` — the task's payload. Joined in EVERY arm: RFC-0095 M3
-            // made the walk arm-granular, so a join in one arm and nothing in
-            // the other is a task the other path abandons, and this case was
-            // written that way while nothing could see it.
-            (
-                "a join",
-                "fn work(n: Int64) -> Int64 { return n + 1 }                  fn main() -> Int64 { let t = spawn work(1) let o: Option<Int64> = Some(1)                      return match o { Some(n) => t.join() + n, None => t.join() } }",
-            ),
             // An empty `[]` is typed by the position, in an arm like anywhere.
             (
                 "an empty array",
@@ -17645,11 +17447,6 @@ mod tests {
             (
                 "a fallible construction",
                 "type Age = Int64 where value >= 0                  fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let r: Option<Age> = match o { Some(n) => Age?(n), None => Age?(0) }                      return 0 }",
-            ),
-            // `spawn f(a)` in an arm — the call's type, in a `Task`.
-            (
-                "a spawn",
-                "fn work(n: Int64) -> Int64 { return n + 1 }                  fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let t: Task<Int64> = match o { Some(n) => spawn work(n), None => spawn work(0) }                      return t.join() }",
             ),
         ];
         for (what, src) in cases {

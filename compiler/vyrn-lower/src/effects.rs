@@ -9,7 +9,7 @@
 //! the direction the RFC asks for: the code derives from the table.
 //!
 //! The judgment knows nothing about the surface language. It sees a call by
-//! its callee's name, the spawn marker on a call (`Rhs::Call::spawn`), an
+//! its callee's name, an
 //! owned name born of a primitive or a literal (an allocation), a read or a
 //! write of a global place (module state, RFC-0013), and a trap.
 //! A call through a function value names a local, and the caller answers
@@ -21,9 +21,7 @@
 //! in; a body joins the frames of the lambdas it holds, because the value it
 //! builds can run them (finding 2).
 //!
-//! One inclusion check lives here: the spawn-isolation rule of RFC-0004 §Q4,
-//! stated as RFC-0125 §2.2 states it — a spawned callee's set within
-//! [`Effects::SPAWN_ALLOWS`]. The other two, a body within its target's set
+//! The two inclusion checks, a body within its target's set
 //! and within its context's, still wait on the floor and the fence;
 //! `tests/effects.rs` compares the set with both passes, per function.
 
@@ -67,25 +65,6 @@ pub enum Callee {
     Unknown,
 }
 
-/// One `spawn` the judgment saw.
-#[derive(Debug, Clone)]
-pub struct Spawned {
-    /// The body the spawn is in, by index.
-    pub body: usize,
-    pub callee: String,
-    pub line: usize,
-    /// The spawned callee's set, after the fixpoint.
-    pub effects: Effects,
-}
-
-impl Spawned {
-    /// What the spawn-isolation rule refuses: the callee's effects outside
-    /// [`Effects::SPAWN_ALLOWS`]. Pure when the spawn is allowed.
-    pub fn outside(&self) -> Effects {
-        self.effects.minus(Effects::SPAWN_ALLOWS)
-    }
-}
-
 /// The judgment's answer for a set of bodies.
 #[derive(Debug, Default)]
 pub struct Judged {
@@ -101,8 +80,6 @@ pub struct Judged {
     /// `(body index, callee name)` for every call through a function value
     /// that `through` answered with bodies.
     pub through: Vec<(usize, String)>,
-    /// Every spawn site, with its callee's set.
-    pub spawns: Vec<Spawned>,
 }
 
 /// The effect set of every body in `bodies`, each the join of its own atoms,
@@ -126,7 +103,6 @@ pub fn judge(
     let mut unknown = Vec::new();
     let mut empty = Vec::new();
     let mut via = Vec::new();
-    let mut spawns: Vec<(usize, String, usize, Vec<usize>)> = Vec::new();
     // One resolution per distinct name and per distinct type, not one per
     // call site.
     let mut memo: HashMap<String, Callee> = HashMap::new();
@@ -139,7 +115,6 @@ pub fn judge(
             unknown: Vec::new(),
             empty: Vec::new(),
             via: Vec::new(),
-            spawns: Vec::new(),
             resolve,
             through,
             memo: &mut memo,
@@ -162,7 +137,6 @@ pub fn judge(
         unknown.extend(w.unknown.into_iter().map(|(n, l)| (i, n, l)));
         empty.extend(w.empty.into_iter().map(|(n, l)| (i, n, l)));
         via.extend(w.via.into_iter().map(|n| (i, n)));
-        spawns.extend(w.spawns.into_iter().map(|(c, l, idx)| (i, c, l, idx)));
     }
     // The fixpoint. Monotone over a finite lattice, so it ends; the corpus
     // needs a handful of rounds.
@@ -183,24 +157,11 @@ pub fn judge(
             break;
         }
     }
-    let spawns = spawns
-        .into_iter()
-        .map(|(body, callee, line, idx)| Spawned {
-            body,
-            callee,
-            line,
-            effects: idx
-                .iter()
-                .map(|j| effects[*j])
-                .fold(Effects::PURE, Effects::join),
-        })
-        .collect();
     Judged {
         effects,
         unknown,
         empty,
         through: via,
-        spawns,
     }
 }
 
@@ -213,8 +174,6 @@ struct Walk<'a> {
     empty: Vec<(String, usize)>,
     /// The callees `through` answered with bodies.
     via: Vec<String>,
-    /// `(callee, line, callee bodies)` per spawn.
-    spawns: Vec<(String, usize, Vec<usize>)>,
     resolve: &'a mut dyn FnMut(&str) -> Callee,
     through: &'a mut dyn FnMut(&Type) -> Callee,
     memo: &'a mut HashMap<String, Callee>,
@@ -325,35 +284,29 @@ impl Walk<'_> {
     /// Whether the right-hand side was a call that is not a user body — the
     /// caller's own allocation when the result is owned.
     fn rhs(&mut self, r: &Rhs, line: usize) -> bool {
-        let Rhs::Call { callee, spawn, .. } = r else {
+        let Rhs::Call { callee, .. } = r else {
             return false;
         };
-        if *spawn {
-            self.own = self.own.with(Effect::Spawn);
-        }
         let c = self.callee(callee);
-        let (atom, idx) = match c {
+        let atom = match c {
             Callee::Atom(e) => {
                 self.own = self.own.join(e);
-                (true, Vec::new())
+                true
             }
             Callee::Bodies(idx) => {
                 self.edges.extend(idx.iter().copied());
-                (false, idx)
+                false
             }
-            Callee::Pure => (true, Vec::new()),
+            Callee::Pure => true,
             Callee::Empty => {
                 self.empty.push((callee.clone(), line));
-                (true, Vec::new())
+                true
             }
             Callee::Unknown => {
                 self.unknown.push((callee.clone(), line));
-                (true, Vec::new())
+                true
             }
         };
-        if *spawn {
-            self.spawns.push((callee.clone(), line, idx));
-        }
         atom
     }
 }
@@ -447,7 +400,7 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
 /// Everything between a `Program` and a [`Judged`] is one setup — the lowering,
 /// the ownership plan, a core body per instance and per projection, the frame
 /// list a lambda is keyed in, and the two resolvers. Two readers want it: the
-/// floor's [`reaches`] and the isolation rule's [`spawn_refusals`]. It is a
+/// floor's [`reaches`]. It is a
 /// callback rather than a return because `refs` borrows `bodies`, and a
 /// function cannot hand back both.
 ///
@@ -603,85 +556,4 @@ fn with_judgment<R>(
     };
     let judged = judge(&refs, &mut resolve, &mut through);
     then(&judged, &refs, &insts, &top)
-}
-
-/// The spawn-isolation rule of RFC-0004 §Q4, stated once — RFC-0125 §3 M6, the
-/// isolation slice.
-///
-/// `checker.rs` stated it as a fixpoint over the AST call graph: a seed of
-/// functions with no forbidden callee, no `extern`, no `modify` parameter, no
-/// `drop` and no module state, shrunk until every callee of a member was a
-/// member, and a second fixpoint beside it for calls through a stored function
-/// value (RFC-0037). This is the same rule over the core: the callee's effect
-/// set, joined to a fixpoint through every route including a stored value and a
-/// `fn`-typed argument, held inside [`Effects::SPAWN_ALLOWS`].
-///
-/// One condition of the checker's five is not an effect and is still here: a
-/// `modify` parameter is a fact about the SIGNATURE, and it needs no fixpoint —
-/// only the spawned callee's own parameters can alias what the caller keeps,
-/// because only the spawned callee is handed the caller's values. The other
-/// four are the lattice's now: `extern` and the forbidden builtins were always
-/// rows, module state became one, and the `drop` search was deleted rather than
-/// moved (the ownership judgment refuses every body it caught that was worth
-/// refusing).
-///
-/// The refusal is stated after the check, where a core exists. Its price is
-/// reachability: a `spawn` inside a function no instance covers has no core and
-/// is not judged. That is the trade finding 7 made for the floor, taken again
-/// here, and the corpus holds no such site — all four spawn-holding bodies are
-/// covered.
-pub fn spawn_refusals(
-    program: &vyrn_frontend::ast::Program,
-) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
-    use vyrn_frontend::ast::Capability;
-    let mut out: Vec<(
-        String,
-        usize,
-        String,
-        vyrn_frontend::diagnostics::Diagnostic,
-    )> = Vec::new();
-    with_judgment(program, |judged, refs, _insts, _top| {
-        for sp in &judged.spawns {
-            // A `modify` parameter of the SPAWNED callee: the caller keeps the
-            // value it hands over, so the task and the caller would write one
-            // place. Named apart from the effects, because it is one.
-            let modifies = program
-                .functions
-                .iter()
-                .find(|f| f.name == sp.callee)
-                .and_then(|f| {
-                    f.params
-                        .iter()
-                        .find(|p| p.capability == Capability::Modify)
-                        .map(|p| p.name.clone())
-                });
-            let outside = sp.outside();
-            let text = if let Some(p) = modifies {
-                format!(
-                    "`spawn {}(..)` is not allowed: `{}` declares the `modify` parameter \
-                     `{p}`, so the task and its caller would write one value. A spawned \
-                     function must be isolated (pure).",
-                    sp.callee, sp.callee
-                )
-            } else if !outside.is_pure() {
-                format!(
-                    "`spawn {}(..)` is not allowed: `{}` (or something it calls) does \
-                     `{outside}`, so running it as a task could race or interleave. A \
-                     spawned function must be isolated (pure).",
-                    sp.callee, sp.callee
-                )
-            } else {
-                continue;
-            };
-            let file = refs[sp.body].file.clone();
-            let mut d = vyrn_frontend::diagnostics::Diagnostic::error(sp.line, 0, "check", text);
-            d.file = file.clone();
-            out.push((file.unwrap_or_default(), sp.line, sp.callee.clone(), d));
-        }
-    });
-    // One refusal per site, whatever how many instances of the enclosing
-    // function reached it, and in a fixed order.
-    out.sort_by(|a, b| (&a.0, a.1, &a.2).cmp(&(&b.0, b.1, &b.2)));
-    out.dedup_by(|a, b| (&a.0, a.1, &a.2) == (&b.0, b.1, &b.2));
-    out.into_iter().map(|(_, _, _, d)| d).collect()
 }

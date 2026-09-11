@@ -1796,19 +1796,6 @@ fn file_sink_needs_a_string_path() {
 }
 
 #[test]
-fn spawn_and_join_fork_join() {
-    let src = "
-            fn sq(n: Int64) -> Int64 { return n * n; }
-            fn main() -> Int64 {
-                let a = spawn sq(6);
-                let b = spawn sq(8);
-                return a.join() + b.join();   // 36 + 64
-            }
-        ";
-    assert_eq!(run(src).unwrap(), 100);
-}
-
-#[test]
 fn modify_parameter_writes_back_to_caller() {
     let src = "
             type C = { x: Int64 };
@@ -1870,13 +1857,6 @@ fn contextual_array_literal_is_growable() {
     let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; \
                    a.push(4); return a.length + a[3]; }"; // 4 + 4
     assert_eq!(run(src).unwrap(), 8);
-}
-
-#[test]
-fn task_join_method_awaits_result() {
-    let src = "fn sq(n: Int64) -> Int64 { return n * n } \
-                   fn main() -> Int64 { let t = spawn sq(9); return t.join() }";
-    assert_eq!(run(src).unwrap(), 81);
 }
 
 #[test]

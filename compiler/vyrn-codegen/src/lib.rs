@@ -352,7 +352,6 @@ pub mod observe {
             E::TryConstruct { .. } => "tryconstruct",
             E::ArrayLit { .. } => "array",
             E::MapLit { .. } => "map",
-            E::Spawn { .. } => "spawn",
             E::Lambda { .. } => "lambda",
             E::Consume { .. } => "consume",
         }
@@ -599,9 +598,6 @@ pub fn check_instantiations(program: &Program) -> Result<(), String> {
 /// Deep-normalize a stored-fn signature (RFC-0037) so structurally identical
 /// spellings — a `type Transform = fn(Int64) -> Int64` alias, a validated scalar,
 /// transformer sugar — register and dispatch as ONE synthesized enum.
-/// `Task` interiors are left resolved: they cannot hold fn values, and
-/// recursing would cycle.
-///
 /// Shared with the direct wasm backend, because it decides which constructions a
 /// dispatcher covers. Two backends grouping differently would give one of them a
 /// dispatcher missing a variant — a defensive trap where a call belongs, reached
@@ -1095,7 +1091,6 @@ fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, str
             }
         }
         Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
         | Expr::TryConstruct { args, .. }
         | Expr::ArrayLit { elems: args, .. } => {
             for a in args {
@@ -1578,10 +1573,6 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         Type::SmallArray(inner, n) => {
             format!("{{ i64, i64, ptr, [{n} x {}] }}", llt_of(&inner, types))
         }
-        // A task handle (RFC-0025) is an opaque `ptr` to the shim's task
-        // record (thread handle + heap frame); `t.join()` blocks on it and
-        // loads the result from the frame's leading slot.
-        Type::Task(_) => "ptr".into(),
         // A logger handle is a `ptr` to its name string.
         Type::Logger => "ptr".into(),
         Type::Record(fields) => {
@@ -1797,7 +1788,6 @@ mod tests {
             Type::ConstInt(8),
             Type::Map(b(Type::Str), b(Type::Int)),
             Type::Stream(b(Type::Int)),
-            Type::Task(b(Type::Int)),
             Type::Logger,
             Type::Fn(vec![Type::Int], b(Type::Unit)),
             Type::Lazy(b(Type::Int)),
@@ -1870,7 +1860,6 @@ mod tests {
                 Type::option(t.clone()),
                 Type::Array(b()),
                 Type::Stream(b()),
-                Type::Task(b()),
                 Type::Lazy(b()),
                 Type::ArrayN(b(), 4),
                 Type::ArrayN(b(), 8),
@@ -2059,7 +2048,6 @@ mod tests {
                 }
             }
             Type::Lazy(a) => go(a, under.or(Some("Lazy")), out),
-            Type::Task(a) => go(a, under.or(Some("Task")), out),
             Type::Partial(a) | Type::Omit(a, _) | Type::Pick(a, _) => {
                 go(a, under.or(Some("Omit/Pick/Partial")), out)
             }
@@ -2212,19 +2200,13 @@ mod tests {
             ),
             Some(Type::Float),
         );
-        assert_eq!(
-            solved(Type::Task(Box::new(t())), Type::Task(Box::new(Type::Bool))),
-            Some(Type::Bool),
-        );
-        // A different constructor still binds nothing — the rule's second half.
-        assert_eq!(solved(Type::Task(Box::new(t())), Type::Int), None);
     }
 
     /// **Why the arms above were dead, and why filling them changed no
     /// program.**
     ///
-    /// RFC-0086 deferred this list because "filling in `Lazy`/`Record`/`Enum`/
-    /// `Task` turns some silent `Unit` into a real type and some refusal into a
+    /// RFC-0086 deferred this list because "filling in `Lazy`/`Record`/`Enum`
+    /// turns some silent `Unit` into a real type and some refusal into a
     /// compile". Neither happened, and the reason was that the CHECKER refused
     /// all four shapes before codegen was asked: `Checker::unify` had the same
     /// list, and its fall-through is a diagnostic rather than a substitution.
@@ -2232,14 +2214,7 @@ mod tests {
     /// program's meaning moved.
     ///
     /// If any of these ever starts checking, this test fails and says so, and
-    /// the arms it unblocks are already written and already tested. **`Task`
-    /// has now done exactly that**, and it is off the list below.
-    /// `Checker::unify` grew a `Task` arm when `@join`'s seeded row became the
-    /// first signature that names one (RFC-0125 §3 M6, the `consume` slice), so
-    /// `fn awaitOne<T>(t: Task<T>) -> T { return t.join() }` checks, and
-    /// `solve_param`'s `Task` arm — written and asserted in the test above —
-    /// binds `T`. The program answers 42 on the native route and on the wasm
-    /// route. That is the promise this test was written to keep, kept.
+    /// the arms it unblocks are already written and already tested.
     #[test]
     fn the_checker_refuses_every_shape_the_fall_through_used_to_swallow() {
         let cases: &[(&str, &str)] = &[
@@ -2265,9 +2240,6 @@ mod tests {
                  fn main() -> Int64 { let h: Holder<Int64> = Holder { body: () -> seven() }\n\
                  return h.body }",
             ),
-            // (A `Task<T>` parameter stood here. It checks now — see the doc
-            // comment — so it belongs to `a_generic_task_parameter_solves`
-            // below rather than to this list.)
         ];
         for (what, src) in cases {
             assert!(
@@ -2276,17 +2248,5 @@ mod tests {
                  see the arms above and RFC-0086's last open list"
             );
         }
-    }
-
-    /// The first shape to leave the list above. A generic function taking a
-    /// `Task<T>` checks since RFC-0125 §3 M6 gave `Checker::unify` the `Task`
-    /// arm `@join`'s seeded row needed, and `solve_param` binds `T` from the
-    /// argument the way it binds one from an `Array`.
-    #[test]
-    fn a_generic_task_parameter_solves() {
-        let src = "fn slow(n: Int64) -> Int64 { return n * 2 }\n\
-                   fn awaitOne<T>(t: Task<T>) -> T { return t.join() }\n\
-                   fn main() -> Int64 { let t = spawn slow(21)\n return awaitOne(t) }";
-        assert!(check(src).is_ok(), "{:?}", check(src));
     }
 }

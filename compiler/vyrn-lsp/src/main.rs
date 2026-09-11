@@ -2222,7 +2222,7 @@ fn name_ends_at(line: &str, col: usize, name: &str) -> bool {
 /// * an initializer that opens with the type's own name (`Outer { .. }`,
 ///   `Color.Red`).
 ///
-/// Everything else — a call, a `match`, a `spawn`, a field or element read —
+/// Everything else, a call, a `match`, a field or element read,
 /// hides the type, and gets the hint. In doubt the answer is false: a hint too
 /// many is noise, a hint too few is the feature not working.
 fn spells_type(line: &str, end_col: usize, ty: &str) -> bool {

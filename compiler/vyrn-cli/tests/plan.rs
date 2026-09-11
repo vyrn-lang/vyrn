@@ -151,10 +151,9 @@ fn a_some_binding_types_as_the_option_it_is() {
 
 /// Round fifty-seven: a lambda's capture is a deep snapshot (both
 /// compiling backends duplicate heap captures into the block), so the
-/// captured binding still reclaims at block exit; a `spawn`'s capture
-/// crosses to a task and stays the recorded leak.
+/// captured binding still reclaims at block exit.
 #[test]
-fn a_lambda_capture_reclaims_and_a_spawn_capture_does_not() {
+fn a_lambda_capture_reclaims() {
     let src = "type Sink = fn(Int64)\n\
                let mut pending: Array<Sink> = []\n\
                fn keep(cb: consume Sink) {\n\
@@ -610,24 +609,6 @@ fn a_record_with_a_taken_field_is_reclaimed_minus_the_hole() {
             Some(DropKind::FreeStr),
         ]
     );
-}
-
-/// `rfcs/census-regions.md` defect 2. A `Task<T>` has no release row on
-/// purpose, and the automatic path must place none — the construct that
-/// discharges the obligation frees it, and a second row would free it
-/// twice. The SENTENCE a reader is told is the core's now (RFC-0125 §3 M3,
-/// the report slice), and this crate installs no placer to ask.
-#[test]
-fn a_discharged_task_gets_no_automatic_row() {
-    let src = "fn work(n: Int64) -> Int64 { return n + 1 } \
-               fn main() -> Int64 { let t = spawn work(1) let u = spawn work(2) \
-               let n = t.join() drop u return n }";
-    let f = kepts(src, "main");
-    assert!(
-        f[0].is_none(),
-        "a joined task gets no block-exit row: {f:?}"
-    );
-    assert!(f[1].is_none(), "a dropped task gets none either: {f:?}");
 }
 
 /// Census §14, Phase 5. An `Option` and a `Result` DO own their payload:

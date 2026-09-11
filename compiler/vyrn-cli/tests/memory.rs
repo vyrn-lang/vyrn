@@ -55,7 +55,6 @@
 //! | `mapRepeatKey` | U4's price, the other half | steady | a map takes its key, so it releases the key it does not keep — the hit path used to drop it, which is a leak per repeat in every histogram loop |
 //! | `mapReplaceValue` | RFC-0028, the value half | steady | a map takes the VALUE too, so a store over an existing key releases the value it replaces — the half missed one line from the key's |
 //! | `mapRemoveEntry` | RFC-0028, both halves | steady | `remove` gives up the whole entry, so the key AND the value go back — the runtime shim shifts bytes and is handed no types, so only the call site can |
-//! | `spawnFrame` | §10 | steady | RFC-0095 M1: a task is linear, and both discharges give its storage back |
 //! | `consumingLoop` | U4's price, one keyword over | steady | RFC-0092 M5's row for `for x in consume xs`: the loop is the buffer's last owner, so it releases it at every exit |
 //! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
@@ -75,23 +74,15 @@
 //! census closed the class next door, and by the same reading one level down: an
 //! ARGUMENT with no owner.
 //!
-//! **§10 reaches this harness in half.** A task owns a frame, a task record and
-//! an operating-system handle. On wasm there are no threads, so the direct
-//! backend runs the thunk at the spawn point and the whole task is one heap box:
-//! the frame, with no record and no handle beside it. RFC-0095 M1 frees that box
-//! at the join and at the `drop`, and the row is sized so a missed release shows
-//! — a `Task<String>` carrying ~900 bytes, dropped rather than joined, where the
-//! old row leaked 8 bytes a call and hid inside a page.
-//!
 //! **What this table cannot see, and what used to see it.** Four measurements
 //! here ran the TEXTUAL route's binary under `VYRN_FREE_AUDIT`, which was the C
-//! shim's allocator counting its own live pointers: the operating-system handle
-//! a `spawn` takes, the empty String whose `cap == 0` named both "static
+//! shim's allocator counting its own live pointers: the empty String whose
+//! `cap == 0` named both "static
 //! literal" and "empty heap buffer" natively, a `match` scrutinee and a map
 //! entry. The instrument was the shim and went with it when the native route
 //! became this module through wasm2c (RFC-0125 §2.5); the wasm allocator has no
-//! audit of its own, and building one is its own slice. Three of the four rows
-//! are steady in this table anyway. The handle is not, and nothing sees it now.
+//! audit of its own, and building one is its own slice. Every one of these rows
+//! is steady in this table anyway.
 //!
 //! Two rows carry a finding the census did not have:
 //!
@@ -303,8 +294,9 @@ fn main() -> Int64 {
     let joined = a + b
     let picked = if c { joined } else { a + b }
     let sent = a + b
-    let job = spawn takes(sent)
-    let doubled = job.join()
+    let doubled = takes(sent)
+    let flow = fromArray([1, 2])
+    close(flow)
     let f: Sizer = x -> x + held.byteLength
     region {
         let arena = a + b
@@ -365,11 +357,9 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     // Every reason the printer can still name.
     has("c                NOT reclaimed — the type Bool owns no heap");
     // Round fifty-seven: a LAMBDA's capture is a deep snapshot, so the
-    // captured binding reclaims. RFC-0125 §3 M3, the report slice: a SPAWN's
-    // capture reclaims too, because the core owns the binding and the kernel
-    // places its release — the walk that worded this report used to say
-    // "`sent` NOT reclaimed — a lambda or a spawn captures it at line 55"
-    // about a row the placer had already placed.
+    // captured binding reclaims. RFC-0125 §3 M3, the report slice: the core
+    // owns the binding and the kernel places its release, where the walk that
+    // worded this report used to say a capture kept it alive.
     has("held             reclaimed at block exit — freeing the String buffer");
     has("sent             reclaimed at block exit — freeing the String buffer");
     has("named            NOT reclaimed — it is a borrow of somebody else's value");
@@ -430,11 +420,11 @@ fn why_memory_counts_the_whole_file() {
     assert!(text.contains("  summary: "), "{text}");
     assert!(text.contains(" reclaimed, "), "{text}");
     assert!(text.contains("not reclaimed"), "{text}");
-    // `rfcs/census-regions.md` defect 2: a task is discharged where it is
-    // joined, so the report may not call it a leak. It has its own column.
+    // A linear value is discharged where it is closed, so the report may not
+    // call it a leak. It has its own column.
     assert!(text.contains(" discharged, "), "{text}");
     assert!(
-        text.contains("discharged, not leaked — a task is joined, forwarded or dropped"),
+        text.contains("discharged, not leaked — a stream is consumed, forwarded or closed"),
         "{text}"
     );
     assert!(text.contains("aliased by another binding"), "{text}");
@@ -793,23 +783,6 @@ const ROWS: &[Row] = &[
         census: "§9a",
         today: Shape::Steady,
         why: "Phase 6: rule 3 makes a return the caller's, and across this boundary the               caller is `wasi-min.js` — it decodes the String, then hands the block back               through `__vyrn_free`. An export that would lend one no longer compiles",
-    },
-    Row {
-        export: "spawnFrame",
-        census: "§10",
-        today: Shape::Steady,
-        why: "RFC-0095 M1: a `Task<T>` is linear, so `t.join()` consumes it and `drop t` \
-              discharges it without taking the result, and both give the task's storage \
-              back. wasm has no threads, so `spawn f(a)` runs at the spawn point and the \
-              whole task IS one heap box — the frame with no record and no handle beside \
-              it. The row used to say this harness could not see §10, and it was right \
-              about the reason and wrong about the fix: the box was allocated per call \
-              and never freed, 8 bytes at a time, which hides inside one 64 KiB page at \
-              500 calls. It is a `Task<String>` now, dropped rather than joined, so a \
-              missed release is ~900 bytes a call and the row moves. What this harness \
-              still cannot see is the OPERATING-SYSTEM HANDLE, which is the part of §10 \
-              that matters and exists only natively. Nothing sees it since the shim's \
-              free audit went with the textual route (RFC-0125 §2.5)",
     },
     Row {
         export: "selfReferring",
@@ -1531,27 +1504,6 @@ export extern fn callArgument() {{
     // decides. `s` names the concatenation, so a leak here is the operand's.
     let s = "n" + tagged(seen)
     seen = seen + Int64(s.byteLength)
-}}
-
-/// Census §10, both discharges (RFC-0095 M1). The join takes the result and
-/// gives the frame back; the `drop` waits, releases the result BY ITS TYPE, and
-/// gives the frame back. The second one is why the row is worth ~900 bytes a
-/// call: a `Task<String>` the program drops holds a String the task allocated
-/// and nothing else will ever free.
-export extern fn spawnFrame() {{
-    let t = spawn work(seen)
-    seen = t.join()
-    // The FRAME on its own is 8 bytes here, which hides inside a 64 KiB page at
-    // one per call — which is exactly how the old row read steady while leaking.
-    // Sixty-four a call is 512 bytes a call, and the row sees that.
-    let mut i = 0
-    while i < 64 {{
-        let u = spawn work(i)
-        seen = seen + u.join()
-        i = i + 1
-    }}
-    let d = spawn tagged(seen)
-    drop d
 }}
 
 /// The CANARY, and the only row here that is meant to grow.

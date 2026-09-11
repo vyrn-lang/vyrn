@@ -1,6 +1,6 @@
 //! The two highlighters colour the same contextual words.
 //!
-//! `read`, `modify`, `consume` and `share` are the language's whole ownership
+//! `read`, `modify` and `consume` are the language's whole ownership
 //! surface, and a page that invites you to type them cannot render them as
 //! ordinary names. Two highlighters agree about that today and nothing checks
 //! that they keep agreeing:
@@ -16,7 +16,7 @@
 //! **The editor grammar is deliberately not compared.** Its contextual list
 //! answers a different question — which words to colour in a `.vyrn` FILE — and
 //! it holds `extern`, `lazy`, `place` and `logging`, which these two do not,
-//! while leaving out `consume`, `share` and `panic`, which these two carry.
+//! while leaving out `consume` and `panic`, which these two carry.
 //! `editor/vscode/test/grammar.test.mjs` checks that one against the lexer, and
 //! RFC-0127 §3.4 counts every word in all three lists against the compiler.
 

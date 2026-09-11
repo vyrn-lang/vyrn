@@ -124,7 +124,7 @@ impl Capability {
     /// through one match rather than a second list of builtin names (RFC-0125
     /// §3 M6, sixth slice). `fs` is three effect rows. `None` covers the two
     /// opposite cases RFC-0103 M2 records: an effect every target has —
-    /// `alloc`, `write-output`, the clock, entropy, `spawn`, `module-state`,
+    /// `alloc`, `write-output`, the clock, entropy, `module-state`,
     /// `trap` — so a row
     /// for it would refuse nothing; and one no compiled target has — `serve` —
     /// or that exists only in the generator — `gen-only`.
@@ -140,7 +140,6 @@ impl Capability {
             | Effect::Clock
             | Effect::Random
             | Effect::Serve
-            | Effect::Spawn
             | Effect::ModuleState
             | Effect::Trap
             | Effect::GenOnly => return None,

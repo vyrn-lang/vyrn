@@ -141,8 +141,7 @@ fn sections() -> Vec<Section> {
             "fn check_accum_inner(",
             Shared,
             "the driver: it builds every whole-program table — types, \
-             variants, signatures, generics, capabilities, the spawn-safety \
-             fixpoint, the protocol registries — and then walks the \
+             variants, signatures, generics, capabilities, the protocol registries — and then walks the \
              declarations. Its 26 refusals are the declaration-level ones \
              (a name defined twice, an impl that does not conform, `main`'s \
              signature); the tables are what the rest of the file reads",
@@ -540,11 +539,6 @@ fn sections() -> Vec<Section> {
             "which type constructors may appear in an `extern` signature",
         ),
         sec(
-            "struct Spawns(bool);",
-            Shared,
-            "the spawn probe's one line at a node; the descent is `ast::body_scope_descent!`'s",
-        ),
-        sec(
             "fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {",
             Refusal,
             "the generation fence over the AST: a `gen fn` body's effects, \
@@ -730,12 +724,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3457, 140),
-        ("a rule the checker states", 1477, 54),
+        ("the typing judgment", 3389, 134),
+        ("a rule the checker states", 1466, 53),
         ("the checker's part in a rewrite stated elsewhere", 455, 14),
-        ("one arm per form, type constructor or builtin", 2778, 140),
-        ("shared machinery", 2398, 30),
-        ("tests", 4666, 0),
+        ("one arm per form, type constructor or builtin", 2760, 139),
+        ("shared machinery", 2355, 30),
+        ("tests", 4535, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
