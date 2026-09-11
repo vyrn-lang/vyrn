@@ -70,7 +70,7 @@ files	clean
 finitekeys	clean
 floats	other
 fnvalarg	clean
-fnvalstore	leak	1
+fnvalstore	clean
 foreach	other
 freelist	other
 gendemo	clean
