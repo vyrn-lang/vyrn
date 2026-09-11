@@ -25382,7 +25382,13 @@ every family:
    the gate.
 
 **Order.** Largest family first by bodies unlocked, sugar families before row
-families at equal size. A family that needs a decision the kernel has not made
+families at equal size. The inventory's table (b) gives the order at the start:
+a scalar conversion makes 16,816 bodies whole alone and takes the count from
+13.9 to 35.0 per cent, then a layout made, a short circuit, a builtin
+operation, a layout read, the row that names no value, a release the driver
+places, the receiver handed back, and the tag, which together reach 99.6 per
+cent; four small families are the rest. Three of them are sugar: the short
+circuit, the handed-back receiver, and the nullary constructor as a value. A family that needs a decision the kernel has not made
 gets its decision paragraph in this section before its track starts. The one
 known at the start is the undeclared callee: `track-ek` counted 10,842 bodies
 that wait on `Rhs::Call` for a callee no declared function of the program
