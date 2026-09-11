@@ -6495,17 +6495,25 @@ fn build_wasm2c(
         .arg(format!("-I{}", show_path(&w2c.include)))
         .arg(format!("-I{}", show_path(&w2c.runtime)))
         .arg(format!("-I{}", show_path(&simde)))
-        .arg(format!("-DVYRN_W2C_HEADER=\"{h_name}\""))
-        // wasm-rt counts call depth where it has no guard page (Windows), at
-        // 500 frames by default. Vyrn's own counter traps at
-        // `CALL_DEPTH_LIMIT` (1,000) user frames, and the runtime's frames
-        // (RFC-0125 M4 step 1) are not counted by it, so the host's limit sits
-        // above the program's with room for those; `error: call depth exceeds
-        // 1000` stays the program's wording, as under the engine.
-        .arg(format!(
+        .arg(format!("-DVYRN_W2C_HEADER=\"{h_name}\""));
+    // The host traps stack exhaustion, so wasm-rt need not count call depth.
+    // Guard pages put wasm-rt's handler in place, and on Windows that handler
+    // maps `EXCEPTION_STACK_OVERFLOW` to `error: Call stack exhausted` with no
+    // alternate stack to select. The POSIX handler needs one, and wasm-rt
+    // allocates it only when it picks the handler itself, so the counter stays
+    // for the configurations that fall back to counting. Either way
+    // `error: call depth exceeds 1000` is the emitter's own counter
+    // (`call_depth_enter`), untouched. The counter wasm-rt drops here is a
+    // thread-local load, compare and store in every prologue: `benching.vyrn`
+    // "push 1000" 2,600 ns with it against 1,032 (RFC-0125, `read-loop`).
+    if cfg!(windows) {
+        cmd.arg("-DWASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1");
+    } else {
+        cmd.arg(format!(
             "-DWASM_RT_MAX_CALL_STACK_DEPTH={}",
             4 * vyrn_frontend::trap::CALL_DEPTH_LIMIT
         ));
+    }
     // The same `-O2 -ffp-contract=off -march=..` the text-IR route ships, so
     // the two routes' numbers differ by the route and nothing else.
     add_native_clang_flags(&mut cmd, native_target);
