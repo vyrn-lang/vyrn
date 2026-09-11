@@ -4379,10 +4379,14 @@ impl<'a> Builder<'a> {
     }
 
     /// The names of this body a lambda mentions, as a place or as a callee
-    /// (`n -> f(n) + 1` captures the function value `f`). Over-approximate: a
-    /// name the lambda shadows is counted, and a block-bodied lambda counts
-    /// every name in scope (`mentions_place` answers true for one); either
-    /// costs a read of a held name and nothing else.
+    /// (`n -> f(n) + 1` captures the function value `f`).
+    ///
+    /// The mention set is [`mentions_in_lambda`]'s, which reads the body and
+    /// honours the body's own bindings. `ast::mentions_place` cannot answer
+    /// this question: it answers `true` for every name once the lambda has a
+    /// block body, so a frame captured every name in scope, and a capture is a
+    /// READ — every block-bodied lambda written after a `consume` was refused
+    /// as a use of the consumed name (round two's F2-051).
     fn captures(&self, e: &Expr) -> Vec<Val> {
         let Expr::Lambda { params, body, .. } = e else {
             return Vec::new();
@@ -4394,7 +4398,7 @@ impl<'a> Builder<'a> {
             if params.iter().any(|p| p.name == *name) || caps.contains(&Val::Name(*n)) {
                 continue;
             }
-            if vyrn_frontend::ast::mentions_place(e, name) || calls.contains(&name.as_str()) {
+            if reads_place(&vars, name) || calls.contains(&name.as_str()) {
                 caps.push(Val::Name(*n));
             }
         }
@@ -4416,24 +4420,13 @@ impl<'a> Builder<'a> {
         // body — and no value the closure holds.
         let (mut vars, mut calls) = (Vec::new(), Vec::new());
         mentions_in_lambda(body, &mut vars, &mut calls);
-        let read = |at: &str| {
-            vars.iter().any(|v| match v {
-                Expr::Var { name, .. } => {
-                    name == at
-                        || (name.len() > at.len()
-                            && name.starts_with(at)
-                            && matches!(name.as_bytes()[at.len()], b'.' | b'['))
-                }
-                _ => false,
-            })
-        };
         Some(
             caps.iter()
                 .filter_map(|v| match v {
                     Val::Name(n) => Some(*n),
                     Val::Lit(_) => None,
                 })
-                .filter(|n| read(&self.body.names[*n as usize].source))
+                .filter(|n| reads_place(&vars, &self.body.names[*n as usize].source))
                 .collect(),
         )
     }
@@ -5334,12 +5327,32 @@ impl<'a> Builder<'a> {
 // declared (RFC-0125 §3 M6).
 vyrn_frontend::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 
+/// The binding a place expression names: `s.id[0]` names `s`.
+fn place_base(name: &str) -> &str {
+    &name[..name.find(['.', '[']).unwrap_or(name.len())]
+}
+
+/// Whether a lambda body's mentions read `base` or a place under it.
+fn reads_place(vars: &[&Expr], base: &str) -> bool {
+    vars.iter().any(|v| match v {
+        Expr::Var { name, .. } => {
+            name == base
+                || (name.len() > base.len()
+                    && name.starts_with(base)
+                    && matches!(name.as_bytes()[base.len()], b'.' | b'['))
+        }
+        _ => false,
+    })
+}
+
 /// Every `Var` node and every callee name in a lambda's body, nested
-/// lambdas included: what the frame captures, and where an untyped
-/// parameter's type can be read.
+/// lambdas included, minus the names the body itself binds: what the frame
+/// captures, and where an untyped parameter's type can be read.
 ///
 /// The descent is `ast::body_scope_descent!`'s; what is this reader's own is
-/// the two names it records.
+/// the two names it records. A name the body shadows is NOT recorded: a
+/// capture is a read, so counting a shadow refuses a program that reads
+/// nothing (round two's F2-051).
 fn mentions_in_lambda<'e>(
     body: &'e LambdaBody,
     vars: &mut Vec<&'e Expr>,
@@ -5351,12 +5364,12 @@ fn mentions_in_lambda<'e>(
     }
 
     impl<'e> BodyVisit<'e> for Mentions<'e, '_> {
-        const SCOPED: bool = false;
-
-        fn expr(&mut self, e: &'e Expr, _: &std::collections::HashSet<String>) -> bool {
+        fn expr(&mut self, e: &'e Expr, locals: &std::collections::HashSet<String>) -> bool {
             match e {
-                Expr::Var { .. } => self.vars.push(e),
-                Expr::Call { name, .. } => self.calls.push(name.as_str()),
+                Expr::Var { name, .. } if !locals.contains(place_base(name)) => self.vars.push(e),
+                Expr::Call { name, .. } if !locals.contains(name.as_str()) => {
+                    self.calls.push(name.as_str())
+                }
                 _ => {}
             }
             true

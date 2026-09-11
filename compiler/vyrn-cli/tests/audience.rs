@@ -732,3 +732,60 @@ fn why_names_the_compiler_as_the_declarer_of_std_mems_audience() {
         "{text}"
     );
 }
+
+/// `vyrn why` answers "imported by" about a project that does not compile.
+///
+/// This is what keeps `main.rs`'s `project_imports` alive against
+/// `loader::module_graph`, which is the loader's only edge-set API
+/// (RFC-0125, "what is left"). `module_graph` calls `load_modules`, and that
+/// walk is root-driven, runs every generator import to learn its key, and
+/// returns `Err` at the first spec it cannot resolve. `why` needs the
+/// opposite of all three: every file under the project directory, a
+/// generator's INPUT rather than its output, and an answer per file. Two
+/// projects price it — one whose target has a type error, one that imports a
+/// file that is not there.
+#[test]
+fn why_answers_imported_by_about_a_project_that_does_not_compile() {
+    for (tag, bad, importer) in [
+        (
+            "whytypeerror",
+            "export fn helper() -> Int64 {\n    return \"not an Int64\"\n}\n",
+            "import { helper } from \"./bad\"\nfn main() -> Int64 {\n    return helper()\n}\n",
+        ),
+        (
+            "whybadspec",
+            "import { nope } from \"./nowhere\"\nexport fn helper() -> Int64 {\n    return 1\n}\n",
+            "import { helper } from \"./bad\"\nfn main() -> Int64 {\n    return helper()\n}\n",
+        ),
+    ] {
+        let dir = scratch(tag);
+        write(&dir, "vyrn.json", MANIFEST_WITHOUT);
+        write(&dir, "bad.vyrn", bad);
+        write(&dir, "main.vyrn", importer);
+
+        let out = vyrn()
+            .arg("check")
+            .arg(dir.join("main.vyrn"))
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{tag}: the project is supposed to be broken"
+        );
+
+        let out = vyrn()
+            .arg("why")
+            .arg(dir.join("bad.vyrn"))
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{tag}: `why` reports; it does not gate"
+        );
+        assert!(
+            text.contains("main.vyrn -> bad.vyrn"),
+            "{tag}: `why` lost the edge:\n{text}"
+        );
+    }
+}

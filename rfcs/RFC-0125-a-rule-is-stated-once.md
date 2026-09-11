@@ -26862,3 +26862,23 @@ recomputed, not witnessed, and `declared.rs`'s.
 Left: `checker.rs` under 13,500, blocked by the typing judgment. `Checker::stmt`
 and `Checker::expr` are 1,318 of the 1,590 the target needs and they fill
 `Recorded`, which `vyrn-lower` reads to build the core `typed.rs` judges.
+
+#### Three recorded leftovers get their witnesses (2026-09-11, `track-es`)
+
+Decision: witness each of the three before touching it, because two of the three records were recomputed rather than run, and the lead's brief asked for the witness first.
+
+Went: `Owned::reaches_declared` and `reaches_declared_in` in `declared.rs`, and the `Declared` wrapper over them, 55 lines. Stayed: `project_imports` in `vyrn-cli/src/main.rs`, 65 lines, because `loader::module_graph` is the loader's only edge-set API and it is `load_modules`.
+
+Lines: `vyrn-lower/src/core.rs` 6,712 to 6,725. `vyrn-frontend/src/declared.rs` 1,183 to 1,132. Refusals: 0 lost / 0 gained, and one FALSE refusal class gone. Manifest: untouched, no row moved.
+
+Licence: `vyrn check` over 415 corpus roots under the branch-point binary and this one, 415 byte-identical, 243 refused under both. `VYRN_WASM_MANIFEST=check cargo test --release -p vyrn-cli --test wasmhash -- --ignored` green. `cargo test -p vyrn-frontend` 1,049 passed. `cargo test -p vyrn-cli` over all 85 targets in four foreground groups, 85 green. `coredrive` and `refusals` `--ignored` green, no accepted body lost. Both formatters clean, release build with no new warning.
+
+Findings: `Builder::captures` asked `ast::mentions_place`, which answers `true` for every name once the lambda has a BLOCK body, so every name in scope became a capture and a capture is a read -- every block-bodied lambda written after a `consume` was refused as a use of the consumed name, whether or not it named it; the same lambda with an expression body was accepted. Round two's F2-051 read that as a shadowing rule and it is not one: the shadow was the second diagnostic, the lambda itself was the first.
+
+The capture set is `mentions_in_lambda`'s now, which reads the body and honours the body's own bindings, so the shadow is no longer a use either; one `read` predicate served two callers and is `reads_place`. The corpus never wrote the shape, which is why 415 roots are byte-identical across the fix.
+
+`project_imports` stays, and the blocker is sharper than the record said. The resolution rule is already stated once -- `project_imports` calls `loader::resolve_spec` -- so what is left to share is a `for imp in imports` loop. `module_graph` cannot give it: `load_modules` is root-driven and never sees a file no root reaches, it RUNS every generator import to learn the key where `why` wants the generator's input, and it returns `Err` at the first spec it cannot resolve. The verdict is a test rather than a sentence now, `why_answers_imported_by_about_a_project_that_does_not_compile`, over a project with a type error and a project with a dangling import.
+
+`Owned::reaches_declared` was both wrong and dead. Wrong: it keyed its cycle set on `types::type_key`, the bare constructor, so `{ a: Option<Int64>, b: Option<Ring> }` claimed `Option` on the first field and refused the second as already seen -- `Checker::declared_owned_in` had the same defect, fixed it by keying on the full shape, and its comment names this example. Dead: its one reader was the receiver-temporary screen, which went with the plan tables on 2026-09-07 (`63272eca`), so no program could show the wrong answer and none does. It goes rather than gets fixed. Two doc blocks were stacked on it and the upper one describes `release_kind`, which had none; it goes back.
+
+Left: `project_imports`, 65 lines, blocked by `load_modules` being root-driven, generator-running and fail-fast, which is three separate changes to the loader and none of them is this track's.
