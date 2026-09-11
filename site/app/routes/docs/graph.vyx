@@ -118,12 +118,7 @@ fn graphStyle() -> String {
 
     <nav class="pager" aria-label="Reference">
         <a class="prev" v-if="pager().prevHref.byteLength > 0" :href="pager().prevHref"><span class="eyebrow">Previous</span>{{ pager().prevLabel }}</a>
-        <a class="next" v-if="pager().nextHref.byteLength > 0" :href="pager().nextHref"><span class="eyebrow">Next</span>{{ pager().nextLabel }}</a>
-    </nav>
-
-    <aside class="onpage">
-        <p class="eyebrow">On this page</p>
         <a href="#graph">The library, as it depends on itself</a>
-    </aside>
+    </nav>
 </main>
 </template>
