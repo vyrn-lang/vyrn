@@ -512,9 +512,6 @@ pub enum Callee {
     Builtin,
     /// A variant of an enum, or `Some`, `Ok`, `Err`.
     Ctor,
-    /// A scalar type's own conversion — `Int32(n)`, `F64x2(..)` — or
-    /// `logger`. Its arguments are read.
-    Scalar,
     /// A declared type's constructor: `T(v)` for a record or a
     /// `where`-checked type (RFC-0079). Its arguments are taken.
     Named,
@@ -576,10 +573,23 @@ impl Callee {
 /// pass reads both operands into the row because a read of either owns
 /// nothing and the linear judgment is the same either way, and the operator
 /// is what tells a later reader that the second read may not happen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     Un(UnOp),
     Bin(BinOp),
+    /// A conversion between two scalars: `Int32(n)`, `UInt8(n)`, `Float64(n)`
+    /// and their siblings (RFC-0125 §3 M7). The payload is the TARGET, and
+    /// the source is the operand's own type, which the checker put on the
+    /// name the row reads — the same split every other operator here makes,
+    /// for the same reason.
+    ///
+    /// Which names convert is [`vyrn_frontend::types::numeric_conv_target`],
+    /// the one table the checker types the node by, so no pass decides it
+    /// twice. What a conversion DOES between a given pair — widen by the
+    /// source's signedness, wrap into the target's, saturate across the
+    /// int/float line — stays the coercion plan's ([`vyrn_codegen::Rung`]),
+    /// which is where both compiled backends already read it.
+    Conv(Type),
     /// RFC-0023: a lambda literal. Its operands are the captures the closure
     /// snapshots and its result is the closure value, which is why it is a
     /// prim and not a [`Ctor`] — the parts are READ, where a constructor's
@@ -1066,6 +1076,7 @@ impl Body {
                 match op {
                     Op::Un(o) => format!("{o:?}").to_lowercase(),
                     Op::Bin(o) => format!("{o:?}").to_lowercase(),
+                    Op::Conv(t) => format!("conv {t}"),
                     Op::Closure => "closure".into(),
                 },
                 vs.iter()
@@ -5393,25 +5404,6 @@ impl<'a> Builder<'a> {
     ) -> Result<Rhs, Gap> {
         // The capability of each argument position, by who the callee is.
         let decls = self.proto.types();
-        let scalar = matches!(
-            name,
-            "Int64"
-                | "Int32"
-                | "Int16"
-                | "Int8"
-                | "UInt64"
-                | "UInt32"
-                | "UInt16"
-                | "UInt8"
-                | "Float64"
-                | "Float32"
-                | "F32x4"
-                | "F64x2"
-                | "I32x4"
-                | "Mask32x4"
-                | "Mask64x2"
-                | "logger"
-        );
         let method = self
             .program
             .impls
@@ -5464,9 +5456,6 @@ impl<'a> Builder<'a> {
                 (0..args.len())
                     .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
                     .collect()
-            } else if scalar {
-                kind = Callee::Scalar;
-                vec![Capability::Read; args.len()]
             } else if decls.contains_key(name) {
                 kind = Callee::Named;
                 vec![Capability::Consume; args.len()]
@@ -5575,6 +5564,16 @@ impl<'a> Builder<'a> {
             self.drain -= 1;
         }
         self.after.extend(temps_to_drop);
+        // `Int32(n)` and its nine siblings CONVERT between two scalars. Both
+        // emitters already write the conversion and neither could read this
+        // one, because the row said only that a reserved name was called —
+        // 13,388 bodies of the gap tally waited on that and on nothing else
+        // (RFC-0125 §3 M7). The operand is read above, where every argument
+        // of every call is read, so the row states the operation over it and
+        // the argument keying and the drains do not move.
+        if let (1, Some(to)) = (vs.len(), vyrn_frontend::types::numeric_conv_target(name)) {
+            return Ok(Rhs::Prim(Op::Conv(to), vec![vs[0].0.clone()], ret));
+        }
         Ok(Rhs::Call {
             callee: name.to_string(),
             args: vs,

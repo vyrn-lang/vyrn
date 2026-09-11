@@ -17008,7 +17008,7 @@ impl<'p> Fn_<'_, 'p> {
         match rhs {
             Rhs::Val(v) => self.core_val(m, b, body, w, v, want, line),
             Rhs::Prim(op, vs, ret) => {
-                let got = self.core_prim(m, b, body, w, *op, vs, line)?;
+                let got = self.core_prim(m, b, body, w, op, vs, line)?;
                 let got = ret.clone().unwrap_or(got);
                 self.coerce(m, b, None, &got, want, line)
             }
@@ -17283,7 +17283,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         body: &vyrn_lower::core::Body,
         w: &mut Walked,
-        op: Op,
+        op: &Op,
         vs: &[Val],
         line: usize,
     ) -> Result<Type, String> {
@@ -17291,7 +17291,7 @@ impl<'p> Fn_<'_, 'p> {
             (Op::Un(u), [v]) => {
                 let t = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &t, line)?;
-                self.un_ins(b, u, &t, line)
+                self.un_ins(b, *u, &t, line)
             }
             (Op::Bin(o), [l, r]) => {
                 let lt = self.core_ty(body, l, &Type::Int);
@@ -17308,7 +17308,7 @@ impl<'p> Fn_<'_, 'p> {
                     self.coerce(m, b, None, &lt, &opty, line)?;
                 }
                 self.core_val(m, b, body, w, r, &opty, line)?;
-                self.bin_ins(b, o, &opty, &lt, line)
+                self.bin_ins(b, *o, &opty, &lt, line)
             }
             _ => unsupported("an operator of this arity", line),
         }
@@ -17556,7 +17556,9 @@ impl<'p> Fn_<'_, 'p> {
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => core_val_readable(body, v),
-            Rhs::Prim(Op::Closure, ..) => false,
+            // A conversion is a row this walk does not read yet; the arm
+            // emits it (RFC-0125 §3 M7, the row's own slice).
+            Rhs::Prim(Op::Closure | Op::Conv(_), ..) => false,
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_val_readable(body, v)),
             // A write-back stores the receiver the call handed back, which is
             // more than a `call`.
