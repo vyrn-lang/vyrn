@@ -60,6 +60,7 @@
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
 //! | `exprTemporary` | RFC-0096 M3 | steady | a String an EXPRESSION allocated has no binding, so the CONSUMER releases it — `@concat`, a String `+`, `@str` and the in-place append each free an operand the expression itself built |
 //! | `argsBlock` | RFC-0014, the wasm half | steady | `args()` handed back a data pointer four bytes past a block, which `free` reads as a refusal — so `drop xs` reclaimed nothing on wasm where native has always reclaimed |
+//! | `clockRead` | RFC-0043, the wasm half | steady | `envGet` read the whole environment on every clock call and kept the blob the answer points into — a program that polls the clock grew the heap until `malloc` trapped |
 //! | `bytesRejected` | RFC-0014 M2 | steady | a REJECTED `stringFromBytes` gives its buffer back: the buffer is allocated before the scan, and both refusals used to leave with the message and without it |
 //! | `keptForever` | the detector itself | **leaks, on purpose** | the canary: every other row asserts `steady`, and so does a measurement that stopped measuring |
 //! | `localAccumulator` | RFC-0096 M3, defect 3 | steady | the static-data rule read the INITIALIZER, so `let mut acc = ""` answered `Static` for the buffer the loop grew; it asks whether the binding can CHANGE now |
@@ -764,6 +765,21 @@ const ROWS: &[Row] = &[
               6,488,064 after 2,000; 131,072 at both after it",
     },
     Row {
+        export: "clockRead",
+        census: "RFC-0043, the wasm half",
+        today: Shape::Steady,
+        why: "`monotonic()` asks the runtime whether `VYRN_FIXED_TIME` is set, and that \
+              reaches `envGet`, which asks WASI for the whole environment. The answer \
+              points into the blob WASI writes, so the blob cannot be freed — and it was \
+              allocated per call, so a program that polls the clock or reseeds in a loop \
+              grew the heap by a blob a turn until `malloc` trapped. Reading the \
+              environment once and holding the pair in the two dead class heads makes the \
+              comment that always claimed it (\"the two callers run once per process\") \
+              true. Measured on this harness before the fix, a hundred \
+              `monotonic()` a call: 9,109,504 bytes after 500 calls and 11,534,336 \
+              after 2,000; 8,323,072 at both after it",
+    },
+    Row {
         export: "bytesRejected",
         census: "RFC-0014 M2",
         today: Shape::Steady,
@@ -1000,6 +1016,7 @@ fn shapes_fixture() -> String {
     format!(
         r#"import {{ Slots, newSlots, insert, count }} from "std/slots"
 import {{ Json, JsonField, emit }} from "std/json"
+import {{ monotonic }} from "std/time"
 
 let mut seen: Int64 = 0
 
@@ -1273,6 +1290,19 @@ export extern fn argsBlock() {{
     while i < 100 {{
         let xs = args()
         seen = seen + xs.length
+        i = i + 1
+    }}
+}}
+
+/// RFC-0043's injected clock. Every `monotonic()` asks the runtime whether
+/// `VYRN_FIXED_TIME` is set, which reads the whole environment; the answer
+/// points into the blob WASI writes, so the blob is held rather than freed.
+/// Held ONCE: a hundred turns a call allocate on the first turn of the first
+/// call and nothing after it.
+export extern fn clockRead() {{
+    let mut i = 0
+    while i < 100 {{
+        seen = seen + monotonic()
         i = i + 1
     }}
 }}
