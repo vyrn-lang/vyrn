@@ -510,9 +510,9 @@ fn auditDeath(p: Int32, cls: Int32) {
 }
 
 /// A block the RUNTIME holds for the life of the process is not the
-/// program's residue: `envGet`'s environment blob is the one such block, and
-/// its own comment says why nothing frees it. Forget it rather than let every
-/// program that reads an injected value take a baseline row.
+/// program's residue: `envGet`'s environment pair is the one such pair, and
+/// its own comment says why nothing frees it. Forget them rather than let
+/// every program that reads an injected value take a baseline row.
 fn auditForget(p: Int32) {
     let s = Int32(load32(heapBase()))
     if s == 0 {
@@ -1336,31 +1336,44 @@ export fn printStr(s: Int32) {
 
 /// `env_get`: the value of the environment entry `key` names (`key` carries
 /// its own `=`, so the lookup is one prefix test), or 0. WASI hands the whole
-/// environment over in one go, so this is `environ_get` plus a scan. The blob
-/// is never freed: the answer points into it, and the two callers run once
-/// per process.
+/// environment over in one go, so this is `environ_get` plus a scan.
+///
+/// The environment is read ONCE and the pair it arrives in is held for the
+/// life of the process. The answer points into the blob, so the blob cannot
+/// be freed; a program that reads the clock or the seed in a loop calls this
+/// once per iteration, and a blob per call is a heap that grows until `malloc`
+/// traps. The pointer array and the count live in the two dead class heads
+/// (the instrument's note above says why 4 and 8 are free), and zero there
+/// means the read has not happened yet. A failing `environ_sizes_get` caches
+/// nothing, so the next call asks again.
 export fn envGet(key: Int32) -> Int32 {
-    let sc = heapBase() + 8696
-    store32(sc, 0)
-    store32(sc + 4, 0)
-    if environSizesGet(sc, sc + 4) != 0 {
-        return 0
+    let base = heapBase()
+    if load32(base + 4) == 0 {
+        let sc = base + 8696
+        store32(sc, 0)
+        store32(sc + 4, 0)
+        if environSizesGet(sc, sc + 4) != 0 {
+            return 0
+        }
+        let n = Int32(load32(sc))
+        let pa = malloc(Int64((n << 2) + 8))
+        let blob = malloc(Int64(Int32(load32(sc + 4)) + 1))
+        auditForget(pa)
+        auditForget(blob)
+        environGet(pa, blob)
+        store32(base + 4, UInt32(pa))
+        store32(base + 8, UInt32(n))
     }
-    let cnt = Int32(load32(sc))
-    let ptrs = malloc(Int64((cnt << 2) + 8))
-    let blob = malloc(Int64(Int32(load32(sc + 4)) + 1))
-    auditForget(blob)
-    environGet(ptrs, blob)
+    let ptrs = Int32(load32(base + 4))
+    let cnt = Int32(load32(base + 8))
     let mut i: Int32 = 0
     while UInt32(i) < UInt32(cnt) {
         let e = Int32(load32(ptrs + (i << 2)))
         if starts(e, key) {
-            free(ptrs)
             return e + strLen(key)
         }
         i = i + 1
     }
-    free(ptrs)
     return 0
 }
 
