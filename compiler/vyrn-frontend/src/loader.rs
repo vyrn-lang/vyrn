@@ -2941,6 +2941,18 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             if m.key == root_key && name == "main" {
                 continue;
             }
+            // A protocol-method surface name is not a free-function name. A
+            // method call `x.m(..)` parses as `Call { m, args: [x, ..] }`,
+            // the shape a free call `m(x, ..)` has, and the checker
+            // dispatches such a name to the impls before any free function,
+            // so it refuses the declaration outright ("could never run").
+            // Minting a second spelling for it hid that refusal and rewrote
+            // the module's own `w.fetch()` into `fetch__from0(w)`, losing the
+            // dispatch and naming a symbol nobody wrote. The same reading of
+            // `method_surface` the hidden-original check above makes.
+            if method_surface.contains(&name) {
+                continue;
+            }
             if name_module_count.get(&name).copied().unwrap_or(0) >= 2 {
                 rename_apart(&mut foreign_renames, &m.key, &name);
             }

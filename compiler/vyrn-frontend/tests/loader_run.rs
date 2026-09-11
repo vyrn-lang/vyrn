@@ -1790,6 +1790,30 @@ fn main() -> Int64 { return shape().byteLength }"#;
     }
 
     #[test]
+    fn a_protocol_method_name_is_never_renamed_apart_for_privacy() {
+        // A method call `w.fetch()` parses as `fetch(w)`, the shape a free call
+        // has, and the checker dispatches the name to the impls before any free
+        // function. The name-privacy rename (RFC-0046 §3) used to mint a second
+        // spelling for a private `fetch` the moment two modules declared one,
+        // and the rewrite that follows a rename then turned `w.fetch()` into
+        // `fetch__from0(w)`: the dispatch was lost and the module was refused
+        // in the name of a symbol nobody wrote.
+        vyrn_lower::install();
+        let proto = "export protocol Draw { fn fetch(self) -> Int64 }                      export type W = { v: Int64 }                      impl Draw for W { fn fetch(self) -> Int64 { return self.v } }";
+        let other = "fn fetch(n: Int64) -> Int64 { return n + 1 }                      export fn other() -> Int64 { return fetch(1) }";
+        let root = "import { W } from \"./proto\"                     import { other } from \"./other\"                     fn fetch(n: Int64) -> Int64 { return n * 2 }                     fn main() -> Int64 { let w = W { v: 7 } return w.fetch() + other() }";
+        let e = gen_err(root, &[("proto.vyrn", proto), ("other.vyrn", other)]);
+        assert!(
+            !e.contains("__from"),
+            "no minted spelling in the refusal: {e}"
+        );
+        assert!(
+            e.contains("`fetch` is declared by both"),
+            "the clash is named: {e}"
+        );
+    }
+
+    #[test]
     fn closure_name_collision_is_a_load_diagnostic_naming_both_modules() {
         // RFC-0031: if the closure would hold two DISTINCT `T` decls (one per
         // module), reflection fails with a load diagnostic naming BOTH modules —
