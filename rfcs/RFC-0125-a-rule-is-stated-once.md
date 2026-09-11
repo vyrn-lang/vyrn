@@ -26882,3 +26882,31 @@ The capture set is `mentions_in_lambda`'s now, which reads the body and honours 
 `Owned::reaches_declared` was both wrong and dead. Wrong: it keyed its cycle set on `types::type_key`, the bare constructor, so `{ a: Option<Int64>, b: Option<Ring> }` claimed `Option` on the first field and refused the second as already seen -- `Checker::declared_owned_in` had the same defect, fixed it by keying on the full shape, and its comment names this example. Dead: its one reader was the receiver-temporary screen, which went with the plan tables on 2026-09-07 (`63272eca`), so no program could show the wrong answer and none does. It goes rather than gets fixed. Two doc blocks were stacked on it and the upper one describes `release_kind`, which had none; it goes back.
 
 Left: `project_imports`, 65 lines, blocked by `load_modules` being root-driven, generator-running and fail-fast, which is three separate changes to the loader and none of them is this track's.
+#### The checker's `stmt`/`expr` measured against the typed judgment (2026-09-11, `track-er`)
+
+Decision: measure the track's items before taking them, as `track-ep` did. The verdict holds: of the 66 rules `Checker::stmt` and `Checker::expr` state, two have a second home, both are the kernel's, and neither can be read from it today, so nothing this track took came from the typed judgment.
+
+| where the rule is stated | rules | refusal sites | `Recorded` writes |
+|---|---|---|---|
+| (a) stated also in `vyrn-lower` | 2 | 2 (the `Stmt::Break` and `Stmt::Continue` arms) | 0 |
+| (b) stated only here | 64 | 61 | 3 |
+| (c) stated only here and consumed nowhere | 0 | 0 | 0 |
+
+Went: three rules `Checker::expr` wrote at two positions each, all inside one function. An integer literal adapting to a sized sibling operand was written for `lhs` and again for `rhs`; a byte literal the same; an array literal checked element 0 outside the loop that checks the rest, with the refusal sentence written twice. `adapt_int_literal` and `adapt_byte_literal` now sit beside the sized-integer literal rules they read, and the array loop takes element 0's computed type the way `MapLit` beside it already did.
+
+Stayed: the other 61 refusals and the three `Recorded` writes, because the checker is their only home; the two (a) rows, because the kernel judges the core and `vyrn check` must refuse before a core exists.
+
+Lines: `checker.rs` 14,960 to 14,950; `Checker::stmt` 554 to 554, `Checker::expr` 712 to 652. Rules stated twice in the two spans: 5 to 2. Refusal sites in the file 370 to 368, no sentence changed. Refusals: 0 lost / 0 gained. Manifest: untouched.
+
+Licence: `vyrn check` over 415 loadable roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/` under the branch-point binary and this one, byte-identical, 171 accepted and 244 refused under both.
+Licence: 35 hand witnesses, the 26 for the never-fired refusals and 9 for the three rules that moved, byte-identical under both binaries.
+Licence: `cargo test -p vyrn-cli` 88 targets, 0 failed; `--test refusals`, `--test coredrive` and `VYRN_WASM_MANIFEST=check ... --test wasmhash`, each `--ignored`, green; `cargo fmt --all --check` and the LSP's clean; `cargo build --release -p vyrn-cli` 0 new warnings.
+
+Findings: the two (a) rows are `break` and `continue` outside a loop, stated by `Checker::stmt`'s `Stmt::Break` and `Stmt::Continue` arms and again by the kernel's `St::Break` and `St::Continue` arms. The core lowers 963 of 21,722 bodies whole and `St::Break` stands at one row, so the kernel's answer reaches no `vyrn check`.
+Findings: (c) is empty by measurement. A throwaway `line!()` trace inside the `cerr!` macro fired 37 of the 63 sites over the corpus and the workspace unit tests, and each of the other 26 got a hand witness that refused with its own sentence. The 26 are a coverage finding, not dead code.
+Findings: `Recorded` has three fields, all written in the `expr` wrapper alone and all read outside the checker (`vyrn-lower/src/lib.rs`, `vyrn-lower/src/core.rs`, `vyrn_frontend::declared`). No write is dead.
+Findings: `typed.rs` states none of these rules, measured from the other side of `track-ep`'s item 1. It answers by `How` kind and writes one sentence, `typed::obligation`'s must-use, which `checker.rs` never writes. Every `refuse` site in `kernel.rs` is an ownership sentence but the two above.
+Findings: `core.rs`'s sixteen `gap` sentences name shapes the core cannot build, not rules. One of them, "a `drop` of module state", names a program the checker refuses first, so no accepted program reaches it.
+Findings: the three rules that moved were repeats inside one function, which a per-rule reading finds and a clone scan over sections does not. `track-ep`'s scan reported "no repeat above fourteen lines" and each of these is under it.
+
+Left: `Checker::stmt` and `Checker::expr` as the typed judgment's reader, blocked by the core being a statement-level IR whose rows point at AST expression leaves. The two (a) rows are blocked by the same thing, and no series of slices reaches it.
