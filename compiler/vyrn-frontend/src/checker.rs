@@ -5136,79 +5136,21 @@ impl<'a> Checker<'a> {
             Expr::Binary { op, lhs, rhs, line } => {
                 let mut l = self.base(&self.expr(lhs, scope, None, fn_ret)?);
                 let mut r = self.base(&self.expr(rhs, scope, None, fn_ret)?);
-                // An integer literal adapts to a sized sibling operand, so
-                // `x + 5` (x: Int32), `5 + x` and `x == -5` all type-check —
-                // but only if the VALUE fits (`x < 300` on a UInt8 would
-                // otherwise silently truncate 300 to 44 in the comparison).
-                // A NEGATIVE literal arrives as `Neg(Int(5))`, so its value
-                // is read through [`int_literal_value`] and ranged in
-                // [`int_value_fits`], which covers the negative half of the
-                // type down to its exact minimum.
                 if l == Type::Int {
-                    if let Type::IntN { bits, signed } = &r {
-                        if let Some(v) = int_literal_value(&lhs) {
-                            if !int_value_fits(v, *bits, *signed) {
-                                return Err(cerr!(
-                                    line,
-                                    "integer literal {} does not fit {} \
-                                     (its range is {})",
-                                    v,
-                                    intn_name(*bits, *signed),
-                                    intn_range(*bits, *signed),
-                                ));
-                            }
-                            l = r.clone();
-                        }
-                    }
-                }
-                if r == Type::Int {
-                    if let Type::IntN { bits, signed } = &l {
-                        if let Some(v) = int_literal_value(&rhs) {
-                            if !int_value_fits(v, *bits, *signed) {
-                                return Err(cerr!(
-                                    line,
-                                    "integer literal {} does not fit {} \
-                                     (its range is {})",
-                                    v,
-                                    intn_name(*bits, *signed),
-                                    intn_range(*bits, *signed),
-                                ));
-                            }
-                            r = l.clone();
-                        }
-                    }
-                }
-                // A byte literal (default `UInt8`, RFC-0057) also adapts to an
-                // integer sibling of another width, exactly like an int literal —
-                // its 0..255 value must fit the sibling. This lets `chars(s)[i] ==
-                // '\xe9'` (Int64 vs a byte) type-check.
-                if let Expr::Byte(b) = &**lhs {
-                    let adapt = match &r {
-                        Type::Int => Some(Type::Int),
-                        Type::IntN { bits, signed }
-                            if int_literal_fits(*b as i64, *bits, *signed) =>
-                        {
-                            Some(r.clone())
-                        }
-                        _ => None,
-                    };
-                    if let Some(t) = adapt {
+                    if let Some(t) = adapt_int_literal(lhs, &r, *line)? {
                         l = t;
                     }
                 }
-                if let Expr::Byte(b) = &**rhs {
-                    let adapt = match &l {
-                        Type::Int => Some(Type::Int),
-                        Type::IntN { bits, signed }
-                            if int_literal_fits(*b as i64, *bits, *signed) =>
-                        {
-                            Some(l.clone())
-                        }
-                        _ => None,
-                    };
-                    if let Some(t) = adapt {
+                if r == Type::Int {
+                    if let Some(t) = adapt_int_literal(rhs, &l, *line)? {
                         r = t;
                     }
+                }
+                if let Some(t) = adapt_byte_literal(lhs, &r) {
+                    l = t;
+                }
+                if let Some(t) = adapt_byte_literal(rhs, &l) {
+                    r = t;
                 }
                 // Likewise a plain float literal adapts to a `Float32` sibling.
                 if l == Type::Float && r == Type::Float32 && matches!(**lhs, Expr::Float(_)) {
@@ -5450,17 +5392,15 @@ impl<'a> Checker<'a> {
                 };
                 // Every element (including the first) is a value boundary into
                 // the element type — auto-validated when it is predicated.
-                if !self.coercible(&first, &elem_ty) {
-                    return Err(cerr!(
-                        line,
-                        "array elements must share a type: expected {elem_ty}, \
-                         found {first}"
-                    ));
-                }
-                self.prove_coercion(&elems[0], &elem_ty, *line)?;
-                self.prove_string_interpolation(&elems[0], &elem_ty, scope, fn_ret, *line)?;
-                for e in &elems[1..] {
-                    let t = self.expr(e, scope, Some(&elem_ty), fn_ret)?;
+                // Element 0's type already ran above (`first`); re-running it
+                // evaluates the expression twice and doubles everything its
+                // check records, which is the rule `MapLit` states below.
+                for (i, e) in elems.iter().enumerate() {
+                    let t = if i == 0 {
+                        first.clone()
+                    } else {
+                        self.expr(e, scope, Some(&elem_ty), fn_ret)?
+                    };
                     if !self.coercible(&t, &elem_ty) {
                         return Err(cerr!(
                             line,
@@ -9695,6 +9635,56 @@ fn int_value_fits(v: i128, bits: u8, signed: bool) -> bool {
         (i128::MIN >> shift..=i128::MAX >> shift).contains(&v)
     } else {
         (0..(1i128 << bits)).contains(&v)
+    }
+}
+
+/// The type an integer literal takes from a sized sibling operand, or `None`
+/// when the sibling is not sized and nothing is adapted.
+///
+/// `x + 5` (x: Int32), `5 + x` and `x == -5` all type-check through this, but
+/// only if the VALUE fits: `x < 300` on a `UInt8` would otherwise truncate 300
+/// to 44 in the comparison. A negative literal arrives as `Neg(Int(5))`, so the
+/// value is read through [`int_literal_value`] and ranged by [`int_value_fits`],
+/// which covers the negative half down to the type's exact minimum.
+///
+/// # Errors
+///
+/// The literal names a value outside the sibling's range.
+fn adapt_int_literal(lit: &Expr, sibling: &Type, line: usize) -> Result<Option<Type>, Diagnostic> {
+    let Type::IntN { bits, signed } = sibling else {
+        return Ok(None);
+    };
+    let Some(v) = int_literal_value(lit) else {
+        return Ok(None);
+    };
+    if !int_value_fits(v, *bits, *signed) {
+        return Err(cerr!(
+            line,
+            "integer literal {} does not fit {} (its range is {})",
+            v,
+            intn_name(*bits, *signed),
+            intn_range(*bits, *signed),
+        ));
+    }
+    Ok(Some(sibling.clone()))
+}
+
+/// The type a byte literal takes from an integer sibling operand, or `None`
+/// when it adapts to nothing and the operator's own arm answers.
+///
+/// A byte literal defaults to `UInt8` (RFC-0057) and adapts to a sibling of
+/// another width when its 0..255 value fits there, which is what lets
+/// `chars(s)[i] == '\xe9'` compare an Int64 against a byte.
+fn adapt_byte_literal(lit: &Expr, sibling: &Type) -> Option<Type> {
+    let Expr::Byte(b) = lit else {
+        return None;
+    };
+    match sibling {
+        Type::Int => Some(Type::Int),
+        Type::IntN { bits, signed } if int_literal_fits(i64::from(*b), *bits, *signed) => {
+            Some(sibling.clone())
+        }
+        _ => None,
     }
 }
 
