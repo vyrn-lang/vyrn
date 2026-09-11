@@ -26931,3 +26931,21 @@ The read loop first. The `sa-route` record blamed its 190 ns on "the bounds-chec
 Then the counter. The `perf-push` record kept it as "the native binary's only stack-exhaustion trap". It is not the only one and it is not reachable. `wasm-rt-impl.c`'s Windows path installs a vectored exception handler whenever guard pages are on, and that handler maps `EXCEPTION_STACK_OVERFLOW` to `WASM_RT_TRAP_EXHAUSTION`; a harness that links the same runtime with the counter compiled out and recurses to real stack exhaustion prints `error: Call stack exhausted` and exits 1, byte-identical to the counted build. The counter itself sits at four times `CALL_DEPTH_LIMIT`, so on any user recursion the emitter's counter traps at 1,000 first, and no program was found that reaches 4,000 uncounted frames.
 Three rows read slower and each is layout, not work: `simdbench.vyrn` "min builtin" and "max builtin" at 0.78 and 0.84, and `langbench.vyrn` "fn-value dispatch" at 0.93, all reproduced over five more rounds. The same "min builtin" row measured alone rather than after its file's other benches reads 15.4 us base against 9.2 us here, a 1.67x the other way, so that row's own spread is larger than the change.
 Left: nothing on the read loop; it is priced. The counter's removal is Windows-only by construction, so the POSIX prologue is unchanged and was never counted.
+
+#### Every body's gaps are named, and the next RFC has its partition (2026-09-11, `track-gi`)
+Decision: the core states its own gaps, `VYRN_GAP_TALLY` tables them over the gate list, and `coredrive` stays the pinned home of "bodies whole". Mine, on the counts below.
+Went: `coredrive.rs`'s own walk over the rows, 120 lines, into `core::gaps`, which the tally and the census both read. Stayed: `coredrive`'s eight classes and their order, because the ranking is that census's and the tags are the core's.
+Lines: `core.rs` 6,725 to 6,937. `coredrive.rs` 592 to 493. Refusals: 0 lost / 0 gained. Manifest: untouched, `VYRN_WASM_MANIFEST=check` green.
+Licence:
+- `coredrive --ignored`: 168 programs, 21,556 bodies, every class count and the 953 of 21,512 line byte-identical to `377cb367` run before the change.
+- `kernel --ignored`: 175 programs, 27,416 instances accepted, 0 refused, 0 unlowered.
+- `cargo test -p vyrn-cli` 647 passed, 0 failed, 47 ignored; `emitter_census` and `forms` green and unmoved. `cargo test -p vyrn-lower -p vyrn-codegen` green.
+- `cargo fmt --all --check` and `vyrn-lsp`'s own: clean. `cargo build --release -p vyrn-cli`: no warning.
+- the tally over 206 programs in `examples/`, the four vyx apps, `site/` and the `semantics` suite: 79,498 bodies, 11,014 whole, 68,484 not. `rfcs/census/core-gaps.md` holds both tables.
+Findings:
+- the largest gap is not a construct, it is a conversion: `Int32(n)` and its six siblings are 27,189 first gaps, 34 per cent of every body, and closing that family alone takes bodies whole from 13.9 per cent to 35.0. One `Op` variant pays it.
+- `Callee::Scalar` is documented as the kind for exactly that call and the corpus produces it zero times; the conversions arrive as `Callee::Reserved`. `Callee::Projection` is zero too. Two of the nine callee kinds have no reader.
+- a body waits on 2.4 families on average and 466 bodies wait on nine, so a family's worth depends on the order: the greedy order is in the census and reaches 99.6 per cent at the ninth family.
+- three families are sugar over a form the parser can write: `&&` and `||` (1,244 bodies), the handed-back receiver of `out.push(v)`, and a nullary constructor used as a value. None of the three needs a core row.
+- `core::build` gives up on 51 bodies over the whole run and 46 of them are one cause, a call to a generator's `__vyrnGen*` entry. `kernel` reports 0 unlowered because the programs that hold them do not load there.
+Left: nothing in this track. The next RFC's tracks are the thirteen families, and the census names what each one buys.

@@ -1531,6 +1531,210 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
     })
 }
 
+/// Every gap of `body`: the shapes among its rows that no emitter reads from
+/// the core, in source order, each named once.
+///
+/// An empty answer means the rows carry the body end to end. A tag names the
+/// family one form track closes: `Call:<who>:<name>` for a callee the
+/// emitter's function table does not answer, `Make:<what>` for a layout,
+/// `Read`, `Take`, `Lambda`, `Switch`, `Drop`, `Row`, `Prim:And`, `Prim:Or`,
+/// `Opaque`. `tests/coredrive.rs` ranks the tags into its classes, and
+/// `VYRN_GAP_TALLY` tables them over the gate list.
+pub fn gaps(body: &Body) -> Vec<String> {
+    let mut out = Vec::new();
+    gaps_of(&body.stmts, &mut out);
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|t| seen.insert(t.clone()));
+    out
+}
+
+fn gaps_of(ss: &[St], out: &mut Vec<String>) {
+    for s in ss {
+        match s {
+            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(r, out),
+            St::Store { place, value, .. } => {
+                gaps_place(place, out);
+                gaps_val(value, out);
+            }
+            St::Drop(..) => out.push("Drop".into()),
+            St::Row { .. } => out.push("Row".into()),
+            St::If {
+                cond, then, els, ..
+            } => {
+                gaps_val(cond, out);
+                gaps_of(then, out);
+                gaps_of(els, out);
+            }
+            // Since the loop slice the exit is the row's: the pass makes up the
+            // two-way branch and the `break` at the head of the loop it
+            // desugared, and a walk emits wasm's conditional branch for it.
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(b, out),
+            St::Break { .. } | St::Continue { .. } | St::Trap => {}
+            St::Return { value, .. } => {
+                if let Some(v) = value {
+                    gaps_val(v, out);
+                }
+            }
+            St::Switch { on, arms, .. } => {
+                out.push("Switch".into());
+                gaps_val(on, out);
+                for a in arms {
+                    gaps_of(&a.body, out);
+                }
+            }
+        }
+    }
+}
+
+fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
+    let vals = |vs: &[Val], out: &mut Vec<String>| {
+        for v in vs {
+            gaps_val(v, out);
+        }
+    };
+    match r {
+        Rhs::Val(v) => gaps_val(v, out),
+        Rhs::Read(p) => {
+            out.push("Read".into());
+            gaps_place(p, out);
+        }
+        Rhs::Take(p) => {
+            out.push("Take".into());
+            gaps_place(p, out);
+        }
+        // Since the callee slice the row says WHO: a function this program
+        // declares is one the emitter's own table answers for, and only the
+        // other eight kinds, and a write-back, are still waiting on a row.
+        Rhs::Call {
+            callee,
+            args,
+            kind,
+            write_back,
+            ..
+        } => {
+            if *write_back {
+                out.push(format!("Call:writeBack:{callee}"));
+            } else if *kind != Callee::Fn {
+                out.push(format!("Call:{kind:?}:{callee}"));
+            }
+            for (v, _) in args {
+                gaps_val(v, out);
+            }
+        }
+        Rhs::Prim(Op::Closure, vs, _) => {
+            out.push("Lambda".into());
+            vals(vs, out);
+        }
+        Rhs::Prim(Op::Bin(op @ (BinOp::And | BinOp::Or)), vs, _) => {
+            out.push(format!("Prim:{op:?}"));
+            vals(vs, out);
+        }
+        Rhs::Prim(_, vs, _) => vals(vs, out),
+        Rhs::Make(c, vs) => {
+            out.push(format!(
+                "Make:{}",
+                match c {
+                    Ctor::Record(n, _) => n.as_str(),
+                    Ctor::Array => "Array",
+                    Ctor::Map => "Map",
+                    Ctor::Try(_) => "Try",
+                }
+            ));
+            vals(vs, out);
+        }
+    }
+}
+
+fn gaps_val(v: &Val, out: &mut Vec<String>) {
+    if matches!(v, Val::Lit(Lit::Opaque)) {
+        out.push("Opaque".into());
+    }
+}
+
+fn gaps_place(p: &Place, out: &mut Vec<String>) {
+    match p {
+        Place::Name(_) | Place::Global(_) => {}
+        Place::Field(b, _) => gaps_place(b, out),
+        Place::Elem(b, v) | Place::Key(b, v) => {
+            gaps_place(b, out);
+            gaps_val(v, out);
+        }
+    }
+}
+
+/// Where the gap tally is appended, or `None` when nothing asked for one.
+fn gap_tally_at() -> Option<&'static std::path::Path> {
+    static AT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    AT.get_or_init(|| std::env::var_os("VYRN_GAP_TALLY").map(std::path::PathBuf::from))
+        .as_deref()
+}
+
+thread_local! {
+    /// The lines already appended. A body is built twice where a scrutinee is
+    /// seeded, and again by every host that compiles it, and the histogram
+    /// counts bodies.
+    static SAID: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Appends one line per body of `out`: the module, the function, the first gap,
+/// every gap, and the command that ran. A body the rows carry whole reads `-`
+/// in both gap fields.
+fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
+    let file = inst.func.module.as_deref().unwrap_or("(the root)");
+    let mut lines: Vec<String> = Vec::new();
+    match out {
+        Err(g) => {
+            // The field is space-separated and a gap names a construct in
+            // words, so the words are joined.
+            let what = format!(
+                "Gap:{}{}",
+                g.what.replace(' ', "-"),
+                if g.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(":{}", g.detail)
+                }
+            );
+            lines.push(format!("{file}\t{}\t{what}\t{what}", inst.spelling()));
+        }
+        Ok(body) => {
+            for f in body.frames() {
+                let g = gaps(f);
+                // A body the rows carry end to end is a line too, with no gap
+                // in either field: the denominator of every table the tally
+                // answers is the tally's own.
+                lines.push(format!(
+                    "{file}\t{}\t{}\t{}",
+                    f.name,
+                    g.first().map_or("-", |t| t.as_str()),
+                    if g.is_empty() {
+                        "-".into()
+                    } else {
+                        g.join(" ")
+                    }
+                ));
+            }
+        }
+    }
+    static ARGV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let argv = ARGV.get_or_init(|| std::env::args().collect::<Vec<_>>().join(" "));
+    for line in lines {
+        let line = format!("{line}\t{argv}\n");
+        if !SAID.with(|s| s.borrow_mut().insert(line.clone())) {
+            continue;
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(gap_tally_at().unwrap())
+        {
+            use std::io::Write;
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
 /// Build the core of one instance.
 ///
 /// Twice where the body has a `match` over a NAMED scrutinee whose note says
@@ -1539,6 +1743,14 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
 /// build takes the scrutinees it named. A body with no candidate is built
 /// once (RFC-0125 §3 M3, the third derivation slice).
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
+    let out = build_twice(program, inst, own);
+    if gap_tally_at().is_some() {
+        tally_gaps(inst, &out);
+    }
+    out
+}
+
+fn build_twice(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
     let b1 = vyrn_frontend::prof::phase("placer: build: first");
     let first = build_seeded(program, inst, own, &none)?;
