@@ -110,7 +110,7 @@ the_surface_census_as_a_table` and checked against the code by
 
 | constructor | checker | shared | wasm | types | prelude | editor | all six |
 |---|---|---|---|---|---|---|---|---|
-| `Type::Int` | 47 | 3 | 54 | 10 | 0 | 2 | 116 |
+| `Type::Int` | 47 | 3 | 55 | 10 | 0 | 2 | 117 |
 | `Type::IntN` | 23 | 4 | 14 | 21 | 3 | 2 | 67 |
 | `Type::Float` | 20 | 3 | 24 | 5 | 0 | 2 | 54 |
 | `Type::Float32` | 23 | 3 | 18 | 5 | 0 | 1 | 50 |

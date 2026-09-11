@@ -17293,6 +17293,16 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, v, &t, line)?;
                 self.un_ins(b, *u, &t, line)
             }
+            // A conversion is the operand at its own type and then the
+            // coercion plan's rungs to the target, which is what the AST arm
+            // writes for `Int32(n)` (`Fn_::call_inner`'s conversion rung).
+            // The plan decides the instructions; this row decides nothing.
+            (Op::Conv(to), [v]) => {
+                let from = self.core_ty(body, v, &Type::Int);
+                self.core_val(m, b, body, w, v, &from, line)?;
+                self.coerce(m, b, None, &from, to, line)?;
+                Ok(to.clone())
+            }
             (Op::Bin(o), [l, r]) => {
                 let lt = self.core_ty(body, l, &Type::Int);
                 let lt = self.cx.resolve(&lt);
@@ -17393,6 +17403,7 @@ impl<'p> Fn_<'_, 'p> {
             },
             Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
             Rhs::Call { callee, kind, .. } => self.core_sig(callee, *kind)?.ret_ty,
+            Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
             _ => return None,
         })
