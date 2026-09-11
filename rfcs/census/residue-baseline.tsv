@@ -12,11 +12,12 @@
 # (KNOWN_DIVERGENT, EXPECTED_CHECK_FAILURE, WASM_ONLY) own that question, and
 # `residue.rs` takes the corpus they leave.
 #
-# The leak column was EMPTY when RFC-0114 closed at 143 clean / 0 leaking / 0
-# double-free — on the text-IR route, whose emitter no longer exists. These
-# rows are the wasm route's first measurement, and each is a defect rather
-# than a licence: `fromJson` into an enum with an `Array` payload leaks the
-# box it decoded (twelve lines reproduce it), and that one row is 1 of the 26.
+# The leak column is EMPTY again, at 175 clean / 0 leaking / 0 double-free on
+# both engines (2026-09-11). It held 26 rows when the wasm route was first
+# measured and the last three closed with the stored closure's release twin,
+# the capture a source mints, and the value `?` copies — so every leak from
+# here is a regression and a red gate, which is the only state this column is
+# meant to have.
 aliascontext	clean
 appendreserve	clean
 args	clean
@@ -61,7 +62,7 @@ enumcodec	clean
 eventloop	clean
 externdemo2	clean
 fallible	clean
-falliblegeneric	leak	1
+falliblegeneric	clean
 fannkuch	clean
 fasta	clean
 fib	other

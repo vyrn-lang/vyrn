@@ -4978,8 +4978,11 @@ impl<'a> Builder<'a> {
 
     /// `?` on a declared `Fallible` type (RFC-0080 M3): the failing path
     /// returns the whole value, whichever failing variant it is; the succeeding
-    /// path hands it to the impl's `success`, which owns it. The switch reads
-    /// the value and each arm takes it, so neither arm leaves it held.
+    /// path hands it to the impl's `success`, which READS it — the protocol
+    /// declares a bare `self` — and answers a value of its own. So the copy the
+    /// `?` made is still this frame's on that path, and this frame gives it
+    /// back after the call. The failing path returns it instead, so each arm
+    /// accounts for it exactly once.
     fn fallible_try(
         &mut self,
         ity: Type,
@@ -5010,7 +5013,7 @@ impl<'a> Builder<'a> {
             t,
             Rhs::Call {
                 callee: success,
-                args: vec![(sv.clone(), Capability::Consume)],
+                args: vec![(sv.clone(), Capability::Read)],
                 write_back: false,
                 // A variant constructor: it puts the payload into the value.
                 kind: Callee::Ctor,
@@ -5019,6 +5022,11 @@ impl<'a> Builder<'a> {
                 ret: Some(self.body.names[res as usize].ty.clone()),
             },
         ));
+        if let Val::Name(n) = sv {
+            if owns && self.body.names[n as usize].releases {
+                ok.push(St::Drop(n, Site::None, 0));
+            }
+        }
         ok.push(St::Store {
             place: Place::Name(res),
             value: Val::Name(t),

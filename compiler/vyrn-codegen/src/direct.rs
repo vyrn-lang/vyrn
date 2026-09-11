@@ -13391,9 +13391,21 @@ impl<'p> Fn_<'_, 'p> {
             &recv,
             &[],
             line,
-        );
+        )?;
+        // The copy `?` made is still this frame's on the success path: the
+        // protocol declares `success(self)`, a READ, so the callee answers a
+        // value of its own and leaves this one held. The core says whether the
+        // frame made it ([`Cx::owns_scrutinee`]) and states the release as a
+        // drop in that arm; this is where the arm ends. The failing path is
+        // gone by here — it returned the value itself.
+        if self.cx.owns_scrutinee(at) {
+            let a = b.local(ValType::I32);
+            b.slot(off);
+            b.ins(&Instruction::LocalSet(a));
+            self.rel_at(m, b, a, st, line)?;
+        }
         self.scope.truncate(mark);
-        out
+        Ok(out)
     }
 
     /// `Age?(n)` — a validated construction whose refinement answers with a tag
