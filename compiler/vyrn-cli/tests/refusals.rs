@@ -2502,3 +2502,63 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
         bad.join("\n  ")
     );
 }
+
+/// A block-bodied lambda captures what its body reads, and nothing else
+/// (round two's F2-051).
+///
+/// `ast::mentions_place` answers `true` for every name once a lambda has a
+/// block body, so `core::Builder::captures` made every name in scope a
+/// capture, and a capture is a READ. Three programs price that: a lambda whose
+/// body reads nothing was refused as a use of a consumed name, one whose block
+/// shadows the consumed name was refused for the shadow, and the shadow drew a
+/// SECOND diagnostic above the one real use. The capture set is the body's own
+/// mentions now, minus the names the body binds.
+#[test]
+fn a_block_bodied_lambda_captures_only_what_its_body_reads() {
+    const HEAD: &str = "type T = { id: Int64 }\n\
+                        fn take(t: consume T) -> Int64 { return t.id }\n";
+    let dir = common::scratch("lambda-captures");
+    let mut bad: Vec<String> = Vec::new();
+
+    // Accepted: neither lambda body names `s`. The shadow's `s` is the
+    // lambda's own binding.
+    for (what, tail) in [
+        (
+            "reads nothing",
+            "  let g: fn(Int64) -> Int64 = x -> { return x + 1 }\n",
+        ),
+        (
+            "shadows the name",
+            "  let g: fn(Int64) -> Int64 = x -> { let s = 0 return x + s }\n",
+        ),
+    ] {
+        let src = format!("{HEAD}fn main() -> Int64 {{\n  let s = T {{ id: 1 }}\n  let n = take(s)\n{tail}  return g(n)\n}}\n");
+        let name = format!("accepted_{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if !ok {
+            bad.push(format!("a lambda that {what} was refused: {text}"));
+        }
+    }
+
+    // Refused once: the shadowing lambda stands, and `take(s)` on line 7 is
+    // the only use of the consumed `s`.
+    let src = format!(
+        "{HEAD}fn main() -> Int64 {{\n  let s = T {{ id: 1 }}\n  let n = take(s)\n  \
+         let g: fn(Int64) -> Int64 = x -> {{ let s = 0 return x + s }}\n  \
+         return g(n) + take(s)\n}}\n"
+    );
+    std::fs::write(dir.join("refused.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "refused.vyrn", false);
+    let heads: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("already consumed by"))
+        .collect();
+    if ok || heads.len() != 1 || !heads[0].contains("refused.vyrn:7:") {
+        bad.push(format!(
+            "the one use of `s` is not the one diagnostic: {text}"
+        ));
+    }
+
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}
