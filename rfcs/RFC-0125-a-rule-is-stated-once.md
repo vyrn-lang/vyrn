@@ -7950,7 +7950,7 @@ where it is, which is what catches a deletion that deleted prose.
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,808 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
-| the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
+| the wasm format | 343 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
 | shared machinery | 2,588 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
 | tests | 326 | 0 | the file's own unit tests |
 
@@ -26739,6 +26739,73 @@ access carries its own bounds check and a memory-base indirection.
 
 Left: that read loop, on both rows, blocked by the bounds-check shape wasm2c
 emits per access, not by anything `SmallArray` states.
+**The last three residue rows (2026-09-11, `residue-three`).**
+
+Decision: close the exit-residue ratchet's last three rows, so the baseline's
+leak column is empty again and every future leak is a red gate. The lead's.
+
+Went: `fnvalstore` 1 block, `capturefn` 2 blocks, `falliblegeneric` 1 block.
+Stayed: nothing.
+
+Lines: `direct.rs` 17,660 to 17,781; `core.rs` 6,733 to 6,741. Refusals: 0 lost
+/ 0 gained. Manifest: 15 rows of 176, written — every program that stores a
+`fn` value, and the two that write `?` on a declared `Fallible`.
+
+Licence: `cargo fmt --all --check` green; `cargo build --release -p vyrn-cli`
+0 warnings; `cargo test -p vyrn-cli` over every test target in five groups, 0
+failed; `--release --test residue -- --ignored` **175 clean, 0 leaking, 0
+double-free on each engine** (278 s), against 172 clean / 3 leaking before;
+`--test kernel`, `--test coretables`, `--test coredrive`, `--test refusals`
+(all `--ignored`) and `--test memory -- --test-threads=1` green;
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` green after the
+write.
+
+Findings, one mechanism each.
+
+**`fnvalstore`: the release of a stored `fn` value was shallower than its
+construction.** `build_fnval` duplicates a heap capture INTO the block, so the
+block owns what its captures point at; the release freed the block alone and
+the derived copy duplicated the block alone. Three statements of one rule, two
+of them wrong — and the copy's comment said the two were mirrors "both
+shallow" while the construction three hundred lines away said "DUPLICATED".
+Only the tag knows a block's capture types, so the walk belongs where the
+registry is readable: `lower_fnval_free` is the twin of `lower_fnval_copy`, and
+`Type::Fn`'s release arm hands it the tag and the block exactly as the copy arm
+already did. Both derived bodies are written inside the drain loop now, because
+each is an ordinary release or copy of a capture type and puts a shape body on
+the worklist the next turn drains.
+
+**`capturefn`: a capture the source MINTS was duplicated, which orphans what
+was minted.** With the release deep, one block still leaked. `applyAll`'s own
+lambda captures `f`, and inside an RFC-0023 specialization `f` is a `fn`
+binding with no slot, so reading its name BUILDS an aggregate
+(`Fn_::fnval_binding`) rather than reading one. `build_fnval` then copied that
+fresh aggregate and nothing owned the original. Duplication is for a capture
+read out of a place, where the enclosing binding keeps releasing its own value;
+the rule names the one source that is not one. The previous record's question,
+"what a specialization's capture block holds", is answered: it holds a value
+the specialization made.
+
+**`falliblegeneric`: the value `?` copies is still the frame's on the success
+path.** The protocol declares `fn success(self)`, a READ, so the impl answers a
+value of its own and leaves the copy held; the core said `Capability::Consume`
+there and both sides then disowned it. The core says `Read` now and drops the
+name in that arm, and `Fn_::try_fallible` releases the `@try` slot after
+`success` returns, gated on the core's own `owns_scrutinee`. The failing path
+is gone by then — it returned the value itself. Genericity was a red herring:
+the same program with a concrete `Slot` leaks the same block, and
+`examples/fallible.vyrn` is clean only because every payload it builds is a
+static literal.
+
+**A reverted experiment, for the record.** Making the argument-position lambda
+temporary own its block in the core (`Builder::lambda`, keyed on
+`closure_reads`) closed nothing, as the previous round found. The reason is
+visible in the trace: `applyAll`'s parameter is declared bare, so the core
+reads the lambda as one the call cannot keep and is right to. The block comes
+from the specialization, not from the call.
+
+Left: nothing on these three rows. The baseline's leak column is empty and the
+ratchet now only guards regressions.
 
 ## Open questions
 

@@ -477,6 +477,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         mono: RefCell::new(Mono::default()),
         fnvals: RefCell::new(Vec::new()),
         fnval_copy: 0,
+        fnval_free: 0,
         dispatch: RefCell::new(Dispatch::default()),
         shapes: RefCell::new(Shapes::default()),
         globals: HashMap::new(),
@@ -580,6 +581,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // cannot be written until the last body is walked, while a copy site in the
     // middle of that walk has to be able to call it.
     cx.fnval_copy = m.reserve_func(&[ValType::I64, ValType::I32], &[ValType::I32]);
+    cx.fnval_free = m.reserve_func(&[ValType::I64, ValType::I32], &[]);
 
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
@@ -619,6 +621,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // A5.2, RFC-0125 §3 M5). One program, one sentence: the drain goes on, and the
     // frame refusal is returned only when no instantiation refusal came.
     let mut deferred: Option<String> = None;
+    let mut derived = false;
     loop {
         let p = {
             let mono = cx.mono.borrow();
@@ -695,10 +698,24 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             let disp = cx.dispatch.borrow();
             disp.sigs.get(disp.done).cloned()
         };
-        let Some((sig_ty, dsig)) = d else { break };
-        let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
-        m.fill(dsig.index, body);
-        cx.dispatch.borrow_mut().done += 1;
+        if let Some((sig_ty, dsig)) = d {
+            let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
+            m.fill(dsig.index, body);
+            cx.dispatch.borrow_mut().done += 1;
+            continue;
+        }
+        // The registry is closed once every body above is walked, so the two
+        // derived walks over it can be written — and they are written INSIDE
+        // this loop because each is an ordinary release or copy of a capture
+        // type, which puts a shape body on the worklist the next turn drains.
+        if derived {
+            break;
+        }
+        derived = true;
+        let fncopy = lower_fnval_copy(&mut m, &cx)?;
+        m.fill(cx.fnval_copy, fncopy);
+        let fnfree = lower_fnval_free(&mut m, &cx)?;
+        m.fill(cx.fnval_free, fnfree);
     }
     if let Some(e) = deferred {
         return Err(e);
@@ -709,10 +726,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // plan row any more (RFC-0125 §3 M3, the emitter-reads-the-core-alone
     // slice). What answers the same question about the core's rows is
     // measurement: the residue ratchet and the memory suite.
-
-    // The registry is closed now, so the derived copy can be written.
-    let fncopy = lower_fnval_copy(&cx)?;
-    m.fill(cx.fnval_copy, fncopy);
 
     // `_start`: WASI's entry point. The exit code is `main & 255`, the same
     // truncation `vyrn_entry` does natively — `vyrn run` and the native binary
@@ -1315,6 +1328,9 @@ struct Cx<'a> {
     /// loop, for the reason a dispatcher is — a variant's capture layout is only
     /// complete once the last body is walked.
     fnval_copy: u32,
+    /// The module's one derived RELEASE over that registry: `(tag, block) -> ()`.
+    /// The twin of [`Cx::fnval_copy`], reserved and filled beside it.
+    fnval_free: u32,
     dispatch: RefCell<Dispatch>,
     /// One release and one copy per type, and the worklist of the bodies still
     /// to write — see [`Shapes`].
@@ -2696,36 +2712,38 @@ fn call_depth_bump(b: &mut Frame, cx: &Cx<'_>, by: i32) {
 /// every one's capture types, so the size comes off the registry here — a chain
 /// of tag tests, then one `malloc` and one `memory.copy`.
 ///
-/// The copy is **shallow**: the block, not what the captures point at. Two
-/// lambdas over one String already build two blocks holding one pointer, so a
-/// deep copy would need a deep release to match and the release would then free
-/// that pointer twice. The two stay mirrors, both shallow.
-fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {
+/// The copy is **deep**, because the CONSTRUCTION is
+/// ([`Fn_::build_fnval`]): a heap capture is duplicated into the block, so the
+/// block owns what its captures point at and a copy of the block owes a second
+/// copy of that. The release twin below walks the same captures, so the two
+/// stay mirrors.
+fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(2, &[], 0);
-    let f = top_level(cx);
+    let mut f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
     let vals = cx.fnvals.borrow().clone();
     for (i, v) in vals.iter().enumerate() {
-        let cap_tys = &v.target.sig.params[..v.target.ncaps];
+        let cap_tys = v.target.sig.params[..v.target.ncaps].to_vec();
         // No captures means payload 0, and 0 copies to itself.
         if cap_tys.is_empty() {
             continue;
         }
-        let size = f.cap_block(cap_tys)?.size;
+        let bl = f.cap_block(&cap_tys)?;
         b.ins(&Instruction::LocalGet(tag));
         b.ins(&Instruction::I64Const(i as i64));
         b.ins(&Instruction::I64Eq);
         b.ins(&Instruction::If(BlockType::Empty));
         let dst = b.local(ValType::I32);
-        b.ins(&Instruction::I64Const(size as i64));
+        b.ins(&Instruction::I64Const(bl.size as i64));
         b.ins(&Instruction::Call(cx.rt.malloc));
         b.ins(&Instruction::LocalTee(dst));
         b.ins(&Instruction::LocalGet(pay));
-        b.ins(&Instruction::I32Const(size as i32));
+        b.ins(&Instruction::I32Const(bl.size as i32));
         b.ins(&Instruction::MemoryCopy {
             src_mem: 0,
             dst_mem: 0,
         });
+        fnval_captures(m, &mut f, &mut b, dst, &bl, &cap_tys, false)?;
         b.ins(&Instruction::LocalGet(dst));
         b.ins(&Instruction::Return);
         b.ins(&Instruction::End);
@@ -2734,6 +2752,73 @@ fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {
     // value, exactly as a scalar's is.
     b.ins(&Instruction::LocalGet(pay));
     Ok(b)
+}
+
+/// The module's one derived RELEASE over the defunctionalized enum:
+/// `(tag, block) -> ()`, the twin of [`lower_fnval_copy`].
+///
+/// A stored `fn` value's block holds its captures BY VALUE and owns their heap
+/// (`Fn_::build_fnval`), so giving the block back means walking those captures
+/// first. Only the tag knows which captures a block holds, so the walk is here
+/// — the one place the registry is readable — rather than at the release site,
+/// which sees a `Fn(..)` type and no tag.
+fn lower_fnval_free(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
+    let mut b = Frame::new(2, &[], 0);
+    let mut f = top_level(cx);
+    let (tag, pay) = (0u32, 1u32);
+    let vals = cx.fnvals.borrow().clone();
+    for (i, v) in vals.iter().enumerate() {
+        let cap_tys = v.target.sig.params[..v.target.ncaps].to_vec();
+        // A tag with no heap capture has nothing above the block itself, and
+        // the tail below frees that.
+        if !cap_tys.iter().any(|t| f.owns_heap(t)) {
+            continue;
+        }
+        let bl = f.cap_block(&cap_tys)?;
+        b.ins(&Instruction::LocalGet(tag));
+        b.ins(&Instruction::I64Const(i as i64));
+        b.ins(&Instruction::I64Eq);
+        b.ins(&Instruction::If(BlockType::Empty));
+        fnval_captures(m, &mut f, &mut b, pay, &bl, &cap_tys, true)?;
+        b.ins(&Instruction::End);
+    }
+    // The block itself, whatever the tag. A payload of 0 is the no-capture
+    // case and `free` refuses it.
+    b.ins(&Instruction::LocalGet(pay));
+    b.ins(&Instruction::Call(cx.rt.free));
+    Ok(b)
+}
+
+/// Walk the captures of one tag's block, whose address is in local `at`:
+/// release each one that owns heap, or give each one its own heap. The two
+/// directions differ by which call the walk makes, so they are one function.
+fn fnval_captures(
+    m: &mut Module,
+    f: &mut Fn_<'_, '_>,
+    b: &mut Frame,
+    at: u32,
+    bl: &Layout,
+    cap_tys: &[Type],
+    rel: bool,
+) -> Result<(), String> {
+    for (ci, ct) in cap_tys.iter().enumerate() {
+        if !f.owns_heap(ct) {
+            continue;
+        }
+        let a = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(at));
+        if bl.fields[ci] != 0 {
+            b.ins(&Instruction::I32Const(bl.fields[ci] as i32));
+            b.ins(&Instruction::I32Add);
+        }
+        b.ins(&Instruction::LocalSet(a));
+        if rel {
+            f.rel_at(m, b, a, ct, 0)?;
+        } else {
+            f.copy_at(m, b, a, ct, 0)?;
+        }
+    }
+    Ok(())
 }
 
 /// One shape body: `(addr) -> ()`, releasing or copying the value at `addr`.
@@ -3834,13 +3919,19 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
-            // The captures are one heap block, read by value at the construction
-            // site, and 0 when there are none — which `free` refuses. Census §16.
+            // The captures are one heap block, DUPLICATED into it at the
+            // construction site, so the block owns their heap and the walk over
+            // them is the tag's. Only the registry knows which captures a tag
+            // holds, so this hands both words to the module's derived release
+            // ([`lower_fnval_free`]) exactly as the copy hands them to
+            // [`lower_fnval_copy`]. Census §16.
             Type::Fn(..) => {
                 let l = self.layout_of(ty, line)?;
                 b.ins(&Instruction::LocalGet(a))
+                    .ins(&Instruction::I64Load(word_at8(l.fields[0])))
+                    .ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word_at(l.fields[1])))
-                    .ins(&Instruction::Call(self.cx.rt.free));
+                    .ins(&Instruction::Call(self.cx.fnval_free));
                 Ok(())
             }
             // A fixed `[N x T]` is a container, so its elements are U4's
@@ -10064,20 +10155,28 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalSet(p));
             for (i, (src, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
+                // The snapshot OWNS its heap (RFC-0114 §25 round three, the
+                // textual backend's rule, mirrored here in round fifty-seven):
+                // a heap capture READ OUT OF A PLACE is duplicated into the
+                // block, which is what lets the release twin walk it and the
+                // captured binding keep releasing its own value at block exit.
+                //
+                // A capture the source MINTS is already the block's, and
+                // duplicating it orphans what was minted. That is the one such
+                // source: a `fn`-typed parameter inside a specialization has no
+                // slot, so reading its name BUILDS the aggregate (RFC-0023 ×
+                // RFC-0037, [`Fn_::fnval_binding`]) rather than reading one.
+                let dup = self.owns_heap(ty)
+                    && !matches!(src, Expr::Var { name, .. } if self.fn_binds.contains_key(name));
                 b.ins(&Instruction::LocalGet(p));
                 if bl.fields[i] != 0 {
                     b.ins(&Instruction::I32Const(bl.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                 }
                 self.expr_as(m, b, src, ty)?;
-                // The snapshot OWNS its heap (RFC-0114 §25 round three, the
-                // textual backend's rule, mirrored here in round fifty-seven):
-                // a heap capture is DUPLICATED into the block, which is what
-                // lets the release twin walk it and the captured binding keep
-                // releasing its own value at block exit.
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
-                        if self.owns_heap(ty) {
+                        if dup {
                             self.copy_stack(m, b, ty, line)?;
                         }
                         b.ins(&store_of(&self.cx.ll(ty)));
@@ -10088,7 +10187,7 @@ impl<'p> Fn_<'_, 'p> {
                             src_mem: 0,
                             dst_mem: 0,
                         });
-                        if self.owns_heap(ty) {
+                        if dup {
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalGet(p));
                             if bl.fields[i] != 0 {
@@ -13292,9 +13391,21 @@ impl<'p> Fn_<'_, 'p> {
             &recv,
             &[],
             line,
-        );
+        )?;
+        // The copy `?` made is still this frame's on the success path: the
+        // protocol declares `success(self)`, a READ, so the callee answers a
+        // value of its own and leaves this one held. The core says whether the
+        // frame made it ([`Cx::owns_scrutinee`]) and states the release as a
+        // drop in that arm; this is where the arm ends. The failing path is
+        // gone by here — it returned the value itself.
+        if self.cx.owns_scrutinee(at) {
+            let a = b.local(ValType::I32);
+            b.slot(off);
+            b.ins(&Instruction::LocalSet(a));
+            self.rel_at(m, b, a, st, line)?;
+        }
         self.scope.truncate(mark);
-        out
+        Ok(out)
     }
 
     /// `Age?(n)` — a validated construction whose refinement answers with a tag
@@ -14894,6 +15005,15 @@ fn word_at(off: u32) -> MemArg {
 fn word8() -> MemArg {
     MemArg {
         offset: 0,
+        align: 3,
+        memory_index: 0,
+    }
+}
+
+/// An 8-byte access at a static offset.
+fn word_at8(off: u32) -> MemArg {
+    MemArg {
+        offset: off as u64,
         align: 3,
         memory_index: 0,
     }
@@ -17211,6 +17331,7 @@ mod tests {
             mono: RefCell::new(Mono::default()),
             fnvals: RefCell::new(Vec::new()),
             fnval_copy: 0,
+            fnval_free: 0,
             dispatch: RefCell::new(Dispatch::default()),
             shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
