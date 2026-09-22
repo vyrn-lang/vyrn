@@ -1172,11 +1172,13 @@ fn gate() {
         "only {} backend answers were compared — the gate stopped seeing the corpus",
         t.compared
     );
-    // …and the same floor for the pair's second member. The has-type is 21,154
-    // of the corpus's answers; a change that quietly stopped deriving it would
-    // otherwise read as green, with every one of those falling back to a rule.
+    // …and the same floor for the pair's second member. A change that quietly
+    // stopped deriving it would otherwise read as green, with every one of
+    // those falling back to a rule. Only the AST walk answers, so the count
+    // falls as the core walk takes bodies from it: 21,154 before the driver,
+    // 9,911 when a temporary took a slot (RFC-0125 M7).
     assert!(
-        t.answered_has > 10_000,
+        t.answered_has > 5_000,
         "only {} backend answers matched the pair's has-type — the form stopped          carrying it",
         t.answered_has
     );

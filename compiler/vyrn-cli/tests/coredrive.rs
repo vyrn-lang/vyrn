@@ -10,10 +10,10 @@
 //!
 //! This is its licence and its count in one test. Every corpus program is
 //! emitted twice — once with the driver, once with `VYRN_NO_CORE_WALK=1`,
-//! which takes the AST walk back — and the two modules are compared. What
-//! differs is listed rather than asserted away, because a difference is a
-//! finding the RFC's record has to explain: either the AST arm was wrong, or
-//! the core states a shape the AST arm did not.
+//! which takes the AST walk back — and the two modules are compared. Where the
+//! bytes differ, both modules are run and must print and exit the same
+//! (RFC-0125 M7): the core gives a local to a value the arm kept on the
+//! operand stack, so a byte-identical module stopped being the witness.
 //!
 //! The unit of selection is the STATEMENT since the interleave slice, so the
 //! count beside the licence is per FORM: how many occurrences of each form of
@@ -23,7 +23,9 @@
 //! to end, out of how many the emitter lowers. The classification below says what each of the rest waits on, and
 //! it is the same list §3 M3 records.
 
-use std::path::PathBuf;
+mod common;
+
+use std::path::{Path, PathBuf};
 use vyrn_frontend::ast::Program;
 use vyrn_lower::core::{Body, Callee, Rhs, St};
 
@@ -307,6 +309,7 @@ fn run() {
     let mut emitted = 0usize;
     let mut forms = [(0usize, 0usize); vyrn_codegen::direct::FORMS.len()];
     let mut differ: Vec<String> = Vec::new();
+    let mut runs_apart: Vec<String> = Vec::new();
     let mut exits: Vec<(String, usize, usize)> = Vec::new();
     let mut calls: std::collections::BTreeMap<(String, String), usize> = Default::default();
     let mut same = 0usize;
@@ -358,13 +361,16 @@ fn run() {
         let ast = emit(&program, true);
         match (core, ast) {
             (Ok(a), Ok(b)) if a == b => same += 1,
-            (Ok(a), Ok(b)) => differ.push(format!(
-                "{name}: {} bytes from the core, {} from the AST",
-                a.len(),
-                b.len()
-            )),
+            (Ok(a), Ok(b)) => match runs_the_same(&path) {
+                Ok(()) => differ.push(format!(
+                    "{name}: {} bytes from the core, {} from the AST, and they run the same",
+                    a.len(),
+                    b.len()
+                )),
+                Err(e) => runs_apart.push(format!("{name}: {e}")),
+            },
             (Err(a), Err(b)) if a == b => same += 1,
-            (a, b) => differ.push(format!("{name}: {a:?} against {b:?}")),
+            (a, b) => runs_apart.push(format!("{name}: {a:?} against {b:?}")),
         }
     }
     // The same two walks over the shapes the corpus does not write. Their
@@ -383,7 +389,14 @@ fn run() {
         let ast = emit(&program, true);
         // Two walks that fail alike are no witness of a shape.
         assert!(core.is_ok(), "{what}: {core:?}");
-        assert_eq!(core, ast, "{what}: the two walks emit different modules");
+        if core != ast {
+            let dir = common::scratch("coredrive");
+            let file = dir.join("shape.vyrn");
+            std::fs::write(&file, &src).unwrap();
+            if let Err(e) = runs_the_same(&file) {
+                panic!("{what}: the two walks' modules run differently\n{e}");
+            }
+        }
         shapes.push((what, per[BREAK].0, per[CONT].0));
     }
 
@@ -411,6 +424,10 @@ fn run() {
         eprintln!("  {brk:4} break   {cont:4} continue   {name}");
     }
     eprintln!("{same} of {programs} programs emit the same module either way");
+    eprintln!(
+        "{} more emit different modules that run the same",
+        differ.len()
+    );
     for d in &differ {
         eprintln!("  {d}");
     }
@@ -476,39 +493,52 @@ fn run() {
     // AST walk emits exactly what it did. So a body it takes has to reach the
     // corpus at all, or this test measures nothing.
     assert!(from_core > 0, "the core walk emitted no body");
-    // The licence. Every program that emits a different module does so for ONE
-    // shape, and RFC-0125 §3 M3's record explains it: a `return` whose value
-    // is a `match` or an `if` reaches the AST walk as a join it writes with a
-    // typed block and one branch out, and the core rewrites it into a `return`
-    // per arm (`Builder::return_through`) so the linear judgment sees each
-    // exit. The driver emits what the row says, which is one `br` per arm
-    // where the join had one after the block. `strpredbytes.vyrn` joined the
-    // list when the frame took a `String` (RFC-0125 M7): its join carries a
-    // pointer where the other two carry an `Int64`. The six below joined it
-    // when the walk took a `return match` (RFC-0125 M7, the tag and the walk):
-    // `autovalidate.vyrn` also moves the check that follows the join into each
-    // arm, which is the same shape and its consequence, because the check
-    // belongs to the return. A program not on this list is a shape nobody has
-    // read, and this is where a reader is told to read it.
-    let named: Vec<&str> = differ
-        .iter()
-        .map(|d| d.split(':').next().unwrap())
-        .collect();
-    assert_eq!(
-        named,
-        [
-            "assoctype.vyrn",
-            "autovalidate.vyrn",
-            "enum.vyrn",
-            "ifexpr.vyrn",
-            "knucleotide.vyrn",
-            "option.vyrn",
-            "reflection.vyrn",
-            "strpredbytes.vyrn",
-            "vlog.vyrn"
-        ],
-        "the two walks differ somewhere the record does not explain"
+    // The licence. A program whose two modules differ runs the same under
+    // both: same stdout, stderr and exit code. Two shapes make the bytes
+    // differ. The core names every value, so it gives a local to the values
+    // the arm kept on the stack (RFC-0125 M7); and it writes a `return`
+    // per arm where the arm joins a `match` or an `if` and returns once
+    // (`Builder::return_through`).
+    assert!(
+        runs_apart.is_empty(),
+        "the two walks' modules run differently:\n{}",
+        runs_apart.join("\n")
     );
+}
+
+/// Whether the module each walk emits for `file` runs the same: `vyrn run`
+/// with and without `VYRN_NO_CORE_WALK=1`, under the corpus's conventions
+/// (`common::run_io`). `Err` names the first stream that differs.
+fn runs_the_same(file: &Path) -> Result<(), String> {
+    let run = |ast: bool| {
+        let mut cmd = common::vyrn();
+        cmd.arg("run").arg(file);
+        cmd.args(common::read_args(&file.with_extension("args")));
+        if ast {
+            cmd.env("VYRN_NO_CORE_WALK", "1");
+        } else {
+            cmd.env_remove("VYRN_NO_CORE_WALK");
+        }
+        common::run_io(cmd, &common::examples_dir(), &file.with_extension("stdin"))
+    };
+    let (core, ast) = (run(false), run(true));
+    let (c, a) = (core.status.code(), ast.status.code());
+    let mut why = String::new();
+    if c != a {
+        why = format!("exit {c:?} from the core, {a:?} from the AST\n");
+    }
+    for (stream, x, y) in [
+        ("stdout", &core.stdout, &ast.stdout),
+        ("stderr", &core.stderr, &ast.stderr),
+    ] {
+        let (x, y) = (common::norm(x), common::norm(y));
+        why += &common::first_diff(stream, "core", &x, "AST", &y).unwrap_or_default();
+    }
+    if why.is_empty() {
+        Ok(())
+    } else {
+        Err(why)
+    }
 }
 
 fn emit(program: &Program, ast: bool) -> Result<Vec<u8>, String> {
