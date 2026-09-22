@@ -16652,18 +16652,7 @@ impl<'p> Fn_<'_, 'p> {
         let Some(r) = self.rel_slots.get(&step) else {
             return Ok(());
         };
-        let (place, mut rel) = (r.place, r.rel.clone());
-        // The row spells a hole with the leading dot a path has; a walk names
-        // the field.
-        if let Rel::Deep(ty, _) = rel {
-            rel = Rel::Deep(
-                ty,
-                holes
-                    .iter()
-                    .filter_map(|h| h.strip_prefix('.').map(str::to_string))
-                    .collect(),
-            );
-        }
+        let (place, rel) = (r.place, around(r.rel.clone(), holes));
         // A FALL-THROUGH exit ends what the row holds on the path that carries
         // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
         if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
@@ -16678,7 +16667,6 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// What a release of the type runs is [`Fn_::rel_for`]'s answer, as at the
     /// `Stmt::Drop` arm, walking around the holes the row's name carries.
-    #[allow(clippy::too_many_arguments)]
     fn core_drop(
         &mut self,
         m: &mut Module,
@@ -16692,17 +16680,10 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("a release of a name with no place", line);
         };
         let info = &body.names[n as usize];
-        let Some(mut rel) = self.rel_for(&ty, line)? else {
+        let Some(rel) = self.rel_for(&ty, line)? else {
             return Ok(());
         };
-        if let Rel::Deep(t, _) = rel {
-            let holes = info
-                .holes
-                .iter()
-                .filter_map(|h| h.strip_prefix('.').map(str::to_string))
-                .collect();
-            rel = Rel::Deep(t, holes);
-        }
+        let rel = around(rel, &info.holes);
         if let Some(step) = info.binding {
             self.rel_pending.retain(|(k, _)| *k != step);
         }
@@ -18683,6 +18664,21 @@ fn core_switched(s: &St, out: &mut Vec<vyrn_lower::core::Name>) {
             inner.iter().for_each(|s| core_switched(s, out));
         }
         _ => {}
+    }
+}
+
+/// `rel`, walking around the holes a core row names. The row spells a hole
+/// with the leading dot a path has, and a walk names the field.
+fn around(rel: Rel, holes: &[String]) -> Rel {
+    match rel {
+        Rel::Deep(ty, _) => Rel::Deep(
+            ty,
+            holes
+                .iter()
+                .filter_map(|h| h.strip_prefix('.').map(str::to_string))
+                .collect(),
+        ),
+        rel => rel,
     }
 }
 
