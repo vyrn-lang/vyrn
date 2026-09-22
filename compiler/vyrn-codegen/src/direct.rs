@@ -16652,24 +16652,42 @@ impl<'p> Fn_<'_, 'p> {
         let Some(r) = self.rel_slots.get(&step) else {
             return Ok(());
         };
-        let (place, mut rel) = (r.place, r.rel.clone());
-        // The row spells a hole with the leading dot a path has; a walk names
-        // the field.
-        if let Rel::Deep(ty, _) = rel {
-            rel = Rel::Deep(
-                ty,
-                holes
-                    .iter()
-                    .filter_map(|h| h.strip_prefix('.').map(str::to_string))
-                    .collect(),
-            );
-        }
+        let (place, rel) = (r.place, around(r.rel.clone(), holes));
         // A FALL-THROUGH exit ends what the row holds on the path that carries
         // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
         if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
             self.rel_pending.retain(|(k, _)| *k != step);
         }
         self.emit_rel(m, b, place, &rel, 0)
+    }
+
+    /// Emit a release the core STATES as a statement — a `drop` the reader
+    /// wrote, a temporary its reading site frees, a payload binder at its
+    /// arm's end, an edge's release — at the place this walk gave the name.
+    ///
+    /// What a release of the type runs is [`Fn_::rel_for`]'s answer, as at the
+    /// `Stmt::Drop` arm, walking around the holes the row's name carries.
+    fn core_drop(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &Walked,
+        n: vyrn_lower::core::Name,
+        line: usize,
+    ) -> Result<(), String> {
+        let Some((place, ty)) = self.core_place(w, body, n) else {
+            return unsupported("a release of a name with no place", line);
+        };
+        let info = &body.names[n as usize];
+        let Some(rel) = self.rel_for(&ty, line)? else {
+            return Ok(());
+        };
+        let rel = around(rel, &info.holes);
+        if let Some(step) = info.binding {
+            self.rel_pending.retain(|(k, _)| *k != step);
+        }
+        self.emit_rel(m, b, place, &rel, line)
     }
 
     /// A tag is read and an arm is chosen, off the row — RFC-0125 M7.
@@ -17418,6 +17436,7 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     ..
                 } => self.core_switch(m, b, body, w, on, arms, *owns, *line)?,
+                St::Drop(n, _, line) => self.core_drop(m, b, body, w, *n, *line)?,
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
@@ -18399,8 +18418,14 @@ impl<'p> Fn_<'_, 'p> {
             St::Do { rhs, line, .. } => {
                 self.core_rhs_readable(body, rhs) && self.core_rhs_ty(rhs, *line).is_ok()
             }
+            // A release stated as a statement ([`Fn_::core_drop`]) needs the
+            // name's place: one wasm local, or a layout the walk bound, which
+            // [`Fn_::core_walkable`]'s name clause has already asked.
+            St::Drop(n, ..) => {
+                let ty = &body.names[*n as usize].ty;
+                self.core_framed(ty) || matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
+            }
             St::Trap => true,
-            _ => false,
         })
     }
 
@@ -18639,6 +18664,21 @@ fn core_switched(s: &St, out: &mut Vec<vyrn_lower::core::Name>) {
             inner.iter().for_each(|s| core_switched(s, out));
         }
         _ => {}
+    }
+}
+
+/// `rel`, walking around the holes a core row names. The row spells a hole
+/// with the leading dot a path has, and a walk names the field.
+fn around(rel: Rel, holes: &[String]) -> Rel {
+    match rel {
+        Rel::Deep(ty, _) => Rel::Deep(
+            ty,
+            holes
+                .iter()
+                .filter_map(|h| h.strip_prefix('.').map(str::to_string))
+                .collect(),
+        ),
+        rel => rel,
     }
 }
 

@@ -27331,3 +27331,33 @@ Findings:
 - the stream's pull is not an `Iterate` call. `Fn_::stream_next` switches over a `Stream<T>`'s two producers inline and writes the element into the loop variable's place beside a flag. Its row is a call that writes an out-place, which §2.1 has no form for, or a switch over an `Option`, which is another byte shape. `drain__from0` in `stream_abandoned.vyrn` and `total` in `stream.vyrn` wait on it alone.
 - `Test::Impl` asks `isSuccess`, not `failed` as its doc and the census say. The switch row is where `Facts::owns_scrutinee`, `consuming` and each arm's releases live, and the AST arm reads them at the `?` node; each of its 3 bodies also waits on `Drop`, so a call and a branch in its place buys 0 bodies.
 Left: `Opaque:Pull`, 21 lines, blocked by a call row that writes an out-place; `Switch:Impl`, 3 bodies, blocked by `St::Drop` and by the three facts the switch row carries; the corpus's key reads, blocked by the frame's clause that every name is a scalar; `@str` of a minted String temporary, blocked by the release the arm makes inline.
+#### A release the core states is read off its row (2026-09-22, `m7-drop`)
+Decision: a `St::Drop` is the emitter's `rel_for` and `emit_rel` at the place the walk gave the name, which is what the `Stmt::Drop` arm runs, and a release counts as a read so the name keeps its local until then. Mine, on the counts below.
+Went: `St::Drop` out of `core::gaps` and `coredrive`'s release class; the hole rewrite `Fn_::core_release` wrote inline, into `around`, which `Fn_::core_drop` reads too. Stayed: a switch at a construct the plan releases whole (`Exit::Scrutinee`), because no body reaches it: a sum that owns heap is never a layout this walk makes (`Fn_::core_part_ty` admits scalar parts), and an aggregate call as a scrutinee is refused by the aggregate track's clause; `Test::Impl`, because its 3 bodies pass the scrutinee to `isSuccess` and `success` as an aggregate argument, which `Fn_::core_val_readable` refuses, and the AST arm refuses a `Fallible` that is no aggregate, so neither the corpus nor a shape can witness a reader.
+Lines: `direct.rs` 19,013 to 19,053, `core.rs` 7,332 to 7,334, `coredrive.rs` 565 to 563. Refusals: not run; no pass that refuses was touched. Manifest: 10 of 174 rows, written in the reader's commit.
+The count, from `VYRN_GAP_TALLY` over `examples/` with a `Drop:<who>:<type>` tag, both binaries in one cache state: 25,739 lines, 17,447 whole, 3,112 naming a release, 1,532 with a release as the first gap and 1,056 with no other gap. The released value is a String in 1,210 of the first gaps, an array in 177, a record or an enum in 126 and a generic instance in 19. A body counts once under each kind it names.
+
+| who the release names | first gap | bodies with no other gap |
+|---|---|---|
+| a temporary the reading site frees | 652 | 615 |
+| an argument temporary the caller frees | 620 | 466 |
+| a `drop` the reader wrote | 116 | 80 |
+| a payload binder at its arm's end | 94 | 81 |
+| a discarded result, or a container a `for` consumed | 24 | 24 |
+| a receiver freed after a field read | 13 | 9 |
+| an edge of a join (Rule N) | 13 | 19 |
+| a stream a `for` closed | 0 | 0 |
+
+Licence:
+- `coredrive --ignored`, branch point against the head: 168 programs, 21,556 bodies. Whole 15,393 to 16,131; carried end to end 777 to 1,006; taken from the core 13,369 to 13,384 of 21,512; 1 byte-identical and 167 run the same, both unmoved. The release class held 738 bodies and is gone with its tag.
+- `VYRN_GAP_TALLY` over `examples/`, warm: whole 17,447 to 18,468 lines, lines 25,544 to 25,162, because a line is deduplicated whole and the tags changed.
+- the manifest's 10 rows are two shapes and nothing else, read from `emit-wat` under both binaries: a `local.tee` the arm writes where the rows write `local.set` and `local.get`, because a freed temporary keeps its local; and in `sha1.vyrn` a literal pushed after that store, which moves one string in the data segment.
+- `residue --ignored`, 248 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed. `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- `kernel --ignored`: 175 programs, 27,416 instances accepted, 0 refused, 0 unlowered. `cargo test -p vyrn-cli` as four groups: 648 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed. Both formatters clean; `cargo build --release -p vyrn-cli` no warning; the manifest check green after the write.
+- `emitter_census` re-pinned: the mapping 9,053 to 9,093 lines, `both, for two questions` 8,746 to 8,786 with 186 to 188 rows. `forms` and `kernel` green and unmoved.
+Findings:
+- no body is refused at a release. A temporary instrument named the first refusal each time the emitter declined a body whose only gaps were releases: 686 at the frame's name clause (an array temporary 362, a record 86, a `Unit` temporary a statement `match` binds 76) and 386 at another family's statement (a String `+` 129, a String read 70, a scalar read 59), and 0 at a drop row.
+- the release was never what held the bodies back. It is 738 bodies whole in the rows and 15 taken, the way the conversion and the frame were before it.
+- `Stmt::Drop` on the arm 443 to 442. A source `drop` names a String or an array, which `Fn_::core_run`'s scalar clause refuses per statement, so the arm cannot reach zero through this walk and nothing in `FORMS` turns false.
+- the `?` on a declared `Fallible` states `success` as `Callee::Ctor`, with the Option arm's comment "a variant constructor". It is the impl's method, a read of the value.
+Left: `Exit::Scrutinee`, blocked by `Fn_::core_part_ty`'s scalar parts and the aggregate-call scrutinee clause; `Switch:Impl`, 3 bodies, blocked by the aggregate argument `Fn_::core_val_readable` refuses and, in `greet` and `shout`, by a String `+`; the drop-only bodies, blocked by the name clause and the statement families above.

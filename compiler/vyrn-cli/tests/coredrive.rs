@@ -76,13 +76,12 @@ fn corpus() -> Vec<PathBuf> {
 ///
 /// A body's class is the HARDEST thing in it, so the counts partition the
 /// corpus and the ranked list in §3 M3 reads straight off them.
-const CLASSES: [&str; 7] = [
+const CLASSES: [&str; 6] = [
     "the row names no value (`Val::Lit(Opaque)`)",
     "a lambda body the row does not carry (`Op::Closure`)",
     "a switch whose arms a call chooses (`Test::Impl`)",
     "a layout: an aggregate made, read or taken",
     "a callee that is no declared function of the program (`Rhs::Call`)",
-    "a release the driver must place (`St::Drop`)",
     "nothing: the rows carry it",
 ];
 
@@ -248,7 +247,6 @@ fn class_of(body: &Body) -> usize {
             "Switch" => 2,
             "Read" | "Take" | "Make" => 3,
             "Call" => 4,
-            "Drop" => 5,
             other => panic!("the core states a gap this census does not rank: {other}"),
         };
         worst = worst.min(c);

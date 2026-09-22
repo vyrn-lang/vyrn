@@ -1691,7 +1691,7 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// family one form track closes: `Call:<who>:<name>` for a callee the
 /// emitter's function table does not answer, `Make:<what>` for a layout,
 /// `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>` for a row
-/// that names no value, `Lambda`, `Switch:Impl` and `Drop`.
+/// that names no value, `Lambda` and `Switch:Impl`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
@@ -1710,10 +1710,10 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
                 gaps_place(place, out);
                 gaps_val(value, out);
             }
-            St::Drop(..) => out.push("Drop".into()),
-            // The emitter reads the release off the row it stands on
-            // (RFC-0125 M7), so a row is no gap.
-            St::Row { .. } => {}
+            // The emitter reads a release off the row it stands on, whether
+            // the plan placed it at an exit or the core states it as a
+            // statement (RFC-0125 M7), so neither is a gap.
+            St::Drop(..) | St::Row { .. } => {}
             St::If {
                 cond, then, els, ..
             } => {
@@ -6326,6 +6326,8 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
             St::Return { value: Some(v), .. } => hit(v, out),
             St::If { cond, .. } => hit(cond, out),
             St::Switch { on, .. } => hit(on, out),
+            // A release reads the name, so the name holds a place until then.
+            St::Drop(n, ..) => out[*n as usize] += 1,
             _ => {}
         }
         match s {
