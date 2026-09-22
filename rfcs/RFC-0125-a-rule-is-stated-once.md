@@ -27044,3 +27044,23 @@ Findings:
 - the tally deduplicates a LINE, so its denominator moves when the gap list does: 25,694 lines over `examples/` became 25,550 for the same corpus. The census page says so now.
 - no AST arm reached zero. `VYRN_FORM_TALLY` has `Stmt::Let` at 36,866 and the expression arms this family feeds are not forms the census counts, so nothing in `FORMS` turns false here.
 Left: `Ctor::Map` and `Ctor::Try`, blocked by a runtime call and a check the row does not state; `Callee::Named`, blocked by the same check; the per-body count, blocked by `core_walkable`'s `placed.is_empty()`, which is the release family's track and not this one's.
+#### The short circuit is a branch, and the core states it (2026-09-11, `m7-shortcircuit`)
+Decision: `a && b` is `if a { b } else { false }` and `a || b` is `if a { true } else { b }`, written by the core's builder and not by the parser. Mine, on the counts below.
+Went: the `Prim:And` and `Prim:Or` gap tags out of `core::gaps`; the core route's decline in `Fn_::core_prim`; the row's screen in `Fn_::core_rhs_readable`; `coredrive`'s eighth class. Stayed: the branch in `Fn_::binary_inner`, because the ONE emitter reads the source for every body the rows do not carry and this walk stands down at the store into a temporary, as it does at an `if` expression; `BinOp::And` in the AST, because a `where` predicate's conjunction is the same node.
+Lines: `core.rs` 6,937 to 6,990, `direct.rs` 17,568 to 17,555, `coredrive.rs` 493 to 491, 38 more than before, because a branch is three rows and a prim was one. Refusals: 0 lost / 0 gained. Manifest: untouched, `VYRN_WASM_MANIFEST=check` green with nothing written.
+Licence:
+- `vyrn check` over the 415 loadable roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/` under the branch-point binary and this one: byte-identical stderr and exit code, 338 accepted and 77 refused under both.
+- `coredrive --ignored`: 168 programs, 21,556 bodies, whole 3,072 to 3,341, and 953 of 21,512 bodies emitted from the core before and after. The two programs that differ are the two the record names.
+- `kernel --ignored`: 175 programs, 27,416 instances accepted, 0 refused, 0 unlowered, unmoved.
+- `VYRN_GAP_TALLY` over `examples/`, cold, 25,694 bodies: whole 3,544 to 3,874, and no `Prim:` tag left.
+- `cargo test -p vyrn-cli` 88 targets, 647 passed, 0 failed; `cargo test -p vyrn-frontend -p vyrn-lower -p vyrn-codegen` green; `--release --test residue -- --ignored` 298 s, both engines, ok.
+- `forms`, `surface`, `emitter_census`, `frontend_census`, `checker_census`, `coretables`, `lowered_dump` and `fmt` green, the emitter census re-pinned in the same commit. `cargo fmt --all --check` and `vyrn-lsp`'s clean; `cargo build --release -p vyrn-cli` no warning. `node --test` over `web/test` and `editor/vscode/test` green and untouched by this change.
+Findings:
+- the census predicted 1,244 bodies over the gate list and 330 over `examples/` alone; `examples/` measured 330 and `coredrive` 269, which is the whole of its short-circuit class.
+- the parser is not the home. `&&` in a `where` predicate is the same `Expr::Binary`, and `types::predicate_multiple_of`, `types::predicate_pattern`, `schema.rs` and `finite.rs` read that node; a parser desugar takes the refinement's conjunction with it. `consteval` folds the same node for a `const`.
+- the row was not only unread, it was wrong: it put the right operand's statements in the enclosing list, so the core stated an evaluation the program does not make. The branch releases a temporary the right operand read on its own edge, which `VYRN_KERNEL_TRACE` witnesses as a `drop` inside the arm.
+- the wasm does not move because the core walk already stands down at a store into a `@` temporary, which is the screen an `if` expression meets (`Fn_::core_readable`). A family can close without an emitter reading it.
+- the tally's denominator depends on the generator cache: `pagesdemo.vyrn` builds 999 bodies cold and 855 warm. A before and after pair must be run in the same state, and both numbers above are cold.
+- the emitter census's mapping kind 7,724 to 7,711 lines and the read class `both, for two questions` 7,453 to 7,440 lines with its row count 140 to 139.
+- `vyrn-codegen/src/lib.rs`'s module doc still describes a textual LLVM backend and `vyrn_frontend::interp`; neither exists. Not this slice's to fix.
+Left: nothing on this family. `Callee::Scalar` and `Make` are other tracks'.
