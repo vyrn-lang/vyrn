@@ -17481,7 +17481,6 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::Drop);
                     }
                 }
-                _ => return unsupported("a core statement this walk does not read", 0),
             }
         }
         Ok(())
