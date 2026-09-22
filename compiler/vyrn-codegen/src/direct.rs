@@ -17428,7 +17428,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_val_readable(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
         match v {
             Val::Name(n) => self.core_framed(&body.names[*n as usize].ty),
-            Val::Lit(l) => !matches!(l, Lit::Opaque),
+            Val::Lit(l) => !matches!(l, Lit::Opaque(_)),
         }
     }
 
@@ -17657,7 +17657,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Const(at as i32));
                     Type::Str
                 }
-                Lit::Opaque => return unsupported("a value the row does not name", line),
+                Lit::Opaque(_) => return unsupported("a value the row does not name", line),
             },
         };
         self.coerce(m, b, None, &got, want, line)
@@ -17676,7 +17676,7 @@ impl<'p> Fn_<'_, 'p> {
                 Lit::Float(_) => Type::Float,
                 Lit::Bool(_) => Type::Bool,
                 Lit::Str(_) => Type::Str,
-                Lit::Opaque => return None,
+                Lit::Opaque(_) => return None,
             },
             Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
             Rhs::Call { callee, kind, .. } => self.core_sig(callee, *kind)?.ret_ty,
@@ -17942,7 +17942,7 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
 fn core_operand(body: &vyrn_lower::core::Body, v: &Val) -> bool {
     match v {
         Val::Name(n) => core_scalar(&body.names[*n as usize].ty),
-        Val::Lit(l) => !matches!(l, Lit::Opaque | Lit::Str(_)),
+        Val::Lit(l) => !matches!(l, Lit::Opaque(_) | Lit::Str(_)),
     }
 }
 

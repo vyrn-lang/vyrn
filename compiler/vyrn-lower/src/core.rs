@@ -371,13 +371,40 @@ pub enum Lit {
     /// segment: where they land is the emitter's question, and the two
     /// compiled backends answer it differently.
     Str(String),
-    /// Not a value a reader wrote, and nothing an emitter loads. A function's
-    /// name, a type's name and a nullary constructor used as a value are
-    /// static and the checker types none of them as an expression; and this
-    /// pass writes the same word where it needs a value and reads none — a
-    /// loop's exit condition, the index of the element read that walks a
-    /// container, the result of a `?` whose ok arm binds nothing.
-    Opaque,
+    /// Not a value a reader wrote, and nothing an emitter loads. The kind
+    /// says which row wrote it, so a partial close of the family says which
+    /// part.
+    Opaque(Opaque),
+}
+
+/// What a row stands on where it names no value.
+///
+/// Each kind is one producer in this pass, and each one blocks on something
+/// of its own: [`Opaque::Index`] and [`Opaque::Exit`] on the container's
+/// length, which is a call the row does not state, [`Opaque::Trapped`] on
+/// nothing, because the statement after it never runs, and [`Opaque::Unbound`]
+/// on a store with nothing to store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opaque {
+    /// A function's name used as a value, or a type's name as an argument
+    /// (`fromJson(Bag, src)`). The position decides what it stands for: a
+    /// `fn`-typed argument (`unfold(100, naturals)`) is monomorphized at the
+    /// call and no value stands there at all, and a stored fn value (`let
+    /// sink: IntSink = double`) is the tag RFC-0037's defunctionalizer
+    /// chose, which the emitter holds and this pass does not.
+    Static,
+    /// The index of the element read at a `for` head. The row states the
+    /// read; the counter that walks the container is the emitter's, and
+    /// naming it needs the length beside it.
+    Index,
+    /// The exit test of the `for` this pass desugared. The branch is made up
+    /// and an emitter writes its own.
+    Exit,
+    /// The result of a call that traps (`panic`), which the `St::Trap` after
+    /// it makes unreachable.
+    Trapped,
+    /// The value a `?` stores where its ok arm binds nothing.
+    Unbound,
 }
 
 /// The literal a literal expression IS, and `None` for every other
@@ -1052,7 +1079,7 @@ impl Body {
                 Lit::Float(v) => format!("lit {v:?}"),
                 Lit::Bool(v) => format!("lit {v}"),
                 Lit::Str(s) => format!("lit {s:?}"),
-                Lit::Opaque => "lit".into(),
+                Lit::Opaque(_) => "lit".into(),
             },
         }
     }
@@ -1634,7 +1661,8 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// An empty answer means the rows carry the body end to end. A tag names the
 /// family one form track closes: `Call:<who>:<name>` for a callee the
 /// emitter's function table does not answer, `Make:<what>` for a layout,
-/// `Read`, `Take`, `Lambda`, `Switch`, `Drop` and `Opaque`.
+/// `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>` for a row
+/// that names no value, `Lambda`, `Switch` and `Drop`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
@@ -1757,8 +1785,8 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
 }
 
 fn gaps_val(v: &Val, out: &mut Vec<String>) {
-    if matches!(v, Val::Lit(Lit::Opaque)) {
-        out.push("Opaque".into());
+    if let Val::Lit(Lit::Opaque(k)) = v {
+        out.push(format!("Opaque:{k:?}"));
     }
 }
 
@@ -2325,21 +2353,22 @@ impl<'a> Builder<'a> {
     /// value, and a `Rhs` is the whole answer. The type owns heap or carries
     /// an obligation, and then three things are not this frame's:
     ///
-    ///   - a literal, which lives in the data segment. It answers only for a
-    ///     binding nothing can reassign: a `mut` slot is released by its
-    ///     FINAL value in all three engines, and `let mut acc: String = ""`
-    ///     is the opening line of every accumulator in this language;
+    ///   - a static value — a literal, or a nullary constructor — which
+    ///     lives in the data segment. It answers only for a binding nothing
+    ///     can reassign: a `mut` slot is released by its FINAL value in all
+    ///     three engines, and `let mut acc: String = ""` is the opening line
+    ///     of every accumulator in this language;
     ///   - a read of a place, or a second name for a borrow. The place's
     ///     owner still owns it.
     ///
     /// A rebind states the same rule at the store rather than here
     /// (`Stmt::Assign`): `t = d.title` makes `t` a projection of `d`,
     /// exactly as `let t = d.title` does.
-    fn owned_binding(&self, rhs: &Rhs, ty: &Type, literal: bool, mutable: bool) -> bool {
+    fn owned_binding(&self, rhs: &Rhs, ty: &Type, static_value: bool, mutable: bool) -> bool {
         if !self.owns(ty) {
             return false;
         }
-        if literal && !mutable {
+        if static_value && !mutable {
             return false;
         }
         match rhs {
@@ -2364,7 +2393,7 @@ impl<'a> Builder<'a> {
         &self,
         rhs: &Rhs,
         ty: &Type,
-        literal: bool,
+        static_value: bool,
         mutable: bool,
         lends: bool,
     ) -> Option<NotOwned> {
@@ -2379,9 +2408,10 @@ impl<'a> Builder<'a> {
                 },
             });
         }
-        // A literal lives in the data segment. It answers only for a binding
-        // nothing can reassign: a `mut` slot is released by its FINAL value.
-        if literal && !mutable {
+        // A static value lives in the data segment. It answers only for a
+        // binding nothing can reassign: a `mut` slot is released by its FINAL
+        // value.
+        if static_value && !mutable {
             return Some(NotOwned::Static);
         }
         if lends {
@@ -3002,18 +3032,22 @@ impl<'a> Builder<'a> {
                     return Ok(());
                 }
                 let rhs = self.rhs(value, out)?;
-                let literal = matches!(
+                // A literal, or a nullary constructor, which is static in
+                // the same sense: [`Builder::val`] makes the variant and
+                // nothing allocated it.
+                let static_value = matches!(
                     value,
                     Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
-                );
+                ) || matches!(&rhs, Rhs::Val(Val::Name(m))
+                    if matches!(self.body.names[*m as usize].not_owned, Some(NotOwned::Static)));
                 // A call whose result points into an argument — a lending
                 // prelude row, a projection — binds a borrow whatever its
                 // type says, and that screen is the one thing about the
                 // value the `Rhs` does not carry.
                 let mutable = matches!(s, Stmt::Let { mutable: true, .. });
                 let lends = self.lends(value);
-                let owned = !lends && self.owned_binding(&rhs, &ty, literal, mutable);
-                let reason = self.report_reason(&rhs, &ty, literal, mutable, lends);
+                let owned = !lends && self.owned_binding(&rhs, &ty, static_value, mutable);
+                let reason = self.report_reason(&rhs, &ty, static_value, mutable, lends);
                 // A join inside a loop, one of whose arms handed out a name
                 // bound outside it, and a binding that owns the result: the
                 // release the back edge repeats ([`Builder::loop_alias`]).
@@ -3425,7 +3459,7 @@ impl<'a> Builder<'a> {
                 // walked a field the dead edge had taken (`std/vyx`'s
                 // `vyxMergeImports`, found by the cross-engine generator gate).
                 l.push(St::If {
-                    cond: Val::Lit(Lit::Opaque),
+                    cond: Val::Lit(Lit::Opaque(Opaque::Exit)),
                     then: Vec::new(),
                     els: vec![St::Break { site: 0 }],
                     site: 0,
@@ -3489,7 +3523,7 @@ impl<'a> Builder<'a> {
                     x,
                     Rhs::Read(Place::Elem(
                         Box::new(Place::Name(it)),
-                        Val::Lit(Lit::Opaque),
+                        Val::Lit(Lit::Opaque(Opaque::Index)),
                     )),
                 )];
                 let mark = self.scope.len();
@@ -4508,19 +4542,30 @@ impl<'a> Builder<'a> {
         match e {
             Expr::Var { name, line } => match self.lookup(name) {
                 Some(n) => Ok(Val::Name(n)),
+                // A nullary constructor (`None`, a fieldless variant) parses
+                // as a bare name, and the row makes it: the same variant
+                // `Some(x)` makes, with one part less. The temporary owns
+                // nothing and borrows nothing, for the reason a literal does
+                // — the payload that would allocate is the variant this is
+                // not — so the plan places no release at it and the value is
+                // nobody else's.
+                None if name == "None" || self.is_variant(name) => {
+                    let ty = self.ty_of(e)?;
+                    let rhs = self.call(name, &[], *line, Some(ty.clone()), out)?;
+                    let t = self.name("@nullary", ty, false, *line);
+                    self.body.names[t as usize].borrow = false;
+                    self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+                    out.push(St::Let(t, rhs));
+                    Ok(Val::Name(t))
+                }
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
                 // the checker types neither as an expression.
-                // A nullary constructor (`None`, a fieldless variant) parses
-                // as a bare name too, and is a literal: it owns nothing, and
-                // it is not module state anything reads out of.
                 None if self.program.functions.iter().any(|f| &f.name == name)
                     || self.program.contracts.iter().any(|c| &c.name == name)
-                    || self.proto.types().contains_key(name)
-                    || name == "None"
-                    || self.is_variant(name) =>
+                    || self.proto.types().contains_key(name) =>
                 {
-                    Ok(Val::Lit(Lit::Opaque))
+                    Ok(Val::Lit(Lit::Opaque(Opaque::Static)))
                 }
                 // Module state lives for the whole module and nothing
                 // may take it (RFC-0013): `movecheck` refuses passing it
@@ -5011,7 +5056,10 @@ impl<'a> Builder<'a> {
             // fail to compile rather than fall into a catch-all. WHAT each one
             // is stays `lit_of`'s answer alone.
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
-                Ok(Rhs::Val(Val::Lit(lit_of(e).unwrap_or(Lit::Opaque))))
+                match lit_of(e) {
+                    Some(l) => Ok(Rhs::Val(Val::Lit(l))),
+                    None => gap("a literal form `lit_of` does not answer", e.line()),
+                }
             }
             Expr::Var { .. } | Expr::Consume { .. } => Ok(Rhs::Val(self.val(e, out)?)),
             Expr::Unary { op, expr, .. } => Ok(Rhs::Prim(
@@ -5088,7 +5136,7 @@ impl<'a> Builder<'a> {
                     site: 0,
                 });
                 out.push(St::Trap);
-                Ok(Rhs::Val(Val::Lit(Lit::Opaque)))
+                Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
             }
             Expr::Call {
                 name,
@@ -5320,7 +5368,7 @@ impl<'a> Builder<'a> {
                     value: ob
                         .first()
                         .map(|n| Val::Name(*n))
-                        .unwrap_or(Val::Lit(Lit::Opaque)),
+                        .unwrap_or(Val::Lit(Lit::Opaque(Opaque::Unbound))),
                     old: Old::Nothing,
                     line: *line,
                     site: Site::None,
@@ -5497,12 +5545,13 @@ impl<'a> Builder<'a> {
                     }
                     // A literal receiver — `"abc".byteLength`, which the
                     // corpus writes only inside a `test` body. The place is a
-                    // temporary the site owns, named here so the chain above
-                    // has a base (RFC-0125 §3 M6, seventh slice).
+                    // temporary the site owns, bound to the literal itself so
+                    // the chain above has a base that names a value
+                    // (RFC-0125 §3 M6, seventh slice).
                     Val::Lit(_) => {
                         let ty = self.ty_of(e)?;
                         let t = self.temp(ty, e.line());
-                        out.push(St::Let(t, Rhs::Val(Val::Lit(Lit::Opaque))));
+                        out.push(St::Let(t, Rhs::Val(v)));
                         Ok(Place::Name(t))
                     }
                 }
@@ -5555,7 +5604,7 @@ impl<'a> Builder<'a> {
             } else if let Some(p) = self.projection(name) {
                 kind = Callee::Projection;
                 p.params.iter().map(|p| p.capability).collect()
-            } else if matches!(name, "Some" | "Ok" | "Err") || self.is_variant(name) {
+            } else if matches!(name, "Some" | "None" | "Ok" | "Err") || self.is_variant(name) {
                 kind = Callee::Ctor;
                 vec![Capability::Consume; args.len()]
             } else if vyrn_frontend::checker::RESERVED.contains(&name)

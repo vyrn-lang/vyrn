@@ -207,7 +207,7 @@ impl<'a> Walk<'a, '_> {
                             }
                         },
                         Val::Lit(_) => {
-                            outside = Rhs::Val(Val::Lit(crate::core::Lit::Opaque));
+                            outside = Rhs::Val(value.clone());
                             &outside
                         }
                     };

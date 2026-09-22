@@ -289,7 +289,7 @@ fn literal(v: &Val, ops: &mut BTreeMap<String, usize>) {
         Lit::Float(_) => "float",
         Lit::Bool(_) => "bool",
         Lit::Str(_) => "string",
-        Lit::Opaque => "opaque",
+        Lit::Opaque(_) => "opaque",
     };
     *ops.entry(format!("lit {what}")).or_default() += 1;
 }
