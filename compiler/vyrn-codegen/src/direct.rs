@@ -2226,6 +2226,9 @@ struct Fn_<'a, 'p> {
     /// The core's rows for each source statement of this body
     /// ([`vyrn_lower::core::Body::rows_by_statement`]).
     core_at: HashMap<usize, Vec<St>>,
+    /// The release rows held back for the read an exit hands back — see
+    /// [`Fn_::core_releases`].
+    core_rows: Vec<(vyrn_lower::core::Name, Vec<String>, ExitKind)>,
     /// Where the core's names live, and what the operand stack is holding.
     /// Shared by the two walks: a name the AST arm bound is found through
     /// [`Fn_::scope`], and one this walk bound is pushed onto it.
@@ -2276,6 +2279,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         owner: String::new(),
         core: None,
         core_at: HashMap::new(),
+        core_rows: Vec::new(),
         core_w: Walked::default(),
         core_bound: None,
     }
@@ -2438,6 +2442,7 @@ fn lower_body(
         owner,
         core: vyrn_lower::core::body_of(&f.name).map(std::rc::Rc::new),
         core_at: HashMap::new(),
+        core_rows: Vec::new(),
         core_w: Walked::default(),
         core_bound: None,
     };
@@ -3447,6 +3452,66 @@ impl<'p> Fn_<'_, 'p> {
             self.emit_rel(m, b, p, &k, 0)?;
         }
         Ok(())
+    }
+
+    /// Emit the rows held back for the read an exit hands back, in the order
+    /// the core stated them.
+    fn core_releases(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+    ) -> Result<(), String> {
+        for (name, holes, exit) in std::mem::take(&mut self.core_rows) {
+            self.core_release(m, b, body, name, &holes, exit)?;
+        }
+        Ok(())
+    }
+
+    /// Emit the one release a core row STATES, where the row stands —
+    /// RFC-0125 M7.
+    ///
+    /// The row is the whole of the answer: the name, whose binding is the node
+    /// the plan keys the slot by, and the holes the walk goes around.
+    /// [`Fn_::emit_releases`] asks `own::placed` the same question by exit and
+    /// node, and its readers are the AST arms alone.
+    ///
+    /// A name with no slot releases nothing: the walk registers one for every
+    /// layout it makes, and a body it takes holds no other value that owns
+    /// heap ([`Fn_::core_walkable`]'s scalar clause).
+    fn core_release(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        name: vyrn_lower::core::Name,
+        holes: &[String],
+        exit: ExitKind,
+    ) -> Result<(), String> {
+        let Some(step) = body.names[name as usize].binding else {
+            return unsupported("a release row whose binding the plan does not key", 0);
+        };
+        let Some(r) = self.rel_slots.get(&step) else {
+            return Ok(());
+        };
+        let (place, mut rel) = (r.place, r.rel.clone());
+        // The row spells a hole with the leading dot a path has; a walk names
+        // the field.
+        if let Rel::Deep(ty, _) = rel {
+            rel = Rel::Deep(
+                ty,
+                holes
+                    .iter()
+                    .filter_map(|h| h.strip_prefix('.').map(str::to_string))
+                    .collect(),
+            );
+        }
+        // A FALL-THROUGH exit ends what the row holds on the path that carries
+        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
+        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
+            self.rel_pending.retain(|(k, _)| *k != step);
+        }
+        self.emit_rel(m, b, place, &rel, 0)
     }
 
     /// The floor the rows that still name a frame slot hold — see
@@ -16879,17 +16944,12 @@ impl<'p> Fn_<'_, 'p> {
                     self.depth -= 1;
                     b.ins(&Instruction::End);
                 }
-                St::Break { site } | St::Continue { site } => {
+                St::Break { .. } | St::Continue { .. } => {
                     let Some(&(brk, cont, regions)) = self.loops.last() else {
                         return unsupported("a core exit outside a loop", 0);
                     };
-                    let kind = match s {
-                        St::Break { .. } => ExitKind::Break,
-                        _ => ExitKind::Continue,
-                    };
-                    // Every frame the loop body opened, before the branch, as
-                    // the AST arm does.
-                    self.emit_releases(m, b, kind, *site)?;
+                    // The frames the loop body opened are the rows before this
+                    // one, each emitted where it stands.
                     self.exit_regions_above(b, regions, true);
                     let to = match s {
                         St::Break { .. } => brk,
@@ -16940,9 +17000,7 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     self.scope.truncate(scope);
                 }
-                St::Return {
-                    value, line, site, ..
-                } => {
+                St::Return { value, line, .. } => {
                     match value {
                         Some(v) => {
                             let want = self.ret_ty.clone();
@@ -16956,10 +17014,7 @@ impl<'p> Fn_<'_, 'p> {
                             )
                         }
                     }
-                    // Every open frame, before the branch, as the AST arm
-                    // does: the value is on the operand stack already and a
-                    // release does not disturb it.
-                    self.emit_releases(m, b, ExitKind::Return, *site)?;
+                    self.core_releases(m, b, body)?;
                     // Every region scope this return leaves, as the AST arm
                     // does: a returned value built inside a region points into
                     // the arena and its caller owns it, so the scope POPS
@@ -16967,13 +17022,22 @@ impl<'p> Fn_<'_, 'p> {
                     self.exit_regions_above(b, 0, false);
                     b.ins(&Instruction::Br(self.depth));
                 }
-                // A placed release, one row per step. The exit row below asks
-                // [`Fn_::emit_releases`] for the whole group in the placement's
-                // own order — the same walk over `rel_slots` the AST arm makes
-                // at the same exit — so a step of its own emits nothing here.
-                // §2.3 leaves the PLACEMENT to the emitter; what the row adds
-                // is which exit, and which node the plan keys it by.
-                St::Row { exit, .. } if CORE_EXITS.contains(exit) => {}
+                // An exit's releases run AFTER the read it hands back, which
+                // is the order the AST arm writes and the order a reader of
+                // the wasm expects: the value is on the operand stack and a
+                // release does not disturb it. The row states the release and
+                // not its place among the reads, so the two commute.
+                St::Row {
+                    name, holes, exit, ..
+                } => {
+                    self.core_rows.push((*name, holes.clone(), *exit));
+                    if !matches!(
+                        ss.get(i + 1),
+                        Some(St::Row { .. } | St::Return { value: Some(_), .. })
+                    ) {
+                        self.core_releases(m, b, body)?;
+                    }
+                }
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
@@ -17428,9 +17492,10 @@ impl<'p> Fn_<'_, 'p> {
     /// with what it waits on. It is a screen and not a judgement: a body it
     /// stands down at is emitted from the AST exactly as before.
     fn core_walkable(&self, body: &vyrn_lower::core::Body, stmts: Option<&Block>) -> bool {
-        // A frame with a release row, a region, an aggregate return or a
-        // hoisted walk is one whose emission is more than its statements.
-        if !self.placed.is_empty() || self.dest.is_some() || !body.lambdas.is_empty() {
+        // A frame with an aggregate return or a hoisted walk is one whose
+        // emission is more than its statements. A placed release is not: the
+        // rows state it and [`Fn_::core_release`] emits it (RFC-0125 M7).
+        if self.dest.is_some() || !body.lambdas.is_empty() {
             return false;
         }
         if !matches!(self.ret, Repr::Scalar(_) | Repr::Unit) {
@@ -17546,12 +17611,10 @@ impl<'p> Fn_<'_, 'p> {
             St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
             St::Loop { body: inner, .. } => self.core_readable(body, inner, reads),
             St::Break { .. } | St::Continue { .. } => true,
-            // A placed release runs at an exit. At the three exits this walk
-            // takes itself, the exit's own row asks [`Fn_::emit_releases`] for
-            // the whole group, so the steps before it are already accounted
-            // for. A block's fall-through release and a scrutinee's are the
-            // arm's, and they are refused.
-            St::Row { exit, .. } => CORE_EXITS.contains(exit),
+            // A release is the row's, at every exit, and the walk emits it
+            // where it stands ([`Fn_::core_release`]). What it needs is the
+            // node the plan keys the slot by, which is the name's binding.
+            St::Row { name, .. } => body.names[*name as usize].binding.is_some(),
             St::Return { value, .. } => value.as_ref().is_none_or(|v| core_val_readable(body, v)),
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
