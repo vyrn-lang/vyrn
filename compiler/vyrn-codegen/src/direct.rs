@@ -1976,6 +1976,22 @@ fn mem_pre(b: &mut Frame, prim: &str) {
     }
 }
 
+/// The end of an aggregate store, with the destination's address and the
+/// value's on the stack: two drops when the value was built `in_place`, and
+/// the copy of `size` bytes otherwise. Both walks end a store with it.
+fn agg_landed(b: &mut Frame, size: u32, in_place: bool) {
+    if in_place {
+        b.ins(&Instruction::Drop);
+        b.ins(&Instruction::Drop);
+    } else {
+        b.ins(&Instruction::I32Const(size as i32));
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+    }
+}
+
 impl Dest {
     /// Push the address `off` bytes into this destination.
     fn addr(self, b: &mut Frame, off: u32) {
@@ -2482,6 +2498,7 @@ fn lower_body(
             at: vec![None; core.names.len()],
             reads: core.reads(),
             held: None,
+            landed: None,
         };
     }
 
@@ -5499,16 +5516,7 @@ impl<'p> Fn_<'_, 'p> {
         self.dest_hint = None;
         let used = std::mem::take(&mut self.dest_used);
         r?;
-        if used {
-            b.ins(&Instruction::Drop);
-            b.ins(&Instruction::Drop);
-        } else {
-            b.ins(&Instruction::I32Const(size as i32));
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
-        }
+        agg_landed(b, size, used);
         Ok(())
     }
 
@@ -9444,6 +9452,38 @@ impl<'p> Fn_<'_, 'p> {
         Ok(out)
     }
 
+    /// The first half of the aggregate-result convention, which both walks
+    /// read (RFC-0125 M7): the out-pointer a call's result is written
+    /// through, pushed before the arguments.
+    ///
+    /// The storage is the consumer's own when it holds this very type, so the
+    /// callee's `return` lands there and no slot is taken (RFC-0125 M1), and a
+    /// slot of this frame otherwise. `None` for a result that is not an
+    /// aggregate. [`Fn_::out_ptr_back`] is the second half.
+    fn out_ptr(
+        &mut self,
+        b: &mut Frame,
+        sig: &Sig,
+        hint: Option<(Dest, Type)>,
+    ) -> Option<(Dest, bool)> {
+        let l = sig.ret.agg()?;
+        let (d, used) = match hint {
+            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&sig.ret_ty) => (d, true),
+            _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+        };
+        d.addr(b, 0);
+        Some((d, used))
+    }
+
+    /// The second half: after the call, the out-pointer again as the value,
+    /// and `dest_used` says whether it was the consumer's storage.
+    fn out_ptr_back(&mut self, b: &mut Frame, dest: Option<(Dest, bool)>) {
+        if let Some((d, used)) = dest {
+            d.addr(b, 0);
+            self.dest_used = used;
+        }
+    }
+
     /// The call itself, once the callee's signature is known.
     fn emit_call(
         &mut self,
@@ -9453,21 +9493,7 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
-        // An aggregate result is written through a hidden leading pointer into a
-        // slot of ours, so the destination goes on the stack before the
-        // arguments and is pushed again afterwards as the value. RFC-0125 M1:
-        // the consumer's own storage when it holds this very type, so the
-        // callee's `return` lands there and no slot is taken here.
-        let dest = match sig.ret.agg() {
-            Some(l) => Some(match hint {
-                Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&sig.ret_ty) => (d, true),
-                _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
-            }),
-            None => None,
-        };
-        if let Some((d, _)) = dest {
-            d.addr(b, 0);
-        }
+        let dest = self.out_ptr(b, sig, hint);
         // A `modify` argument is the caller's binding by ADDRESS. Reloads are the
         // one case that needs a fixup after the call: a scalar in a wasm local has
         // no address at all, so it is spilled to a slot for the callee to write
@@ -9512,10 +9538,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&load_of(ll, 0, *signed));
             b.ins(&Instruction::LocalSet(*l));
         }
-        if let Some((d, used)) = dest {
-            d.addr(b, 0);
-            self.dest_used = used;
-        }
+        self.out_ptr_back(b, dest);
         // The DECLARED return type, not its structural form. Resolving here threw
         // away exactly the information a caller needs to solve a further generic:
         // a `Pair<Int64, Int64>` reduced to its record shape no longer matches
@@ -16548,6 +16571,9 @@ struct Walked {
     reads: Vec<u32>,
     /// The name the operand stack is holding, if any.
     held: Option<vyrn_lower::core::Name>,
+    /// The temporary built in the caller's storage, which the `return` after
+    /// it hands back without a copy ([`Fn_::core_lands`]).
+    landed: Option<vyrn_lower::core::Name>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -16803,15 +16829,29 @@ impl<'p> Fn_<'_, 'p> {
         {
             return None;
         }
-        // An aggregate result travels through `dest` and a stream cursor is a
-        // release at a function exit that no plan row names, so both belong to
-        // a `return` and to nothing else: `streamlazy.vyrn` lost 51 bytes of a
-        // cursor when the rows took its `return`. The clause is about the RUN
-        // rather than about the form, because a subtree carries the `return` of
-        // every branch under it.
-        if (self.dest.is_some() || !self.cursors.is_empty()) && run.iter().any(core_returns) {
+        // A stream cursor is a release at a function exit that no plan row
+        // names, so it belongs to a `return` and to nothing else:
+        // `streamlazy.vyrn` lost 51 bytes of a cursor when the rows took its
+        // `return`. The clause is about the RUN rather than about the form,
+        // because a subtree carries the `return` of every branch under it.
+        if !self.cursors.is_empty() && run.iter().any(core_returns) {
             return None;
         }
+        // An aggregate result travels through `dest`, which the run's own
+        // `return` writes ([`Fn_::core_lands`]); one under a branch of the run
+        // is the arm's.
+        let tail = usize::from(matches!(run.last(), Some(St::Return { .. })));
+        if self.dest.is_some() && run[..run.len() - tail].iter().any(core_returns) {
+            return None;
+        }
+        // The aggregate that `return` copies into the caller's storage.
+        let returned = match run.last() {
+            Some(St::Return {
+                value: Some(Val::Name(n)),
+                ..
+            }) if matches!(self.ret, Repr::Agg(_)) => Some(*n),
+            _ => None,
+        };
         // A node is an ADDRESS. The row's FORM and the name it binds are
         // checked against the statement's, so a row is never read as a
         // statement it did not come from.
@@ -16863,7 +16903,9 @@ impl<'p> Fn_<'_, 'p> {
             // The DECLARED return type, for the same reason: a function
             // returning `Age` validates at its `return` and the row does not.
             (Stmt::Return { line, .. }, St::Return { line: at, .. })
-                if line == at && core_scalar(&self.ret_ty) => {}
+                if line == at
+                    && (core_scalar(&self.ret_ty)
+                        || (matches!(self.ret, Repr::Agg(_)) && !self.checks(&self.ret_ty))) => {}
             // RFC-0114 Rule N's edge releases are the plan's rows at the JOIN,
             // and the core states them as drops inside the branch — which the
             // statement screen refuses. An `if` that owes one is the arm's.
@@ -16893,13 +16935,23 @@ impl<'p> Fn_<'_, 'p> {
         for st in run {
             core_lets(st, &mut lets);
         }
-        // A name the run binds by a made layout: its type is the layout's and
-        // not a scalar, and the two clauses below are about a value the arm
-        // leaves on the operand stack (RFC-0125 M7).
+        // A name the run binds by a made layout or an aggregate call: its type
+        // is the layout's and not a scalar, and the two clauses below are about
+        // a value the arm leaves on the operand stack (RFC-0125 M7). A
+        // temporary the run's `return` hands back is built in the caller's
+        // storage.
+        let lands: Vec<_> = (0..run.len())
+            .filter(|&i| self.core_lands(body, run, i, &self.core_w.reads))
+            .filter_map(|i| match &run[i] {
+                St::Let(n, _) => Some(*n),
+                _ => None,
+            })
+            .collect();
         let mut made = Vec::new();
         for (n, rhs) in &lets {
             if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) {
                 let at = match bound {
+                    _ if lands.contains(n) => &self.ret_ty,
                     (Some(top), Some(t)) if top == *n => t,
                     _ => &body.names[*n as usize].ty,
                 };
@@ -16907,13 +16959,20 @@ impl<'p> Fn_<'_, 'p> {
                     return None;
                 }
                 made.push(*n);
+            } else if self.core_agg_call(body, rhs) && lands.contains(n) {
+                made.push(*n);
             }
         }
         // A made layout is the STATEMENT's own binding and nothing deeper: this
         // walk reads the annotation off the statement it was handed, and a row
         // under an `if` of the run has a `Stmt::Let` of its own with an
         // annotation this walk never sees.
-        if !made.is_empty() && bound.0.is_none_or(|top| made != [top]) {
+        let slotted: Vec<_> = made
+            .iter()
+            .filter(|n| !lands.contains(n))
+            .copied()
+            .collect();
+        if !slotted.is_empty() && bound.0.is_none_or(|top| slotted != [top]) {
             return None;
         }
         for (n, rhs) in &lets {
@@ -16949,7 +17008,11 @@ impl<'p> Fn_<'_, 'p> {
         }
         for n in &names {
             let info = &body.names[*n as usize];
-            if !core_scalar(&info.ty) && !made.contains(n) && !switched.contains(n) {
+            if !core_scalar(&info.ty)
+                && !made.contains(n)
+                && !switched.contains(n)
+                && returned != Some(*n)
+            {
                 return None;
             }
         }
@@ -16970,7 +17033,7 @@ impl<'p> Fn_<'_, 'p> {
             // row and at `Int64` from the frame, for the same source. The
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
-            if !core_scalar(&ty)
+            if !(core_scalar(&ty) || returned == Some(*n))
                 || self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty)
             {
                 return None;
@@ -17025,6 +17088,13 @@ impl<'p> Fn_<'_, 'p> {
                 {
                     let info = &body.names[*n as usize];
                     let line = info.line;
+                    if self.core_lands(body, ss, i, &w.reads) {
+                        let dest = Dest::Addr(self.core_out(line)?, 0);
+                        let ty = self.ret_ty.clone();
+                        self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
+                        w.landed = Some(*n);
+                        continue;
+                    }
                     // The DESTINATION's type, which is the annotation where the
                     // reader wrote one: the arm takes the slot and writes the
                     // hint from it, and the row states the value's type instead.
@@ -17035,18 +17105,48 @@ impl<'p> Fn_<'_, 'p> {
                     let place = Place::Slot(b.alloc(l.size, l.align));
                     let dest = Dest::of(place).expect("a slot is a destination");
                     self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
-                    w.at[*n as usize] = Some((place, ty.clone()));
-                    let Some(key) = info.binding else {
-                        return unsupported("a made layout the row binds to no `let`", line);
+                    self.core_bind(b, body, w, *n, place, ty)?;
+                }
+                // An AGGREGATE CALL RESULT, written through the out-pointer
+                // into the binding's own slot, or into the caller's storage
+                // when the `return` after it hands the temporary back. The
+                // bytes are the AST arm's at `let p = f(a)` and at
+                // `return f(a)`: [`Fn_::agg_into`]'s destination, then the
+                // call's own convention ([`Fn_::out_ptr`]).
+                St::Let(
+                    n,
+                    Rhs::Call {
+                        callee, kind, args, ..
+                    },
+                ) if self
+                    .core_sig(callee, *kind)
+                    .is_some_and(|s| s.ret.agg().is_some()) =>
+                {
+                    let line = body.names[*n as usize].line;
+                    let lands = self.core_lands(body, ss, i, &w.reads);
+                    let bound = self.core_bound.take();
+                    let ty = match bound {
+                        _ if lands => self.ret_ty.clone(),
+                        Some(t) => t,
+                        None => body.names[*n as usize].ty.clone(),
                     };
-                    self.scope.push((info.source.clone(), place, ty.clone()));
-                    // The release the binding owes, keyed as the arm keys it:
-                    // the plan names the `Stmt::Let` and this row carries the
-                    // same node, so the two walks register the same slot.
-                    if self.releases_whole(key) {
-                        if let Some(r) = self.rel_for(&ty, line)? {
-                            self.register_rel(b, key, place, r);
-                        }
+                    let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+                        return unsupported("an aggregate call with no layout", line);
+                    };
+                    let (dest, place) = if lands {
+                        (Dest::Addr(self.core_out(line)?, 0), None)
+                    } else {
+                        let off = b.alloc(l.size, l.align);
+                        (Dest::Slot(off), Some(Place::Slot(off)))
+                    };
+                    dest.addr(b, 0);
+                    self.dest_used = false;
+                    let hint = Some((dest, ty.clone()));
+                    self.core_call(m, b, body, w, callee, *kind, args, hint, line)?;
+                    agg_landed(b, l.size, std::mem::take(&mut self.dest_used));
+                    match place {
+                        Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
+                        None => w.landed = Some(*n),
                     }
                 }
                 St::Let(n, rhs) => {
@@ -17059,7 +17159,7 @@ impl<'p> Fn_<'_, 'p> {
                     // gets one, in the order the AST walk takes them.
                     if info.binding.is_none()
                         && w.reads[*n as usize] == 1
-                        && ss.get(i + 1).and_then(first_read) == Some(*n)
+                        && self.core_first_read(body, ss.get(i + 1)) == Some(*n)
                     {
                         w.held = Some(*n);
                         continue;
@@ -17070,30 +17170,7 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("a core `let` of an aggregate", line);
                     };
                     b.ins(&Instruction::LocalSet(l));
-                    w.at[*n as usize] = Some((place, info.ty.clone()));
-                    // A binding a `Stmt::Let` wrote goes on the scope too, so
-                    // a statement the AST arm emits after this one finds it
-                    // exactly where that arm would have put it (RFC-0125 §3
-                    // M3, the interleave slice). The question is the ROW's —
-                    // [`vyrn_lower::core::NameInfo::binding`] is the node the
-                    // plan keys the binding by, and a temporary this pass
-                    // minted has none. The spelling is not the question: a
-                    // projection inlined at its access site renames its own
-                    // bindings to `@b<tag>.<name>`, and the statements after
-                    // them still name them.
-                    if let Some(key) = info.binding {
-                        self.scope
-                            .push((info.source.clone(), place, info.ty.clone()));
-                        // And the release it owes, keyed as the arm keys it:
-                        // the plan names the `Stmt::Let` and this row carries
-                        // the same node, so the two walks register one slot.
-                        // A scalar owns no heap and asks for none.
-                        if self.releases_whole(key) {
-                            if let Some(r) = self.rel_for(&info.ty, line)? {
-                                self.register_rel(b, key, place, r);
-                            }
-                        }
-                    }
+                    self.core_bind(b, body, w, *n, place, info.ty.clone())?;
                 }
                 St::Store {
                     place: vyrn_lower::core::Place::Name(n),
@@ -17213,13 +17290,23 @@ impl<'p> Fn_<'_, 'p> {
                     self.scope.truncate(scope);
                 }
                 St::Return { value, line, .. } => {
-                    match value {
-                        Some(v) => {
+                    match (value, self.ret.agg().map(|l| l.size)) {
+                        // The caller's storage, which the `let` before this
+                        // row built into or which the value is copied into:
+                        // [`Fn_::ret_value`]'s two cases.
+                        (Some(Val::Name(n)), Some(size)) => {
+                            if w.landed.take() != Some(*n) {
+                                Dest::Addr(self.core_out(*line)?, 0).addr(b, 0);
+                                self.core_addr_of(b, w, body, *n, *line)?;
+                                agg_landed(b, size, false);
+                            }
+                        }
+                        (Some(v), _) => {
                             let want = self.ret_ty.clone();
                             self.core_val(m, b, body, w, v, &want, *line)?;
                         }
-                        None if matches!(self.ret, Repr::Unit) => {}
-                        None => {
+                        (None, _) if matches!(self.ret, Repr::Unit) => {}
+                        (None, _) => {
                             return unsupported(
                                 "a return whose value does not match the signature",
                                 *line,
@@ -17298,7 +17385,7 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Call {
                 callee, args, kind, ..
             } => {
-                let got = self.core_call(m, b, body, w, callee, *kind, args, line)?;
+                let got = self.core_call(m, b, body, w, callee, *kind, args, None, line)?;
                 self.coerce(m, b, None, &got, want, line)
             }
             // A read and a take load the same address; what parts them is the
@@ -17351,6 +17438,7 @@ impl<'p> Fn_<'_, 'p> {
         callee: &str,
         kind: Callee,
         args: &[(Val, vyrn_frontend::ast::Capability)],
+        hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
         // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction and
@@ -17395,10 +17483,12 @@ impl<'p> Fn_<'_, 'p> {
         let Some(sig) = self.core_sig(callee, kind) else {
             return unsupported("a core call this walk does not read", line);
         };
+        let dest = self.out_ptr(b, &sig, hint);
         for ((v, _), p) in args.iter().zip(&sig.params) {
             self.core_val(m, b, body, w, v, p, line)?;
         }
         b.ins(&Instruction::Call(sig.index));
+        self.out_ptr_back(b, dest);
         Ok(sig.ret_ty)
     }
 
@@ -17755,6 +17845,71 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// The local holding the caller's out-pointer.
+    fn core_out(&self, line: usize) -> Result<u32, String> {
+        self.dest
+            .ok_or_else(|| gap("an aggregate result with no out-pointer", line))
+    }
+
+    /// Push the address of the aggregate the name `n` holds: a slot's, or the
+    /// one a parameter's local holds, which is what `Expr::Var` pushes for a
+    /// layout.
+    fn core_addr_of(
+        &self,
+        b: &mut Frame,
+        w: &Walked,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+        line: usize,
+    ) -> Result<(), String> {
+        let Some((place, _)) = self.core_place(w, body, n) else {
+            return unsupported("a core name with no place", line);
+        };
+        match place {
+            Place::Local(l) => {
+                b.ins(&Instruction::LocalGet(l));
+            }
+            Place::Slot(_) | Place::Static(_) => {
+                place.addr(b, 0);
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind the core name `n` at `place`. A name a `Stmt::Let` wrote goes on
+    /// the scope too, so a statement the AST arm emits after this one finds it
+    /// exactly where that arm would have put it (RFC-0125 §3 M3, the
+    /// interleave slice), with the release it owes, keyed as the arm keys it:
+    /// the plan names the `Stmt::Let` and the row carries the same node.
+    ///
+    /// The question is the ROW's: [`vyrn_lower::core::NameInfo::binding`] is
+    /// the node the plan keys the binding by, and a temporary this pass minted
+    /// has none. The spelling is not the question: a projection inlined at its
+    /// access site renames its own bindings to `@b<tag>.<name>`, and the
+    /// statements after them still name them.
+    fn core_bind(
+        &mut self,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        n: vyrn_lower::core::Name,
+        place: Place,
+        ty: Type,
+    ) -> Result<(), String> {
+        let info = &body.names[n as usize];
+        w.at[n as usize] = Some((place, ty.clone()));
+        let Some(key) = info.binding else {
+            return Ok(());
+        };
+        self.scope.push((info.source.clone(), place, ty.clone()));
+        if self.releases_whole(key) {
+            if let Some(r) = self.rel_for(&ty, info.line)? {
+                self.register_rel(b, key, place, r);
+            }
+        }
+        Ok(())
+    }
+
     /// The signature this walk calls a [`Callee::Fn`] through, and `None` for
     /// every callee whose emission is more than a `call`.
     ///
@@ -17769,11 +17924,11 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         }
         let sig = self.cx.sigs.get(callee)?;
-        // A `modify` parameter crosses as the address of the caller's binding
-        // and an aggregate result through a hidden leading pointer. Both are
-        // placements, which is where §2.3 draws the emitter's own line, and
-        // neither is reachable from a body of scalars.
-        (!sig.modify.iter().any(|m| *m) && sig.ret.agg().is_none()).then(|| sig.clone())
+        // A `modify` parameter crosses as the address of the caller's binding,
+        // which is a placement this walk does not make. An aggregate result
+        // crosses through the out-pointer, which [`Fn_::out_ptr`] states for
+        // both walks.
+        (!sig.modify.iter().any(|m| *m)).then(|| sig.clone())
     }
 
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
@@ -17948,13 +18103,16 @@ impl<'p> Fn_<'_, 'p> {
     /// with what it waits on. It is a screen and not a judgement: a body it
     /// stands down at is emitted from the AST exactly as before.
     fn core_walkable(&self, body: &vyrn_lower::core::Body, stmts: Option<&Block>) -> bool {
-        // A frame with an aggregate return or a hoisted walk is one whose
-        // emission is more than its statements. A placed release is not: the
-        // rows state it and [`Fn_::core_release`] emits it (RFC-0125 M7).
-        if self.dest.is_some() || !body.lambdas.is_empty() {
-            return false;
-        }
-        if !matches!(self.ret, Repr::Scalar(_) | Repr::Unit) {
+        // A frame with a hoisted walk is one whose emission is more than its
+        // statements. A placed release is not: the rows state it and
+        // [`Fn_::core_release`] emits it (RFC-0125 M7). Nor is an aggregate
+        // result, which crosses through the caller's out-pointer and is
+        // written at the `return` ([`Fn_::core_lands`]); what is refused is a
+        // result checked where it is returned, because the row states no
+        // check (RFC-0079).
+        if !body.lambdas.is_empty()
+            || (matches!(self.ret, Repr::Agg(_)) && self.checks(&self.ret_ty))
+        {
             return false;
         }
         let mut lets = Vec::new();
@@ -17988,12 +18146,19 @@ impl<'p> Fn_<'_, 'p> {
             // the caller passed. The name has a place either way; what this
             // walk cannot do with a layout is read it as a value, and
             // [`Fn_::core_val_readable`] is where that is refused.
+            //
+            // Or an aggregate a call returns into the slot this walk takes for
+            // it ([`Fn_::out_ptr`]). A temporary made or returned into is
+            // one [`Fn_::core_readable`] asks about where it stands, because
+            // what places it is the `return` after it.
             if !(self.core_framed(&info.ty)
                 || (n < body.params.len() && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
-                && !(info.binding.is_some_and(|at| !annotated.contains(&at))
-                    && lets
-                        .iter()
-                        .any(|(b, rhs)| *b as usize == n && self.core_makes(body, &info.ty, rhs)))
+                && !(info.binding.is_none_or(|at| !annotated.contains(&at))
+                    && lets.iter().any(|(b, rhs)| {
+                        *b as usize == n
+                            && (self.core_makes(body, &info.ty, rhs)
+                                || self.core_agg_call(body, rhs))
+                    }))
             {
                 return false;
             }
@@ -18036,16 +18201,22 @@ impl<'p> Fn_<'_, 'p> {
         ss.iter().enumerate().all(|(i, s)| match s {
             // A made layout is built into the binding's own slot, so the name
             // is one this walk BINDS and the reader screen above never sees
-            // (RFC-0125 M7). A temporary cannot hold one: the slot is the
+            // (RFC-0125 M7). A temporary holds one only where the `return`
+            // after it hands it back ([`Fn_::core_lands`]): the slot is the
             // reader's `let`, and a row that minted the name has none.
             St::Let(n, rhs) if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) => {
+                if self.core_lands(body, ss, i, reads) {
+                    return self.core_makes(body, &self.ret_ty, rhs);
+                }
                 body.names[*n as usize].binding.is_some()
                     && self.core_makes(body, &body.names[*n as usize].ty, rhs)
             }
+            // An aggregate call result is the caller's storage.
+            St::Let(_, rhs) if self.core_agg_call(body, rhs) => self.core_lands(body, ss, i, reads),
             St::Let(n, rhs) => {
                 let held = body.names[*n as usize].binding.is_none()
                     && reads[*n as usize] == 1
-                    && ss.get(i + 1).and_then(first_read) == Some(*n);
+                    && self.core_first_read(body, ss.get(i + 1)) == Some(*n);
                 // A temporary the stack cannot carry needs a local the AST walk
                 // never takes, so the two would emit different locals.
                 (held || body.names[*n as usize].binding.is_some())
@@ -18114,9 +18285,12 @@ impl<'p> Fn_<'_, 'p> {
             // where it stands ([`Fn_::core_release`]). What it needs is the
             // node the plan keys the slot by, which is the name's binding.
             St::Row { name, .. } => body.names[*name as usize].binding.is_some(),
-            St::Return { value, .. } => value
-                .as_ref()
-                .is_none_or(|v| self.core_val_readable(body, v)),
+            St::Return { value, .. } => value.as_ref().is_none_or(|v| match v {
+                Val::Name(n) if matches!(self.ret, Repr::Agg(_)) => {
+                    self.cx.resolve(&body.names[*n as usize].ty) == self.cx.resolve(&self.ret_ty)
+                }
+                _ => self.core_val_readable(body, v),
+            }),
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
             // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
@@ -18126,6 +18300,77 @@ impl<'p> Fn_<'_, 'p> {
             St::Trap => true,
             _ => false,
         })
+    }
+
+    /// Whether this walk writes every argument of a call row.
+    ///
+    /// A value that owns heap crosses as its pointer, and who owns it after
+    /// the call is the call arm's decision: this walk writes the pointer and
+    /// nothing else, which is what a `read` argument is.
+    fn core_args_readable(
+        &self,
+        body: &vyrn_lower::core::Body,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+    ) -> bool {
+        args.iter().all(|(v, c)| {
+            self.core_val_readable(body, v)
+                && (core_operand(body, v) || *c == vyrn_frontend::ast::Capability::Read)
+        })
+    }
+
+    /// Whether a row is a call this walk makes whose result is an aggregate,
+    /// which crosses through an out-pointer ([`Fn_::out_ptr`], RFC-0125 M7).
+    fn core_agg_call(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
+        let Rhs::Call {
+            callee, args, kind, ..
+        } = rhs
+        else {
+            return false;
+        };
+        self.core_args_readable(body, args)
+            && self
+                .core_sig(callee, *kind)
+                .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some())
+    }
+
+    /// Whether the `let` at `ss[i]` binds the value the next `return` hands
+    /// back, so the value is built in the caller's storage (RFC-0125 M7).
+    ///
+    /// A temporary, read once, by the `return` after it with nothing but
+    /// releases between, at the declared result's own type: the AST arm
+    /// builds `return f(a)` and `return Some(a)` into `dest` the same way
+    /// ([`Fn_::ret_value`]).
+    fn core_lands(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        i: usize,
+        reads: &[u32],
+    ) -> bool {
+        let St::Let(n, _) = &ss[i] else {
+            return false;
+        };
+        let info = &body.names[*n as usize];
+        self.dest.is_some()
+            && info.binding.is_none()
+            && reads[*n as usize] == 1
+            && self.cx.resolve(&info.ty) == self.cx.resolve(&self.ret_ty)
+            && matches!(ss[i + 1..].iter().find(|s| !matches!(s, St::Row { .. })),
+                Some(St::Return { value: Some(Val::Name(r)), .. }) if r == n)
+    }
+
+    /// The first name the statement `s` reads, which is the only one the
+    /// operand stack can be carrying for it. None for an aggregate call and a
+    /// variant, whose destination goes on the stack before their parts.
+    fn core_first_read(
+        &self,
+        body: &vyrn_lower::core::Body,
+        s: Option<&St>,
+    ) -> Option<vyrn_lower::core::Name> {
+        match s? {
+            St::Let(_, rhs) if self.core_ctor(rhs) || self.core_agg_call(body, rhs) => None,
+            s => first_read(s),
+        }
     }
 
     /// Whether a call row's builtin is one [`Fn_::core_call`] emits: the
@@ -18161,26 +18406,20 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Call {
                 callee, args, kind, ..
             } => {
-                // A value that owns heap crosses as its pointer, and who
-                // owns it after the call is the call arm's decision: this
-                // walk writes the pointer and nothing else, which is what
-                // a `read` argument is.
-                args.iter().all(|(v, c)| {
-                    self.core_val_readable(body, v)
-                        && (core_operand(body, v) || *c == vyrn_frontend::ast::Capability::Read)
-                }) && (self.core_builtin_readable(body, callee, *kind, args)
-                    || self.core_mem_ty(callee, args.len()).is_some()
-                    || self.core_sig(callee, *kind).is_some_and(|s| {
-                        // An aggregate result crosses through an out-pointer
-                        // the caller allocates, and this walk writes a plain
-                        // `call`: the frame it would need is the callee's
-                        // destination and not a name of this body.
-                        s.params.len() == args.len()
-                            && matches!(
-                                self.cx.repr(&s.ret_ty, 0),
-                                Ok(Repr::Scalar(_) | Repr::Unit)
-                            )
-                    }))
+                self.core_args_readable(body, args)
+                    && (self.core_builtin_readable(body, callee, *kind, args)
+                        || self.core_mem_ty(callee, args.len()).is_some()
+                        || self.core_sig(callee, *kind).is_some_and(|s| {
+                            // An aggregate result crosses through an out-pointer
+                            // the caller allocates, and this walk writes a plain
+                            // `call`: the frame it would need is the callee's
+                            // destination and not a name of this body.
+                            s.params.len() == args.len()
+                                && matches!(
+                                    self.cx.repr(&s.ret_ty, 0),
+                                    Ok(Repr::Scalar(_) | Repr::Unit)
+                                )
+                        }))
             }
             // A place this walk addresses, whose value is one it loads. An
             // aggregate read is refused by the same clause that refuses an
