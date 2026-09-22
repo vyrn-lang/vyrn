@@ -15505,6 +15505,23 @@ impl HoistVisit<'_> for Hoist<'_, '_> {
     }
 }
 
+/// Whether a `while` of `blk` indexes a binding [`Fn_::hoist_walks`] may take
+/// apart before the loop. The rows state no hoist (RFC-0125 M1's read half),
+/// and without it `growable array element read` ran x1.13, so such a body
+/// stays in the arm. Asked on the syntax alone, so it may refuse a binding
+/// the hoist would pass over for its type or its place.
+fn hoists_a_header(blk: &Block) -> bool {
+    let mut found = false;
+    each_block(blk, &mut |_| {}, &mut |s| found |= while_hoists(s));
+    found
+}
+
+fn while_hoists(s: &Stmt) -> bool {
+    matches!(s, Stmt::While { cond, body, .. } if indexed_names(cond, body)
+        .iter()
+        .any(|n| header_invariant(cond, body, n)))
+}
+
 /// Every expression under `e`, pre-order, `e` itself first, and every
 /// statement under it through `fs` — `ast::body_scope_descent!`'s descent
 /// since RFC-0125 §3 M6, where this file wrote the arms out itself.
@@ -16908,6 +16925,24 @@ impl<'p> Fn_<'_, 'p> {
         // because a subtree carries the `return` of every branch under it.
         if !self.cursors.is_empty() && run.iter().any(core_returns) {
             return None;
+        }
+        // A header the arm hoists before a `while` ([`hoists_a_header`]): the
+        // `while` itself, and a statement inside it that names a binding the
+        // hoist holds in locals, which the rows would walk again.
+        if while_hoists(s) {
+            return None;
+        }
+        if !self.walks.is_empty() {
+            let mut names = Vec::new();
+            for st in run {
+                vyrn_lower::core::names_in(st, &mut names);
+            }
+            if names.iter().any(|n| {
+                self.walks
+                    .contains_key(body.names[*n as usize].source.as_str())
+            }) {
+                return None;
+            }
         }
         // An aggregate result travels through `dest`, which the run's own
         // `return` writes ([`Fn_::core_lands`]); one under a branch of the run
@@ -18348,7 +18383,7 @@ impl<'p> Fn_<'_, 'p> {
         // annotation asks for goes unrefused. The AST arm validates at the
         // `let` and at every later store into the binding, and the row states
         // neither. [`Fn_::core_run`] asks the same question per statement.
-        if stmts.is_some_and(|blk| self.annotates_a_check(blk)) {
+        if stmts.is_some_and(|blk| self.annotates_a_check(blk) || hoists_a_header(blk)) {
             return false;
         }
         let reads = body.reads();

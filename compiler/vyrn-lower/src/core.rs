@@ -5160,6 +5160,21 @@ impl<'a> Builder<'a> {
     /// the binding that follows; the ones queued by an enclosing expression
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
+    /// Whether `name(args)` at `e` is an element read of a builtin array
+    /// whose element owns no heap, off a receiver that is a place.
+    fn reads_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
+        name == vyrn_frontend::project::AT
+            && args.len() == 2
+            && is_place_read(&args[0])
+            && self.ty_of(e).is_ok_and(|t| !self.owns(&t))
+            && self.ty_of(&args[0]).is_ok_and(|t| {
+                matches!(
+                    vyrn_frontend::types::resolve(&t, self.proto.types()),
+                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
+                )
+            })
+    }
+
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         let outer = std::mem::take(&mut self.after);
         let r = self.rhs_inner(e, out);
@@ -5308,12 +5323,21 @@ impl<'a> Builder<'a> {
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
             }
+            // `xs[i]` of a heapless element is section 2.1's element read, one load at
+            // an address, and not a call: the seeded `place at` row yields
+            // `@slot(self, i)` and nothing else. A String's byte, a map's
+            // entry and a user container's projection are other reads.
             Expr::Call {
                 name,
                 args,
                 line,
                 type_args: _,
-            } => self.call(name, args, *line, self.produced(e), out),
+            } => {
+                if self.reads_an_element(name, args, e) {
+                    return Ok(Rhs::Read(self.place(e, out)?));
+                }
+                self.call(name, args, *line, self.produced(e), out)
+            }
             Expr::TryConstruct { name, args, .. } => {
                 let mut vs = Vec::new();
                 for a in args {
