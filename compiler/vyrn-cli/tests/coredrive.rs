@@ -472,9 +472,11 @@ fn run() {
         }
     }
     // The forms whose arm the rows have started to relieve. An arm goes when
-    // its first number reaches zero, and this pin says which nine are on that
+    // its first number reaches zero, and this pin says which eight are on that
     // road: a form that drops off the list has lost a reader the record has to
-    // explain, and one that joins it is a slice's own count.
+    // explain, and one that joins it is a slice's own count. The count is per
+    // statement, so a form whose whole body the core walk takes leaves it:
+    // `Stmt::IfLet` did, with its arm unmoved at 155 (the M7 screen track).
     let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
         .iter()
         .enumerate()
@@ -491,8 +493,7 @@ fn run() {
             "Stmt::Expr",
             "Stmt::While",
             "Stmt::Break",
-            "Stmt::Continue",
-            "Stmt::IfLet"
+            "Stmt::Continue"
         ],
         "the forms the core's rows carry are not the ones the record names"
     );
