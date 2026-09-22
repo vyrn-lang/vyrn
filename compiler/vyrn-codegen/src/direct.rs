@@ -1958,6 +1958,24 @@ enum Dest {
     Addr(u32, u32),
 }
 
+/// How one `std/mem` primitive lowers (PLAN-0125-runtime §2.2): a `call` of
+/// the host import `wasi_imports` declared, or this emitter's own
+/// instruction. A host import the build declares none of is `unreachable`,
+/// which is what the `vyrn_gen` pair is outside a generation.
+#[derive(Clone, Copy)]
+enum Mem {
+    Host(Option<u32>),
+    Ins,
+}
+
+/// What a `std/mem` primitive pushes UNDER its arguments. Only `trap` has
+/// one: the descriptor its message goes to.
+fn mem_pre(b: &mut Frame, prim: &str) {
+    if prim == "trap" {
+        b.ins(&Instruction::I32Const(2));
+    }
+}
+
 impl Dest {
     /// Push the address `off` bytes into this destination.
     fn addr(self, b: &mut Frame, off: u32) {
@@ -7563,10 +7581,7 @@ impl<'p> Fn_<'_, 'p> {
         type_args: &[Type],
         line: usize,
     ) -> Result<Type, String> {
-        // RFC-0114 §25: the instrument's hooks are calls only in an audited
-        // build. The arguments are locals and constants at every one of the
-        // four sites, so dropping the statement drops nothing else with it.
-        if !self.cx.audit && name.starts_with(AUDIT_PREFIX) {
+        if self.audit_dropped(name) {
             return Ok(Type::Unit);
         }
         let mark = self.arg_frees.len();
@@ -7599,6 +7614,16 @@ impl<'p> Fn_<'_, 'p> {
                 .impls
                 .iter()
                 .any(|i| i.places.iter().any(|p| p.name == name))
+    }
+
+    /// Whether this build drops the call to `name` rather than emitting it.
+    ///
+    /// RFC-0114 §25: the residue instrument's hooks are calls only in an
+    /// audited build. The arm drops the whole expression, so the operand goes
+    /// with it; the core states the operand as a row of its own, which is why
+    /// the whole-body walk refuses the statement instead (RFC-0125 M7).
+    fn audit_dropped(&self, name: &str) -> bool {
+        !self.cx.audit && name.starts_with(AUDIT_PREFIX)
     }
 
     fn call_inner(
@@ -9070,11 +9095,6 @@ impl<'p> Fn_<'_, 'p> {
     /// instruction, or one host import as its `call`. `std/mem.vyrn` holds the
     /// signatures and this holds the whole of their lowering; the bodies there
     /// are never read by this emitter.
-    ///
-    /// The argument types are spelled here as well as in the module because
-    /// `expr_as` needs the target type to coerce a literal, and the row is the
-    /// one place the two lists meet. A mismatch is a checker error at the call
-    /// in `std/runtime` before it is anything here.
     fn mem_prim(
         &mut self,
         m: &mut Module,
@@ -9083,14 +9103,57 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        let (how, params, ret) = self.mem_spec(prim, line)?;
+        if args.len() != params.len() {
+            return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
+        }
+        mem_pre(b, prim);
+        for (a, p) in args.iter().zip(&params) {
+            self.expr_as(m, b, a, p)?;
+        }
+        self.mem_ins(b, prim, how);
+        Ok(ret)
+    }
+
+    /// One `std/mem` primitive off the core's row: the same table
+    /// [`Fn_::mem_prim`] reads, its operands read from the row rather than
+    /// walked over the source (RFC-0125 M7).
+    fn core_mem(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        prim: &str,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+        line: usize,
+    ) -> Result<Type, String> {
+        let (how, params, ret) = self.mem_spec(prim, line)?;
+        if args.len() != params.len() {
+            return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
+        }
+        mem_pre(b, prim);
+        for ((v, _), p) in args.iter().zip(&params) {
+            self.core_val(m, b, body, w, v, p, line)?;
+        }
+        self.mem_ins(b, prim, how);
+        Ok(ret)
+    }
+
+    /// What one `std/mem` primitive takes and hands back, and how it lowers.
+    ///
+    /// The argument types are spelled here as well as in the module because
+    /// each caller needs the target type to coerce a literal, and this is the
+    /// one place the two lists meet. A mismatch is a checker error at the call
+    /// in `std/runtime` before it is anything here.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a name `std/mem` does not declare.
+    fn mem_spec(&self, prim: &str, line: usize) -> Result<(Mem, Vec<Type>, Type), String> {
         let u = |bits: u8| Type::IntN {
             bits,
             signed: false,
-        };
-        let at = |align: u32| MemArg {
-            offset: 0,
-            align,
-            memory_index: 0,
         };
         // PLAN-0125-runtime §2.2: a host import is one `call` of the import
         // `wasi_imports` declared, with the witx signature. The `vyrn_gen`
@@ -9138,17 +9201,7 @@ impl<'p> Fn_<'_, 'p> {
             _ => None,
         };
         if let Some((index, params, ret)) = host {
-            if args.len() != params.len() {
-                return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
-            }
-            for (a, p) in args.iter().zip(&params) {
-                self.expr_as(m, b, a, p)?;
-            }
-            match index {
-                Some(i) => b.ins(&Instruction::Call(i)),
-                None => b.ins(&Instruction::Unreachable),
-            };
-            return Ok(ret);
+            return Ok((Mem::Host(index), params, ret));
         }
         let (params, ret): (Vec<Type>, Type) = match prim {
             "load8" => (vec![INT32], u(8)),
@@ -9171,15 +9224,23 @@ impl<'p> Fn_<'_, 'p> {
             "trap" => (vec![INT32, INT32], Type::Unit),
             _ => return unsupported(&format!("the `std/mem` primitive `{prim}`"), line),
         };
-        if args.len() != params.len() {
-            return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
-        }
-        if prim == "trap" {
-            // The descriptor, under the message and its length.
-            b.ins(&Instruction::I32Const(2));
-        }
-        for (a, p) in args.iter().zip(&params) {
-            self.expr_as(m, b, a, p)?;
+        Ok((Mem::Ins, params, ret))
+    }
+
+    /// The instructions one `std/mem` primitive IS, its operands already on
+    /// the stack.
+    fn mem_ins(&mut self, b: &mut Frame, prim: &str, how: Mem) {
+        let at = |align: u32| MemArg {
+            offset: 0,
+            align,
+            memory_index: 0,
+        };
+        if let Mem::Host(index) = how {
+            match index {
+                Some(i) => b.ins(&Instruction::Call(i)),
+                None => b.ins(&Instruction::Unreachable),
+            };
+            return;
         }
         match prim {
             "load8" => b.ins(&Instruction::I32Load8U(at(0))),
@@ -9210,9 +9271,8 @@ impl<'p> Fn_<'_, 'p> {
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::Call(self.cx.rt.proc_exit))
                 .ins(&Instruction::Unreachable),
-            _ => unreachable!("matched above"),
+            _ => unreachable!("`mem_spec` answered, so the name is one of these"),
         };
-        Ok(ret)
     }
 
     /// One log line: `[LEVEL] name: message\n`, to the configured descriptor.
@@ -17261,9 +17321,12 @@ impl<'p> Fn_<'_, 'p> {
                 callee, kind, args, ..
             } => match builtin_spec(callee, args.len()) {
                 Some((_, _, ret)) => Ok(ret.clone()),
-                None => match self.core_sig(callee, *kind) {
-                    Some(s) => Ok(s.ret_ty),
-                    None => unsupported("a core call this walk does not read", line),
+                None => match self.core_mem_ty(callee, args.len()) {
+                    Some(t) => Ok(t),
+                    None => match self.core_sig(callee, *kind) {
+                        Some(s) => Ok(s.ret_ty),
+                        None => unsupported("a core call this walk does not read", line),
+                    },
                 },
             },
             _ => unsupported("a discarded value the row does not type", line),
@@ -17290,6 +17353,12 @@ impl<'p> Fn_<'_, 'p> {
         args: &[(Val, vyrn_frontend::ast::Capability)],
         line: usize,
     ) -> Result<Type, String> {
+        // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction and
+        // never a call, so no signature answers for it. The table is
+        // [`Fn_::mem_spec`]'s, which the arm over the source reads too.
+        if let Some(prim) = callee.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
+            return self.core_mem(m, b, body, w, prim, args, line);
+        }
         // RFC-0125 M7, the builtin family: a builtin with a specification row
         // is emitted from that row. Every kind of row is answered here, so a
         // kind added to [`Spec`] is a compile error until it is.
@@ -17696,7 +17765,7 @@ impl<'p> Fn_<'_, 'p> {
     /// one name that hits and must not be called — an unaudited build drops
     /// its four hooks rather than emitting them.
     fn core_sig(&self, callee: &str, kind: Callee) -> Option<Sig> {
-        if kind != Callee::Fn || (!self.cx.audit && callee.starts_with(AUDIT_PREFIX)) {
+        if kind != Callee::Fn || self.audit_dropped(callee) {
             return None;
         }
         let sig = self.cx.sigs.get(callee)?;
@@ -17823,6 +17892,14 @@ impl<'p> Fn_<'_, 'p> {
         self.coerce(m, b, None, &got, want, line)
     }
 
+    /// The result of a `std/mem` primitive call, and `None` for a callee that
+    /// is not one or an arity the table does not state.
+    fn core_mem_ty(&self, callee: &str, args: usize) -> Option<Type> {
+        let prim = callee.strip_prefix(vyrn_frontend::loader::MEM_PREFIX)?;
+        let (_, params, ret) = self.mem_spec(prim, 0).ok()?;
+        (params.len() == args).then_some(ret)
+    }
+
     /// What the AST arm would bind for one row — the screen's type clause.
     ///
     /// It is not the operator table stated twice: what it asks is which VALUE
@@ -17839,7 +17916,12 @@ impl<'p> Fn_<'_, 'p> {
                 Lit::Opaque(_) => return None,
             },
             Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
-            Rhs::Call { callee, kind, .. } => self.core_sig(callee, *kind)?.ret_ty,
+            Rhs::Call {
+                callee, kind, args, ..
+            } => match self.core_mem_ty(callee, args.len()) {
+                Some(t) => t,
+                None => self.core_sig(callee, *kind)?.ret_ty,
+            },
             Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
             Rhs::Read(p) | Rhs::Take(p) => self.core_place_ty(body, p)?,
@@ -17901,7 +17983,13 @@ impl<'p> Fn_<'_, 'p> {
             // Or a layout this walk MAKES. Such a name is bound and never
             // read: every read of a value goes through
             // [`Fn_::core_val_readable`], which asks the same question.
-            if !self.core_framed(&info.ty)
+            //
+            // Or a PARAMETER of a layout type, whose local holds the address
+            // the caller passed. The name has a place either way; what this
+            // walk cannot do with a layout is read it as a value, and
+            // [`Fn_::core_val_readable`] is where that is refused.
+            if !(self.core_framed(&info.ty)
+                || (n < body.params.len() && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
                 && !(info.binding.is_some_and(|at| !annotated.contains(&at))
                     && lets
                         .iter()
@@ -18065,9 +18153,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => self.core_val_readable(body, v),
-            // A conversion is a row this walk does not read yet; the arm
-            // emits it (RFC-0125 §3 M7, the row's own slice).
-            Rhs::Prim(Op::Closure | Op::Conv(_), ..) => false,
+            Rhs::Prim(Op::Closure, ..) => false,
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_operand(body, v)),
             // A handed-back receiver asks nothing extra of this walk: the
             // builder states the call and the store that puts the result back
@@ -18083,6 +18169,7 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_val_readable(body, v)
                         && (core_operand(body, v) || *c == vyrn_frontend::ast::Capability::Read)
                 }) && (self.core_builtin_readable(body, callee, *kind, args)
+                    || self.core_mem_ty(callee, args.len()).is_some()
                     || self.core_sig(callee, *kind).is_some_and(|s| {
                         // An aggregate result crosses through an out-pointer
                         // the caller allocates, and this walk writes a plain
