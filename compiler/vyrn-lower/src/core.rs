@@ -5584,6 +5584,19 @@ impl<'a> Builder<'a> {
                 vec![Capability::Read; args.len()]
             } else if matches!(name, "print") {
                 vec![Capability::Read; args.len()]
+            } else if matches!(
+                name,
+                vyrn_frontend::checker::GEN_REFLECT
+                    | vyrn_frontend::checker::GEN_NEXT_INT
+                    | vyrn_frontend::checker::GEN_NEXT_STR
+            ) {
+                // The generation host's three primitives (RFC-0076 M3b). They
+                // exist only under `checker::set_gen_host`, so a program cannot
+                // name them and no declaration does either; the emitter lowers
+                // each in place. The host READS what it is handed — `reflect`
+                // takes the String by address and stashes atoms of its own —
+                // so the guest keeps every argument it owns.
+                vec![Capability::Read; args.len()]
             } else {
                 return gap_d("a call this slice cannot attribute", name, line);
             };
