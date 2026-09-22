@@ -16868,9 +16868,18 @@ impl<'p> Fn_<'_, 'p> {
                     // projection inlined at its access site renames its own
                     // bindings to `@b<tag>.<name>`, and the statements after
                     // them still name them.
-                    if info.binding.is_some() {
+                    if let Some(key) = info.binding {
                         self.scope
                             .push((info.source.clone(), place, info.ty.clone()));
+                        // And the release it owes, keyed as the arm keys it:
+                        // the plan names the `Stmt::Let` and this row carries
+                        // the same node, so the two walks register one slot.
+                        // A scalar owns no heap and asks for none.
+                        if self.releases_whole(key) {
+                            if let Some(r) = self.rel_for(&info.ty, line)? {
+                                self.register_rel(b, key, place, r);
+                            }
+                        }
                     }
                 }
                 St::Store {
@@ -17392,9 +17401,35 @@ impl<'p> Fn_<'_, 'p> {
     /// checked where it is stored (RFC-0079) and the row states no check, which
     /// is the same screen every other clause of this walk makes.
     fn core_part_ty(&self, t: &Type) -> bool {
-        matches!(self.cx.repr(t, 0), Ok(Repr::Scalar(_)))
-            && core_scalar(&self.cx.resolve(t))
-            && !self.checks(t)
+        self.core_framed(t) && core_scalar(&self.cx.resolve(t))
+    }
+
+    /// Whether this walk gives a name of `t` the place the AST walk gives it —
+    /// RFC-0125 M7, the frame.
+    ///
+    /// The allocation is [`Fn_::place_for`]'s and both walks call it, so what
+    /// is asked here is whether the type HAS a place of that kind: a value
+    /// that lives in one wasm local, which a `String`, a stream cursor and a
+    /// vector are as much as an `Int64` is. A layout is the make arm's, which
+    /// takes a slot before the parts are written.
+    ///
+    /// A `where` type is refused: it has its base's place and a check at every
+    /// store that the row does not state (RFC-0079).
+    fn core_framed(&self, t: &Type) -> bool {
+        matches!(self.cx.repr(t, 0), Ok(Repr::Scalar(_))) && !self.checks(t)
+    }
+
+    /// Whether this walk can put the value `v` on the operand stack: a name it
+    /// frames, or a literal it writes ([`Fn_::core_val`]).
+    ///
+    /// A different question from [`core_operand`], which is what an ARITHMETIC
+    /// row computes with. An order on two string literals is two values this
+    /// walk writes and no operation it applies.
+    fn core_val_readable(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
+        match v {
+            Val::Name(n) => self.core_framed(&body.names[*n as usize].ty),
+            Val::Lit(l) => !matches!(l, Lit::Opaque),
+        }
     }
 
     /// Whether a row is a call to a variant constructor, which is a made layout
@@ -17440,7 +17475,7 @@ impl<'p> Fn_<'_, 'p> {
                 kind: Callee::Ctor,
                 ..
             } => {
-                args.iter().all(|(v, _)| core_val_readable(body, v))
+                args.iter().all(|(v, _)| core_operand(body, v))
                     && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
                     && self.core_variant(ty, callee).is_some_and(|(_, p)| {
                         p.len() == args.len() && p.iter().all(|t| self.core_part_ty(t))
@@ -17458,7 +17493,7 @@ impl<'p> Fn_<'_, 'p> {
     /// row does not carry.
     fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
         let scalar = |t: &Type| self.core_part_ty(t);
-        if !vs.iter().all(|v| core_val_readable(body, v))
+        if !vs.iter().all(|v| core_operand(body, v))
             || !matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
         {
             return false;
@@ -17700,14 +17735,15 @@ impl<'p> Fn_<'_, 'p> {
             });
         }
         for (n, info) in body.names.iter().enumerate() {
-            // A scalar of a type that needs no validation: a `where` type
-            // (RFC-0079) is a `check` row the core does not carry, which is
-            // the census's row 7.
+            // A value with a place of its own: one wasm local, whatever the
+            // type in it (RFC-0125 M7, the frame). A `where` type is not one —
+            // it is a `check` row the core does not carry, which is the
+            // census's row 7.
             //
-            // Or a layout this walk MAKES (RFC-0125 M7). Such a name is bound
-            // and never read: every read of a value goes through
-            // [`core_val_readable`], which asks the same scalar question.
-            if !core_scalar(&info.ty)
+            // Or a layout this walk MAKES. Such a name is bound and never
+            // read: every read of a value goes through
+            // [`Fn_::core_val_readable`], which asks the same question.
+            if !self.core_framed(&info.ty)
                 && !(info.binding.is_some_and(|at| !annotated.contains(&at))
                     && lets
                         .iter()
@@ -17780,12 +17816,12 @@ impl<'p> Fn_<'_, 'p> {
                 matches!(place, vyrn_lower::core::Place::Name(n)
                     if !body.names[*n as usize].source.starts_with('@')
                         && core_scalar(&body.names[*n as usize].ty))
-                    && core_val_readable(body, value)
+                    && self.core_val_readable(body, value)
             }
             St::If {
                 cond, then, els, ..
             } => {
-                core_val_readable(body, cond)
+                self.core_val_readable(body, cond)
                     && self.core_readable(body, then, reads)
                     && self.core_readable(body, els, reads)
             }
@@ -17796,7 +17832,9 @@ impl<'p> Fn_<'_, 'p> {
             // where it stands ([`Fn_::core_release`]). What it needs is the
             // node the plan keys the slot by, which is the name's binding.
             St::Row { name, .. } => body.names[*name as usize].binding.is_some(),
-            St::Return { value, .. } => value.as_ref().is_none_or(|v| core_val_readable(body, v)),
+            St::Return { value, .. } => value
+                .as_ref()
+                .is_none_or(|v| self.core_val_readable(body, v)),
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
             // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
@@ -17832,11 +17870,11 @@ impl<'p> Fn_<'_, 'p> {
 
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
-            Rhs::Val(v) => core_val_readable(body, v),
+            Rhs::Val(v) => self.core_val_readable(body, v),
             // A conversion is a row this walk does not read yet; the arm
             // emits it (RFC-0125 §3 M7, the row's own slice).
             Rhs::Prim(Op::Closure | Op::Conv(_), ..) => false,
-            Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_val_readable(body, v)),
+            Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_operand(body, v)),
             // A write-back stores the receiver the call handed back, which is
             // more than a `call`.
             Rhs::Call {
@@ -17847,11 +17885,27 @@ impl<'p> Fn_<'_, 'p> {
                 ..
             } => {
                 !write_back
-                    && args.iter().all(|(v, _)| core_val_readable(body, v))
+                    // A value that owns heap crosses as its pointer, and who
+                    // owns it after the call is the call arm's decision: this
+                    // walk writes the pointer and nothing else, which is what
+                    // a `read` argument is.
+                    && args.iter().all(|(v, c)| {
+                        self.core_val_readable(body, v)
+                            && (core_operand(body, v)
+                                || *c == vyrn_frontend::ast::Capability::Read)
+                    })
                     && (self.core_builtin_readable(body, callee, *kind, args)
-                        || self
-                            .core_sig(callee, *kind)
-                            .is_some_and(|s| s.params.len() == args.len()))
+                        || self.core_sig(callee, *kind).is_some_and(|s| {
+                            // An aggregate result crosses through an out-pointer
+                            // the caller allocates, and this walk writes a plain
+                            // `call`: the frame it would need is the callee's
+                            // destination and not a name of this body.
+                            s.params.len() == args.len()
+                                && matches!(
+                                    self.cx.repr(&s.ret_ty, 0),
+                                    Ok(Repr::Scalar(_) | Repr::Unit)
+                                )
+                        }))
             }
             // A place this walk addresses, whose value is one it loads. An
             // aggregate read is refused by the same clause that refuses an
@@ -17886,15 +17940,14 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
     }
 }
 
-fn core_val_readable(body: &vyrn_lower::core::Body, v: &Val) -> bool {
-    // A literal has no name and carries its type in its own variant: a
-    // `Lit::Str` is a String, which this walk emits no operation on. `"a" < "b"`
-    // reached `Op::Lt` with two of them and not one name for the other screen to
-    // refuse.
-    //
-    // A NAME is screened by its recorded type. The screen was the caller's until
-    // M7: a made layout is a name this walk BINDS and never reads, so the two
-    // questions parted and the read one is asked here, at every use of a value.
+/// Whether `v` is a value one of this walk's ARITHMETIC rows computes with —
+/// a different question from [`Fn_::core_val_readable`], which is whether the
+/// walk can write the value at all.
+///
+/// A literal has no name and carries its type in its own variant: a `Lit::Str`
+/// is a String, which this walk applies no operation to. `"a" < "b"` reached
+/// `Op::Lt` with two of them and not one name for the other screen to refuse.
+fn core_operand(body: &vyrn_lower::core::Body, v: &Val) -> bool {
     match v {
         Val::Name(n) => core_scalar(&body.names[*n as usize].ty),
         Val::Lit(l) => !matches!(l, Lit::Opaque | Lit::Str(_)),

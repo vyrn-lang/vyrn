@@ -457,21 +457,24 @@ fn run() {
     // AST walk emits exactly what it did. So a body it takes has to reach the
     // corpus at all, or this test measures nothing.
     assert!(from_core > 0, "the core walk emitted no body");
-    // The licence. Two programs emit a different module, both for ONE shape,
-    // and RFC-0125 §3 M3's record explains it: `return if c { a } else { b }`
-    // reaches the AST walk as a join it writes with a typed `if` and one
-    // branch out, and the core rewrites it into a `return` per arm
+    // The licence. Three programs emit a different module, all three for ONE
+    // shape, and RFC-0125 §3 M3's record explains it: `return if c { a } else
+    // { b }` reaches the AST walk as a join it writes with a typed `if` and
+    // one branch out, and the core rewrites it into a `return` per arm
     // (`Builder::return_through`) so the linear judgment sees each exit. The
     // driver emits what the row says, which is one `br` per arm where the join
-    // had one after the `if`. A THIRD differing program is a shape nobody has
-    // read, and this is where a reader is told to read it.
+    // had one after the `if`. `strpredbytes.vyrn` joined the list when the
+    // frame took a `String` (RFC-0125 M7): its join carries a pointer where
+    // the other two carry an `Int64`, and the shape is the same one. A FOURTH
+    // differing program is a shape nobody has read, and this is where a reader
+    // is told to read it.
     let named: Vec<&str> = differ
         .iter()
         .map(|d| d.split(':').next().unwrap())
         .collect();
     assert_eq!(
         named,
-        ["ifexpr.vyrn", "knucleotide.vyrn"],
+        ["ifexpr.vyrn", "knucleotide.vyrn", "strpredbytes.vyrn"],
         "the two walks differ somewhere the record does not explain"
     );
 }
