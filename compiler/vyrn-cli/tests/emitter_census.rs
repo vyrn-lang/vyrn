@@ -835,7 +835,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
         ("one block per builtin name", 4657, 946),
         ("the wasm format", 343, 0),
         ("shared machinery", 2686, 88),
-        ("tests", 314, 0),
+        ("tests", 331, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
     assert_eq!(
@@ -909,7 +909,7 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 51, 6038, 0, 0),
+        ("neither", 51, 6055, 0, 0),
         ("the core's rows", 5, 2090, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
         ("the source, and the core has no row", 10, 1958, 81, 0),
