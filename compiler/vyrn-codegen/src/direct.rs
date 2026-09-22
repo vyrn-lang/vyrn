@@ -17717,6 +17717,22 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
             }
+            // `bytes` and `stringFromBytes`: built in a slot of the call's
+            // own, which [`agg_landed`] copies into the destination.
+            Some(Spec::Builds(_)) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
+                        .get(i)
+                    {
+                        Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
+                        None => unsupported(&format!("`{callee}` with too few operands"), line),
+                    };
+                return match callee {
+                    "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    "stringFromBytes" => self.string_from_bytes(m, b, &mut operand, line),
+                    _ => unsupported(&format!("`{callee}` builds nothing this walk emits"), line),
+                };
+            }
             None => {}
         }
         let Some(sig) = self.core_sig(callee, kind) else {
@@ -18613,9 +18629,10 @@ impl<'p> Fn_<'_, 'p> {
                 callee, args, kind, ..
             } => {
                 self.core_args_readable(body, args)
-                    && self
-                        .core_sig(callee, *kind)
-                        .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some())
+                    && (matches!(core_builtin(callee, *kind), Some(Spec::Builds(_)))
+                        || self
+                            .core_sig(callee, *kind)
+                            .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                 self.core_val_readable(body, k)
@@ -18746,8 +18763,9 @@ impl<'p> Fn_<'_, 'p> {
             },
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
             // A rebuild is read together with the store after it
-            // ([`Fn_::core_rebuilt`]), and never alone.
-            Some(Spec::Rebuilds) | None => false,
+            // ([`Fn_::core_rebuilt`]), and a built aggregate as an aggregate
+            // call ([`Fn_::core_agg_call`]); neither alone.
+            Some(Spec::Rebuilds | Spec::Builds(_)) | None => false,
         }
     }
 

@@ -1626,6 +1626,10 @@ pub enum Spec {
     /// receiver's own storage, so the result is the receiver, and the store
     /// the builder states after the call puts back what is already there.
     Rebuilds,
+    /// Operands at whatever type the row put on their names, and a result at
+    /// the stated type that the call builds in storage of its own. The caller
+    /// lands it as it lands any aggregate result.
+    Builds(Type),
 }
 
 /// Every builtin the row specifies, by name.
@@ -1635,10 +1639,6 @@ pub enum Spec {
 /// emission there; the match over [`Spec`] makes a new KIND a compile error,
 /// and the codegen test `builtin_rows_all_emit` refuses a [`Spec::Typed`] row
 /// with no instruction.
-///
-/// A builtin whose operands and result the row cannot state at all — `bytes`
-/// and `stringFromBytes` hand back an aggregate the emitter must place — is
-/// not here and is still a gap.
 pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
     static ROWS: std::sync::OnceLock<Vec<(&'static str, Spec)>> = std::sync::OnceLock::new();
     ROWS.get_or_init(|| {
@@ -1649,6 +1649,10 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
         let i32_ = Type::IntN {
             bits: 32,
             signed: true,
+        };
+        let u8_ = Type::IntN {
+            bits: 8,
+            signed: false,
         };
         let one = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone()], r.clone()));
         let two = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone(), p.clone()], r.clone()));
@@ -1687,6 +1691,11 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@clear", Spec::Rebuilds),
             ("@append", Spec::Rebuilds),
             ("@copyFrom", Spec::Rebuilds),
+            ("bytes", Spec::Builds(Type::Array(Box::new(u8_)))),
+            (
+                "stringFromBytes",
+                Spec::Builds(Type::result(Type::Str, Type::Str)),
+            ),
         ]
     })
 }
