@@ -48,7 +48,7 @@ use vyrn_frontend::types::INT32;
 /// RFC-0125 §2.3's own vocabulary: the statements the emitter walks, what each
 /// one computes, and the values it computes it from. `Body` is spelled out at
 /// each use, because this file's own `Body` is the AST's.
-use vyrn_lower::core::{Callee, Ctor, Lit, Op, Rhs, St, Val};
+use vyrn_lower::core::{Callee, Ctor, Lit, Op, Rhs, Spec, St, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
@@ -7697,6 +7697,18 @@ impl<'p> Fn_<'_, 'p> {
             b.slot(off);
             return Ok(ty);
         }
+        // RFC-0125 M7, the builtin family: a builtin the core's row specifies
+        // is its operands at the row's types and one instruction, and
+        // [`Fn_::core_call`] reads the same pair off a call row. A name with
+        // no row falls to the arms below, which read the SITE for what a row
+        // cannot state.
+        if let Some((params, ins, ret)) = builtin_spec(name, args.len()) {
+            for (a, p) in args.iter().zip(params) {
+                self.expr_as(m, b, a, p)?;
+            }
+            b.ins(&ins);
+            return Ok(ret.clone());
+        }
         match name {
             // RFC-0079: `panic(msg)` — `error: `, the caller's message, a
             // newline, exit 1, in three `write_all`s for the reason `log_write`
@@ -8149,31 +8161,6 @@ impl<'p> Fn_<'_, 'p> {
                     None => unsupported("the built-in `Value` enum", line),
                 };
             }
-            // The IEEE-754 bit views (RFC-0078 M4a). One instruction each, and
-            // the whole reason they are primitives: `f64` and `i64` are the same
-            // 64 bits in this backend's value stack, so a reinterpretation is
-            // free while a conversion rounds.
-            "floatBits" if args.len() == 1 => {
-                self.expr_as(m, b, &args[0], &Type::Float)?;
-                b.ins(&Instruction::I64ReinterpretF64);
-                return Ok(Type::IntN {
-                    bits: 64,
-                    signed: false,
-                });
-            }
-            "floatFromBits" if args.len() == 1 => {
-                self.expr_as(
-                    m,
-                    b,
-                    &args[0],
-                    &Type::IntN {
-                        bits: 64,
-                        signed: false,
-                    },
-                )?;
-                b.ins(&Instruction::F64ReinterpretI64);
-                return Ok(Type::Float);
-            }
             // `stringFromBytes(b)` (RFC-0014): the bytes checked by `std/text`'s
             // `stringFault` and then copied into a fresh NUL-terminated buffer, as
             // a `Result<String, String>`. The result is an aggregate, so the slot
@@ -8538,11 +8525,9 @@ impl<'p> Fn_<'_, 'p> {
             // M3's integer width is the same two shapes with the lane-typed
             // opcodes swapped, which is what M1 meant by "one internal name per
             // width": nothing here decodes a receiver.
-            "F32x4" | "@f32x4Splat" | "I32x4" | "@i32x4Splat" | "F64x2" | "@f64x2Splat"
-                if !args.is_empty() =>
-            {
-                let wide = name.starts_with("@f64x2") || name == "F64x2";
-                let int = name.starts_with("@i32x4") || name == "I32x4";
+            "F32x4" | "I32x4" | "F64x2" if !args.is_empty() => {
+                let wide = name == "F64x2";
+                let int = name == "I32x4";
                 let (vec, lane) = if int {
                     (Type::I32x4, INT32)
                 } else if wide {
@@ -8550,27 +8535,16 @@ impl<'p> Fn_<'_, 'p> {
                 } else {
                     (Type::F32x4, Type::Float32)
                 };
-                if name.ends_with("Splat") {
-                    self.expr_as(m, b, &args[0], &lane)?;
-                    b.ins(if int {
-                        &Instruction::I32x4Splat
+                b.ins(&Instruction::V128Const(0));
+                for (i, a) in args.iter().enumerate() {
+                    self.expr_as(m, b, a, &lane)?;
+                    b.ins(&if int {
+                        Instruction::I32x4ReplaceLane(i as u8)
                     } else if wide {
-                        &Instruction::F64x2Splat
+                        Instruction::F64x2ReplaceLane(i as u8)
                     } else {
-                        &Instruction::F32x4Splat
+                        Instruction::F32x4ReplaceLane(i as u8)
                     });
-                } else {
-                    b.ins(&Instruction::V128Const(0));
-                    for (i, a) in args.iter().enumerate() {
-                        self.expr_as(m, b, a, &lane)?;
-                        b.ins(&if int {
-                            Instruction::I32x4ReplaceLane(i as u8)
-                        } else if wide {
-                            Instruction::F64x2ReplaceLane(i as u8)
-                        } else {
-                            Instruction::F32x4ReplaceLane(i as u8)
-                        });
-                    }
                 }
                 return Ok(vec);
             }
@@ -8675,46 +8649,6 @@ impl<'p> Fn_<'_, 'p> {
                     Instruction::I32x4AllTrue
                 });
                 return Ok(Type::Bool);
-            }
-            // RFC-0083 M2. `min`/`max` are wasm's own, which is the rule the other
-            // two engines were pointed AT rather than the one they fell into: NaN
-            // in either operand propagates and `-0.0` orders below `+0.0`.
-            //
-            // `f32x4.nearest` is roundTiesToEven, and it is the engine with no
-            // choice again: the other two were pointed at it (`llvm.roundeven`,
-            // `round_ties_even`) rather than at their `round`, which is ties-away
-            // and answers 3 for 2.5.
-            "@f32x4Min" | "@f32x4Max" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
-            | "@f32x4Trunc" | "@f32x4Nearest" => {
-                self.expr_as(m, b, &args[0], &Type::F32x4)?;
-                if args.len() == 2 {
-                    self.expr_as(m, b, &args[1], &Type::F32x4)?;
-                }
-                b.ins(&match name {
-                    "@f32x4Min" => Instruction::F32x4Min,
-                    "@f32x4Max" => Instruction::F32x4Max,
-                    "@f32x4Ceil" => Instruction::F32x4Ceil,
-                    "@f32x4Floor" => Instruction::F32x4Floor,
-                    "@f32x4Trunc" => Instruction::F32x4Trunc,
-                    "@f32x4Nearest" => Instruction::F32x4Nearest,
-                    _ => Instruction::F32x4Sqrt,
-                });
-                return Ok(Type::F32x4);
-            }
-            // The wide width's three (RFC-0083 M4). Same rule, same reason: wasm's
-            // `f64x2.min` is IEEE-754-2019 `minimum` and the other two engines were
-            // pointed at it rather than at their own default.
-            "@f64x2Min" | "@f64x2Max" | "@f64x2Sqrt" => {
-                self.expr_as(m, b, &args[0], &Type::F64x2)?;
-                if args.len() == 2 {
-                    self.expr_as(m, b, &args[1], &Type::F64x2)?;
-                }
-                b.ins(&match name {
-                    "@f64x2Min" => Instruction::F64x2Min,
-                    "@f64x2Max" => Instruction::F64x2Max,
-                    _ => Instruction::F64x2Sqrt,
-                });
-                return Ok(Type::F64x2);
             }
             // (`@f32x4Abs` was here as `f32x4.abs`, deleted in M4 — and this is the
             // column that kept it two milestones too long. Its census row claimed
@@ -16400,6 +16334,60 @@ fn core_walk_off() -> bool {
     std::env::var_os("VYRN_NO_CORE_WALK").is_some()
 }
 
+/// What a builtin the core's row specifies emits: its operand types, the one
+/// instruction it is, and its result type — RFC-0125 M7, the builtin family.
+///
+/// `vyrn_lower::core::builtin_row` states the types, because a row is what
+/// makes such a call a `call` with a specification and not a gap; this states
+/// the instruction, because an instruction is the emitter's. `None` where the
+/// name has no row, or where the site's arity is not the row's. Two readers
+/// ask it: [`Fn_::call_inner`] over the source and [`Fn_::core_call`] over the
+/// rows. `builtin_rows_all_emit` refuses a row with no instruction.
+fn builtin_spec(
+    name: &str,
+    argc: usize,
+) -> Option<(&'static [Type], Instruction<'static>, &'static Type)> {
+    let Some(Spec::Typed(params, ret)) = vyrn_lower::core::builtin_row(name) else {
+        return None;
+    };
+    if params.len() != argc {
+        return None;
+    }
+    let ins = match name {
+        // `f64` and `i64` are the same 64 bits on this backend's value stack,
+        // so a reinterpretation is free where a conversion rounds.
+        "floatBits" => Instruction::I64ReinterpretF64,
+        "floatFromBits" => Instruction::F64ReinterpretI64,
+        "@f32x4Splat" => Instruction::F32x4Splat,
+        "@i32x4Splat" => Instruction::I32x4Splat,
+        "@f64x2Splat" => Instruction::F64x2Splat,
+        // RFC-0083 M2 and M4: wasm's own `min` and `max`, which propagate a
+        // NaN in either operand and order `-0.0` below `+0.0`, and
+        // `f32x4.nearest`, which is roundTiesToEven. The other two engines are
+        // pointed at these rules rather than at their own defaults.
+        "@f32x4Min" => Instruction::F32x4Min,
+        "@f32x4Max" => Instruction::F32x4Max,
+        "@f32x4Sqrt" => Instruction::F32x4Sqrt,
+        "@f32x4Ceil" => Instruction::F32x4Ceil,
+        "@f32x4Floor" => Instruction::F32x4Floor,
+        "@f32x4Trunc" => Instruction::F32x4Trunc,
+        "@f32x4Nearest" => Instruction::F32x4Nearest,
+        "@f64x2Min" => Instruction::F64x2Min,
+        "@f64x2Max" => Instruction::F64x2Max,
+        "@f64x2Sqrt" => Instruction::F64x2Sqrt,
+        _ => return None,
+    };
+    Some((params.as_slice(), ins, ret))
+}
+
+/// The specification row of the builtin a CALL ROW names, or `None` where the
+/// row names a function this program declares or a callee with no row.
+fn core_builtin(callee: &str, kind: Callee) -> Option<&'static Spec> {
+    matches!(kind, Callee::Builtin | Callee::Reserved)
+        .then(|| vyrn_lower::core::builtin_row(callee))
+        .flatten()
+}
+
 thread_local! {
     /// How many bodies this thread emitted from the core's statements, and how
     /// many it emitted at all — RFC-0125 §3 M3, the driver slice's own count.
@@ -17100,9 +17088,14 @@ impl<'p> Fn_<'_, 'p> {
     /// name and a name has the checker's type on it.
     fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
         match rhs {
-            Rhs::Call { callee, kind, .. } => match self.core_sig(callee, *kind) {
-                Some(s) => Ok(s.ret_ty),
-                None => unsupported("a core call this walk does not read", line),
+            Rhs::Call {
+                callee, kind, args, ..
+            } => match builtin_spec(callee, args.len()) {
+                Some((_, _, ret)) => Ok(ret.clone()),
+                None => match self.core_sig(callee, *kind) {
+                    Some(s) => Ok(s.ret_ty),
+                    None => unsupported("a core call this walk does not read", line),
+                },
             },
             _ => unsupported("a discarded value the row does not type", line),
         }
@@ -17128,6 +17121,39 @@ impl<'p> Fn_<'_, 'p> {
         args: &[(Val, vyrn_frontend::ast::Capability)],
         line: usize,
     ) -> Result<Type, String> {
+        // RFC-0125 M7, the builtin family: a builtin with a specification row
+        // is emitted from that row. Every kind of row is answered here, so a
+        // kind added to [`Spec`] is a compile error until it is.
+        match core_builtin(callee, kind) {
+            Some(Spec::Typed(..)) => {
+                let Some((params, ins, ret)) = builtin_spec(callee, args.len()) else {
+                    return unsupported("a specified builtin at another arity", line);
+                };
+                for ((v, _), p) in args.iter().zip(params) {
+                    self.core_val(m, b, body, w, v, p, line)?;
+                }
+                b.ins(&ins);
+                return Ok(ret.clone());
+            }
+            // `x.copy()` (RFC-0089 M1b): the operand at its own type, which
+            // the row put on the name, and then the duplication the arm over
+            // the source makes from the type `peek` answers with. A type that
+            // declares `impl Copy for T` says what duplicating it means, and
+            // that call is the declaration's, so the row stands down.
+            Some(Spec::OwnType) => {
+                let [(v, _)] = args else {
+                    return unsupported("`copy` of other than one value", line);
+                };
+                let ty = self.core_ty(body, v, &Type::Int);
+                if ftypes::copy_impl(&self.cx.impls, &ty).is_some() {
+                    return unsupported("a `copy` the receiver's type declares", line);
+                }
+                self.core_val(m, b, body, w, v, &ty, line)?;
+                self.copy_stack(m, b, &ty, line)?;
+                return Ok(ty);
+            }
+            None => {}
+        }
         let Some(sig) = self.core_sig(callee, kind) else {
             return unsupported("a core call this walk does not read", line);
         };
@@ -17782,6 +17808,28 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
+    /// Whether a call row's builtin is one [`Fn_::core_call`] emits: the
+    /// arity the row states, and for a duplication a type that does not
+    /// declare its own `copy`.
+    fn core_builtin_readable(
+        &self,
+        body: &vyrn_lower::core::Body,
+        callee: &str,
+        kind: Callee,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+    ) -> bool {
+        match core_builtin(callee, kind) {
+            Some(Spec::Typed(params, _)) => params.len() == args.len(),
+            Some(Spec::OwnType) => match args {
+                [(v, _)] => {
+                    ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int)).is_none()
+                }
+                _ => false,
+            },
+            None => false,
+        }
+    }
+
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => core_val_readable(body, v),
@@ -17800,9 +17848,10 @@ impl<'p> Fn_<'_, 'p> {
             } => {
                 !write_back
                     && args.iter().all(|(v, _)| core_val_readable(body, v))
-                    && self
-                        .core_sig(callee, *kind)
-                        .is_some_and(|s| s.params.len() == args.len())
+                    && (self.core_builtin_readable(body, callee, *kind, args)
+                        || self
+                            .core_sig(callee, *kind)
+                            .is_some_and(|s| s.params.len() == args.len()))
             }
             // A place this walk addresses, whose value is one it loads. An
             // aggregate read is refused by the same clause that refuses an
@@ -17945,6 +17994,23 @@ mod tests {
             e.unwrap_err(),
             "direct backend: no lowering for `while` at line 12"
         );
+    }
+
+    /// The two halves of a specified builtin are keyed by the same name: the
+    /// core's row states the types and [`builtin_spec`] states the
+    /// instruction, so a row with no instruction would be a call the gap
+    /// screen promises this walk reads and it cannot.
+    #[test]
+    fn builtin_rows_all_emit() {
+        for (name, spec) in vyrn_lower::core::builtin_rows() {
+            let Spec::Typed(params, _) = spec else {
+                continue;
+            };
+            assert!(
+                builtin_spec(name, params.len()).is_some(),
+                "`{name}` has a row and no instruction"
+            );
+        }
     }
 
     /// The runtime table's invariant, now that every runtime FUNCTION is
