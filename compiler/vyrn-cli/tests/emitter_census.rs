@@ -832,7 +832,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
         ("the mapping §2.3 names", 9199, 748),
         ("a decision §2.3 says it must not make", 1256, 214),
         ("the runtime it emits by hand", 625, 7),
-        ("one block per builtin name", 4704, 933),
+        ("one block per builtin name", 4669, 917),
         ("the wasm format", 343, 0),
         ("shared machinery", 2697, 88),
         ("tests", 331, 0),
@@ -913,7 +913,7 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
         ("the core's rows", 5, 2094, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
         ("the source, and the core has no row", 10, 1975, 82, 0),
-        ("both, for two questions", 15, 8832, 105, 192),
+        ("both, for two questions", 15, 8797, 105, 192),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
     assert_eq!(

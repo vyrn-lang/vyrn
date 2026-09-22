@@ -8690,11 +8690,10 @@ impl<'p> Fn_<'_, 'p> {
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
             }
-            "@push" if args.len() == 2 => return self.push(m, b, args, line),
-            "@reserve" if args.len() == 2 => return self.reserve_arr(m, b, args, line),
-            "@clear" if args.len() == 1 => return self.clear_arr(m, b, args, line),
-            "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
-            "@copyFrom" if args.len() == 2 => return self.copy_from_arr(m, b, args, line),
+            "@push" | "@reserve" | "@append" | "@copyFrom" if args.len() == 2 => {
+                return self.rebuild(m, b, name, args, line)
+            }
+            "@clear" if args.len() == 1 => return self.rebuild(m, b, name, args, line),
             "@tally" if args.len() == 3 => return self.map_tally(m, b, args, line),
             "@tallyBytes" if args.len() == 3 => return self.map_tally_bytes(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
@@ -11792,162 +11791,128 @@ impl<'p> Fn_<'_, 'p> {
         Ok((*elem, l, stride, src))
     }
 
-    /// `xs.clear()` (RFC-0115 addendum): `std/runtime`'s `arrClear`.
-    fn clear_arr(
+    /// `xs.push(v)`, `xs.reserve(n)`, `xs.clear()`, `xs.append(ys)` and
+    /// `dst.copyFrom(src)` over the source: the receiver's address, then
+    /// [`Fn_::arr_rebuild`]. A `SmallArray` receiver takes the four-field path.
+    fn rebuild(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        name: &str,
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        let (_, _, _, src) = self.arr_recv(b, &aty, "clear", line)?;
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::Call(self.cx.rt.arr_clear));
-        b.ins(&Instruction::LocalGet(src));
-        Ok(aty)
-    }
-
-    /// `xs.reserve(n)` (RFC-0115): `std/runtime`'s `arrReserve`. The count is
-    /// evaluated into a local first, so no operand of the call is on the stack
-    /// while a user expression runs.
-    fn reserve_arr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        let (elem, _, stride, src) = self.arr_recv(b, &aty, "reserve", line)?;
-        let n = b.local(ValType::I64);
-        self.expr_as(m, b, &args[1], &Type::Int)?;
-        b.ins(&Instruction::LocalSet(n));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::LocalGet(n));
-        b.ins(&Instruction::Call(self.cx.rt.arr_reserve));
-        b.ins(&Instruction::LocalGet(src));
-        Ok(Type::Array(Box::new(elem)))
-    }
-
-    /// `xs.append(ys)` and `dst.copyFrom(src)` (RFC-0115): `std/runtime`'s
-    /// `arrAppend` and `arrCopyFrom`. The checker held the element type to
-    /// heapless ones, so the runtime moves bytes and is handed no type.
-    fn append_arr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        self.arr_bulk(m, b, args, "append", line)
-    }
-
-    fn copy_from_arr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        self.arr_bulk(m, b, args, "copyFrom", line)
-    }
-
-    fn arr_bulk(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        verb: &str,
-        line: usize,
-    ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        let (elem, _, stride, src) = self.arr_recv(b, &aty, verb, line)?;
-        let xs = b.local(ValType::I32);
-        self.expr_as(m, b, &args[1], &aty)?;
-        b.ins(&Instruction::LocalSet(xs));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::LocalGet(xs));
-        b.ins(&Instruction::Call(if verb == "append" {
-            self.cx.rt.arr_append
-        } else {
-            self.cx.rt.arr_copy_from
-        }));
-        b.ins(&Instruction::LocalGet(src));
-        Ok(Type::Array(Box::new(elem)))
-    }
-
-    /// `xs.push(v)`: `std/runtime`'s `arrPush` grows and writes the new triple
-    /// with `len + 1`; the element is stored here, because the runtime knows
-    /// the stride and not the type.
-    ///
-    /// The old buffer comes back from the call and is released only after the
-    /// element is stored, and that is not tidiness. The value expression is
-    /// evaluated BELOW, and it may read the array being pushed onto —
-    /// `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in `std/hash` does, through the
-    /// caller's header, which still names the OLD buffer. Freeing at the
-    /// growth made that a read of a block already on a free list, and SHA-1
-    /// came out wrong from the seventeenth word.
-    fn push(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        if let Type::SmallArray(inner, n) = self.cx.resolve(&aty) {
+        if let (Type::SmallArray(inner, n), "@push") = (self.cx.resolve(&aty), name) {
             let ty = self.cx.resolve(&aty);
             return self.sa_push(m, b, &ty, &inner, n, &args[1], line);
         }
-        let (elem, l, stride, src) = self.arr_recv(b, &aty, "push", line)?;
-        let stale = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::Call(self.cx.rt.arr_push));
-        b.ins(&Instruction::LocalSet(stale));
-        // The element goes at the old length, which the new triple holds plus one.
-        let (data, last) = (b.local(ValType::I32), b.local(ValType::I64));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Sub);
-        b.ins(&Instruction::LocalSet(last));
-        let w = Walk {
-            data,
-            len: last,
-            stride: stride as u32,
-            elem: elem.clone(),
-            byte: false,
+        let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match args {
+            [_, a] => s.expr_as(m, b, a, t).map(|_| ()),
+            _ => unsupported(&format!("`{name}` with no operand"), line),
         };
-        self.elem_addr(b, &w, last);
-        let r = self.cx.repr(&elem, line)?;
-        self.expr_as(m, b, &args[1], &elem)?;
-        match &r {
-            Repr::Scalar(_) => {
-                b.ins(&store_of(&self.cx.ll(&elem)));
+        self.arr_rebuild(m, b, name, &aty, &mut operand, line)
+    }
+
+    /// One array operation `std/runtime` rebuilds the receiver with, the
+    /// receiver's address on the stack (RFC-0115, PLAN-0125-runtime section 6 step
+    /// 6). Leaves the same address, which is the result: the runtime wrote the
+    /// new triple into the receiver ([`Fn_::arr_recv`]). `operand` writes the
+    /// second argument at the type asked for; `clear` has none.
+    ///
+    /// `reserve`, `append` and `copyFrom` take their operand into a local
+    /// before the call, so no operand of the call is on the stack while a user
+    /// expression runs, and the runtime moves bytes and is handed no type,
+    /// because the checker held the element type to heapless ones.
+    ///
+    /// `push`: `arrPush` grows and writes the new triple with `len + 1`; the
+    /// element is stored here, because the runtime knows the stride and not
+    /// the type. The old buffer comes back from the call and is released only
+    /// after the element is stored, and that is not tidiness. Over the source
+    /// the value expression is evaluated BELOW, and it may read the array
+    /// being pushed onto — `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in
+    /// `std/hash` does, through the caller's header, which still names the
+    /// OLD buffer. Freeing at the growth made that a read of a block already
+    /// on a free list, and SHA-1 came out wrong from the seventeenth word.
+    fn arr_rebuild(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        aty: &Type,
+        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let verb = name.trim_start_matches('@');
+        let (elem, l, stride, src) = self.arr_recv(b, aty, verb, line)?;
+        let rt = &self.cx.rt;
+        let (call, arg) = match verb {
+            "clear" => (rt.arr_clear, None),
+            "reserve" => (rt.arr_reserve, Some((ValType::I64, Type::Int))),
+            "append" => (rt.arr_append, Some((ValType::I32, aty.clone()))),
+            "copyFrom" => (rt.arr_copy_from, Some((ValType::I32, aty.clone()))),
+            "push" => (rt.arr_push, None),
+            _ => return unsupported(&format!("`{name}` rebuilds no array"), line),
+        };
+        let arg = match arg {
+            Some((vt, t)) => {
+                let x = b.local(vt);
+                operand(self, m, b, &t)?;
+                b.ins(&Instruction::LocalSet(x));
+                Some(x)
             }
-            Repr::Agg(_) => {
-                b.ins(&Instruction::I32Const(stride));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
-            Repr::Unit => return unsupported("an array of Unit", line),
+            None => None,
+        };
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::LocalGet(src));
+        if verb != "clear" {
+            b.ins(&Instruction::I32Const(stride));
         }
-        // Now nothing can read the old buffer through the caller's header.
-        b.ins(&Instruction::LocalGet(stale));
-        b.ins(&Instruction::Call(self.cx.rt.free));
+        if let Some(x) = arg {
+            b.ins(&Instruction::LocalGet(x));
+        }
+        b.ins(&Instruction::Call(call));
+        if verb == "push" {
+            let stale = b.local(ValType::I32);
+            b.ins(&Instruction::LocalSet(stale));
+            // The element goes at the old length, which the new triple holds
+            // plus one.
+            let (data, last) = (b.local(ValType::I32), b.local(ValType::I64));
+            b.ins(&Instruction::LocalGet(src));
+            b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+            b.ins(&Instruction::LocalSet(data));
+            b.ins(&Instruction::LocalGet(src));
+            b.ins(&Instruction::I64Load(at(l.fields[1])));
+            b.ins(&Instruction::I64Const(1));
+            b.ins(&Instruction::I64Sub);
+            b.ins(&Instruction::LocalSet(last));
+            let w = Walk {
+                data,
+                len: last,
+                stride: stride as u32,
+                elem: elem.clone(),
+                byte: false,
+            };
+            self.elem_addr(b, &w, last);
+            let r = self.cx.repr(&elem, line)?;
+            operand(self, m, b, &elem)?;
+            match &r {
+                Repr::Scalar(_) => {
+                    b.ins(&store_of(&self.cx.ll(&elem)));
+                }
+                Repr::Agg(_) => {
+                    b.ins(&Instruction::I32Const(stride));
+                    b.ins(&Instruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                }
+                Repr::Unit => return unsupported("an array of Unit", line),
+            }
+            // Now nothing can read the old buffer through the caller's header.
+            b.ins(&Instruction::LocalGet(stale));
+            b.ins(&Instruction::Call(self.cx.rt.free));
+        }
         b.ins(&Instruction::LocalGet(src));
         Ok(Type::Array(Box::new(elem)))
     }
