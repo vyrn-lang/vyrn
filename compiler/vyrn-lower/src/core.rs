@@ -457,6 +457,12 @@ pub enum Rhs {
         /// (`out.push(v)`): the call hands the buffer back through its result
         /// and the store after it puts it back, so the take changes no owner.
         ///
+        /// The KERNEL is the reader, and the only one: it lets a `modify`
+        /// parameter be this take's subject and it words the refusal when the
+        /// receiver is an alias ([`crate::kernel::Kernel::take_arg`]). An
+        /// emitter needs no such field, because the call and the store are two
+        /// rows and each is read where it stands.
+        ///
         /// The rule under it — which builtin rebuilds its receiver — is
         /// [`vyrn_frontend::prelude::rebuilds`], the one statement both this
         /// pass and `movecheck::sinks` read. The exception itself is stated
@@ -1704,13 +1710,9 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
         }
         // Since the callee slice the row says WHO: a function this program
         // declares is one the emitter's own table answers for, and only the
-        // other eight kinds, and a write-back, are still waiting on a row.
+        // other eight kinds are still waiting on a row.
         Rhs::Call {
-            callee,
-            args,
-            kind,
-            write_back,
-            ..
+            callee, args, kind, ..
         } => {
             // Since RFC-0125 M7 a variant constructor is read off the row too
             // (`direct::Fn_::core_make`): it is a layout MADE, with a tag in
@@ -1719,9 +1721,13 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             // is read off the row too (`direct::Fn_::core_call`): the row
             // names the operand types and the result, and the emitter's table
             // names the instruction.
-            if *write_back {
-                out.push(format!("Call:writeBack:{callee}"));
-            } else if !matches!(kind, Callee::Fn | Callee::Ctor) && builtin_row(callee).is_none() {
+            //
+            // A handed-back receiver is no gap of its own (RFC-0125 M7): the
+            // builder states `out.push(v)` as the call and the store that puts
+            // the result back, two rows an emitter reads, for a name, a field,
+            // an element and a global alike. What such a body waits on is its
+            // CALLEE, which is `@push` and its siblings, and the tag says so.
+            if !matches!(kind, Callee::Fn | Callee::Ctor) && builtin_row(callee).is_none() {
                 out.push(format!("Call:{kind:?}:{callee}"));
             }
             for (v, _) in args {
@@ -5577,6 +5583,19 @@ impl<'a> Builder<'a> {
                 kind = Callee::Value;
                 vec![Capability::Read; args.len()]
             } else if matches!(name, "print") {
+                vec![Capability::Read; args.len()]
+            } else if matches!(
+                name,
+                vyrn_frontend::checker::GEN_REFLECT
+                    | vyrn_frontend::checker::GEN_NEXT_INT
+                    | vyrn_frontend::checker::GEN_NEXT_STR
+            ) {
+                // The generation host's three primitives (RFC-0076 M3b). They
+                // exist only under `checker::set_gen_host`, so a program cannot
+                // name them and no declaration does either; the emitter lowers
+                // each in place. The host READS what it is handed — `reflect`
+                // takes the String by address and stashes atoms of its own —
+                // so the guest keeps every argument it owns.
                 vec![Capability::Read; args.len()]
             } else {
                 return gap_d("a call this slice cannot attribute", name, line);
