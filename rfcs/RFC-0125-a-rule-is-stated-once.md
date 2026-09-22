@@ -27145,7 +27145,7 @@ Left: the eight names above, 180 bodies over `examples/` that the family alone s
 #### A frame holds a value, and the frame was not what held the count back (2026-09-22, `m7-frame`)
 Decision: a name is this walk's when it has a place of its own, which is `Fn_::place_for`'s answer and not a list of five types. Mine, on the counts below.
 Went: `Fn_::core_walkable`'s scalar clause over the body's names, and the scalar clause at every read of a value, into `Fn_::core_framed` and `Fn_::core_val_readable`. Stayed: the scalar clause on an arithmetic row's operands, now `core_operand`, because the walk applies no operation to a String; the clause on a store's destination, because the assign arm's append and its release of the displaced value are more than the row states; the clause on an annotated `let`, because the arm takes the place before the initializer runs and this walk takes it after.
-Lines: `direct.rs` 18,059 to 18,113. Refusals: 0 lost / 0 gained. Manifest: 2 rows of 174, `ifexpr.vyrn` and `strpredbytes.vyrn`, written in the same commit.
+Lines: `direct.rs` 18,059 to 18,112. Refusals: 0 lost / 0 gained. Manifest: 2 rows of 174, `ifexpr.vyrn` and `strpredbytes.vyrn`, written in the same commit.
 Licence:
 - `coredrive --ignored`: 168 programs, 21,556 bodies. Bodies the emitter took from the core 953 to 996. Bodies with no gap 13,623 and distinct bodies the rows carry end to end 393, both unmoved, because the change is a screen and no row moved.
 - 165 of 168 programs emit the same module either way, where 166 did. `strpredbytes.vyrn` joined `ifexpr.vyrn` and `knucleotide.vyrn`, and `ifexpr.vyrn` gained a second occurrence: all four are `return if c { a } else { b }`, which the arm writes as a typed `if` with one branch out and the rows write as a `return` per arm (`Builder::return_through`). The wat diff of each is that one shape and nothing else. The two manifest rows are the same four occurrences.
@@ -27155,7 +27155,7 @@ Licence:
 - `kernel --ignored`: 175 programs, 27,416 instances accepted, 0 refused, 0 unlowered, unmoved.
 - `cargo test -p vyrn-cli --no-fail-fast`: 647 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 46 passed, 0 failed.
 - `cargo fmt --all --check` and `vyrn-lsp`'s own: clean. `cargo build --release -p vyrn-cli`: no warning.
-- the emitter census re-pinned in the same commit: the mapping kind 8,129 to 8,183 lines, the read class `both, for two questions` 7,892 to 7,946 lines with its row count 154 to 155.
+- the emitter census re-pinned in the same commit: the mapping kind 8,129 to 8,182 lines, the read class `both, for two questions` 7,892 to 7,945 lines with its row count 154 to 155.
 Findings:
 - the frame is not what holds the count back, and the measurement says so. Of the 5,486 bodies the scalar clause refused, 1,928 were a value with a place of its own, and widening them moved 43. The rest of each body waits on a family that is not this one.
 - the biggest of those is a conversion the emitter does not read. The row exists since `track-gs` and `Fn_::core_rhs_readable` still declines `Op::Conv`, which is 16,417 statement refusals over the corpus, against 22,337 for a call to a declared function and the unnamed-temporary rule behind both.
