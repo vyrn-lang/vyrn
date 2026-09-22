@@ -17295,6 +17295,17 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&Instruction::LocalSet(l));
                 }
+                // A field or module state: its address with the field's offset
+                // added, the value, and the store, which is the `SetField`
+                // arm's order for a scalar field.
+                St::Store {
+                    place, value, line, ..
+                } => {
+                    let (ty, off) = self.core_addr(m, b, body, w, place, *line)?;
+                    self.core_step(b, off);
+                    self.core_val(m, b, body, w, value, &ty, *line)?;
+                    b.ins(&store_of(&self.cx.ll(&ty)));
+                }
                 // A LOOP'S EXIT, which the core states and wasm has one
                 // instruction for. The pass makes up exactly one `break`
                 // (`site: 0`, "a break this pass made up") and puts it in the
@@ -18391,9 +18402,14 @@ impl<'p> Fn_<'_, 'p> {
                     || self.core_lands(body, ss, i, reads)
             }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
+            // A store into a field or into module state owns no heap when its
+            // type is a scalar, so the displaced value needs no release.
             St::Store { place, value, .. } => {
-                matches!(place, vyrn_lower::core::Place::Name(n)
-                    if core_scalar(&body.names[*n as usize].ty))
+                let ty = match place {
+                    vyrn_lower::core::Place::Name(n) => Some(body.names[*n as usize].ty.clone()),
+                    p => self.core_place_ty(body, p),
+                };
+                ty.is_some_and(|t| core_scalar(&t) && !self.checks(&t))
                     && self.core_val_readable(body, value)
             }
             St::If {
@@ -18549,8 +18565,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The first name the statement `s` reads, which is the only one the
-    /// operand stack can be carrying for it. None for an aggregate call and a
-    /// variant, whose destination goes on the stack before their parts.
+    /// operand stack can be carrying for it. None for an aggregate call, a
+    /// variant and a store into a place, whose destination goes on the stack
+    /// before their parts.
     fn core_first_read(
         &self,
         body: &vyrn_lower::core::Body,
@@ -18558,6 +18575,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Option<vyrn_lower::core::Name> {
         match s? {
             St::Let(_, rhs) if self.core_ctor(rhs) || self.core_agg_call(body, rhs) => None,
+            St::Store { place, .. } if !matches!(place, vyrn_lower::core::Place::Name(_)) => None,
             s => first_read(s),
         }
     }
