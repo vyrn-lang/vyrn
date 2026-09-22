@@ -27390,3 +27390,29 @@ Findings:
 - the fix is a statement the builder does not write, not a row the emitter drops: dropping the call row alone left `p + 8` bound, four instructions on every allocation, as `m7-walk` measured.
 - `fallible_try` stated `success` as `Callee::Ctor`, which `Fn_::core_ctor` reads as a layout made. It is `Callee::Method` now; the 3 bodies still wait on `Switch:Impl`, so nothing moved.
 Left: the value row after a `panic` in value position, 710 lines, blocked by a list the caller extends after the `trap`, which a cut in each of the three builders would close; `runtime$intStr`, blocked by `@push`, `@at` and `stringFromBytes`; the 749 bodies that can panic and wait on another family first.
+
+##### What the whole-body screen refuses, by clause (2026-09-22, `m7-screen`)
+
+Measured before any code moved. A temporary instrument in `Fn_::core_walkable` and the statement screen under it made every refusing clause record its name and pass, so one run gives each body's first clause and every clause it meets. It ran over the gate list in one cache state: `cargo test -p vyrn-cli` as four `--test` groups and `coredrive --ignored`. A body is counted once per compile, and only where `core::gaps` names no gap, which is 107,283 compiles: 89,084 taken, 18,199 refused.
+
+| clause | first | only | met |
+|---|---|---|---|
+| a name of a layout the body does not make, call or take as a parameter | 7,964 | 0 | 8,334 |
+| a call to a callee with no signature: the three audit hooks, then `hostMonotonicNanos` and `hostRandomSeed` | 3,312 | 3,312 | 4,198 |
+| a `read` argument that is a layout (`core_args_readable`) | 2,639 | 2,420 | 8,300 |
+| a read or take of a place that is not a scalar | 1,140 | 886 | 6,106 |
+| an arithmetic operand that is not a scalar (`core_operand`) | 1,103 | 376 | 2,508 |
+| a name of a `where` type | 596 | 0 | 599 |
+| a store into a place that is not a name | 551 | 249 | 798 |
+| a made layout under an annotation | 537 | 6 | 564 |
+| a switch payload binder that is not a scalar | 124 | 0 | 3,717 |
+| an aggregate call into a temporary that does not land | 89 | 83 | 291 |
+| a made layout into a temporary | 74 | 0 | 1,496 |
+| an arithmetic operand that is a string literal | 27 | 26 | 50 |
+| a `modify` or `consume` argument that is a layout | 25 | 3 | 751 |
+| a name of a unit type | 8 | 0 | 8 |
+| a `let` annotated with a `where` type | 4 | 4 | 4 |
+| a store into a name that is not a scalar | 3 | 3 | 1,248 |
+| an aggregate result checked where it is returned | 3 | 0 | 3 |
+
+The first clause is never the only one in 7,964 bodies: a layout name the body does not make is always also the statement that reads or binds it, and the two close together or not at all. The audit hooks are 3,249 of the 3,312, one call each in `runtime$free`, `runtime$envGet` and `runtime$auditDeath`, and every operand of the three is a name.
