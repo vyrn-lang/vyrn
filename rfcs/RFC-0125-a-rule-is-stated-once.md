@@ -27064,3 +27064,19 @@ Findings:
 - the emitter census's mapping kind 7,724 to 7,711 lines and the read class `both, for two questions` 7,453 to 7,440 lines with its row count 140 to 139.
 - `vyrn-codegen/src/lib.rs`'s module doc still describes a textual LLVM backend and `vyrn_frontend::interp`; neither exists. Not this slice's to fix.
 Left: nothing on this family. `Callee::Scalar` and `Make` are other tracks'.
+#### The largest gap was a conversion, and the row states it (2026-09-11, `track-gs`)
+Decision: an `Op` variant in `Rhs::Prim`, not `Callee::Scalar` made real. Mine, on the two readings below.
+Went: `Builder::call`'s sixteen-name scalar screen and the `Callee::Scalar` branch under it, 22 lines; `Callee::Scalar` itself. Stayed: the wrap, renormalize and saturate rules, in `coerce_plan`'s rungs, because both compiled backends already read them at one place and a row that restated them would be the second copy.
+Lines: `core.rs` 6,995 to 6,994. `direct.rs` 17,981 to 17,994. Refusals: 0 lost / 0 gained. Manifest: untouched, `VYRN_WASM_MANIFEST=check` green.
+Licence:
+- `coredrive --ignored`: 168 programs, 21,556 bodies. Bodies the rows carry end to end 3,449 to 13,576, of which scalar-only 2,995 to 10,923, distinct names 283 to 354. The callee class falls 10,876 to 749 and its scalar-only part 8,113 to 185. 166 of 168 programs emit the same module either way, before and after, and the two that differ are the same two by the same bytes.
+- the gap tally over `examples/`, the census's own script, run cold under both binaries: 25,694 bodies on each side, whole 4,026 (15.7 per cent) to 15,185 (59.1 per cent).
+- `kernel --ignored`: 175 programs, 27,416 instances accepted, 0 refused, 0 unlowered, every number unmoved.
+- `residue --ignored` green in 282 s; `refusals`, `traps` and `limits` green, no conversion trap sentence moved; `cargo test -p vyrn-cli` over its 85 targets 611 passed, 0 failed, 47 ignored; `cargo test -p vyrn-lower -p vyrn-codegen` 46 passed, 0 failed; both formatters clean; the release build carries no new warning.
+Findings:
+- `Callee::Scalar` was unreachable, not merely unproduced. Every one of the sixteen names it screened for is in `checker::RESERVED`, which is the branch above it, except `Mask32x4` and `Mask64x2`, which no program calls, because a mask comes from a comparison. The census counted zero because the arm cannot run.
+- the row is no longer what stands between a whole body and the whole-body walk. Whole bodies move 3,449 to 13,576 while the emitter takes the core's walk for 953 of 21,512, the count the branch point already read. What refuses the rest is `Fn_::core_readable`'s own screen, not a gap.
+- no AST arm moves. `coredrive`'s dispatch table is byte for byte the branch point's, `Stmt::Let` at 36,866 on the arm against 38,181 off the rows, because no body changes hands.
+- the greedy order is recomputed, and the two families the census ranked next closed first. Over `examples/`, the bodies a single family still blocks are `Val::Lit(Opaque)` 410, a builtin call 299, an aggregate read 277, a reserved call 203, a placed release 160, a tag 95 and a write-back 82. `rfcs/census/core-gaps.md` dates its step table to head `377cb367` and is not re-measured here.
+- the tally's denominator held at 25,694 across both binaries, so the percentages above carry no wobble, and `coredrive` stays the pinned count.
+Left: the 12,623 bodies the rows carry whole that the per-body screen refuses, blocked by `Fn_::core_readable`'s unnamed-temporary rule. A temporary the reader did not bind passes only when one statement reads it and that statement is the next one, because any other temporary needs a local the AST walk never takes.
