@@ -953,13 +953,18 @@ impl Body {
             names_in(s, &mut need);
             let mut start = i;
             while start > 0 {
-                let St::Let(n, rhs) = &ss[start - 1] else {
-                    break;
-                };
-                if self.names[*n as usize].binding.is_some() || !need.contains(n) {
-                    break;
+                match &ss[start - 1] {
+                    // The releases an exit runs are the exit's own rows: the
+                    // row names the node the plan keys the exit by, which is
+                    // this statement's (RFC-0125 M7).
+                    St::Row { site, .. } if *site == node => {}
+                    St::Let(n, rhs)
+                        if self.names[*n as usize].binding.is_none() && need.contains(n) =>
+                    {
+                        names_in_rhs(rhs, &mut need);
+                    }
+                    _ => break,
                 }
-                names_in_rhs(rhs, &mut need);
                 start -= 1;
             }
             if out.insert(node, ss[start..=i].to_vec()).is_some() {
@@ -1794,9 +1799,15 @@ fn build_seeded(
             }
         }
     }
-    // The placed releases, by the exit they are at.
+    // The placed releases, by the exit they are at — the PLAN's own rows and
+    // not the instance's copy of them. The copy is made where the lowering
+    // names the instance, which is before [`augment`] places the rows the plan
+    // was missing, so the second build read a plan that was one pass old and
+    // stated none of them. What the copy carries and the plan does not is the
+    // substituted type a `Deep` walks, and no row below reads a kind.
+    let no_steps: Vec<Release> = Vec::new();
     let mut placed: HashMap<(Exit, usize), Vec<&Release>> = HashMap::new();
-    for r in &inst.releases {
+    for r in own.releases.get(&inst.func.name).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
     let mut b = Builder {
