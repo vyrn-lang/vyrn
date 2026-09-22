@@ -18286,16 +18286,16 @@ impl<'p> Fn_<'_, 'p> {
         for st in &body.stmts {
             core_lets(st, &mut lets);
         }
-        // A made layout is built into the ANNOTATION's layout, and this walk
-        // reads the annotation off the statement it was handed
-        // ([`Fn_::core_took`]). The per-body walk is handed none, so a made
-        // layout whose `let` annotates one stays in the arm. The key is the
-        // node the plan keys the binding by, which is that `Stmt::Let`.
+        // A made layout is built into the ANNOTATION's layout, and the
+        // per-body walk builds into the name's, which is the type of the
+        // VALUE. The two are one layout where they resolve alike, and a made
+        // layout whose `let` annotates another type stays in the arm. The key
+        // is the node the plan keys the binding by, which is that `Stmt::Let`.
         let mut annotated = Vec::new();
         if let Some(blk) = stmts {
             each_block(blk, &mut |_| {}, &mut |s| {
-                if matches!(s, Stmt::Let { ty: Some(_), .. }) {
-                    annotated.push(s as *const Stmt as usize);
+                if let Stmt::Let { ty: Some(t), .. } = s {
+                    annotated.push((s as *const Stmt as usize, self.cx.resolve(t)));
                 }
             });
         }
@@ -18320,12 +18320,14 @@ impl<'p> Fn_<'_, 'p> {
             // what places it is the `return` after it.
             if !(self.core_framed(&info.ty)
                 || (n < body.params.len() && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
-                && !(info.binding.is_none_or(|at| !annotated.contains(&at))
-                    && lets.iter().any(|(b, rhs)| {
-                        *b as usize == n
-                            && (self.core_makes(body, &info.ty, rhs)
-                                || self.core_agg_call(body, rhs))
-                    }))
+                && !(info.binding.is_none_or(|at| {
+                    annotated
+                        .iter()
+                        .all(|(a, t)| *a != at || *t == self.cx.resolve(&info.ty))
+                }) && lets.iter().any(|(b, rhs)| {
+                    *b as usize == n
+                        && (self.core_makes(body, &info.ty, rhs) || self.core_agg_call(body, rhs))
+                }))
             {
                 return false;
             }
