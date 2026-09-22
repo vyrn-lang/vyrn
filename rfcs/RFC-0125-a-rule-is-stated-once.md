@@ -27331,3 +27331,16 @@ Findings:
 - the stream's pull is not an `Iterate` call. `Fn_::stream_next` switches over a `Stream<T>`'s two producers inline and writes the element into the loop variable's place beside a flag. Its row is a call that writes an out-place, which §2.1 has no form for, or a switch over an `Option`, which is another byte shape. `drain__from0` in `stream_abandoned.vyrn` and `total` in `stream.vyrn` wait on it alone.
 - `Test::Impl` asks `isSuccess`, not `failed` as its doc and the census say. The switch row is where `Facts::owns_scrutinee`, `consuming` and each arm's releases live, and the AST arm reads them at the `?` node; each of its 3 bodies also waits on `Drop`, so a call and a branch in its place buys 0 bodies.
 Left: `Opaque:Pull`, 21 lines, blocked by a call row that writes an out-place; `Switch:Impl`, 3 bodies, blocked by `St::Drop` and by the three facts the switch row carries; the corpus's key reads, blocked by the frame's clause that every name is a scalar; `@str` of a minted String temporary, blocked by the release the arm makes inline.
+#### A release the core states is read off its row (2026-09-22, `m7-drop`)
+The count, from `VYRN_GAP_TALLY` over `examples/` with `Drop:<who>:<type>` tags, both binaries in one cache state: 25,739 lines, 17,447 whole, 3,112 naming a release, 1,532 with a release as the first gap and 1,056 with no other gap. The released value is a String in 1,210 of the first gaps, an array in 177, a record or an enum in 126 and a generic instance in 19.
+
+| who the release names | first gap | bodies with no other gap |
+|---|---|---|
+| a temporary the reading site frees | 652 | 615 |
+| an argument temporary the caller frees | 620 | 466 |
+| a `drop` the reader wrote | 116 | 80 |
+| a payload binder at its arm's end | 94 | 81 |
+| a discarded result, or a container a `for` consumed | 24 | 24 |
+| a receiver freed after a field read | 13 | 9 |
+| an edge of a join (Rule N) | 13 | 19 |
+| a stream a `for` closed | 0 | 0 |
