@@ -12703,25 +12703,31 @@ impl<'p> Fn_<'_, 'p> {
                 self.each(m, b, false, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
-            // whose declared type owns something. The tag is the variant's
-            // position, exactly as `match` reads it. The mirror of `rel_at`'s own
-            // arm, and one walk for the same reason (RFC-0126 §8.11, M4a).
+            // that own something, a box the emitter made included. The tag is
+            // the variant's position, exactly as `match` reads it. The mirror
+            // of `rel_body`'s own arm, asking its question of each payload: a
+            // copy that skipped a boxed `Handle` shared the box, and both
+            // copies released it.
             Type::Enum(_) => {
                 let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
-                    if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                    let mut live = false;
+                    for p in &var.payload {
+                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
+                    }
+                    if !live {
                         continue;
                     }
                     tag_eq(b, a, tag as i64);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     for (j, pty) in var.payload.clone().iter().enumerate() {
-                        if !self.owns_heap(pty) {
+                        let w = self.word2(pty)?;
+                        if !self.owns_heap(pty) && w != Word::Boxed {
                             continue;
                         }
                         let at = self.cx.payload_slot(&var.payload, j);
-                        let w = self.word2(pty)?;
                         self.copy_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
