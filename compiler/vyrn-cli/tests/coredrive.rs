@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 21] = [
+const SHAPES: [(&str, &str); 22] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -305,6 +305,13 @@ const SHAPES: [(&str, &str); 21] = [
          fn vyrnTestMain() -> Int64 { let h = land(4) let a = arr(2) \
          return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 + boxed(6) * 100000000000 + made(3) * 10000000000000 }",
     ),
+    // A scalar handed to `modify` lives in a local, which has no address, so
+    // the call spills it to a slot and reloads it after (RFC-0125 M7).
+    // `examples/` hands `modify` only layouts.
+    (
+        "a scalar `modify` argument",
+        "fn bump(n: modify Int64, by: Int64) { n = n + by }          fn flip(b: modify Bool) { b = !b }          fn thrice(n: modify Int64) { bump(n, 3) }          fn vyrnTestMain() -> Int64 { let mut x = 1 bump(x, 2) thrice(x)          let mut f = false flip(f) if f { x = x + 100 } return x }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -314,7 +321,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 21] = [
+const SHAPE_PIN: [(&str, usize, usize); 22] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -348,6 +355,7 @@ const SHAPE_PIN: [(&str, usize, usize); 21] = [
         0,
     ),
     ("a part built at its offset where its own row stands", 0, 0),
+    ("a scalar `modify` argument", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

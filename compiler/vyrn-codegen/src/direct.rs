@@ -9319,11 +9319,9 @@ impl<'p> Fn_<'_, 'p> {
         hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
         let dest = self.out_ptr(b, sig, hint);
-        // A `modify` argument is the caller's binding by ADDRESS. Reloads are the
-        // one case that needs a fixup after the call: a scalar in a wasm local has
-        // no address at all, so it is spilled to a slot for the callee to write
-        // through and read back afterwards.
-        let mut reload: Vec<(u32, u32, String, bool)> = Vec::new();
+        // A `modify` argument is the caller's binding by ADDRESS, and a scalar
+        // in a wasm local has none ([`Fn_::spill`]).
+        let mut spilled = Vec::new();
         for (i, (a, p)) in args.iter().zip(&sig.params).enumerate() {
             if sig.modify.get(i) != Some(&true) {
                 self.expr_as(m, b, a, p)?;
@@ -9336,17 +9334,7 @@ impl<'p> Fn_<'_, 'p> {
             let (place, ty) = self.lookup(name, line)?;
             match place {
                 Place::Local(l) => {
-                    let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
-                        return unsupported("a `modify` argument in a local", line);
-                    };
-                    let ll = self.cx.ll(&ty);
-                    let l2 = layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))?;
-                    let off = b.alloc(l2.size, l2.align);
-                    b.slot(off);
-                    b.ins(&Instruction::LocalGet(l));
-                    b.ins(&store_of(&ll));
-                    b.slot(off);
-                    reload.push((off, l, ll, self.cx.signed(&ty)));
+                    spilled.push(self.spill(b, l, &ty, line)?);
                 }
                 // A frame slot or module state: hand over the address itself, so
                 // the callee's copy-out lands in the caller's own storage.
@@ -9358,11 +9346,7 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         b.ins(&Instruction::Call(sig.index));
-        for (off, l, ll, signed) in &reload {
-            b.slot(*off);
-            b.ins(&load_of(ll, 0, *signed));
-            b.ins(&Instruction::LocalSet(*l));
-        }
+        reload(b, &spilled);
         self.out_ptr_back(b, dest);
         // The DECLARED return type, not its structural form. Resolving here threw
         // away exactly the information a caller needs to solve a further generic:
@@ -9370,6 +9354,23 @@ impl<'p> Fn_<'_, 'p> {
         // `Pair<A, B>`, so `firstOf(twice(41))` could not fix `A`. The textual
         // emitter returns the declared type for the same reason.
         Ok(sig.ret_ty.clone())
+    }
+
+    /// Spill the scalar in the local `l` to a slot of its own and push the
+    /// slot's address, which a `modify` parameter takes and a wasm local does
+    /// not have. [`reload`] writes the slot back into `l` after the call.
+    fn spill(&self, b: &mut Frame, l: u32, ty: &Type, line: usize) -> Result<Spill, String> {
+        let Repr::Scalar(_) = self.cx.repr(ty, line)? else {
+            return unsupported("a `modify` argument in a local", line);
+        };
+        let ll = self.cx.ll(ty);
+        let l2 = layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))?;
+        let off = b.alloc(l2.size, l2.align);
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(l));
+        b.ins(&store_of(&ll));
+        b.slot(off);
+        Ok((off, l, ll, self.cx.signed(ty)))
     }
 
     // ---- RFC-0023 higher-order specialization -----------------------------
@@ -15778,6 +15779,19 @@ fn store_of(ll: &str) -> Instruction<'static> {
     }
 }
 
+/// A scalar spilled for a `modify` call: its slot, its local, its LLVM type
+/// and whether it loads signed ([`Fn_::spill`]).
+type Spill = (u32, u32, String, bool);
+
+/// Write each spilled scalar back into its local after the call.
+fn reload(b: &mut Frame, spilled: &[Spill]) {
+    for (off, l, ll, signed) in spilled {
+        b.slot(*off);
+        b.ins(&load_of(ll, 0, *signed));
+        b.ins(&Instruction::LocalSet(*l));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The emitted runtime
 // ---------------------------------------------------------------------------
@@ -18229,10 +18243,22 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("a core call this walk does not read", line);
         };
         let dest = self.out_ptr(b, &sig, hint);
-        for ((v, _), p) in args.iter().zip(&sig.params) {
-            self.core_val(m, b, body, w, v, p, line)?;
+        let mut spilled = Vec::new();
+        for ((v, c), p) in args.iter().zip(&sig.params) {
+            match (v, c) {
+                (Val::Name(n), vyrn_frontend::ast::Capability::Modify)
+                    if !matches!(self.cx.repr(p, line)?, Repr::Agg(_)) =>
+                {
+                    let Some((Place::Local(l), ty)) = self.core_place(w, body, *n) else {
+                        return unsupported("a `modify` argument with no local", line);
+                    };
+                    spilled.push(self.spill(b, l, &ty, line)?);
+                }
+                _ => self.core_val(m, b, body, w, v, p, line)?,
+            }
         }
         b.ins(&Instruction::Call(sig.index));
+        reload(b, &spilled);
         self.out_ptr_back(b, dest);
         Ok(sig.ret_ty)
     }
@@ -19615,9 +19641,9 @@ impl<'p> Fn_<'_, 'p> {
     /// its address the same way ([`Fn_::core_val`]), whatever the capability:
     /// every layout this walk names lives in a slot, and a `modify` callee
     /// copies its result back into it. A scalar `modify` argument lives in a
-    /// local with no address, and the arm spills and reloads it, which the
-    /// row does not state; nor may a name that holds another place's address
-    /// ([`Fn_::core_alias`]) be written through.
+    /// local, which [`Fn_::spill`] gives an address for the call's extent. A
+    /// name that holds another place's address ([`Fn_::core_alias`]) may not
+    /// be written through.
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
@@ -19631,9 +19657,17 @@ impl<'p> Fn_<'_, 'p> {
             });
             match c {
                 Cap::Read | Cap::Consume => self.core_val_readable(body, v) || layout,
-                Cap::Modify => {
-                    layout && !matches!(v, Val::Name(n) if self.core_alias(body, *n).is_some())
-                }
+                Cap::Modify => match v {
+                    Val::Name(n) if layout => self.core_alias(body, *n).is_none(),
+                    // A temporary may ride the operand stack, which has no
+                    // local to reload into.
+                    Val::Name(n) => {
+                        self.core_val_readable(body, v)
+                            && (body.names[*n as usize].binding.is_some()
+                                || (*n as usize) < body.params.len())
+                    }
+                    Val::Lit(_) => false,
+                },
             }
         })
     }
