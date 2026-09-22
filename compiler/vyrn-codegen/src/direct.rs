@@ -17043,6 +17043,10 @@ impl<'p> Fn_<'_, 'p> {
                 made.push(*n);
             }
         }
+        let rebuilt: Vec<_> = (0..run.len())
+            .filter_map(|i| self.core_rebuilt(body, run, i))
+            .flat_map(|(x, t)| [x, t])
+            .collect();
         // A made layout is the STATEMENT's own binding and nothing deeper: this
         // walk reads the annotation off the statement it was handed, and a row
         // under an `if` of the run has a `Stmt::Let` of its own with an
@@ -17056,7 +17060,7 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         }
         for (n, rhs) in &lets {
-            if Some(*n) == annotated || made.contains(n) {
+            if Some(*n) == annotated || made.contains(n) || rebuilt.contains(n) {
                 continue;
             }
             let info = &body.names[*n as usize];
@@ -17091,6 +17095,7 @@ impl<'p> Fn_<'_, 'p> {
             if !core_scalar(&info.ty)
                 && !made.contains(n)
                 && !switched.contains(n)
+                && !rebuilt.contains(n)
                 && returned != Some(*n)
             {
                 return None;
@@ -17113,7 +17118,7 @@ impl<'p> Fn_<'_, 'p> {
             // row and at `Int64` from the frame, for the same source. The
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
-            if !(core_scalar(&ty) || returned == Some(*n))
+            if !(core_scalar(&ty) || returned == Some(*n) || rebuilt.contains(n))
                 || self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty)
             {
                 return None;
@@ -17154,6 +17159,25 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         for (i, s) in ss.iter().enumerate() {
             match s {
+                // A receiver rebuilt in place: the result is the receiver's
+                // own storage, so the name takes the receiver's place.
+                St::Let(
+                    n,
+                    rhs @ Rhs::Call {
+                        callee, kind, args, ..
+                    },
+                ) if self.core_rebuild(body, rhs) => {
+                    let line = body.names[*n as usize].line;
+                    self.core_call(m, b, body, w, callee, *kind, args, None, line)?;
+                    b.ins(&Instruction::Drop);
+                    let Some((Val::Name(x), _)) = args.first() else {
+                        return unsupported("a rebuild of no named receiver", line);
+                    };
+                    w.at[*n as usize] = self.core_place(w, body, *x);
+                }
+                // The store that puts the rebuilt receiver back, which the
+                // rebuild already wrote.
+                St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => {}
                 // A LAYOUT MADE, built into the binding's own slot — RFC-0125
                 // M7. It is a `let` arm of its own because the slot has to
                 // exist before the parts are written: the arm below evaluates
@@ -17633,6 +17657,21 @@ impl<'p> Fn_<'_, 'p> {
                     s.core_val(m, b, body, w, v, &Type::Str, line)
                 })?;
                 return Ok(Type::Never);
+            }
+            // `xs.push(v)` and its siblings: the receiver's address, which the
+            // runtime rebuilds in place, and the operand the row names.
+            Some(Spec::Rebuilds) => {
+                let [(Val::Name(x), _), rest @ ..] = args else {
+                    return unsupported("a rebuild of no named receiver", line);
+                };
+                let aty = body.names[*x as usize].ty.clone();
+                self.core_addr_of(b, w, body, *x, line)?;
+                let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match rest
+                {
+                    [(v, _)] => s.core_val(m, b, body, w, v, t, line),
+                    _ => unsupported(&format!("`{callee}` with no operand"), line),
+                };
+                return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
             }
             None => {}
         }
@@ -18336,7 +18375,9 @@ impl<'p> Fn_<'_, 'p> {
                         .all(|(a, t)| *a != at || *t == self.cx.resolve(&info.ty))
                 }) && lets.iter().any(|(b, rhs)| {
                     *b as usize == n
-                        && (self.core_makes(body, &info.ty, rhs) || self.core_agg_call(body, rhs))
+                        && (self.core_makes(body, &info.ty, rhs)
+                            || self.core_agg_call(body, rhs)
+                            || self.core_rebuild(body, rhs))
                 }))
             {
                 return false;
@@ -18400,7 +18441,11 @@ impl<'p> Fn_<'_, 'p> {
                 (info.binding.is_some() && !info.source.starts_with('@'))
                     || self.core_lands(body, ss, i, reads)
             }
+            St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
+                self.core_rebuilt(body, ss, i + 1).is_some()
+            }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
+            St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
             // A store into a field or into module state owns no heap when its
             // type is a scalar, so the displaced value needs no release.
             St::Store { place, value, .. } => {
@@ -18537,6 +18582,47 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Whether a row rebuilds a named `Array` receiver in place
+    /// ([`Spec::Rebuilds`]), with an operand this walk writes.
+    fn core_rebuild(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
+        let Rhs::Call {
+            callee, kind, args, ..
+        } = rhs
+        else {
+            return false;
+        };
+        matches!(core_builtin(callee, *kind), Some(Spec::Rebuilds))
+            && matches!(args.split_first(), Some(((Val::Name(x), _), rest))
+                if matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_))
+                    && self.core_args_readable(body, rest))
+    }
+
+    /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
+    /// is the store that puts the result back into that receiver: one
+    /// address, which [`Fn_::arr_rebuild`] has already written.
+    fn core_rebuilt(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        i: usize,
+    ) -> Option<(vyrn_lower::core::Name, vyrn_lower::core::Name)> {
+        let (
+            St::Let(t, rhs @ Rhs::Call { args, .. }),
+            St::Store {
+                place: vyrn_lower::core::Place::Name(x),
+                value: Val::Name(v),
+                ..
+            },
+        ) = (ss.get(i.checked_sub(1)?)?, ss.get(i)?)
+        else {
+            return None;
+        };
+        (t == v
+            && matches!(args.first(), Some((Val::Name(r), _)) if r == x)
+            && self.core_rebuild(body, rhs))
+        .then_some((*x, *t))
+    }
+
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands
     /// back, so the value is built in the caller's storage (RFC-0125 M7).
     ///
@@ -18573,7 +18659,13 @@ impl<'p> Fn_<'_, 'p> {
         s: Option<&St>,
     ) -> Option<vyrn_lower::core::Name> {
         match s? {
-            St::Let(_, rhs) if self.core_ctor(rhs) || self.core_agg_call(body, rhs) => None,
+            St::Let(_, rhs)
+                if self.core_ctor(rhs)
+                    || self.core_agg_call(body, rhs)
+                    || self.core_rebuild(body, rhs) =>
+            {
+                None
+            }
             St::Store { place, .. } if !matches!(place, vyrn_lower::core::Place::Name(_)) => None,
             s => first_read(s),
         }
@@ -18609,7 +18701,9 @@ impl<'p> Fn_<'_, 'p> {
                 _ => false,
             },
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
-            None => false,
+            // A rebuild is read together with the store after it
+            // ([`Fn_::core_rebuilt`]), and never alone.
+            Some(Spec::Rebuilds) | None => false,
         }
     }
 

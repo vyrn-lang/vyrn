@@ -1621,6 +1621,11 @@ pub enum Spec {
     /// literal. The call writes the line and returns to nobody; the
     /// [`St::Trap`] the builder states after it is what ends the path.
     Traps,
+    /// An array receiver first, and at most one operand at whatever type the
+    /// row put on its name. The runtime writes the new triple into the
+    /// receiver's own storage, so the result is the receiver, and the store
+    /// the builder states after the call puts back what is already there.
+    Rebuilds,
 }
 
 /// Every builtin the row specifies, by name.
@@ -1677,6 +1682,11 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@str", Spec::Renders(Type::Str)),
             ("panic", Spec::Traps),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
+            ("@push", Spec::Rebuilds),
+            ("@reserve", Spec::Rebuilds),
+            ("@clear", Spec::Rebuilds),
+            ("@append", Spec::Rebuilds),
+            ("@copyFrom", Spec::Rebuilds),
         ]
     })
 }
