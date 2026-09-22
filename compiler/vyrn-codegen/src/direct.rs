@@ -17983,7 +17983,13 @@ impl<'p> Fn_<'_, 'p> {
             // Or a layout this walk MAKES. Such a name is bound and never
             // read: every read of a value goes through
             // [`Fn_::core_val_readable`], which asks the same question.
-            if !self.core_framed(&info.ty)
+            //
+            // Or a PARAMETER of a layout type, whose local holds the address
+            // the caller passed. The name has a place either way; what this
+            // walk cannot do with a layout is read it as a value, and
+            // [`Fn_::core_val_readable`] is where that is refused.
+            if !(self.core_framed(&info.ty)
+                || (n < body.params.len() && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
                 && !(info.binding.is_some_and(|at| !annotated.contains(&at))
                     && lets
                         .iter()
