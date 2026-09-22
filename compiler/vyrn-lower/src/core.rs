@@ -1691,19 +1691,18 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// family one form track closes: `Call:<who>:<name>` for a callee the
 /// emitter's function table does not answer, `Make:<what>` for a layout,
 /// `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>` for a row
-/// that names no value, `Lambda`, `Switch:Impl`, and `Drop:<who>:<type>` for
-/// a release, named by [`drop_kind`].
+/// that names no value, `Lambda` and `Switch:Impl`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
-    gaps_of(body, &body.stmts, &mut out);
+    gaps_of(&body.stmts, &mut out);
     let mut seen = std::collections::HashSet::new();
     out.retain(|t| seen.insert(t.clone()));
     out
 }
 
-fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
+fn gaps_of(ss: &[St], out: &mut Vec<String>) {
     for s in ss {
         match s {
             St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(r, out),
@@ -1711,21 +1710,21 @@ fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
                 gaps_place(place, out);
                 gaps_val(value, out);
             }
-            St::Drop(n, at, line) => out.push(drop_kind(body, *n, at, *line)),
-            // The emitter reads the release off the row it stands on
-            // (RFC-0125 M7), so a row is no gap.
-            St::Row { .. } => {}
+            // The emitter reads a release off the row it stands on, whether
+            // the plan placed it at an exit or the core states it as a
+            // statement (RFC-0125 M7), so neither is a gap.
+            St::Drop(..) | St::Row { .. } => {}
             St::If {
                 cond, then, els, ..
             } => {
                 gaps_val(cond, out);
-                gaps_of(body, then, out);
-                gaps_of(body, els, out);
+                gaps_of(then, out);
+                gaps_of(els, out);
             }
             // Since the loop slice the exit is the row's: the pass makes up the
             // two-way branch and the `break` at the head of the loop it
             // desugared, and a walk emits wasm's conditional branch for it.
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(body, b, out),
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(b, out),
             St::Break { .. } | St::Continue { .. } | St::Trap => {}
             St::Return { value, .. } => {
                 if let Some(v) = value {
@@ -1742,54 +1741,11 @@ fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
                 }
                 gaps_val(on, out);
                 for a in arms {
-                    gaps_of(body, &a.body, out);
+                    gaps_of(&a.body, out);
                 }
             }
         }
     }
-}
-
-/// A release's tag: who the released name is, then the head of its type.
-fn drop_kind(body: &Body, n: Name, at: &Site, line: usize) -> String {
-    let info = &body.names[n as usize];
-    let binder = |ss: &[St]| -> bool {
-        fn any(ss: &[St], f: &dyn Fn(&St) -> bool) -> bool {
-            ss.iter().any(|s| {
-                f(s) || match s {
-                    St::If { then, els, .. } => any(then, f) || any(els, f),
-                    St::Loop { body: b, .. } | St::Block { body: b, .. } => any(b, f),
-                    St::Switch { arms, .. } => arms.iter().any(|a| any(&a.body, f)),
-                    _ => false,
-                }
-            })
-        }
-        any(
-            ss,
-            &|s| matches!(s, St::Switch { arms, .. } if arms.iter().any(|a| a.binds.contains(&n))),
-        )
-    };
-    let who = if line != 0 {
-        "Source"
-    } else if matches!(at, Site::Edge(..)) {
-        "Edge"
-    } else if info.linear {
-        "Stream"
-    } else if binder(&body.stmts) {
-        "Binder"
-    } else if info.receiver.is_some() {
-        "Receiver"
-    } else if info.arg_drop.is_some() {
-        "Argument"
-    } else if matches!(at, Site::Node(_)) {
-        "Node"
-    } else if info.binding.is_some() {
-        "Bound"
-    } else {
-        "Temporary"
-    };
-    let ty = format!("{:?}", info.ty);
-    let head: String = ty.chars().take_while(|c| c.is_alphanumeric()).collect();
-    format!("Drop:{who}:{head}")
 }
 
 fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
