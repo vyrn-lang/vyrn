@@ -27362,6 +27362,7 @@ Findings:
 - the `?` on a declared `Fallible` states `success` as `Callee::Ctor`, with the Option arm's comment "a variant constructor". It is the impl's method, a read of the value.
 Left: `Exit::Scrutinee`, blocked by `Fn_::core_part_ty`'s scalar parts and the aggregate-call scrutinee clause; `Switch:Impl`, 3 bodies, blocked by the aggregate argument `Fn_::core_val_readable` refuses and, in `greet` and `shout`, by a String `+`; the drop-only bodies, blocked by the name clause and the statement families above.
 #### A trap writes its line once, and an unaudited build states no hook (2026-09-22, `m7-panic`)
+Decision: `panic` and `@panicAt` are one `Spec::Traps` row, a message and an optional site literal, and the `trap` after it stays the row the builder already stated; an unaudited build states no audit hook, operand included. Mine, on the counts below. The brief asked for the panic as a trap-table row. It is not one: a table row is static text around at most one integer, and a panic's message is a runtime String, so a row would change `trapAt` and the data segment of every program.
 The count, from a temporary instrument that asks `Fn_::core_walkable` again under each assumption, over `emit-wat` of the 176 programs of `examples/` that emit, in one cache state with `VYRN_GAP_TALLY`: 9,744 bodies declined, counted once per program that emits them.
 
 | what the body waits on | bodies | which |
@@ -27373,3 +27374,19 @@ The count, from a temporary instrument that asks `Fn_::core_walkable` again unde
 | neither | 8,046 | |
 
 No runtime body waits on a shape of its own. The one runtime body left after both is `runtime$intStr`, which waits on `@push`, `@at` and `stringFromBytes`.
+Went: the arm's write sequence for `panic`, into `Fn_::panic_line`, which `Fn_::core_call` reads too; `AUDIT_PREFIX` in `direct.rs`, into `loader::audit_hook`, which the builder and `Fn_::audit_dropped` read; the value row after a statement-position `panic`. Stayed: `Fn_::core_sig`'s hook clause, because a generator's build is never audited and its core can still state a hook; the value row after a `panic` in value position (`x ?? panic(..)`), 710 tally lines, because it stands after the `trap` in a list the caller extends.
+Lines: `core.rs` 7,334 to 7,349. `direct.rs` 19,053 to 19,089: the row reader is new and the writer is the arm's sequence moved. `loader.rs` 4,845 to 4,852. Refusals: 0 lost / 0 gained. Manifest: 161 of 176 rows in the hook commit, 154 in the panic commit, each the slot-per-temporary shape of `m7-temporary` in a runtime body the core walk now takes.
+Licence:
+- `vyrn check` over the 363 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, branch point against the head: byte-identical stdout, stderr and exit code, 288 accepted and 75 refused under both.
+- `coredrive --ignored`: 168 programs, 21,556 bodies. Taken from the core 13,384 to 13,888 after the hook, 14,283 after `panic`, of 21,512. Whole 16,131 to 16,563; carried end to end 1,006 to 1,044; the opaque class 1,086 to 649. 1 byte-identical and 167 run the same, both unmoved.
+- the per-form table: `Stmt::Let` on the arm 11,793 to 11,625, `Stmt::Return` 7,732 to 7,564, `Stmt::If` 18,130 to 16,559, `Stmt::Expr` 4,547 to 2,808, `Expr::Var` 107,699 to 105,287. No arm reached zero, so nothing in `FORMS` turns false.
+- `VYRN_GAP_TALLY` over `examples/`: whole 18,468 to 18,955 of 25,162 lines; `Call:Builtin:panic` 440 and `Call:Reserved:@panicAt` 150 first gaps to 0; `Opaque:Trapped` 1,202 lines to 710.
+- the instrument at the head: 9,744 declined bodies to 8,795, and every body of the table's first three rows is taken.
+- `traps`, `limits` and `refusals` green: no trap sentence moved. `residue --ignored`, 247 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed. `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `cargo test -p vyrn-cli`: 648 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed. Both formatters clean; the release build has no warning; the manifest check green after each write.
+- re-pinned: `emitter_census` the mapping 9,093 to 9,150 lines with 735 to 748 rows, one block per builtin name 4,724 to 4,704, `neither` 6,134 to 6,173, `both, for two questions` 8,786 to 8,783 with 188 to 190 rows; `frontend_census` `loader.rs` 4,044 to 4,051; RFC-0127's form table `Stmt::Expr` and `Expr::Call` one each, 840 to 842 mentions; RFC-0126's surface table `Str` 139 to 140 and `Never` 12 to 14, 1,407 to 1,410 mentions.
+Findings:
+- the hook held back more bodies than `panic`: 704 against 421 with `malloc` counted in both. `runtime$free` and `runtime$envGet` wait on nothing else.
+- the fix is a statement the builder does not write, not a row the emitter drops: dropping the call row alone left `p + 8` bound, four instructions on every allocation, as `m7-walk` measured.
+- `fallible_try` stated `success` as `Callee::Ctor`, which `Fn_::core_ctor` reads as a layout made. It is `Callee::Method` now; the 3 bodies still wait on `Switch:Impl`, so nothing moved.
+Left: the value row after a `panic` in value position, 710 lines, blocked by a list the caller extends after the `trap`, which a cut in each of the three builders would close; `runtime$intStr`, blocked by `@push`, `@at` and `stringFromBytes`; the 749 bodies that can panic and wait on another family first.
