@@ -2562,3 +2562,72 @@ fn a_block_bodied_lambda_captures_only_what_its_body_reads() {
 
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
+
+/// A `for` reads its container through a borrow from its head to its end, so a
+/// store over the container inside the body is refused (RFC-0125 §2.2).
+///
+/// `for y in ys` over a bare name read `ys` itself, with no borrow, so `ys =
+/// []` inside the body was accepted. The store released the buffer, the loop
+/// kept reading it through the address it took at the head, and the program
+/// printed 501 where the language says 6. A `for` over a field always read
+/// through a borrow and was refused. Both engines are asked: each refuses the
+/// program before it runs and prints nothing.
+#[test]
+fn a_store_over_the_container_a_for_walks_is_refused() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "a store over the name",
+            "fn main() -> Int64 {\n  let mut ys: Array<Int64> = [1, 2, 3]\n  let mut s = 0\n  \
+             for y in ys {\n    ys = []\n    let zs: Array<Int64> = [100, 200, 300]\n    \
+             s = s + y + zs.length - 3\n  }\n  print(s.toString())\n  return 0\n}\n",
+        ),
+        (
+            "a push onto the name",
+            "fn main() -> Int64 {\n  let mut ys: Array<Int64> = [1, 2]\n  let mut s = 0\n  \
+             for y in ys {\n    ys.push(y)\n    s = s + y\n  }\n  return s\n}\n",
+        ),
+    ];
+    let dir = common::scratch("for-container-store");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        let want = "`ys` is written here while `ys` still reads out of it";
+        if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+            bad.push(format!("{what}: `check` said {text}"));
+        }
+        for engine in [&["run"][..], &["build"][..]] {
+            let out = vyrn()
+                .current_dir(&dir)
+                .args(engine)
+                .arg(&name)
+                .args(if engine[0] == "build" {
+                    &["-o", "never"][..]
+                } else {
+                    &[]
+                })
+                .output()
+                .expect("vyrn");
+            let err = String::from_utf8_lossy(&out.stderr);
+            if out.status.success() || !out.stdout.is_empty() || !err.contains(want) {
+                bad.push(format!("{what}: `{}` ran or said {err}", engine[0]));
+            }
+        }
+    }
+    // The way out the menu names: the loop walks a copy of its own.
+    let fixed = cases[0].1.replace("for y in ys {", "for y in ys.copy() {");
+    std::fs::write(dir.join("copy.vyrn"), fixed).expect("write the program");
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "copy.vyrn"])
+        .output()
+        .expect("vyrn run");
+    if String::from_utf8_lossy(&out.stdout).trim() != "6" {
+        bad.push(format!(
+            "the copy printed {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        ));
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}

@@ -3428,16 +3428,37 @@ impl<'a> Builder<'a> {
                     take_names_a_place(iter, *line, true)?;
                 }
                 // The container: a name the loop reads, or one it takes.
+                // `owner` is the name whose ownership the element sentence
+                // below asks about, which for a borrowed name is the name.
+                let mut owner = None;
                 let it = match iter {
                     Expr::Var { name, .. } if self.lookup(name).is_some() => {
                         let n = self.lookup(name).unwrap();
+                        let pulled = matches!(
+                            vyrn_frontend::types::resolve(&ity, &self.proto.types()),
+                            Type::Stream(_)
+                        );
                         if *consuming {
                             let t = self.temp(ity.clone(), *line);
                             out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                             self.keyed(t, sid);
                             t
-                        } else {
+                        } else if pulled {
+                            // A stream is pulled to its end and closed by the
+                            // loop through its own name (below).
                             n
+                        } else {
+                            // The loop reads the container from its head to
+                            // its end, so it reads it through a borrow, as it
+                            // reads a field below: a store over the name inside
+                            // the body then ends the borrow the next turn
+                            // reads, and the kernel refuses it. Without the
+                            // borrow `ys = []` freed the buffer the loop was
+                            // still walking.
+                            owner = Some(n);
+                            let t = self.borrow_name(iter, ity.clone(), *line);
+                            out.push(St::Let(t, Rhs::Read(Place::Name(n))));
+                            t
                         }
                     }
                     _ if !*consuming && is_place_read(iter) => {
@@ -3516,7 +3537,7 @@ impl<'a> Builder<'a> {
                 // NAMED outlives the loop, so `for r in ns` only borrows
                 // its elements and `take(r)` is refused (the structural
                 // census, rows 01, 02, 03, 27 and 34).
-                let ic = &self.body.names[it as usize];
+                let ic = &self.body.names[owner.unwrap_or(it) as usize];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 let owned = self.owns(&ety) && loops_alone && self.seed.contains(&ekey);
                 // The other half of the same sentence: if every element left
