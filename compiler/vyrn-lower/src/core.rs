@@ -1612,12 +1612,19 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
     };
     match r {
         Rhs::Val(v) => gaps_val(v, out),
+        // Since RFC-0125 M7 a name, a global and a field are read off the row
+        // (`direct::Fn_::core_read`): the row states the place and the address
+        // is the reader's own arithmetic. An element and a key are not.
         Rhs::Read(p) => {
-            out.push("Read".into());
+            if let Some(k) = place_gap(p) {
+                out.push(format!("Read:{k}"));
+            }
             gaps_place(p, out);
         }
         Rhs::Take(p) => {
-            out.push("Take".into());
+            if let Some(k) = place_gap(p) {
+                out.push(format!("Take:{k}"));
+            }
             gaps_place(p, out);
         }
         // Since the callee slice the row says WHO: a function this program
@@ -1667,6 +1674,17 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
 fn gaps_val(v: &Val, out: &mut Vec<String>) {
     if matches!(v, Val::Lit(Lit::Opaque)) {
         out.push("Opaque".into());
+    }
+}
+
+/// The kind of place a read still waits on, and `None` for one an emitter
+/// addresses. A family closes one kind at a time, and a tag that named no kind
+/// could not say which was left.
+fn place_gap(p: &Place) -> Option<&'static str> {
+    match p {
+        Place::Name(_) | Place::Global(_) | Place::Field(..) => None,
+        Place::Elem(..) => Some("Elem"),
+        Place::Key(..) => Some("Key"),
     }
 }
 

@@ -17084,6 +17084,13 @@ impl<'p> Fn_<'_, 'p> {
                 let got = self.core_call(m, b, body, w, callee, *kind, args, line)?;
                 self.coerce(m, b, None, &got, want, line)
             }
+            // A read and a take load the same address; what parts them is the
+            // hole a take leaves, and the release that walks around it is the
+            // driver's row (RFC-0125 M7, the layout-read family).
+            Rhs::Read(p) | Rhs::Take(p) => {
+                let got = self.core_read(m, b, body, w, p, line)?;
+                self.coerce(m, b, None, &got, want, line)
+            }
             _ => unsupported("a core right-hand side this walk does not read", line),
         }
     }
@@ -17129,6 +17136,151 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::Call(sig.index));
         Ok(sig.ret_ty)
+    }
+
+    /// One read of a place, the address computed from the row — RFC-0125 M7,
+    /// the layout-read family.
+    ///
+    /// §2.1 states the rule: a place is an address, a read of it is one scalar
+    /// load, and a place is never copied to read a field of it.
+    /// [`Fn_::core_addr`] is the address, stated once over
+    /// [`vyrn_lower::core::Place`]; what this adds is the load the value's own
+    /// type asks for, with the offset folded into the access.
+    ///
+    /// A take reads the same address. The hole it leaves in the base, and the
+    /// release that walks around it, are rows the driver places, so a body
+    /// holding one stands down at [`Fn_::core_walkable`]'s placement clause.
+    fn core_read(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        p: &vyrn_lower::core::Place,
+        line: usize,
+    ) -> Result<Type, String> {
+        // A scalar name lives in a wasm local, which has no address at all, so
+        // the read IS the local — the one place kind [`Fn_::core_addr`] cannot
+        // answer for.
+        if let vyrn_lower::core::Place::Name(n) = p {
+            let ty = body.names[*n as usize].ty.clone();
+            self.core_val(m, b, body, w, &Val::Name(*n), &ty, line)?;
+            return Ok(ty);
+        }
+        let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
+        let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
+            return unsupported("a read of a place this walk does not load", line);
+        };
+        b.ins(&load_of(
+            &self.cx.ll(&ty),
+            off.unwrap_or(0),
+            self.cx.signed(&ty),
+        ));
+        Ok(ty)
+    }
+
+    /// The address of a place, and the offset the load still owes it —
+    /// RFC-0125 M7, §2.1's address arithmetic written once.
+    ///
+    /// `Some(off)` is a FIELD step: the address on the stack is the record's
+    /// and the field is `off` bytes into it, which a scalar load folds into its
+    /// own access and an aggregate step adds. `None` is an address that is
+    /// already the place's. The distinction is what keeps the bytes the
+    /// `Expr::Field` arm's: it loads at the offset rather than adding it.
+    fn core_addr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        p: &vyrn_lower::core::Place,
+        line: usize,
+    ) -> Result<(Type, Option<u32>), String> {
+        use vyrn_lower::core::Place as At;
+        match p {
+            At::Name(n) => {
+                let Some((place, ty)) = self.core_place(w, body, *n) else {
+                    return unsupported("a core place with no storage", line);
+                };
+                match place {
+                    // An aggregate in a local is the ADDRESS of one, which is
+                    // what the `Expr::Var` arm pushes for it.
+                    Place::Local(l) => {
+                        b.ins(&Instruction::LocalGet(l));
+                    }
+                    other => {
+                        if other.addr(b, 0).is_none() {
+                            return unsupported("the address of a scalar local", line);
+                        }
+                    }
+                }
+                Ok((ty, None))
+            }
+            // Module state is storage at a fixed address, which is the one way
+            // a global differs from a local here (RFC-0013).
+            At::Global(name) => {
+                let (place, ty) = self.lookup(name, line)?;
+                let Place::Static(at) = place else {
+                    return unsupported("module state that is not static", line);
+                };
+                b.ins(&Instruction::I32Const(at as i32));
+                Ok((ty, None))
+            }
+            At::Field(base, f) => {
+                let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
+                self.core_step(b, off);
+                let (at, fty) = self.field_of(&bty, f, line)?;
+                // A `lazy T` field is FORCED by a read (RFC-0085 M4a), which is
+                // a call through the thunk's signature and not a load.
+                if vyrn_frontend::types::deferred(&fty).is_some() {
+                    return unsupported("a read of a deferred field", line);
+                }
+                Ok((fty, Some(at)))
+            }
+            // The element's address is the walk's: the header read, the bounds
+            // check the language states, and one stride multiply — the same
+            // three [`Fn_::at`] emits for `a[i]`.
+            // An element and a key are what `core::gaps` still names. A key is
+            // a lookup in the runtime's map and the row states no call; an
+            // element read is the borrow of a value that owns heap, or a `for`
+            // whose index the row does not state, so no body reaches a reader
+            // for one.
+            At::Elem(..) | At::Key(..) => unsupported("a read of an element or a key", line),
+        }
+    }
+
+    /// Fold a field step's offset into the address on the stack, which is what
+    /// an aggregate field costs and a scalar one does not.
+    fn core_step(&self, b: &mut Frame, off: Option<u32>) {
+        if let Some(off) = off {
+            b.ins(&Instruction::I32Const(off as i32));
+            b.ins(&Instruction::I32Add);
+        }
+    }
+
+    /// The type of a place, without emitting it — the layout-read family's
+    /// screen, asking exactly what [`Fn_::core_addr`] walks.
+    fn core_place_ty(
+        &self,
+        body: &vyrn_lower::core::Body,
+        p: &vyrn_lower::core::Place,
+    ) -> Option<Type> {
+        use vyrn_lower::core::Place as At;
+        match p {
+            At::Name(n) => Some(body.names[*n as usize].ty.clone()),
+            At::Global(name) => {
+                let (place, ty) = self.lookup(name, 0).ok()?;
+                matches!(place, Place::Static(_)).then_some(ty)
+            }
+            At::Field(base, f) => {
+                let bty = self.core_place_ty(body, base)?;
+                let fty = self.field_of(&bty, f, 0).ok()?.1;
+                vyrn_frontend::types::deferred(&fty)
+                    .is_none()
+                    .then_some(fty)
+            }
+            At::Elem(..) | At::Key(..) => None,
+        }
     }
 
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
@@ -17471,6 +17623,7 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Call { callee, kind, .. } => self.core_sig(callee, *kind)?.ret_ty,
             Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
+            Rhs::Read(p) | Rhs::Take(p) => self.core_place_ty(body, p)?,
             _ => return None,
         })
     }
@@ -17651,6 +17804,12 @@ impl<'p> Fn_<'_, 'p> {
                         .core_sig(callee, *kind)
                         .is_some_and(|s| s.params.len() == args.len())
             }
+            // A place this walk addresses, whose value is one it loads. An
+            // aggregate read is refused by the same clause that refuses an
+            // aggregate name: this walk carries scalars (RFC-0125 M7).
+            Rhs::Read(p) | Rhs::Take(p) => self
+                .core_place_ty(body, p)
+                .is_some_and(|t| core_scalar(&t) && !self.checks(&t)),
             _ => false,
         }
     }
