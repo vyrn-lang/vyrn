@@ -1617,6 +1617,10 @@ pub enum Spec {
     /// (`print`, `@str`), and the emitter chooses the rendering by the
     /// operand's own type, as it chooses an instruction for [`Op::Conv`].
     Renders(Type),
+    /// A message at `String`, and for `@panicAt` the site as a string
+    /// literal. The call writes the line and returns to nobody; the
+    /// [`St::Trap`] the builder states after it is what ends the path.
+    Traps,
 }
 
 /// Every builtin the row specifies, by name.
@@ -1671,6 +1675,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@copy", Spec::OwnType),
             ("print", Spec::Renders(Type::Unit)),
             ("@str", Spec::Renders(Type::Str)),
+            ("panic", Spec::Traps),
+            (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
         ]
     })
 }
@@ -3650,10 +3656,19 @@ impl<'a> Builder<'a> {
                 // drop.
                 out.push(St::Drop(n, Site::None, *line));
             }
+            // RFC-0114 section 25: an unaudited build emits no audit hook, so the
+            // row states neither the call nor its operand. A row for `p + 8`
+            // alone is four instructions on every allocation.
+            Stmt::Expr(Expr::Call { name, .. })
+                if vyrn_frontend::loader::audit_hook(name)
+                    && !vyrn_frontend::loader::audit_build() => {}
             Stmt::Expr(e) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
-                if self.owns(&ty) {
+                if matches!(rhs, Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped)))) {
+                    // A `panic` for its effect: the `trap` is already stated,
+                    // and nothing after it runs to discard a value.
+                } else if self.owns(&ty) {
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
                     if self.discards(e) {
@@ -5611,8 +5626,8 @@ impl<'a> Builder<'a> {
                 callee: success,
                 args: vec![(sv.clone(), Capability::Read)],
                 write_back: false,
-                // A variant constructor: it puts the payload into the value.
-                kind: Callee::Ctor,
+                // The impl's method, which reads the value it is handed.
+                kind: Callee::Method,
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),

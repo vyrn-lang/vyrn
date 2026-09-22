@@ -875,6 +875,13 @@ pub fn audit_build() -> bool {
     std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+/// Whether `name` is one of `std/runtime`'s audit hooks, which a build emits
+/// only when [`audit_build`] says it is audited.
+pub fn audit_hook(name: &str) -> bool {
+    name.strip_prefix(RUNTIME_PREFIX)
+        .is_some_and(|n| n.starts_with("audit"))
+}
+
 /// Every runtime module, in load order.
 pub const RT_MODULES: &[RtModule] = &[
     // `fromJson` links this one too, and for the same reason `toJson` does: the
