@@ -380,10 +380,9 @@ pub enum Lit {
 /// What a row stands on where it names no value.
 ///
 /// Each kind is one producer in this pass, and each one blocks on something
-/// of its own: [`Opaque::Index`] and [`Opaque::Exit`] on the container's
-/// length, which is a call the row does not state, [`Opaque::Trapped`] on
-/// nothing, because the statement after it never runs, and [`Opaque::Unbound`]
-/// on a store with nothing to store.
+/// of its own: [`Opaque::Pull`] on a stream's pull, which is a call the row
+/// does not state, [`Opaque::Trapped`] on nothing, because the statement after
+/// it never runs, and [`Opaque::Unbound`] on a store with nothing to store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opaque {
     /// A function's name used as a value, or a type's name as an argument
@@ -393,13 +392,10 @@ pub enum Opaque {
     /// sink: IntSink = double`) is the tag RFC-0037's defunctionalizer
     /// chose, which the emitter holds and this pass does not.
     Static,
-    /// The index of the element read at a `for` head. The row states the
-    /// read; the counter that walks the container is the emitter's, and
-    /// naming it needs the length beside it.
-    Index,
-    /// The exit test of the `for` this pass desugared. The branch is made up
-    /// and an emitter writes its own.
-    Exit,
+    /// A `for` head over a stream: its exit test and the index its element is
+    /// read at. A stream is pulled and not indexed, so both are the one call
+    /// that answers the next element or none, and the row states no such call.
+    Pull,
     /// The result of a call that traps (`panic`), which the `St::Trap` after
     /// it makes unreachable.
     Trapped,
@@ -3501,6 +3497,21 @@ impl<'a> Builder<'a> {
                 if streaming {
                     self.stream_loops.push(it);
                 }
+                // `for x in xs` walks an index the core names (§2.1): the
+                // length read once, before the loop, and a counter from zero
+                // that steps right after the element is read, so a `continue`
+                // needs no step of its own. A stream is pulled and has
+                // neither.
+                let counter = if streaming {
+                    None
+                } else {
+                    let n = self.temp(Type::Int, *line);
+                    let len = self.length_of(it, &ity, *line)?;
+                    out.push(St::Let(n, len));
+                    let i = self.temp(Type::Int, *line);
+                    out.push(St::Let(i, Rhs::Val(Val::Lit(Lit::Int(0)))));
+                    Some((n, i))
+                };
                 let mut l = Vec::new();
                 // The loop leaves when the container is walked: the same
                 // `if .. else break` a `while` has at its top. Without it the
@@ -3510,8 +3521,26 @@ impl<'a> Builder<'a> {
                 // row's hole set then read a join's other edge alone, and
                 // walked a field the dead edge had taken (`std/vyx`'s
                 // `vyxMergeImports`, found by the cross-engine generator gate).
+                let (cond, index) = match counter {
+                    Some((n, i)) => {
+                        let c = self.temp(Type::Bool, *line);
+                        l.push(St::Let(
+                            c,
+                            Rhs::Prim(
+                                Op::Bin(BinOp::Lt),
+                                vec![Val::Name(i), Val::Name(n)],
+                                Some(Type::Bool),
+                            ),
+                        ));
+                        (Val::Name(c), Val::Name(i))
+                    }
+                    None => (
+                        Val::Lit(Lit::Opaque(Opaque::Pull)),
+                        Val::Lit(Lit::Opaque(Opaque::Pull)),
+                    ),
+                };
                 l.push(St::If {
-                    cond: Val::Lit(Lit::Opaque(Opaque::Exit)),
+                    cond,
                     then: Vec::new(),
                     els: vec![St::Break { site: 0 }],
                     site: 0,
@@ -3571,13 +3600,13 @@ impl<'a> Builder<'a> {
                 // The variable has no `let` node; the plan keys it by its
                 // spelling's buffer, which is one address per loop.
                 self.keyed(x, vyrn_frontend::own::for_var_key(var));
-                let head = vec![St::Let(
+                let mut head = vec![St::Let(
                     x,
-                    Rhs::Read(Place::Elem(
-                        Box::new(Place::Name(it)),
-                        Val::Lit(Lit::Opaque(Opaque::Index)),
-                    )),
+                    Rhs::Read(Place::Elem(Box::new(Place::Name(it)), index)),
                 )];
+                if let Some((_, i)) = counter {
+                    self.step(i, &mut head);
+                }
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), x));
                 let r = self.block_with(body, head, &mut l);
@@ -3837,6 +3866,52 @@ impl<'a> Builder<'a> {
                 .map(|f| f.ret.clone()),
             _ => None,
         }
+    }
+
+    /// The length a `for` over `it` walks to: a header read for a container
+    /// the language lays out, and the `Iterate` impl's `size` for a user one
+    /// (RFC-0091 M3).
+    fn length_of(&self, it: Name, ity: &Type, line: usize) -> Result<Rhs, Gap> {
+        let decls = self.proto.types();
+        let field = |f: &str| Rhs::Read(Place::Field(Box::new(Place::Name(it)), f.to_string()));
+        Ok(match vyrn_frontend::types::resolve(ity, &decls) {
+            Type::Str => field("byteLength"),
+            Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Map(..) => {
+                field("length")
+            }
+            _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
+                Some((size, _)) => Rhs::Call {
+                    callee: size,
+                    args: vec![(Val::Name(it), Capability::Read)],
+                    write_back: false,
+                    kind: Callee::Method,
+                    ret: Some(Type::Int),
+                },
+                None => return gap("a `for` over a container with no length", line),
+            },
+        })
+    }
+
+    /// `i = i + 1`, for the counter of a `for` over an index.
+    fn step(&mut self, i: Name, out: &mut Vec<St>) {
+        let line = self.body.names[i as usize].line;
+        let t = self.temp(Type::Int, line);
+        out.push(St::Let(
+            t,
+            Rhs::Prim(
+                Op::Bin(BinOp::Add),
+                vec![Val::Name(i), Val::Lit(Lit::Int(1))],
+                Some(Type::Int),
+            ),
+        ));
+        out.push(St::Store {
+            place: Place::Name(i),
+            value: Val::Name(t),
+            old: Old::Nothing,
+            line,
+            site: Site::None,
+            releases: false,
+        });
     }
 
     fn projected_elem(&self, ity: &Type) -> Option<Type> {
