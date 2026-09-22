@@ -17878,11 +17878,12 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether this walk writes one PART of a made layout at the type the
     /// layout puts it at — RFC-0125 M7.
     ///
-    /// A scalar the walk emits, and not a `where` type: a validated part is
-    /// checked where it is stored (RFC-0079) and the row states no check, which
-    /// is the same screen every other clause of this walk makes.
+    /// A value in one wasm local, which a String is as much as an `Int64`
+    /// ([`Fn_::core_framed`]): the builders store it through [`Fn_::part`] for
+    /// both walks. A layout part is built from an expression, which the row
+    /// does not carry.
     fn core_part_ty(&self, t: &Type) -> bool {
-        self.core_framed(t) && core_scalar(&self.cx.resolve(t))
+        self.core_framed(t)
     }
 
     /// Whether this walk gives a name of `t` the place the AST walk gives it —
@@ -17954,7 +17955,7 @@ impl<'p> Fn_<'_, 'p> {
                 kind: Callee::Ctor,
                 ..
             } => {
-                args.iter().all(|(v, _)| core_operand(body, v))
+                args.iter().all(|(v, _)| self.core_val_readable(body, v))
                     && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
                     && self.core_variant(ty, callee).is_some_and(|(_, p)| {
                         p.len() == args.len() && p.iter().all(|t| self.core_part_ty(t))
@@ -17971,8 +17972,8 @@ impl<'p> Fn_<'_, 'p> {
     /// part, parts this walk emits, and no check at the construction that the
     /// row does not carry.
     fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
-        let scalar = |t: &Type| self.core_part_ty(t);
-        if !vs.iter().all(|v| core_operand(body, v))
+        let part = |t: &Type| self.core_part_ty(t);
+        if !vs.iter().all(|v| self.core_val_readable(body, v))
             || !matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
         {
             return false;
@@ -17994,13 +17995,11 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 decl.len() == vs.len()
                     && names.len() == vs.len()
-                    && decl
-                        .iter()
-                        .all(|f| scalar(&f.ty) && names.contains(&f.name))
+                    && decl.iter().all(|f| part(&f.ty) && names.contains(&f.name))
             }
             Ctor::Array => match self.cx.resolve(ty) {
-                Type::Array(inner) => scalar(&inner),
-                Type::ArrayN(inner, n) => n == vs.len() && n > 0 && scalar(&inner),
+                Type::Array(inner) => part(&inner),
+                Type::ArrayN(inner, n) => n == vs.len() && n > 0 && part(&inner),
                 _ => false,
             },
             Ctor::Map | Ctor::Try(_) => false,
