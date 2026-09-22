@@ -150,6 +150,10 @@ pub struct NameInfo {
     /// found. Making it a kind refused `std/vyx.vyrn`'s `for s in kids` and
     /// twenty-two programs of the corpus with it.
     pub loop_var: Option<String>,
+    /// Whether this is the borrow a `for` reads its container through, from
+    /// the head to the end. A `modify` argument over the container ends it
+    /// ([`crate::kernel`]), where it ends no other borrow.
+    pub walked: bool,
     /// Whether the type is LINEAR — a `Stream`, a `Task`, a type that declares
     /// `impl MustUse` (RFC-0075). Such a value is disposed, not stored, and the
     /// builtin that disposes it (`close`, `@join`, `boxStream`) is the one
@@ -2317,6 +2321,7 @@ impl<'a> Builder<'a> {
             for_consume: false,
             fields: Vec::new(),
             loop_var: None,
+            walked: false,
             linear,
             bound_by_let: false,
             closure_reads: None,
@@ -3453,6 +3458,7 @@ impl<'a> Builder<'a> {
                             // still walking.
                             owner = Some(n);
                             let t = self.borrow_name(iter, ity.clone(), *line);
+                            self.body.names[t as usize].walked = true;
                             out.push(St::Let(t, Rhs::Read(Place::Name(n))));
                             t
                         }
@@ -3466,6 +3472,7 @@ impl<'a> Builder<'a> {
                         // judgment says so.
                         self.pending_receiver = None;
                         let t = self.borrow_name(iter, ity.clone(), *line);
+                        self.body.names[t as usize].walked = true;
                         out.push(St::Let(t, Rhs::Read(place)));
                         t
                     }

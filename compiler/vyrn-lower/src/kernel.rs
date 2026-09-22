@@ -636,6 +636,22 @@ impl<'b> Kernel<'b> {
 
     /// `p` is written: every alias reading a place that overlaps it ends
     /// here. `what` is the place, in the checker's words.
+    /// Ends the `for` borrows over what a `modify` argument `m` names, so the
+    /// loop's next read of its container is refused as a read after a write.
+    fn wrote_walked(&self, st: &mut State, m: Name) {
+        let a = self.src_of(st, &Place::Name(m));
+        let what = self.alias_text(&a);
+        for (k, info) in self.body.names.iter().enumerate() {
+            let Some(x) = &st.alias[k] else {
+                continue;
+            };
+            if info.walked && x.root == a.root && overlaps(&x.path, &a.path) && st.dead[k].is_none()
+            {
+                st.dead[k] = Some((self.here, what.clone()));
+            }
+        }
+    }
+
     fn wrote(&self, st: &mut State, p: &Place, what: &str) {
         // A store into a binding writes the binding's own slot, not the
         // place it reads.
@@ -1703,8 +1719,16 @@ impl<'b> Kernel<'b> {
                         self.take_arg(st, v, *write_back && i == 0, kind.declared())?;
                     }
                 }
-                // A `modify` argument does NOT end the aliases of what it is
-                // handed, and the census measured why (RFC-0125 §3 M3).
+                // A `modify` argument ends the borrow a `for` walks its
+                // container through: the callee may replace the container, and
+                // the loop reads it until it ends (RFC-0125 §2.2).
+                for (v, cap) in args {
+                    if let (Capability::Modify, Val::Name(m)) = (cap, v) {
+                        self.wrote_walked(st, *m);
+                    }
+                }
+                // Any other `modify` argument does NOT end the aliases of what
+                // it is handed, and the census measured why (RFC-0125 §3 M3).
                 // Ending them refuses `freeNode` in `tree.vyrn`,
                 // `linkedlist.vyrn` and `freelist.vyrn`: each reads
                 // `t[h].left` — an `Option<Handle<T>>`, which owns heap

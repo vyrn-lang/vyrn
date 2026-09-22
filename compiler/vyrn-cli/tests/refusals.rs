@@ -2570,8 +2570,10 @@ fn a_block_bodied_lambda_captures_only_what_its_body_reads() {
 /// []` inside the body was accepted. The store released the buffer, the loop
 /// kept reading it through the address it took at the head, and the program
 /// printed 501 where the language says 6. A `for` over a field always read
-/// through a borrow and was refused. Both engines are asked: each refuses the
-/// program before it runs and prints nothing.
+/// through a borrow and was refused. A `modify` argument over the container
+/// ends that borrow too, where it ends no other. Both engines are asked: each
+/// refuses the program before it runs and prints nothing. A `consume` of the
+/// container is the loop rule's, which says it would be used again.
 #[test]
 fn a_store_over_the_container_a_for_walks_is_refused() {
     let cases: &[(&str, &str)] = &[
@@ -2585,6 +2587,12 @@ fn a_store_over_the_container_a_for_walks_is_refused() {
             "a push onto the name",
             "fn main() -> Int64 {\n  let mut ys: Array<Int64> = [1, 2]\n  let mut s = 0\n  \
              for y in ys {\n    ys.push(y)\n    s = s + y\n  }\n  return s\n}\n",
+        ),
+        (
+            "a modify argument of the name",
+            "fn grow(xs: modify Array<Int64>) { xs = [9, 9, 9] }\n\
+             fn main() -> Int64 {\n  let mut ys: Array<Int64> = [1, 2, 3]\n  let mut s = 0\n  \
+             for y in ys {\n    grow(ys)\n    s = s + y\n  }\n  return s\n}\n",
         ),
     ];
     let dir = common::scratch("for-container-store");
