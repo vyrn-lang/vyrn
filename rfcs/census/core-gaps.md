@@ -216,3 +216,29 @@ instrument rather than the corpus: a line is deduplicated whole, so two
 instances that share a spelling and differed only in a tag this track retired
 are now one line. Read the denominator as lines, not as bodies, whenever the
 gap list itself has changed.
+
+## What the release track changed (2026-09-22)
+
+The release family is half closed. `St::Row` has a reader, so `core::gaps`
+stops naming it and every table above is the state BEFORE that; `St::Drop` is
+still a gap, and it is what the family's row in table (b) now counts.
+
+The track found the instrument's own subject wrong. The core's second build
+read `Instance::releases`, a copy the lowering makes before the placer writes
+the rows the plan was missing, so the core stated almost none of the releases
+it was meant to: over `examples/` a release row reached the emitter for one
+binding in twenty. The tables above were measured against that core. So the
+family's numbers here are a floor, not a count, and the order they rank is
+unchanged only because the rows they were missing were missing from every
+family's bodies alike.
+
+Over `examples/` the tally reads 4,089 bodies whole where it read 4,026, and
+`coredrive --ignored` reads 3,496 with no gap where it read 3,449, with 322
+distinct bodies carried end to end where it read 283. The tally's denominator
+moved from 25,694 lines to 26,356, which is the instrument again: a line is
+deduplicated whole, and the core states more rows than it did.
+
+The bodies the emitter TAKES stand at 953. `Fn_::core_walkable`'s
+`placed.is_empty()` screen is gone and it moved none of them: a released name
+is a String or an array, so the clause that asks every name to be a scalar
+refuses the same frames. That clause is the layout families' to move.
