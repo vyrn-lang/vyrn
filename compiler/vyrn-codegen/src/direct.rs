@@ -7986,43 +7986,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("`print` with other than one argument", line);
                 }
                 let t = self.expr(m, b, &args[0])?;
-                match self.cx.resolve(&t) {
-                    // Every width goes through one `i64` printer: widened by its
-                    // own signedness, and then told whether to look for a sign.
-                    // An unsigned type prints its magnitude, which is the
-                    // interpreter's `*v as u64`.
-                    ref it if Num::of(it).is_some() => {
-                        let n = Num::of(it).unwrap();
-                        widen(b, n);
-                        b.ins(&Instruction::I32Const(n.signed as i32));
-                        b.ins(&Instruction::Call(self.cx.rt.print_i64));
-                    }
-                    // Fixed six decimals, which `std/num`'s `f64Str` owns. Its
-                    // answer is a fresh allocation always — the doc on `f64Str`
-                    // pins that, non-finite words included — and the write was
-                    // its whole life, so it is freed here: one block per float
-                    // print, simd's entire residue table (exit-residue round
-                    // seventeen).
-                    ref f if matches!(f, Type::Float | Type::Float32) => {
-                        self.f64_str(b, f, line)?;
-                        let s = b.local(ValType::I32);
-                        b.ins(&Instruction::LocalTee(s));
-                        b.ins(&Instruction::Call(self.cx.rt.print_str));
-                        b.ins(&Instruction::LocalGet(s));
-                        str_hdr(b);
-                        b.ins(&Instruction::Call(self.cx.rt.free));
-                    }
-                    Type::Str => {
-                        b.ins(&Instruction::Call(self.cx.rt.print_str));
-                    }
-                    Type::Bool => {
-                        b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
-                            .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
-                            .ins(&Instruction::Call(self.cx.rt.bool_str));
-                        b.ins(&Instruction::Call(self.cx.rt.print_str));
-                    }
-                    _ => return unsupported(&format!("`print` of `{t}`"), line),
-                }
+                self.print_value(b, &t, line)?;
                 return Ok(Type::Unit);
             }
             // RFC-0008's facade. A `Logger` IS its name string — the handle has no
@@ -8069,57 +8033,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("`toString` with other than one argument", line);
                 }
                 let t = self.expr(m, b, &args[0])?;
-                match self.cx.resolve(&t) {
-                    // Copy, so the rendered value owns its storage. This arm was
-                    // the IDENTITY until RFC-0096 M3 — the pointer passed
-                    // straight through, and the textual backend has strdup'd
-                    // here since it was written. That divergence was a latent
-                    // double free on this backend alone: `let t = "\{s}"` has a
-                    // single hole and no literal piece, so the whole
-                    // interpolation IS `@str(s)` with no `@concat` above it, and
-                    // `t` and `s` then released one buffer twice. The two
-                    // engines now say the same thing about who owns a rendered
-                    // String, which is what lets one rule
-                    // ([`vyrn_frontend::declared::str_temporary`]) answer for both.
-                    Type::Str => {
-                        let k = self.tee_str_temp(b, &args[0]);
-                        self.str_dup(b);
-                        self.free_str_temp(b, k);
-                    }
-                    // The same two steps `print` takes, for the same reason: the
-                    // digits of a sized int are the digits of the `i64` its own
-                    // signedness widens it to.
-                    ref it if Num::of(it).is_some() => {
-                        let n = Num::of(it).unwrap();
-                        widen(b, n);
-                        b.ins(&Instruction::I32Const(n.signed as i32));
-                        self.arena_route(b, true);
-                        b.ins(&Instruction::Call(self.cx.rt.int_str));
-                        self.arena_route(b, false);
-                    }
-                    ref f if matches!(f, Type::Float | Type::Float32) => {
-                        self.f64_str(b, f, line)?;
-                    }
-                    // Copy, for the reason the `Str` arm above copies: a rendered
-                    // value owns its storage. `bool_str` hands back the interned
-                    // `"true"`/`"false"` itself, and a caller that owns a
-                    // data-segment pointer is a caller that writes into the data
-                    // segment — `var s = "\{flag}"` then `s = s + ".."` took
-                    // `str_append`'s ours-branch, read the literal's `cap` of
-                    // `u32::MAX`, never grew, and copied past the literal's end.
-                    // The copy is here rather than in `bool_str` because `print`
-                    // is the other caller and it frees nothing: duplicating there
-                    // would leak a block per `print(flag)`. The textual backend
-                    // splits the same way — `@.str.true` is strdup'd by `str(..)`
-                    // and printed straight by `print`.
-                    Type::Bool => {
-                        b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
-                            .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
-                            .ins(&Instruction::Call(self.cx.rt.bool_str));
-                        self.str_dup(b);
-                    }
-                    _ => return unsupported(&format!("`toString` of `{t}`"), line),
-                }
+                self.str_value(b, &t, Some(&args[0]), line)?;
                 return Ok(Type::Str);
             }
             "@concat" => {
@@ -9097,6 +9011,116 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported(&format!("the call `{name}` at this arity"), line);
         }
         self.emit_call(m, b, &sig, args, hint)
+    }
+
+    /// `print` of the value on the stack, rendered by its own type `t`. Both
+    /// walks call it: the arm over the source after it evaluates the operand,
+    /// and [`Fn_::core_call`] after it reads the name (RFC-0125 M7).
+    fn print_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
+        match self.cx.resolve(t) {
+            // Every width goes through one `i64` printer: widened by its
+            // own signedness, and then told whether to look for a sign.
+            // An unsigned type prints its magnitude, which is the
+            // interpreter's `*v as u64`.
+            ref it if Num::of(it).is_some() => {
+                let n = Num::of(it).unwrap();
+                widen(b, n);
+                b.ins(&Instruction::I32Const(n.signed as i32));
+                b.ins(&Instruction::Call(self.cx.rt.print_i64));
+            }
+            // Fixed six decimals, which `std/num`'s `f64Str` owns. Its
+            // answer is a fresh allocation always — the doc on `f64Str`
+            // pins that, non-finite words included — and the write was
+            // its whole life, so it is freed here: one block per float
+            // print, simd's entire residue table (exit-residue round
+            // seventeen).
+            ref f if matches!(f, Type::Float | Type::Float32) => {
+                self.f64_str(b, f, line)?;
+                let s = b.local(ValType::I32);
+                b.ins(&Instruction::LocalTee(s));
+                b.ins(&Instruction::Call(self.cx.rt.print_str));
+                b.ins(&Instruction::LocalGet(s));
+                str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
+            }
+            Type::Str => {
+                b.ins(&Instruction::Call(self.cx.rt.print_str));
+            }
+            Type::Bool => {
+                b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                    .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                    .ins(&Instruction::Call(self.cx.rt.bool_str));
+                b.ins(&Instruction::Call(self.cx.rt.print_str));
+            }
+            _ => return unsupported(&format!("`print` of `{t}`"), line),
+        }
+        Ok(())
+    }
+
+    /// `toString` of the value on the stack, rendered by its own type `t` into
+    /// a String the caller owns. `arg` is the operand's expression where the
+    /// arm over the source has one: a String temporary is freed once it is
+    /// copied ([`vyrn_frontend::declared::str_temporary`]), and the rows state
+    /// that release as a row of their own.
+    fn str_value(
+        &mut self,
+        b: &mut Frame,
+        t: &Type,
+        arg: Option<&Expr>,
+        line: usize,
+    ) -> Result<(), String> {
+        match self.cx.resolve(t) {
+            // Copy, so the rendered value owns its storage. This arm was
+            // the IDENTITY until RFC-0096 M3 — the pointer passed
+            // straight through, and the textual backend has strdup'd
+            // here since it was written. That divergence was a latent
+            // double free on this backend alone: `let t = "\{s}"` has a
+            // single hole and no literal piece, so the whole
+            // interpolation IS `@str(s)` with no `@concat` above it, and
+            // `t` and `s` then released one buffer twice. The two
+            // engines now say the same thing about who owns a rendered
+            // String, which is what lets one rule
+            // ([`vyrn_frontend::declared::str_temporary`]) answer for both.
+            Type::Str => {
+                let k = arg.and_then(|a| self.tee_str_temp(b, a));
+                self.str_dup(b);
+                self.free_str_temp(b, k);
+            }
+            // The same two steps `print` takes, for the same reason: the
+            // digits of a sized int are the digits of the `i64` its own
+            // signedness widens it to.
+            ref it if Num::of(it).is_some() => {
+                let n = Num::of(it).unwrap();
+                widen(b, n);
+                b.ins(&Instruction::I32Const(n.signed as i32));
+                self.arena_route(b, true);
+                b.ins(&Instruction::Call(self.cx.rt.int_str));
+                self.arena_route(b, false);
+            }
+            ref f if matches!(f, Type::Float | Type::Float32) => {
+                self.f64_str(b, f, line)?;
+            }
+            // Copy, for the reason the `Str` arm above copies: a rendered
+            // value owns its storage. `bool_str` hands back the interned
+            // `"true"`/`"false"` itself, and a caller that owns a
+            // data-segment pointer is a caller that writes into the data
+            // segment — `var s = "\{flag}"` then `s = s + ".."` took
+            // `str_append`'s ours-branch, read the literal's `cap` of
+            // `u32::MAX`, never grew, and copied past the literal's end.
+            // The copy is here rather than in `bool_str` because `print`
+            // is the other caller and it frees nothing: duplicating there
+            // would leak a block per `print(flag)`. The textual backend
+            // splits the same way — `@.str.true` is strdup'd by `str(..)`
+            // and printed straight by `print`.
+            Type::Bool => {
+                b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                    .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                    .ins(&Instruction::Call(self.cx.rt.bool_str));
+                self.str_dup(b);
+            }
+            _ => return unsupported(&format!("`toString` of `{t}`"), line),
+        }
+        Ok(())
     }
 
     /// One `std/mem` primitive (PLAN-0125-runtime §2.1 to §2.3) as its
@@ -17456,9 +17480,12 @@ impl<'p> Fn_<'_, 'p> {
         match rhs {
             Rhs::Call {
                 callee, kind, args, ..
-            } => match builtin_spec(callee, args.len()) {
-                Some((_, _, ret)) => Ok(ret.clone()),
-                None => match self.core_mem_ty(callee, args.len()) {
+            } => match (
+                builtin_spec(callee, args.len()),
+                core_builtin(callee, *kind),
+            ) {
+                (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
+                (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(callee, *kind) {
                         Some(s) => Ok(s.ret_ty),
@@ -17527,6 +17554,21 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, v, &ty, line)?;
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
+            }
+            // `print(x)` and `x.toString()`: the operand at its own type, and
+            // the rendering that type chooses, which the arm over the source
+            // calls too.
+            Some(Spec::Renders(ret)) => {
+                let [(v, _)] = args else {
+                    return unsupported("a rendering of other than one value", line);
+                };
+                let ty = self.core_ty(body, v, &Type::Int);
+                self.core_val(m, b, body, w, v, &ty, line)?;
+                match ret {
+                    Type::Unit => self.print_value(b, &ty, line)?,
+                    _ => self.str_value(b, &ty, None, line)?,
+                }
+                return Ok(ret.clone());
             }
             None => {}
         }
@@ -18462,6 +18504,17 @@ impl<'p> Fn_<'_, 'p> {
                 [(v, _)] => {
                     ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int)).is_none()
                 }
+                _ => false,
+            },
+            // `@str` frees a String temporary once it has copied it
+            // (`str_temporary`), and the rows state that release as a row of
+            // their own. A name this pass minted is that temporary.
+            Some(Spec::Renders(ret)) => match args {
+                [(Val::Name(n), _)] if *ret == Type::Str => {
+                    let info = &body.names[*n as usize];
+                    !(info.source.starts_with('@') && self.cx.resolve(&info.ty) == Type::Str)
+                }
+                [_] => true,
                 _ => false,
             },
             None => false,

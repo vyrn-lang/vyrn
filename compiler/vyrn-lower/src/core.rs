@@ -1612,6 +1612,11 @@ pub enum Spec {
     /// One operand, at whatever type the row put on the name it reads, and a
     /// result of that same type.
     OwnType,
+    /// One operand, at whatever type the row put on the name it reads, and a
+    /// result at the stated type. The checker types the operand over a union
+    /// (`print`, `@str`), and the emitter chooses the rendering by the
+    /// operand's own type, as it chooses an instruction for [`Op::Conv`].
+    Renders(Type),
 }
 
 /// Every builtin the row specifies, by name.
@@ -1622,9 +1627,9 @@ pub enum Spec {
 /// and the codegen test `builtin_rows_all_emit` refuses a [`Spec::Typed`] row
 /// with no instruction.
 ///
-/// A builtin whose operands and result the row cannot state at all — `print`
-/// and `@str` take a union, `bytes` and `stringFromBytes` hand back an
-/// aggregate the emitter must place — is not here and is still a gap.
+/// A builtin whose operands and result the row cannot state at all — `bytes`
+/// and `stringFromBytes` hand back an aggregate the emitter must place — is
+/// not here and is still a gap.
 pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
     static ROWS: std::sync::OnceLock<Vec<(&'static str, Spec)>> = std::sync::OnceLock::new();
     ROWS.get_or_init(|| {
@@ -1664,6 +1669,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             // heap of its own, so its result is the receiver's type and the
             // row states it by naming the operand.
             ("@copy", Spec::OwnType),
+            ("print", Spec::Renders(Type::Unit)),
+            ("@str", Spec::Renders(Type::Str)),
         ]
     })
 }
