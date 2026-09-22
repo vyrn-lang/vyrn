@@ -18887,10 +18887,19 @@ impl<'p> Fn_<'_, 'p> {
                 callee, args, kind, ..
             } => {
                 self.core_args_readable(body, args)
-                    && (matches!(core_builtin(callee, *kind), Some(Spec::Builds(_)))
-                        || self
-                            .core_sig(callee, *kind)
-                            .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
+                    && (match core_builtin(callee, *kind) {
+                        Some(Spec::Builds(_)) => true,
+                        // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
+                        // the copy in a slot of its own, as `Builds` does.
+                        Some(Spec::OwnType) => {
+                            self.core_builtin_readable(body, callee, *kind, args)
+                                && matches!(args.as_slice(), [(Val::Name(n), _)]
+                                    if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_))))
+                        }
+                        _ => false,
+                    } || self
+                        .core_sig(callee, *kind)
+                        .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                 self.core_val_readable(body, k)
