@@ -1842,6 +1842,18 @@ enum Place {
     Static(u32),
 }
 
+/// The chain a switch is being written as — see [`Fn_::chain_open`].
+struct Chain {
+    /// The arm the two-way collapse tests, and its tag; `None` for the chain.
+    two: Option<(usize, usize)>,
+    /// The depth a chain arm branches out to.
+    out: u32,
+    /// What the join carries.
+    bt: BlockType,
+    /// Where the `Else` went, so an arm that writes nothing can take it back.
+    els: Option<usize>,
+}
+
 /// A stream's step signature (RFC-0075 M2b), which is a function of the ELEMENT
 /// type and nothing else — the cursor is two plain `Int64`s precisely so that it
 /// is. Both the construction site and the loop that dispatches through it derive
@@ -13006,7 +13018,6 @@ impl<'p> Fn_<'_, 'p> {
             .iter()
             .map(|a| tag_of(&sum, a.pattern, line))
             .collect::<Result<_, _>>()?;
-        let two = crate::two_way(&tags);
         // One scratch slot for every switch. `if let` took a local of its
         // own, on the argument that "an inner one's scrutinee would take the
         // same scratch slot back" — which the emitted order says is not so:
@@ -13063,51 +13074,21 @@ impl<'p> Fn_<'_, 'p> {
             Repr::Agg(l) => Some((b.alloc(l.size, l.align), l.size)),
             _ => None,
         };
-        // A two-way branch is an `if`/`else` and joins where it ends, so it
-        // needs no block to leave and no `br` to leave it by. Every other
-        // shape is a chain of `if`s inside one block, and each arm branches
-        // out of it.
         let bt = match &r {
             Repr::Scalar(v) => BlockType::Result(*v),
             _ => BlockType::Empty,
         };
-        let out = self.depth;
-        if two.is_none() {
-            b.ins(&Instruction::Block(bt));
-            self.depth += 1;
-        }
+        let mut chain = self.chain_open(b, &tags, bt);
 
         // RFC-0114 Rule N at a match join, keyed by this expression's address.
         let ers = self.cx.edge_rows(key);
         let free_box = self.frees_boxes(scrutinee, key);
-        // The tagged arm goes first in a two-way branch, whichever side the
-        // source wrote it on: the `if` tests a tag and the `else` is what is
-        // left.
-        let order: Vec<usize> = match two {
-            Some((at, _)) => vec![at, 1 - at],
-            None => (0..arms.len()).collect(),
-        };
-        // Where the `else` went, so an arm that writes nothing can take it
-        // back — `if let` with no `else` is the whole of that case.
-        let mut els = None;
-        for (slot, arm_ix) in order.into_iter().enumerate() {
+        for (slot, arm_ix) in Self::chain_order(&chain, arms.len())
+            .into_iter()
+            .enumerate()
+        {
             let arm = &arms[arm_ix];
-            match two {
-                Some(_) if slot == 1 => {
-                    els = Some(b.here());
-                    b.ins(&Instruction::Else);
-                }
-                Some(_) => {
-                    self.tag_test(b, addr, &sum, arm.pattern, line)?;
-                    b.ins(&Instruction::If(bt));
-                    self.depth += 1;
-                }
-                None => {
-                    self.tag_test(b, addr, &sum, arm.pattern, line)?;
-                    b.ins(&Instruction::If(BlockType::Empty));
-                    self.depth += 1;
-                }
-            }
+            self.chain_enter(b, &mut chain, slot, addr, tags[arm_ix].map(|t| t as u64));
 
             let mark = self.scope.len();
             let binds = self.pattern_binds(&sum, arm.pattern, line)?;
@@ -13197,35 +13178,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             self.scope.truncate(mark);
             self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;
-            match two {
-                Some(_) if slot == 0 => {}
-                Some(_) => {
-                    // An `else` that wrote nothing is no `else` at all. A
-                    // branch that carries a value always writes one, so only
-                    // an empty-result `if` can lose it.
-                    if let Some(at) =
-                        els.filter(|at| b.here() == at + 1 && matches!(bt, BlockType::Empty))
-                    {
-                        b.rewind(at);
-                    }
-                    self.depth -= 1;
-                    b.ins(&Instruction::End);
-                }
-                None => {
-                    let d = self.br_to(out);
-                    b.ins(&Instruction::Br(d));
-                    self.depth -= 1;
-                    b.ins(&Instruction::End);
-                }
-            }
+            self.chain_leave(b, &chain, slot);
         }
-        if two.is_none() {
-            // The checker proves the arms exhaustive; the validator cannot see
-            // the proof, so it is told instead.
-            b.ins(&Instruction::Unreachable);
-            self.depth -= 1;
-            b.ins(&Instruction::End);
-        }
+        self.chain_close(b, &chain);
         // The fall-through release, after the arms have rejoined and before the
         // aggregate result's address is pushed. A scalar result is already on
         // the stack here and the release is stack-neutral, so it sits under it.
@@ -13638,14 +13593,122 @@ impl<'p> Fn_<'_, 'p> {
         pat: &Pattern,
         line: usize,
     ) -> Result<(), String> {
+        self.tag_is(b, addr, tag_of(sum, pat, line)?.map(|t| t as u64));
+        Ok(())
+    }
+
+    /// Open the chain a switch is, and say which arm goes first.
+    ///
+    /// The arms are tried in order inside one `block`, each leaving by a
+    /// branch to it; two arms that are one tag and a default collapse to an
+    /// `if`/`else`, which joins where it ends and needs neither
+    /// ([`crate::two_way`]). `bt` is what the join carries.
+    ///
+    /// One home for the shape, because both walks write it: [`Fn_::match_expr`]
+    /// over the arms the reader wrote, [`Fn_::core_switch`] over the row's
+    /// (RFC-0125 M7).
+    fn chain_open(&mut self, b: &mut Frame, tags: &[Option<usize>], bt: BlockType) -> Chain {
+        let two = crate::two_way(tags);
+        let out = self.depth;
+        if two.is_none() {
+            b.ins(&Instruction::Block(bt));
+            self.depth += 1;
+        }
+        Chain {
+            two,
+            out,
+            bt,
+            els: None,
+        }
+    }
+
+    /// The arms in the order they are emitted. The tagged arm goes first in a
+    /// two-way branch, whichever side the source wrote it on: the `if` tests a
+    /// tag and the `else` is what is left.
+    fn chain_order(c: &Chain, arms: usize) -> Vec<usize> {
+        match c.two {
+            Some((at, _)) => vec![at, 1 - at],
+            None => (0..arms).collect(),
+        }
+    }
+
+    /// Enter arm `slot` of the chain: its test, and the block it writes into.
+    fn chain_enter(
+        &mut self,
+        b: &mut Frame,
+        c: &mut Chain,
+        slot: usize,
+        addr: u32,
+        tag: Option<u64>,
+    ) {
+        if c.two.is_some() && slot == 1 {
+            c.els = Some(b.here());
+            b.ins(&Instruction::Else);
+            return;
+        }
+        self.tag_is(b, addr, tag);
+        // A chain arm carries its value out on the branch, so only the
+        // two-way branch's own `if` is the join.
+        let bt = if c.two.is_some() {
+            c.bt
+        } else {
+            BlockType::Empty
+        };
+        b.ins(&Instruction::If(bt));
+        self.depth += 1;
+    }
+
+    /// Leave arm `slot`: the branch out of the chain, or the end of the
+    /// two-way branch once its second side has been written.
+    fn chain_leave(&mut self, b: &mut Frame, c: &Chain, slot: usize) {
+        match c.two {
+            Some(_) if slot == 0 => return,
+            Some(_) => {
+                // An `else` that wrote nothing is no `else` at all. A branch
+                // that carries a value always writes one, so only an
+                // empty-result `if` can lose it.
+                if let Some(at) = c
+                    .els
+                    .filter(|at| b.here() == at + 1 && matches!(c.bt, BlockType::Empty))
+                {
+                    b.rewind(at);
+                }
+            }
+            None => {
+                let d = self.br_to(c.out);
+                b.ins(&Instruction::Br(d));
+            }
+        }
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+    }
+
+    /// Close the chain. The checker proves the arms exhaustive; the validator
+    /// cannot see the proof, so it is told instead.
+    fn chain_close(&mut self, b: &mut Frame, c: &Chain) {
+        if c.two.is_some() {
+            return;
+        }
+        b.ins(&Instruction::Unreachable);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+    }
+
+    /// The probe itself: whether the sum at `addr` carries `tag`, and constant
+    /// truth for an arm no tag chooses.
+    ///
+    /// The arm above asks it of a PATTERN and the core walk asks it of the row
+    /// ([`vyrn_lower::core::Test`], RFC-0125 M7), so the two spellings of
+    /// "a tag is read and an arm is chosen" are one.
+    fn tag_is(&self, b: &mut Frame, addr: u32, tag: Option<u64>) {
         b.ins(&Instruction::LocalGet(addr));
         // The refutable-`let` desugar's default arm (RFC-0121): the probe is
         // constant truth — the address read above is discarded, and the one
         // `i32` every caller expects is pushed in its place.
-        let Some(tag) = tag_of(sum, pat, line)? else {
+        let Some(tag) = tag else {
             b.ins(&Instruction::Drop);
             b.ins(&Instruction::I32Const(1));
-            return Ok(());
+            return;
         };
         // One tag read for every sum since RFC-0126 §8.11's M4b, where the two
         // built-in ones stopped having a variant list of their own. A second
@@ -13654,7 +13717,6 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(word8()));
         b.ins(&Instruction::I64Const(tag as i64));
         b.ins(&Instruction::I64Eq);
-        Ok(())
     }
 
     /// Bind payload `i` of the matched variant out of the sum at `addr`.
@@ -16489,6 +16551,96 @@ impl<'p> Fn_<'_, 'p> {
         self.emit_rel(m, b, place, &rel, 0)
     }
 
+    /// A tag is read and an arm is chosen, off the row — RFC-0125 M7.
+    ///
+    /// The arms are a chain of `if`s inside one `block`, each leaving by a
+    /// branch to it: the shape [`Fn_::match_expr`] writes for the same
+    /// construct, tested by the same probe ([`Fn_::tag_is`]). What is not here
+    /// is the join, because the core's switch carries no value — every arm
+    /// stores its own into the name the reader bound, and `match_expr`'s
+    /// destination, result type and two-way collapse are all about a value
+    /// this row does not have.
+    ///
+    /// The payload binder is the PLACE the row names (§2.1): the walk binds it
+    /// where the arm is entered and the arm's own rows read it there.
+    #[allow(clippy::too_many_arguments)]
+    fn core_switch(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        on: &Val,
+        arms: &[vyrn_lower::core::Arm],
+        owns: bool,
+        line: usize,
+    ) -> Result<(), String> {
+        let Val::Name(n) = on else {
+            return unsupported("a switch on a value the row does not name", line);
+        };
+        let Some((place, sty)) = self.core_place(w, body, *n) else {
+            return unsupported("a switch on a name with no place", line);
+        };
+        let Some(sum) = self.sum_of(&sty) else {
+            return unsupported("a switch on a value that is no sum", line);
+        };
+        let Repr::Agg(sl) = self.cx.repr(&sty, line)? else {
+            return unsupported("a switch on a non-aggregate", line);
+        };
+        // The scrutinee's address, in the scratch local the arm takes for it.
+        if place.addr(b, 0).is_none() {
+            let Place::Local(l) = place else {
+                unreachable!("a place is a slot, a static or a local")
+            };
+            b.ins(&Instruction::LocalGet(l));
+        }
+        let addr = self.scratch(b, ValType::I32, 3);
+        b.ins(&Instruction::LocalSet(addr));
+        // The boxes the binders come out of, on the clauses the arm asks
+        // ([`Fn_::frees_boxes`]): the construct owns the value, and no row
+        // releases it whole afterwards. The screen refuses the rest — a
+        // declared `release` taking its own receiver apart, and a construct
+        // whose own copy the plan releases.
+        let free_box = owns;
+        let tags: Vec<Option<usize>> = arms
+            .iter()
+            .map(|a| match a.test {
+                vyrn_lower::core::Test::Tag(t) => Ok(Some(t as usize)),
+                vyrn_lower::core::Test::Else => Ok(None),
+                vyrn_lower::core::Test::Impl => {
+                    Err(gap("a switch whose arms a call chooses", line))
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        // The switch carries no value: the core stores each arm's own into the
+        // name the reader bound, so the join is empty and there is no
+        // destination for it to write through.
+        let mut chain = self.chain_open(b, &tags, BlockType::Empty);
+        for (slot, ix) in Self::chain_order(&chain, arms.len())
+            .into_iter()
+            .enumerate()
+        {
+            let arm = &arms[ix];
+            self.chain_enter(b, &mut chain, slot, addr, tags[ix].map(|t| t as u64));
+            // A payload's slot is the width of the ones before it (RFC-0126
+            // §8.4), so the binder needs the whole variant's list and not its
+            // own type. The row binds them in payload order.
+            let ptys: Vec<Type> = match tags[ix] {
+                Some(t) => sum[t].payload.clone(),
+                None => Vec::new(),
+            };
+            for (i, bn) in arm.binds.iter().enumerate() {
+                let ty = body.names[*bn as usize].ty.clone();
+                let at = self.bind_payload(b, addr, &sl, &ptys, i, &ty, line, free_box)?;
+                w.at[*bn as usize] = Some((at, ty));
+            }
+            self.core_stmts(m, b, body, w, &arm.body)?;
+            self.chain_leave(b, &chain, slot);
+        }
+        self.chain_close(b, &chain);
+        Ok(())
+    }
+
     /// One function body, emitted from the core's own statements — RFC-0125
     /// §3 M3, the driver slice.
     ///
@@ -16721,6 +16873,7 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         let mut names = Vec::new();
+        let mut switched = Vec::new();
         for st in run {
             // A release row names a binding the PLACEMENT holds, and the
             // emitter reads its place off `rel_slots` rather than off this
@@ -16731,11 +16884,12 @@ impl<'p> Fn_<'_, 'p> {
             if matches!(st, St::Row { .. }) {
                 continue;
             }
+            core_switched(st, &mut switched);
             vyrn_lower::core::names_in(st, &mut names);
         }
         for n in &names {
             let info = &body.names[*n as usize];
-            if !core_scalar(&info.ty) && !made.contains(n) {
+            if !core_scalar(&info.ty) && !made.contains(n) && !switched.contains(n) {
                 return None;
             }
         }
@@ -16747,7 +16901,7 @@ impl<'p> Fn_<'_, 'p> {
         // inside its own body with no place, which is why that form stood at
         // zero until the site slice asked the question once.
         for n in &names {
-            if lets.iter().any(|(b, _)| b == n) {
+            if lets.iter().any(|(b, _)| b == n) || switched.contains(n) {
                 continue;
             }
             let (_, ty) = self.core_place(&self.core_w, body, *n)?;
@@ -16784,8 +16938,7 @@ impl<'p> Fn_<'_, 'p> {
         if info.source.starts_with('@') {
             return None;
         }
-        let p = self.lookup(&info.source, info.line).ok()?;
-        matches!(p.0, Place::Local(_)).then_some(p)
+        self.lookup(&info.source, info.line).ok()
     }
 
     fn core_stmts(
@@ -17037,6 +17190,13 @@ impl<'p> Fn_<'_, 'p> {
                         self.core_releases(m, b, body)?;
                     }
                 }
+                St::Switch {
+                    on,
+                    arms,
+                    owns,
+                    line,
+                    ..
+                } => self.core_switch(m, b, body, w, on, arms, *owns, *line)?,
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
@@ -17826,6 +17986,42 @@ impl<'p> Fn_<'_, 'p> {
             St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
             St::Loop { body: inner, .. } => self.core_readable(body, inner, reads),
             St::Break { .. } | St::Continue { .. } => true,
+            // A tag is read and an arm is chosen off the row
+            // ([`Fn_::core_switch`]). What that needs is a scrutinee this walk
+            // can take the address of, a tag on every arm, and a payload
+            // binder it can hold in a local — which is the scalar question
+            // again, because every wider payload lands in a slot.
+            St::Switch { on, arms, site, .. } => {
+                let Val::Name(n) = on else {
+                    return false;
+                };
+                // The place is the one this walk bound (a layout the run MAKES,
+                // which the `let` arm slots before the switch is reached) or
+                // the one the AST arm bound.
+                let placed = self.core_place(&self.core_w, body, *n).is_some()
+                    || ss[..i].iter().any(|p| {
+                        matches!(p, St::Let(l, rhs)
+                        if l == n && (matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs)))
+                    });
+                placed
+                    && self.sum_of(&body.names[*n as usize].ty).is_some()
+                    // A declared `release` taking its own receiver apart keeps
+                    // the boxes for its caller, and the row does not say which
+                    // place a `consume` named ([`Fn_::frees_boxes`]).
+                    && !self.is_release
+                    // A construct the plan releases WHOLE is one the arm gives
+                    // a slot and a copy of its own, because an arm may build
+                    // over the scratch the scrutinee was left in. The row
+                    // states the release and not the copy.
+                    && !self.releases_whole(*site)
+                    && arms.iter().all(|a| {
+                        a.test != vyrn_lower::core::Test::Impl
+                            && a.binds
+                                .iter()
+                                .all(|bn| core_scalar(&body.names[*bn as usize].ty))
+                            && self.core_readable(body, &a.body, reads)
+                    })
+            }
             // A release is the row's, at every exit, and the walk emits it
             // where it stands ([`Fn_::core_release`]). What it needs is the
             // node the plan keys the slot by, which is the name's binding.
@@ -17966,12 +18162,48 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
     }
 }
 
+/// The names a run's switches account for themselves — RFC-0125 M7.
+///
+/// A payload binder is a local [`Fn_::core_switch`] binds when it enters the
+/// arm, and a scrutinee is read as an ADDRESS rather than as a value. So the
+/// screen's scalar clause is asked about neither: a sum is not a scalar, and
+/// asking would refuse every run that switches at all.
+fn core_switched(s: &St, out: &mut Vec<vyrn_lower::core::Name>) {
+    match s {
+        St::Switch { on, arms, .. } => {
+            if let Val::Name(n) = on {
+                out.push(*n);
+            }
+            for a in arms {
+                out.extend(a.binds.iter().copied());
+                a.body.iter().for_each(|s| core_switched(s, out));
+            }
+        }
+        St::If { then, els, .. } => {
+            then.iter().for_each(|s| core_switched(s, out));
+            els.iter().for_each(|s| core_switched(s, out));
+        }
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+            inner.iter().for_each(|s| core_switched(s, out));
+        }
+        _ => {}
+    }
+}
+
 /// The exits this walk gives back at itself — RFC-0125 §3 M3, the release
 /// slice. A `break`, a `continue` and a `return` each carry the node the plan
 /// keys their releases by, so the walk asks [`Fn_::emit_releases`] for the
-/// group there. A block's fall-through release and a scrutinee's are keyed by
-/// the block and by the construct, which no statement of a run names.
-const CORE_EXITS: [ExitKind; 3] = [ExitKind::Break, ExitKind::Continue, ExitKind::Return];
+/// group there. A scrutinee's joins them with the tag family (RFC-0125 M7):
+/// the core states it as a [`St::Row`] after the switch, keyed by the
+/// construct, and [`Fn_::core_release`] emits it where the row stands. A
+/// block's fall-through release is keyed by the block, which no statement of
+/// a run names.
+const CORE_EXITS: [ExitKind; 4] = [
+    ExitKind::Break,
+    ExitKind::Continue,
+    ExitKind::Return,
+    ExitKind::Scrutinee,
+];
 
 /// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
 /// [`Fn_::core_run`]'s screen, which a subtree carries for every branch.

@@ -856,10 +856,32 @@ pub struct Arm {
     /// reader needs no second table.
     pub frees: Option<Vec<Name>>,
     pub body: Vec<St>,
+    /// Why control reaches this arm — RFC-0125 M7, the tag family.
+    pub test: Test,
     /// The `match` (or `if let`, or `?`) this arm belongs to, and which arm
     /// it is — the plan's key for an arm payload free and an edge release.
     pub site: usize,
     pub index: u32,
+}
+
+/// How one [`Arm`] of a [`St::Switch`] is chosen.
+///
+/// The arms are tried in order, so a [`Test::Else`] runs when no arm before it
+/// did. The index is the SOURCE's arm order and the tag is the variant's
+/// position in the scrutinee's list, and the two are different numbers: `match
+/// o { None => a, Some(n) => b }` has arm 0 at tag 0 only because the reader
+/// wrote it that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Test {
+    /// The scrutinee's tag is this one.
+    Tag(u64),
+    /// No arm before it was chosen: `_` (RFC-0121's refutable `let`), and the
+    /// `else` block of an `if let`.
+    Else,
+    /// A predicate the PROGRAM states: `?` on a declared `Fallible`
+    /// (RFC-0080 M3) asks the impl's own `failed`, which is a call this row
+    /// does not carry. The one shape of the family that is still a gap.
+    Impl,
 }
 
 #[derive(Debug, Clone)]
@@ -1662,7 +1684,7 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// family one form track closes: `Call:<who>:<name>` for a callee the
 /// emitter's function table does not answer, `Make:<what>` for a layout,
 /// `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>` for a row
-/// that names no value, `Lambda`, `Switch` and `Drop`.
+/// that names no value, `Lambda`, `Switch:Impl` and `Drop`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
@@ -1702,8 +1724,14 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
                     gaps_val(v, out);
                 }
             }
+            // Since RFC-0125 M7 the arm says which tag reaches it, so the
+            // emitter chooses the arm off the row (`direct::Fn_::core_switch`).
+            // A `?` on a declared `Fallible` is the one shape left: its arms
+            // are picked by a call the row does not carry.
             St::Switch { on, arms, .. } => {
-                out.push("Switch".into());
+                if arms.iter().any(|a| a.test == Test::Impl) {
+                    out.push("Switch:Impl".into());
+                }
                 gaps_val(on, out);
                 for a in arms {
                     gaps_of(&a.body, out);
@@ -2953,6 +2981,7 @@ impl<'a> Builder<'a> {
                         binds,
                         frees: Some(frees),
                         body,
+                        test: self.arm_test(&arm.pattern, &sty, *mline)?,
                         site: mid,
                         index: i as u32,
                     });
@@ -3341,6 +3370,7 @@ impl<'a> Builder<'a> {
                             frees: Some(frees),
                             binds,
                             body: t,
+                            test: self.arm_test(pattern, &sty, *line)?,
                             site: sid,
                             index: 0,
                         },
@@ -3348,6 +3378,7 @@ impl<'a> Builder<'a> {
                             frees: Some(Vec::new()),
                             binds: Vec::new(),
                             body: e,
+                            test: Test::Else,
                             site: sid,
                             index: 1,
                         },
@@ -4021,6 +4052,28 @@ impl<'a> Builder<'a> {
     fn taken_by_loop(&mut self, it: Name, sid: usize) -> bool {
         self.body.cands.push((sid, it, Cand::Loop));
         self.seed.contains(&sid)
+    }
+
+    /// Which tag a pattern tests for, in the scrutinee's own variant list —
+    /// RFC-0125 M7, the tag family.
+    ///
+    /// `??`'s pair (RFC-0079) names a TAG rather than a variant: tag 1
+    /// succeeds and tag 0 fails, for every sum since RFC-0126 §8.11's M4b.
+    fn arm_test(&self, p: &Pattern, sty: &Type, line: usize) -> Result<Test, Gap> {
+        let Pattern::Variant(v, _) = p else {
+            return Ok(match p {
+                Pattern::Other => Test::Else,
+                _ => Test::Tag(u64::from(matches!(p, Pattern::Success(_)))),
+            });
+        };
+        let decls = self.proto.types();
+        let Type::Enum(variants) = vyrn_frontend::types::resolve(sty, &decls) else {
+            return gap("a variant pattern on a non-enum", line);
+        };
+        match variants.iter().position(|x| x.name == *v) {
+            Some(at) => Ok(Test::Tag(at as u64)),
+            None => gap("a variant the enum does not have", line),
+        }
     }
 
     /// Bind a pattern's names. Owned binders when the match consumed its
@@ -5298,6 +5351,7 @@ impl<'a> Builder<'a> {
                         binds,
                         frees: Some(frees),
                         body,
+                        test: self.arm_test(&arm.pattern, &sty, *line)?,
                         site: mid,
                         index: i as u32,
                     });
@@ -5384,6 +5438,7 @@ impl<'a> Builder<'a> {
                             frees: Some(fail_frees),
                             binds: fb,
                             body: fail,
+                            test: Test::Tag(0),
                             site: tid,
                             index: 0,
                         },
@@ -5391,6 +5446,7 @@ impl<'a> Builder<'a> {
                             frees: Some(ok_frees),
                             binds: ob,
                             body: ok,
+                            test: Test::Tag(1),
                             site: tid,
                             index: 1,
                         },
@@ -5480,6 +5536,7 @@ impl<'a> Builder<'a> {
                     frees: Some(Vec::new()),
                     binds: Vec::new(),
                     body: fail,
+                    test: Test::Impl,
                     site: tid,
                     index: 0,
                 },
@@ -5487,6 +5544,7 @@ impl<'a> Builder<'a> {
                     frees: Some(Vec::new()),
                     binds: Vec::new(),
                     body: ok,
+                    test: Test::Impl,
                     site: tid,
                     index: 1,
                 },
