@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 8] = [
+const SHAPES: [(&str, &str); 9] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -188,6 +188,13 @@ const SHAPES: [(&str, &str); 8] = [
         "an `if let` the rows carry",
         "fn vyrnTestMain() -> Int64 { let o = Some(7) let mut t = 0          if let Some(n) = o { t = t + n } else { t = 1 } return t }",
     ),
+    // A `for` over a String literal gave the whole body up, so the
+    // `continue` in the other loop had no row, and the retired arm failed the
+    // build (RFC-0125 M7, `m7-forhead`).
+    (
+        "a `for` over a String literal beside a `continue`",
+        "fn vyrnTestMain() -> Int64 { let xs: Array<Int64> = [1, 2, 3, 4, 5] let mut s = 0          for x in xs { if x % 2 == 0 { continue } s = s + x }          for c in \"abc\" { s = s + Int64(c) } return s }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -197,7 +204,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 8] = [
+const SHAPE_PIN: [(&str, usize, usize); 9] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -206,6 +213,7 @@ const SHAPE_PIN: [(&str, usize, usize); 8] = [
     ("a match on two string literals", 0, 0),
     ("an order on two string literals", 0, 0),
     ("an `if let` the rows carry", 0, 0),
+    ("a `for` over a String literal beside a `continue`", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
@@ -373,6 +381,8 @@ fn run() {
         let core = emit(&program, false);
         let per = vyrn_codegen::direct::forms();
         let ast = emit(&program, true);
+        // Two walks that fail alike are no witness of a shape.
+        assert!(core.is_ok(), "{what}: {core:?}");
         assert_eq!(core, ast, "{what}: the two walks emit different modules");
         shapes.push((what, per[BREAK].0, per[CONT].0));
     }

@@ -290,3 +290,11 @@ The corpus cannot witness this family. Each of the 156 `if let`s in `examples/`
 waits on another family too, so the AST arm's count does not move. The witness
 is `coredrive`'s `SHAPES`: one `if let` the rows carry, compiled both ways and
 asserted byte for byte.
+
+The `for` head track (`m7-forhead`) retired `Opaque:Exit`, `Opaque:Index` and
+`Read:Elem`. The builder states the length, the counter, the exit test and the
+element read at the counter as rows, and `direct::Fn_::core_addr` addresses an
+element. A stream's head keeps one kind, `Opaque:Pull`, at 21 lines over
+`examples/`. Over `examples/` the tally reads 17,353 lines whole where it read
+17,039. No `for` statement is emitted from the rows yet: its borrow binds an
+array, which the frame screen does not admit.

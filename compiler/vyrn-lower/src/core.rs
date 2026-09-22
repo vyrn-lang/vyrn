@@ -150,6 +150,10 @@ pub struct NameInfo {
     /// found. Making it a kind refused `std/vyx.vyrn`'s `for s in kids` and
     /// twenty-two programs of the corpus with it.
     pub loop_var: Option<String>,
+    /// Whether this is the borrow a `for` reads its container through, from
+    /// the head to the end. A `modify` argument over the container ends it
+    /// ([`crate::kernel`]), where it ends no other borrow.
+    pub walked: bool,
     /// Whether the type is LINEAR — a `Stream`, a `Task`, a type that declares
     /// `impl MustUse` (RFC-0075). Such a value is disposed, not stored, and the
     /// builtin that disposes it (`close`, `@join`, `boxStream`) is the one
@@ -380,10 +384,9 @@ pub enum Lit {
 /// What a row stands on where it names no value.
 ///
 /// Each kind is one producer in this pass, and each one blocks on something
-/// of its own: [`Opaque::Index`] and [`Opaque::Exit`] on the container's
-/// length, which is a call the row does not state, [`Opaque::Trapped`] on
-/// nothing, because the statement after it never runs, and [`Opaque::Unbound`]
-/// on a store with nothing to store.
+/// of its own: [`Opaque::Pull`] on a stream's pull, which is a call the row
+/// does not state, [`Opaque::Trapped`] on nothing, because the statement after
+/// it never runs, and [`Opaque::Unbound`] on a store with nothing to store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opaque {
     /// A function's name used as a value, or a type's name as an argument
@@ -393,13 +396,10 @@ pub enum Opaque {
     /// sink: IntSink = double`) is the tag RFC-0037's defunctionalizer
     /// chose, which the emitter holds and this pass does not.
     Static,
-    /// The index of the element read at a `for` head. The row states the
-    /// read; the counter that walks the container is the emitter's, and
-    /// naming it needs the length beside it.
-    Index,
-    /// The exit test of the `for` this pass desugared. The branch is made up
-    /// and an emitter writes its own.
-    Exit,
+    /// A `for` head over a stream: its exit test and the index its element is
+    /// read at. A stream is pulled and not indexed, so both are the one call
+    /// that answers the next element or none, and the row states no such call.
+    Pull,
     /// The result of a call that traps (`panic`), which the `St::Trap` after
     /// it makes unreachable.
     Trapped,
@@ -1823,8 +1823,7 @@ fn gaps_val(v: &Val, out: &mut Vec<String>) {
 /// could not say which was left.
 fn place_gap(p: &Place) -> Option<&'static str> {
     match p {
-        Place::Name(_) | Place::Global(_) | Place::Field(..) => None,
-        Place::Elem(..) => Some("Elem"),
+        Place::Name(_) | Place::Global(_) | Place::Field(..) | Place::Elem(..) => None,
         Place::Key(..) => Some("Key"),
     }
 }
@@ -2321,6 +2320,7 @@ impl<'a> Builder<'a> {
             for_consume: false,
             fields: Vec::new(),
             loop_var: None,
+            walked: false,
             linear,
             bound_by_let: false,
             closure_reads: None,
@@ -3428,16 +3428,38 @@ impl<'a> Builder<'a> {
                     take_names_a_place(iter, *line, true)?;
                 }
                 // The container: a name the loop reads, or one it takes.
+                // `owner` is the name whose ownership the element sentence
+                // below asks about, which for a borrowed name is the name.
+                let mut owner = None;
                 let it = match iter {
                     Expr::Var { name, .. } if self.lookup(name).is_some() => {
                         let n = self.lookup(name).unwrap();
+                        let pulled = matches!(
+                            vyrn_frontend::types::resolve(&ity, &self.proto.types()),
+                            Type::Stream(_)
+                        );
                         if *consuming {
                             let t = self.temp(ity.clone(), *line);
                             out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                             self.keyed(t, sid);
                             t
-                        } else {
+                        } else if pulled {
+                            // A stream is pulled to its end and closed by the
+                            // loop through its own name (below).
                             n
+                        } else {
+                            // The loop reads the container from its head to
+                            // its end, so it reads it through a borrow, as it
+                            // reads a field below: a store over the name inside
+                            // the body then ends the borrow the next turn
+                            // reads, and the kernel refuses it. Without the
+                            // borrow `ys = []` freed the buffer the loop was
+                            // still walking.
+                            owner = Some(n);
+                            let t = self.borrow_name(iter, ity.clone(), *line);
+                            self.body.names[t as usize].walked = true;
+                            out.push(St::Let(t, Rhs::Read(Place::Name(n))));
+                            t
                         }
                     }
                     _ if !*consuming && is_place_read(iter) => {
@@ -3449,20 +3471,28 @@ impl<'a> Builder<'a> {
                         // judgment says so.
                         self.pending_receiver = None;
                         let t = self.borrow_name(iter, ity.clone(), *line);
+                        self.body.names[t as usize].walked = true;
                         out.push(St::Let(t, Rhs::Read(place)));
                         t
                     }
                     _ => {
-                        let v = self.val(iter, out)?;
-                        let Val::Name(t) = v else {
-                            return gap("a `for` over a literal", *line);
-                        };
-                        // The construct owns the temporary; the plan keys its
-                        // release by the statement, and so does a row the
-                        // placer adds for it (`for t in lex(src)` with a
-                        // `return` inside the loop).
-                        self.keyed(t, sid);
-                        t
+                        match self.val(iter, out)? {
+                            // The construct owns the temporary; the plan keys
+                            // its release by the statement, and so does a row
+                            // the placer adds for it (`for t in lex(src)` with
+                            // a `return` inside the loop).
+                            Val::Name(t) => {
+                                self.keyed(t, sid);
+                                t
+                            }
+                            // A String literal is static: the loop reads it
+                            // through a name that owns nothing.
+                            lit => {
+                                let t = self.name("@lit", ity.clone(), false, *line);
+                                out.push(St::Let(t, Rhs::Val(lit)));
+                                t
+                            }
+                        }
                     }
                 };
                 // The loop is what took the container, whichever spelling
@@ -3480,6 +3510,21 @@ impl<'a> Builder<'a> {
                 if streaming {
                     self.stream_loops.push(it);
                 }
+                // `for x in xs` walks an index the core names (§2.1): the
+                // length read once, before the loop, and a counter from zero
+                // that steps right after the element is read, so a `continue`
+                // needs no step of its own. A stream is pulled and has
+                // neither.
+                let counter = if streaming {
+                    None
+                } else {
+                    let n = self.temp(Type::Int, *line);
+                    let len = self.length_of(it, &ity, *line)?;
+                    out.push(St::Let(n, len));
+                    let i = self.temp(Type::Int, *line);
+                    out.push(St::Let(i, Rhs::Val(Val::Lit(Lit::Int(0)))));
+                    Some((n, i))
+                };
                 let mut l = Vec::new();
                 // The loop leaves when the container is walked: the same
                 // `if .. else break` a `while` has at its top. Without it the
@@ -3489,8 +3534,26 @@ impl<'a> Builder<'a> {
                 // row's hole set then read a join's other edge alone, and
                 // walked a field the dead edge had taken (`std/vyx`'s
                 // `vyxMergeImports`, found by the cross-engine generator gate).
+                let (cond, index) = match counter {
+                    Some((n, i)) => {
+                        let c = self.temp(Type::Bool, *line);
+                        l.push(St::Let(
+                            c,
+                            Rhs::Prim(
+                                Op::Bin(BinOp::Lt),
+                                vec![Val::Name(i), Val::Name(n)],
+                                Some(Type::Bool),
+                            ),
+                        ));
+                        (Val::Name(c), Val::Name(i))
+                    }
+                    None => (
+                        Val::Lit(Lit::Opaque(Opaque::Pull)),
+                        Val::Lit(Lit::Opaque(Opaque::Pull)),
+                    ),
+                };
                 l.push(St::If {
-                    cond: Val::Lit(Lit::Opaque(Opaque::Exit)),
+                    cond,
                     then: Vec::new(),
                     els: vec![St::Break { site: 0 }],
                     site: 0,
@@ -3516,7 +3579,7 @@ impl<'a> Builder<'a> {
                 // NAMED outlives the loop, so `for r in ns` only borrows
                 // its elements and `take(r)` is refused (the structural
                 // census, rows 01, 02, 03, 27 and 34).
-                let ic = &self.body.names[it as usize];
+                let ic = &self.body.names[owner.unwrap_or(it) as usize];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 let owned = self.owns(&ety) && loops_alone && self.seed.contains(&ekey);
                 // The other half of the same sentence: if every element left
@@ -3550,13 +3613,13 @@ impl<'a> Builder<'a> {
                 // The variable has no `let` node; the plan keys it by its
                 // spelling's buffer, which is one address per loop.
                 self.keyed(x, vyrn_frontend::own::for_var_key(var));
-                let head = vec![St::Let(
+                let mut head = vec![St::Let(
                     x,
-                    Rhs::Read(Place::Elem(
-                        Box::new(Place::Name(it)),
-                        Val::Lit(Lit::Opaque(Opaque::Index)),
-                    )),
+                    Rhs::Read(Place::Elem(Box::new(Place::Name(it)), index)),
                 )];
+                if let Some((_, i)) = counter {
+                    self.step(i, &mut head);
+                }
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), x));
                 let r = self.block_with(body, head, &mut l);
@@ -3816,6 +3879,52 @@ impl<'a> Builder<'a> {
                 .map(|f| f.ret.clone()),
             _ => None,
         }
+    }
+
+    /// The length a `for` over `it` walks to: a header read for a container
+    /// the language lays out, and the `Iterate` impl's `size` for a user one
+    /// (RFC-0091 M3).
+    fn length_of(&self, it: Name, ity: &Type, line: usize) -> Result<Rhs, Gap> {
+        let decls = self.proto.types();
+        let field = |f: &str| Rhs::Read(Place::Field(Box::new(Place::Name(it)), f.to_string()));
+        Ok(match vyrn_frontend::types::resolve(ity, &decls) {
+            Type::Str => field("byteLength"),
+            Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Map(..) => {
+                field("length")
+            }
+            _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
+                Some((size, _)) => Rhs::Call {
+                    callee: size,
+                    args: vec![(Val::Name(it), Capability::Read)],
+                    write_back: false,
+                    kind: Callee::Method,
+                    ret: Some(Type::Int),
+                },
+                None => return gap("a `for` over a container with no length", line),
+            },
+        })
+    }
+
+    /// `i = i + 1`, for the counter of a `for` over an index.
+    fn step(&mut self, i: Name, out: &mut Vec<St>) {
+        let line = self.body.names[i as usize].line;
+        let t = self.temp(Type::Int, line);
+        out.push(St::Let(
+            t,
+            Rhs::Prim(
+                Op::Bin(BinOp::Add),
+                vec![Val::Name(i), Val::Lit(Lit::Int(1))],
+                Some(Type::Int),
+            ),
+        ));
+        out.push(St::Store {
+            place: Place::Name(i),
+            value: Val::Name(t),
+            old: Old::Nothing,
+            line,
+            site: Site::None,
+            releases: false,
+        });
     }
 
     fn projected_elem(&self, ity: &Type) -> Option<Type> {
