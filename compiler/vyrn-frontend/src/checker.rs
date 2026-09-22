@@ -5515,10 +5515,18 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let decl = self
-            .types
-            .get(name)
-            .ok_or_else(|| cerr!(line, "unknown type `{name}`"))?;
+        let decl = self.types.get(name);
+        // `Token` (RFC-0054) is the one record no declaration owns: `lex()`
+        // makes it, `types::record_fields` below states its fields, and
+        // `Checker::check_type` admits the name in generation code. A
+        // synthesized decoder BUILDS one (`vyrn_genwasm`'s
+        // `Decoders::materialize`), so the literal is checked from those fields
+        // or its node carries no type at all and the core gives up on the whole
+        // body (RFC-0125 M7). It declares no type parameter and no predicate,
+        // which is why the two readings below may find no declaration.
+        if decl.is_none() && !(name == "Token" && *self.in_gen.borrow()) {
+            return Err(cerr!(line, "unknown type `{name}`"));
+        }
         // Field types (they may mention this type's generic parameters).
         let rfields = crate::types::record_fields(&Type::Named(name.to_string()), self.types)
             .ok_or_else(|| cerr!(line, "`{name}` is not a record type"))?;
@@ -5532,11 +5540,12 @@ impl<'a> Checker<'a> {
         // cannot determine at all — RFC-0090's `Handle<T>` carries `T` for
         // branding and stores nothing of it. A field value still overrides what
         // it can say, so a literal that checks today reaches the same answer.
-        if !decl.type_params.is_empty() {
+        if decl.is_some_and(|d| !d.type_params.is_empty()) {
             if let Some(want) = expected {
                 let mine = Type::App(
                     name.to_string(),
-                    decl.type_params
+                    decl.expect("a declaration with type parameters")
+                        .type_params
                         .iter()
                         .map(|tp| Type::Param(tp.clone()))
                         .collect(),
@@ -5594,7 +5603,7 @@ impl<'a> Checker<'a> {
         }
         // Cross-field predicate: if every field is a compile-time constant, the
         // invariant is checked now and a provable violation is a compile error.
-        if let Some(pred) = &decl.predicate {
+        if let Some(pred) = decl.and_then(|d| d.predicate.as_ref()) {
             let mut env = HashMap::new();
             let mut all_const = true;
             for (fname, value) in fields {
@@ -5618,9 +5627,9 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if decl.type_params.is_empty() {
+        let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else {
             return Ok(Type::Named(name.to_string()));
-        }
+        };
         // Nothing said what `tp` is: no annotation named it and no field value
         // carries it (`Deque { front: [], back: [] }` — two empty arrays say
         // only that they are arrays). The annotation is the fix, so the message
