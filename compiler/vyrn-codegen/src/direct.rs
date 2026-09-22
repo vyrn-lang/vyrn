@@ -1392,7 +1392,6 @@ struct Cx<'a> {
 /// The reserved prefix of the exit-residue instrument's calls inside
 /// `std/runtime` (RFC-0114 §25). One prefix rather than four names, so a
 /// fifth hook needs no edit here.
-const AUDIT_PREFIX: &str = "runtime$audit";
 
 impl<'a> Cx<'a> {
     /// RFC-0114 R1′ read off the core (RFC-0125 §3 M3, the
@@ -7627,11 +7626,12 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether this build drops the call to `name` rather than emitting it.
     ///
     /// RFC-0114 §25: the residue instrument's hooks are calls only in an
-    /// audited build. The arm drops the whole expression, so the operand goes
-    /// with it; the core states the operand as a row of its own, which is why
-    /// the whole-body walk refuses the statement instead (RFC-0125 M7).
+    /// audited build. The arm drops the whole expression, operand included,
+    /// and an unaudited core states no row for either (RFC-0125 M7). A
+    /// generator's build is never audited, so its core can still state a
+    /// hook, and [`Fn_::core_sig`] refuses that row.
     fn audit_dropped(&self, name: &str) -> bool {
-        !self.cx.audit && name.starts_with(AUDIT_PREFIX)
+        !self.cx.audit && vyrn_frontend::loader::audit_hook(name)
     }
 
     fn call_inner(

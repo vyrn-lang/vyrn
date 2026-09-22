@@ -3650,6 +3650,12 @@ impl<'a> Builder<'a> {
                 // drop.
                 out.push(St::Drop(n, Site::None, *line));
             }
+            // RFC-0114 section 25: an unaudited build emits no audit hook, so the
+            // row states neither the call nor its operand. A row for `p + 8`
+            // alone is four instructions on every allocation.
+            Stmt::Expr(Expr::Call { name, .. })
+                if vyrn_frontend::loader::audit_hook(name)
+                    && !vyrn_frontend::loader::audit_build() => {}
             Stmt::Expr(e) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
