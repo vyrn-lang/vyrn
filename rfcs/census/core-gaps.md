@@ -242,6 +242,7 @@ The bodies the emitter TAKES stand at 953. `Fn_::core_walkable`'s
 `placed.is_empty()` screen is gone and it moved none of them: a released name
 is a String or an array, so the clause that asks every name to be a scalar
 refuses the same frames. That clause is the layout families' to move.
+
 ## What the tracks since have changed
 
 Each track below retired tags, so every table above is the state before them
@@ -268,3 +269,24 @@ read 1,430 lines, 1,430, 1,428, 56 and 0, and the bodies the family alone
 blocks fall from 786 to 6. Over `examples/` the tally reads 16,165 lines whole
 where it read 15,406, and `coredrive --ignored` reads 14,495 with no gap where
 it read 13,798.
+
+The tag track (`m7-tag`) closed the family but for one shape. `core::Arm`
+names the tag its arm tests, `direct.rs` chooses the arm off that, and
+`core::gaps` stops naming `Switch` — so every table above is the state
+BEFORE it. What is left is `?` on a declared `Fallible` (RFC-0080 M3), whose
+arms the impl's own `failed` predicate picks: the row carries no call,
+`Test::Impl` says so, and the family's row in table (b) now counts those 3
+bodies alone.
+
+The class does not empty, it partitions. Of the 801 bodies `coredrive` ranked
+under the tag, 313 fall to a layout, 383 to a callee, 74 to a release, 28 become
+whole and 3 stay. Over `examples/` the tally reads 15,268 bodies whole where it
+read 15,174, and the lines that name a tag at all fall from 2,600 to 3;
+`coredrive --ignored` reads 13,651 with no gap where it read 13,623, with 415
+distinct bodies carried end to end where it read 393. The bodies the emitter
+TAKES stand at 953.
+
+The corpus cannot witness this family. Each of the 156 `if let`s in `examples/`
+waits on another family too, so the AST arm's count does not move. The witness
+is `coredrive`'s `SHAPES`: one `if let` the rows carry, compiled both ways and
+asserted byte for byte.
