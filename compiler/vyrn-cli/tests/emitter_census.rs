@@ -832,7 +832,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
         ("the mapping §2.3 names", 8288, 718),
         ("a decision §2.3 says it must not make", 1239, 214),
         ("the runtime it emits by hand", 625, 7),
-        ("one block per builtin name", 4723, 961),
+        ("one block per builtin name", 4657, 946),
         ("the wasm format", 343, 0),
         ("shared machinery", 2686, 88),
         ("tests", 314, 0),
