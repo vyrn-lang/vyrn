@@ -27,7 +27,7 @@ fn freeList(s: modify Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
     return match o { Some(h) => freeNode(s, h), None => 0 }
 }
 fn freeNode(s: modify Slots<Node>, h: Handle<Node>) -> Int64 {
-    let tail = s[h].next
+    let tail = s[h].next.copy()
     remove(s, h)
     return freeList(s, tail)
 }
