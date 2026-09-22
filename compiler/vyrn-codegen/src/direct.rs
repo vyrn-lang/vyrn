@@ -3454,66 +3454,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Emit the rows held back for the read an exit hands back, in the order
-    /// the core stated them.
-    fn core_releases(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        body: &vyrn_lower::core::Body,
-    ) -> Result<(), String> {
-        for (name, holes, exit) in std::mem::take(&mut self.core_rows) {
-            self.core_release(m, b, body, name, &holes, exit)?;
-        }
-        Ok(())
-    }
-
-    /// Emit the one release a core row STATES, where the row stands —
-    /// RFC-0125 M7.
-    ///
-    /// The row is the whole of the answer: the name, whose binding is the node
-    /// the plan keys the slot by, and the holes the walk goes around.
-    /// [`Fn_::emit_releases`] asks `own::placed` the same question by exit and
-    /// node, and its readers are the AST arms alone.
-    ///
-    /// A name with no slot releases nothing: the walk registers one for every
-    /// layout it makes, and a body it takes holds no other value that owns
-    /// heap ([`Fn_::core_walkable`]'s scalar clause).
-    fn core_release(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        body: &vyrn_lower::core::Body,
-        name: vyrn_lower::core::Name,
-        holes: &[String],
-        exit: ExitKind,
-    ) -> Result<(), String> {
-        let Some(step) = body.names[name as usize].binding else {
-            return unsupported("a release row whose binding the plan does not key", 0);
-        };
-        let Some(r) = self.rel_slots.get(&step) else {
-            return Ok(());
-        };
-        let (place, mut rel) = (r.place, r.rel.clone());
-        // The row spells a hole with the leading dot a path has; a walk names
-        // the field.
-        if let Rel::Deep(ty, _) = rel {
-            rel = Rel::Deep(
-                ty,
-                holes
-                    .iter()
-                    .filter_map(|h| h.strip_prefix('.').map(str::to_string))
-                    .collect(),
-            );
-        }
-        // A FALL-THROUGH exit ends what the row holds on the path that carries
-        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
-        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
-            self.rel_pending.retain(|(k, _)| *k != step);
-        }
-        self.emit_rel(m, b, place, &rel, 0)
-    }
-
     /// The floor the rows that still name a frame slot hold — see
     /// [`Fn_::rel_pending`].
     fn rel_floor(&self) -> u32 {
@@ -16501,7 +16441,69 @@ struct Walked {
 }
 
 impl<'p> Fn_<'_, 'p> {
+    /// Emit the rows held back for the read an exit hands back, in the order
+    /// the core stated them.
+    fn core_releases(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+    ) -> Result<(), String> {
+        for (name, holes, exit) in std::mem::take(&mut self.core_rows) {
+            self.core_release(m, b, body, name, &holes, exit)?;
+        }
+        Ok(())
+    }
+
+    /// Emit the one release a core row STATES, where the row stands —
+    /// RFC-0125 M7.
+    ///
+    /// The row is the whole of the answer: the name, whose binding is the node
+    /// the plan keys the slot by, and the holes the walk goes around.
+    /// [`Fn_::emit_releases`] asks `own::placed` the same question by exit and
+    /// node, and its readers are the AST arms alone.
+    ///
+    /// A name with no slot releases nothing: the walk registers one for every
+    /// layout it makes, and a body it takes holds no other value that owns
+    /// heap ([`Fn_::core_walkable`]'s scalar clause).
+    fn core_release(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        name: vyrn_lower::core::Name,
+        holes: &[String],
+        exit: ExitKind,
+    ) -> Result<(), String> {
+        let Some(step) = body.names[name as usize].binding else {
+            return unsupported("a release row whose binding the plan does not key", 0);
+        };
+        let Some(r) = self.rel_slots.get(&step) else {
+            return Ok(());
+        };
+        let (place, mut rel) = (r.place, r.rel.clone());
+        // The row spells a hole with the leading dot a path has; a walk names
+        // the field.
+        if let Rel::Deep(ty, _) = rel {
+            rel = Rel::Deep(
+                ty,
+                holes
+                    .iter()
+                    .filter_map(|h| h.strip_prefix('.').map(str::to_string))
+                    .collect(),
+            );
+        }
+        // A FALL-THROUGH exit ends what the row holds on the path that carries
+        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
+        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
+            self.rel_pending.retain(|(k, _)| *k != step);
+        }
+        self.emit_rel(m, b, place, &rel, 0)
+    }
+
     /// One function body, emitted from the core's own statements — RFC-0125
+    /// §3 M3, the driver slice.
+    ///
     /// §2.3: "the emitter reads the core and writes wasm ... it decides
     /// nothing".
     ///
