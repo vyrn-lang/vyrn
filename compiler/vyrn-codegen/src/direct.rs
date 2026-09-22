@@ -18171,10 +18171,16 @@ impl<'p> Fn_<'_, 'p> {
                 let Some((place, ty)) = self.core_place(w, body, *n) else {
                     return unsupported("a core name with no place", line);
                 };
-                let Place::Local(l) = place else {
-                    return unsupported("a core name that is not a local", line);
-                };
-                b.ins(&Instruction::LocalGet(l));
+                match place {
+                    Place::Local(l) => {
+                        b.ins(&Instruction::LocalGet(l));
+                    }
+                    // A layout is its address, which is what the `Expr::Var`
+                    // arm pushes for one.
+                    _ if matches!(self.cx.repr(&ty, line)?, Repr::Agg(_))
+                        && place.addr(b, 0).is_some() => {}
+                    _ => return unsupported("a core name that is not a local", line),
+                }
                 ty
             }
             // A literal is emitted at the type the AST walk gives one and
@@ -18468,15 +18474,22 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// A value that owns heap crosses as its pointer, and who owns it after
     /// the call is the call arm's decision: this walk writes the pointer and
-    /// nothing else, which is what a `read` argument is.
+    /// nothing else, which is what a `read` argument is. A layout crosses as
+    /// its address the same way ([`Fn_::core_val`]).
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
         args: &[(Val, vyrn_frontend::ast::Capability)],
     ) -> bool {
-        args.iter().all(|(v, c)| {
-            self.core_val_readable(body, v)
-                && (core_operand(body, v) || *c == vyrn_frontend::ast::Capability::Read)
+        args.iter().all(|(v, c)| match c {
+            vyrn_frontend::ast::Capability::Read => {
+                self.core_val_readable(body, v)
+                    || matches!(v, Val::Name(n) if {
+                        let t = &body.names[*n as usize].ty;
+                        matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
+                    })
+            }
+            _ => self.core_val_readable(body, v) && core_operand(body, v),
         })
     }
 
