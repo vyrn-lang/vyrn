@@ -27080,3 +27080,24 @@ Findings:
 - the greedy order is recomputed, and the two families the census ranked next closed first. Over `examples/`, the bodies a single family still blocks are `Val::Lit(Opaque)` 410, a builtin call 299, an aggregate read 277, a reserved call 203, a placed release 160, a tag 95 and a write-back 82. `rfcs/census/core-gaps.md` dates its step table to head `377cb367` and is not re-measured here.
 - the tally's denominator held at 25,694 across both binaries, so the percentages above carry no wobble, and `coredrive` stays the pinned count.
 Left: the 12,623 bodies the rows carry whole that the per-body screen refuses, blocked by `Fn_::core_readable`'s unnamed-temporary rule. A temporary the reader did not bind passes only when one statement reads it and that statement is the next one, because any other temporary needs a local the AST walk never takes.
+
+#### The release is the row's, and the second build was one pass behind (2026-09-22, `m7-release`)
+Decision: the core states every release the plan placed, and the emitter reads each one off the row it stands on. Mine, on the counts below.
+Went: `Fn_::emit_releases`'s three callers in the core walk; the `placed.is_empty()` screen in `Fn_::core_walkable`; the `CORE_EXITS` test in `Fn_::core_readable`; the `Row` tag in `core::gaps`. Stayed: `St::Drop`, because a stream close and a payload binder name no slot this walk registers; `emit_releases` itself, because the AST arms are its readers until the walk goes.
+Lines: `direct.rs` 17,981 to 18,046. `core.rs` 6,995 to 7,008. Refusals: 0 lost / 0 gained. Manifest: untouched, `VYRN_WASM_MANIFEST=check` green with nothing written.
+Licence:
+- `vyrn check` over the 415 loadable roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/` under the branch-point binary and this one: byte-identical stderr and exit code, 338 accepted and 77 refused under both.
+- `coredrive --ignored`: 168 programs, 21,556 bodies, 166 emit the same module either way and the two that differ are the two the record names. Bodies with no gap 3,449 to 3,496; distinct bodies the rows carry end to end 283 to 322; bodies the emitter took from the core 953 of 21,512, unmoved. The release class 150 to 103.
+- `residue --ignored`: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed.
+- `kernel --ignored`: 175 programs, 27,416 instances accepted, 0 refused, 0 unlowered, unmoved.
+- `VYRN_GAP_TALLY` over `examples/`, warm, both runs in one cache state: whole 4,026 to 4,089, lines 25,694 to 26,356.
+- `cargo test -p vyrn-cli --no-fail-fast`: 647 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 46 passed, 0 failed.
+- `cargo fmt --all --check` and `vyrn-lsp`'s own: clean. `cargo build --release -p vyrn-cli`: no warning.
+- the emitter census re-pinned in the same commit: the mapping kind 8,055 to 8,116 lines, shared machinery 2,682 to 2,686, the read class `both, for two questions` 7,819 to 7,879 lines with its row count 152 to 153.
+Findings:
+- the core stated almost none of the releases it was meant to. `build_seeded` read `Instance::releases`, a copy the lowering makes before `augment` writes the rows the plan was missing, so the second build read a plan one pass old: over `examples/` a release row reached the emitter for one binding in twenty. The plan is one table and the copy was a second reading of it; the copy carries the substituted type a `Deep` walks and no row reads a kind.
+- an exit's releases are the exit statement's own run. `Body::rows_by_statement` walked back over unnamed temporaries alone, so a `return` reached the emitter without the rows that release at it, and the walk emitted 95 returns with no release at all until the run carried them.
+- the rows commute with the read an exit hands back, and the order is the emitter's. The AST arm puts the value on the operand stack first; the core states the releases first. `Fn_::core_releases` holds a row back across that one read, which is 7 bytes on `clearkeep.vyrn` and the whole of the difference on 95 programs.
+- `placed.is_empty()` was the scalar clause in other words. Removing it moved no body: a released name is a String or an array, so the clause that asks every name to be a scalar refuses the same frames. The emitter's count is the layout families' to move, not this one's.
+- the unnamed-temporary rule is the AST walk's shadow and not a missing row. It refuses 231 bodies over `examples/` (953 to 1,184 with it dropped), and dropping it makes 167 of 168 programs differ: the rule is what keeps the two walks allocating the same locals in the same order. It retires with the AST walk, so it is no family of its own.
+Left: `St::Drop`, blocked by the names it releases that this walk registers no slot for, and its `Stmt::Drop` arm stands at 443 over `examples/`; `Exit::Scrutinee`, blocked by `St::Switch`, which is the tag family's.
