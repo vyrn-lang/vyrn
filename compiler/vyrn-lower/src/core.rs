@@ -390,8 +390,6 @@ pub enum Opaque {
     /// type's name as an argument (`fromJson(Bag, src)`). Both are static and
     /// neither is a value [`Lit`] has a kind for.
     Static,
-    /// A nullary constructor (`None`, a fieldless variant) used as a value.
-    Ctor,
     /// The index of the element read at a `for` head. The row states the
     /// read; the counter that walks the container is the emitter's, and
     /// naming it needs the length beside it.
@@ -2352,21 +2350,22 @@ impl<'a> Builder<'a> {
     /// value, and a `Rhs` is the whole answer. The type owns heap or carries
     /// an obligation, and then three things are not this frame's:
     ///
-    ///   - a literal, which lives in the data segment. It answers only for a
-    ///     binding nothing can reassign: a `mut` slot is released by its
-    ///     FINAL value in all three engines, and `let mut acc: String = ""`
-    ///     is the opening line of every accumulator in this language;
+    ///   - a static value — a literal, or a nullary constructor — which
+    ///     lives in the data segment. It answers only for a binding nothing
+    ///     can reassign: a `mut` slot is released by its FINAL value in all
+    ///     three engines, and `let mut acc: String = ""` is the opening line
+    ///     of every accumulator in this language;
     ///   - a read of a place, or a second name for a borrow. The place's
     ///     owner still owns it.
     ///
     /// A rebind states the same rule at the store rather than here
     /// (`Stmt::Assign`): `t = d.title` makes `t` a projection of `d`,
     /// exactly as `let t = d.title` does.
-    fn owned_binding(&self, rhs: &Rhs, ty: &Type, literal: bool, mutable: bool) -> bool {
+    fn owned_binding(&self, rhs: &Rhs, ty: &Type, static_value: bool, mutable: bool) -> bool {
         if !self.owns(ty) {
             return false;
         }
-        if literal && !mutable {
+        if static_value && !mutable {
             return false;
         }
         match rhs {
@@ -2391,7 +2390,7 @@ impl<'a> Builder<'a> {
         &self,
         rhs: &Rhs,
         ty: &Type,
-        literal: bool,
+        static_value: bool,
         mutable: bool,
         lends: bool,
     ) -> Option<NotOwned> {
@@ -2406,9 +2405,10 @@ impl<'a> Builder<'a> {
                 },
             });
         }
-        // A literal lives in the data segment. It answers only for a binding
-        // nothing can reassign: a `mut` slot is released by its FINAL value.
-        if literal && !mutable {
+        // A static value lives in the data segment. It answers only for a
+        // binding nothing can reassign: a `mut` slot is released by its FINAL
+        // value.
+        if static_value && !mutable {
             return Some(NotOwned::Static);
         }
         if lends {
@@ -3029,18 +3029,22 @@ impl<'a> Builder<'a> {
                     return Ok(());
                 }
                 let rhs = self.rhs(value, out)?;
-                let literal = matches!(
+                // A literal, or a nullary constructor, which is static in
+                // the same sense: [`Builder::val`] makes the variant and
+                // nothing allocated it.
+                let static_value = matches!(
                     value,
                     Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
-                );
+                ) || matches!(&rhs, Rhs::Val(Val::Name(m))
+                    if matches!(self.body.names[*m as usize].not_owned, Some(NotOwned::Static)));
                 // A call whose result points into an argument — a lending
                 // prelude row, a projection — binds a borrow whatever its
                 // type says, and that screen is the one thing about the
                 // value the `Rhs` does not carry.
                 let mutable = matches!(s, Stmt::Let { mutable: true, .. });
                 let lends = self.lends(value);
-                let owned = !lends && self.owned_binding(&rhs, &ty, literal, mutable);
-                let reason = self.report_reason(&rhs, &ty, literal, mutable, lends);
+                let owned = !lends && self.owned_binding(&rhs, &ty, static_value, mutable);
+                let reason = self.report_reason(&rhs, &ty, static_value, mutable, lends);
                 // A join inside a loop, one of whose arms handed out a name
                 // bound outside it, and a binding that owns the result: the
                 // release the back edge repeats ([`Builder::loop_alias`]).
@@ -4535,19 +4539,30 @@ impl<'a> Builder<'a> {
         match e {
             Expr::Var { name, line } => match self.lookup(name) {
                 Some(n) => Ok(Val::Name(n)),
+                // A nullary constructor (`None`, a fieldless variant) parses
+                // as a bare name, and the row makes it: the same variant
+                // `Some(x)` makes, with one part less. The temporary owns
+                // nothing and borrows nothing, for the reason a literal does
+                // — the payload that would allocate is the variant this is
+                // not — so the plan places no release at it and the value is
+                // nobody else's.
+                None if name == "None" || self.is_variant(name) => {
+                    let ty = self.ty_of(e)?;
+                    let rhs = self.call(name, &[], *line, Some(ty.clone()), out)?;
+                    let t = self.name("@nullary", ty, false, *line);
+                    self.body.names[t as usize].borrow = false;
+                    self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+                    out.push(St::Let(t, rhs));
+                    Ok(Val::Name(t))
+                }
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
                 // the checker types neither as an expression.
-                // A nullary constructor (`None`, a fieldless variant) parses
-                // as a bare name too, and is a literal: it owns nothing, and
-                // it is not module state anything reads out of.
                 None if self.program.functions.iter().any(|f| &f.name == name)
                     || self.program.contracts.iter().any(|c| &c.name == name)
-                    || self.proto.types().contains_key(name)
-                    || name == "None"
-                    || self.is_variant(name) =>
+                    || self.proto.types().contains_key(name) =>
                 {
-                    Ok(Val::Lit(Lit::Opaque(Opaque::Ctor)))
+                    Ok(Val::Lit(Lit::Opaque(Opaque::Static)))
                 }
                 // Module state lives for the whole module and nothing
                 // may take it (RFC-0013): `movecheck` refuses passing it
@@ -5586,7 +5601,7 @@ impl<'a> Builder<'a> {
             } else if let Some(p) = self.projection(name) {
                 kind = Callee::Projection;
                 p.params.iter().map(|p| p.capability).collect()
-            } else if matches!(name, "Some" | "Ok" | "Err") || self.is_variant(name) {
+            } else if matches!(name, "Some" | "None" | "Ok" | "Err") || self.is_variant(name) {
                 kind = Callee::Ctor;
                 vec![Capability::Consume; args.len()]
             } else if vyrn_frontend::checker::RESERVED.contains(&name)
