@@ -7049,11 +7049,7 @@ impl<'p> Fn_<'_, 'p> {
             // An allocated left operand is this operator's to free (round
             // thirty), through the same tee the comparisons use.
             let k = self.tee_str_temp(b, lhs);
-            let (table, accept, start) = self.regex_dfa(m, pat, line)?;
-            b.ins(&Instruction::I32Const(table as i32));
-            b.ins(&Instruction::I32Const(start as i32));
-            b.ins(&Instruction::I32Const(accept as i32));
-            b.ins(&Instruction::Call(self.cx.rt.regex_run));
+            self.str_match(m, b, pat, line)?;
             let flag = b.local(ValType::I32);
             b.ins(&Instruction::LocalSet(flag));
             self.free_str_temp(b, k);
@@ -7088,22 +7084,11 @@ impl<'p> Fn_<'_, 'p> {
             if self.cx.resolve(&r) != Type::Str {
                 return unsupported("a string operator with a non-string operand", line);
             }
-            if op == BinOp::Add {
-                let kr = self.tee_str_temp(b, rhs);
-                self.arena_route(b, true);
-                b.ins(&Instruction::Call(self.cx.rt.concat));
-                self.arena_route(b, false);
-                self.free_str_temp(b, kl);
-                self.free_str_temp(b, kr);
-                return Ok(Type::Str);
-            }
             let kr = self.tee_str_temp(b, rhs);
-            b.ins(&Instruction::Call(self.cx.rt.strcmp));
-            b.ins(&Instruction::I32Const(0));
-            b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on strings"), line))?);
+            let t = self.str_bin(b, op, line)?;
             self.free_str_temp(b, kl);
             self.free_str_temp(b, kr);
-            return Ok(Type::Bool);
+            return Ok(t);
         }
         // `Code + Code` concatenates fragments with their origins carried
         // (RFC-0054). Both sides are handles, so the concatenation happens in the
@@ -7140,6 +7125,40 @@ impl<'p> Fn_<'_, 'p> {
         // why the LLVM emitter returns its `numty` rather than `lty`.
         self.expr_as(m, b, rhs, &opty)?;
         self.bin_ins(b, op, &opty, &l, line)
+    }
+
+    /// A String operator, both operands on the stack: `+` concatenates into
+    /// the arena a `region` routes to, and a comparison is the sign of a byte
+    /// compare. [`Fn_::binary_inner`] and [`Fn_::core_prim`] read it; each
+    /// frees its operand temporaries its own way.
+    fn str_bin(&mut self, b: &mut Frame, op: BinOp, line: usize) -> Result<Type, String> {
+        if op == BinOp::Add {
+            self.arena_route(b, true);
+            b.ins(&Instruction::Call(self.cx.rt.concat));
+            self.arena_route(b, false);
+            return Ok(Type::Str);
+        }
+        b.ins(&Instruction::Call(self.cx.rt.strcmp));
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on strings"), line))?);
+        Ok(Type::Bool)
+    }
+
+    /// `s =~ pat`, the String on the stack: the pattern's DFA, compiled once
+    /// (RFC-0046), and the runtime's walk over it, which leaves a `Bool`.
+    fn str_match(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        pat: &str,
+        line: usize,
+    ) -> Result<(), String> {
+        let (table, accept, start) = self.regex_dfa(m, pat, line)?;
+        b.ins(&Instruction::I32Const(table as i32));
+        b.ins(&Instruction::I32Const(start as i32));
+        b.ins(&Instruction::I32Const(accept as i32));
+        b.ins(&Instruction::Call(self.cx.rt.regex_run));
+        Ok(())
     }
 
     /// The instruction a unary operator IS, once its operand stands on the
@@ -18338,6 +18357,17 @@ impl<'p> Fn_<'_, 'p> {
                 self.coerce(m, b, None, &from, to, line)?;
                 Ok(to.clone())
             }
+            // A String operator is a call, and the builder states its
+            // operand temporaries' releases as rows of their own.
+            (Op::Bin(o), [l, r]) if self.core_str_op(body, *o, l, r) => {
+                self.core_val(m, b, body, w, l, &Type::Str, line)?;
+                if let (BinOp::Match, Val::Lit(Lit::Str(pat))) = (o, r) {
+                    self.str_match(m, b, pat, line)?;
+                    return Ok(Type::Bool);
+                }
+                self.core_val(m, b, body, w, r, &Type::Str, line)?;
+                self.str_bin(b, *o, line)
+            }
             (Op::Bin(o), [l, r]) => {
                 let lt = self.core_ty(body, l, &Type::Int);
                 let lt = self.cx.resolve(&lt);
@@ -18884,10 +18914,32 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Whether `l o r` is a String operator [`Fn_::str_bin`] or
+    /// [`Fn_::str_match`] writes: a String on the left, and a String or, for
+    /// `=~`, the pattern literal on the right.
+    fn core_str_op(&self, body: &vyrn_lower::core::Body, o: BinOp, l: &Val, r: &Val) -> bool {
+        let is_str = |v: &Val| self.cx.resolve(&self.core_ty(body, v, &Type::Int)) == Type::Str;
+        is_str(l)
+            && match o {
+                BinOp::Match => matches!(r, Val::Lit(Lit::Str(_))),
+                BinOp::Add
+                | BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::Lt
+                | BinOp::LtEq
+                | BinOp::Gt
+                | BinOp::GtEq => is_str(r),
+                _ => false,
+            }
+    }
+
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => self.core_val_readable(body, v),
             Rhs::Prim(Op::Closure, ..) => false,
+            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op(body, *o, l, r)) => {
+                vs.iter().all(|v| self.core_val_readable(body, v))
+            }
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_operand(body, v)),
             // A handed-back receiver asks nothing extra of this walk: the
             // builder states the call and the store that puts the result back
