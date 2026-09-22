@@ -17297,6 +17297,19 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(l));
                     self.core_bind(b, body, w, *n, Place::Local(l), ty)?;
                 }
+                St::Let(n, Rhs::Read(p)) if self.core_copies(body, *n) => {
+                    let line = body.names[*n as usize].line;
+                    let ty = body.names[*n as usize].ty.clone();
+                    let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+                        return unsupported("a copy of no layout", line);
+                    };
+                    let slot = b.alloc(l.size, l.align);
+                    b.slot(slot);
+                    let (_, off) = self.core_addr(m, b, body, w, p, line)?;
+                    self.core_step(b, off);
+                    agg_landed(b, l.size, false);
+                    self.core_bind(b, body, w, *n, Place::Slot(slot), ty)?;
+                }
                 // An AGGREGATE CALL RESULT, written through the out-pointer
                 // into the binding's own slot, or into the caller's storage
                 // when the `return` after it hands the temporary back. The
@@ -18054,6 +18067,40 @@ impl<'p> Fn_<'_, 'p> {
         None
     }
 
+    /// Whether the layout name `n` holds a COPY of the place it reads —
+    /// RFC-0125 M7, a layout that owns no heap.
+    ///
+    /// Such a layout is a value, and the kernel lets its place be written
+    /// while the name lives ([`Fn_::core_alias`]), so the name takes a slot and
+    /// the bytes, which is what the AST arm's `let` writes ([`Fn_::agg_into`]).
+    fn core_copies(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
+        let info = &body.names[n as usize];
+        // A name this pass minted, a `for` head's borrow or a scrutinee, is
+        // read by address in the arm.
+        if info.source.starts_with('@')
+            || info.heap
+            || self.owns_heap(&info.ty)
+            || self.checks(&info.ty)
+            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
+        {
+            return false;
+        }
+        let mut lets = Vec::new();
+        for s in &body.stmts {
+            core_lets(s, &mut lets);
+        }
+        let mut at = lets.iter().filter(|(b, _)| *b == n);
+        match (at.next(), at.next()) {
+            (Some((_, Rhs::Read(p))), None) => {
+                !matches!(p, vyrn_lower::core::Place::Key(..))
+                    && self
+                        .core_place_ty(body, p)
+                        .is_some_and(|t| self.cx.resolve(&t) == self.cx.resolve(&info.ty))
+            }
+            _ => false,
+        }
+    }
+
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
     /// layout-made family.
     ///
@@ -18592,7 +18639,8 @@ impl<'p> Fn_<'_, 'p> {
             // [`Fn_::core_val_readable`] is where that is refused.
             //
             // Or a layout read out of a place, which holds the place's address
-            // ([`Fn_::core_alias`]).
+            // ([`Fn_::core_alias`]) or, where it owns no heap, a copy of its
+            // bytes ([`Fn_::core_copies`]).
             //
             // Or an aggregate a call returns into the slot this walk takes for
             // it ([`Fn_::out_ptr`]). A temporary made or returned into is
@@ -18611,6 +18659,7 @@ impl<'p> Fn_<'_, 'p> {
                             || self.core_rebuild(body, rhs))
                 }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
+                && !self.core_copies(body, n as vyrn_lower::core::Name)
             {
                 return false;
             }
@@ -18686,7 +18735,11 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
             }
-            St::Let(n, Rhs::Read(_)) if self.core_alias(body, *n).is_some() => true,
+            St::Let(n, Rhs::Read(_))
+                if self.core_alias(body, *n).is_some() || self.core_copies(body, *n) =>
+            {
+                true
+            }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
             // A store into a field or into module state owns no heap when its
@@ -18728,6 +18781,7 @@ impl<'p> Fn_<'_, 'p> {
                 // the one the AST arm bound.
                 let placed = self.core_place(&self.core_w, body, *n).is_some()
                     || self.core_alias(body, *n).is_some()
+                    || self.core_copies(body, *n)
                     || ss[..i].iter().any(|p| {
                         matches!(p, St::Let(l, rhs) if l == n
                             && (matches!(rhs, Rhs::Make(..))
