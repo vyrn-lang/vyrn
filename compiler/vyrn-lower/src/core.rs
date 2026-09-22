@@ -1823,8 +1823,7 @@ fn gaps_val(v: &Val, out: &mut Vec<String>) {
 /// could not say which was left.
 fn place_gap(p: &Place) -> Option<&'static str> {
     match p {
-        Place::Name(_) | Place::Global(_) | Place::Field(..) => None,
-        Place::Elem(..) => Some("Elem"),
+        Place::Name(_) | Place::Global(_) | Place::Field(..) | Place::Elem(..) => None,
         Place::Key(..) => Some("Key"),
     }
 }

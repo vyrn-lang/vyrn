@@ -17601,13 +17601,25 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The element's address is the walk's: the header read, the bounds
             // check the language states, and one stride multiply — the same
-            // three [`Fn_::at`] emits for `a[i]`.
-            // An element and a key are what `core::gaps` still names. A key is
-            // a lookup in the runtime's map and the row states no call; an
-            // element read is the borrow of a value that owns heap, or a `for`
-            // whose index the row does not state, so no body reaches a reader
-            // for one.
-            At::Elem(..) | At::Key(..) => unsupported("a read of an element or a key", line),
+            // three [`Fn_::at`] emits for `a[i]`. A String's element is a byte
+            // widened on load, which is no load of the element's own type.
+            At::Elem(base, i) => {
+                let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
+                self.core_step(b, off);
+                let walk = self.walk(b, &bty, line)?;
+                if walk.byte {
+                    return unsupported("a read of a String's byte", line);
+                }
+                self.core_val(m, b, body, w, i, &Type::Int, line)?;
+                let ix = b.local(ValType::I64);
+                b.ins(&Instruction::LocalSet(ix));
+                self.bounds_check(b, &walk, ix, false);
+                self.elem_addr(b, &walk, ix);
+                Ok((walk.elem, None))
+            }
+            // A key is a lookup in the runtime's map, and the row states no
+            // call.
+            At::Key(..) => unsupported("a read of a key", line),
         }
     }
 
@@ -17641,7 +17653,11 @@ impl<'p> Fn_<'_, 'p> {
                     .is_none()
                     .then_some(fty)
             }
-            At::Elem(..) | At::Key(..) => None,
+            At::Elem(base, _) => match self.cx.resolve(&self.core_place_ty(body, base)?) {
+                Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => Some(*e),
+                _ => None,
+            },
+            At::Key(..) => None,
         }
     }
 
