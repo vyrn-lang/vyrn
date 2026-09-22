@@ -145,7 +145,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 9] = [
+const SHAPES: [(&str, &str); 10] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -197,6 +197,13 @@ const SHAPES: [(&str, &str); 9] = [
         "a `for` over a String literal beside a `continue`",
         "fn vyrnTestMain() -> Int64 { let xs: Array<Int64> = [1, 2, 3, 4, 5] let mut s = 0          for x in xs { if x % 2 == 0 { continue } s = s + x }          for c in \"abc\" { s = s + Int64(c) } return s }",
     ),
+    // A key read is the runtime's lookup into a slot of its own, and the
+    // `let` copies it out (RFC-0125 M7). Every key read of `examples/` reads
+    // a String value, which the frame does not hold.
+    (
+        "a map key read the rows carry",
+        "fn look(n: Map<String, Int64>, k: String) -> Int64 { let o = n[k] let mut r = 0          if let Some(v) = o { r = v } return r }          fn vyrnTestMain() -> Int64 { let n: Map<String, Int64> = [\"a\": 10, \"b\": 20]          return look(n, \"b\") + look(n, \"c\") }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -206,7 +213,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 9] = [
+const SHAPE_PIN: [(&str, usize, usize); 10] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -216,6 +223,7 @@ const SHAPE_PIN: [(&str, usize, usize); 9] = [
     ("an order on two string literals", 0, 0),
     ("an `if let` the rows carry", 0, 0),
     ("a `for` over a String literal beside a `continue`", 0, 0),
+    ("a map key read the rows carry", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

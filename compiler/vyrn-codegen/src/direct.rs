@@ -11985,7 +11985,15 @@ impl<'p> Fn_<'_, 'p> {
                 // now a branch instead).
                 if let Type::Map(_, val) = self.cx.resolve(&aty) {
                     let mty = self.cx.resolve(&aty);
-                    return self.map_at(m, b, &mty, &val, &args[1], line);
+                    let k = &args[1];
+                    return self.map_at(
+                        m,
+                        b,
+                        &mty,
+                        &val,
+                        &mut |s, m, b, t| s.expr_as(m, b, k, t),
+                        line,
+                    );
                 }
                 let string = self.cx.resolve(&aty) == Type::Str;
                 (self.walk(b, &aty, line)?, string)
@@ -14558,14 +14566,17 @@ impl<'p> Fn_<'_, 'p> {
 
     /// `m[k]` — an honest `Option<V>`, never a trap.
     ///
-    /// The map's address is already on the stack (`at` evaluated it).
+    /// The map's address is already on the stack. `key` pushes the key at the
+    /// type it is handed: the arm over the source evaluates an expression and
+    /// the core's walk reads a name off the row (RFC-0125 M7), and the lookup
+    /// between them is this one sequence.
     fn map_at(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         mty: &Type,
         val: &Type,
-        key: &Expr,
+        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
         let key_t = match self.cx.resolve(mty) {
@@ -14580,19 +14591,19 @@ impl<'p> Fn_<'_, 'p> {
         let k = match mk {
             MapKey::I64 => {
                 let k = b.local(ValType::I64);
-                self.expr_as(m, b, key, &Type::Int)?;
+                key(self, m, b, &Type::Int)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
             MapKey::Pack(_) => {
                 let raw = b.local(ValType::I32);
-                self.expr_as(m, b, key, &key_t)?;
+                key(self, m, b, &key_t)?;
                 b.ins(&Instruction::LocalSet(raw));
                 self.pack_key(b, raw, &key_t, line)?
             }
             MapKey::Str => {
                 let k = b.local(ValType::I32);
-                self.expr_as(m, b, key, &Type::Str)?;
+                key(self, m, b, &Type::Str)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
@@ -17123,13 +17134,8 @@ impl<'p> Fn_<'_, 'p> {
                 // call's own convention ([`Fn_::out_ptr`]).
                 St::Let(
                     n,
-                    Rhs::Call {
-                        callee, kind, args, ..
-                    },
-                ) if self
-                    .core_sig(callee, *kind)
-                    .is_some_and(|s| s.ret.agg().is_some()) =>
-                {
+                    rhs @ (Rhs::Call { .. } | Rhs::Read(vyrn_lower::core::Place::Key(..))),
+                ) if self.core_agg_call(body, rhs) => {
                     let line = body.names[*n as usize].line;
                     let lands = self.core_lands(body, ss, i, &w.reads);
                     let bound = self.core_bound.take();
@@ -17149,8 +17155,29 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     dest.addr(b, 0);
                     self.dest_used = false;
-                    let hint = Some((dest, ty.clone()));
-                    self.core_call(m, b, body, w, callee, *kind, args, hint, line)?;
+                    match rhs {
+                        Rhs::Call {
+                            callee, kind, args, ..
+                        } => {
+                            let hint = Some((dest, ty.clone()));
+                            self.core_call(m, b, body, w, callee, *kind, args, hint, line)?;
+                        }
+                        Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
+                            let (mty, off) = self.core_addr(m, b, body, w, base, line)?;
+                            self.core_step(b, off);
+                            let mty = self.cx.resolve(&mty);
+                            let Type::Map(_, val) = &mty else {
+                                return unsupported("a key read of no map", line);
+                            };
+                            let val = (**val).clone();
+                            let mut key =
+                                |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
+                                    s.core_val(m, b, body, w, k, t, line)
+                                };
+                            self.map_at(m, b, &mty, &val, &mut key, line)?;
+                        }
+                        _ => return unsupported("an aggregate row that is no call", line),
+                    }
                     agg_landed(b, l.size, std::mem::take(&mut self.dest_used));
                     match place {
                         Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
@@ -17632,8 +17659,8 @@ impl<'p> Fn_<'_, 'p> {
                 self.elem_addr(b, &walk, ix);
                 Ok((walk.elem, None))
             }
-            // A key is a lookup in the runtime's map, and the row states no
-            // call.
+            // A key has no address: its read is the runtime's lookup, which
+            // the aggregate `let` arm of [`Fn_::core_stmts`] writes.
             At::Key(..) => unsupported("a read of a key", line),
         }
     }
@@ -18353,17 +18380,30 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether a row is a call this walk makes whose result is an aggregate,
     /// which crosses through an out-pointer ([`Fn_::out_ptr`], RFC-0125 M7).
+    ///
+    /// A map's key read is one too (§2.1): the runtime's lookup builds the
+    /// `Option` in a slot of its own ([`Fn_::map_at`]), and the binding copies
+    /// it. The row keeps the PLACE, because the kernel's alias of `m[..]` is
+    /// what refuses a write to the map while the read is live. A value that
+    /// travels boxed stays in the arm: the lookup copies it into a box, and
+    /// the row states no release for that box.
     fn core_agg_call(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
-        let Rhs::Call {
-            callee, args, kind, ..
-        } = rhs
-        else {
-            return false;
-        };
-        self.core_args_readable(body, args)
-            && self
-                .core_sig(callee, *kind)
-                .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some())
+        match rhs {
+            Rhs::Call {
+                callee, args, kind, ..
+            } => {
+                self.core_args_readable(body, args)
+                    && self
+                        .core_sig(callee, *kind)
+                        .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some())
+            }
+            Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
+                self.core_val_readable(body, k)
+                    && matches!(self.core_place_ty(body, base).map(|t| self.cx.resolve(&t)),
+                        Some(Type::Map(_, v)) if !matches!(self.cx.repr(&v, 0), Ok(Repr::Agg(_))))
+            }
+            _ => false,
+        }
     }
 
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands
