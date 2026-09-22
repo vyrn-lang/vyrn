@@ -1612,6 +1612,11 @@ pub enum Spec {
     /// One operand, at whatever type the row put on the name it reads, and a
     /// result of that same type.
     OwnType,
+    /// One operand, at whatever type the row put on the name it reads, and a
+    /// result at the stated type. The checker types the operand over a union
+    /// (`print`, `@str`), and the emitter chooses the rendering by the
+    /// operand's own type, as it chooses an instruction for [`Op::Conv`].
+    Renders(Type),
 }
 
 /// Every builtin the row specifies, by name.
@@ -1622,9 +1627,9 @@ pub enum Spec {
 /// and the codegen test `builtin_rows_all_emit` refuses a [`Spec::Typed`] row
 /// with no instruction.
 ///
-/// A builtin whose operands and result the row cannot state at all — `print`
-/// and `@str` take a union, `bytes` and `stringFromBytes` hand back an
-/// aggregate the emitter must place — is not here and is still a gap.
+/// A builtin whose operands and result the row cannot state at all — `bytes`
+/// and `stringFromBytes` hand back an aggregate the emitter must place — is
+/// not here and is still a gap.
 pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
     static ROWS: std::sync::OnceLock<Vec<(&'static str, Spec)>> = std::sync::OnceLock::new();
     ROWS.get_or_init(|| {
@@ -1664,6 +1669,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             // heap of its own, so its result is the receiver's type and the
             // row states it by naming the operand.
             ("@copy", Spec::OwnType),
+            ("print", Spec::Renders(Type::Unit)),
+            ("@str", Spec::Renders(Type::Str)),
         ]
     })
 }
@@ -1749,18 +1756,14 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
     };
     match r {
         Rhs::Val(v) => gaps_val(v, out),
-        // Since RFC-0125 M7 a name, a global and a field are read off the row
-        // (`direct::Fn_::core_read`): the row states the place and the address
-        // is the reader's own arithmetic. An element and a key are not.
-        Rhs::Read(p) => {
-            if let Some(k) = place_gap(p) {
-                out.push(format!("Read:{k}"));
-            }
-            gaps_place(p, out);
-        }
+        // Since RFC-0125 M7 every place is read off the row: a name, a
+        // global, a field and an element at the address the reader computes
+        // (`direct::Fn_::core_read`), and a key through the runtime's lookup
+        // (`direct::Fn_::map_at`). A take of a key has no reader.
+        Rhs::Read(p) => gaps_place(p, out),
         Rhs::Take(p) => {
-            if let Some(k) = place_gap(p) {
-                out.push(format!("Take:{k}"));
+            if matches!(p, Place::Key(..)) {
+                out.push("Take:Key".into());
             }
             gaps_place(p, out);
         }
@@ -1815,16 +1818,6 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
 fn gaps_val(v: &Val, out: &mut Vec<String>) {
     if let Val::Lit(Lit::Opaque(k)) = v {
         out.push(format!("Opaque:{k:?}"));
-    }
-}
-
-/// The kind of place a read still waits on, and `None` for one an emitter
-/// addresses. A family closes one kind at a time, and a tag that named no kind
-/// could not say which was left.
-fn place_gap(p: &Place) -> Option<&'static str> {
-    match p {
-        Place::Name(_) | Place::Global(_) | Place::Field(..) | Place::Elem(..) => None,
-        Place::Key(..) => Some("Key"),
     }
 }
 

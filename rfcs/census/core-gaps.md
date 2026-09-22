@@ -298,3 +298,5 @@ element. A stream's head keeps one kind, `Opaque:Pull`, at 21 lines over
 `examples/`. Over `examples/` the tally reads 17,353 lines whole where it read
 17,039. No `for` statement is emitted from the rows yet: its borrow binds an
 array, which the frame screen does not admit.
+
+The key track (`m7-key`) retired `Read:Key`, `Call:Builtin:print` and `Call:Builtin:@str`. The row keeps the key's place, because the kernel's alias of `m[..]` is a refusal, and the emitter reads it through the runtime's lookup; `print` and `@str` are one `Spec::Renders` row each, rendered at the operand's own type. Over `examples/` the tally reads 17,488 lines whole where it read 17,353, and the three tags fall from 16, 276 and 740 lines to 0. `coredrive --ignored` reads 15,393 with no gap where it read 15,310, with 777 distinct bodies carried end to end where it read 735, and the emitter takes 2,591 bodies where it took 2,575. `Opaque:Pull` stays at 21 lines, because a stream's pull writes the loop variable's place and no row states that, and `Switch:Impl` at 3 bodies, each waiting on `Drop` too.
