@@ -17780,6 +17780,25 @@ impl<'p> Fn_<'_, 'p> {
             self.core_val(m, b, body, w, &Val::Name(*n), &ty, line)?;
             return Ok(ty);
         }
+        // A length is a header read and no field ([`Fn_::length_of`]). What
+        // it reads is the base's value: an address for a layout, the pointer
+        // for a String.
+        if let vyrn_lower::core::Place::Field(base, f) = p {
+            if let Some(bty) = self
+                .core_place_ty(body, base)
+                .filter(|t| length_ty(f, &self.cx.resolve(t)).is_some())
+            {
+                if let Repr::Agg(_) = self.cx.repr(&bty, line)? {
+                    let (_, off) = self.core_addr(m, b, body, w, base, line)?;
+                    self.core_step(b, off);
+                } else {
+                    self.core_read(m, b, body, w, base, line)?;
+                }
+                return self
+                    .length_of(b, &bty, f, line)?
+                    .ok_or_else(|| gap("a length of no container", line));
+            }
+        }
         let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
         let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
             return unsupported("a read of a place this walk does not load", line);
@@ -17899,6 +17918,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             At::Field(base, f) => {
                 let bty = self.core_place_ty(body, base)?;
+                if let Some(t) = length_ty(f, &self.cx.resolve(&bty)) {
+                    return Some(t);
+                }
                 let fty = self.field_of(&bty, f, 0).ok()?.1;
                 vyrn_frontend::types::deferred(&fty)
                     .is_none()
