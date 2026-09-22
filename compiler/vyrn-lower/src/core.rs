@@ -5626,8 +5626,8 @@ impl<'a> Builder<'a> {
                 callee: success,
                 args: vec![(sv.clone(), Capability::Read)],
                 write_back: false,
-                // A variant constructor: it puts the payload into the value.
-                kind: Callee::Ctor,
+                // The impl's method, which reads the value it is handed.
+                kind: Callee::Method,
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
