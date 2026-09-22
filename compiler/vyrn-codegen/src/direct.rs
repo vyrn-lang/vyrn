@@ -7581,10 +7581,7 @@ impl<'p> Fn_<'_, 'p> {
         type_args: &[Type],
         line: usize,
     ) -> Result<Type, String> {
-        // RFC-0114 §25: the instrument's hooks are calls only in an audited
-        // build. The arguments are locals and constants at every one of the
-        // four sites, so dropping the statement drops nothing else with it.
-        if !self.cx.audit && name.starts_with(AUDIT_PREFIX) {
+        if self.audit_dropped(name) {
             return Ok(Type::Unit);
         }
         let mark = self.arg_frees.len();
@@ -7617,6 +7614,16 @@ impl<'p> Fn_<'_, 'p> {
                 .impls
                 .iter()
                 .any(|i| i.places.iter().any(|p| p.name == name))
+    }
+
+    /// Whether this build drops the call to `name` rather than emitting it.
+    ///
+    /// RFC-0114 §25: the residue instrument's hooks are calls only in an
+    /// audited build. The arm drops the whole expression, so the operand goes
+    /// with it; the core states the operand as a row of its own, which is why
+    /// the whole-body walk refuses the statement instead (RFC-0125 M7).
+    fn audit_dropped(&self, name: &str) -> bool {
+        !self.cx.audit && name.starts_with(AUDIT_PREFIX)
     }
 
     fn call_inner(
@@ -17758,7 +17765,7 @@ impl<'p> Fn_<'_, 'p> {
     /// one name that hits and must not be called — an unaudited build drops
     /// its four hooks rather than emitting them.
     fn core_sig(&self, callee: &str, kind: Callee) -> Option<Sig> {
-        if kind != Callee::Fn || (!self.cx.audit && callee.starts_with(AUDIT_PREFIX)) {
+        if kind != Callee::Fn || self.audit_dropped(callee) {
             return None;
         }
         let sig = self.cx.sigs.get(callee)?;
