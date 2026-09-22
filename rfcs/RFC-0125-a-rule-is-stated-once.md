@@ -27025,3 +27025,22 @@ Findings:
 - three families are sugar over a form the parser can write: `&&` and `||` (1,244 bodies), the handed-back receiver of `out.push(v)`, and a nullary constructor used as a value. None of the three needs a core row.
 - `core::build` gives up on 51 bodies over the whole run and 46 of them are one cause, a call to a generator's `__vyrnGen*` entry. `kernel` reports 0 unlowered because the programs that hold them do not load there.
 Left: nothing in this track. The next RFC's tracks are the thirteen families, and the census names what each one buys.
+
+#### A record, an array and a variant are built from the row (2026-09-11, `track-gm`)
+Decision: the core states the layout a row MAKES, `direct.rs` builds it from there, and the placement stays in the one function both walks call. Mine, on the counts below.
+Went: `Fn_::core_make` and its screen, 146 lines; the part source `Parts`, 34 lines, which `fixed_elems`, `array_lit_heap`, `record_into` and `build_variant` all read. Stayed: `Ctor::Map`, `Ctor::Try` and `Callee::Named`, because a map literal is a runtime call this walk does not write and both constructors carry a check the row does not state.
+Lines: `direct.rs` 17,568 to 17,994. `core.rs` 6,937 to 6,942. Refusals: 0 lost / 0 gained. Manifest: untouched, `VYRN_WASM_MANIFEST=check` green.
+Licence:
+- `coredrive --ignored`: 166 of 168 programs byte-identical, the same two the record already explains (`ifexpr.vyrn`, `knucleotide.vyrn`). `Stmt::Let` on the AST arm 39,660 to 36,866, against the rows' 35,387 to 38,181. Bodies with no gap 3,072 to 3,180; distinct bodies the rows carry end to end 242 to 260; the per-body count 953 of 21,512, unmoved.
+- `VYRN_GAP_TALLY` over `examples/`: 3,685 lines whole where it read 3,544.
+- `residue --ignored`: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed.
+- `kernel --ignored`: 175 programs, 27,416 instances accepted, 0 refused, 0 unlowered.
+- `cargo test -p vyrn-cli` as `--test` groups: 601 passed, 0 failed. `cargo test -p vyrn-lower -p vyrn-codegen`: 46 passed, 0 failed.
+- `cargo fmt --all --check` and `vyrn-lsp`'s own: clean. `cargo build --release -p vyrn-cli`: no warning.
+Findings:
+- the destination's type is the ANNOTATION's, not the row's. The row carries `ty_of(value)`, so `let xs: Array<Int64> = [1, 2, 3]` states a fixed three where the arm builds a heap triple. Reading the annotation off the statement took the family from 11 statements to 2,794.
+- a validated part is the same screen as everywhere else in this walk. `validate_sum.vyrn` built `Some(rt(21))` at `Age` and the row states no check, which is one refusal of `where` types and not a case of its own.
+- `core::gaps` narrowed by two tags rather than by a family: `Make:Record`, `Make:Array` and `Call:Ctor` have a reader now, and what the reader still refuses is its own screen, the way a `Callee::Fn` whose parameter crosses by address was never a gap.
+- the tally deduplicates a LINE, so its denominator moves when the gap list does: 25,694 lines over `examples/` became 25,550 for the same corpus. The census page says so now.
+- no AST arm reached zero. `VYRN_FORM_TALLY` has `Stmt::Let` at 36,866 and the expression arms this family feeds are not forms the census counts, so nothing in `FORMS` turns false here.
+Left: `Ctor::Map` and `Ctor::Try`, blocked by a runtime call and a check the row does not state; `Callee::Named`, blocked by the same check; the per-body count, blocked by `core_walkable`'s `placed.is_empty()`, which is the release family's track and not this one's.

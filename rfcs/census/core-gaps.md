@@ -201,3 +201,18 @@ body holding its form is whole. The four statement arms that read no core row
 today are `Stmt::ForIn`, `Stmt::IfLet`, `Stmt::Drop` and a statement of another
 form. Their payers are, in order, a layout read with a builtin operation, the
 tag, a release the driver places, and the tag again.
+
+## What M7's first track changed (2026-09-11)
+
+The layout-made track (`track-gm`) gave the emitter a reader for two of the
+tags above, so `core::gaps` stopped naming them and every table on this page is
+the state BEFORE that. `Make:<record>`, `Make:Array` and `Call:Ctor:<variant>`
+are no longer gaps; `Make:Map`, `Make:Try` and every other callee kind still
+are. Over `examples/` the tally reads 3,685 bodies whole where it read 3,544,
+and `coredrive --ignored` reads 3,180 with no gap where it read 3,072.
+
+The tally's denominator moved too, from 25,694 lines to 25,550, and that is the
+instrument rather than the corpus: a line is deduplicated whole, so two
+instances that share a spelling and differed only in a tag this track retired
+are now one line. Read the denominator as lines, not as bodies, whenever the
+gap list itself has changed.

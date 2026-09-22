@@ -1612,9 +1612,12 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             write_back,
             ..
         } => {
+            // Since RFC-0125 M7 a variant constructor is read off the row too
+            // (`direct::Fn_::core_make`): it is a layout MADE, with a tag in
+            // front of its payload, and not the `call` the table answers.
             if *write_back {
                 out.push(format!("Call:writeBack:{callee}"));
-            } else if *kind != Callee::Fn {
+            } else if !matches!(kind, Callee::Fn | Callee::Ctor) {
                 out.push(format!("Call:{kind:?}:{callee}"));
             }
             for (v, _) in args {
@@ -1630,16 +1633,18 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             vals(vs, out);
         }
         Rhs::Prim(_, vs, _) => vals(vs, out),
+        // Since RFC-0125 M7 a record literal and an array literal are read off
+        // the row (`direct::Fn_::core_make`), so neither is a gap. What refuses
+        // a part the emitter cannot place is the emitter's own screen, the way
+        // a `Callee::Fn` whose parameter crosses by address is not a gap
+        // either. A map literal and a `where`-checked constructor have no
+        // reader at all.
         Rhs::Make(c, vs) => {
-            out.push(format!(
-                "Make:{}",
-                match c {
-                    Ctor::Record(n, _) => n.as_str(),
-                    Ctor::Array => "Array",
-                    Ctor::Map => "Map",
-                    Ctor::Try(_) => "Try",
-                }
-            ));
+            match c {
+                Ctor::Record(..) | Ctor::Array => {}
+                Ctor::Map => out.push("Make:Map".into()),
+                Ctor::Try(_) => out.push("Make:Try".into()),
+            }
             vals(vs, out);
         }
     }

@@ -48,7 +48,7 @@ use vyrn_frontend::types::INT32;
 /// RFC-0125 §2.3's own vocabulary: the statements the emitter walks, what each
 /// one computes, and the values it computes it from. `Body` is spelled out at
 /// each use, because this file's own `Body` is the AST's.
-use vyrn_lower::core::{Callee, Lit, Op, Rhs, St, Val};
+use vyrn_lower::core::{Callee, Ctor, Lit, Op, Rhs, St, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
@@ -1980,6 +1980,42 @@ impl Dest {
         }
     }
 }
+
+/// Where the parts of a made layout come from — RFC-0125 M7, the layout-made
+/// family.
+///
+/// A record literal, an array literal and a map literal each write their parts
+/// at offsets the layout decides, and the offsets are the same whichever walk
+/// is emitting: the AST arm has an expression per part and the core's row has a
+/// [`Val`]. The builders below take this rather than a slice of expressions, so
+/// the placement is stated once and the two walks cannot drift on it.
+enum Parts<'a, 'c> {
+    Ast(Vec<&'a Expr>),
+    Core(&'a vyrn_lower::core::Body, &'a [Val], &'c mut Walked),
+}
+
+impl<'a> Parts<'a, '_> {
+    fn of(es: &'a [Expr]) -> Self {
+        Parts::Ast(es.iter().collect())
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Parts::Ast(es) => es.len(),
+            Parts::Core(_, vs, ..) => vs.len(),
+        }
+    }
+
+    /// The part as an EXPRESSION, which an aggregate part is built from. The
+    /// core states such a part as a name of its own, and this walk binds a made
+    /// layout without reading one back, so there is no expression to hand over.
+    fn expr(&self, i: usize, line: usize) -> Result<&'a Expr, String> {
+        match self {
+            Parts::Ast(es) => Ok(es[i]),
+            Parts::Core(..) => unsupported("an aggregate part of a made layout", line),
+        }
+    }
+}
 /// The spelling a lifted lambda's shell is named by, followed by the name of
 /// the function that holds the literal: `@lambda main`. Reserved, so no Vyrn
 /// identifier can be it.
@@ -2194,6 +2230,15 @@ struct Fn_<'a, 'p> {
     /// Shared by the two walks: a name the AST arm bound is found through
     /// [`Fn_::scope`], and one this walk bound is pushed onto it.
     core_w: Walked,
+    /// The type the reader ANNOTATED the statement this walk is emitting with,
+    /// for the one row that needs it — a made layout (RFC-0125 M7).
+    ///
+    /// The row's type is the VALUE's (`core::Builder::stmt` asks `ty_of`) and
+    /// the arm builds into the annotation's layout, so `let xs: Array<Int64> =
+    /// [1, 2, 3]` writes a heap triple where the row alone says a fixed three.
+    /// `None` for an unannotated statement and for the per-body walk, which
+    /// refuses a body that annotates anything at all.
+    core_bound: Option<Type>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -2232,6 +2277,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         core: None,
         core_at: HashMap::new(),
         core_w: Walked::default(),
+        core_bound: None,
     }
 }
 
@@ -2393,6 +2439,7 @@ fn lower_body(
         core: vyrn_lower::core::body_of(&f.name).map(std::rc::Rc::new),
         core_at: HashMap::new(),
         core_w: Walked::default(),
+        core_bound: None,
     };
     if let Some(core) = cx_fn.core.clone() {
         cx_fn.core_at = core.rows_by_statement();
@@ -6123,26 +6170,18 @@ impl<'p> Fn_<'_, 'p> {
                     Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&ty) => (d, true),
                     _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
                 };
-                for (i, f) in decl.iter().enumerate() {
+                let mut parts = Vec::new();
+                let mut order = Vec::new();
+                for f in &decl {
                     let init = fields
                         .iter()
                         .find(|(n, _)| *n == f.name)
                         .map(|(_, e)| e)
                         .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), *line))?;
-                    match self.cx.repr(&f.ty, *line)? {
-                        Repr::Scalar(_) => {
-                            dest.addr(b, l.fields[i]);
-                            self.expr_as(m, b, init, &f.ty)?;
-                            b.ins(&store_of(&self.cx.ll(&f.ty)));
-                        }
-                        Repr::Agg(fl) => {
-                            let at = dest.at(l.fields[i]);
-                            self.agg_into(m, b, at, fl.size, init, &f.ty, true)?;
-                        }
-                        Repr::Unit => return unsupported("a Unit field", *line),
-                    }
+                    order.push(parts.len());
+                    parts.push(init);
                 }
-                dest.addr(b, 0);
+                self.record_into(m, b, dest, &decl, &l, &order, &mut Parts::Ast(parts), *line)?;
                 self.dest_used = used;
                 // A predicated record's cross-field `where` runs on the finished
                 // literal. There is no coercion to hang it on — the literal
@@ -11395,12 +11434,20 @@ impl<'p> Fn_<'_, 'p> {
         if let Some((dest, hty)) = hint {
             match self.cx.resolve(&hty) {
                 Type::Array(inner) if !matches!(*inner, Type::Param(_)) => {
-                    return self.array_lit_heap(m, b, dest, &inner, elems, line, true);
+                    return self.array_lit_heap(
+                        m,
+                        b,
+                        dest,
+                        &inner,
+                        &mut Parts::of(elems),
+                        line,
+                        true,
+                    );
                 }
                 Type::ArrayN(inner, n)
                     if n == elems.len() && n > 0 && !matches!(*inner, Type::Param(_)) =>
                 {
-                    self.fixed_elems(m, b, dest, &inner, elems, line)?;
+                    self.fixed_elems(m, b, dest, &inner, &mut Parts::of(elems), line)?;
                     dest.addr(b, 0);
                     self.dest_used = true;
                     return Ok(Type::ArrayN(inner, n));
@@ -11412,7 +11459,7 @@ impl<'p> Fn_<'_, 'p> {
             if !matches!(**inner, Type::Param(_)) {
                 let l = self.layout_of(&Type::Array(inner.clone()), line)?;
                 let dest = Dest::Slot(b.alloc(l.size, l.align));
-                return self.array_lit_heap(m, b, dest, inner, elems, line, false);
+                return self.array_lit_heap(m, b, dest, inner, &mut Parts::of(elems), line, false);
             }
         }
         // An empty `[]` in a `SmallArray<T, N>` position is the inline empty state,
@@ -11457,7 +11504,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         let el = self.layout_of(&elem, line)?;
         let off = b.alloc(self.extent(&elem, elems.len(), line)?, el.align);
-        self.fixed_elems(m, b, Dest::Slot(off), &elem, elems, line)?;
+        self.fixed_elems(m, b, Dest::Slot(off), &elem, &mut Parts::of(elems), line)?;
         b.slot(off);
         Ok(Type::ArrayN(Box::new(elem), elems.len()))
     }
@@ -11471,24 +11518,88 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         dest: Dest,
         elem: &Type,
-        elems: &[Expr],
+        elems: &mut Parts,
         line: usize,
     ) -> Result<(), String> {
         let stride = self.stride(elem, line)?;
         let r = self.cx.repr(elem, line)?;
-        for (i, e) in elems.iter().enumerate() {
+        for i in 0..elems.len() {
             let at = stride * i as u32;
             match &r {
                 Repr::Scalar(_) => {
                     dest.addr(b, at);
-                    self.expr_as(m, b, e, elem)?;
+                    self.part(m, b, elems, i, elem, line)?;
                     b.ins(&store_of(&self.cx.ll(elem)));
                 }
-                Repr::Agg(_) => self.agg_into(m, b, dest.at(at), stride, e, elem, true)?,
+                Repr::Agg(_) => {
+                    let e = elems.expr(i, line)?;
+                    self.agg_into(m, b, dest.at(at), stride, e, elem, true)?;
+                }
                 Repr::Unit => return unsupported("an array of Unit", line),
             }
         }
         Ok(())
+    }
+
+    /// A record literal's fields, each at its layout offset — RFC-0125 M7.
+    ///
+    /// `order[i]` is the part that fills the `i`th DECLARED field. The layout's
+    /// order is the declaration's and a reader writes the fields in whatever
+    /// order suits, so the join is by name and the caller makes it: the AST arm
+    /// joins its `(name, expr)` pairs and the core's row joins the field names
+    /// on [`vyrn_lower::core::Ctor::Record`].
+    #[allow(clippy::too_many_arguments)]
+    fn record_into(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        decl: &[Field],
+        l: &Layout,
+        order: &[usize],
+        parts: &mut Parts,
+        line: usize,
+    ) -> Result<(), String> {
+        for (i, f) in decl.iter().enumerate() {
+            match self.cx.repr(&f.ty, line)? {
+                Repr::Scalar(_) => {
+                    dest.addr(b, l.fields[i]);
+                    self.part(m, b, parts, order[i], &f.ty, line)?;
+                    b.ins(&store_of(&self.cx.ll(&f.ty)));
+                }
+                Repr::Agg(fl) => {
+                    let at = dest.at(l.fields[i]);
+                    let e = parts.expr(order[i], line)?;
+                    self.agg_into(m, b, at, fl.size, e, &f.ty, true)?;
+                }
+                Repr::Unit => return unsupported("a Unit field", line),
+            }
+        }
+        dest.addr(b, 0);
+        Ok(())
+    }
+
+    /// One part of a literal, at the type the layout puts it at: the AST arm's
+    /// expression, or the value the core's row names (RFC-0125 M7).
+    fn part(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        parts: &mut Parts,
+        i: usize,
+        want: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match parts {
+            Parts::Ast(es) => {
+                let e = es[i];
+                self.expr_as(m, b, e, want)
+            }
+            Parts::Core(body, vs, w) => {
+                let (body, v) = (*body, &vs[i]);
+                self.core_val(m, b, body, w, v, want, line)
+            }
+        }
     }
 
     /// `[a, b, c]` in an `Array<T>` position, built on the heap at once
@@ -11503,7 +11614,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         dest: Dest,
         inner: &Type,
-        elems: &[Expr],
+        elems: &mut Parts,
         line: usize,
         used: bool,
     ) -> Result<Type, String> {
@@ -12663,7 +12774,16 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let args: Vec<&Expr> = payload.iter().map(|(e, _)| *e).collect();
         let tys: Vec<Type> = payload.iter().map(|(_, t)| t.clone()).collect();
-        self.build_variant(m, b, ty, tag as u64, &args, &tys, line, hint)
+        self.build_variant(
+            m,
+            b,
+            ty,
+            tag as u64,
+            &mut Parts::Ast(args),
+            &tys,
+            line,
+            hint,
+        )
     }
 
     /// Build a sum value: the tag, then the live variant's payloads in the slots
@@ -12677,7 +12797,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         ty: &Type,
         tag: u64,
-        args: &[&Expr],
+        args: &mut Parts,
         payload: &[Type],
         line: usize,
         hint: Option<(Dest, Type)>,
@@ -12699,12 +12819,12 @@ impl<'p> Fn_<'_, 'p> {
         // Every slot this variant does not fill is zeroed: a `None` and a
         // narrower variant must not leave the widest one's words behind.
         let mut filled = 1;
-        for (i, (a, t)) in args.iter().zip(payload).enumerate() {
+        for (i, t) in payload.iter().enumerate() {
             let at = self.cx.payload_slot(payload, i);
             if self.word2(t)? == Word::Inline2 {
                 // Two words already side by side: one copy, no encoding.
                 dest.addr(b, l.fields[at]);
-                self.expr_as(m, b, a, t)?;
+                self.part(m, b, args, i, t, line)?;
                 b.ins(&Instruction::I32Const(16));
                 b.ins(&Instruction::MemoryCopy {
                     src_mem: 0,
@@ -12712,7 +12832,7 @@ impl<'p> Fn_<'_, 'p> {
                 });
             } else {
                 dest.addr(b, l.fields[at]);
-                self.expr_as(m, b, a, t)?;
+                self.part(m, b, args, i, t, line)?;
                 self.encode_word2(b, t, line)?;
                 b.ins(&Instruction::I64Store(word8()));
             }
@@ -12865,7 +12985,7 @@ impl<'p> Fn_<'_, 'p> {
             }
         };
         let refs: Vec<&Expr> = args.iter().collect();
-        self.build_variant(m, b, &ty, tag, &refs, &payload, line, hint)
+        self.build_variant(m, b, &ty, tag, &mut Parts::Ast(refs), &payload, line, hint)
             .map(Some)
     }
 
@@ -16373,9 +16493,14 @@ impl<'p> Fn_<'_, 'p> {
         let Some(run) = self.core_run(&body, s) else {
             return Ok(false);
         };
+        self.core_bound = match s {
+            Stmt::Let { ty: Some(t), .. } => Some(t.clone()),
+            _ => None,
+        };
         let mut w = std::mem::take(&mut self.core_w);
         let r = self.core_stmts(m, b, &body, &mut w, &run);
         self.core_w = w;
+        self.core_bound = None;
         count(form, true);
         r.map(|()| true)
     }
@@ -16426,24 +16551,39 @@ impl<'p> Fn_<'_, 'p> {
         let named =
             |n: &vyrn_lower::core::Name, name: &String| &body.names[*n as usize].source == name;
         let mut annotated = None;
+        // The statement's own binding, and the type the reader annotated it
+        // with: what a made layout is built into (RFC-0125 M7).
+        let mut bound: (Option<vyrn_lower::core::Name>, Option<&Type>) = (None, None);
         match (s, run.last()?) {
-            (Stmt::Let { name, ty, .. }, St::Let(n, _)) if named(n, name) => {
+            (Stmt::Let { name, ty, .. }, St::Let(n, rhs)) if named(n, name) => {
+                bound = (Some(*n), ty.as_ref());
                 // The arm binds the ANNOTATION where the reader wrote one and
                 // the recorded type of the initializer otherwise, and the two
                 // walks have to bind the same type or they pick different
                 // instructions for it: `simd.vyrn`'s `a / b` on two `Float32`
                 // widens to `Float64` in the arm and stays single in the row.
                 if let Some(t) = ty {
-                    // As WRITTEN, not resolved: `let a: Age = 25` is a `where`
-                    // type, the arm parks the value in a temporary and calls
-                    // its check, and `Age` resolved to `Int64` is the flow that
-                    // does not (M2d). The row states no check.
-                    if !core_scalar(t)
-                        || self.cx.resolve(t) != self.cx.resolve(&body.names[*n as usize].ty)
-                    {
-                        return None;
+                    // A made layout is the one row whose destination is the
+                    // ANNOTATION's layout rather than the value's, and
+                    // [`Fn_::core_stmts`] builds into it (RFC-0125 M7). The
+                    // `where` screen is the same one either way: an
+                    // annotation that checks is a row the core does not state.
+                    if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) {
+                        if self.checks(t) {
+                            return None;
+                        }
+                    } else {
+                        // As WRITTEN, not resolved: `let a: Age = 25` is a
+                        // `where` type, the arm parks the value in a temporary
+                        // and calls its check, and `Age` resolved to `Int64` is
+                        // the flow that does not (M2d). The row states no check.
+                        if !core_scalar(t)
+                            || self.cx.resolve(t) != self.cx.resolve(&body.names[*n as usize].ty)
+                        {
+                            return None;
+                        }
+                        annotated = Some(*n);
                     }
-                    annotated = Some(*n);
                 }
             }
             (
@@ -16486,8 +16626,31 @@ impl<'p> Fn_<'_, 'p> {
         for st in run {
             core_lets(st, &mut lets);
         }
+        // A name the run binds by a made layout: its type is the layout's and
+        // not a scalar, and the two clauses below are about a value the arm
+        // leaves on the operand stack (RFC-0125 M7).
+        let mut made = Vec::new();
         for (n, rhs) in &lets {
-            if Some(*n) == annotated {
+            if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) {
+                let at = match bound {
+                    (Some(top), Some(t)) if top == *n => t,
+                    _ => &body.names[*n as usize].ty,
+                };
+                if !self.core_makes(body, at, rhs) {
+                    return None;
+                }
+                made.push(*n);
+            }
+        }
+        // A made layout is the STATEMENT's own binding and nothing deeper: this
+        // walk reads the annotation off the statement it was handed, and a row
+        // under an `if` of the run has a `Stmt::Let` of its own with an
+        // annotation this walk never sees.
+        if !made.is_empty() && bound.0.is_none_or(|top| made != [top]) {
+            return None;
+        }
+        for (n, rhs) in &lets {
+            if Some(*n) == annotated || made.contains(n) {
                 continue;
             }
             let info = &body.names[*n as usize];
@@ -16517,7 +16680,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         for n in &names {
             let info = &body.names[*n as usize];
-            if !core_scalar(&info.ty) {
+            if !core_scalar(&info.ty) && !made.contains(n) {
                 return None;
             }
         }
@@ -16580,6 +16743,44 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         for (i, s) in ss.iter().enumerate() {
             match s {
+                // A LAYOUT MADE, built into the binding's own slot — RFC-0125
+                // M7. It is a `let` arm of its own because the slot has to
+                // exist before the parts are written: the arm below evaluates
+                // and then binds, and a record or an array is never on the
+                // operand stack to be bound.
+                St::Let(n, rhs)
+                    if self.core_makes(body, &body.names[*n as usize].ty, rhs)
+                        || self
+                            .core_bound
+                            .as_ref()
+                            .is_some_and(|t| self.core_makes(body, t, rhs)) =>
+                {
+                    let info = &body.names[*n as usize];
+                    let line = info.line;
+                    // The DESTINATION's type, which is the annotation where the
+                    // reader wrote one: the arm takes the slot and writes the
+                    // hint from it, and the row states the value's type instead.
+                    let ty = self.core_bound.take().unwrap_or_else(|| info.ty.clone());
+                    let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+                        return unsupported("a made layout with no layout", line);
+                    };
+                    let place = Place::Slot(b.alloc(l.size, l.align));
+                    let dest = Dest::of(place).expect("a slot is a destination");
+                    self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
+                    w.at[*n as usize] = Some((place, ty.clone()));
+                    let Some(key) = info.binding else {
+                        return unsupported("a made layout the row binds to no `let`", line);
+                    };
+                    self.scope.push((info.source.clone(), place, ty.clone()));
+                    // The release the binding owes, keyed as the arm keys it:
+                    // the plan names the `Stmt::Let` and this row carries the
+                    // same node, so the two walks register the same slot.
+                    if self.releases_whole(key) {
+                        if let Some(r) = self.rel_for(&ty, line)? {
+                            self.register_rel(b, key, place, r);
+                        }
+                    }
+                }
                 St::Let(n, rhs) => {
                     let info = &body.names[*n as usize];
                     let line = info.line;
@@ -16864,6 +17065,190 @@ impl<'p> Fn_<'_, 'p> {
         Ok(sig.ret_ty)
     }
 
+    /// One made layout, built into the binding's own slot — RFC-0125 M7, the
+    /// layout-made family.
+    ///
+    /// The bytes are [`Fn_::agg_into`]'s at a `let` of a literal: the
+    /// destination's address, the parts at the offsets the layout gives them,
+    /// the address again, and the two drops that stand for the copy an in-place
+    /// build does not make. The placement itself is [`Fn_::record_into`]'s,
+    /// [`Fn_::array_lit_heap`]'s and [`Fn_::build_variant`]'s, which the AST arm
+    /// calls with the same destination.
+    #[allow(clippy::too_many_arguments)]
+    fn core_make(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        dest: Dest,
+        ty: &Type,
+        rhs: &Rhs,
+        line: usize,
+    ) -> Result<(), String> {
+        dest.addr(b, 0);
+        match rhs {
+            // A variant: its tag, then its payload in the slots the sum gives
+            // it. The hint is this walk's destination, which the builder takes
+            // because the type it is building is the one the slot holds.
+            Rhs::Call { callee, args, .. } => {
+                let Some((tag, payload)) = self.core_variant(ty, callee) else {
+                    return unsupported("a variant the row states of no sum", line);
+                };
+                let vs: Vec<Val> = args.iter().map(|(v, _)| v.clone()).collect();
+                let mut parts = Parts::Core(body, &vs, w);
+                let hint = Some((dest, ty.clone()));
+                self.build_variant(m, b, ty, tag, &mut parts, &payload, line, hint)?;
+            }
+            Rhs::Make(Ctor::Record(_, names), vs) => {
+                let decl = self
+                    .cx
+                    .fields(ty)
+                    .ok_or_else(|| gap("a record literal the row states", line))?;
+                let Repr::Agg(l) = self.cx.repr(ty, line)? else {
+                    return unsupported("a record literal the row states", line);
+                };
+                let mut order = Vec::new();
+                for f in &decl {
+                    let at = names
+                        .iter()
+                        .position(|n| *n == f.name)
+                        .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), line))?;
+                    order.push(at);
+                }
+                let mut parts = Parts::Core(body, vs, w);
+                self.record_into(m, b, dest, &decl, &l, &order, &mut parts, line)?;
+            }
+            Rhs::Make(Ctor::Array, vs) => match self.cx.resolve(ty) {
+                Type::Array(inner) => {
+                    let mut parts = Parts::Core(body, vs, w);
+                    self.array_lit_heap(m, b, dest, &inner, &mut parts, line, true)?;
+                }
+                Type::ArrayN(inner, n) if n == vs.len() => {
+                    let mut parts = Parts::Core(body, vs, w);
+                    self.fixed_elems(m, b, dest, &inner, &mut parts, line)?;
+                    dest.addr(b, 0);
+                }
+                _ => return unsupported("an array literal the row does not place", line),
+            },
+            _ => return unsupported("a made layout this walk does not build", line),
+        }
+        // `dest_used` is the AST arm's answer to [`Fn_::agg_into`], and this
+        // walk writes the in-place build's bytes itself.
+        self.dest_used = false;
+        b.ins(&Instruction::Drop);
+        b.ins(&Instruction::Drop);
+        Ok(())
+    }
+
+    /// Whether this walk writes one PART of a made layout at the type the
+    /// layout puts it at — RFC-0125 M7.
+    ///
+    /// A scalar the walk emits, and not a `where` type: a validated part is
+    /// checked where it is stored (RFC-0079) and the row states no check, which
+    /// is the same screen every other clause of this walk makes.
+    fn core_part_ty(&self, t: &Type) -> bool {
+        matches!(self.cx.repr(t, 0), Ok(Repr::Scalar(_)))
+            && core_scalar(&self.cx.resolve(t))
+            && !self.checks(t)
+    }
+
+    /// Whether a row is a call to a variant constructor, which is a made layout
+    /// (RFC-0125 M7) rather than the `call` [`Fn_::core_call`] writes.
+    fn core_ctor(&self, rhs: &Rhs) -> bool {
+        matches!(
+            rhs,
+            Rhs::Call {
+                kind: Callee::Ctor,
+                write_back: false,
+                ..
+            }
+        )
+    }
+
+    /// The tag and the payload types of the variant `name` of the sum `ty` —
+    /// RFC-0125 M7. `None` when `ty` is no sum, or names no such variant.
+    ///
+    /// The AST arm reads the same pair off the EXPECTATION ([`Fn_::sum_ctor`]'s
+    /// `pick`). The row states the binding's type, which is what the
+    /// expectation was, so the two answer the same variant.
+    fn core_variant(&self, ty: &Type, name: &str) -> Option<(u64, Vec<Type>)> {
+        let Type::Enum(vs) = self.cx.resolve(ty) else {
+            return None;
+        };
+        let i = vs.iter().position(|v| v.name == name)?;
+        Some((i as u64, vs[i].payload.clone()))
+    }
+
+    /// Whether this walk builds the layout a row MAKES — RFC-0125 M7, the
+    /// layout-made family's screen.
+    ///
+    /// Two rows make one: [`Rhs::Make`] states a record, an array or a map
+    /// literal, and a call to [`Callee::Ctor`] states a variant of a sum, which
+    /// is the same build with a tag in front of it.
+    fn core_makes(&self, body: &vyrn_lower::core::Body, ty: &Type, rhs: &Rhs) -> bool {
+        match rhs {
+            Rhs::Make(c, vs) => self.core_made(body, ty, c, vs),
+            Rhs::Call {
+                callee,
+                args,
+                write_back: false,
+                kind: Callee::Ctor,
+                ..
+            } => {
+                args.iter().all(|(v, _)| core_val_readable(body, v))
+                    && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
+                    && self.core_variant(ty, callee).is_some_and(|(_, p)| {
+                        p.len() == args.len() && p.iter().all(|t| self.core_part_ty(t))
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this walk builds the layout a [`Rhs::Make`] row states —
+    /// RFC-0125 M7, the layout-made family's screen.
+    ///
+    /// It asks what [`Fn_::core_make`] needs: a layout with an offset for every
+    /// part, parts this walk emits, and no check at the construction that the
+    /// row does not carry.
+    fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
+        let scalar = |t: &Type| self.core_part_ty(t);
+        if !vs.iter().all(|v| core_val_readable(body, v))
+            || !matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
+        {
+            return false;
+        }
+        match ctor {
+            Ctor::Record(name, names) => {
+                // A cross-field `where` runs on the finished literal (RFC-0079)
+                // and the row states no check.
+                if self
+                    .cx
+                    .types
+                    .get(name)
+                    .is_some_and(|d| d.predicate.is_some())
+                {
+                    return false;
+                }
+                let Some(decl) = self.cx.fields(ty) else {
+                    return false;
+                };
+                decl.len() == vs.len()
+                    && names.len() == vs.len()
+                    && decl
+                        .iter()
+                        .all(|f| scalar(&f.ty) && names.contains(&f.name))
+            }
+            Ctor::Array => match self.cx.resolve(ty) {
+                Type::Array(inner) => scalar(&inner),
+                Type::ArrayN(inner, n) => n == vs.len() && n > 0 && scalar(&inner),
+                _ => false,
+            },
+            Ctor::Map | Ctor::Try(_) => false,
+        }
+    }
+
     /// The signature this walk calls a [`Callee::Fn`] through, and `None` for
     /// every callee whose emission is more than a `call`.
     ///
@@ -17051,11 +17436,37 @@ impl<'p> Fn_<'_, 'p> {
         if !matches!(self.ret, Repr::Scalar(_) | Repr::Unit) {
             return false;
         }
-        for info in &body.names {
+        let mut lets = Vec::new();
+        for st in &body.stmts {
+            core_lets(st, &mut lets);
+        }
+        // A made layout is built into the ANNOTATION's layout, and this walk
+        // reads the annotation off the statement it was handed
+        // ([`Fn_::core_took`]). The per-body walk is handed none, so a made
+        // layout whose `let` annotates one stays in the arm. The key is the
+        // node the plan keys the binding by, which is that `Stmt::Let`.
+        let mut annotated = Vec::new();
+        if let Some(blk) = stmts {
+            each_block(blk, &mut |_| {}, &mut |s| {
+                if matches!(s, Stmt::Let { ty: Some(_), .. }) {
+                    annotated.push(s as *const Stmt as usize);
+                }
+            });
+        }
+        for (n, info) in body.names.iter().enumerate() {
             // A scalar of a type that needs no validation: a `where` type
             // (RFC-0079) is a `check` row the core does not carry, which is
             // the census's row 7.
-            if !core_scalar(&info.ty) {
+            //
+            // Or a layout this walk MAKES (RFC-0125 M7). Such a name is bound
+            // and never read: every read of a value goes through
+            // [`core_val_readable`], which asks the same scalar question.
+            if !core_scalar(&info.ty)
+                && !(info.binding.is_some_and(|at| !annotated.contains(&at))
+                    && lets
+                        .iter()
+                        .any(|(b, rhs)| *b as usize == n && self.core_makes(body, &info.ty, rhs)))
+            {
                 return false;
             }
         }
@@ -17095,13 +17506,22 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
     fn core_readable(&self, body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
         ss.iter().enumerate().all(|(i, s)| match s {
+            // A made layout is built into the binding's own slot, so the name
+            // is one this walk BINDS and the reader screen above never sees
+            // (RFC-0125 M7). A temporary cannot hold one: the slot is the
+            // reader's `let`, and a row that minted the name has none.
+            St::Let(n, rhs) if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) => {
+                body.names[*n as usize].binding.is_some()
+                    && self.core_makes(body, &body.names[*n as usize].ty, rhs)
+            }
             St::Let(n, rhs) => {
                 let held = body.names[*n as usize].binding.is_none()
                     && reads[*n as usize] == 1
                     && ss.get(i + 1).and_then(first_read) == Some(*n);
                 // A temporary the stack cannot carry needs a local the AST walk
                 // never takes, so the two would emit different locals.
-                (held || body.names[*n as usize].binding.is_some()) && self.core_rhs_readable(rhs)
+                (held || body.names[*n as usize].binding.is_some())
+                    && self.core_rhs_readable(body, rhs)
             }
             // A store's destination has to have a place before the store runs,
             // and this walk gives one to a temporary only where it BINDS it.
@@ -17112,13 +17532,14 @@ impl<'p> Fn_<'_, 'p> {
             // AST arm's local and is always placed.
             St::Store { place, value, .. } => {
                 matches!(place, vyrn_lower::core::Place::Name(n)
-                    if !body.names[*n as usize].source.starts_with('@'))
-                    && core_val_readable(value)
+                    if !body.names[*n as usize].source.starts_with('@')
+                        && core_scalar(&body.names[*n as usize].ty))
+                    && core_val_readable(body, value)
             }
             St::If {
                 cond, then, els, ..
             } => {
-                core_val_readable(cond)
+                core_val_readable(body, cond)
                     && self.core_readable(body, then, reads)
                     && self.core_readable(body, els, reads)
             }
@@ -17131,25 +17552,25 @@ impl<'p> Fn_<'_, 'p> {
             // for. A block's fall-through release and a scrutinee's are the
             // arm's, and they are refused.
             St::Row { exit, .. } => CORE_EXITS.contains(exit),
-            St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
+            St::Return { value, .. } => value.as_ref().is_none_or(|v| core_val_readable(body, v)),
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
             // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
             St::Do { rhs, line, .. } => {
-                self.core_rhs_readable(rhs) && self.core_rhs_ty(rhs, *line).is_ok()
+                self.core_rhs_readable(body, rhs) && self.core_rhs_ty(rhs, *line).is_ok()
             }
             St::Trap => true,
             _ => false,
         })
     }
 
-    fn core_rhs_readable(&self, rhs: &Rhs) -> bool {
+    fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
-            Rhs::Val(v) => core_val_readable(v),
+            Rhs::Val(v) => core_val_readable(body, v),
             // `&&` and `||` are stated as prims and emit a branch; the row states
             // no branch, so the walk stands down at them.
             Rhs::Prim(Op::Bin(BinOp::And | BinOp::Or), ..) | Rhs::Prim(Op::Closure, ..) => false,
-            Rhs::Prim(_, vs, _) => vs.iter().all(core_val_readable),
+            Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_val_readable(body, v)),
             // A write-back stores the receiver the call handed back, which is
             // more than a `call`.
             Rhs::Call {
@@ -17160,7 +17581,7 @@ impl<'p> Fn_<'_, 'p> {
                 ..
             } => {
                 !write_back
-                    && args.iter().all(|(v, _)| core_val_readable(v))
+                    && args.iter().all(|(v, _)| core_val_readable(body, v))
                     && self
                         .core_sig(callee, *kind)
                         .is_some_and(|s| s.params.len() == args.len())
@@ -17192,14 +17613,19 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
     }
 }
 
-fn core_val_readable(v: &Val) -> bool {
-    // A NAME is screened by its recorded type ([`core_scalar`], in
-    // `Fn_::core_run` and `Fn_::core_walkable`). A literal has no name and
-    // carries its type in its own variant, so the same screen has to be spelled
-    // here or it is not asked: a `Lit::Str` is a String, which this walk emits
-    // no operation on. `"a" < "b"` reached `Op::Lt` with two of them and not one
-    // name for the other screen to refuse.
-    !matches!(v, Val::Lit(Lit::Opaque | Lit::Str(_)))
+fn core_val_readable(body: &vyrn_lower::core::Body, v: &Val) -> bool {
+    // A literal has no name and carries its type in its own variant: a
+    // `Lit::Str` is a String, which this walk emits no operation on. `"a" < "b"`
+    // reached `Op::Lt` with two of them and not one name for the other screen to
+    // refuse.
+    //
+    // A NAME is screened by its recorded type. The screen was the caller's until
+    // M7: a made layout is a name this walk BINDS and never reads, so the two
+    // questions parted and the read one is asked here, at every use of a value.
+    match v {
+        Val::Name(n) => core_scalar(&body.names[*n as usize].ty),
+        Val::Lit(l) => !matches!(l, Lit::Opaque | Lit::Str(_)),
+    }
 }
 
 /// Every `let` a statement's rows bind, itself and everything under it.
