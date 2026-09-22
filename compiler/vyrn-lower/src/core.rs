@@ -1621,6 +1621,15 @@ pub enum Spec {
     /// literal. The call writes the line and returns to nobody; the
     /// [`St::Trap`] the builder states after it is what ends the path.
     Traps,
+    /// An array receiver first, and at most one operand at whatever type the
+    /// row put on its name. The runtime writes the new triple into the
+    /// receiver's own storage, so the result is the receiver, and the store
+    /// the builder states after the call puts back what is already there.
+    Rebuilds,
+    /// Operands at whatever type the row put on their names, and a result at
+    /// the stated type that the call builds in storage of its own. The caller
+    /// lands it as it lands any aggregate result.
+    Builds(Type),
 }
 
 /// Every builtin the row specifies, by name.
@@ -1630,10 +1639,6 @@ pub enum Spec {
 /// emission there; the match over [`Spec`] makes a new KIND a compile error,
 /// and the codegen test `builtin_rows_all_emit` refuses a [`Spec::Typed`] row
 /// with no instruction.
-///
-/// A builtin whose operands and result the row cannot state at all — `bytes`
-/// and `stringFromBytes` hand back an aggregate the emitter must place — is
-/// not here and is still a gap.
 pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
     static ROWS: std::sync::OnceLock<Vec<(&'static str, Spec)>> = std::sync::OnceLock::new();
     ROWS.get_or_init(|| {
@@ -1644,6 +1649,10 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
         let i32_ = Type::IntN {
             bits: 32,
             signed: true,
+        };
+        let u8_ = Type::IntN {
+            bits: 8,
+            signed: false,
         };
         let one = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone()], r.clone()));
         let two = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone(), p.clone()], r.clone()));
@@ -1677,6 +1686,16 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@str", Spec::Renders(Type::Str)),
             ("panic", Spec::Traps),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
+            ("@push", Spec::Rebuilds),
+            ("@reserve", Spec::Rebuilds),
+            ("@clear", Spec::Rebuilds),
+            ("@append", Spec::Rebuilds),
+            ("@copyFrom", Spec::Rebuilds),
+            ("bytes", Spec::Builds(Type::Array(Box::new(u8_)))),
+            (
+                "stringFromBytes",
+                Spec::Builds(Type::result(Type::Str, Type::Str)),
+            ),
         ]
     })
 }
@@ -1709,7 +1728,10 @@ pub fn gaps(body: &Body) -> Vec<String> {
 }
 
 fn gaps_of(ss: &[St], out: &mut Vec<String>) {
-    for s in ss {
+    // Nothing after a `trap` in its list runs, so nothing there is a gap: the
+    // value a `panic` in value position leaves ([`Opaque::Trapped`]) is read
+    // only by the statement after the `trap`.
+    for s in ss.iter().take_while(|s| !matches!(s, St::Trap)) {
         match s {
             St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(r, out),
             St::Store { place, value, .. } => {
@@ -5160,6 +5182,21 @@ impl<'a> Builder<'a> {
     /// the binding that follows; the ones queued by an enclosing expression
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
+    /// Whether `name(args)` at `e` is an element read of a builtin array
+    /// whose element owns no heap, off a receiver that is a place.
+    fn reads_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
+        name == vyrn_frontend::project::AT
+            && args.len() == 2
+            && is_place_read(&args[0])
+            && self.ty_of(e).is_ok_and(|t| !self.owns(&t))
+            && self.ty_of(&args[0]).is_ok_and(|t| {
+                matches!(
+                    vyrn_frontend::types::resolve(&t, self.proto.types()),
+                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
+                )
+            })
+    }
+
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         let outer = std::mem::take(&mut self.after);
         let r = self.rhs_inner(e, out);
@@ -5308,12 +5345,21 @@ impl<'a> Builder<'a> {
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
             }
+            // `xs[i]` of a heapless element is section 2.1's element read, one load at
+            // an address, and not a call: the seeded `place at` row yields
+            // `@slot(self, i)` and nothing else. A String's byte, a map's
+            // entry and a user container's projection are other reads.
             Expr::Call {
                 name,
                 args,
                 line,
                 type_args: _,
-            } => self.call(name, args, *line, self.produced(e), out),
+            } => {
+                if self.reads_an_element(name, args, e) {
+                    return Ok(Rhs::Read(self.place(e, out)?));
+                }
+                self.call(name, args, *line, self.produced(e), out)
+            }
             Expr::TryConstruct { name, args, .. } => {
                 let mut vs = Vec::new();
                 for a in args {

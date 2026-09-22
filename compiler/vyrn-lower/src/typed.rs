@@ -187,7 +187,8 @@ impl<'a> Walk<'a, '_> {
             St::Let(n, rhs) => {
                 self.born.insert(*n, rhs);
                 let info = &self.body.names[*n as usize];
-                self.judge_store(info.ty.clone(), info.source.clone(), info.line, rhs);
+                let ty = info.ty.clone();
+                self.judge_store(ty.clone(), info.source.clone(), info.line, rhs, Some(ty));
             }
             St::Store {
                 place, value, line, ..
@@ -212,7 +213,11 @@ impl<'a> Walk<'a, '_> {
                         }
                     };
                     let place = self.spell(place);
-                    self.judge_store(ty, place, *line, rhs);
+                    let named = match value {
+                        Val::Name(n) => Some(self.body.names[*n as usize].ty.clone()),
+                        Val::Lit(_) => None,
+                    };
+                    self.judge_store(ty, place, *line, rhs, named);
                 }
             }
             St::If { then, els, .. } => {
@@ -236,9 +241,24 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// The one judgment. `to` is the place's type, `rhs` what the store was
-    /// given.
-    fn judge_store(&mut self, to: Type, place: String, line: usize, rhs: &Rhs) {
-        let from = self.rhs_ty(rhs);
+    /// given, and `named` the type of the name `rhs` was bound to.
+    ///
+    /// A read converts nothing, so it produces the type of the place it reads,
+    /// and the name it binds has that type where the declarations cannot
+    /// resolve the place. A place of a validated type holds only what this
+    /// judgment let in, so a read of it is a producer of that type.
+    fn judge_store(
+        &mut self,
+        to: Type,
+        place: String,
+        line: usize,
+        rhs: &Rhs,
+        named: Option<Type>,
+    ) {
+        let from = match rhs {
+            Rhs::Read(_) | Rhs::Take(_) => self.rhs_ty(rhs).or(named),
+            _ => self.rhs_ty(rhs),
+        };
         // A producer NAMED after the type is that type's constructor, whatever
         // the core knows about what it answers.
         let ctor = matches!(rhs, Rhs::Call { callee, .. } if last(callee) == spelling(&to));

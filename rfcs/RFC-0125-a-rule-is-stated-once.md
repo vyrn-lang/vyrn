@@ -27437,3 +27437,34 @@ Measured before any code moved. A temporary instrument in `Fn_::core_walkable` a
 | an aggregate result checked where it is returned | 3 | 0 | 3 |
 
 The first clause is never the only one in 7,964 bodies: a layout name the body does not make is always also the statement that reads or binds it, and the two close together or not at all. The audit hooks are 3,249 of the 3,312, one call each in `runtime$free`, `runtime$envGet` and `runtime$auditDeath`, and every operand of the three is a name.
+
+#### The rebuilding builtins are one row, and an element read is a place (2026-09-23, `m7-rebuild`)
+Decision: `@push`, `@reserve`, `@clear`, `@append` and `@copyFrom` are one `Spec::Rebuilds` row whose destination is the receiver's own storage, `bytes` and `stringFromBytes` one `Spec::Builds` row landed through the out-pointer, and a heapless `xs[i]` of a builtin array is the element read section 2.1 names and not a call. Mine, on the counts below.
+The count, from `VYRN_GAP_TALLY` over `examples/`, the branch-point binary and the head back to back in one cache state, 25,018 lines on each side:
+
+| builtin | first gap, before | only gap, before | first gap, after |
+|---|---|---|---|
+| `@at` | 2,488 | 1,497 | 659 |
+| `bytes` | 1,255 | 332 | 0 |
+| `@push` | 1,175 | 615 | 0 |
+| `stringFromBytes` | 240 | 37 | 0 |
+| `@reserve`, `@clear`, `@copyFrom` | 35 | 0 | 0 |
+
+Went: the four arm helpers `clear_arr`, `reserve_arr`, `arr_bulk` with its two wrappers, and `push`, into `Fn_::arr_rebuild`, which `Fn_::rebuild` over the source and `Fn_::core_call` over the rows both call; the `bytes` and `stringFromBytes` arms into `Fn_::bytes_of` and `Fn_::string_from_bytes`, the same way; the store that puts a rebuilt receiver back, which writes nothing on the rows (`Fn_::core_rebuilt`); every statement after a `trap` in its list, from `core::gaps`, `Fn_::core_readable` and `Fn_::core_stmts`, so `Opaque:Trapped` went 709 lines to 0. Stayed: `@at` of a String byte, a map entry, a user projection or an owned element, 659 first gaps, because each is another read; a `SmallArray` receiver, because `sa_push` is not the runtime's rebuild; a rebuild whose operand is a layout, because a `consume` argument that is not a scalar is the call arm's.
+Lines: `direct.rs` 19,120 to 19,285. `core.rs` 7,356 to 7,402. The pair grew 211: two row kinds, seven rows, the screens that pair a rebuild with its store, and the hoist clause; the arm helpers shrank by 35. Refusals: 0 lost / 0 gained. Manifest: 15 rows in the element-read commit and 117 in the rebuild commit, each written there; 0 in the others.
+Licence:
+- `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, branch point against the head: byte-identical stdout, stderr and exit code, 338 accepted and 77 refused.
+- `coredrive --ignored`: 168 programs, 21,556 bodies. Whole 16,563 to 17,530 after the element read, 18,906 after the rebuild, 19,911 after `Builds`, 20,380 after the trap cut; carried end to end 1,044 to 1,377; the callee class 3,296 to 1,049 and the opaque class 649 to 46. Taken from the core 14,798 to 14,874 of 21,512. 1 byte-identical and 167 run the same, 0 run apart, throughout.
+- `VYRN_GAP_TALLY` over `examples/`: whole 18,891 to 23,487 of 25,018 lines.
+- the moved manifest rows, read in `wasm2wat` against the previous commit's binary: the element read computes its index before it walks the header, and the rebuild computes the pushed value before the runtime call where the arm computes it at the element's address. The arm's 24-byte copy of the header onto itself is a `drop` on the rows. Both are named shapes, and `coredrive` runs both modules the same.
+- `residue --ignored`, 279 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed. `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered.
+- `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- the bench rows, base and head interleaved, three rounds, best of three: `push 1000` 1.020 to 0.899 us, x0.88; `array push churn` 1.21 to 1.02 us, x0.84; `array copy` x1.002; `array push16` x0.96; `smallarray push16` x1.00; `revcomp` x1.00. Noise band 1.02 or less on every row but the two push16 rows, which are 14 and 24 ns at the timer's resolution. No row past x1.50.
+- `cargo test -p vyrn-cli` as five groups over `--bins` and its 85 targets: 646 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed. Both formatters clean; the release build has no warning; the manifest check green after each write.
+- re-pinned in each commit that moved them: `emitter_census` the mapping kind 9,181 to 9,489 lines with 748 to 803 rows, one block per builtin name 4,704 to 4,544, `neither` 6,173 to 6,342, `both, for two questions` 8,814 to 8,793 with 192 to 202 rows; RFC-0126's `Type::Array` wasm column 42 to 40 to 41, 1,410 to 1,409 mentions; RFC-0127's `Stmt::While` wasm column 4 to 5, 842 to 843 mentions.
+Findings:
+- the element read took the hoist away. The arm takes a `while`'s headers apart before the loop when it proves on the syntax that nothing moves them (RFC-0125 M1), and the rows walk the header at every read. `growable array element read` ran x1.13 against a band of 1.015, and `fieldstore.rs` pins the hoist. A body with such a `while`, and a statement inside one that names a hoisted binding, stay in the arm (`hoists_a_header`); the row reads x0.997 with the clause.
+- the rows read a rebuilt receiver more simply than the arm. The operand is a name the builder bound before the call, so the value the arm must evaluate after the runtime call, because it may read the old buffer, is already a value on the rows. `push 1000` and the churn row are 12 and 16 per cent faster.
+- `Opaque:Trapped` needed no cut in the builders. It is always after the `trap` in its own list, so the three readers stop there, and nothing in the list after a `trap` runs.
+- the family's rows moved 5,582 whole bodies and 76 taken ones. A body with an array it did not make is still refused by the screen's first clause, which is the layout-read track's.
+Left: `runtime$intStr`, whole in the rows and not taken, blocked by the scrutinee temporary of an aggregate call (`match stringFromBytes(w)`), which `Fn_::core_readable` keeps in the arm, and by a switch the plan releases whole; `@at` of a String byte, blocked by `Fn_::core_addr`'s byte load, which is the layout-read track's; `@at` of a map entry, blocked by an `Option` the row makes without a key place; `@lane` 26 and `@f32x4Load` 20 first gaps, blocked by a constant index the row does not carry and by a vector load it does not state; `render` and `@codeText`, generation-time values.

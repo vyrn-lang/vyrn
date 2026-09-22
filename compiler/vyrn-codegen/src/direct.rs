@@ -4375,6 +4375,175 @@ impl<'p> Fn_<'_, 'p> {
         self.region_bump(b, -1);
     }
 
+    /// `stringFromBytes(b)` (RFC-0014): the bytes checked by `std/text`'s
+    /// `stringFault` and then copied into a fresh NUL-terminated buffer, as
+    /// a `Result<String, String>`. The result is an aggregate, so the slot
+    /// is allocated here and the runtime writes through it — the same
+    /// hidden destination an aggregate-returning Vyrn call gets.
+    ///
+    /// RFC-0125 §3 M6 (the third judgment's fifth slice): the check is the
+    /// call this arm makes first, and its answer travels into
+    /// `strFromBytes` where the DFA table used to go. This backend was
+    /// never a carrier of the two `String` rows — it called the runtime —
+    /// and now the runtime is not one either.
+    ///
+    /// `operand` writes argument `i` at the type asked for.
+    fn string_from_bytes(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let ty = Type::result(Type::Str, Type::Str);
+        let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+            return unsupported("`stringFromBytes` returning a non-aggregate", line);
+        };
+        // Through `expr_as`, so a literal argument is typed by the position
+        // rather than by its first element: `['h', 'i']` is bytes because
+        // this is where bytes are wanted, and an empty one has nothing else
+        // to be typed by at all.
+        let bytes = Type::Array(Box::new(Type::IntN {
+            bits: 8,
+            signed: false,
+        }));
+        operand(self, m, b, 0, &bytes)?;
+        let src = self.scratch(b, ValType::I32, 0);
+        let al = self.layout_of(&bytes, line)?;
+        b.ins(&Instruction::LocalSet(src));
+        let off = b.alloc(l.size, l.align);
+        self.str_from_bytes(b, off, src, &al, line)?;
+        b.slot(off);
+        Ok(ty)
+    }
+
+    /// `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
+    /// A copy, because the array is growable and the string is not: a `push`
+    /// on the result must not write into the string's storage.
+    /// `bytes(s)` and `bytes(s, start, end)` (RFC-0113). One arm: the
+    /// three-argument form differs only in where the copy starts and how
+    /// long it is, and `MemoryCopy` does not care which.
+    ///
+    /// `operand` writes argument `i` at the type asked for; `ranged` is the
+    /// three-argument form.
+    fn bytes_of(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ranged: bool,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let ty = Type::Array(Box::new(Type::IntN {
+            bits: 8,
+            signed: false,
+        }));
+        let l = self.layout_of(&ty, line)?;
+        operand(self, m, b, 0, &Type::Str)?;
+        let s = self.scratch(b, ValType::I32, 0);
+        let n = self.scratch(b, ValType::I32, 1);
+        let buf = self.scratch(b, ValType::I32, 2);
+        let from = self.scratch(b, ValType::I32, 3);
+        let malloc = self.cx.rt.malloc;
+        b.ins(&Instruction::LocalTee(s));
+        if ranged {
+            // `start` and `end` as i32 offsets, bounds checked against
+            // the string's length before either is used. The wording is
+            // `s[i]`'s, so the trap catalogue does not grow.
+            str_len(b);
+            let len = self.scratch(b, ValType::I32, 4);
+            b.ins(&Instruction::LocalSet(len));
+            operand(self, m, b, 1, &Type::Int)?;
+            b.ins(&Instruction::I32WrapI64);
+            b.ins(&Instruction::LocalSet(from));
+            operand(self, m, b, 2, &Type::Int)?;
+            b.ins(&Instruction::I32WrapI64);
+            let to = self.scratch(b, ValType::I32, 5);
+            b.ins(&Instruction::LocalSet(to));
+            // start < 0 || end < start || end > len — one unsigned
+            // compare would miss the ordering, so all three are written.
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::I32Or);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(len));
+            b.ins(&Instruction::I32GtS);
+            b.ins(&Instruction::I32Or);
+            b.ins(&Instruction::If(BlockType::Empty));
+            self.depth += 1;
+            // The offset the other two engines name: the low one when it
+            // is negative or out of order, otherwise the high one.
+            let at = b.local(ValType::I64);
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I64ExtendI32S);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::I64ExtendI32S);
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::I32Or);
+            b.ins(&Instruction::Select);
+            b.ins(&Instruction::LocalSet(at));
+            self.trap_row(b, vyrn_frontend::trap::Rule::StringIndex, Some(at));
+            self.depth -= 1;
+            b.ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32Sub);
+        } else {
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::LocalSet(from));
+            str_len(b);
+        }
+        b.ins(&Instruction::LocalTee(n));
+        // A zero-length string still gets a buffer, so the triple's pointer
+        // is never null — `push` reallocs from it either way.
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::Call(malloc));
+        b.ins(&Instruction::LocalTee(buf));
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::LocalGet(from));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word_at(l.fields[0])));
+        for f in [l.fields[1], l.fields[2]] {
+            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(n));
+            b.ins(&Instruction::I64ExtendI32U);
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(ty)
+    }
+
     /// Call `std/runtime`'s `strFromBytes` for the bytes at `src` — a local
     /// holding an `Array<UInt8>` header — writing the `Result<String, String>`
     /// it answers into the frame slot at `dest`.
@@ -8100,142 +8269,17 @@ impl<'p> Fn_<'_, 'p> {
                     None => unsupported("the built-in `Value` enum", line),
                 };
             }
-            // `stringFromBytes(b)` (RFC-0014): the bytes checked by `std/text`'s
-            // `stringFault` and then copied into a fresh NUL-terminated buffer, as
-            // a `Result<String, String>`. The result is an aggregate, so the slot
-            // is allocated here and the runtime writes through it — the same
-            // hidden destination an aggregate-returning Vyrn call gets.
-            //
-            // RFC-0125 §3 M6 (the third judgment's fifth slice): the check is the
-            // call this arm makes first, and its answer travels into
-            // `strFromBytes` where the DFA table used to go. This backend was
-            // never a carrier of the two `String` rows — it called the runtime —
-            // and now the runtime is not one either.
-            "stringFromBytes" if args.len() == 1 => {
-                let ty = Type::result(Type::Str, Type::Str);
-                let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
-                    return unsupported("`stringFromBytes` returning a non-aggregate", line);
+            "stringFromBytes" | "bytes"
+                if args.len() == 1 || (name == "bytes" && args.len() == 3) =>
+            {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.expr_as(m, b, &args[i], t).map(|_| ())
+                    };
+                return match name {
+                    "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    _ => self.string_from_bytes(m, b, &mut operand, line),
                 };
-                // Through `expr_as`, so a literal argument is typed by the position
-                // rather than by its first element: `['h', 'i']` is bytes because
-                // this is where bytes are wanted, and an empty one has nothing else
-                // to be typed by at all.
-                let bytes = Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }));
-                self.expr_as(m, b, &args[0], &bytes)?;
-                let src = self.scratch(b, ValType::I32, 0);
-                let al = self.layout_of(&bytes, line)?;
-                b.ins(&Instruction::LocalSet(src));
-                let off = b.alloc(l.size, l.align);
-                self.str_from_bytes(b, off, src, &al, line)?;
-                b.slot(off);
-                return Ok(ty);
-            }
-            // `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
-            // A copy, because the array is growable and the string is not: a `push`
-            // on the result must not write into the string's storage.
-            // `bytes(s)` and `bytes(s, start, end)` (RFC-0113). One arm: the
-            // three-argument form differs only in where the copy starts and how
-            // long it is, and `MemoryCopy` does not care which.
-            "bytes" if args.len() == 1 || args.len() == 3 => {
-                let ty = Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }));
-                let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let s = self.scratch(b, ValType::I32, 0);
-                let n = self.scratch(b, ValType::I32, 1);
-                let buf = self.scratch(b, ValType::I32, 2);
-                let from = self.scratch(b, ValType::I32, 3);
-                let malloc = self.cx.rt.malloc;
-                b.ins(&Instruction::LocalTee(s));
-                if args.len() == 3 {
-                    // `start` and `end` as i32 offsets, bounds checked against
-                    // the string's length before either is used. The wording is
-                    // `s[i]`'s, so the trap catalogue does not grow.
-                    str_len(b);
-                    let len = self.scratch(b, ValType::I32, 4);
-                    b.ins(&Instruction::LocalSet(len));
-                    self.expr_as(m, b, &args[1], &Type::Int)?;
-                    b.ins(&Instruction::I32WrapI64);
-                    b.ins(&Instruction::LocalSet(from));
-                    self.expr_as(m, b, &args[2], &Type::Int)?;
-                    b.ins(&Instruction::I32WrapI64);
-                    let to = self.scratch(b, ValType::I32, 5);
-                    b.ins(&Instruction::LocalSet(to));
-                    // start < 0 || end < start || end > len — one unsigned
-                    // compare would miss the ordering, so all three are written.
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32Const(0));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::I32Or);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(len));
-                    b.ins(&Instruction::I32GtS);
-                    b.ins(&Instruction::I32Or);
-                    b.ins(&Instruction::If(BlockType::Empty));
-                    self.depth += 1;
-                    // The offset the other two engines name: the low one when it
-                    // is negative or out of order, otherwise the high one.
-                    let at = b.local(ValType::I64);
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I64ExtendI32S);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::I64ExtendI32S);
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32Const(0));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::I32Or);
-                    b.ins(&Instruction::Select);
-                    b.ins(&Instruction::LocalSet(at));
-                    self.trap_row(b, vyrn_frontend::trap::Rule::StringIndex, Some(at));
-                    self.depth -= 1;
-                    b.ins(&Instruction::End);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32Sub);
-                } else {
-                    b.ins(&Instruction::I32Const(0));
-                    b.ins(&Instruction::LocalSet(from));
-                    str_len(b);
-                }
-                b.ins(&Instruction::LocalTee(n));
-                // A zero-length string still gets a buffer, so the triple's pointer
-                // is never null — `push` reallocs from it either way.
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::I32Add);
-                b.ins(&Instruction::I64ExtendI32U);
-                b.ins(&Instruction::Call(malloc));
-                b.ins(&Instruction::LocalTee(buf));
-                b.ins(&Instruction::LocalGet(s));
-                b.ins(&Instruction::LocalGet(from));
-                b.ins(&Instruction::I32Add);
-                b.ins(&Instruction::LocalGet(n));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::LocalGet(buf));
-                b.ins(&Instruction::I32Store(word_at(l.fields[0])));
-                for f in [l.fields[1], l.fields[2]] {
-                    b.slot(off + f);
-                    b.ins(&Instruction::LocalGet(n));
-                    b.ins(&Instruction::I64ExtendI32U);
-                    b.ins(&Instruction::I64Store(word8()));
-                }
-                b.slot(off);
-                return Ok(ty);
             }
             // (`slice` was here, three `expr_as` and a call into `rt.slice`. The
             // arm was cheap; the RUNTIME FUNCTION behind it was a third copy of the
@@ -8690,11 +8734,10 @@ impl<'p> Fn_<'_, 'p> {
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
             }
-            "@push" if args.len() == 2 => return self.push(m, b, args, line),
-            "@reserve" if args.len() == 2 => return self.reserve_arr(m, b, args, line),
-            "@clear" if args.len() == 1 => return self.clear_arr(m, b, args, line),
-            "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
-            "@copyFrom" if args.len() == 2 => return self.copy_from_arr(m, b, args, line),
+            "@push" | "@reserve" | "@append" | "@copyFrom" if args.len() == 2 => {
+                return self.rebuild(m, b, name, args, line)
+            }
+            "@clear" if args.len() == 1 => return self.rebuild(m, b, name, args, line),
             "@tally" if args.len() == 3 => return self.map_tally(m, b, args, line),
             "@tallyBytes" if args.len() == 3 => return self.map_tally_bytes(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
@@ -11792,162 +11835,128 @@ impl<'p> Fn_<'_, 'p> {
         Ok((*elem, l, stride, src))
     }
 
-    /// `xs.clear()` (RFC-0115 addendum): `std/runtime`'s `arrClear`.
-    fn clear_arr(
+    /// `xs.push(v)`, `xs.reserve(n)`, `xs.clear()`, `xs.append(ys)` and
+    /// `dst.copyFrom(src)` over the source: the receiver's address, then
+    /// [`Fn_::arr_rebuild`]. A `SmallArray` receiver takes the four-field path.
+    fn rebuild(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        name: &str,
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        let (_, _, _, src) = self.arr_recv(b, &aty, "clear", line)?;
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::Call(self.cx.rt.arr_clear));
-        b.ins(&Instruction::LocalGet(src));
-        Ok(aty)
-    }
-
-    /// `xs.reserve(n)` (RFC-0115): `std/runtime`'s `arrReserve`. The count is
-    /// evaluated into a local first, so no operand of the call is on the stack
-    /// while a user expression runs.
-    fn reserve_arr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        let (elem, _, stride, src) = self.arr_recv(b, &aty, "reserve", line)?;
-        let n = b.local(ValType::I64);
-        self.expr_as(m, b, &args[1], &Type::Int)?;
-        b.ins(&Instruction::LocalSet(n));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::LocalGet(n));
-        b.ins(&Instruction::Call(self.cx.rt.arr_reserve));
-        b.ins(&Instruction::LocalGet(src));
-        Ok(Type::Array(Box::new(elem)))
-    }
-
-    /// `xs.append(ys)` and `dst.copyFrom(src)` (RFC-0115): `std/runtime`'s
-    /// `arrAppend` and `arrCopyFrom`. The checker held the element type to
-    /// heapless ones, so the runtime moves bytes and is handed no type.
-    fn append_arr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        self.arr_bulk(m, b, args, "append", line)
-    }
-
-    fn copy_from_arr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        self.arr_bulk(m, b, args, "copyFrom", line)
-    }
-
-    fn arr_bulk(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        verb: &str,
-        line: usize,
-    ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        let (elem, _, stride, src) = self.arr_recv(b, &aty, verb, line)?;
-        let xs = b.local(ValType::I32);
-        self.expr_as(m, b, &args[1], &aty)?;
-        b.ins(&Instruction::LocalSet(xs));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::LocalGet(xs));
-        b.ins(&Instruction::Call(if verb == "append" {
-            self.cx.rt.arr_append
-        } else {
-            self.cx.rt.arr_copy_from
-        }));
-        b.ins(&Instruction::LocalGet(src));
-        Ok(Type::Array(Box::new(elem)))
-    }
-
-    /// `xs.push(v)`: `std/runtime`'s `arrPush` grows and writes the new triple
-    /// with `len + 1`; the element is stored here, because the runtime knows
-    /// the stride and not the type.
-    ///
-    /// The old buffer comes back from the call and is released only after the
-    /// element is stored, and that is not tidiness. The value expression is
-    /// evaluated BELOW, and it may read the array being pushed onto —
-    /// `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in `std/hash` does, through the
-    /// caller's header, which still names the OLD buffer. Freeing at the
-    /// growth made that a read of a block already on a free list, and SHA-1
-    /// came out wrong from the seventeenth word.
-    fn push(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        if let Type::SmallArray(inner, n) = self.cx.resolve(&aty) {
+        if let (Type::SmallArray(inner, n), "@push") = (self.cx.resolve(&aty), name) {
             let ty = self.cx.resolve(&aty);
             return self.sa_push(m, b, &ty, &inner, n, &args[1], line);
         }
-        let (elem, l, stride, src) = self.arr_recv(b, &aty, "push", line)?;
-        let stale = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::Call(self.cx.rt.arr_push));
-        b.ins(&Instruction::LocalSet(stale));
-        // The element goes at the old length, which the new triple holds plus one.
-        let (data, last) = (b.local(ValType::I32), b.local(ValType::I64));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Sub);
-        b.ins(&Instruction::LocalSet(last));
-        let w = Walk {
-            data,
-            len: last,
-            stride: stride as u32,
-            elem: elem.clone(),
-            byte: false,
+        let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match args {
+            [_, a] => s.expr_as(m, b, a, t).map(|_| ()),
+            _ => unsupported(&format!("`{name}` with no operand"), line),
         };
-        self.elem_addr(b, &w, last);
-        let r = self.cx.repr(&elem, line)?;
-        self.expr_as(m, b, &args[1], &elem)?;
-        match &r {
-            Repr::Scalar(_) => {
-                b.ins(&store_of(&self.cx.ll(&elem)));
+        self.arr_rebuild(m, b, name, &aty, &mut operand, line)
+    }
+
+    /// One array operation `std/runtime` rebuilds the receiver with, the
+    /// receiver's address on the stack (RFC-0115, PLAN-0125-runtime section 6 step
+    /// 6). Leaves the same address, which is the result: the runtime wrote the
+    /// new triple into the receiver ([`Fn_::arr_recv`]). `operand` writes the
+    /// second argument at the type asked for; `clear` has none.
+    ///
+    /// `reserve`, `append` and `copyFrom` take their operand into a local
+    /// before the call, so no operand of the call is on the stack while a user
+    /// expression runs, and the runtime moves bytes and is handed no type,
+    /// because the checker held the element type to heapless ones.
+    ///
+    /// `push`: `arrPush` grows and writes the new triple with `len + 1`; the
+    /// element is stored here, because the runtime knows the stride and not
+    /// the type. The old buffer comes back from the call and is released only
+    /// after the element is stored, and that is not tidiness. Over the source
+    /// the value expression is evaluated BELOW, and it may read the array
+    /// being pushed onto — `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in
+    /// `std/hash` does, through the caller's header, which still names the
+    /// OLD buffer. Freeing at the growth made that a read of a block already
+    /// on a free list, and SHA-1 came out wrong from the seventeenth word.
+    fn arr_rebuild(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        aty: &Type,
+        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let verb = name.trim_start_matches('@');
+        let (elem, l, stride, src) = self.arr_recv(b, aty, verb, line)?;
+        let rt = &self.cx.rt;
+        let (call, arg) = match verb {
+            "clear" => (rt.arr_clear, None),
+            "reserve" => (rt.arr_reserve, Some((ValType::I64, Type::Int))),
+            "append" => (rt.arr_append, Some((ValType::I32, aty.clone()))),
+            "copyFrom" => (rt.arr_copy_from, Some((ValType::I32, aty.clone()))),
+            "push" => (rt.arr_push, None),
+            _ => return unsupported(&format!("`{name}` rebuilds no array"), line),
+        };
+        let arg = match arg {
+            Some((vt, t)) => {
+                let x = b.local(vt);
+                operand(self, m, b, &t)?;
+                b.ins(&Instruction::LocalSet(x));
+                Some(x)
             }
-            Repr::Agg(_) => {
-                b.ins(&Instruction::I32Const(stride));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
-            Repr::Unit => return unsupported("an array of Unit", line),
+            None => None,
+        };
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::LocalGet(src));
+        if verb != "clear" {
+            b.ins(&Instruction::I32Const(stride));
         }
-        // Now nothing can read the old buffer through the caller's header.
-        b.ins(&Instruction::LocalGet(stale));
-        b.ins(&Instruction::Call(self.cx.rt.free));
+        if let Some(x) = arg {
+            b.ins(&Instruction::LocalGet(x));
+        }
+        b.ins(&Instruction::Call(call));
+        if verb == "push" {
+            let stale = b.local(ValType::I32);
+            b.ins(&Instruction::LocalSet(stale));
+            // The element goes at the old length, which the new triple holds
+            // plus one.
+            let (data, last) = (b.local(ValType::I32), b.local(ValType::I64));
+            b.ins(&Instruction::LocalGet(src));
+            b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+            b.ins(&Instruction::LocalSet(data));
+            b.ins(&Instruction::LocalGet(src));
+            b.ins(&Instruction::I64Load(at(l.fields[1])));
+            b.ins(&Instruction::I64Const(1));
+            b.ins(&Instruction::I64Sub);
+            b.ins(&Instruction::LocalSet(last));
+            let w = Walk {
+                data,
+                len: last,
+                stride: stride as u32,
+                elem: elem.clone(),
+                byte: false,
+            };
+            self.elem_addr(b, &w, last);
+            let r = self.cx.repr(&elem, line)?;
+            operand(self, m, b, &elem)?;
+            match &r {
+                Repr::Scalar(_) => {
+                    b.ins(&store_of(&self.cx.ll(&elem)));
+                }
+                Repr::Agg(_) => {
+                    b.ins(&Instruction::I32Const(stride));
+                    b.ins(&Instruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                }
+                Repr::Unit => return unsupported("an array of Unit", line),
+            }
+            // Now nothing can read the old buffer through the caller's header.
+            b.ins(&Instruction::LocalGet(stale));
+            b.ins(&Instruction::Call(self.cx.rt.free));
+        }
         b.ins(&Instruction::LocalGet(src));
         Ok(Type::Array(Box::new(elem)))
     }
@@ -15505,6 +15514,23 @@ impl HoistVisit<'_> for Hoist<'_, '_> {
     }
 }
 
+/// Whether a `while` of `blk` indexes a binding [`Fn_::hoist_walks`] may take
+/// apart before the loop. The rows state no hoist (RFC-0125 M1's read half),
+/// and without it `growable array element read` ran x1.13, so such a body
+/// stays in the arm. Asked on the syntax alone, so it may refuse a binding
+/// the hoist would pass over for its type or its place.
+fn hoists_a_header(blk: &Block) -> bool {
+    let mut found = false;
+    each_block(blk, &mut |_| {}, &mut |s| found |= while_hoists(s));
+    found
+}
+
+fn while_hoists(s: &Stmt) -> bool {
+    matches!(s, Stmt::While { cond, body, .. } if indexed_names(cond, body)
+        .iter()
+        .any(|n| header_invariant(cond, body, n)))
+}
+
 /// Every expression under `e`, pre-order, `e` itself first, and every
 /// statement under it through `fs` — `ast::body_scope_descent!`'s descent
 /// since RFC-0125 §3 M6, where this file wrote the arms out itself.
@@ -16909,6 +16935,24 @@ impl<'p> Fn_<'_, 'p> {
         if !self.cursors.is_empty() && run.iter().any(core_returns) {
             return None;
         }
+        // A header the arm hoists before a `while` ([`hoists_a_header`]): the
+        // `while` itself, and a statement inside it that names a binding the
+        // hoist holds in locals, which the rows would walk again.
+        if while_hoists(s) {
+            return None;
+        }
+        if !self.walks.is_empty() {
+            let mut names = Vec::new();
+            for st in run {
+                vyrn_lower::core::names_in(st, &mut names);
+            }
+            if names.iter().any(|n| {
+                self.walks
+                    .contains_key(body.names[*n as usize].source.as_str())
+            }) {
+                return None;
+            }
+        }
         // An aggregate result travels through `dest`, which the run's own
         // `return` writes ([`Fn_::core_lands`]); one under a branch of the run
         // is the arm's.
@@ -17043,6 +17087,10 @@ impl<'p> Fn_<'_, 'p> {
                 made.push(*n);
             }
         }
+        let rebuilt: Vec<_> = (0..run.len())
+            .filter_map(|i| self.core_rebuilt(body, run, i))
+            .flat_map(|(x, t)| [x, t])
+            .collect();
         // A made layout is the STATEMENT's own binding and nothing deeper: this
         // walk reads the annotation off the statement it was handed, and a row
         // under an `if` of the run has a `Stmt::Let` of its own with an
@@ -17056,7 +17104,7 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         }
         for (n, rhs) in &lets {
-            if Some(*n) == annotated || made.contains(n) {
+            if Some(*n) == annotated || made.contains(n) || rebuilt.contains(n) {
                 continue;
             }
             let info = &body.names[*n as usize];
@@ -17091,6 +17139,7 @@ impl<'p> Fn_<'_, 'p> {
             if !core_scalar(&info.ty)
                 && !made.contains(n)
                 && !switched.contains(n)
+                && !rebuilt.contains(n)
                 && returned != Some(*n)
             {
                 return None;
@@ -17113,7 +17162,7 @@ impl<'p> Fn_<'_, 'p> {
             // row and at `Int64` from the frame, for the same source. The
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
-            if !(core_scalar(&ty) || returned == Some(*n))
+            if !(core_scalar(&ty) || returned == Some(*n) || rebuilt.contains(n))
                 || self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty)
             {
                 return None;
@@ -17154,6 +17203,25 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         for (i, s) in ss.iter().enumerate() {
             match s {
+                // A receiver rebuilt in place: the result is the receiver's
+                // own storage, so the name takes the receiver's place.
+                St::Let(
+                    n,
+                    rhs @ Rhs::Call {
+                        callee, kind, args, ..
+                    },
+                ) if self.core_rebuild(body, rhs) => {
+                    let line = body.names[*n as usize].line;
+                    self.core_call(m, b, body, w, callee, *kind, args, None, line)?;
+                    b.ins(&Instruction::Drop);
+                    let Some((Val::Name(x), _)) = args.first() else {
+                        return unsupported("a rebuild of no named receiver", line);
+                    };
+                    w.at[*n as usize] = self.core_place(w, body, *x);
+                }
+                // The store that puts the rebuilt receiver back, which the
+                // rebuild already wrote.
+                St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => {}
                 // A LAYOUT MADE, built into the binding's own slot — RFC-0125
                 // M7. It is a `let` arm of its own because the slot has to
                 // exist before the parts are written: the arm below evaluates
@@ -17467,8 +17535,12 @@ impl<'p> Fn_<'_, 'p> {
                     ..
                 } => self.core_switch(m, b, body, w, on, arms, *owns, *line)?,
                 St::Drop(n, _, line) => self.core_drop(m, b, body, w, *n, *line)?,
+                // Nothing after it in this list runs, so nothing after it is
+                // written: the value a `panic` in value position leaves is
+                // read only there.
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
+                    break;
                 }
                 // An expression for its effect. What it leaves on the stack
                 // is dropped, or the enclosing block's type will not check —
@@ -17633,6 +17705,37 @@ impl<'p> Fn_<'_, 'p> {
                     s.core_val(m, b, body, w, v, &Type::Str, line)
                 })?;
                 return Ok(Type::Never);
+            }
+            // `xs.push(v)` and its siblings: the receiver's address, which the
+            // runtime rebuilds in place, and the operand the row names.
+            Some(Spec::Rebuilds) => {
+                let [(Val::Name(x), _), rest @ ..] = args else {
+                    return unsupported("a rebuild of no named receiver", line);
+                };
+                let aty = body.names[*x as usize].ty.clone();
+                self.core_addr_of(b, w, body, *x, line)?;
+                let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match rest
+                {
+                    [(v, _)] => s.core_val(m, b, body, w, v, t, line),
+                    _ => unsupported(&format!("`{callee}` with no operand"), line),
+                };
+                return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
+            }
+            // `bytes` and `stringFromBytes`: built in a slot of the call's
+            // own, which [`agg_landed`] copies into the destination.
+            Some(Spec::Builds(_)) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
+                        .get(i)
+                    {
+                        Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
+                        None => unsupported(&format!("`{callee}` with too few operands"), line),
+                    };
+                return match callee {
+                    "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    "stringFromBytes" => self.string_from_bytes(m, b, &mut operand, line),
+                    _ => unsupported(&format!("`{callee}` builds nothing this walk emits"), line),
+                };
             }
             None => {}
         }
@@ -18336,7 +18439,9 @@ impl<'p> Fn_<'_, 'p> {
                         .all(|(a, t)| *a != at || *t == self.cx.resolve(&info.ty))
                 }) && lets.iter().any(|(b, rhs)| {
                     *b as usize == n
-                        && (self.core_makes(body, &info.ty, rhs) || self.core_agg_call(body, rhs))
+                        && (self.core_makes(body, &info.ty, rhs)
+                            || self.core_agg_call(body, rhs)
+                            || self.core_rebuild(body, rhs))
                 }))
             {
                 return false;
@@ -18348,7 +18453,7 @@ impl<'p> Fn_<'_, 'p> {
         // annotation asks for goes unrefused. The AST arm validates at the
         // `let` and at every later store into the binding, and the row states
         // neither. [`Fn_::core_run`] asks the same question per statement.
-        if stmts.is_some_and(|blk| self.annotates_a_check(blk)) {
+        if stmts.is_some_and(|blk| self.annotates_a_check(blk) || hoists_a_header(blk)) {
             return false;
         }
         let reads = body.reads();
@@ -18377,7 +18482,12 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
     fn core_readable(&self, body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
-        ss.iter().enumerate().all(|(i, s)| match s {
+        // [`Fn_::core_stmts`] writes nothing after a `trap` in its list.
+        let live = ss
+            .iter()
+            .position(|s| matches!(s, St::Trap))
+            .unwrap_or(ss.len());
+        ss[..live].iter().enumerate().all(|(i, s)| match s {
             // A made layout is built into the binding's own slot, so the name
             // is one this walk BINDS and the reader screen above never sees
             // (RFC-0125 M7). A temporary holds one only where the `return`
@@ -18400,7 +18510,11 @@ impl<'p> Fn_<'_, 'p> {
                 (info.binding.is_some() && !info.source.starts_with('@'))
                     || self.core_lands(body, ss, i, reads)
             }
+            St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
+                self.core_rebuilt(body, ss, i + 1).is_some()
+            }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
+            St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
             // A store into a field or into module state owns no heap when its
             // type is a scalar, so the displaced value needs no release.
             St::Store { place, value, .. } => {
@@ -18524,9 +18638,10 @@ impl<'p> Fn_<'_, 'p> {
                 callee, args, kind, ..
             } => {
                 self.core_args_readable(body, args)
-                    && self
-                        .core_sig(callee, *kind)
-                        .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some())
+                    && (matches!(core_builtin(callee, *kind), Some(Spec::Builds(_)))
+                        || self
+                            .core_sig(callee, *kind)
+                            .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                 self.core_val_readable(body, k)
@@ -18535,6 +18650,47 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => false,
         }
+    }
+
+    /// Whether a row rebuilds a named `Array` receiver in place
+    /// ([`Spec::Rebuilds`]), with an operand this walk writes.
+    fn core_rebuild(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
+        let Rhs::Call {
+            callee, kind, args, ..
+        } = rhs
+        else {
+            return false;
+        };
+        matches!(core_builtin(callee, *kind), Some(Spec::Rebuilds))
+            && matches!(args.split_first(), Some(((Val::Name(x), _), rest))
+                if matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_))
+                    && self.core_args_readable(body, rest))
+    }
+
+    /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
+    /// is the store that puts the result back into that receiver: one
+    /// address, which [`Fn_::arr_rebuild`] has already written.
+    fn core_rebuilt(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        i: usize,
+    ) -> Option<(vyrn_lower::core::Name, vyrn_lower::core::Name)> {
+        let (
+            St::Let(t, rhs @ Rhs::Call { args, .. }),
+            St::Store {
+                place: vyrn_lower::core::Place::Name(x),
+                value: Val::Name(v),
+                ..
+            },
+        ) = (ss.get(i.checked_sub(1)?)?, ss.get(i)?)
+        else {
+            return None;
+        };
+        (t == v
+            && matches!(args.first(), Some((Val::Name(r), _)) if r == x)
+            && self.core_rebuild(body, rhs))
+        .then_some((*x, *t))
     }
 
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands
@@ -18573,7 +18729,13 @@ impl<'p> Fn_<'_, 'p> {
         s: Option<&St>,
     ) -> Option<vyrn_lower::core::Name> {
         match s? {
-            St::Let(_, rhs) if self.core_ctor(rhs) || self.core_agg_call(body, rhs) => None,
+            St::Let(_, rhs)
+                if self.core_ctor(rhs)
+                    || self.core_agg_call(body, rhs)
+                    || self.core_rebuild(body, rhs) =>
+            {
+                None
+            }
             St::Store { place, .. } if !matches!(place, vyrn_lower::core::Place::Name(_)) => None,
             s => first_read(s),
         }
@@ -18609,7 +18771,10 @@ impl<'p> Fn_<'_, 'p> {
                 _ => false,
             },
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
-            None => false,
+            // A rebuild is read together with the store after it
+            // ([`Fn_::core_rebuilt`]), and a built aggregate as an aggregate
+            // call ([`Fn_::core_agg_call`]); neither alone.
+            Some(Spec::Rebuilds | Spec::Builds(_)) | None => false,
         }
     }
 

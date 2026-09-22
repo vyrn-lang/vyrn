@@ -137,6 +137,83 @@ fn step_ty(
     }
 }
 
+/// Every body of `program` the core builds, the module-state initializer
+/// included. The caller holds the projection memo open.
+fn bodies_of(program: &Program) -> Vec<vyrn_lower::core::Body> {
+    let lowered = vyrn_lower::lower(program);
+    let own = vyrn_frontend::own::analyze(program);
+    let mut bodies = Vec::new();
+    for inst in &lowered.instances {
+        if let Ok(b) = vyrn_lower::core::build(program, inst, &own) {
+            bodies.push(b);
+        }
+    }
+    // The module-state initializer is a body and no function.
+    if !program.globals.is_empty() {
+        if let Ok(b) = vyrn_lower::core::build_module_state(program, &own, &lowered.globals) {
+            bodies.push(b);
+        }
+    }
+    bodies
+}
+
+/// The judgment over `refs`, with `program`'s declarations answering which
+/// types are validated and what each place step holds. What a call answers is
+/// the core's (`Rhs::Call::ret`), so this file keeps no table of return types.
+fn judge(program: &Program, refs: &[&vyrn_lower::core::Body]) -> typed::Judged {
+    let types = decls(program);
+    let globals: BTreeMap<String, Type> = program
+        .globals
+        .iter()
+        .filter_map(|g| g.ty.clone().map(|t| (g.name.clone(), t)))
+        .collect();
+    let map = types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    typed::judge(refs, &mut |to| validated(to, &map), &mut |base, s| {
+        step_ty(base, s, &types, &globals)
+    })
+}
+
+/// A read of a place of a validated type produces that type, even where the
+/// declarations type no step to the place (an unannotated global), and a
+/// literal into the type is still a literal.
+#[test]
+fn a_read_of_a_validated_place_produces_its_type() {
+    vyrn_lower::install();
+    let dir = std::env::temp_dir().join("vyrn-typed-read");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("read.vyrn");
+    std::fs::write(
+        &path,
+        "type Age = Int64 where value >= 18\n\
+         type Roster = { ages: Array<Age> }\n\
+         let mut shared = Roster { ages: [] }\n\
+         fn main() -> Int64 {\n\
+         shared.ages.push(Age(41))\n\
+         let mut a = Age(20)\n\
+         a = 30\n\
+         print(shared.ages[0])\n\
+         print(a)\n\
+         return 0\n\
+         }\n",
+    )
+    .unwrap();
+    let program = load(&path, None).unwrap();
+    let _memo = vyrn_frontend::project::Memo::open();
+    let bodies = bodies_of(&program);
+    let refs: Vec<&vyrn_lower::core::Body> = bodies.iter().flat_map(|b| b.frames()).collect();
+    let judged = judge(&program, &refs);
+    let kind_of = |producer: &str| {
+        judged
+            .stores
+            .iter()
+            .filter(|s| refs[s.body].name == "main" && s.producer == producer)
+            .map(|s| s.how.kind())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(kind_of("shared.ages[]"), ["by-name"]);
+    assert_eq!(kind_of("@lit"), ["by-literal"]);
+}
+
 #[test]
 #[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test typed -- --ignored"]
 fn the_typed_judgment_over_the_corpus() {
@@ -181,35 +258,10 @@ fn run_corpus() {
         };
         programs += 1;
         let file = path.file_name().unwrap().to_string_lossy().to_string();
-        let types = decls(&program);
-        let globals: BTreeMap<String, Type> = program
-            .globals
-            .iter()
-            .filter_map(|g| g.ty.clone().map(|t| (g.name.clone(), t)))
-            .collect();
         let _memo = vyrn_frontend::project::Memo::open();
-        let lowered = vyrn_lower::lower(&program);
-        let own = vyrn_frontend::own::analyze(&program);
-        let mut bodies = Vec::new();
-        for inst in &lowered.instances {
-            if let Ok(b) = vyrn_lower::core::build(&program, inst, &own) {
-                bodies.push(b);
-            }
-        }
-        if program.globals.is_empty() {
-            // (The module-state initializer is a body and no function; it is
-            // built below only where there are globals to initialize.)
-        } else if let Ok(b) = vyrn_lower::core::build_module_state(&program, &own, &lowered.globals)
-        {
-            bodies.push(b);
-        }
+        let bodies = bodies_of(&program);
         let refs: Vec<&vyrn_lower::core::Body> = bodies.iter().flat_map(|b| b.frames()).collect();
-        let map = types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        // What a call answers is the core's now (`Rhs::Call::ret`), so this
-        // file no longer keeps a table of return types beside the checker's.
-        let judgement = typed::judge(&refs, &mut |to| validated(to, &map), &mut |base, s| {
-            step_ty(base, s, &types, &globals)
-        });
+        let judgement = judge(&program, &refs);
         unjudged += judgement.unjudged;
         judged += judgement.stores.len();
         for s in &judgement.stores {
