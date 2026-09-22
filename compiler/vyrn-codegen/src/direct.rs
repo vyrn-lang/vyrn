@@ -18316,12 +18316,11 @@ impl<'p> Fn_<'_, 'p> {
         if kind != Callee::Fn || self.audit_dropped(callee) {
             return None;
         }
-        let sig = self.cx.sigs.get(callee)?;
         // A `modify` parameter crosses as the address of the caller's binding,
-        // which is a placement this walk does not make. An aggregate result
-        // crosses through the out-pointer, which [`Fn_::out_ptr`] states for
-        // both walks.
-        (!sig.modify.iter().any(|m| *m)).then(|| sig.clone())
+        // which [`Fn_::core_args_readable`] admits for a layout alone. An
+        // aggregate result crosses through the out-pointer, which
+        // [`Fn_::out_ptr`] states for both walks.
+        self.cx.sigs.get(callee).cloned()
     }
 
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
@@ -18741,21 +18740,32 @@ impl<'p> Fn_<'_, 'p> {
     /// A value that owns heap crosses as its pointer, and who owns it after
     /// the call is the call arm's decision: this walk writes the pointer and
     /// nothing else, which is what a `read` argument is. A layout crosses as
-    /// its address the same way ([`Fn_::core_val`]).
+    /// its address the same way ([`Fn_::core_val`]), whatever the capability:
+    /// every layout this walk names lives in a slot, and a `modify` callee
+    /// copies its result back into it. A scalar `modify` argument lives in a
+    /// local with no address, and the arm spills and reloads it, which the
+    /// row does not state; nor may a name that holds another place's address
+    /// ([`Fn_::core_alias`]) be written through.
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
         args: &[(Val, vyrn_frontend::ast::Capability)],
     ) -> bool {
-        args.iter().all(|(v, c)| match c {
-            vyrn_frontend::ast::Capability::Read => {
-                self.core_val_readable(body, v)
-                    || matches!(v, Val::Name(n) if {
-                        let t = &body.names[*n as usize].ty;
-                        matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
-                    })
+        use vyrn_frontend::ast::Capability as Cap;
+        args.iter().all(|(v, c)| {
+            let layout = matches!(v, Val::Name(n) if {
+                let t = &body.names[*n as usize].ty;
+                matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
+            });
+            match c {
+                Cap::Read => self.core_val_readable(body, v) || layout,
+                Cap::Consume => {
+                    (self.core_val_readable(body, v) && core_operand(body, v)) || layout
+                }
+                Cap::Modify => {
+                    layout && !matches!(v, Val::Name(n) if self.core_alias(body, *n).is_some())
+                }
             }
-            _ => self.core_val_readable(body, v) && core_operand(body, v),
         })
     }
 
