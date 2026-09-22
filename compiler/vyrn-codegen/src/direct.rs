@@ -7049,11 +7049,7 @@ impl<'p> Fn_<'_, 'p> {
             // An allocated left operand is this operator's to free (round
             // thirty), through the same tee the comparisons use.
             let k = self.tee_str_temp(b, lhs);
-            let (table, accept, start) = self.regex_dfa(m, pat, line)?;
-            b.ins(&Instruction::I32Const(table as i32));
-            b.ins(&Instruction::I32Const(start as i32));
-            b.ins(&Instruction::I32Const(accept as i32));
-            b.ins(&Instruction::Call(self.cx.rt.regex_run));
+            self.str_match(m, b, pat, line)?;
             let flag = b.local(ValType::I32);
             b.ins(&Instruction::LocalSet(flag));
             self.free_str_temp(b, k);
@@ -7088,22 +7084,11 @@ impl<'p> Fn_<'_, 'p> {
             if self.cx.resolve(&r) != Type::Str {
                 return unsupported("a string operator with a non-string operand", line);
             }
-            if op == BinOp::Add {
-                let kr = self.tee_str_temp(b, rhs);
-                self.arena_route(b, true);
-                b.ins(&Instruction::Call(self.cx.rt.concat));
-                self.arena_route(b, false);
-                self.free_str_temp(b, kl);
-                self.free_str_temp(b, kr);
-                return Ok(Type::Str);
-            }
             let kr = self.tee_str_temp(b, rhs);
-            b.ins(&Instruction::Call(self.cx.rt.strcmp));
-            b.ins(&Instruction::I32Const(0));
-            b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on strings"), line))?);
+            let t = self.str_bin(b, op, line)?;
             self.free_str_temp(b, kl);
             self.free_str_temp(b, kr);
-            return Ok(Type::Bool);
+            return Ok(t);
         }
         // `Code + Code` concatenates fragments with their origins carried
         // (RFC-0054). Both sides are handles, so the concatenation happens in the
@@ -7140,6 +7125,40 @@ impl<'p> Fn_<'_, 'p> {
         // why the LLVM emitter returns its `numty` rather than `lty`.
         self.expr_as(m, b, rhs, &opty)?;
         self.bin_ins(b, op, &opty, &l, line)
+    }
+
+    /// A String operator, both operands on the stack: `+` concatenates into
+    /// the arena a `region` routes to, and a comparison is the sign of a byte
+    /// compare. [`Fn_::binary_inner`] and [`Fn_::core_prim`] read it; each
+    /// frees its operand temporaries its own way.
+    fn str_bin(&mut self, b: &mut Frame, op: BinOp, line: usize) -> Result<Type, String> {
+        if op == BinOp::Add {
+            self.arena_route(b, true);
+            b.ins(&Instruction::Call(self.cx.rt.concat));
+            self.arena_route(b, false);
+            return Ok(Type::Str);
+        }
+        b.ins(&Instruction::Call(self.cx.rt.strcmp));
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on strings"), line))?);
+        Ok(Type::Bool)
+    }
+
+    /// `s =~ pat`, the String on the stack: the pattern's DFA, compiled once
+    /// (RFC-0046), and the runtime's walk over it, which leaves a `Bool`.
+    fn str_match(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        pat: &str,
+        line: usize,
+    ) -> Result<(), String> {
+        let (table, accept, start) = self.regex_dfa(m, pat, line)?;
+        b.ins(&Instruction::I32Const(table as i32));
+        b.ins(&Instruction::I32Const(start as i32));
+        b.ins(&Instruction::I32Const(accept as i32));
+        b.ins(&Instruction::Call(self.cx.rt.regex_run));
+        Ok(())
     }
 
     /// The instruction a unary operator IS, once its operand stands on the
@@ -12684,25 +12703,31 @@ impl<'p> Fn_<'_, 'p> {
                 self.each(m, b, false, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
-            // whose declared type owns something. The tag is the variant's
-            // position, exactly as `match` reads it. The mirror of `rel_at`'s own
-            // arm, and one walk for the same reason (RFC-0126 §8.11, M4a).
+            // that own something, a box the emitter made included. The tag is
+            // the variant's position, exactly as `match` reads it. The mirror
+            // of `rel_body`'s own arm, asking its question of each payload: a
+            // copy that skipped a boxed `Handle` shared the box, and both
+            // copies released it.
             Type::Enum(_) => {
                 let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
-                    if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                    let mut live = false;
+                    for p in &var.payload {
+                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
+                    }
+                    if !live {
                         continue;
                     }
                     tag_eq(b, a, tag as i64);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     for (j, pty) in var.payload.clone().iter().enumerate() {
-                        if !self.owns_heap(pty) {
+                        let w = self.word2(pty)?;
+                        if !self.owns_heap(pty) && w != Word::Boxed {
                             continue;
                         }
                         let at = self.cx.payload_slot(&var.payload, j);
-                        let w = self.word2(pty)?;
                         self.copy_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
@@ -17255,6 +17280,19 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
+                // A LAYOUT READ OUT OF A PLACE, held as the place's address in
+                // a local, the way a layout parameter is (RFC-0125 M7).
+                St::Let(n, Rhs::Read(p)) if self.core_alias(body, *n).is_some() => {
+                    let line = body.names[*n as usize].line;
+                    let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
+                    self.core_step(b, off);
+                    let Place::Local(l) = self.place_for(b, &Repr::Scalar(ValType::I32), line)?
+                    else {
+                        return unsupported("an address with no local", line);
+                    };
+                    b.ins(&Instruction::LocalSet(l));
+                    self.core_bind(b, body, w, *n, Place::Local(l), ty)?;
+                }
                 // An AGGREGATE CALL RESULT, written through the out-pointer
                 // into the binding's own slot, or into the caller's storage
                 // when the `return` after it hands the temporary back. The
@@ -17780,6 +17818,25 @@ impl<'p> Fn_<'_, 'p> {
             self.core_val(m, b, body, w, &Val::Name(*n), &ty, line)?;
             return Ok(ty);
         }
+        // A length is a header read and no field ([`Fn_::length_of`]). What
+        // it reads is the base's value: an address for a layout, the pointer
+        // for a String.
+        if let vyrn_lower::core::Place::Field(base, f) = p {
+            if let Some(bty) = self
+                .core_place_ty(body, base)
+                .filter(|t| length_ty(f, &self.cx.resolve(t)).is_some())
+            {
+                if let Repr::Agg(_) = self.cx.repr(&bty, line)? {
+                    let (_, off) = self.core_addr(m, b, body, w, base, line)?;
+                    self.core_step(b, off);
+                } else {
+                    self.core_read(m, b, body, w, base, line)?;
+                }
+                return self
+                    .length_of(b, &bty, f, line)?
+                    .ok_or_else(|| gap("a length of no container", line));
+            }
+        }
         let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
         let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
             return unsupported("a read of a place this walk does not load", line);
@@ -17899,6 +17956,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             At::Field(base, f) => {
                 let bty = self.core_place_ty(body, base)?;
+                if let Some(t) = length_ty(f, &self.cx.resolve(&bty)) {
+                    return Some(t);
+                }
                 let fty = self.field_of(&bty, f, 0).ok()?.1;
                 vyrn_frontend::types::deferred(&fty)
                     .is_none()
@@ -17910,6 +17970,71 @@ impl<'p> Fn_<'_, 'p> {
             },
             At::Key(..) => None,
         }
+    }
+
+    /// The place a layout name holds the ADDRESS of — RFC-0125 M7, a name read
+    /// from a layout.
+    ///
+    /// §2.1: a place is never copied to read it, so a borrow bound by a read of
+    /// a layout is that place for the read's extent. The kernel ends the alias
+    /// at every store, take and drop of the place, and refuses a read after
+    /// one.
+    ///
+    /// `None` where the program can observe the copy. A layout that owns no
+    /// heap is a value, and the kernel lets its place be written while it
+    /// lives. A binding the body stores into, or hands to `modify`, writes a
+    /// value of its own. A callee handed the root, or any root on the chain,
+    /// to `modify` writes where the kernel does not look (`freeNode` in
+    /// `tree.vyrn`). Module state has no root: any callee may write it. A
+    /// store into the root is the kernel's, which ends the alias there.
+    fn core_alias<'b>(
+        &self,
+        body: &'b vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<&'b vyrn_lower::core::Place> {
+        let info = &body.names[n as usize];
+        if !info.borrow
+            || self.checks(&info.ty)
+            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
+        {
+            return None;
+        }
+        let mut lets = Vec::new();
+        let mut written = Vec::new();
+        for s in &body.stmts {
+            core_lets(s, &mut lets);
+            core_written(s, &mut written);
+        }
+        let read = |m: vyrn_lower::core::Name| {
+            let mut at = lets.iter().filter(|(b, _)| *b == m);
+            match (at.next(), at.next()) {
+                (Some((_, Rhs::Read(p))), None) => Some(p),
+                _ => None,
+            }
+        };
+        let place = read(n)?;
+        if written.iter().any(|(m, _)| *m == n)
+            || matches!(place, vyrn_lower::core::Place::Key(..))
+            || self
+                .core_place_ty(body, place)
+                .is_none_or(|t| self.cx.resolve(&t) != self.cx.resolve(&info.ty))
+        {
+            return None;
+        }
+        // Each name on the chain is bound once, before the name it reads, so
+        // the walk ends within `body.names.len()` steps.
+        let mut on = place;
+        for _ in 0..body.names.len() {
+            let (root, _) = vyrn_lower::kernel::root_of(on)?;
+            if written.contains(&(root, true)) {
+                return None;
+            }
+            match read(root) {
+                Some(p) => on = p,
+                None => return Some(place),
+            }
+        }
+        None
     }
 
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
@@ -18197,12 +18322,11 @@ impl<'p> Fn_<'_, 'p> {
         if kind != Callee::Fn || self.audit_dropped(callee) {
             return None;
         }
-        let sig = self.cx.sigs.get(callee)?;
         // A `modify` parameter crosses as the address of the caller's binding,
-        // which is a placement this walk does not make. An aggregate result
-        // crosses through the out-pointer, which [`Fn_::out_ptr`] states for
-        // both walks.
-        (!sig.modify.iter().any(|m| *m)).then(|| sig.clone())
+        // which [`Fn_::core_args_readable`] admits for a layout alone. An
+        // aggregate result crosses through the out-pointer, which
+        // [`Fn_::out_ptr`] states for both walks.
+        self.cx.sigs.get(callee).cloned()
     }
 
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
@@ -18237,6 +18361,17 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, v, &from, line)?;
                 self.coerce(m, b, None, &from, to, line)?;
                 Ok(to.clone())
+            }
+            // A String operator is a call, and the builder states its
+            // operand temporaries' releases as rows of their own.
+            (Op::Bin(o), [l, r]) if self.core_str_op(body, *o, l, r) => {
+                self.core_val(m, b, body, w, l, &Type::Str, line)?;
+                if let (BinOp::Match, Val::Lit(Lit::Str(pat))) = (o, r) {
+                    self.str_match(m, b, pat, line)?;
+                    return Ok(Type::Bool);
+                }
+                self.core_val(m, b, body, w, r, &Type::Str, line)?;
+                self.str_bin(b, *o, line)
             }
             (Op::Bin(o), [l, r]) => {
                 let lt = self.core_ty(body, l, &Type::Int);
@@ -18427,6 +18562,9 @@ impl<'p> Fn_<'_, 'p> {
             // walk cannot do with a layout is read it as a value, and
             // [`Fn_::core_val_readable`] is where that is refused.
             //
+            // Or a layout read out of a place, which holds the place's address
+            // ([`Fn_::core_alias`]).
+            //
             // Or an aggregate a call returns into the slot this walk takes for
             // it ([`Fn_::out_ptr`]). A temporary made or returned into is
             // one [`Fn_::core_readable`] asks about where it stands, because
@@ -18443,6 +18581,7 @@ impl<'p> Fn_<'_, 'p> {
                             || self.core_agg_call(body, rhs)
                             || self.core_rebuild(body, rhs))
                 }))
+                && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
             {
                 return false;
             }
@@ -18513,6 +18652,7 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
             }
+            St::Let(n, Rhs::Read(_)) if self.core_alias(body, *n).is_some() => true,
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
             // A store into a field or into module state owns no heap when its
@@ -18548,6 +18688,7 @@ impl<'p> Fn_<'_, 'p> {
                 // which the `let` arm slots before the switch is reached) or
                 // the one the AST arm bound.
                 let placed = self.core_place(&self.core_w, body, *n).is_some()
+                    || self.core_alias(body, *n).is_some()
                     || ss[..i].iter().any(|p| {
                         matches!(p, St::Let(l, rhs) if l == n
                             && (matches!(rhs, Rhs::Make(..))
@@ -18605,21 +18746,32 @@ impl<'p> Fn_<'_, 'p> {
     /// A value that owns heap crosses as its pointer, and who owns it after
     /// the call is the call arm's decision: this walk writes the pointer and
     /// nothing else, which is what a `read` argument is. A layout crosses as
-    /// its address the same way ([`Fn_::core_val`]).
+    /// its address the same way ([`Fn_::core_val`]), whatever the capability:
+    /// every layout this walk names lives in a slot, and a `modify` callee
+    /// copies its result back into it. A scalar `modify` argument lives in a
+    /// local with no address, and the arm spills and reloads it, which the
+    /// row does not state; nor may a name that holds another place's address
+    /// ([`Fn_::core_alias`]) be written through.
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
         args: &[(Val, vyrn_frontend::ast::Capability)],
     ) -> bool {
-        args.iter().all(|(v, c)| match c {
-            vyrn_frontend::ast::Capability::Read => {
-                self.core_val_readable(body, v)
-                    || matches!(v, Val::Name(n) if {
-                        let t = &body.names[*n as usize].ty;
-                        matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
-                    })
+        use vyrn_frontend::ast::Capability as Cap;
+        args.iter().all(|(v, c)| {
+            let layout = matches!(v, Val::Name(n) if {
+                let t = &body.names[*n as usize].ty;
+                matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
+            });
+            match c {
+                Cap::Read => self.core_val_readable(body, v) || layout,
+                Cap::Consume => {
+                    (self.core_val_readable(body, v) && core_operand(body, v)) || layout
+                }
+                Cap::Modify => {
+                    layout && !matches!(v, Val::Name(n) if self.core_alias(body, *n).is_some())
+                }
             }
-            _ => self.core_val_readable(body, v) && core_operand(body, v),
         })
     }
 
@@ -18778,10 +18930,32 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Whether `l o r` is a String operator [`Fn_::str_bin`] or
+    /// [`Fn_::str_match`] writes: a String on the left, and a String or, for
+    /// `=~`, the pattern literal on the right.
+    fn core_str_op(&self, body: &vyrn_lower::core::Body, o: BinOp, l: &Val, r: &Val) -> bool {
+        let is_str = |v: &Val| self.cx.resolve(&self.core_ty(body, v, &Type::Int)) == Type::Str;
+        is_str(l)
+            && match o {
+                BinOp::Match => matches!(r, Val::Lit(Lit::Str(_))),
+                BinOp::Add
+                | BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::Lt
+                | BinOp::LtEq
+                | BinOp::Gt
+                | BinOp::GtEq => is_str(r),
+                _ => false,
+            }
+    }
+
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => self.core_val_readable(body, v),
             Rhs::Prim(Op::Closure, ..) => false,
+            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op(body, *o, l, r)) => {
+                vs.iter().all(|v| self.core_val_readable(body, v))
+            }
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_operand(body, v)),
             // A handed-back receiver asks nothing extra of this walk: the
             // builder states the call and the store that puts the result back
@@ -18865,6 +19039,39 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
         St::Switch { arms, .. } => {
             for a in arms {
                 a.body.iter().for_each(|s| core_lets(s, out));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names a statement writes: the root of a store, `false`, and a `modify`
+/// or `consume` argument, `true`. [`Fn_::core_alias`] reads it.
+fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, bool)>) {
+    let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, bool)>| {
+        if let Rhs::Call { args, .. } = r {
+            for (v, c) in args {
+                if let (Val::Name(n), Capability::Modify | Capability::Consume) = (v, c) {
+                    out.push((*n, true));
+                }
+            }
+        }
+    };
+    match s {
+        St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
+        St::Store { place, .. } => {
+            out.extend(vyrn_lower::kernel::root_of(place).map(|(n, _)| (n, false)))
+        }
+        St::If { then, els, .. } => {
+            then.iter().for_each(|s| core_written(s, out));
+            els.iter().for_each(|s| core_written(s, out));
+        }
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+            inner.iter().for_each(|s| core_written(s, out));
+        }
+        St::Switch { arms, .. } => {
+            for a in arms {
+                a.body.iter().for_each(|s| core_written(s, out));
             }
         }
         _ => {}

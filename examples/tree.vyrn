@@ -36,8 +36,8 @@ fn treeFree(t: modify Slots<Tree>, o: Option<Handle<Tree>>) -> Int64 {
     return match o { Some(h) => freeNode(t, h), None => 0 }
 }
 fn freeNode(t: modify Slots<Tree>, h: Handle<Tree>) -> Int64 {
-    let l = t[h].left
-    let rt = t[h].right
+    let l = t[h].left.copy()
+    let rt = t[h].right.copy()
     remove(t, h)
     return treeFree(t, l) + treeFree(t, rt)
 }

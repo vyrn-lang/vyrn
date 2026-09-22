@@ -45,7 +45,7 @@ fn freeList(nodes: modify Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
     return match o { Some(h) => freeNode(nodes, h), None => 0 }
 }
 fn freeNode(nodes: modify Slots<Node>, h: Handle<Node>) -> Int64 {
-    let tail = nodes[h].next // read before remove, or the access would trap
+    let tail = nodes[h].next.copy() // read before remove, or the access would trap
     remove(nodes, h)
     return freeList(nodes, tail)
 }

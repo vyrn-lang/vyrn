@@ -2639,3 +2639,115 @@ fn a_store_over_the_container_a_for_walks_is_refused() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
+
+/// A take of a name ends every alias that reads out of it, as a drop does
+/// (RFC-0125 M7).
+///
+/// `let xs = b.items` then `eat(b)` with a `consume` parameter was accepted:
+/// the callee released `b.items`, both engines read `xs[0]` out of the freed
+/// buffer, and the program printed 3 where the language says 4. A move into
+/// another name is refused alike, because the new owner may release the
+/// buffer while `xs` still reads it.
+#[test]
+fn a_take_of_the_place_a_read_binding_reads_is_refused() {
+    let head = "type Bag = { items: Array<Int64>, n: Int64 }\n\
+                fn eat(b: consume Bag) -> Int64 { return b.n }\n";
+    let cases: &[(&str, &str)] = &[
+        ("a consume argument", "let k = eat(b)\n  print(xs[0] + k)"),
+        ("a move", "let c = b\n  print(xs[0] + c.n)"),
+    ];
+    let dir = common::scratch("alias-take");
+    let want = "`b` is written here while `xs` still reads out of it";
+    let mut bad: Vec<String> = Vec::new();
+    for (what, tail) in cases {
+        let src = format!(
+            "{head}fn main() -> Int64 {{\n  let b = Bag {{ items: [1, 2, 3], n: 3 }}\n  \
+             let xs = b.items\n  {tail}\n  return 0\n}}\n"
+        );
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), &src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+            bad.push(format!("{what}: `check` said {text}"));
+        }
+        let out = vyrn()
+            .current_dir(&dir)
+            .args(["run", &name])
+            .output()
+            .expect("vyrn run");
+        if out.status.success() || !out.stdout.is_empty() {
+            bad.push(format!("{what}: `run` ran"));
+        }
+    }
+    // The way out the menu names: `xs` is a value of its own.
+    let fixed = format!(
+        "{head}fn main() -> Int64 {{\n  let b = Bag {{ items: [1, 2, 3], n: 3 }}\n  \
+         let xs = b.items.copy()\n  let k = eat(b)\n  print(xs[0] + k)\n  return 0\n}}\n"
+    );
+    std::fs::write(dir.join("copy.vyrn"), fixed).expect("write the program");
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "copy.vyrn"])
+        .output()
+        .expect("vyrn run");
+    if String::from_utf8_lossy(&out.stdout).trim() != "4" {
+        bad.push(format!(
+            "the copy printed {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        ));
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}
+
+/// A `modify` argument ends every borrow that reads what it names (RFC-0125
+/// M7).
+///
+/// `let xs = b.items` then `reset(b)`, whose body stores a new array into
+/// `b.items`, was accepted: the store released the buffer `xs` read, and
+/// both engines printed 0 where the language says 1. The rule is the one a
+/// `for` states for its container. Both engines are asked: each refuses the
+/// program before it runs and prints nothing.
+#[test]
+fn a_modify_of_the_place_a_read_binding_reads_is_refused() {
+    let src = "type Bag = { items: Array<Int64>, n: Int64 }\n\
+               fn reset(b: modify Bag) { b.items = [9, 9, 9] }\n\
+               fn main() -> Int64 {\n  let mut b = Bag { items: [1, 2, 3], n: 3 }\n  \
+               let xs = b.items\n  reset(b)\n  print(xs[0])\n  return 0\n}\n";
+    let dir = common::scratch("alias-modify");
+    let want = "`b` is written here while `xs` still reads out of it";
+    let mut bad: Vec<String> = Vec::new();
+    std::fs::write(dir.join("modify.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "modify.vyrn", false);
+    if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+        bad.push(format!("`check` said {text}"));
+    }
+    for engine in [
+        &["run", "modify.vyrn"][..],
+        &["build", "modify.vyrn", "-o", "never"][..],
+    ] {
+        let out = vyrn()
+            .current_dir(&dir)
+            .args(engine)
+            .output()
+            .expect("vyrn");
+        let err = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() || !out.stdout.is_empty() || !err.contains(want) {
+            bad.push(format!("`{}` ran or said {err}", engine[0]));
+        }
+    }
+    // The way out the menu names: `xs` is a value of its own.
+    let fixed = src.replace("let xs = b.items\n", "let xs = b.items.copy()\n");
+    std::fs::write(dir.join("copy.vyrn"), fixed).expect("write the program");
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "copy.vyrn"])
+        .output()
+        .expect("vyrn run");
+    if String::from_utf8_lossy(&out.stdout).trim() != "1" {
+        bad.push(format!(
+            "the copy printed {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        ));
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}

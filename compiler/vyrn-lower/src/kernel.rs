@@ -69,10 +69,8 @@
 //! read of it is refused, because the compiled routes see the write through
 //! one buffer and the interpreter does not
 //! (`rfcs/probes-0125/alias-then-write-through-the-root.vyrn`). RFC-0090:
-//! all mutation is exclusive. Not modelled: what a `modify` argument does to
-//! the aliases of what it is handed (`examples/tree.vyrn`'s `freeNode` reads
-//! a handle out of the node it then removes, and a handle is safe to hold);
-//! `rhs` says what the census measured when the rule was tried.
+//! all mutation is exclusive. A `modify` argument is a write too: the callee
+//! may replace or free what it is handed, so it ends the aliases that read it.
 //!
 //! A borrow with no place to be an alias of carries its kind instead
 //! ([`crate::core::BorrowKind`], RFC-0125 §3 M3, the census): a `read` or
@@ -216,7 +214,7 @@ struct Alias {
 }
 
 /// The root name of a place and the path under it; `None` for module state.
-pub(crate) fn root_of(p: &Place) -> Option<(Name, String)> {
+pub fn root_of(p: &Place) -> Option<(Name, String)> {
     match p {
         Place::Name(n) => Some((*n, String::new())),
         Place::Global(_) => None,
@@ -636,16 +634,29 @@ impl<'b> Kernel<'b> {
 
     /// `p` is written: every alias reading a place that overlaps it ends
     /// here. `what` is the place, in the checker's words.
-    /// Ends the `for` borrows over what a `modify` argument `m` names, so the
-    /// loop's next read of its container is refused as a read after a write.
-    fn wrote_walked(&self, st: &mut State, m: Name) {
+    /// Ends the borrows that read what a `modify` argument `m` names: the
+    /// callee may replace or free it, so a later read is refused as a read
+    /// after a write. A binding that owns no heap copied its value out, and a
+    /// `for` borrow is ended whatever its container holds.
+    fn wrote_by_call(&self, st: &mut State, m: Name) {
         let a = self.src_of(st, &Place::Name(m));
         let what = self.alias_text(&a);
+        // A write through an alias is that alias's own, and its chain's.
+        let mut chain = Vec::new();
+        let mut via = Some(m);
+        while let Some(n) = via {
+            chain.push(n);
+            via = st.alias[n as usize].as_ref().and_then(|x| x.via);
+        }
         for (k, info) in self.body.names.iter().enumerate() {
             let Some(x) = &st.alias[k] else {
                 continue;
             };
-            if info.walked && x.root == a.root && overlaps(&x.path, &a.path) && st.dead[k].is_none()
+            if !chain.contains(&(k as Name))
+                && (info.walked || !self.owned(k as Name))
+                && x.root == a.root
+                && overlaps(&x.path, &a.path)
+                && st.dead[k].is_none()
             {
                 st.dead[k] = Some((self.here, what.clone()));
             }
@@ -1555,8 +1566,11 @@ impl<'b> Kernel<'b> {
                         ),
                     );
                 }
+                // The new owner may release the buffer while an alias still
+                // reads it, as a drop does (RFC-0125 M7).
                 if self.moves(*n, consume) {
                     self.gone(st, *n);
+                    self.wrote(st, &Place::Name(*n), self.src(*n));
                 }
             }
         }
@@ -1719,25 +1733,14 @@ impl<'b> Kernel<'b> {
                         self.take_arg(st, v, *write_back && i == 0, kind.declared())?;
                     }
                 }
-                // A `modify` argument ends the borrow a `for` walks its
-                // container through: the callee may replace the container, and
-                // the loop reads it until it ends (RFC-0125 §2.2).
+                // A `modify` argument ends every borrow that reads what it
+                // names: the callee may replace or free it (RFC-0125 M7). A
+                // `for` walking the container is one such borrow.
                 for (v, cap) in args {
                     if let (Capability::Modify, Val::Name(m)) = (cap, v) {
-                        self.wrote_walked(st, *m);
+                        self.wrote_by_call(st, *m);
                     }
                 }
-                // Any other `modify` argument does NOT end the aliases of what
-                // it is handed, and the census measured why (RFC-0125 §3 M3).
-                // Ending them refuses `freeNode` in `tree.vyrn`,
-                // `linkedlist.vyrn` and `freelist.vyrn`: each reads
-                // `t[h].left` — an `Option<Handle<T>>`, which owns heap
-                // because a wide payload travels boxed — and then calls
-                // `remove(t, h)`, which shuffles index arrays and never
-                // touches the payload the read points into. The rule needs
-                // to know WHICH place a callee writes, and that is the
-                // per-argument retention over the call graph the deletion
-                // track still owes.
                 Ok(())
             }
             Rhs::Prim(_, vs, _) => {
