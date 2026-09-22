@@ -291,10 +291,10 @@ waits on another family too, so the AST arm's count does not move. The witness
 is `coredrive`'s `SHAPES`: one `if let` the rows carry, compiled both ways and
 asserted byte for byte.
 
-The `for` head track (`m7-forhead`) retired `Opaque:Exit` and `Opaque:Index`.
-The builder states the length, the counter, the exit test and the element read
-at the counter as rows, and a stream's head keeps one kind, `Opaque:Pull`, at
-21 lines over `examples/`. No body became whole. The 1,430 lines that named the
-two kinds now wait on `Read:Elem` first, and the bodies that `Read:Elem` alone
-blocks go from 76 to 314. The element read waits on a `modify` argument, which
-can make the live container differ from the one the loop walks.
+The `for` head track (`m7-forhead`) retired `Opaque:Exit`, `Opaque:Index` and
+`Read:Elem`. The builder states the length, the counter, the exit test and the
+element read at the counter as rows, and `direct::Fn_::core_addr` addresses an
+element. A stream's head keeps one kind, `Opaque:Pull`, at 21 lines over
+`examples/`. Over `examples/` the tally reads 17,353 lines whole where it read
+17,039. No `for` statement is emitted from the rows yet: its borrow binds an
+array, which the frame screen does not admit.
