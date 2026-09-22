@@ -6370,6 +6370,8 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
             St::Return { value: Some(v), .. } => hit(v, out),
             St::If { cond, .. } => hit(cond, out),
             St::Switch { on, .. } => hit(on, out),
+            // A release reads the name, so the name holds a place until then.
+            St::Drop(n, ..) => out[*n as usize] += 1,
             _ => {}
         }
         match s {
