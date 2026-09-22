@@ -27361,3 +27361,15 @@ Findings:
 - `Stmt::Drop` on the arm 443 to 442. A source `drop` names a String or an array, which `Fn_::core_run`'s scalar clause refuses per statement, so the arm cannot reach zero through this walk and nothing in `FORMS` turns false.
 - the `?` on a declared `Fallible` states `success` as `Callee::Ctor`, with the Option arm's comment "a variant constructor". It is the impl's method, a read of the value.
 Left: `Exit::Scrutinee`, blocked by `Fn_::core_part_ty`'s scalar parts and the aggregate-call scrutinee clause; `Switch:Impl`, 3 bodies, blocked by the aggregate argument `Fn_::core_val_readable` refuses and, in `greet` and `shout`, by a String `+`; the drop-only bodies, blocked by the name clause and the statement families above.
+#### A trap writes its line once, and an unaudited build states no hook (2026-09-22, `m7-panic`)
+The count, from a temporary instrument that asks `Fn_::core_walkable` again under each assumption, over `emit-wat` of the 176 programs of `examples/` that emit, in one cache state with `VYRN_GAP_TALLY`: 9,744 bodies declined, counted once per program that emits them.
+
+| what the body waits on | bodies | which |
+|---|---|---|
+| the audit hook alone | 528 | `runtime$free`, `runtime$envGet`, `runtime$auditDeath`, 176 each |
+| `panic` or `@panicAt` alone | 245 | `runtime$arenaAlloc` 176, the `where$c*` checks 69 |
+| both, and neither alone | 176 | `runtime$malloc` |
+| `panic` and another family first | 749 | `runtime$intStr` 176, `num$asciiStr` 175, `std/strings` and `std/json` 398 |
+| neither | 8,046 | |
+
+No runtime body waits on a shape of its own. The one runtime body left after both is `runtime$intStr`, which waits on `@push`, `@at` and `stringFromBytes`.
