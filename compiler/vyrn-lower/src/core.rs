@@ -1553,7 +1553,7 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
 /// An empty answer means the rows carry the body end to end. A tag names the
 /// family one form track closes: `Call:<who>:<name>` for a callee the
 /// emitter's function table does not answer, `Make:<what>` for a layout,
-/// `Read`, `Take`, `Lambda`, `Switch`, `Drop`, `Row` and `Opaque`.
+/// `Read`, `Take`, `Lambda`, `Switch`, `Drop` and `Opaque`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
@@ -1573,7 +1573,9 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
                 gaps_val(value, out);
             }
             St::Drop(..) => out.push("Drop".into()),
-            St::Row { .. } => out.push("Row".into()),
+            // The emitter reads the release off the row it stands on
+            // (RFC-0125 M7), so a row is no gap.
+            St::Row { .. } => {}
             St::If {
                 cond, then, els, ..
             } => {
