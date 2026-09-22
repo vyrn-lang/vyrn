@@ -17161,10 +17161,10 @@ impl<'p> Fn_<'_, 'p> {
                     let info = &body.names[*n as usize];
                     let line = info.line;
                     self.core_rhs(m, b, body, w, rhs, &info.ty, line)?;
-                    // A value the next statement reads once, first, and
-                    // nothing else reads: wasm's operand stack is where it
-                    // lives, and no local is taken for it. Every other name
-                    // gets one, in the order the AST walk takes them.
+                    // The slot rule (RFC-0125 M7). A temporary the next
+                    // statement reads once, first, and nothing else reads
+                    // stays on wasm's operand stack. Every other name takes a
+                    // local from [`Fn_::place_for`], in row order.
                     if info.binding.is_none()
                         && w.reads[*n as usize] == 1
                         && self.core_first_read(body, ss.get(i + 1)) == Some(*n)
@@ -17186,8 +17186,23 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     ..
                 } => {
-                    let Some((Place::Local(l), ty)) = self.core_place(w, body, *n) else {
-                        return unsupported("a core store into a place with no local", *line);
+                    // The temporary an `if` expression joins through is stored
+                    // by each branch and bound by the `let` after them
+                    // (RFC-0030), so the first store it meets takes its slot.
+                    let (l, ty) = match self.core_place(w, body, *n) {
+                        Some((Place::Local(l), ty)) => (l, ty),
+                        Some(_) => {
+                            return unsupported("a core store into a place with no local", *line)
+                        }
+                        None => {
+                            let ty = body.names[*n as usize].ty.clone();
+                            let r = self.cx.repr(&ty, *line)?;
+                            let Place::Local(l) = self.place_for(b, &r, *line)? else {
+                                return unsupported("a core store of an aggregate", *line);
+                            };
+                            self.core_bind(b, body, w, *n, Place::Local(l), ty.clone())?;
+                            (l, ty)
+                        }
                     };
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&Instruction::LocalSet(l));
@@ -18245,26 +18260,10 @@ impl<'p> Fn_<'_, 'p> {
                 (info.binding.is_some() && !info.source.starts_with('@'))
                     || self.core_lands(body, ss, i, reads)
             }
-            St::Let(n, rhs) => {
-                let held = body.names[*n as usize].binding.is_none()
-                    && reads[*n as usize] == 1
-                    && self.core_first_read(body, ss.get(i + 1)) == Some(*n);
-                // A temporary the stack cannot carry needs a local the AST walk
-                // never takes, so the two would emit different locals.
-                (held || body.names[*n as usize].binding.is_some())
-                    && self.core_rhs_readable(body, rhs)
-            }
-            // A store's destination has to have a place before the store runs,
-            // and this walk gives one to a temporary only where it BINDS it.
-            // The temporary an `if` expression joins through is stored into by
-            // each branch and bound by the `let` after them (RFC-0030), so it
-            // has none: `let x = if c { 10 } else { 20 }` reached the store
-            // with nowhere to put the value. A name the reader wrote is the
-            // AST arm's local and is always placed.
+            St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { place, value, .. } => {
                 matches!(place, vyrn_lower::core::Place::Name(n)
-                    if !body.names[*n as usize].source.starts_with('@')
-                        && core_scalar(&body.names[*n as usize].ty))
+                    if core_scalar(&body.names[*n as usize].ty))
                     && self.core_val_readable(body, value)
             }
             St::If {
