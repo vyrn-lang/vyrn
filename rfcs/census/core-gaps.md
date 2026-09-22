@@ -242,3 +242,19 @@ The bodies the emitter TAKES stand at 953. `Fn_::core_walkable`'s
 `placed.is_empty()` screen is gone and it moved none of them: a released name
 is a String or an array, so the clause that asks every name to be a scalar
 refuses the same frames. That clause is the layout families' to move.
+## What the tracks since have changed
+
+Each track below retired tags, so every table above is the state before them
+and the `Read` row's own tally has moved.
+
+The short-circuit track (`m7-shortcircuit`) took `Prim:And` and `Prim:Or` out
+of `core::gaps`: the core writes the branch, so the family has no tag left.
+
+The layout-read track (`m7-read`) gave the emitter a reader for a place
+(`direct::Fn_::core_read`), and `Read` and `Take` now name only the kinds it
+does not address. Over `examples/` the tally splits the family into 6,079 field
+reads, 2,360 element reads, 459 name reads, 158 global reads and 17 key reads,
+with 323 field takes, 4 global takes and 1 element take; what is left is
+`Read:Elem`, `Read:Key` and `Take:Elem`. Over `examples/` the tally reads 4,238
+lines whole where it read 4,026, and `coredrive --ignored` reads 3,605 with no
+gap where it read 3,449.
