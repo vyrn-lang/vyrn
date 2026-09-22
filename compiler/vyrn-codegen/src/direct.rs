@@ -16875,8 +16875,16 @@ impl<'p> Fn_<'_, 'p> {
                     // [`Fn_::core_stmts`] builds into it (RFC-0125 M7). The
                     // `where` screen is the same one either way: an
                     // annotation that checks is a row the core does not state.
-                    if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) {
-                        if self.checks(t) {
+                    // An aggregate call writes through the same destination,
+                    // and the arm converts its result to the annotation after
+                    // the call, which the row does not state.
+                    let call = self.core_agg_call(body, rhs);
+                    if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) || call {
+                        if self.checks(t)
+                            || (call
+                                && self.cx.resolve(t)
+                                    != self.cx.resolve(&body.names[*n as usize].ty))
+                        {
                             return None;
                         }
                     } else {
@@ -16959,7 +16967,7 @@ impl<'p> Fn_<'_, 'p> {
                     return None;
                 }
                 made.push(*n);
-            } else if self.core_agg_call(body, rhs) && lands.contains(n) {
+            } else if self.core_agg_call(body, rhs) {
                 made.push(*n);
             }
         }
@@ -18211,8 +18219,16 @@ impl<'p> Fn_<'_, 'p> {
                 body.names[*n as usize].binding.is_some()
                     && self.core_makes(body, &body.names[*n as usize].ty, rhs)
             }
-            // An aggregate call result is the caller's storage.
-            St::Let(_, rhs) if self.core_agg_call(body, rhs) => self.core_lands(body, ss, i, reads),
+            // An aggregate call result has a slot of its own, which the
+            // reader's `let` takes before the call, or it is the caller's
+            // storage. A temporary with a binding is a scrutinee the plan
+            // keys by its `match`, and the arm hands the call's own slot to
+            // the switch with nothing bound.
+            St::Let(n, rhs) if self.core_agg_call(body, rhs) => {
+                let info = &body.names[*n as usize];
+                (info.binding.is_some() && !info.source.starts_with('@'))
+                    || self.core_lands(body, ss, i, reads)
+            }
             St::Let(n, rhs) => {
                 let held = body.names[*n as usize].binding.is_none()
                     && reads[*n as usize] == 1
@@ -18259,8 +18275,10 @@ impl<'p> Fn_<'_, 'p> {
                 // the one the AST arm bound.
                 let placed = self.core_place(&self.core_w, body, *n).is_some()
                     || ss[..i].iter().any(|p| {
-                        matches!(p, St::Let(l, rhs)
-                        if l == n && (matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs)))
+                        matches!(p, St::Let(l, rhs) if l == n
+                            && (matches!(rhs, Rhs::Make(..))
+                                || self.core_ctor(rhs)
+                                || self.core_agg_call(body, rhs)))
                     });
                 placed
                     && self.sum_of(&body.names[*n as usize].ty).is_some()
