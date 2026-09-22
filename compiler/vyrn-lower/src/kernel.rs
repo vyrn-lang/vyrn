@@ -1555,8 +1555,11 @@ impl<'b> Kernel<'b> {
                         ),
                     );
                 }
+                // The new owner may release the buffer while an alias still
+                // reads it, as a drop does (RFC-0125 M7).
                 if self.moves(*n, consume) {
                     self.gone(st, *n);
+                    self.wrote(st, &Place::Name(*n), self.src(*n));
                 }
             }
         }
