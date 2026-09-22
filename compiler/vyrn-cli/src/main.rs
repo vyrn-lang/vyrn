@@ -295,7 +295,10 @@ fn main() -> ExitCode {
         .unwrap_or(ExitCode::FAILURE)
 }
 
-fn real_main() -> ExitCode {
+/// Installs the generator engine and the lowering into this process. Every
+/// process that compiles calls it before it loads a module, this binary's own
+/// tests included (`tests/hosts.rs`).
+fn install() {
     // RFC-0076. Installed before anything can load a module, since generation
     // happens deep inside the load. There is no way to turn it off: it is the
     // only generation engine there is (RFC-0125 §3 M5), and a binary without it
@@ -308,6 +311,10 @@ fn real_main() -> ExitCode {
     if std::env::var("VYRN_NO_PLACER").is_err() {
         vyrn_lower::install();
     }
+}
+
+fn real_main() -> ExitCode {
+    install();
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
     if is_offline {
@@ -7017,6 +7024,7 @@ fn handle(req: Request) -> Response {
         let source = format!("{SRC}\n{SERVE_SHIM}");
         std::fs::write(&file, &source).unwrap();
         let key = file.to_string_lossy().replace('\\', "/");
+        install();
         let mut program = load_program(&key, &source).expect("the doors load and check");
         serve_rewrite(&mut program);
         let bytes = vyrn_codegen::direct::compile(&program).expect("the doors compile");
