@@ -92,7 +92,7 @@ order.
 
 ## 3. The census: what each constructor costs
 
-1,407 mentions in six files for 32 constructors — it was 2,517 in seven, and
+1,410 mentions in six files for 32 constructors — it was 2,517 in seven, and
 the seventh was `interp.rs` (RFC-0125 §3 M5); the sixth column was the text-IR
 emitter and is now the shared lowering alone, which is where the other 499 went
 (RFC-0125 §3 M4). It was 1,612 until RFC-0125 §3 M6's size slices, and 1,405 until M7's
@@ -122,7 +122,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Mask32x4` | 5 | 1 | 5 | 1 | 0 | 0 | 12 |
 | `Type::Mask64x2` | 6 | 1 | 6 | 1 | 0 | 0 | 14 |
 | `Type::Bool` | 32 | 2 | 34 | 6 | 0 | 2 | 76 |
-| `Type::Str` | 46 | 2 | 79 | 8 | 0 | 4 | 139 |
+| `Type::Str` | 46 | 2 | 80 | 8 | 0 | 4 | 140 |
 | `Type::Unit` | 25 | 4 | 31 | 9 | 2 | 0 | 71 |
 | `Type::Named` | 36 | 3 | 10 | 9 | 3 | 6 | 67 |
 | `Type::Record` | 12 | 3 | 5 | 18 | 0 | 5 | 43 |
@@ -142,7 +142,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Logger` | 0 | 1 | 2 | 1 | 2 | 1 | 7 |
 | `Type::Fn` | 26 | 5 | 23 | 10 | 1 | 0 | 65 |
 | `Type::Lazy` | 7 | 1 | 1 | 9 | 0 | 0 | 18 |
-| `Type::Never` | 4 | 2 | 4 | 2 | 0 | 0 | 12 |
+| `Type::Never` | 4 | 2 | 6 | 2 | 0 | 0 | 14 |
 | `Type::Err` | 78 | 1 | 0 | 1 | 0 | 0 | 80 |
 
 The counts are this branch's tip. §8.7 took them 16 below the

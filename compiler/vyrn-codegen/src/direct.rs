@@ -7939,31 +7939,11 @@ impl<'p> Fn_<'_, 'p> {
                 if args.is_empty() || args.len() > 2 {
                     return unsupported("`panic` with other than one argument", line);
                 }
-                let write_all = self.cx.rt.write_all;
-                let tail = match args.get(1) {
-                    Some(Expr::Str(at)) => format!(" ({at})\n"),
-                    _ => "\n".to_string(),
+                let at = match args.get(1) {
+                    Some(Expr::Str(at)) => Some(at.as_str()),
+                    _ => None,
                 };
-                let (pre, nl) = (self.cx.rt.intern(m, "error: "), self.cx.rt.intern(m, &tail));
-                // Parked in a local because `write_all` consumes three operands,
-                // so the message cannot wait on the stack under the prefix's
-                // call. Evaluated FIRST, since the other two engines evaluate the
-                // argument before any byte of the line is written.
-                let msg = self.scratch(b, ValType::I32, 7);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                b.ins(&Instruction::LocalSet(msg));
-                b.ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::I32Const(pre as i32))
-                    .ins(&Instruction::I32Const(7))
-                    .ins(&Instruction::Call(write_all))
-                    .ins(&Instruction::Drop);
-                b.ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::LocalGet(msg));
-                b.ins(&Instruction::LocalGet(msg));
-                str_len(b);
-                b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
-                b.ins(&Instruction::I32Const(nl as i32))
-                    .ins(&Instruction::Call(self.cx.rt.trap));
+                self.panic_line(m, b, at, |s, m, b| s.expr_as(m, b, &args[0], &Type::Str))?;
                 // The stack goes polymorphic here, which is what lets a `panic`
                 // arm sit inside a `block (result T)` owing no value.
                 b.ins(&Instruction::Unreachable);
@@ -11336,6 +11316,45 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I32Mul);
         }
         b.ins(&Instruction::I32Add);
+    }
+
+    /// The line a `panic` writes, and the call that traps after it: `error: `,
+    /// the message `msg` pushes, and the site where the call names one
+    /// (RFC-0125 M7). The arm over the source and [`Fn_::core_call`] both
+    /// write it, and the `unreachable` after it is the arm's own and the
+    /// core's [`St::Trap`].
+    ///
+    /// Both wordings are interned, and the local taken, before the message is
+    /// pushed, so the two walks lay out the same data and the same locals. The
+    /// message waits in the local because `write_all` consumes three operands,
+    /// and it is pushed first because the other engines evaluate the argument
+    /// before they write any byte of the line.
+    fn panic_line(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        at: Option<&str>,
+        msg: impl FnOnce(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let write_all = self.cx.rt.write_all;
+        let tail = at.map_or_else(|| "\n".to_string(), |at| format!(" ({at})\n"));
+        let (pre, nl) = (self.cx.rt.intern(m, "error: "), self.cx.rt.intern(m, &tail));
+        let slot = self.scratch(b, ValType::I32, 7);
+        msg(self, m, b)?;
+        b.ins(&Instruction::LocalSet(slot));
+        b.ins(&Instruction::I32Const(2))
+            .ins(&Instruction::I32Const(pre as i32))
+            .ins(&Instruction::I32Const(7))
+            .ins(&Instruction::Call(write_all))
+            .ins(&Instruction::Drop);
+        b.ins(&Instruction::I32Const(2))
+            .ins(&Instruction::LocalGet(slot));
+        b.ins(&Instruction::LocalGet(slot));
+        str_len(b);
+        b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
+        b.ins(&Instruction::I32Const(nl as i32))
+            .ins(&Instruction::Call(self.cx.rt.trap));
+        Ok(())
     }
 
     /// Take a trap-table row — RFC-0125 §2.3, and the one way this backend
@@ -17504,6 +17523,7 @@ impl<'p> Fn_<'_, 'p> {
                 core_builtin(callee, *kind),
             ) {
                 (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
+                (None, Some(Spec::Traps)) => Ok(Type::Never),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(callee, *kind) {
@@ -17588,6 +17608,21 @@ impl<'p> Fn_<'_, 'p> {
                     _ => self.str_value(b, &ty, None, line)?,
                 }
                 return Ok(ret.clone());
+            }
+            // `panic(msg)` and `@panicAt(msg, site)`: the line, and the call
+            // that traps. The `unreachable` is the next row's.
+            Some(Spec::Traps) => {
+                let [(v, _), site @ ..] = args else {
+                    return unsupported("`panic` with other than one argument", line);
+                };
+                let at = match site {
+                    [(Val::Lit(Lit::Str(at)), _)] => Some(at.as_str()),
+                    _ => None,
+                };
+                self.panic_line(m, b, at, |s, m, b| {
+                    s.core_val(m, b, body, w, v, &Type::Str, line)
+                })?;
+                return Ok(Type::Never);
             }
             None => {}
         }
@@ -18542,6 +18577,7 @@ impl<'p> Fn_<'_, 'p> {
                 [_] => true,
                 _ => false,
             },
+            Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
             None => false,
         }
     }

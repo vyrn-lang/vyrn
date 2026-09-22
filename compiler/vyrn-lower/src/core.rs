@@ -1617,6 +1617,10 @@ pub enum Spec {
     /// (`print`, `@str`), and the emitter chooses the rendering by the
     /// operand's own type, as it chooses an instruction for [`Op::Conv`].
     Renders(Type),
+    /// A message at `String`, and for `@panicAt` the site as a string
+    /// literal. The call writes the line and returns to nobody; the
+    /// [`St::Trap`] the builder states after it is what ends the path.
+    Traps,
 }
 
 /// Every builtin the row specifies, by name.
@@ -1671,6 +1675,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@copy", Spec::OwnType),
             ("print", Spec::Renders(Type::Unit)),
             ("@str", Spec::Renders(Type::Str)),
+            ("panic", Spec::Traps),
+            (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
         ]
     })
 }
@@ -3659,7 +3665,10 @@ impl<'a> Builder<'a> {
             Stmt::Expr(e) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
-                if self.owns(&ty) {
+                if matches!(rhs, Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped)))) {
+                    // A `panic` for its effect: the `trap` is already stated,
+                    // and nothing after it runs to discard a value.
+                } else if self.owns(&ty) {
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
                     if self.discards(e) {
