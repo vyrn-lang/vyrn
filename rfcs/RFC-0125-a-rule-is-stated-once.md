@@ -27390,3 +27390,50 @@ Findings:
 - the fix is a statement the builder does not write, not a row the emitter drops: dropping the call row alone left `p + 8` bound, four instructions on every allocation, as `m7-walk` measured.
 - `fallible_try` stated `success` as `Callee::Ctor`, which `Fn_::core_ctor` reads as a layout made. It is `Callee::Method` now; the 3 bodies still wait on `Switch:Impl`, so nothing moved.
 Left: the value row after a `panic` in value position, 710 lines, blocked by a list the caller extends after the `trap`, which a cut in each of the three builders would close; `runtime$intStr`, blocked by `@push`, `@at` and `stringFromBytes`; the 749 bodies that can panic and wait on another family first.
+
+#### A layout crosses as its address, and the screen was hiding a callee the core named wrong (2026-09-22, `m7-screen`)
+Decision: a clause of the whole-body screen goes where both walks already emit the same shape through one path; a layout the body reads as a value stays behind it. Mine, on the counts below.
+Went: `core_args_readable`'s refusal of a `read` argument that is a layout; the audit hook's refusal where every operand is a name; `core_part_ty`'s scalar clause, for any value in one local; the annotation clause where the annotation resolves to the value's type; the store clause for a scalar field and for module state. Stayed: a layout name the body reads or binds from a switch, 584 bodies over `examples/`, because the name would alias the address or copy it and the rows say neither; an arithmetic row whose operand is not a scalar, 29 alone, because `core_operand` admits scalars and the operand types were not classed further; a `where` name, 55, because the row states no check (RFC-0079); a `modify` or `consume` layout argument, 46, because ownership after the call is the call arm's; `hostMonotonicNanos` and `hostRandomSeed`, 6, which have no signature.
+Lines: `direct.rs` 18,904 to 18,951. `core.rs` 7,230 to 7,237. The screens widened and the walk gained a field store and a dropped hook, so the file grew. Refusals: 0 lost / 0 gained. Manifest: 7, 161, 19, 0 and 19 rows of 174, each written in the commit that moved it.
+Licence:
+- `coredrive --ignored`: 168 programs, 21,556 bodies. The emitter took the core's walk for 13,350 of 21,512, then 13,709 after the argument, 14,213 after the hooks, 14,274 after the parts, 14,312 after the annotation and 14,340 after the store. Whole 15,128 and carried end to end 671, unmoved. 1 byte-identical, 167 run the same, 0 run apart.
+- the moved manifest rows, read in `wasm2wat` against the previous slice's binary: a local where the arm kept the stack, and a typed `if` that stores into a local. `jsoncodec` and `jsondecbytes` also build each arm's variant in the caller's storage and return per arm, and their frames fall from 64 to 16 bytes. All 161 rows of the hook slice are one shape, in `runtime$free`.
+- stacked on main at `b5890b6c`, with the `for` head, key, release and panic tracks: 14,283 to 14,798 of 21,512, whole 16,563, carried 1,044, 1 byte-identical, 167 run the same, 0 run apart. The hook slice was dropped in the rebase: the panic track's core states no hook row in an unaudited build, which moved the same 161 rows of `runtime$free`. The manifest rows per remaining slice are 7, 22, 1 and 19; the extra rows are the slot shape, and `shadowing.vyrn`'s is a typed `block` that stores into a local. `Stmt::IfLet` leaves `coredrive`'s carried list with its arm unmoved at 155: its one row-carried occurrence is in a body the whole-body walk takes, which the per-form count does not see. The walk's catch-all arm became unreachable once the store and the release arms stood together, and went. `residue` 173 / 173 clean on both engines, the leak check 2, 22, 4 and 1 ok, `cargo test -p vyrn-cli` 648 passed, 0 failed.
+- `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, branch-point binary and this one: byte-identical stderr and exit code, 338 accepted and 77 refused.
+- `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `residue --ignored`, 319 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed.
+- `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- the bench corpus, 17 programs and 78 benches, base and head interleaved per program, three rounds: best of three, median ratio 1.000, from 0.484 to 1.088, median noise band 1.01. The rows outside their band are all faster and each is one round: `simdbench` floor, ceil and trunc, and six `membench` rows. `vyrn bench --compare` against the base's best of three at x1.50: 16 of 17 clean. `simdbench` flags 6 rows under a host scale of x0.60, and the base binary flags the same 6 against its own best of three.
+- `cargo test -p vyrn-cli` as four `--test` groups: 647 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed. Both formatters clean; the release build has no warning. The emitter census re-pinned in each commit: the mapping kind 8,979 to 9,026 lines.
+Findings:
+- the screen was hiding a defect in the core. `Builder::call` asked the program's functions before the scope, so `std/http`'s `h(req)` through a `fn`-typed parameter named a test program's own `fn h(path: String)`, and four page tests stopped compiling once a layout argument passed the screen. The core now asks the binding first, which is `Checker::call`'s order.
+- the hooks were the largest clause that stood alone: 3,249 compiles of `runtime$free`, `runtime$envGet` and `runtime$auditDeath` over the gate list, one hook call each, with names for operands.
+- the first clause in the table never stood alone. A layout name the body does not make is always also the read or the switch that binds it, and that is the one family left in front of most of the remaining bodies.
+- a field at offset zero costs `i32.const 0; i32.add` in the store arm, where the arm's `Place::addr` adds nothing. `modify.vyrn` shows it once; both engines fold it.
+- `VYRN_FORM_TALLY` over the gate list: no arm reads zero. `Stmt::Break` stands at 20, 19 in `vyrn-cli`'s unit-test binary, which compiles without a core, and 1 in `jchain.vyrn`; `Stmt::IfLet` 1,489, `Stmt::Drop` 6,170, `Stmt::ForIn` 19,100, held by the `Test::Impl`, release and element-read families. Nothing in `FORMS` turns false.
+Left: the layout read, 584 bodies over `examples/` and the first clause of 7,964 compiles over the gate list. The decision is the lead's: a name read from a layout is its address for the read's extent, never a copy, because §2.1 says a place is never copied to read a field of it and a copy exists only where the program writes `.copy()`; a `let y = x` of an owned layout is a move the linear judgment already reads, and a `read` binding is a borrow the kernel's alias rule already guards. The next track builds it; the non-scalar operand, blocked by an operation the walk does not read, not classed; the `where` name, blocked by the check row; the `modify` layout argument, blocked by the call arm's write-back.
+
+##### What the whole-body screen refuses, by clause (2026-09-22, `m7-screen`)
+
+Measured before any code moved. A temporary instrument in `Fn_::core_walkable` and the statement screen under it made every refusing clause record its name and pass, so one run gives each body's first clause and every clause it meets. It ran over the gate list in one cache state: `cargo test -p vyrn-cli` as four `--test` groups and `coredrive --ignored`. A body is counted once per compile, and only where `core::gaps` names no gap, which is 107,283 compiles: 89,084 taken, 18,199 refused.
+
+| clause | first | only | met |
+|---|---|---|---|
+| a name of a layout the body does not make, call or take as a parameter | 7,964 | 0 | 8,334 |
+| a call to a callee with no signature: the three audit hooks, then `hostMonotonicNanos` and `hostRandomSeed` | 3,312 | 3,312 | 4,198 |
+| a `read` argument that is a layout (`core_args_readable`) | 2,639 | 2,420 | 8,300 |
+| a read or take of a place that is not a scalar | 1,140 | 886 | 6,106 |
+| an arithmetic operand that is not a scalar (`core_operand`) | 1,103 | 376 | 2,508 |
+| a name of a `where` type | 596 | 0 | 599 |
+| a store into a place that is not a name | 551 | 249 | 798 |
+| a made layout under an annotation | 537 | 6 | 564 |
+| a switch payload binder that is not a scalar | 124 | 0 | 3,717 |
+| an aggregate call into a temporary that does not land | 89 | 83 | 291 |
+| a made layout into a temporary | 74 | 0 | 1,496 |
+| an arithmetic operand that is a string literal | 27 | 26 | 50 |
+| a `modify` or `consume` argument that is a layout | 25 | 3 | 751 |
+| a name of a unit type | 8 | 0 | 8 |
+| a `let` annotated with a `where` type | 4 | 4 | 4 |
+| a store into a name that is not a scalar | 3 | 3 | 1,248 |
+| an aggregate result checked where it is returned | 3 | 0 | 3 |
+
+The first clause is never the only one in 7,964 bodies: a layout name the body does not make is always also the statement that reads or binds it, and the two close together or not at all. The audit hooks are 3,249 of the 3,312, one call each in `runtime$free`, `runtime$envGet` and `runtime$auditDeath`, and every operand of the three is a name.

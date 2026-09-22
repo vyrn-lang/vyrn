@@ -17295,6 +17295,17 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&Instruction::LocalSet(l));
                 }
+                // A field or module state: its address with the field's offset
+                // added, the value, and the store, which is the `SetField`
+                // arm's order for a scalar field.
+                St::Store {
+                    place, value, line, ..
+                } => {
+                    let (ty, off) = self.core_addr(m, b, body, w, place, *line)?;
+                    self.core_step(b, off);
+                    self.core_val(m, b, body, w, value, &ty, *line)?;
+                    b.ins(&store_of(&self.cx.ll(&ty)));
+                }
                 // A LOOP'S EXIT, which the core states and wasm has one
                 // instruction for. The pass makes up exactly one `break`
                 // (`site: 0`, "a break this pass made up") and puts it in the
@@ -17470,7 +17481,6 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::Drop);
                     }
                 }
-                _ => return unsupported("a core statement this walk does not read", 0),
             }
         }
         Ok(())
@@ -17878,11 +17888,12 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether this walk writes one PART of a made layout at the type the
     /// layout puts it at — RFC-0125 M7.
     ///
-    /// A scalar the walk emits, and not a `where` type: a validated part is
-    /// checked where it is stored (RFC-0079) and the row states no check, which
-    /// is the same screen every other clause of this walk makes.
+    /// A value in one wasm local, which a String is as much as an `Int64`
+    /// ([`Fn_::core_framed`]): the builders store it through [`Fn_::part`] for
+    /// both walks. A layout part is built from an expression, which the row
+    /// does not carry.
     fn core_part_ty(&self, t: &Type) -> bool {
-        self.core_framed(t) && core_scalar(&self.cx.resolve(t))
+        self.core_framed(t)
     }
 
     /// Whether this walk gives a name of `t` the place the AST walk gives it —
@@ -17954,7 +17965,7 @@ impl<'p> Fn_<'_, 'p> {
                 kind: Callee::Ctor,
                 ..
             } => {
-                args.iter().all(|(v, _)| core_operand(body, v))
+                args.iter().all(|(v, _)| self.core_val_readable(body, v))
                     && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
                     && self.core_variant(ty, callee).is_some_and(|(_, p)| {
                         p.len() == args.len() && p.iter().all(|t| self.core_part_ty(t))
@@ -17971,8 +17982,8 @@ impl<'p> Fn_<'_, 'p> {
     /// part, parts this walk emits, and no check at the construction that the
     /// row does not carry.
     fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
-        let scalar = |t: &Type| self.core_part_ty(t);
-        if !vs.iter().all(|v| core_operand(body, v))
+        let part = |t: &Type| self.core_part_ty(t);
+        if !vs.iter().all(|v| self.core_val_readable(body, v))
             || !matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
         {
             return false;
@@ -17994,13 +18005,11 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 decl.len() == vs.len()
                     && names.len() == vs.len()
-                    && decl
-                        .iter()
-                        .all(|f| scalar(&f.ty) && names.contains(&f.name))
+                    && decl.iter().all(|f| part(&f.ty) && names.contains(&f.name))
             }
             Ctor::Array => match self.cx.resolve(ty) {
-                Type::Array(inner) => scalar(&inner),
-                Type::ArrayN(inner, n) => n == vs.len() && n > 0 && scalar(&inner),
+                Type::Array(inner) => part(&inner),
+                Type::ArrayN(inner, n) => n == vs.len() && n > 0 && part(&inner),
                 _ => false,
             },
             Ctor::Map | Ctor::Try(_) => false,
@@ -18171,10 +18180,16 @@ impl<'p> Fn_<'_, 'p> {
                 let Some((place, ty)) = self.core_place(w, body, *n) else {
                     return unsupported("a core name with no place", line);
                 };
-                let Place::Local(l) = place else {
-                    return unsupported("a core name that is not a local", line);
-                };
-                b.ins(&Instruction::LocalGet(l));
+                match place {
+                    Place::Local(l) => {
+                        b.ins(&Instruction::LocalGet(l));
+                    }
+                    // A layout is its address, which is what the `Expr::Var`
+                    // arm pushes for one.
+                    _ if matches!(self.cx.repr(&ty, line)?, Repr::Agg(_))
+                        && place.addr(b, 0).is_some() => {}
+                    _ => return unsupported("a core name that is not a local", line),
+                }
                 ty
             }
             // A literal is emitted at the type the AST walk gives one and
@@ -18281,16 +18296,16 @@ impl<'p> Fn_<'_, 'p> {
         for st in &body.stmts {
             core_lets(st, &mut lets);
         }
-        // A made layout is built into the ANNOTATION's layout, and this walk
-        // reads the annotation off the statement it was handed
-        // ([`Fn_::core_took`]). The per-body walk is handed none, so a made
-        // layout whose `let` annotates one stays in the arm. The key is the
-        // node the plan keys the binding by, which is that `Stmt::Let`.
+        // A made layout is built into the ANNOTATION's layout, and the
+        // per-body walk builds into the name's, which is the type of the
+        // VALUE. The two are one layout where they resolve alike, and a made
+        // layout whose `let` annotates another type stays in the arm. The key
+        // is the node the plan keys the binding by, which is that `Stmt::Let`.
         let mut annotated = Vec::new();
         if let Some(blk) = stmts {
             each_block(blk, &mut |_| {}, &mut |s| {
-                if matches!(s, Stmt::Let { ty: Some(_), .. }) {
-                    annotated.push(s as *const Stmt as usize);
+                if let Stmt::Let { ty: Some(t), .. } = s {
+                    annotated.push((s as *const Stmt as usize, self.cx.resolve(t)));
                 }
             });
         }
@@ -18315,12 +18330,14 @@ impl<'p> Fn_<'_, 'p> {
             // what places it is the `return` after it.
             if !(self.core_framed(&info.ty)
                 || (n < body.params.len() && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
-                && !(info.binding.is_none_or(|at| !annotated.contains(&at))
-                    && lets.iter().any(|(b, rhs)| {
-                        *b as usize == n
-                            && (self.core_makes(body, &info.ty, rhs)
-                                || self.core_agg_call(body, rhs))
-                    }))
+                && !(info.binding.is_none_or(|at| {
+                    annotated
+                        .iter()
+                        .all(|(a, t)| *a != at || *t == self.cx.resolve(&info.ty))
+                }) && lets.iter().any(|(b, rhs)| {
+                    *b as usize == n
+                        && (self.core_makes(body, &info.ty, rhs) || self.core_agg_call(body, rhs))
+                }))
             {
                 return false;
             }
@@ -18384,9 +18401,14 @@ impl<'p> Fn_<'_, 'p> {
                     || self.core_lands(body, ss, i, reads)
             }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
+            // A store into a field or into module state owns no heap when its
+            // type is a scalar, so the displaced value needs no release.
             St::Store { place, value, .. } => {
-                matches!(place, vyrn_lower::core::Place::Name(n)
-                    if core_scalar(&body.names[*n as usize].ty))
+                let ty = match place {
+                    vyrn_lower::core::Place::Name(n) => Some(body.names[*n as usize].ty.clone()),
+                    p => self.core_place_ty(body, p),
+                };
+                ty.is_some_and(|t| core_scalar(&t) && !self.checks(&t))
                     && self.core_val_readable(body, value)
             }
             St::If {
@@ -18468,15 +18490,22 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// A value that owns heap crosses as its pointer, and who owns it after
     /// the call is the call arm's decision: this walk writes the pointer and
-    /// nothing else, which is what a `read` argument is.
+    /// nothing else, which is what a `read` argument is. A layout crosses as
+    /// its address the same way ([`Fn_::core_val`]).
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
         args: &[(Val, vyrn_frontend::ast::Capability)],
     ) -> bool {
-        args.iter().all(|(v, c)| {
-            self.core_val_readable(body, v)
-                && (core_operand(body, v) || *c == vyrn_frontend::ast::Capability::Read)
+        args.iter().all(|(v, c)| match c {
+            vyrn_frontend::ast::Capability::Read => {
+                self.core_val_readable(body, v)
+                    || matches!(v, Val::Name(n) if {
+                        let t = &body.names[*n as usize].ty;
+                        matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
+                    })
+            }
+            _ => self.core_val_readable(body, v) && core_operand(body, v),
         })
     }
 
@@ -18535,8 +18564,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The first name the statement `s` reads, which is the only one the
-    /// operand stack can be carrying for it. None for an aggregate call and a
-    /// variant, whose destination goes on the stack before their parts.
+    /// operand stack can be carrying for it. None for an aggregate call, a
+    /// variant and a store into a place, whose destination goes on the stack
+    /// before their parts.
     fn core_first_read(
         &self,
         body: &vyrn_lower::core::Body,
@@ -18544,6 +18574,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Option<vyrn_lower::core::Name> {
         match s? {
             St::Let(_, rhs) if self.core_ctor(rhs) || self.core_agg_call(body, rhs) => None,
+            St::Store { place, .. } if !matches!(place, vyrn_lower::core::Place::Name(_)) => None,
             s => first_read(s),
         }
     }

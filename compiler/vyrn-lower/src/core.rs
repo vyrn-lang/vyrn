@@ -5760,70 +5760,77 @@ impl<'a> Builder<'a> {
         // because a later reader that needs a third case has no other way to
         // ask (RFC-0125 §3 M3, the callee slice).
         let mut kind = Callee::Reserved;
-        let mut caps: Vec<Capability> =
-            if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
-                kind = Callee::Fn;
-                f.params.iter().map(|p| p.capability).collect()
-            } else if prelude::signature(name).is_some() {
-                kind = Callee::Builtin;
-                let mut caps: Vec<Capability> = (0..args.len())
-                    .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
-                    .collect();
-                if rebuilds && !caps.is_empty() {
-                    caps[0] = Capability::Consume;
-                }
-                caps
-            } else if let Some(m) = method {
-                kind = Callee::Method;
-                m.params.iter().map(|p| p.capability).collect()
-            } else if let Some(p) = self.projection(name) {
-                kind = Callee::Projection;
-                p.params.iter().map(|p| p.capability).collect()
-            } else if matches!(name, "Some" | "None" | "Ok" | "Err") || self.is_variant(name) {
-                kind = Callee::Ctor;
-                vec![Capability::Consume; args.len()]
-            } else if vyrn_frontend::checker::RESERVED.contains(&name)
-                || vyrn_frontend::ast::is_surface_builtin(name)
-            {
-                // A reserved name with no prelude row (`fromJson`, `value`, a
-                // generation-time surface builtin): its capabilities are the
-                // prelude's answer where it has one, and `read` elsewhere. The
-                // four surface builtins are one list
-                // (`ast::SURFACE_BUILTINS`); naming two of them here left
-                // `std/vyx`'s `vyxRegion` with no core (RFC-0125 §3 M6,
-                // finding 12). The log levels stood here too, and their rows
-                // took them to the branch above.
-                (0..args.len())
-                    .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
-                    .collect()
-            } else if decls.contains_key(name) {
-                kind = Callee::Named;
-                vec![Capability::Consume; args.len()]
-            } else if name.starts_with('@') {
-                vec![Capability::Read; args.len()]
-            } else if self.lookup(name).is_some() {
-                // A call through a function value: the value's parameters are
-                // `read` (RFC-0023) — a lambda captures by read and takes by read.
-                kind = Callee::Value;
-                vec![Capability::Read; args.len()]
-            } else if matches!(name, "print") {
-                vec![Capability::Read; args.len()]
-            } else if matches!(
-                name,
-                vyrn_frontend::checker::GEN_REFLECT
-                    | vyrn_frontend::checker::GEN_NEXT_INT
-                    | vyrn_frontend::checker::GEN_NEXT_STR
-            ) {
-                // The generation host's three primitives (RFC-0076 M3b). They
-                // exist only under `checker::set_gen_host`, so a program cannot
-                // name them and no declaration does either; the emitter lowers
-                // each in place. The host READS what it is handed — `reflect`
-                // takes the String by address and stashes atoms of its own —
-                // so the guest keeps every argument it owns.
-                vec![Capability::Read; args.len()]
-            } else {
-                return gap_d("a call this slice cannot attribute", name, line);
-            };
+        // A binding of function type is asked first, as `Checker::call` asks
+        // it: a `fn`-typed parameter `h` shadows a function `h` the program
+        // declares, and `h(req)` is a call through the value.
+        let bound = self.lookup(name).is_some_and(|n| {
+            matches!(
+                vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, decls),
+                Type::Fn(..)
+            )
+        });
+        let mut caps: Vec<Capability> = if bound {
+            // A lambda captures by read and takes by read (RFC-0023).
+            kind = Callee::Value;
+            vec![Capability::Read; args.len()]
+        } else if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
+            kind = Callee::Fn;
+            f.params.iter().map(|p| p.capability).collect()
+        } else if prelude::signature(name).is_some() {
+            kind = Callee::Builtin;
+            let mut caps: Vec<Capability> = (0..args.len())
+                .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
+                .collect();
+            if rebuilds && !caps.is_empty() {
+                caps[0] = Capability::Consume;
+            }
+            caps
+        } else if let Some(m) = method {
+            kind = Callee::Method;
+            m.params.iter().map(|p| p.capability).collect()
+        } else if let Some(p) = self.projection(name) {
+            kind = Callee::Projection;
+            p.params.iter().map(|p| p.capability).collect()
+        } else if matches!(name, "Some" | "None" | "Ok" | "Err") || self.is_variant(name) {
+            kind = Callee::Ctor;
+            vec![Capability::Consume; args.len()]
+        } else if vyrn_frontend::checker::RESERVED.contains(&name)
+            || vyrn_frontend::ast::is_surface_builtin(name)
+        {
+            // A reserved name with no prelude row (`fromJson`, `value`, a
+            // generation-time surface builtin): its capabilities are the
+            // prelude's answer where it has one, and `read` elsewhere. The
+            // four surface builtins are one list
+            // (`ast::SURFACE_BUILTINS`); naming two of them here left
+            // `std/vyx`'s `vyxRegion` with no core (RFC-0125 §3 M6,
+            // finding 12). The log levels stood here too, and their rows
+            // took them to the branch above.
+            (0..args.len())
+                .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
+                .collect()
+        } else if decls.contains_key(name) {
+            kind = Callee::Named;
+            vec![Capability::Consume; args.len()]
+        } else if name.starts_with('@') {
+            vec![Capability::Read; args.len()]
+        } else if matches!(name, "print") {
+            vec![Capability::Read; args.len()]
+        } else if matches!(
+            name,
+            vyrn_frontend::checker::GEN_REFLECT
+                | vyrn_frontend::checker::GEN_NEXT_INT
+                | vyrn_frontend::checker::GEN_NEXT_STR
+        ) {
+            // The generation host's three primitives (RFC-0076 M3b). They
+            // exist only under `checker::set_gen_host`, so a program cannot
+            // name them and no declaration does either; the emitter lowers
+            // each in place. The host READS what it is handed — `reflect`
+            // takes the String by address and stashes atoms of its own —
+            // so the guest keeps every argument it owns.
+            vec![Capability::Read; args.len()]
+        } else {
+            return gap_d("a call this slice cannot attribute", name, line);
+        };
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
         }
