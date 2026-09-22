@@ -25356,8 +25356,8 @@ deletions below can start on no smaller number.
 
 **Gate:** the wasm manifest byte-identical, or re-written in the commit that
 moves a row with the rows named; the refusal corpus 0 lost / 0 gained; the
-residue ratchet; the bench gate; `coredrive`'s byte-identical count not lower
-than before the change.
+residue ratchet; the bench gate; `coredrive`: each program emits the same
+module either way, or both of its modules run the same.
 
 **Step 0, the inventory (`core-inventory`).** One instrument, stated once in
 `core.rs` beside `VYRN_FORM_TALLY`: `VYRN_GAP_TALLY=<file>` appends, for every
@@ -27292,3 +27292,22 @@ Findings:
 - `coredrive`'s shapes compared two walks that failed alike as equal, so a shape that no longer compiled stayed green. Each shape now asserts that it compiles, and the new shape fails without the fix.
 - rebased onto the aggregate track: `coredrive` reads 15,310 whole, 735 carried end to end, 2,575 of 21,512 taken from the core, 159 of 168 byte-identical, and the emitter census the mapping 8,996 lines with 735 rows, `both, for two questions` 8,657.
 Left: the `for` statement on the rows, blocked by the frame's layout half (`m7-frame`), which frames no array the body did not make; its byte shape and its bench price, blocked by the same; the stream head, 21 lines, blocked by the pull; a String's element, blocked by the byte load the row does not state.
+
+#### A temporary is a name, and the name takes a slot (2026-09-22, `m7-temporary`)
+Decision: the core walk gives every named value a slot of its own, including a value the AST arm kept on the operand stack, and where the bytes differ the witness is that both modules run the same. The lead's.
+Went: the unnamed-temporary clause of `Fn_::core_readable` at a `let` and at a store, 17 lines; `coredrive`'s list of nine programs, for one sentence and a run of both modules. Stayed: the `binding` clause on a made layout, because dropping it moved 0 bodies; the aggregate call a `match` scrutinizes, because the arm hands the call's own slot to the switch; a join temporary in a per-statement run, because `Fn_::core_run`'s place clause still asks for it, not measured.
+Lines: `direct.rs` 18,905 to 18,904. `coredrive.rs` 516 to 546. `lowered.rs` 2 more. Refusals: not run; no pass that refuses was touched. Manifest: 174 of 174 rows, rewritten in the commit that moves them. `fib.vyrn`'s wat goes from 52 locals to 73, and 174 of its 220 changed lines are a `local.set` or a `local.get`; the rest are declarations, a typed `if (result i32)` that became an `if` storing into a local, and a literal moved after a `local.set`.
+Licence:
+- `coredrive --ignored`: 168 programs, 21,556 bodies. The emitter took the core's walk for 2,575 of 21,512 before, 10,902 after the `let` clause, 13,350 after the store clause. Whole 15,128 and carried end to end 671, unmoved. Byte-identical 159 to 1; the rest run the same, 9 to 167, and 0 run apart. The eight shapes off the corpus run the same.
+- the bench corpus, 17 programs and 78 benches, base and head interleaved per program, three rounds, release binaries: best of three, median ratio 1.000, from 0.853 to 1.183, median noise band 1.02. The three rows at the edge re-run for five more rounds: `contractquery` 1.183 to 0.987, `membench`'s array copy 0.853 to 1.017, k-nucleotide's 18-mers 0.899 to 1.013. No row moved outside the band.
+- `vyrn bench --compare` against the base's best of three at x1.50: 17 of 17 programs, no regression. Against `bench/baseline.json`: five rows past x1.50 under the base binary and this one at the same factors, so they are older than this track.
+- `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- `residue --ignored`, 283 s: ok on both engines. `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered, unmoved.
+- `cargo test -p vyrn-cli` as four `--test` groups over its 85 targets: 647 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed, 0 failed. Both formatters clean; `cargo build --release -p vyrn-cli`: no warning. The wasm manifest check green after the write.
+- the emitter census re-pinned: the mapping kind 8,980 to 8,979 lines, `both, for two questions` 8,641 to 8,640. `forms`, `coretables`, `surface` and `kernel` green and unmoved.
+Findings:
+- the rule held back what the aggregate track's instrument said it did: the `let` clause moved 8,327 bodies and the join temporary 2,448, which is 10,775 against the 10,867 it named. Under the `let` clause alone, 116,687 `let` rows over the 168 programs took a local where the arm had used the stack.
+- a slot costs nothing that the bench measures. The expected reason is that Cranelift and wasm2c's C both make a wasm local and a stack operand one SSA value; the bench shows the outcome, not the reason.
+- the `lowered` gate's has-type floor counts only the AST walk's answers. It fell from above 10,000 to 9,911 and is now 5,000, with that reason written beside it.
+- no AST arm reached zero. Over `examples/`, `Stmt::Let` on the arm went 17,593 to 11,794, `Stmt::Return` 14,964 to 7,742, `Stmt::If` 30,968 to 18,136, `Stmt::Expr` 22,828 to 4,852, `Stmt::While` 13,710 to 8,837 and `Expr::Var` 219,191 to 107,883. `ForIn` 1,047, `IfLet` 156, `Drop` 443 and `Break` 1 did not move. The gate list contains these programs, so no arm can read zero there, and nothing in `FORMS` turns false.
+Left: about 1,778 bodies whole in the core that the emitter does not take (15,128 of 21,556 against 13,350 of 21,512), blocked by a screen this track did not instrument; the 6,428 bodies with a gap, blocked by the families `coredrive` classes them under; every AST arm, blocked by those same bodies.
