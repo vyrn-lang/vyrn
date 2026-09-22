@@ -17439,7 +17439,6 @@ impl<'p> Fn_<'_, 'p> {
             rhs,
             Rhs::Call {
                 kind: Callee::Ctor,
-                write_back: false,
                 ..
             }
         )
@@ -17471,7 +17470,6 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Call {
                 callee,
                 args,
-                write_back: false,
                 kind: Callee::Ctor,
                 ..
             } => {
@@ -17875,37 +17873,31 @@ impl<'p> Fn_<'_, 'p> {
             // emits it (RFC-0125 §3 M7, the row's own slice).
             Rhs::Prim(Op::Closure | Op::Conv(_), ..) => false,
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_operand(body, v)),
-            // A write-back stores the receiver the call handed back, which is
-            // more than a `call`.
+            // A handed-back receiver asks nothing extra of this walk: the
+            // builder states the call and the store that puts the result back
+            // as two rows, and each is read where it stands (RFC-0125 M7).
             Rhs::Call {
-                callee,
-                args,
-                write_back,
-                kind,
-                ..
+                callee, args, kind, ..
             } => {
-                !write_back
-                    // A value that owns heap crosses as its pointer, and who
-                    // owns it after the call is the call arm's decision: this
-                    // walk writes the pointer and nothing else, which is what
-                    // a `read` argument is.
-                    && args.iter().all(|(v, c)| {
-                        self.core_val_readable(body, v)
-                            && (core_operand(body, v)
-                                || *c == vyrn_frontend::ast::Capability::Read)
-                    })
-                    && (self.core_builtin_readable(body, callee, *kind, args)
-                        || self.core_sig(callee, *kind).is_some_and(|s| {
-                            // An aggregate result crosses through an out-pointer
-                            // the caller allocates, and this walk writes a plain
-                            // `call`: the frame it would need is the callee's
-                            // destination and not a name of this body.
-                            s.params.len() == args.len()
-                                && matches!(
-                                    self.cx.repr(&s.ret_ty, 0),
-                                    Ok(Repr::Scalar(_) | Repr::Unit)
-                                )
-                        }))
+                // A value that owns heap crosses as its pointer, and who
+                // owns it after the call is the call arm's decision: this
+                // walk writes the pointer and nothing else, which is what
+                // a `read` argument is.
+                args.iter().all(|(v, c)| {
+                    self.core_val_readable(body, v)
+                        && (core_operand(body, v) || *c == vyrn_frontend::ast::Capability::Read)
+                }) && (self.core_builtin_readable(body, callee, *kind, args)
+                    || self.core_sig(callee, *kind).is_some_and(|s| {
+                        // An aggregate result crosses through an out-pointer
+                        // the caller allocates, and this walk writes a plain
+                        // `call`: the frame it would need is the callee's
+                        // destination and not a name of this body.
+                        s.params.len() == args.len()
+                            && matches!(
+                                self.cx.repr(&s.ret_ty, 0),
+                                Ok(Repr::Scalar(_) | Repr::Unit)
+                            )
+                    }))
             }
             // A place this walk addresses, whose value is one it loads. An
             // aggregate read is refused by the same clause that refuses an
