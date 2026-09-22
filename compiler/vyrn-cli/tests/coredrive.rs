@@ -77,7 +77,7 @@ fn corpus() -> Vec<PathBuf> {
 const CLASSES: [&str; 7] = [
     "the row names no value (`Val::Lit(Opaque)`)",
     "a lambda body the row does not carry (`Op::Closure`)",
-    "a tag the arm does not carry (`St::Switch`)",
+    "a switch whose arms a call chooses (`Test::Impl`)",
     "a layout: an aggregate made, read or taken",
     "a callee that is no declared function of the program (`Rhs::Call`)",
     "a release the driver must place (`St::Drop`)",
@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 7] = [
+const SHAPES: [(&str, &str); 8] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -180,6 +180,14 @@ const SHAPES: [(&str, &str); 7] = [
         "an order on two string literals",
         "fn vyrnTestMain() -> Int64 { if \"abc\" < \"abd\" { return 1 } return 0 }",
     ),
+    // The tag family's own witness (RFC-0125 M7). Every `if let` of
+    // `examples/` waits on another family as well — a builtin call in the
+    // arm, a layout, a release — so the corpus cannot say whether the two
+    // walks agree on the switch itself.
+    (
+        "an `if let` the rows carry",
+        "fn vyrnTestMain() -> Int64 { let o = Some(7) let mut t = 0          if let Some(n) = o { t = t + n } else { t = 1 } return t }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -189,7 +197,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 7] = [
+const SHAPE_PIN: [(&str, usize, usize); 8] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -197,6 +205,7 @@ const SHAPE_PIN: [(&str, usize, usize); 7] = [
     ("a `let` of an `if` expression", 0, 0),
     ("a match on two string literals", 0, 0),
     ("an order on two string literals", 0, 0),
+    ("an `if let` the rows carry", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
