@@ -1547,6 +1547,81 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
     })
 }
 
+/// What a builtin's specification row states about its operands and its
+/// result (RFC-0125 §2.1). A builtin with such a row is a `call`, not a gap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spec {
+    /// Each operand at the stated type, in order, and a result at the stated
+    /// type. The emitter writes one instruction between them.
+    Typed(Vec<Type>, Type),
+    /// One operand, at whatever type the row put on the name it reads, and a
+    /// result of that same type.
+    OwnType,
+}
+
+/// Every builtin the row specifies, by name.
+///
+/// The emitter answers each of these from the row and nowhere else
+/// (`vyrn_codegen::direct::Fn_::core_call`), so a name added here needs an
+/// emission there; the match over [`Spec`] makes a new KIND a compile error,
+/// and the codegen test `builtin_rows_all_emit` refuses a [`Spec::Typed`] row
+/// with no instruction.
+///
+/// A builtin whose operands and result the row cannot state at all — `print`
+/// and `@str` take a union, `bytes` and `stringFromBytes` hand back an
+/// aggregate the emitter must place — is not here and is still a gap.
+pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
+    static ROWS: std::sync::OnceLock<Vec<(&'static str, Spec)>> = std::sync::OnceLock::new();
+    ROWS.get_or_init(|| {
+        let u64_ = Type::IntN {
+            bits: 64,
+            signed: false,
+        };
+        let i32_ = Type::IntN {
+            bits: 32,
+            signed: true,
+        };
+        let one = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone()], r.clone()));
+        let two = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone(), p.clone()], r.clone()));
+        let (f4, d2) = (Type::F32x4, Type::F64x2);
+        vec![
+            // The IEEE-754 bit views (RFC-0078 M4a): the same 64 bits read at
+            // the other type, which is why neither is a conversion.
+            one("floatBits", &Type::Float, &u64_),
+            one("floatFromBits", &u64_, &Type::Float),
+            // RFC-0083: one lane value broadcast to every lane.
+            one("@f32x4Splat", &Type::Float32, &f4),
+            one("@i32x4Splat", &i32_, &Type::I32x4),
+            one("@f64x2Splat", &Type::Float, &d2),
+            // The lane-wise arithmetic of both widths. `min` and `max` take
+            // two vectors; the roundings and the root take one.
+            two("@f32x4Min", &f4, &f4),
+            two("@f32x4Max", &f4, &f4),
+            one("@f32x4Sqrt", &f4, &f4),
+            one("@f32x4Ceil", &f4, &f4),
+            one("@f32x4Floor", &f4, &f4),
+            one("@f32x4Trunc", &f4, &f4),
+            one("@f32x4Nearest", &f4, &f4),
+            two("@f64x2Min", &d2, &d2),
+            two("@f64x2Max", &d2, &d2),
+            one("@f64x2Sqrt", &d2, &d2),
+            // `x.copy()` (RFC-0089 M1b) hands back the receiver's value with
+            // heap of its own, so its result is the receiver's type and the
+            // row states it by naming the operand.
+            ("@copy", Spec::OwnType),
+        ]
+    })
+}
+
+/// The row [`builtin_rows`] holds for `name`, or `None` where the name is not
+/// a builtin the row specifies.
+pub fn builtin_row(name: &str) -> Option<&'static Spec> {
+    builtin_rows()
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, s)| s)
+}
+
 /// Every gap of `body`: the shapes among its rows that no emitter reads from
 /// the core, in source order, each named once.
 ///
@@ -1640,9 +1715,13 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             // Since RFC-0125 M7 a variant constructor is read off the row too
             // (`direct::Fn_::core_make`): it is a layout MADE, with a tag in
             // front of its payload, and not the `call` the table answers.
+            // Since RFC-0125 M7's builtin family a builtin the row SPECIFIES
+            // is read off the row too (`direct::Fn_::core_call`): the row
+            // names the operand types and the result, and the emitter's table
+            // names the instruction.
             if *write_back {
                 out.push(format!("Call:writeBack:{callee}"));
-            } else if !matches!(kind, Callee::Fn | Callee::Ctor) {
+            } else if !matches!(kind, Callee::Fn | Callee::Ctor) && builtin_row(callee).is_none() {
                 out.push(format!("Call:{kind:?}:{callee}"));
             }
             for (v, _) in args {
