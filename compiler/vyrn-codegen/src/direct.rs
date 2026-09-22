@@ -18065,9 +18065,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => self.core_val_readable(body, v),
-            // A conversion is a row this walk does not read yet; the arm
-            // emits it (RFC-0125 §3 M7, the row's own slice).
-            Rhs::Prim(Op::Closure | Op::Conv(_), ..) => false,
+            Rhs::Prim(Op::Closure, ..) => false,
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_operand(body, v)),
             // A handed-back receiver asks nothing extra of this walk: the
             // builder states the call and the store that puts the result back
