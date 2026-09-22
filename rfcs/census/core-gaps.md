@@ -258,3 +258,13 @@ with 323 field takes, 4 global takes and 1 element take; what is left is
 `Read:Elem`, `Read:Key` and `Take:Elem`. Over `examples/` the tally reads 4,238
 lines whole where it read 4,026, and `coredrive --ignored` reads 3,605 with no
 gap where it read 3,449.
+
+The opaque track (`m7-opaque`) closed the nullary constructor, which the page
+above called sugar and which was the whole of what the family alone blocked:
+the row states a `Callee::Ctor` call with no parts. What is left of the family
+carries a kind, so `Opaque` is now `Opaque:Exit`, `Opaque:Index`,
+`Opaque:Trapped`, `Opaque:Static` and `Opaque:Unbound`. Over `examples/` they
+read 1,430 lines, 1,430, 1,428, 56 and 0, and the bodies the family alone
+blocks fall from 786 to 6. Over `examples/` the tally reads 16,165 lines whole
+where it read 15,406, and `coredrive --ignored` reads 14,495 with no gap where
+it read 13,798.
