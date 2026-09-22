@@ -380,15 +380,18 @@ pub enum Lit {
 /// What a row stands on where it names no value.
 ///
 /// Each kind is one producer in this pass, and each one blocks on something
-/// of its own: [`Opaque::Static`] on a value kind `Lit` does not have,
-/// [`Opaque::Index`] and [`Opaque::Exit`] on the container's length, which is
-/// a call the row does not state, and the last two on nothing, because the
-/// statement after them never runs.
+/// of its own: [`Opaque::Index`] and [`Opaque::Exit`] on the container's
+/// length, which is a call the row does not state, [`Opaque::Trapped`] on
+/// nothing, because the statement after it never runs, and [`Opaque::Unbound`]
+/// on a store with nothing to store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opaque {
-    /// A function's name used as a value (`sortWith(es, byCount)`) or a
-    /// type's name as an argument (`fromJson(Bag, src)`). Both are static and
-    /// neither is a value [`Lit`] has a kind for.
+    /// A function's name used as a value, or a type's name as an argument
+    /// (`fromJson(Bag, src)`). The position decides what it stands for: a
+    /// `fn`-typed argument (`unfold(100, naturals)`) is monomorphized at the
+    /// call and no value stands there at all, and a stored fn value (`let
+    /// sink: IntSink = double`) is the tag RFC-0037's defunctionalizer
+    /// chose, which the emitter holds and this pass does not.
     Static,
     /// The index of the element read at a `for` head. The row states the
     /// read; the counter that walks the container is the emitter's, and
