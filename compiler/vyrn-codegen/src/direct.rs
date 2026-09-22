@@ -17141,11 +17141,11 @@ impl<'p> Fn_<'_, 'p> {
     /// One read of a place, the address computed from the row — RFC-0125 M7,
     /// the layout-read family.
     ///
-    /// §2.1 states the rule: `b[i].x` is the address `elem(b, i) + offset(x)`,
-    /// a read of it is one scalar load, and a place is never copied to read a
-    /// field of it. [`Fn_::core_addr`] is the address, stated once over
+    /// §2.1 states the rule: a place is an address, a read of it is one scalar
+    /// load, and a place is never copied to read a field of it.
+    /// [`Fn_::core_addr`] is the address, stated once over
     /// [`vyrn_lower::core::Place`]; what this adds is the load the value's own
-    /// type asks for, which is the offset folded into the access.
+    /// type asks for, with the offset folded into the access.
     ///
     /// A take reads the same address. The hole it leaves in the base, and the
     /// release that walks around it, are rows the driver places, so a body
@@ -17180,7 +17180,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The address of a place, and the offset the load still owes it —
-    /// RFC-0125 M7, §2.1's `elem(b, i) + offset(x)` written once.
+    /// RFC-0125 M7, §2.1's address arithmetic written once.
     ///
     /// `Some(off)` is a FIELD step: the address on the stack is the record's
     /// and the field is `off` bytes into it, which a scalar load folds into its
