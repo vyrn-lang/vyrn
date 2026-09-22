@@ -1728,7 +1728,10 @@ pub fn gaps(body: &Body) -> Vec<String> {
 }
 
 fn gaps_of(ss: &[St], out: &mut Vec<String>) {
-    for s in ss {
+    // Nothing after a `trap` in its list runs, so nothing there is a gap: the
+    // value a `panic` in value position leaves ([`Opaque::Trapped`]) is read
+    // only by the statement after the `trap`.
+    for s in ss.iter().take_while(|s| !matches!(s, St::Trap)) {
         match s {
             St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(r, out),
             St::Store { place, value, .. } => {
