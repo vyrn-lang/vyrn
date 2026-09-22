@@ -4375,6 +4375,175 @@ impl<'p> Fn_<'_, 'p> {
         self.region_bump(b, -1);
     }
 
+    /// `stringFromBytes(b)` (RFC-0014): the bytes checked by `std/text`'s
+    /// `stringFault` and then copied into a fresh NUL-terminated buffer, as
+    /// a `Result<String, String>`. The result is an aggregate, so the slot
+    /// is allocated here and the runtime writes through it — the same
+    /// hidden destination an aggregate-returning Vyrn call gets.
+    ///
+    /// RFC-0125 §3 M6 (the third judgment's fifth slice): the check is the
+    /// call this arm makes first, and its answer travels into
+    /// `strFromBytes` where the DFA table used to go. This backend was
+    /// never a carrier of the two `String` rows — it called the runtime —
+    /// and now the runtime is not one either.
+    ///
+    /// `operand` writes argument `i` at the type asked for.
+    fn string_from_bytes(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let ty = Type::result(Type::Str, Type::Str);
+        let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+            return unsupported("`stringFromBytes` returning a non-aggregate", line);
+        };
+        // Through `expr_as`, so a literal argument is typed by the position
+        // rather than by its first element: `['h', 'i']` is bytes because
+        // this is where bytes are wanted, and an empty one has nothing else
+        // to be typed by at all.
+        let bytes = Type::Array(Box::new(Type::IntN {
+            bits: 8,
+            signed: false,
+        }));
+        operand(self, m, b, 0, &bytes)?;
+        let src = self.scratch(b, ValType::I32, 0);
+        let al = self.layout_of(&bytes, line)?;
+        b.ins(&Instruction::LocalSet(src));
+        let off = b.alloc(l.size, l.align);
+        self.str_from_bytes(b, off, src, &al, line)?;
+        b.slot(off);
+        Ok(ty)
+    }
+
+    /// `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
+    /// A copy, because the array is growable and the string is not: a `push`
+    /// on the result must not write into the string's storage.
+    /// `bytes(s)` and `bytes(s, start, end)` (RFC-0113). One arm: the
+    /// three-argument form differs only in where the copy starts and how
+    /// long it is, and `MemoryCopy` does not care which.
+    ///
+    /// `operand` writes argument `i` at the type asked for; `ranged` is the
+    /// three-argument form.
+    fn bytes_of(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ranged: bool,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let ty = Type::Array(Box::new(Type::IntN {
+            bits: 8,
+            signed: false,
+        }));
+        let l = self.layout_of(&ty, line)?;
+        operand(self, m, b, 0, &Type::Str)?;
+        let s = self.scratch(b, ValType::I32, 0);
+        let n = self.scratch(b, ValType::I32, 1);
+        let buf = self.scratch(b, ValType::I32, 2);
+        let from = self.scratch(b, ValType::I32, 3);
+        let malloc = self.cx.rt.malloc;
+        b.ins(&Instruction::LocalTee(s));
+        if ranged {
+            // `start` and `end` as i32 offsets, bounds checked against
+            // the string's length before either is used. The wording is
+            // `s[i]`'s, so the trap catalogue does not grow.
+            str_len(b);
+            let len = self.scratch(b, ValType::I32, 4);
+            b.ins(&Instruction::LocalSet(len));
+            operand(self, m, b, 1, &Type::Int)?;
+            b.ins(&Instruction::I32WrapI64);
+            b.ins(&Instruction::LocalSet(from));
+            operand(self, m, b, 2, &Type::Int)?;
+            b.ins(&Instruction::I32WrapI64);
+            let to = self.scratch(b, ValType::I32, 5);
+            b.ins(&Instruction::LocalSet(to));
+            // start < 0 || end < start || end > len — one unsigned
+            // compare would miss the ordering, so all three are written.
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::I32Or);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(len));
+            b.ins(&Instruction::I32GtS);
+            b.ins(&Instruction::I32Or);
+            b.ins(&Instruction::If(BlockType::Empty));
+            self.depth += 1;
+            // The offset the other two engines name: the low one when it
+            // is negative or out of order, otherwise the high one.
+            let at = b.local(ValType::I64);
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I64ExtendI32S);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::I64ExtendI32S);
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32LtS);
+            b.ins(&Instruction::I32Or);
+            b.ins(&Instruction::Select);
+            b.ins(&Instruction::LocalSet(at));
+            self.trap_row(b, vyrn_frontend::trap::Rule::StringIndex, Some(at));
+            self.depth -= 1;
+            b.ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(to));
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::I32Sub);
+        } else {
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::LocalSet(from));
+            str_len(b);
+        }
+        b.ins(&Instruction::LocalTee(n));
+        // A zero-length string still gets a buffer, so the triple's pointer
+        // is never null — `push` reallocs from it either way.
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::Call(malloc));
+        b.ins(&Instruction::LocalTee(buf));
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::LocalGet(from));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word_at(l.fields[0])));
+        for f in [l.fields[1], l.fields[2]] {
+            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(n));
+            b.ins(&Instruction::I64ExtendI32U);
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(ty)
+    }
+
     /// Call `std/runtime`'s `strFromBytes` for the bytes at `src` — a local
     /// holding an `Array<UInt8>` header — writing the `Result<String, String>`
     /// it answers into the frame slot at `dest`.
@@ -8100,142 +8269,17 @@ impl<'p> Fn_<'_, 'p> {
                     None => unsupported("the built-in `Value` enum", line),
                 };
             }
-            // `stringFromBytes(b)` (RFC-0014): the bytes checked by `std/text`'s
-            // `stringFault` and then copied into a fresh NUL-terminated buffer, as
-            // a `Result<String, String>`. The result is an aggregate, so the slot
-            // is allocated here and the runtime writes through it — the same
-            // hidden destination an aggregate-returning Vyrn call gets.
-            //
-            // RFC-0125 §3 M6 (the third judgment's fifth slice): the check is the
-            // call this arm makes first, and its answer travels into
-            // `strFromBytes` where the DFA table used to go. This backend was
-            // never a carrier of the two `String` rows — it called the runtime —
-            // and now the runtime is not one either.
-            "stringFromBytes" if args.len() == 1 => {
-                let ty = Type::result(Type::Str, Type::Str);
-                let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
-                    return unsupported("`stringFromBytes` returning a non-aggregate", line);
+            "stringFromBytes" | "bytes"
+                if args.len() == 1 || (name == "bytes" && args.len() == 3) =>
+            {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.expr_as(m, b, &args[i], t).map(|_| ())
+                    };
+                return match name {
+                    "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    _ => self.string_from_bytes(m, b, &mut operand, line),
                 };
-                // Through `expr_as`, so a literal argument is typed by the position
-                // rather than by its first element: `['h', 'i']` is bytes because
-                // this is where bytes are wanted, and an empty one has nothing else
-                // to be typed by at all.
-                let bytes = Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }));
-                self.expr_as(m, b, &args[0], &bytes)?;
-                let src = self.scratch(b, ValType::I32, 0);
-                let al = self.layout_of(&bytes, line)?;
-                b.ins(&Instruction::LocalSet(src));
-                let off = b.alloc(l.size, l.align);
-                self.str_from_bytes(b, off, src, &al, line)?;
-                b.slot(off);
-                return Ok(ty);
-            }
-            // `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
-            // A copy, because the array is growable and the string is not: a `push`
-            // on the result must not write into the string's storage.
-            // `bytes(s)` and `bytes(s, start, end)` (RFC-0113). One arm: the
-            // three-argument form differs only in where the copy starts and how
-            // long it is, and `MemoryCopy` does not care which.
-            "bytes" if args.len() == 1 || args.len() == 3 => {
-                let ty = Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }));
-                let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let s = self.scratch(b, ValType::I32, 0);
-                let n = self.scratch(b, ValType::I32, 1);
-                let buf = self.scratch(b, ValType::I32, 2);
-                let from = self.scratch(b, ValType::I32, 3);
-                let malloc = self.cx.rt.malloc;
-                b.ins(&Instruction::LocalTee(s));
-                if args.len() == 3 {
-                    // `start` and `end` as i32 offsets, bounds checked against
-                    // the string's length before either is used. The wording is
-                    // `s[i]`'s, so the trap catalogue does not grow.
-                    str_len(b);
-                    let len = self.scratch(b, ValType::I32, 4);
-                    b.ins(&Instruction::LocalSet(len));
-                    self.expr_as(m, b, &args[1], &Type::Int)?;
-                    b.ins(&Instruction::I32WrapI64);
-                    b.ins(&Instruction::LocalSet(from));
-                    self.expr_as(m, b, &args[2], &Type::Int)?;
-                    b.ins(&Instruction::I32WrapI64);
-                    let to = self.scratch(b, ValType::I32, 5);
-                    b.ins(&Instruction::LocalSet(to));
-                    // start < 0 || end < start || end > len — one unsigned
-                    // compare would miss the ordering, so all three are written.
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32Const(0));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::I32Or);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(len));
-                    b.ins(&Instruction::I32GtS);
-                    b.ins(&Instruction::I32Or);
-                    b.ins(&Instruction::If(BlockType::Empty));
-                    self.depth += 1;
-                    // The offset the other two engines name: the low one when it
-                    // is negative or out of order, otherwise the high one.
-                    let at = b.local(ValType::I64);
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I64ExtendI32S);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::I64ExtendI32S);
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32Const(0));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32LtS);
-                    b.ins(&Instruction::I32Or);
-                    b.ins(&Instruction::Select);
-                    b.ins(&Instruction::LocalSet(at));
-                    self.trap_row(b, vyrn_frontend::trap::Rule::StringIndex, Some(at));
-                    self.depth -= 1;
-                    b.ins(&Instruction::End);
-                    b.ins(&Instruction::LocalGet(to));
-                    b.ins(&Instruction::LocalGet(from));
-                    b.ins(&Instruction::I32Sub);
-                } else {
-                    b.ins(&Instruction::I32Const(0));
-                    b.ins(&Instruction::LocalSet(from));
-                    str_len(b);
-                }
-                b.ins(&Instruction::LocalTee(n));
-                // A zero-length string still gets a buffer, so the triple's pointer
-                // is never null — `push` reallocs from it either way.
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::I32Add);
-                b.ins(&Instruction::I64ExtendI32U);
-                b.ins(&Instruction::Call(malloc));
-                b.ins(&Instruction::LocalTee(buf));
-                b.ins(&Instruction::LocalGet(s));
-                b.ins(&Instruction::LocalGet(from));
-                b.ins(&Instruction::I32Add);
-                b.ins(&Instruction::LocalGet(n));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::LocalGet(buf));
-                b.ins(&Instruction::I32Store(word_at(l.fields[0])));
-                for f in [l.fields[1], l.fields[2]] {
-                    b.slot(off + f);
-                    b.ins(&Instruction::LocalGet(n));
-                    b.ins(&Instruction::I64ExtendI32U);
-                    b.ins(&Instruction::I64Store(word8()));
-                }
-                b.slot(off);
-                return Ok(ty);
             }
             // (`slice` was here, three `expr_as` and a call into `rt.slice`. The
             // arm was cheap; the RUNTIME FUNCTION behind it was a third copy of the
