@@ -216,7 +216,7 @@ struct Alias {
 }
 
 /// The root name of a place and the path under it; `None` for module state.
-pub(crate) fn root_of(p: &Place) -> Option<(Name, String)> {
+pub fn root_of(p: &Place) -> Option<(Name, String)> {
     match p {
         Place::Name(n) => Some((*n, String::new())),
         Place::Global(_) => None,

@@ -17255,6 +17255,19 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
+                // A LAYOUT READ OUT OF A PLACE, held as the place's address in
+                // a local, the way a layout parameter is (RFC-0125 M7).
+                St::Let(n, Rhs::Read(p)) if self.core_alias(body, *n).is_some() => {
+                    let line = body.names[*n as usize].line;
+                    let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
+                    self.core_step(b, off);
+                    let Place::Local(l) = self.place_for(b, &Repr::Scalar(ValType::I32), line)?
+                    else {
+                        return unsupported("an address with no local", line);
+                    };
+                    b.ins(&Instruction::LocalSet(l));
+                    self.core_bind(b, body, w, *n, Place::Local(l), ty)?;
+                }
                 // An AGGREGATE CALL RESULT, written through the out-pointer
                 // into the binding's own slot, or into the caller's storage
                 // when the `return` after it hands the temporary back. The
@@ -17934,6 +17947,71 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// The place a layout name holds the ADDRESS of — RFC-0125 M7, a name read
+    /// from a layout.
+    ///
+    /// §2.1: a place is never copied to read it, so a borrow bound by a read of
+    /// a layout is that place for the read's extent. The kernel ends the alias
+    /// at every store, take and drop of the place, and refuses a read after
+    /// one.
+    ///
+    /// `None` where the program can observe the copy. A layout that owns no
+    /// heap is a value, and the kernel lets its place be written while it
+    /// lives. A binding the body stores into, or hands to `modify`, writes a
+    /// value of its own. A callee handed the root, or any root on the chain,
+    /// to `modify` writes where the kernel does not look (`freeNode` in
+    /// `tree.vyrn`). Module state has no root: any callee may write it. A
+    /// store into the root is the kernel's, which ends the alias there.
+    fn core_alias<'b>(
+        &self,
+        body: &'b vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<&'b vyrn_lower::core::Place> {
+        let info = &body.names[n as usize];
+        if !info.borrow
+            || self.checks(&info.ty)
+            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
+        {
+            return None;
+        }
+        let mut lets = Vec::new();
+        let mut written = Vec::new();
+        for s in &body.stmts {
+            core_lets(s, &mut lets);
+            core_written(s, &mut written);
+        }
+        let read = |m: vyrn_lower::core::Name| {
+            let mut at = lets.iter().filter(|(b, _)| *b == m);
+            match (at.next(), at.next()) {
+                (Some((_, Rhs::Read(p))), None) => Some(p),
+                _ => None,
+            }
+        };
+        let place = read(n)?;
+        if written.iter().any(|(m, _)| *m == n)
+            || matches!(place, vyrn_lower::core::Place::Key(..))
+            || self
+                .core_place_ty(body, place)
+                .is_none_or(|t| self.cx.resolve(&t) != self.cx.resolve(&info.ty))
+        {
+            return None;
+        }
+        // Each name on the chain is bound once, before the name it reads, so
+        // the walk ends within `body.names.len()` steps.
+        let mut on = place;
+        for _ in 0..body.names.len() {
+            let (root, _) = vyrn_lower::kernel::root_of(on)?;
+            if written.contains(&(root, true)) {
+                return None;
+            }
+            match read(root) {
+                Some(p) => on = p,
+                None => return Some(place),
+            }
+        }
+        None
+    }
+
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
     /// layout-made family.
     ///
@@ -18449,6 +18527,9 @@ impl<'p> Fn_<'_, 'p> {
             // walk cannot do with a layout is read it as a value, and
             // [`Fn_::core_val_readable`] is where that is refused.
             //
+            // Or a layout read out of a place, which holds the place's address
+            // ([`Fn_::core_alias`]).
+            //
             // Or an aggregate a call returns into the slot this walk takes for
             // it ([`Fn_::out_ptr`]). A temporary made or returned into is
             // one [`Fn_::core_readable`] asks about where it stands, because
@@ -18465,6 +18546,7 @@ impl<'p> Fn_<'_, 'p> {
                             || self.core_agg_call(body, rhs)
                             || self.core_rebuild(body, rhs))
                 }))
+                && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
             {
                 return false;
             }
@@ -18535,6 +18617,7 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
             }
+            St::Let(n, Rhs::Read(_)) if self.core_alias(body, *n).is_some() => true,
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
             // A store into a field or into module state owns no heap when its
@@ -18570,6 +18653,7 @@ impl<'p> Fn_<'_, 'p> {
                 // which the `let` arm slots before the switch is reached) or
                 // the one the AST arm bound.
                 let placed = self.core_place(&self.core_w, body, *n).is_some()
+                    || self.core_alias(body, *n).is_some()
                     || ss[..i].iter().any(|p| {
                         matches!(p, St::Let(l, rhs) if l == n
                             && (matches!(rhs, Rhs::Make(..))
@@ -18887,6 +18971,39 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
         St::Switch { arms, .. } => {
             for a in arms {
                 a.body.iter().for_each(|s| core_lets(s, out));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names a statement writes: the root of a store, `false`, and a `modify`
+/// or `consume` argument, `true`. [`Fn_::core_alias`] reads it.
+fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, bool)>) {
+    let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, bool)>| {
+        if let Rhs::Call { args, .. } = r {
+            for (v, c) in args {
+                if let (Val::Name(n), Capability::Modify | Capability::Consume) = (v, c) {
+                    out.push((*n, true));
+                }
+            }
+        }
+    };
+    match s {
+        St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
+        St::Store { place, .. } => {
+            out.extend(vyrn_lower::kernel::root_of(place).map(|(n, _)| (n, false)))
+        }
+        St::If { then, els, .. } => {
+            then.iter().for_each(|s| core_written(s, out));
+            els.iter().for_each(|s| core_written(s, out));
+        }
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+            inner.iter().for_each(|s| core_written(s, out));
+        }
+        St::Switch { arms, .. } => {
+            for a in arms {
+                a.body.iter().for_each(|s| core_written(s, out));
             }
         }
         _ => {}
