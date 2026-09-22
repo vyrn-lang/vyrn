@@ -17723,10 +17723,10 @@ impl<'p> Fn_<'_, 'p> {
                 let [(v, _)] = args else {
                     return unsupported("`copy` of other than one value", line);
                 };
-                let ty = self.core_ty(body, v, &Type::Int);
-                if ftypes::copy_impl(&self.cx.impls, &ty).is_some() {
-                    return unsupported("a `copy` the receiver's type declares", line);
+                if let Some(f) = self.core_copy_impl(body, callee, kind, args) {
+                    return self.core_call(m, b, body, w, &f, Callee::Fn, args, hint, line);
                 }
+                let ty = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &ty, line)?;
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
@@ -18409,6 +18409,23 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.sigs.get(callee).cloned()
     }
 
+    /// The declared function a `x.copy()` row calls when the receiver's type
+    /// declares `impl Copy for T` (RFC-0091 M1), as the arm's `@copy` does.
+    fn core_copy_impl(
+        &self,
+        body: &vyrn_lower::core::Body,
+        callee: &str,
+        kind: Callee,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+    ) -> Option<String> {
+        match (core_builtin(callee, kind), args) {
+            (Some(Spec::OwnType), [(v, _)]) => {
+                ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int))
+            }
+            _ => None,
+        }
+    }
+
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
     /// operation slice's own reader.
     ///
@@ -18891,11 +18908,16 @@ impl<'p> Fn_<'_, 'p> {
                         Some(Spec::Builds(_)) => true,
                         // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
                         // the copy in a slot of its own, as `Builds` does.
-                        Some(Spec::OwnType) => {
-                            self.core_builtin_readable(body, callee, *kind, args)
-                                && matches!(args.as_slice(), [(Val::Name(n), _)]
-                                    if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_))))
-                        }
+                        // A type that declares `impl Copy` is copied by that
+                        // declaration's function, a call like any other.
+                        Some(Spec::OwnType) => match self.core_copy_impl(body, callee, *kind, args)
+                        {
+                            Some(f) => self
+                                .core_sig(&f, Callee::Fn)
+                                .is_some_and(|s| s.params.len() == 1 && s.ret.agg().is_some()),
+                            None => matches!(args.as_slice(), [(Val::Name(n), _)]
+                                if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
+                        },
                         _ => false,
                     } || self
                         .core_sig(callee, *kind)
@@ -19011,12 +19033,9 @@ impl<'p> Fn_<'_, 'p> {
     ) -> bool {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
-            Some(Spec::OwnType) => match args {
-                [(v, _)] => {
-                    ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int)).is_none()
-                }
-                _ => false,
-            },
+            Some(Spec::OwnType) => {
+                matches!(args, [_]) && self.core_copy_impl(body, callee, kind, args).is_none()
+            }
             // `@str` frees a String temporary once it has copied it
             // (`str_temporary`), and the rows state that release as a row of
             // their own. A name this pass minted is that temporary.
