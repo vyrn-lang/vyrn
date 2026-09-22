@@ -3476,16 +3476,23 @@ impl<'a> Builder<'a> {
                         t
                     }
                     _ => {
-                        let v = self.val(iter, out)?;
-                        let Val::Name(t) = v else {
-                            return gap("a `for` over a literal", *line);
-                        };
-                        // The construct owns the temporary; the plan keys its
-                        // release by the statement, and so does a row the
-                        // placer adds for it (`for t in lex(src)` with a
-                        // `return` inside the loop).
-                        self.keyed(t, sid);
-                        t
+                        match self.val(iter, out)? {
+                            // The construct owns the temporary; the plan keys
+                            // its release by the statement, and so does a row
+                            // the placer adds for it (`for t in lex(src)` with
+                            // a `return` inside the loop).
+                            Val::Name(t) => {
+                                self.keyed(t, sid);
+                                t
+                            }
+                            // A String literal is static: the loop reads it
+                            // through a name that owns nothing.
+                            lit => {
+                                let t = self.name("@lit", ity.clone(), false, *line);
+                                out.push(St::Let(t, Rhs::Val(lit)));
+                                t
+                            }
+                        }
                     }
                 };
                 // The loop is what took the container, whichever spelling
