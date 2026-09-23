@@ -7996,7 +7996,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// One call to an `extern fn` or a host-boundary name, `argc` operands
-    /// written by `operand` at each parameter's type.
+    /// written by `operand` at each parameter's type. Both walks call it:
+    /// [`Fn_::call_inner`] over the source and [`Fn_::core_call`] over the
+    /// rows.
     fn extern_call(
         &mut self,
         m: &mut Module,
@@ -18153,6 +18155,11 @@ impl<'p> Fn_<'_, 'p> {
                     Some(t) => Ok(t),
                     None => match self.core_sig(callee, *kind) {
                         Some(s) => Ok(s.ret_ty),
+                        None if *kind == Callee::Fn && self.is_extern(callee) => Ok(self
+                            .cx
+                            .externs
+                            .get(callee)
+                            .map_or(Type::Unit, |e| e.ret.clone())),
                         None => unsupported("a core call this walk does not read", line),
                     },
                 },
@@ -18342,6 +18349,12 @@ impl<'p> Fn_<'_, 'p> {
                 self.emit_validation(b, &decl, line)?;
             }
             return Ok(Type::Named(decl.name));
+        }
+        if kind == Callee::Fn && self.is_extern(callee) {
+            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
+                s.core_val(m, b, body, w, &args[i].0, p, line)
+            };
+            return self.extern_call(m, b, callee, args.len(), &mut operand, line);
         }
         let Some(sig) = self.core_sig(callee, kind) else {
             return unsupported("a core call this walk does not read", line);
@@ -20061,6 +20074,7 @@ impl<'p> Fn_<'_, 'p> {
             } => {
                 self.core_args_readable(body, args)
                     && (self.core_builtin_readable(body, callee, *kind, args)
+                        || (*kind == Callee::Fn && self.is_extern(callee))
                         || self.core_named(callee, *kind).is_some()
                         || self.core_mem_ty(callee, args.len()).is_some()
                         || self.core_sig(callee, *kind).is_some_and(|s| {
