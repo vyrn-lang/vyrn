@@ -6247,6 +6247,15 @@ impl<'a> Builder<'a> {
         if let (1, Some(to)) = (vs.len(), vyrn_frontend::types::numeric_conv_target(name)) {
             return Ok(Rhs::Prim(Op::Conv(to), vec![vs[0].0.clone()], ret));
         }
+        // `@concat(a, b)` is the String `+` the interpolation spine spells as
+        // a call, so the row is the operator's, over the same arguments.
+        if let ("@concat", [(a, _), (b, _)]) = (name, vs.as_slice()) {
+            return Ok(Rhs::Prim(
+                Op::Bin(BinOp::Add),
+                vec![a.clone(), b.clone()],
+                ret,
+            ));
+        }
         Ok(Rhs::Call {
             callee: name.to_string(),
             args: vs,
