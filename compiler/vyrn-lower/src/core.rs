@@ -1669,6 +1669,11 @@ pub enum Spec {
     /// it otherwise, and the store after the call puts the new address
     /// into the name.
     Rebuilds,
+    /// An array receiver, and for `@swapRemove` an index at `Int64`. The call
+    /// shrinks the receiver in its own storage and hands back what it
+    /// removed: `@pop` an `Option` of the last element, `@swapRemove` the
+    /// element at the index.
+    Removes,
     /// Operands at whatever type the row put on their names, and a result at
     /// the stated type that the call builds in storage of its own. The caller
     /// lands it as it lands any aggregate result.
@@ -1735,6 +1740,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@append", Spec::Rebuilds),
             ("@copyFrom", Spec::Rebuilds),
             ("@strAppend", Spec::Rebuilds),
+            ("@pop", Spec::Removes),
+            ("@swapRemove", Spec::Removes),
             ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),
             (
                 "stringFromBytes",

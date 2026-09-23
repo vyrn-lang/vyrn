@@ -12097,11 +12097,23 @@ impl<'p> Fn_<'_, 'p> {
             .addr(b, 0)
             .ok_or_else(|| gap("`pop` on a non-array binding", line))?;
         b.ins(&Instruction::LocalSet(slot));
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
+        self.pop_at(b, slot, &aty, line)
+    }
+
+    /// `pop` on the array whose address is in the local `slot`. The arm over
+    /// the source and [`Fn_::core_call`] over the rows both call this.
+    fn pop_at(
+        &mut self,
+        b: &mut Frame,
+        slot: u32,
+        aty: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`pop` on `{aty}`"), line);
         };
         let elem = *elem;
-        let al = self.layout_of(&aty, line)?;
+        let al = self.layout_of(aty, line)?;
         let opt = Type::option(elem.clone());
         let ol = self.layout_of(&opt, line)?;
         let out = b.alloc(ol.size, ol.align);
@@ -12117,7 +12129,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Store(word8()));
         }
         b.ins(&Instruction::LocalGet(slot));
-        let w = self.walk(b, &aty, line)?;
+        let w = self.walk(b, aty, line)?;
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::I32Eqz);
@@ -12161,14 +12173,32 @@ impl<'p> Fn_<'_, 'p> {
             .addr(b, 0)
             .ok_or_else(|| gap("`swapRemove` on a non-array binding", line))?;
         b.ins(&Instruction::LocalSet(slot));
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
+        let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+            s.expr_as(m, b, &args[1], &Type::Int).map(|_| ())
+        };
+        self.swap_remove_at(m, b, slot, &aty, &mut index, line)
+    }
+
+    /// `swapRemove` on the array whose address is in the local `slot`, with
+    /// `index` writing the index. The arm over the source and
+    /// [`Fn_::core_call`] over the rows both call this.
+    fn swap_remove_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        slot: u32,
+        aty: &Type,
+        index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`swapRemove` on `{aty}`"), line);
         };
         let elem = *elem;
-        let al = self.layout_of(&aty, line)?;
+        let al = self.layout_of(aty, line)?;
         b.ins(&Instruction::LocalGet(slot));
-        let w = self.walk(b, &aty, line)?;
-        self.expr_as(m, b, &args[1], &Type::Int)?;
+        let w = self.walk(b, aty, line)?;
+        index(self, m, b)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
         self.bounds_check(b, &w, idx, false);
@@ -17936,6 +17966,27 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
             }
+            // `xs.pop()` and `xs.swapRemove(i)`: the receiver's address, which
+            // the call shrinks in place, and the index the row names.
+            Some(Spec::Removes) => {
+                let [(Val::Name(x), _), rest @ ..] = args else {
+                    return unsupported("a removal from no named receiver", line);
+                };
+                let aty = body.names[*x as usize].ty.clone();
+                let slot = b.local(ValType::I32);
+                self.core_addr_of(b, w, body, *x, line)?;
+                b.ins(&Instruction::LocalSet(slot));
+                return match (callee, rest) {
+                    ("@pop", []) => self.pop_at(b, slot, &aty, line),
+                    ("@swapRemove", [(i, _)]) => {
+                        let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                            s.core_val(m, b, body, w, i, &Type::Int, line)
+                        };
+                        self.swap_remove_at(m, b, slot, &aty, &mut index, line)
+                    }
+                    _ => unsupported(&format!("`{callee}` at this arity"), line),
+                };
+            }
             // `bytes` and `stringFromBytes`: built in a slot of the call's
             // own, which [`agg_landed`] copies into the destination.
             Some(Spec::Builds(_)) => {
@@ -19132,25 +19183,27 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Call {
                 callee, args, kind, ..
             } => {
-                self.core_args_readable(body, args)
-                    && (match core_builtin(callee, *kind) {
-                        Some(Spec::Builds(_)) => true,
-                        // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
-                        // the copy in a slot of its own, as `Builds` does.
-                        // A type that declares `impl Copy` is copied by that
-                        // declaration's function, a call like any other.
-                        Some(Spec::OwnType) => match self.core_copy_impl(body, callee, *kind, args)
-                        {
-                            Some(f) => self
-                                .core_sig(&f, Callee::Fn)
-                                .is_some_and(|s| s.params.len() == 1 && s.ret.agg().is_some()),
-                            None => matches!(args.as_slice(), [(Val::Name(n), _)]
+                self.core_removes(body, callee, *kind, args) == Some(true)
+                    || self.core_args_readable(body, args)
+                        && (match core_builtin(callee, *kind) {
+                            Some(Spec::Builds(_)) => true,
+                            // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
+                            // the copy in a slot of its own, as `Builds` does.
+                            // A type that declares `impl Copy` is copied by that
+                            // declaration's function, a call like any other.
+                            Some(Spec::OwnType) => {
+                                match self.core_copy_impl(body, callee, *kind, args) {
+                                    Some(f) => self.core_sig(&f, Callee::Fn).is_some_and(|s| {
+                                        s.params.len() == 1 && s.ret.agg().is_some()
+                                    }),
+                                    None => matches!(args.as_slice(), [(Val::Name(n), _)]
                                 if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
-                        },
-                        _ => false,
-                    } || self
-                        .core_sig(callee, *kind)
-                        .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
+                                }
+                            }
+                            _ => false,
+                        } || self
+                            .core_sig(callee, *kind)
+                            .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                 self.core_val_readable(body, k)
@@ -19176,6 +19229,29 @@ impl<'p> Fn_<'_, 'p> {
                 if (body.names[*x as usize].grows
                     || matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_)))
                     && self.core_args_readable(body, rest))
+    }
+
+    /// Whether a row removes from a named `Array` receiver
+    /// ([`Spec::Removes`]) with operands this walk writes, and if so whether
+    /// what it hands back is an aggregate, which lands through a slot.
+    fn core_removes(
+        &self,
+        body: &vyrn_lower::core::Body,
+        callee: &str,
+        kind: Callee,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+    ) -> Option<bool> {
+        if !matches!(core_builtin(callee, kind), Some(Spec::Removes)) {
+            return None;
+        }
+        let [(Val::Name(x), _), rest @ ..] = args else {
+            return None;
+        };
+        let Type::Array(e) = self.cx.resolve(&body.names[*x as usize].ty) else {
+            return None;
+        };
+        (self.core_args_readable(body, args) && rest.len() == usize::from(callee == "@swapRemove"))
+            .then(|| callee == "@pop" || matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))))
     }
 
     /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
@@ -19245,7 +19321,9 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs)
                 if self.core_ctor(rhs)
                     || self.core_agg_call(body, rhs)
-                    || self.core_rebuild(body, rhs) =>
+                    || self.core_rebuild(body, rhs)
+                    || matches!(rhs, Rhs::Call { callee, kind, args, .. }
+                        if self.core_removes(body, callee, *kind, args).is_some()) =>
             {
                 None
             }
@@ -19281,6 +19359,9 @@ impl<'p> Fn_<'_, 'p> {
                 _ => false,
             },
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
+            // A removal that hands back a scalar leaves it on the stack; one
+            // that hands back an aggregate is an aggregate call.
+            Some(Spec::Removes) => self.core_removes(body, callee, kind, args) == Some(false),
             // A rebuild is read together with the store after it
             // ([`Fn_::core_rebuilt`]), and a built aggregate as an aggregate
             // call ([`Fn_::core_agg_call`]); neither alone.

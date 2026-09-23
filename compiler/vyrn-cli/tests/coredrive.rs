@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 14] = [
+const SHAPES: [(&str, &str); 15] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -230,6 +230,12 @@ const SHAPES: [(&str, &str); 14] = [
     (
         "a `for` over a String whose byte leaves a byte's range",
         "fn sum(s: String) -> Int64 { let mut t = 0 for c in s { t = t + c * 1000 }          return t + Int64(s[1]) } fn vyrnTestMain() -> Int64 { return sum(\"ab\") }",
+    ),    // A removal shrinks its receiver in place and hands back what it took
+    // (RFC-0125 M7, `m7-rows`). Every `pop` of `examples/` sits in a body
+    // the rows do not take for another reason.
+    (
+        "a pop and a swapRemove the rows carry",
+        "type P = { x: Int64, s: String }          fn vyrnTestMain() -> Int64 { let mut ps: Array<P> = [P { x: 1, s: \"a\" }, P { x: 2, s: \"bb\" }]          let q = ps.swapRemove(0) let o = ps.pop() let mut xs: Array<Int64> = [5, 6, 7]          let a = xs.swapRemove(0) let mut t = q.x * 10 + q.s.byteLength + a * 1000          if let Some(p) = o { t = t + p.x * 100 } return t + xs.length * 10000 }",
     ),
 ];
 
@@ -240,7 +246,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 14] = [
+const SHAPE_PIN: [(&str, usize, usize); 15] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -263,6 +269,7 @@ const SHAPE_PIN: [(&str, usize, usize); 14] = [
         0,
         0,
     ),
+    ("a pop and a swapRemove the rows carry", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
