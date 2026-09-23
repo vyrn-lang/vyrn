@@ -27904,3 +27904,33 @@ Findings:
 - on `df71b0b0`, a layout part copied from a temporary grew frames: 36 functions, `htmltree`'s 384 to 1,024 bytes and `patchdemo`'s 720 to 1,552, where the arm lets the call write into the parent. Refusing that copy cost 143 bodies there. One growth is left, `graphql`'s 64 to 96: a record made for a boxed variant payload, which `build_variant` copies into the box where the arm builds it there.
 - a generator's compiled artifact is cached by the executable's size and mtime, so a `check` under another std root reused an older artifact and passed where a fresh cache trapped.
 Left: a layout part made into a temporary, 216, blocked by a call row that names no destination: holding a call row would move its effects; a made array handed to `@push` and to `@append`, 14 each, blocked by those calls' screens; the boxed payload's copy, blocked by `build_variant` taking a value and not a destination; the double release after a `consume` of a borrow, blocked by `St::Drop`, which states no hole for the payload `Kernel::gives` lets the frame hand on.
+
+#### A call ends the borrows of the globals it stores into, and module state is read at its address (2026-09-23, `m7-state`)
+Decision: the lead's: the kernel asks the effect judgment which calls write module state, and a borrow of module state ends at such a call and at a store. Mine: the judgment keeps the write half by place (`Judged::state_callees`), because the atom alone refused two correct corpus programs; `augment` builds every body before it places any, so the judgment is whole when the kernel asks; the call is a write point of `kernel::writes_of` (`Write::State`).
+Pending, the lead's to decide: the hoist of a module-state container. After the judgment, `augment` builds again the bodies whose loop reads a module-state container, before it places them, so `kernel::writes` reads the judgment the kernel reads.
+Went: `Fn_::core_alias`'s refusal of a place rooted at module state; the screen's refusal of a String store into module state, which releases through `emit_rel`; `global_append_candidates`, `bound_names` and `pattern_names` from `vyrn-codegen/src/lib.rs` to `vyrn-lower/src/append.rs`; the builder's two store arms, into one. Stayed: the module-state hoist, 4 loops, because the builder runs before the judgment.
+Lines, on `m7-made` at `ad2cc03a`: `kernel.rs` 2,878 to 2,918. `core.rs` 7,887 to 7,951. `direct.rs` 20,208 to 20,271. `effects.rs` 559 to 687. `append.rs` 285 to 422; `vyrn-codegen/src/lib.rs` 1,963 to 1,858. Refusals: 0 lost / 0 gained over the corpus; the witness gains one. Manifest: 4 rows in the address commit, 2 in the store commit.
+The count, from a temporary instrument in `Fn_::core_walkable` and `Builder::hoist_headers` over `emit-wat` of the 174 programs of `examples/` that emit, second pass, first refused clause per body per program, `ad2cc03a` against the head: refused bodies 1,497 to 1,453.
+
+| module-state clause | before | after |
+|---|---|---|
+| a String store | 31 | 0 |
+| a `match` scrutinee | 10 | 0 |
+| a named layout read | 6 | 5 |
+| a `for` head | 10 | 9 |
+| a statement's read, and a store of another type | 14 | 17 |
+| a `while` over module state, not hoisted | 4 | 4 |
+
+Licence:
+- `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, `ad2cc03a` against the head: byte-identical stdout, stderr and exit code, 338 accepted and 77 refused. Under the judgment's atom alone, on `d01cca39`, `examples/bin/server.vyrn` and `examples/shelf/client/boot.vyrn` gained a refusal; the write half cleared the second and the place the first.
+- `refusals.rs`, `a_call_that_writes_module_state_ends_its_borrows`: `let a = xs`, `reset()` storing into `xs`, then `a[0]`, refused by `check` and `run` with "`xs` is written here while `a` still reads out of it"; `xs.copy()` prints 3 and 1. The base printed 3 and 0.
+- `coredrive --ignored`: taken 20,005 to 20,034 of 21,512; whole 21,330 and carried end to end 1,642, unmoved; 1 byte-identical, 167 run the same, 0 run apart. `SHAPES` gains module state reset, grown and matched.
+- the moved rows in `wat` against `ad2cc03a`: `i18ndemo`'s 4 `match`es on the locale hold its address in a local and return from inside each arm; `contractquery`'s `main` holds a module-state record's address in a local before the call it is handed to; `graphql`'s 2 and `rpcsplit`'s 1 `for` over module state leave the arm with the `for` head's rows, frames 128 to 80 and 48 to 32 bytes; `domdemo`'s `onType` computes the new String before it reads the old one to release; `membench`'s `globalSpine` tees the global's address and grows at it. Each runs the same under both binaries with `VYRN_LEAK_CHECK=1`.
+- every commit builds with no warning, formats clean and passes the manifest check and the emitter and forms censuses on its own. `kernel --ignored`: 27,416 accepted, 0 refused, 0 unlowered. `effects`: 29,988 judged, 0 unattributed. `typed`: 238,193 judged, 0 unjudged. `coretables`, `fieldstore` (7) and `refusals` (25) green. `residue --release --ignored`, 269 s: 173 clean / 0 leaking on both engines. `VYRN_LEAK_CHECK=1 vyrn bench <f> --check` over the 17 bench programs: 78 ok, 0 failed.
+- `cargo test --release -p vyrn-cli`, `--bins` and four `--test` groups over all 85 targets: 654 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed. Re-pinned: `emitter_census` the mapping 10,560 to 10,623 lines with 815 to 816 rows, `both, for two questions` 9,320 to 9,383 with 257 to 259; RFC-0127's form and declaration tables where the whitelist moved.
+- on `d01cca39`: the bench corpus, 17 programs and 78 benches interleaved, median ratio 1.000, no row outside its band, `module-state append spine` x1.002; `placer: effects` 3.1 ms on `langbench`. Not re-run on this base.
+Findings:
+- the judgment did not see the lambdas of a module-state initializer, so a hook stored in one module's state and run by a function that borrows its own read freed memory under the base; it joins those frames.
+- the builder's store into module state returned before it released an append's part temporaries, 48 bytes over three turns, found by the `coredrive` shape.
+- a borrow of module state that a `while` hoisted is refused at the right call, but its fix names the loop's line: `kernel::writes` reads no judgment while the builder runs.
+Left: the module-state hoist and that fix line, blocked by the builder running before the judgment (the pending decision above); the editor's memo, where a served body is not built and a call into it stores nothing, blocked by a key that excludes bodies; 31 module-state first clauses, not classed.
