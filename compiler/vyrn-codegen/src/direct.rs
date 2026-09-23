@@ -19310,7 +19310,14 @@ impl<'p> Fn_<'_, 'p> {
                 self.str_bin(b, *o, line)
             }
             (Op::Bin(o), [l, r]) => {
-                let lt = self.core_ty(body, l, &Type::Int);
+                // A float literal has the type the checker gave it, which is
+                // its sibling's: `0.0 - o` with `o: Float32` runs at
+                // `Float32`, the type of the local the row binds. An integer
+                // literal widens by [`Fn_::op_width`] below.
+                let lt = match (l, r) {
+                    (Val::Lit(Lit::Float(_)), Val::Name(_)) => self.core_ty(body, r, &Type::Int),
+                    _ => self.core_ty(body, l, &Type::Int),
+                };
                 let lt = self.cx.resolve(&lt);
                 self.core_val(m, b, body, w, l, &lt, line)?;
                 let opty = match Num::of(&lt) {

@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 25] = [
+const SHAPES: [(&str, &str); 26] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -332,6 +332,12 @@ const SHAPES: [(&str, &str); 25] = [
         "a `for` left early over the elements it never reached",
         "type Rec = { name: String, k: Int64 }          fn mk(n: Int64) -> Array<Rec> { let mut out: Array<Rec> = [] let mut i = 0          while i < n { out.push(Rec { name: \"r\" + i.toString(), k: i }) i = i + 1 } return out }          fn sink(r: consume Rec) -> Int64 { return r.k }          fn first(n: Int64) -> Int64 { for x in mk(n) { return sink(x) + 10 } return 0 }          fn until(n: Int64, stop: Int64) -> Int64 { let xs = mk(n) let mut t = 0          for x in consume xs { if x.k == stop { break } t = t + sink(x) } return t }          fn vyrnTestMain() -> Int64 { return first(3) + until(5, 3) * 100 }",
     ),
+    // A float literal takes its sibling's type: the core walk ran `0.0 - o`
+    // at `Float64` into a `Float32` local, which no engine loads.
+    (
+        "a float literal left of a `Float32` operand",
+        "fn neg(o: Float32) -> Float32 { return 0.0 - o }          fn vyrnTestMain() -> Int64 { let x: Float32 = 1.5 if neg(x) < 0.0 { return 1 } return 0 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -341,7 +347,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 25] = [
+const SHAPE_PIN: [(&str, usize, usize); 26] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -391,6 +397,7 @@ const SHAPE_PIN: [(&str, usize, usize); 25] = [
         1,
         0,
     ),
+    ("a float literal left of a `Float32` operand", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
