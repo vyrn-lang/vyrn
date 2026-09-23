@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 34] = [
+const SHAPES: [(&str, &str); 35] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -318,6 +318,12 @@ const SHAPES: [(&str, &str); 34] = [
         "an element a `for` hands on out of a container it alone owns",
         "type F = { key: String, n: Int64 }          fn mk(k: Int64) -> Array<F> { return [F { key: k.toString(), n: k }, F { key: \"b\".copy(), n: 2 }, F { key: \"cc\".copy(), n: 3 }] }          fn pick(k: Int64) -> Int64 { let mut out: Array<F> = [] for f in mk(k) { if f.n != 2 { out.push(f) } }          return out.length * 10 + out[0].key.byteLength + out[1].key.byteLength * 100 }          fn eat(f: consume F) -> Int64 { return f.key.byteLength + f.n }          fn sum(k: Int64) -> Int64 { let mut t = 0 for x in mk(k) { if x.n > 2 { t = t + eat(x) } } return t }          fn vyrnTestMain() -> Int64 { return pick(40) + sum(123) * 1000 }",
     ),
+    // The element may be any layout: an enum and an array are bound at their
+    // address in the buffer as a record is, and leave the same ways.
+    (
+        "an enum and an array element a `for` hands on",
+        "type N = | A(String) | B(Int64)          fn mk(k: Int64) -> Array<N> { return [A(k.toString()), B(k), A(\"cc\".copy())] }          fn size(n: consume N) -> Int64 { return match n { A(s) => s.byteLength, B(k) => k } }          fn keep(k: Int64) -> Int64 { let mut out: Array<N> = [] for n in mk(k) { out.push(n) } return out.length }          fn sum(k: Int64) -> Int64 { let mut t = 0 for n in mk(k) { t = t + size(n) } return t }          fn skim(k: Int64) -> Int64 { let mut t = 0 for n in mk(k) { t = t + 1 } return t }          fn first(k: Int64) -> Int64 { for n in mk(k) { return size(n) } return 0 }          fn rows(k: Int64) -> Array<Array<String>> { return [[k.toString(), \"a\".copy()], [\"bb\".copy()], []] }          fn eat(r: consume Array<String>) -> Int64 { let mut t = 0 for s in r { t = t + s.byteLength } return t }          fn flat(k: Int64) -> Int64 { let mut out: Array<Array<String>> = [] for r in rows(k) { if r.length > 0 { out.push(r) } } return out.length }          fn total(k: Int64) -> Int64 { let mut t = 0 for r in rows(k) { t = t + eat(r) } return t }          fn vyrnTestMain() -> Int64 { return keep(40) + sum(123) * 10 + skim(1) * 10000 + first(5) * 100000 + (flat(7) + total(12) * 10) * 10000000 }",
+    ),
     // A String taken out of a field is the pointer the field held, and the
     // release of the record it left walks around the hole (RFC-0125 M7).
     (
@@ -397,7 +403,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 34] = [
+const SHAPE_PIN: [(&str, usize, usize); 35] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -437,6 +443,7 @@ const SHAPE_PIN: [(&str, usize, usize); 34] = [
         0,
         0,
     ),
+    ("an enum and an array element a `for` hands on", 0, 0),
     (
         "a String taken out of a field, on one edge and in a loop",
         0,
