@@ -553,7 +553,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     //
     // This loop is why `global_append_candidates` gives back an ORDERED set: a
     // reservation is an address, and it moves every reservation after it.
-    let gaccs: Vec<String> = crate::global_append_candidates(program)
+    let gaccs: Vec<String> = vyrn_lower::append::global_append_candidates(program)
         .into_iter()
         .filter(|n| {
             cx.globals
@@ -1342,7 +1342,7 @@ struct Cx<'a> {
     globals: HashMap<String, (Place, Type)>,
     /// Module-state `String` accumulators (census P1): name → the fixed address of
     /// its one ownership word. Present only for a global that
-    /// [`crate::global_append_candidates`] cleared, so `g = g + …` grows the
+    /// [`vyrn_lower::append::global_append_candidates`] cleared, so `g = g + …` grows the
     /// buffer in place instead of building a new one and dropping the old on the
     /// floor. The local twin of this map is [`Fn_::str_append`], keyed by wasm
     /// local; a global has no local, so it needs its own word in static memory.
@@ -16645,6 +16645,22 @@ fn core_lane(args: &[(Val, vyrn_frontend::ast::Capability)], i: usize, lanes: i6
 
 /// The specification row of the builtin a CALL ROW names, or `None` where the
 /// row names a function this program declares or a callee with no row.
+/// The module-state binding a receiver reads, where `n` is a read of one
+/// that a `@strAppend` row grows ([`vyrn_lower::core::NameInfo::grows`]).
+fn core_global(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> Option<&str> {
+    if !body.names[n as usize].grows {
+        return None;
+    }
+    let mut lets = Vec::new();
+    for s in &body.stmts {
+        core_lets(s, &mut lets);
+    }
+    lets.iter().find_map(|(m, rhs)| match rhs {
+        Rhs::Read(vyrn_lower::core::Place::Global(g)) if *m == n => Some(g.as_str()),
+        _ => None,
+    })
+}
+
 /// Clears an accumulator's ownership word at `own`: the place holds a
 /// pointer a store put there, which this path did not allocate, so the next
 /// append copies rather than grows ([`Fn_::append_in_place`]).
@@ -17322,19 +17338,32 @@ impl<'p> Fn_<'_, 'p> {
                         let Some(St::Store { releases, .. }) = ss.get(i + 1) else {
                             return unsupported("an append with no store", line);
                         };
-                        let Some((Place::Local(l), _)) = self.core_place(w, body, *x) else {
-                            return unsupported("an append into a place with no local", line);
-                        };
-                        let Some(&at) = self.str_append.get(&l) else {
-                            return unsupported("an append with no ownership word", line);
+                        // Module state grows at its fixed address, with the
+                        // word the module reserved for it.
+                        let (place, own) = match core_global(body, *x) {
+                            Some(g) => match (self.lookup(g, line)?.0, self.cx.gappend.get(g)) {
+                                (at @ Place::Static(_), Some(&word)) => (at, Place::Static(word)),
+                                _ => return unsupported("an append with no ownership word", line),
+                            },
+                            None => {
+                                let Some((Place::Local(l), _)) = self.core_place(w, body, *x)
+                                else {
+                                    return unsupported(
+                                        "an append into a place with no local",
+                                        line,
+                                    );
+                                };
+                                let Some(&at) = self.str_append.get(&l) else {
+                                    return unsupported("an append with no ownership word", line);
+                                };
+                                (Place::Local(l), Place::Slot(at))
+                            }
                         };
                         let mut operand =
                             |f: &mut Self, m: &mut Module, b: &mut Frame, k: usize| {
                                 f.core_val(m, b, body, w, &rest[k].0, &Type::Str, line)?;
                                 Ok(None)
                             };
-                        let own = Place::Slot(at);
-                        let place = Place::Local(l);
                         let parts = rest.len();
                         self.append_in_place(
                             m,
@@ -17360,6 +17389,9 @@ impl<'p> Fn_<'_, 'p> {
                 St::Let(n, rhs) if self.core_nests(body, ss, i, &w.occurs).is_some() => {
                     w.nested[*n as usize] = Some(rhs.clone());
                 }
+                // A module-state receiver is read at its address by the
+                // append, and by nothing else.
+                St::Let(n, _) if core_global(body, *n).is_some() => {}
                 // A LAYOUT MADE, built into the binding's own slot — RFC-0125
                 // M7. It is a `let` arm of its own because the slot has to
                 // exist before the parts are written: the arm below evaluates
@@ -17588,14 +17620,33 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A field or module state: its address with the field's offset
                 // added, the value, and the store, which is the `SetField`
-                // arm's order for a scalar field.
+                // arm's order for a scalar field. A String in module state is
+                // released where the row says so, and its word cleared, as a
+                // String name's.
                 St::Store {
-                    place, value, line, ..
+                    place,
+                    value,
+                    line,
+                    releases,
+                    ..
                 } => {
                     let (ty, off) = self.core_addr(m, b, body, w, place, *line)?;
                     self.core_step(b, off);
+                    let snap = if *releases {
+                        let a = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalTee(a));
+                        self.snap_at(b, a, &ty, *line)?
+                    } else {
+                        None
+                    };
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&store_of(&self.cx.ll(&ty)));
+                    self.free_snap(m, b, snap, *line)?;
+                    if let vyrn_lower::core::Place::Global(g) = place {
+                        if let Some(&word) = self.cx.gappend.get(g) {
+                            disown(b, Place::Static(word));
+                        }
+                    }
                 }
                 // A LOOP'S EXIT, which the core states and wasm has one
                 // instruction for. The pass makes up exactly one `break`
@@ -18327,8 +18378,8 @@ impl<'p> Fn_<'_, 'p> {
     /// stores into, or hands to `modify`, writes a
     /// value of its own. A callee handed the root, or any root on the chain,
     /// to `modify` writes where the kernel does not look (`freeNode` in
-    /// `tree.vyrn`). Module state has no root: any callee may write it. A
-    /// store into the root is the kernel's, which ends the alias there.
+    /// `tree.vyrn`). A store into the root is the kernel's, which ends the
+    /// alias there; for module state, a callee's store into it too.
     fn core_alias<'b>(
         &self,
         body: &'b vyrn_lower::core::Body,
@@ -18368,7 +18419,9 @@ impl<'p> Fn_<'_, 'p> {
         // the walk ends within `body.names.len()` steps.
         let mut on = place;
         for _ in 0..body.names.len() {
-            let (root, _) = vyrn_lower::kernel::root_of(on)?;
+            let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
+                return Some(place);
+            };
             if written.contains(&(root, true)) {
                 return None;
             }
@@ -19267,12 +19320,16 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
-                // A String name takes the store too: the release is the row's
-                // `releases`, and an accumulator's word is cleared after it.
-                let named = matches!(place, vyrn_lower::core::Place::Name(_));
+                // A String name or module state takes the store too: the
+                // release is the row's `releases`, and an accumulator's word is
+                // cleared after it.
+                let whole = matches!(
+                    place,
+                    vyrn_lower::core::Place::Name(_) | vyrn_lower::core::Place::Global(_)
+                );
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
-                    (core_scalar(&r) || (named && r == Type::Str))
+                    (core_scalar(&r) || (whole && r == Type::Str))
                         && (!self.checks(&t)
                             || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
                 }) && self.core_val_readable(body, value)
@@ -19457,6 +19514,7 @@ impl<'p> Fn_<'_, 'p> {
             && matches!(args.split_first(), Some(((Val::Name(x), _), rest))
                 if (body.names[*x as usize].grows
                     || matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_)))
+                    && core_global(body, *x).is_none_or(|g| self.cx.gappend.contains_key(g))
                     && self.core_args_readable(body, rest))
     }
 
@@ -19495,7 +19553,7 @@ impl<'p> Fn_<'_, 'p> {
         let (
             St::Let(t, rhs @ Rhs::Call { args, .. }),
             St::Store {
-                place: vyrn_lower::core::Place::Name(x),
+                place,
                 value: Val::Name(v),
                 ..
             },
@@ -19503,10 +19561,15 @@ impl<'p> Fn_<'_, 'p> {
         else {
             return None;
         };
-        (t == v
-            && matches!(args.first(), Some((Val::Name(r), _)) if r == x)
-            && self.core_rebuild(body, rhs))
-        .then_some((*x, *t))
+        let Some((Val::Name(r), _)) = args.first() else {
+            return None;
+        };
+        let back = match place {
+            vyrn_lower::core::Place::Name(x) => x == r,
+            vyrn_lower::core::Place::Global(g) => core_global(body, *r) == Some(g.as_str()),
+            _ => false,
+        };
+        (t == v && back && self.core_rebuild(body, rhs)).then_some((*r, *t))
     }
 
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands

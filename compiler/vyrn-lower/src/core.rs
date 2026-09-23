@@ -118,7 +118,9 @@ pub struct NameInfo {
     pub must_use_param: bool,
     /// A String accumulator [`crate::append::append_candidates`] admits: its
     /// `let` gives it the ownership word, and `s = s + e` on it is one
-    /// `@strAppend` row ([`Spec::Rebuilds`]).
+    /// `@strAppend` row ([`Spec::Rebuilds`]). A read of a module-state
+    /// accumulator ([`crate::append::global_append_candidates`]) is the
+    /// receiver of that row for `g = g + e`.
     pub grows: bool,
     /// The path the READER wrote, for a temporary this pass minted to hold a
     /// read of a place: `p.name`, `xs[i]`, `d.title`. A refusal about the
@@ -3378,6 +3380,31 @@ impl<'a> Builder<'a> {
                     (Some(n), None) if self.region == 0 && self.body.names[n as usize].grows => {
                         crate::append::self_append_spine(name, value).map(|parts| (n, parts))
                     }
+                    // Module state grows through a read of it, which the row
+                    // names as its receiver.
+                    (None, _)
+                        if self.region == 0
+                            && crate::append::global_grows(name)
+                            && vyrn_frontend::types::resolve(
+                                &self.ty_of(value)?,
+                                self.proto.types(),
+                            ) == Type::Str =>
+                    {
+                        match crate::append::self_append_spine(name, value) {
+                            Some(parts) => {
+                                let mut root = value;
+                                while let Expr::Binary { lhs, .. } = root {
+                                    root = lhs;
+                                }
+                                let Val::Name(g) = self.global_read(root, name, *line, out)? else {
+                                    return gap("a module-state read that names no value", *line);
+                                };
+                                self.body.names[g as usize].grows = true;
+                                Some((g, parts))
+                            }
+                            None => None,
+                        }
+                    }
                     _ => None,
                 };
                 self.rebinding = grown.is_none();
@@ -3420,47 +3447,34 @@ impl<'a> Builder<'a> {
                 let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
                 let key = self.store_key(sid);
                 let releases = !handed_back && placed_store(key);
-                let Some(n) = n else {
-                    // Module state owns what it holds for the whole module
-                    // and nothing may `consume` it, so a store into one
-                    // releases what it replaces whenever that owns heap.
-                    let owns = self.owns(&ty);
-                    out.push(St::Store {
-                        place: Place::Global(name.clone()),
-                        value: v,
-                        old: if handed_back {
-                            Old::Transferred
-                        } else if !owns {
-                            Old::Nothing
-                        } else if releases {
-                            Old::Released
-                        } else {
-                            Old::Pending
-                        },
-                        line: *line,
-                        site: Site::Node(key),
-                        releases,
-                    });
-                    return Ok(());
+                // Module state owns what it holds for the whole module and
+                // nothing may `consume` it, so a store into one releases what
+                // it replaces whenever that owns heap.
+                let (place, owes) = match n {
+                    None => (Place::Global(name.clone()), self.owns(&ty)),
+                    Some(n) => {
+                        // A rebind carries the same ownership answer a `let`
+                        // does, which is the other half of the same sentence:
+                        // `let t = d.title` is a projection of `d` and so is
+                        // `t = d.title`. RFC-0092's two-spellings-two-verdicts
+                        // defect, stated once — a `mut` slot is released by
+                        // its FINAL value in all three engines, so a slot ever
+                        // assigned somebody else's place is not this frame's
+                        // to release.
+                        if self.borrows(&v) && self.body.names[n as usize].releases {
+                            self.body.names[n as usize].releases = false;
+                            self.body.names[n as usize].borrow = true;
+                        }
+                        (Place::Name(n), self.body.names[n as usize].releases)
+                    }
                 };
-                // A rebind carries the same ownership answer a `let` does,
-                // which is the other half of the same sentence: `let t =
-                // d.title` is a projection of `d` and so is `t = d.title`.
-                // RFC-0092's two-spellings-two-verdicts defect, stated once
-                // — a `mut` slot is released by its FINAL value in all three
-                // engines, so a slot ever assigned somebody else's place is
-                // not this frame's to release.
-                if self.borrows(&v) && self.body.names[n as usize].releases {
-                    self.body.names[n as usize].releases = false;
-                    self.body.names[n as usize].borrow = true;
-                }
                 // The hand-back is read off the STATEMENT, so it is stated
-                // before the name's own obligation is: a name that owes no
+                // before the place's own obligation is: a name that owes no
                 // release still hands its buffer back, and the census reads
                 // the word to tell the two reasons for `false` apart.
                 let old = if handed_back {
                     Old::Transferred
-                } else if !self.body.names[n as usize].releases {
+                } else if !owes {
                     Old::Nothing
                 } else if releases {
                     Old::Released
@@ -3468,7 +3482,7 @@ impl<'a> Builder<'a> {
                     Old::Pending
                 };
                 out.push(St::Store {
-                    place: Place::Name(n),
+                    place,
                     value: v,
                     old,
                     line: *line,
@@ -4236,7 +4250,7 @@ impl<'a> Builder<'a> {
             if !indexed
                 || !info.heap
                 || bound.contains(&n)
-                || crate::kernel::writes(l, n, &self.body.names)
+                || crate::kernel::writes(l, n, &self.body.names, &self.body.name)
             {
                 continue;
             }
@@ -7229,18 +7243,82 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let js = vyrn_frontend::prof::phase("placer: judgments");
     let memo = vyrn_frontend::movecheck::Judgments::open(program);
     drop(js);
+    let _held = crate::append::Held::new(program);
+    // Every body is built before any is placed, because the kernel asks the
+    // effect judgment whether a callee writes module state (RFC-0125 M7), and
+    // the judgment joins every body. A body the memo serves is not built, and
+    // a call into it is judged as pure.
+    let mut made: Vec<Made> = Vec::with_capacity(lowered.instances.len());
     for inst in &lowered.instances {
         let key = memo
             .as_ref()
             .and_then(|m| m.key(inst.func.module.as_deref(), &inst.spelling()));
-        if serve(memo.as_ref(), key.as_ref()) {
-            built.push(None);
+        if let Some(rs) = serve(memo.as_ref(), key.as_ref()) {
+            made.push(Made::Served(rs));
             continue;
         }
-        let refused_before = REFUSALS.with(|v| v.borrow().len());
         let bs = vyrn_frontend::prof::phase("placer: core::build");
-        let made = build(program, inst, own);
+        let top = build(program, inst, own);
         drop(bs);
+        made.push(Made::Built(key, top));
+    }
+    // A `test` (RFC-0015) or `bench` (RFC-0055) body is a body, and the
+    // kernel judges it like any other (RFC-0125 §3 M3, the reach slice). The
+    // core lowers FUNCTION instances, so these two were the last bodies it
+    // did not reach: the judgment said nothing about them, and one program
+    // of `movecheck`'s own suite was accepted for that reason alone.
+    let os = vyrn_frontend::prof::phase("placer: build_outside");
+    let mut made_outside: Vec<Made> = Vec::with_capacity(lowered.bodies.len());
+    for ob in &lowered.bodies {
+        // The same key, spelled with the LINE beside the synthetic name: a
+        // `test@<i>` index is global, and a test added to an earlier module
+        // renumbers every later one, so the name alone would name a different
+        // body of the same unchanged module.
+        let key = memo
+            .as_ref()
+            .and_then(|m| m.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)));
+        if let Some(rs) = serve(memo.as_ref(), key.as_ref()) {
+            made_outside.push(Made::Served(rs));
+            continue;
+        }
+        let top = build_outside(
+            program,
+            own,
+            &ob.name,
+            ob.module.clone(),
+            ob.block,
+            &ob.rows,
+        );
+        made_outside.push(Made::Built(key, top));
+    }
+    drop(os);
+    let ej = vyrn_frontend::prof::phase("placer: effects");
+    let mut tops: Vec<(&str, &Body)> = Vec::new();
+    for (inst, m) in lowered.instances.iter().zip(&made) {
+        if let Made::Built(_, Ok(b)) = m {
+            tops.push((inst.func.name.as_str(), b));
+        }
+    }
+    for (ob, m) in lowered.bodies.iter().zip(&made_outside) {
+        if let Made::Built(_, Ok(b)) = m {
+            tops.push((ob.name.as_str(), b));
+        }
+    }
+    crate::effects::judge_built(program, &lowered, own, &tops, |judged, refs, _| {
+        crate::effects::set_state_callees(Some((judged, refs)));
+    });
+    drop(tops);
+    drop(ej);
+    for (inst, m) in lowered.instances.iter().zip(made) {
+        let (key, made) = match m {
+            Made::Served(rs) => {
+                REFUSALS.with(|v| v.borrow_mut().extend(rs));
+                built.push(None);
+                continue;
+            }
+            Made::Built(key, made) => (key, made),
+        };
+        let refused_before = REFUSALS.with(|v| v.borrow().len());
         let top = match made {
             Ok(b) => Some(b),
             Err(g) => {
@@ -7281,34 +7359,18 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         remember(memo.as_ref(), key, refused_before);
         built.push(top);
     }
-    // A `test` (RFC-0015) or `bench` (RFC-0055) body is a body, and the
-    // kernel judges it like any other (RFC-0125 §3 M3, the reach slice). The
-    // core lowers FUNCTION instances, so these two were the last bodies it
-    // did not reach: the judgment said nothing about them, and one program
-    // of `movecheck`'s own suite was accepted for that reason alone.
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    let os = vyrn_frontend::prof::phase("placer: build_outside");
-    for ob in &lowered.bodies {
-        // The same key, spelled with the LINE beside the synthetic name: a
-        // `test@<i>` index is global, and a test added to an earlier module
-        // renumbers every later one, so the name alone would name a different
-        // body of the same unchanged module.
-        let key = memo
-            .as_ref()
-            .and_then(|m| m.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)));
-        if serve(memo.as_ref(), key.as_ref()) {
-            outside.push(None);
-            continue;
-        }
+    for (ob, m) in lowered.bodies.iter().zip(made_outside) {
+        let (key, made) = match m {
+            Made::Served(rs) => {
+                REFUSALS.with(|v| v.borrow_mut().extend(rs));
+                outside.push(None);
+                continue;
+            }
+            Made::Built(key, made) => (key, made),
+        };
         let refused_before = REFUSALS.with(|v| v.borrow().len());
-        match build_outside(
-            program,
-            own,
-            &ob.name,
-            ob.module.clone(),
-            ob.block,
-            &ob.rows,
-        ) {
+        match made {
             Ok(top) => {
                 if std::env::var("VYRN_KERNEL_TRACE")
                     .is_ok_and(|v| v != "1" && ob.name.contains(&v))
@@ -7336,7 +7398,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         remember(memo.as_ref(), key, refused_before);
     }
-    drop(os);
+    crate::effects::set_state_callees(None);
     for (f, row) in added {
         touched.insert(f.clone());
         own.releases.entry(f).or_default().push(row);
@@ -7403,32 +7465,34 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     FACTS.with(|f| *f.borrow_mut() = Some(facts));
 }
 
-/// Serve one body's refusals out of the judgment memo — RFC-0125 §3 M3, the
-/// memo slice. `true` when it did, and then the body is neither built nor
+/// One body `augment` built, or served out of the memo.
+enum Made {
+    /// The refusals the memo recorded for it.
+    Served(Vec<crate::kernel::Refusal>),
+    Built(
+        Option<vyrn_frontend::movecheck::JudgmentKey>,
+        Result<Body, Gap>,
+    ),
+}
+
+/// One body's refusals out of the judgment memo — RFC-0125 §3 M3, the memo
+/// slice. `Some` when it has them, and then the body is neither built nor
 /// judged.
 fn serve(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
     key: Option<&vyrn_frontend::movecheck::JudgmentKey>,
-) -> bool {
-    let (Some(memo), Some(key)) = (memo, key) else {
-        return false;
-    };
-    let Some(hit) = memo.get(key) else {
-        return false;
-    };
-    REFUSALS.with(|v| {
-        v.borrow_mut()
-            .extend(
-                hit.into_iter()
-                    .map(|(file, line, message, body)| crate::kernel::Refusal {
-                        message,
-                        line,
-                        file,
-                        body,
-                    }),
-            )
-    });
-    true
+) -> Option<Vec<crate::kernel::Refusal>> {
+    let hit = memo?.get(key?)?;
+    Some(
+        hit.into_iter()
+            .map(|(file, line, message, body)| crate::kernel::Refusal {
+                message,
+                line,
+                file,
+                body,
+            })
+            .collect(),
+    )
 }
 
 /// Record what one body earned: every refusal from `from` to the end of the

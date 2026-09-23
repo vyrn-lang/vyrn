@@ -2819,3 +2819,45 @@ fn a_write_to_the_scrutinee_a_payload_binder_reads_is_refused() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
+
+/// RFC-0125 M7, module state: a call whose callee stores into a global ends
+/// every borrow of that global, by the effect judgment's write half. The
+/// emitter read the freed array and printed 3 and 0 where the language says
+/// 3 and 1.
+#[test]
+fn a_call_that_writes_module_state_ends_its_borrows() {
+    let src = "let mut xs: Array<Int64> = [1, 2, 3]\n\
+               fn reset() { xs = [7, 8, 9, 10] }\n\
+               fn main() -> Int64 {\n  let a = xs\n  reset()\n  print(a.length)\n  \
+               print(a[0])\n  return 0\n}\n";
+    let want = "`xs` is written here while `a` still reads out of it";
+    let dir = common::scratch("state-write");
+    let mut bad: Vec<String> = Vec::new();
+    std::fs::write(dir.join("state.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "state.vyrn", false);
+    if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+        bad.push(format!("`check state.vyrn` said {text}"));
+    }
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "state.vyrn"])
+        .output()
+        .expect("vyrn");
+    let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || !out.stdout.is_empty() || !err.contains(want) {
+        bad.push(format!("`run state.vyrn` ran or said {err}"));
+    }
+    // The way out the menu names: `a` is a value of its own.
+    let copy = src.replace("let a = xs\n", "let a = xs.copy()\n");
+    std::fs::write(dir.join("state-copy.vyrn"), copy).expect("write the program");
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "state-copy.vyrn"])
+        .output()
+        .expect("vyrn run");
+    let got = String::from_utf8_lossy(&out.stdout);
+    if got.split_whitespace().collect::<Vec<_>>() != ["3", "1"] {
+        bad.push(format!("`run state-copy.vyrn` printed {got:?}"));
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}

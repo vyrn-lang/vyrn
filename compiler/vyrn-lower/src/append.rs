@@ -1,6 +1,6 @@
 //! The String accumulators an append may grow in place, stated once for the
-//! core's builder and the emitter's arm: [`append_candidates`] for a body's
-//! locals, and [`scan_append_block`] for the emitter's module-state reading.
+//! core's builder and the emitter: [`append_candidates`] for a body's locals,
+//! and [`global_append_candidates`] for module state.
 
 use vyrn_frontend::ast::*;
 
@@ -56,7 +56,7 @@ pub fn append_candidates(body: &Block) -> std::collections::HashSet<String> {
 /// Walk a block collecting append targets and banned names. `strict` marks a
 /// lambda body: everything inside one is banned outright, because a capture
 /// copies the pointer into a value that outlives the append.
-pub fn scan_append_block(
+fn scan_append_block(
     b: &Block,
     targets: &mut std::collections::HashSet<String>,
     banned: &mut std::collections::HashSet<String>,
@@ -186,7 +186,7 @@ fn binop_retains_str(op: BinOp) -> bool {
 /// Ban every variable `e` mentions in a position that might retain it. The
 /// match is exhaustive on purpose: a new `Expr` variant must be classified
 /// rather than silently fall into a permissive default.
-pub fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, strict: bool) {
+fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, strict: bool) {
     match e {
         Expr::Var { name, .. } => {
             banned.insert(name.clone());
@@ -283,3 +283,140 @@ pub fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>,
         Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
     }
 }
+
+/// The **module-state** `String` accumulators of a whole program (census P1).
+///
+/// The same whitelist, read over every body instead of one, because a global is
+/// reachable from all of them: a name qualifies when some body grows it with
+/// `g = g + …` and NO body puts a pointer to it anywhere that could outlive the
+/// grow. `let t = g` is one of the things that bans a name, which is exactly the
+/// aliasing guard a global needs and a local already had.
+///
+/// P1 measured what not having this costs: 4.92 s and 12.2 GB to build a 160 KB
+/// string, against 0.095 s for the identical local. The global did not qualify
+/// for one reason — the whitelist read one body — and every server that
+/// accumulates a response body is a module-state accumulator.
+///
+/// A body that binds the name LOCALLY votes on neither side, because inside it
+/// the name is not the global. Without that filter one `let out` among the
+/// hundreds of linked `std/` functions disqualifies a module-state `out`, and the
+/// first measurement of this pass hit exactly that.
+/// The result is a `BTreeSet` and not a `HashSet` because one caller ITERATES
+/// it: the direct backend reserves an ownership word per accumulator, and a
+/// reservation is an address baked into every `i32.const` that reads or writes
+/// it — and it shifts every later reservation, so the whole static map moves.
+/// `RandomState` is seeded per process, so two accumulators were a coin flip and
+/// three built six different modules from one source. Sorted here rather than at
+/// that loop, because the next caller to iterate it would have to know.
+pub fn global_append_candidates(program: &Program) -> std::collections::BTreeSet<String> {
+    let mut targets = std::collections::HashSet::new();
+    let mut banned = std::collections::HashSet::new();
+    let mut one = |body: &Block, params: &[Param]| {
+        let (mut t, mut ban) = (
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        );
+        scan_append_block(body, &mut t, &mut ban, false);
+        let mut shadowed: std::collections::HashSet<String> =
+            params.iter().map(|p| p.name.clone()).collect();
+        bound_names(body, &mut shadowed);
+        targets.extend(t.into_iter().filter(|n| !shadowed.contains(n)));
+        banned.extend(ban.into_iter().filter(|n| !shadowed.contains(n)));
+    };
+    for f in &program.functions {
+        one(&f.body, &f.params);
+    }
+    for t in &program.tests {
+        one(&t.body, &[]);
+    }
+    for bn in &program.benches {
+        one(&bn.body, &[]);
+    }
+    // A global's own initializer runs once and cannot append, but a name it reads
+    // is a name held somewhere this walk should see.
+    for g in &program.globals {
+        ban_append_expr(&g.init, &mut banned, false);
+    }
+    targets.retain(|n| !banned.contains(n));
+    targets.retain(|n| program.globals.iter().any(|g| &g.name == n));
+    targets.into_iter().collect()
+}
+
+thread_local! {
+    /// [`global_append_candidates`] of the program `core::augment` is
+    /// placing, which every body it builds asks; empty outside it.
+    static HELD: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// Holds `program`'s module-state accumulators for the builds of one
+/// placement, and lets them go when dropped.
+pub(crate) struct Held;
+
+impl Held {
+    pub(crate) fn new(program: &Program) -> Held {
+        HELD.with(|h| *h.borrow_mut() = global_append_candidates(program));
+        Held
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        HELD.with(|h| h.borrow_mut().clear());
+    }
+}
+
+/// Whether the module-state binding `name` is a String accumulator of the
+/// program being placed.
+pub(crate) fn global_grows(name: &str) -> bool {
+    HELD.with(|h| h.borrow().contains(name))
+}
+
+/// The collector's line at each site: a `let`, a loop variable, an `if let` or
+/// arm binder, a lambda parameter.
+struct BoundNames<'a>(&'a mut std::collections::HashSet<String>);
+
+impl BodyVisit<'_> for BoundNames<'_> {
+    // The union of every name bound anywhere, not what is in scope where.
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+        match s {
+            Stmt::Let { name, .. } => {
+                self.0.insert(name.clone());
+            }
+            Stmt::ForIn { var, .. } => {
+                self.0.insert(var.clone());
+            }
+            Stmt::IfLet { pattern, .. } => self.0.extend(pattern_names(pattern)),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        if let Expr::Lambda { params, .. } = e {
+            self.0.extend(params.iter().map(|p| p.name.clone()));
+        }
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &Pattern, _: usize, _: &std::collections::HashSet<String>) {
+        self.0.extend(pattern_names(p));
+    }
+}
+
+/// Every name a block binds anywhere inside it — `let`s, loop variables, pattern
+/// binders and lambda parameters. Over-collecting is safe here: the only use is
+/// to decide that a body is talking about its own name rather than about module
+/// state, and an extra name only costs a global the in-place append path.
+fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
+    let mut locals = std::collections::HashSet::new();
+    body_block(b, &mut locals, &mut BoundNames(out));
+}
+
+/// The names a refutable pattern binds.
+fn pattern_names(p: &Pattern) -> Vec<String> {
+    p.bindings().into_iter().map(String::from).collect()
+}
+
+vyrn_frontend::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
