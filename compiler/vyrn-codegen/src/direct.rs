@@ -7989,6 +7989,112 @@ impl<'p> Fn_<'_, 'p> {
         !self.cx.audit && vyrn_frontend::loader::audit_hook(name)
     }
 
+    /// Whether `name` is an `extern fn` (RFC-0012) or one of RFC-0043's
+    /// host-boundary names, which [`Fn_::extern_call`] writes.
+    fn is_extern(&self, name: &str) -> bool {
+        crate::host_boundary_extern(name).is_some() || self.cx.externs.contains_key(name)
+    }
+
+    /// One call to an `extern fn` or a host-boundary name, `argc` operands
+    /// written by `operand` at each parameter's type.
+    fn extern_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        argc: usize,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        // RFC-0043's host boundary. These three are not `vyrn` host imports like
+        // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
+        // honouring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`, which is what makes a
+        // clock example a three-way parity citizen instead of a browser-only one.
+        //
+        // M2i got them by reaching that shim, and M2j took it back out: a shape
+        // that only works linked cannot be what `vyrn build --target wasm` does,
+        // because M5's criterion is no clang. WASI has `clock_time_get` and
+        // `random_get`, the env injection is `environ_get`, and wasi-libc's
+        // `timespec_get`/`getentropy` are thin wrappers over the first two — so
+        // the emitted runtime reads the same syscalls by a shorter route.
+        if let Some(sym) = crate::host_boundary_extern(name) {
+            // Each reader takes the interned name of its injected value
+            // (`VYRN_FIXED_TIME=`, `VYRN_FIXED_SEED=`), which is how the
+            // harness fixes a clock example (RFC-0043).
+            let (f, key) = match sym {
+                "__vyrn_now_millis" => (self.cx.rt.now_millis, self.cx.rt.fixed_time),
+                "__vyrn_monotonic_nanos" => (self.cx.rt.mono_nanos, self.cx.rt.fixed_time),
+                _ => (self.cx.rt.random_seed, self.cx.rt.fixed_seed),
+            };
+            if argc != 0 {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            b.ins(&Instruction::I32Const(key as i32));
+            // What it returns is the declaration's business, not this file's, and
+            // the boundary hands back an `i64`. Anything else spelled over one of
+            // these reserved names would read the wrong bytes silently.
+            let ret = self
+                .cx
+                .externs
+                .get(name)
+                .map(|e| e.ret.clone())
+                .unwrap_or(Type::Unit);
+            if self.cx.repr(&ret, line)? != Repr::Scalar(ValType::I64) {
+                return unsupported(&format!("`{name}` declared as returning `{ret}`"), line);
+            }
+            b.ins(&Instruction::Call(f));
+            return Ok(ret);
+        }
+        // RFC-0012 M1: a real call into the host, through the `vyrn` import
+        // declared from this `extern fn`'s own signature.
+        //
+        // Every ABI conversion the textual backend's `to_extern_abi` performs is
+        // already done here by the carrier invariant (M2h): a `Bool` and every
+        // sub-64-bit int ride an `i32`, correctly extended, which is exactly what
+        // the ABI widens them to. `String` is the one shape that is not one word,
+        // and it is the one thing this loop does.
+        if let Some(ext) = self.cx.externs.get(name).cloned() {
+            let Some(index) = ext.index else {
+                // A host-boundary name handled above; anything else here is a
+                // declaration this backend has no route for.
+                return unsupported(&format!("the call `{name}`"), line);
+            };
+            if ext.params.len() != argc {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            for (i, p) in ext.params.iter().enumerate() {
+                operand(self, m, b, i, p)?;
+                if matches!(self.cx.resolve(p), Type::Str) {
+                    // (ptr, len): the host decodes UTF-8 out of linear memory, so
+                    // it needs the length a NUL-terminated pointer does not carry.
+                    // Its own scratch number per argument — one local for two live
+                    // values is the M2g bug, and here it would send the host a
+                    // length taken from the wrong string.
+                    let s = self.scratch(b, ValType::I32, 20 + i as u8);
+                    b.ins(&Instruction::LocalTee(s))
+                        .ins(&Instruction::LocalGet(s));
+                    str_len(b);
+                    b.ins(&Instruction::I64ExtendI32U);
+                }
+            }
+            b.ins(&Instruction::Call(index));
+            // The host returns an `i32` for every narrow width, and a JS number
+            // out of range would otherwise be a carrier the rest of this backend
+            // reads as in-range. `from_extern_abi`'s `trunc` on the other backend.
+            if let Some(n) = Num::of(&self.cx.resolve(&ext.ret)) {
+                renorm(b, n);
+            }
+            return Ok(ext.ret.clone());
+        }
+        unsupported(&format!("the call `{name}`"), line)
+    }
+
     fn call_inner(
         &mut self,
         m: &mut Module,
@@ -8749,85 +8855,11 @@ impl<'p> Fn_<'_, 'p> {
             let sig = self.cx.instantiate(m, &f, type_args, subst)?;
             return self.emit_call(m, b, &sig, args, hint);
         }
-        // RFC-0043's host boundary. These three are not `vyrn` host imports like
-        // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
-        // honouring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`, which is what makes a
-        // clock example a three-way parity citizen instead of a browser-only one.
-        //
-        // M2i got them by reaching that shim, and M2j took it back out: a shape
-        // that only works linked cannot be what `vyrn build --target wasm` does,
-        // because M5's criterion is no clang. WASI has `clock_time_get` and
-        // `random_get`, the env injection is `environ_get`, and wasi-libc's
-        // `timespec_get`/`getentropy` are thin wrappers over the first two — so
-        // the emitted runtime reads the same syscalls by a shorter route.
-        if let Some(sym) = crate::host_boundary_extern(name) {
-            // Each reader takes the interned name of its injected value
-            // (`VYRN_FIXED_TIME=`, `VYRN_FIXED_SEED=`), which is how the
-            // harness fixes a clock example (RFC-0043).
-            let (f, key) = match sym {
-                "__vyrn_now_millis" => (self.cx.rt.now_millis, self.cx.rt.fixed_time),
-                "__vyrn_monotonic_nanos" => (self.cx.rt.mono_nanos, self.cx.rt.fixed_time),
-                _ => (self.cx.rt.random_seed, self.cx.rt.fixed_seed),
+        if self.is_extern(name) {
+            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
+                s.expr_as(m, b, &args[i], p).map(|_| ())
             };
-            if !args.is_empty() {
-                return unsupported(&format!("the call `{name}` at this arity"), line);
-            }
-            b.ins(&Instruction::I32Const(key as i32));
-            // What it returns is the declaration's business, not this file's, and
-            // the boundary hands back an `i64`. Anything else spelled over one of
-            // these reserved names would read the wrong bytes silently.
-            let ret = self
-                .cx
-                .externs
-                .get(name)
-                .map(|e| e.ret.clone())
-                .unwrap_or(Type::Unit);
-            if self.cx.repr(&ret, line)? != Repr::Scalar(ValType::I64) {
-                return unsupported(&format!("`{name}` declared as returning `{ret}`"), line);
-            }
-            b.ins(&Instruction::Call(f));
-            return Ok(ret);
-        }
-        // RFC-0012 M1: a real call into the host, through the `vyrn` import
-        // declared from this `extern fn`'s own signature.
-        //
-        // Every ABI conversion the textual backend's `to_extern_abi` performs is
-        // already done here by the carrier invariant (M2h): a `Bool` and every
-        // sub-64-bit int ride an `i32`, correctly extended, which is exactly what
-        // the ABI widens them to. `String` is the one shape that is not one word,
-        // and it is the one thing this loop does.
-        if let Some(ext) = self.cx.externs.get(name).cloned() {
-            let Some(index) = ext.index else {
-                // A host-boundary name handled above; anything else here is a
-                // declaration this backend has no route for.
-                return unsupported(&format!("the call `{name}`"), line);
-            };
-            if ext.params.len() != args.len() {
-                return unsupported(&format!("the call `{name}` at this arity"), line);
-            }
-            for (i, (a, p)) in args.iter().zip(&ext.params).enumerate() {
-                self.expr_as(m, b, a, p)?;
-                if matches!(self.cx.resolve(p), Type::Str) {
-                    // (ptr, len): the host decodes UTF-8 out of linear memory, so
-                    // it needs the length a NUL-terminated pointer does not carry.
-                    // Its own scratch number per argument — one local for two live
-                    // values is the M2g bug, and here it would send the host a
-                    // length taken from the wrong string.
-                    let s = self.scratch(b, ValType::I32, 20 + i as u8);
-                    b.ins(&Instruction::LocalTee(s))
-                        .ins(&Instruction::LocalGet(s));
-                    str_len(b);
-                    b.ins(&Instruction::I64ExtendI32U);
-                }
-            }
-            b.ins(&Instruction::Call(index));
-            // The host returns an `i32` for every narrow width, and a JS number
-            // out of range would otherwise be a carrier the rest of this backend
-            // reads as in-range. `from_extern_abi`'s `trunc` on the other backend.
-            if let Some(n) = Num::of(&self.cx.resolve(&ext.ret)) {
-                renorm(b, n);
-            }
-            return Ok(ext.ret.clone());
+            return self.extern_call(m, b, name, args.len(), &mut operand, line);
         }
         // RFC-0120: a named projection dispatches here exactly as `a[i]` does —
         // the same table, its own method name. Last, so every callable of the
