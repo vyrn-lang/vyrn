@@ -17389,6 +17389,9 @@ impl<'p> Fn_<'_, 'p> {
                 St::Let(n, rhs) if self.core_nests(body, ss, i, &w.occurs).is_some() => {
                     w.nested[*n as usize] = Some(rhs.clone());
                 }
+                // A module-state receiver is read at its address by the
+                // append, and by nothing else.
+                St::Let(n, _) if core_global(body, *n).is_some() => {}
                 // A LAYOUT MADE, built into the binding's own slot — RFC-0125
                 // M7. It is a `let` arm of its own because the slot has to
                 // exist before the parts are written: the arm below evaluates
@@ -17617,14 +17620,33 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A field or module state: its address with the field's offset
                 // added, the value, and the store, which is the `SetField`
-                // arm's order for a scalar field.
+                // arm's order for a scalar field. A String in module state is
+                // released where the row says so, and its word cleared, as a
+                // String name's.
                 St::Store {
-                    place, value, line, ..
+                    place,
+                    value,
+                    line,
+                    releases,
+                    ..
                 } => {
                     let (ty, off) = self.core_addr(m, b, body, w, place, *line)?;
                     self.core_step(b, off);
+                    let snap = if *releases {
+                        let a = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalTee(a));
+                        self.snap_at(b, a, &ty, *line)?
+                    } else {
+                        None
+                    };
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&store_of(&self.cx.ll(&ty)));
+                    self.free_snap(m, b, snap, *line)?;
+                    if let vyrn_lower::core::Place::Global(g) = place {
+                        if let Some(&word) = self.cx.gappend.get(g) {
+                            disown(b, Place::Static(word));
+                        }
+                    }
                 }
                 // A LOOP'S EXIT, which the core states and wasm has one
                 // instruction for. The pass makes up exactly one `break`
@@ -19298,12 +19320,16 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
-                // A String name takes the store too: the release is the row's
-                // `releases`, and an accumulator's word is cleared after it.
-                let named = matches!(place, vyrn_lower::core::Place::Name(_));
+                // A String name or module state takes the store too: the
+                // release is the row's `releases`, and an accumulator's word is
+                // cleared after it.
+                let whole = matches!(
+                    place,
+                    vyrn_lower::core::Place::Name(_) | vyrn_lower::core::Place::Global(_)
+                );
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
-                    (core_scalar(&r) || (named && r == Type::Str))
+                    (core_scalar(&r) || (whole && r == Type::Str))
                         && (!self.checks(&t)
                             || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
                 }) && self.core_val_readable(body, value)
