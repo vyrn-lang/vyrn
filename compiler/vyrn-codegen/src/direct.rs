@@ -17716,9 +17716,10 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     w.walks[*n as usize] = Some(self.walk(b, &ty, line)?);
                 }
-                // A LAYOUT READ OUT OF A PLACE, held as the place's address in
-                // a local, the way a layout parameter is (RFC-0125 M7).
-                St::Let(n, Rhs::Read(p)) if self.core_alias(body, *n).is_some() => {
+                // A LAYOUT READ OUT OF A PLACE, or taken out of one and handed
+                // back, held as the place's address in a local, the way a
+                // layout parameter is (RFC-0125 M7).
+                St::Let(n, Rhs::Read(p) | Rhs::Take(p)) if self.core_alias(body, *n).is_some() => {
                     let line = body.names[*n as usize].line;
                     let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
                     self.core_step(b, off);
@@ -18733,12 +18734,18 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<&'b vyrn_lower::core::Place> {
         let info = &body.names[n as usize];
+        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
+            return None;
+        }
+        // A take a rebuild hands back is the place it was taken from: the
+        // arm rebuilds a field in place (`s.keys.push(k)`), and the hole the
+        // take leaves is the rebuild's own until the store fills it.
+        if let Some(p) = core_taken(body, n) {
+            return self.core_hands_back(body, &body.stmts, n).then_some(p);
+        }
         let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
         let owned = info.releases && !info.borrow;
-        if !(info.borrow || minted || owned)
-            || self.checks(&info.ty)
-            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
-        {
+        if !(info.borrow || minted || owned) {
             return None;
         }
         let mut lets = Vec::new();
@@ -20096,8 +20103,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
-    /// is the store that puts the result back into that receiver: one
-    /// address, which [`Fn_::arr_rebuild`] has already written.
+    /// is the store that puts the result back into that receiver, or into the
+    /// place the receiver was taken from: one address, which
+    /// [`Fn_::arr_rebuild`] has already written ([`Fn_::core_alias`]).
     fn core_rebuilt(
         &self,
         body: &vyrn_lower::core::Body,
@@ -20120,10 +20128,33 @@ impl<'p> Fn_<'_, 'p> {
         };
         let back = match place {
             vyrn_lower::core::Place::Name(x) => x == r,
-            vyrn_lower::core::Place::Global(g) => core_global(body, *r) == Some(g.as_str()),
-            _ => false,
+            vyrn_lower::core::Place::Global(g) if core_global(body, *r) == Some(g.as_str()) => true,
+            p => core_taken(body, *r) == Some(p),
         };
         (t == v && back && self.core_rebuild(body, rhs)).then_some((*r, *t))
+    }
+
+    /// Whether a rebuild in `ss` hands `n` back to the place it was taken
+    /// from ([`Fn_::core_rebuilt`]).
+    fn core_hands_back(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        n: vyrn_lower::core::Name,
+    ) -> bool {
+        (1..ss.len()).any(|i| {
+            matches!(ss[i], St::Store { .. })
+                && self.core_rebuilt(body, ss, i).is_some_and(|(r, _)| r == n)
+        }) || ss.iter().any(|s| match s {
+            St::If { then, els, .. } => {
+                self.core_hands_back(body, then, n) || self.core_hands_back(body, els, n)
+            }
+            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+                self.core_hands_back(body, inner, n)
+            }
+            St::Switch { arms, .. } => arms.iter().any(|a| self.core_hands_back(body, &a.body, n)),
+            _ => false,
+        })
     }
 
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands
@@ -20351,6 +20382,22 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
             ..
         } => args.first().and_then(|(v, _)| name(v)),
         St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
+        _ => None,
+    }
+}
+
+/// The place the name `n` was taken from, when its one `let` is a take.
+fn core_taken(
+    body: &vyrn_lower::core::Body,
+    n: vyrn_lower::core::Name,
+) -> Option<&vyrn_lower::core::Place> {
+    let mut lets = Vec::new();
+    for s in &body.stmts {
+        core_lets(s, &mut lets);
+    }
+    let mut at = lets.iter().filter(|(b, _)| *b == n);
+    match (at.next(), at.next()) {
+        (Some((_, Rhs::Take(p))), None) => Some(p),
         _ => None,
     }
 }

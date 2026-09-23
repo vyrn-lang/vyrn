@@ -457,7 +457,7 @@ pub enum Val {
     Lit(Lit),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Place {
     Name(Name),
     Global(String),
