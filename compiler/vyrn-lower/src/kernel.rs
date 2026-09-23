@@ -243,6 +243,9 @@ enum Write<'s> {
     Release(Name),
     /// A `modify` argument: the callee may replace or free what it names.
     Modify(&'s Val),
+    /// A call whose callee may store into these globals, by the effect
+    /// judgment's write half ([`crate::effects::writes_state`]).
+    State(Vec<String>),
 }
 
 /// Whether a store at `rel`, a path under a container's header, lands in an
@@ -254,7 +257,8 @@ fn in_element(rel: &str) -> bool {
 /// Every write point of the row `s`, in the order the judgment reaches them,
 /// without the rows of a list inside `s`. The judgment's state walk and
 /// [`writes`] both read this, so the two agree on what a row writes.
-fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo]) -> Vec<Write<'s>> {
+/// `body` is the name the effect judgment knows the row's body by.
+fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<Write<'s>> {
     match s {
         // A second name for a borrow reads it; nothing is handed on.
         St::Let(n, Rhs::Val(Val::Name(m)))
@@ -266,11 +270,15 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo]) -> Vec<Write<'s>> {
             Rhs::Val(v) => vec![Write::Hand(v, false)],
             Rhs::Make(_, vs) => vs.iter().map(|v| Write::Hand(v, false)).collect(),
             Rhs::Take(p) => vec![Write::Take(p)],
-            Rhs::Call { args, kind, .. } => {
+            Rhs::Call {
+                callee, args, kind, ..
+            } => {
                 let consumed = args.iter().filter(|(_, c)| *c == Capability::Consume);
                 let modified = args.iter().filter(|(_, c)| *c == Capability::Modify);
+                let state = crate::effects::writes_state(body, callee);
                 (consumed.map(|(v, _)| Write::Hand(v, kind.declared())))
                     .chain(modified.map(|(v, _)| Write::Modify(v)))
+                    .chain((!state.is_empty()).then_some(Write::State(state)))
                     .collect()
             }
             Rhs::Read(_) | Rhs::Prim(..) => vec![],
@@ -297,12 +305,17 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo]) -> Vec<Write<'s>> {
 /// builder asks before the judgment runs (RFC-0125 M7, the hoisted header).
 /// A release or a `return` that only an exit follows is not one: no row
 /// after it reads the borrow.
-pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo]) -> bool {
+///
+/// A call that stores into module state is one whatever `n` reads, because a
+/// name does not record the global it reads. The builder asks before the
+/// judgment is held, and there no call is one.
+pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo], body: &str) -> bool {
     let mut inside = Vec::new();
     ss.iter()
         .for_each(|s| crate::core::names_bound(s, &mut inside));
     let mut w = Writes {
         n,
+        body,
         alias: vec![n],
         elem: Vec::new(),
         inside,
@@ -314,6 +327,7 @@ pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo]) -> bool {
 
 struct Writes<'a> {
     n: Name,
+    body: &'a str,
     /// `n`, and every borrow bound so far by a read of one of these.
     alias: Vec<Name>,
     /// Those of `alias` that read inside an element of `n`.
@@ -347,16 +361,20 @@ impl Writes<'_> {
     }
 
     fn st(&mut self, s: &St) -> bool {
-        let hit = writes_of(s, self.names).into_iter().any(|w| match w {
-            Write::Store(p) => root_of(p).is_some_and(|(r, path)| {
-                self.under(r)
-                    && !(self.elem.contains(&r) || (self.alias.contains(&r) && in_element(&path)))
-            }),
-            Write::Take(p) => root_of(p).is_some_and(|(r, _)| self.under(r)),
-            Write::Hand(v, _) => *v == Val::Name(self.n),
-            Write::Release(k) => self.alias.contains(&k),
-            Write::Modify(v) => matches!(v, Val::Name(k) if self.under(*k)),
-        });
+        let hit = writes_of(s, self.names, self.body)
+            .into_iter()
+            .any(|w| match w {
+                Write::Store(p) => root_of(p).is_some_and(|(r, path)| {
+                    self.under(r)
+                        && !(self.elem.contains(&r)
+                            || (self.alias.contains(&r) && in_element(&path)))
+                }),
+                Write::Take(p) => root_of(p).is_some_and(|(r, _)| self.under(r)),
+                Write::Hand(v, _) => *v == Val::Name(self.n),
+                Write::Release(k) => self.alias.contains(&k),
+                Write::Modify(v) => matches!(v, Val::Name(k) if self.under(*k)),
+                Write::State(_) => true,
+            });
         if hit {
             return true;
         }
@@ -840,6 +858,10 @@ impl<'b> Kernel<'b> {
     /// the callee may replace or free it, and it ends a walked borrow
     /// whatever the container holds.
     fn end(&self, st: &mut State, w: Write) {
+        if let Write::State(gs) = &w {
+            self.end_state(st, gs);
+            return;
+        }
         let name;
         let p = match w {
             Write::Store(p) | Write::Take(p) => p,
@@ -853,7 +875,7 @@ impl<'b> Kernel<'b> {
                 name = Place::Name(n);
                 &name
             }
-            Write::Hand(..) | Write::Modify(_) => return,
+            Write::Hand(..) | Write::Modify(_) | Write::State(_) => return,
         };
         let by_call = matches!(w, Write::Modify(_));
         let store = matches!(w, Write::Store(_));
@@ -899,8 +921,26 @@ impl<'b> Kernel<'b> {
         }
     }
 
+    /// Ends every borrow of the globals `gs`: the judgment names no place
+    /// under a global, so a borrow of any part of one ends.
+    fn end_state(&self, st: &mut State, gs: &[String]) {
+        for (n, info) in self.body.names.iter().enumerate() {
+            if self.owned(n as Name) && !self.read_out[n] && info.walked.is_none() {
+                continue;
+            }
+            if let Some(Alias {
+                root: Root::G(g), ..
+            }) = &st.alias[n]
+            {
+                if gs.contains(g) && st.dead[n].is_none() {
+                    st.dead[n] = Some((self.here, g.clone()));
+                }
+            }
+        }
+    }
+
     fn ends(&self, st: &mut State, s: &St) {
-        for w in writes_of(s, &self.body.names) {
+        for w in writes_of(s, &self.body.names, &self.body.name) {
             self.end(st, w);
         }
     }

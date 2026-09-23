@@ -80,6 +80,65 @@ pub struct Judged {
     /// `(body index, callee name)` for every call through a function value
     /// that `through` answered with bodies.
     pub through: Vec<(usize, String)>,
+    /// Per body, every callee name and what it resolved to.
+    calls: Vec<Vec<(String, Callee)>>,
+    /// Per body, the globals it or a callee stores into: the write half of
+    /// `module-state`, by place, joined in the same fixpoint.
+    writes: Vec<std::collections::BTreeSet<String>>,
+}
+
+impl Judged {
+    /// Each callee name of body `i` with the globals a call to it may store
+    /// into; a callee that stores into none is left out.
+    pub fn state_callees(&self, i: usize) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        for (n, c) in &self.calls[i] {
+            let Callee::Bodies(idx) = c else {
+                continue;
+            };
+            let gs: std::collections::BTreeSet<&String> =
+                idx.iter().flat_map(|j| &self.writes[*j]).collect();
+            if !gs.is_empty() && !out.iter().any(|(m, _)| m == n) {
+                out.push((n.clone(), gs.into_iter().cloned().collect()));
+            }
+        }
+        out
+    }
+}
+
+thread_local! {
+    /// [`Judged::state_callees`] by body name, for the program `augment` is
+    /// placing; empty outside it.
+    static STATE_CALLEES: std::cell::RefCell<HashMap<String, Vec<(String, Vec<String>)>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// The globals a call to `callee` in the body named `body` may store into,
+/// by the judgment of the program being placed. The kernel ends every borrow
+/// of one of them at the call.
+pub fn writes_state(body: &str, callee: &str) -> Vec<String> {
+    STATE_CALLEES.with(|m| {
+        m.borrow()
+            .get(body)
+            .and_then(|cs| cs.iter().find(|(c, _)| c == callee))
+            .map(|(_, gs)| gs.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// Record the judgment's module-state callees for every frame of `refs`.
+/// `None` clears them.
+pub(crate) fn set_state_callees(judged: Option<(&Judged, &[&Body])>) {
+    let map = judged
+        .map(|(j, refs)| {
+            refs.iter()
+                .enumerate()
+                .map(|(i, b)| (b.name.clone(), j.state_callees(i)))
+                .filter(|(_, cs)| !cs.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    STATE_CALLEES.with(|m| *m.borrow_mut() = map);
 }
 
 /// The effect set of every body in `bodies`, each the join of its own atoms,
@@ -103,6 +162,8 @@ pub fn judge(
     let mut unknown = Vec::new();
     let mut empty = Vec::new();
     let mut via = Vec::new();
+    let mut calls = Vec::with_capacity(bodies.len());
+    let mut writes: Vec<std::collections::BTreeSet<String>> = Vec::with_capacity(bodies.len());
     // One resolution per distinct name and per distinct type, not one per
     // call site.
     let mut memo: HashMap<String, Callee> = HashMap::new();
@@ -115,6 +176,8 @@ pub fn judge(
             unknown: Vec::new(),
             empty: Vec::new(),
             via: Vec::new(),
+            calls: Vec::new(),
+            writes: Default::default(),
             resolve,
             through,
             memo: &mut memo,
@@ -137,6 +200,8 @@ pub fn judge(
         unknown.extend(w.unknown.into_iter().map(|(n, l)| (i, n, l)));
         empty.extend(w.empty.into_iter().map(|(n, l)| (i, n, l)));
         via.extend(w.via.into_iter().map(|n| (i, n)));
+        calls.push(w.calls);
+        writes.push(w.writes);
     }
     // The fixpoint. Monotone over a finite lattice, so it ends; the corpus
     // needs a handful of rounds.
@@ -152,6 +217,13 @@ pub fn judge(
                 effects[i] = e;
                 changed = true;
             }
+            for &j in &edges[i] {
+                if j != i && !writes[j].is_subset(&writes[i]) {
+                    let more: Vec<String> = writes[j].difference(&writes[i]).cloned().collect();
+                    writes[i].extend(more);
+                    changed = true;
+                }
+            }
         }
         if !changed {
             break;
@@ -162,6 +234,17 @@ pub fn judge(
         unknown,
         empty,
         through: via,
+        calls,
+        writes,
+    }
+}
+
+/// The global `p` is rooted at, if any.
+fn global_root(p: &Place) -> Option<&String> {
+    match p {
+        Place::Global(g) => Some(g),
+        Place::Name(_) => None,
+        Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => global_root(b),
     }
 }
 
@@ -174,6 +257,9 @@ struct Walk<'a> {
     empty: Vec<(String, usize)>,
     /// The callees `through` answered with bodies.
     via: Vec<String>,
+    calls: Vec<(String, Callee)>,
+    /// The globals the body stores into.
+    writes: std::collections::BTreeSet<String>,
     resolve: &'a mut dyn FnMut(&str) -> Callee,
     through: &'a mut dyn FnMut(&Type) -> Callee,
     memo: &'a mut HashMap<String, Callee>,
@@ -220,7 +306,12 @@ impl Walk<'_> {
                     self.stmts(&a.body);
                 }
             }
-            St::Store { place, .. } => self.place(place),
+            St::Store { place, .. } => {
+                if let Some(g) = global_root(place) {
+                    self.writes.insert(g.clone());
+                }
+                self.place(place)
+            }
             St::Drop(..)
             | St::Row { .. }
             | St::Break { .. }
@@ -288,6 +379,7 @@ impl Walk<'_> {
             return false;
         };
         let c = self.callee(callee);
+        self.calls.push((callee.clone(), c.clone()));
         let atom = match c {
             Callee::Atom(e) => {
                 self.own = self.own.join(e);
@@ -421,6 +513,27 @@ fn with_judgment<R>(
             insts.push(inst);
         }
     }
+    let tops: Vec<(&str, &crate::core::Body)> = insts
+        .iter()
+        .zip(&bodies)
+        .map(|(i, b)| (i.func.name.as_str(), b))
+        .collect();
+    judge_built(program, &lowered, &own, &tops, |judged, refs, top| {
+        then(judged, refs, &insts, top)
+    })
+}
+
+/// The judgment over bodies the caller built: `tops` holds each body with
+/// the name a call spells it by. The projection bodies are built here, and
+/// `then` is given every frame in the order judged and `top[i]`, the frame
+/// index of `tops[i]`'s own body.
+pub(crate) fn judge_built<R>(
+    program: &vyrn_frontend::ast::Program,
+    lowered: &crate::Lowered<'_>,
+    own: &vyrn_frontend::own::Ownership,
+    tops: &[(&str, &crate::core::Body)],
+    then: impl FnOnce(&Judged, &[&crate::core::Body], &[usize]) -> R,
+) -> R {
     // An `impl` projection's body (RFC-0091 M2, RFC-0120): no function of the
     // program, no instance, and still a CALL by its own name in the core. It
     // is judged so the join can bound what an access site runs (RFC-0125 §3
@@ -434,7 +547,7 @@ fn with_judgment<R>(
             rows: pr.rows.clone(),
             releases: Vec::new(),
         };
-        if let Ok(b) = crate::core::build(program, &inst, &own) {
+        if let Ok(b) = crate::core::build(program, &inst, own) {
             place_bodies.push((pr.func.name.as_str(), b));
         }
     }
@@ -444,9 +557,9 @@ fn with_judgment<R>(
     let mut refs: Vec<&crate::core::Body> = Vec::new();
     let mut top: Vec<usize> = Vec::new();
     let mut lambda_frames: HashMap<(&str, usize), Vec<usize>> = HashMap::new();
-    for (i, b) in bodies.iter().enumerate() {
+    for (name, b) in tops {
         for f in b.frames() {
-            if std::ptr::eq(f, b) {
+            if std::ptr::eq(f, *b) {
                 top.push(refs.len());
             } else if let Some(line) = f
                 .name
@@ -455,12 +568,30 @@ fn with_judgment<R>(
                 .and_then(|l| l.parse::<usize>().ok())
             {
                 lambda_frames
-                    .entry((insts[i].func.name.as_str(), line))
+                    .entry((name, line))
                     .or_default()
                     .push(refs.len());
             }
             refs.push(f);
         }
+    }
+    // The module-state initializer's lambdas (RFC-0013), keyed under the
+    // empty name RFC-0037 records them by, so a call through a value of their
+    // type reaches their frames.
+    let state = crate::core::build_module_state(program, own, &lowered.globals).ok();
+    for f in state.iter().flat_map(|b| b.frames()).skip(1) {
+        if let Some(line) = f
+            .name
+            .rsplit("@lambda:")
+            .next()
+            .and_then(|l| l.parse::<usize>().ok())
+        {
+            lambda_frames
+                .entry(("", line))
+                .or_default()
+                .push(refs.len());
+        }
+        refs.push(f);
     }
     let mut place_tops: HashMap<&str, Vec<usize>> = HashMap::new();
     for (name, b) in &place_bodies {
@@ -470,11 +601,8 @@ fn with_judgment<R>(
         }
     }
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (i, inst) in insts.iter().enumerate() {
-        by_name
-            .entry(inst.func.name.as_str())
-            .or_default()
-            .push(top[i]);
+    for (i, (name, _)) in tops.iter().enumerate() {
+        by_name.entry(name).or_default().push(top[i]);
     }
     let mut impl_methods: HashMap<&str, Vec<usize>> = HashMap::new();
     for im in &program.impls {
@@ -555,5 +683,5 @@ fn with_judgment<R>(
         }
     };
     let judged = judge(&refs, &mut resolve, &mut through);
-    then(&judged, &refs, &insts, &top)
+    then(&judged, &refs, &top)
 }
