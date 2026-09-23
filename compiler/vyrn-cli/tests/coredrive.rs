@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 31] = [
+const SHAPES: [(&str, &str); 32] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -367,6 +367,12 @@ const SHAPES: [(&str, &str); 31] = [
         "a field taken into a part",
         "type In = { d: Array<Int64>, k: Int64 } type Out = { d: Array<Int64>, n: Int64 }          fn mk(k: Int64) -> In { let mut a: Array<Int64> = [] a.push(k) a.push(k + 1) return In { d: a, k: k } }          fn moved(k: Int64) -> Out { let t = mk(k) return Out { d: consume t.d, n: t.k } }          fn kept(k: Int64) -> Int64 { let t = mk(k) let o = Out { d: consume t.d, n: t.k } return o.d.length + o.n }          fn vyrnTestMain() -> Int64 { let o = moved(3) return o.d.length * 100 + o.d[1] + kept(5) * 1000 }",
     ),
+    // A `let` of a layout that owns no heap copies it, so a store into the
+    // copy leaves the original.
+    (
+        "a heapless record copied by `let`",
+        "type P = { x: Int64, y: Int64 }          fn bump(a: P) -> P { let mut b = a b.x = b.x + 10 return b }          fn vyrnTestMain() -> Int64 { let a = P { x: 1, y: 2 } let b = bump(a) return a.x * 100 + b.x }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -376,7 +382,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 31] = [
+const SHAPE_PIN: [(&str, usize, usize); 32] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -432,6 +438,7 @@ const SHAPE_PIN: [(&str, usize, usize); 31] = [
     ("a lane store whose result is discarded", 0, 0),
     ("a call to a host-boundary extern", 0, 0),
     ("a field taken into a part", 0, 0),
+    ("a heapless record copied by `let`", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

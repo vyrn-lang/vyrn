@@ -17673,7 +17673,15 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(l));
                     self.core_bind(b, body, w, *n, Place::Local(l), ty)?;
                 }
-                St::Let(n, Rhs::Read(p)) if self.core_copies(body, *n) => {
+                St::Let(n, rhs @ (Rhs::Read(_) | Rhs::Val(Val::Name(_))))
+                    if self.core_copies(body, *n) =>
+                {
+                    let p = match rhs {
+                        Rhs::Val(Val::Name(src)) => vyrn_lower::core::Place::Name(*src),
+                        Rhs::Read(p) => p.clone(),
+                        _ => return unsupported("a copy of no place", 0),
+                    };
+                    let p = &p;
                     let line = body.names[*n as usize].line;
                     let ty = body.names[*n as usize].ty.clone();
                     let r = self.cx.repr(&ty, line)?;
@@ -18728,6 +18736,11 @@ impl<'p> Fn_<'_, 'p> {
                         .core_place_ty(body, p)
                         .is_some_and(|t| self.cx.resolve(&t) == self.cx.resolve(&info.ty))
             }
+            // `let mut next = a` of a layout that owns no heap is the same
+            // copy: the value of `a`, at `a`'s place.
+            (Some((_, Rhs::Val(Val::Name(src)))), None) => {
+                self.cx.resolve(&body.names[*src as usize].ty) == self.cx.resolve(&info.ty)
+            }
             _ => false,
         }
     }
@@ -19703,6 +19716,7 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
             }
+            St::Let(n, Rhs::Val(Val::Name(_))) if self.core_copies(body, *n) => true,
             St::Let(n, Rhs::Read(_))
                 if self.core_alias(body, *n).is_some() || self.core_copies(body, *n) =>
             {
