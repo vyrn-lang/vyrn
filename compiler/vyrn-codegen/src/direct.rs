@@ -17230,7 +17230,31 @@ impl<'p> Fn_<'_, 'p> {
         w: &mut Walked,
         ss: &[St],
     ) -> Result<(), String> {
+        // A statement's slots are its own ([`Frame::alloc`]), and on the rows
+        // a temporary is dead after the last row of this list that names it.
+        // A name the plan keys keeps everything taken before it, as a `let`
+        // does in the arm's [`Fn_::block`].
+        let mut last = HashMap::new();
         for (i, s) in ss.iter().enumerate() {
+            let mut named = Vec::new();
+            vyrn_lower::core::names_in(s, &mut named);
+            for n in named {
+                last.insert(n, i);
+            }
+        }
+        let (mut mark, mut open) = (b.mark(), Vec::new());
+        for (i, s) in ss.iter().enumerate() {
+            if let Some(St::Let(n, _)) = i.checked_sub(1).map(|j| &ss[j]) {
+                if body.names[*n as usize].binding.is_some() {
+                    (mark, open) = (b.mark(), Vec::new());
+                } else {
+                    open.push(*n);
+                }
+            }
+            if open.iter().all(|n| last[n] < i) {
+                b.reset(mark.max(self.rel_floor()));
+                open.clear();
+            }
             match s {
                 // A receiver rebuilt in place: the result is the receiver's
                 // own storage, so the name takes the receiver's place.
