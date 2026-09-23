@@ -4077,13 +4077,13 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether a value of `ty` that a store or a map entry displaces is
-    /// released. A stream and a type that declares its `release` are left
-    /// alone at the top, because both are observable from inside the language;
-    /// one under a field or a payload is released by the walk ([`Fn_::rel_at`]).
+    /// released: every value that owns heap but a stream, which is linear and
+    /// whose end is its consumer's. A declared `release` runs, because a value
+    /// that reaches its end without it leaks (record `m7-box`).
     fn replaced_releases(&self, ty: &Type) -> bool {
         !matches!(
             self.cx.owned.release_kind(ty),
-            None | Some(DropKind::CloseStream) | Some(DropKind::Release(..))
+            None | Some(DropKind::CloseStream)
         )
     }
 

@@ -2153,3 +2153,48 @@ fn a_store_releases_the_whole_value_it_displaces() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+// A store runs the declared `release` of the value it displaces, once per
+// store, and the value's heap comes back (record `m7-box`).
+const DECLARED: &str = r#"type Pool = { slots: Array<Int64>, taken: Int64 }
+
+impl Owned for Pool {
+    fn release(consume self) {
+        print("released")
+        let slots = consume self.slots
+        drop slots
+    }
+}
+
+fn main() -> Int64 {
+    let mut q: Pool = Pool { slots: [1, 2], taken: 0 }
+    q = Pool { slots: [3], taken: 0 }
+    q = Pool { slots: [4, 5, 6], taken: 0 }
+    print("end")
+    return 0
+}
+"#;
+
+#[test]
+fn a_store_runs_the_declared_release_of_what_it_displaces() {
+    let dir = std::env::temp_dir().join(format!("vyrn-declared-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("declared.vyrn");
+    std::fs::write(&file, DECLARED).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        (
+            run.status.code(),
+            String::from_utf8_lossy(&run.stdout).replace('\r', "")
+        ),
+        (Some(0), "released\nreleased\nend\nreleased\n".to_string()),
+        "the free audit: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
