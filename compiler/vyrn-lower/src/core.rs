@@ -33,7 +33,7 @@ use vyrn_frontend::declared::Owned;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
 
-use crate::kernel::MissingKind;
+use crate::kernel::{MissingKind, Root};
 use crate::{Instance, Node};
 
 /// A name in a body: an index into [`Body::names`].
@@ -4260,37 +4260,55 @@ impl<'a> Builder<'a> {
     /// hoisted header). The header is a borrow the loop walks, as a `for`'s
     /// container is, so the kernel keeps its alias and an emitter takes the
     /// header apart once. A container that owns no heap is a value and not a
-    /// borrow, so it is read in place each turn; module state is a
-    /// `Place::Global` and never a candidate.
+    /// borrow, so it is read in place each turn. Module state takes the same
+    /// rule, and a call that stores into it is a write by the effect judgment.
     fn hoist_headers(&mut self, l: &mut [St], line: usize, out: &mut Vec<St>) {
         let mut read = Vec::new();
         l.iter_mut().for_each(|s| header_reads(s, None, &mut read));
-        read.sort_unstable();
+        read.sort_unstable_by(|a, b| match (a, b) {
+            (Root::N(x), Root::N(y)) => x.cmp(y),
+            (Root::G(x), Root::G(y)) => x.cmp(y),
+            (Root::N(_), Root::G(_)) => std::cmp::Ordering::Less,
+            (Root::G(_), Root::N(_)) => std::cmp::Ordering::Greater,
+        });
         read.dedup();
         let mut bound = Vec::new();
         l.iter().for_each(|s| names_bound(s, &mut bound));
         let decls = self.proto.types();
-        for n in read {
-            let info = &self.body.names[n as usize];
+        for r in read {
+            let (ty, path, from, heap) = match &r {
+                Root::N(n) => {
+                    let info = &self.body.names[*n as usize];
+                    if bound.contains(n) {
+                        continue;
+                    }
+                    let path = info.path.clone().unwrap_or_else(|| info.source.clone());
+                    (info.ty.clone(), path, Place::Name(*n), info.heap)
+                }
+                Root::G(g) => match self.named_place(g, line) {
+                    Ok((from @ Place::Global(_), ty)) => {
+                        let heap = self.proto.owns_heap(&ty);
+                        (ty, g.clone(), from, heap)
+                    }
+                    _ => continue,
+                },
+            };
             let indexed = matches!(
-                vyrn_frontend::types::resolve(&info.ty, &decls),
+                vyrn_frontend::types::resolve(&ty, &decls),
                 Type::Array(_) | Type::SmallArray(..) | Type::Str
             );
             if !indexed
-                || !info.heap
-                || bound.contains(&n)
-                || crate::kernel::writes(l, n, &self.body.names, &self.body.name)
+                || !heap
+                || crate::kernel::writes(l, r.clone(), &self.body.names, &self.body.name)
             {
                 continue;
             }
-            let ty = info.ty.clone();
-            let path = info.path.clone().unwrap_or_else(|| info.source.clone());
             let h = self.name("@borrow", ty, false, line);
             self.body.names[h as usize].walked = Some(Walk::While);
             self.body.names[h as usize].path = Some(path);
-            out.push(St::Let(h, Rhs::Read(Place::Name(n))));
+            out.push(St::Let(h, Rhs::Read(from)));
             l.iter_mut()
-                .for_each(|s| header_reads(s, Some((n, h)), &mut Vec::new()));
+                .for_each(|s| header_reads(s, Some((&r, h)), &mut Vec::new()));
         }
     }
 
@@ -6937,23 +6955,29 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
     out
 }
 
-/// The names whose header a read in `s` walks: an element read, or a
-/// length read, straight off the name. With `rebase`, each such read of the
-/// first name reads the second instead. A store and a take keep their place,
-/// so a store into an element writes the container and not its header.
-fn header_reads(s: &mut St, rebase: Option<(Name, Name)>, out: &mut Vec<Name>) {
-    fn place(p: &mut Place, rebase: Option<(Name, Name)>, out: &mut Vec<Name>) {
+/// The names and the module state whose header a read in `s` walks: an
+/// element read, or a length read, straight off one. With `rebase`, each
+/// such read of the first reads the name instead. A store and a take keep
+/// their place, so a store into an element writes the container and not its
+/// header.
+fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
+    fn place(p: &mut Place, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
         let header = match p {
             Place::Elem(b, _) => Some(b),
             Place::Field(b, f) if f == "length" || f == "byteLength" => Some(b),
             _ => None,
         };
         if let Some(b) = header {
-            if let Place::Name(n) = **b {
+            let r = match &**b {
+                Place::Name(n) => Some(Root::N(*n)),
+                Place::Global(g) => Some(Root::G(g.clone())),
+                _ => None,
+            };
+            if let Some(r) = r {
                 match rebase {
-                    Some((from, to)) if from == n => **b = Place::Name(to),
+                    Some((from, to)) if *from == r => **b = Place::Name(to),
                     Some(_) => {}
-                    None => out.push(n),
+                    None => out.push(r),
                 }
                 return;
             }
@@ -6963,7 +6987,7 @@ fn header_reads(s: &mut St, rebase: Option<(Name, Name)>, out: &mut Vec<Name>) {
             Place::Name(_) | Place::Global(_) => {}
         }
     }
-    let each = |ss: &mut Vec<St>, out: &mut Vec<Name>| {
+    let each = |ss: &mut Vec<St>, out: &mut Vec<Root>| {
         ss.iter_mut().for_each(|s| header_reads(s, rebase, out))
     };
     match s {
@@ -7360,6 +7384,33 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     });
     drop(tops);
     drop(ej);
+    // A hoist asked `kernel::writes` before the judgment was held, when no
+    // call stored into module state. Where a frame hoisted a header and calls
+    // a function that does, the answer may differ, so the body is built
+    // again; every other body builds the same.
+    let unjudged = |m: &Made| {
+        matches!(m, Made::Built(_, Ok(b)) if b.frames().iter().any(|f| {
+            f.names.iter().any(|i| i.walked == Some(Walk::While))
+                && crate::effects::stores_state(&f.name)
+        }))
+    };
+    for (inst, m) in lowered.instances.iter().zip(made.iter_mut()) {
+        if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
+            *top = build(program, inst, own);
+        }
+    }
+    for (ob, m) in lowered.bodies.iter().zip(made_outside.iter_mut()) {
+        if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
+            *top = build_outside(
+                program,
+                own,
+                &ob.name,
+                ob.module.clone(),
+                ob.block,
+                &ob.rows,
+            );
+        }
+    }
     for (inst, m) in lowered.instances.iter().zip(made) {
         let (key, made) = match m {
             Made::Served(rs) => {
@@ -7449,7 +7500,6 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         remember(memo.as_ref(), key, refused_before);
     }
-    crate::effects::set_state_callees(None);
     for (f, row) in added {
         touched.insert(f.clone());
         own.releases.entry(f).or_default().push(row);
@@ -7463,6 +7513,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // facts is the emitter — which a host that armed the memo does not run
     // (RFC-0125 §3 M3, the memo slice).
     if memo.is_some() {
+        crate::effects::set_state_callees(None);
         return;
     }
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
@@ -7514,6 +7565,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
     }
     FACTS.with(|f| *f.borrow_mut() = Some(facts));
+    crate::effects::set_state_callees(None);
 }
 
 /// One body `augment` built, or served out of the memo.
