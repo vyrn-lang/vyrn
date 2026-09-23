@@ -18865,17 +18865,15 @@ impl<'p> Fn_<'_, 'p> {
             .position(|s| matches!(s, St::Trap))
             .unwrap_or(ss.len());
         ss[..live].iter().enumerate().all(|(i, s)| match s {
-            // A made layout is built into the binding's own slot, so the name
-            // is one this walk BINDS and the reader screen above never sees
-            // (RFC-0125 M7). A temporary holds one only where the `return`
-            // after it hands it back ([`Fn_::core_lands`]): the slot is the
-            // reader's `let`, and a row that minted the name has none.
+            // A made layout is built into the name's own slot, which the
+            // name holds to the end of its extent, or into the caller's
+            // storage where the `return` after it hands it back
+            // ([`Fn_::core_lands`]) (RFC-0125 M7).
             St::Let(n, rhs) if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) => {
                 if self.core_lands(body, ss, i, reads) {
                     return self.core_makes(body, &self.ret_ty, rhs);
                 }
-                body.names[*n as usize].binding.is_some()
-                    && self.core_makes(body, &body.names[*n as usize].ty, rhs)
+                self.core_makes(body, &body.names[*n as usize].ty, rhs)
             }
             // An aggregate call result has a slot of its own, which the
             // reader's `let` takes before the call, the storage the call
