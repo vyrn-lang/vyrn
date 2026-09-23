@@ -17030,11 +17030,13 @@ impl<'p> Fn_<'_, 'p> {
                         }
                     } else {
                         // As WRITTEN, not resolved: `let a: Age = 25` is a
-                        // `where` type, the arm parks the value in a temporary
-                        // and calls its check, and `Age` resolved to `Int64` is
-                        // the flow that does not (M2d). The row states no check.
-                        if !core_scalar(t)
-                            || self.cx.resolve(t) != self.cx.resolve(&body.names[*n as usize].ty)
+                        // `where` type, and `Age` resolved to `Int64` is the
+                        // flow that does not check (M2d). The row states the
+                        // check where it types the name at the annotation.
+                        let named = &body.names[*n as usize].ty;
+                        if !core_scalar(&self.cx.resolve(t))
+                            || self.cx.resolve(t) != self.cx.resolve(named)
+                            || (self.checks(t) && self.cx.sub(t) != *named)
                         {
                             return None;
                         }
@@ -17187,8 +17189,10 @@ impl<'p> Fn_<'_, 'p> {
             // row and at `Int64` from the frame, for the same source. The
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
-            if !(core_scalar(&ty) || returned == Some(*n) || rebuilt.contains(n))
-                || self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty)
+            let named = &body.names[*n as usize].ty;
+            if !(core_scalar(&self.cx.resolve(&ty)) || returned == Some(*n) || rebuilt.contains(n))
+                || self.cx.resolve(&ty) != self.cx.resolve(named)
+                || ((self.checks(&ty) || self.checks(named)) && self.cx.sub(&ty) != *named)
             {
                 return None;
             }
@@ -17777,6 +17781,19 @@ impl<'p> Fn_<'_, 'p> {
             }
             None => {}
         }
+        // `T(v)` of a validated type: the operand at the base, then the check
+        // (RFC-0125 §2.2). A literal was proven by the checker, which refuses
+        // one that fails at compile time, so it runs no check.
+        if let Some(decl) = self.core_named(callee, kind) {
+            let [(v, _)] = args else {
+                return unsupported(&format!("`{callee}` at this arity"), line);
+            };
+            self.core_val(m, b, body, w, v, &decl.base, line)?;
+            if !matches!(v, Val::Lit(_)) {
+                self.emit_validation(b, &decl, line)?;
+            }
+            return Ok(Type::Named(decl.name));
+        }
         let Some(sig) = self.core_sig(callee, kind) else {
             return unsupported("a core call this walk does not read", line);
         };
@@ -18133,16 +18150,16 @@ impl<'p> Fn_<'_, 'p> {
     /// vector are as much as an `Int64` is. A layout is the make arm's, which
     /// takes a slot before the parts are written.
     ///
-    /// A `where` type is refused: it has its base's place and a check at every
-    /// store that the row does not state (RFC-0079).
+    /// A `where` type has its base's place. Its value comes from its
+    /// constructor, which is a row, or from a name already of the type.
     fn core_framed(&self, t: &Type) -> bool {
-        matches!(self.cx.repr(t, 0), Ok(Repr::Scalar(_))) && !self.checks(t)
+        matches!(self.cx.repr(t, 0), Ok(Repr::Scalar(_)))
     }
 
     /// Whether this walk can put the value `v` on the operand stack: a name it
     /// frames, or a literal it writes ([`Fn_::core_val`]).
     ///
-    /// A different question from [`core_operand`], which is what an ARITHMETIC
+    /// A different question from [`Fn_::core_operand`], which is what an ARITHMETIC
     /// row computes with. An order on two string literals is two values this
     /// walk writes and no operation it applies.
     fn core_val_readable(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
@@ -18309,6 +18326,18 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
+    /// The declaration a check row names: `T(v)` of a type with a `where`
+    /// clause whose base is one wasm value.
+    fn core_named(&self, callee: &str, kind: Callee) -> Option<TypeDecl> {
+        let decl = self
+            .cx
+            .types
+            .get(callee)
+            .filter(|d| d.predicate.is_some())?;
+        (kind == Callee::Named && matches!(self.cx.repr(&decl.base, 0), Ok(Repr::Scalar(_))))
+            .then(|| decl.clone())
+    }
+
     /// The signature this walk calls a [`Callee::Fn`] through, and `None` for
     /// every callee whose emission is more than a `call`.
     ///
@@ -18348,7 +18377,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         match (op, vs) {
             (Op::Un(u), [v]) => {
-                let t = self.core_ty(body, v, &Type::Int);
+                let t = self.cx.resolve(&self.core_ty(body, v, &Type::Int));
                 self.core_val(m, b, body, w, v, &t, line)?;
                 self.un_ins(b, *u, &t, line)
             }
@@ -18588,11 +18617,10 @@ impl<'p> Fn_<'_, 'p> {
         }
         // The type the READER wrote, which the clause above cannot see: the
         // core names a `let` by the type of its VALUE (`core::Builder`'s `let`
-        // arm), so `let a: Age = 20` reads `Int64` there and the check the
-        // annotation asks for goes unrefused. The AST arm validates at the
-        // `let` and at every later store into the binding, and the row states
-        // neither. [`Fn_::core_run`] asks the same question per statement.
-        if stmts.is_some_and(|blk| self.annotates_a_check(blk) || hoists_a_header(blk)) {
+        // arm) except where it states the annotation's check, so a check the
+        // rows do not state is a binding whose type is not the annotation's.
+        // [`Fn_::core_run`] asks the same question per statement.
+        if stmts.is_some_and(|blk| self.annotates_a_check(body, blk) || hoists_a_header(blk)) {
             return false;
         }
         let reads = body.reads();
@@ -18600,12 +18628,18 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether any `let` of `blk` is annotated with a type that carries a
-    /// `where` clause (RFC-0079).
-    fn annotates_a_check(&self, blk: &Block) -> bool {
+    /// `where` clause (RFC-0079) and binds a name of another type, which is a
+    /// check the rows do not state.
+    fn annotates_a_check(&self, body: &vyrn_lower::core::Body, blk: &Block) -> bool {
         let mut found = false;
         each_block(blk, &mut |_| {}, &mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
-                found |= self.checks(t);
+                let at = s as *const Stmt as usize;
+                found |= self.checks(t)
+                    && !body
+                        .names
+                        .iter()
+                        .any(|i| i.binding == Some(at) && i.ty == self.cx.sub(t));
             }
         });
         found
@@ -18662,8 +18696,13 @@ impl<'p> Fn_<'_, 'p> {
                     vyrn_lower::core::Place::Name(n) => Some(body.names[*n as usize].ty.clone()),
                     p => self.core_place_ty(body, p),
                 };
-                ty.is_some_and(|t| core_scalar(&t) && !self.checks(&t))
-                    && self.core_val_readable(body, value)
+                // A value of the place's own validated type crosses nothing;
+                // any other one is a check the row does not state.
+                ty.is_some_and(|t| {
+                    core_scalar(&self.cx.resolve(&t))
+                        && (!self.checks(&t)
+                            || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
+                }) && self.core_val_readable(body, value)
             }
             St::If {
                 cond, then, els, ..
@@ -18766,7 +18805,7 @@ impl<'p> Fn_<'_, 'p> {
             match c {
                 Cap::Read => self.core_val_readable(body, v) || layout,
                 Cap::Consume => {
-                    (self.core_val_readable(body, v) && core_operand(body, v)) || layout
+                    (self.core_val_readable(body, v) && self.core_operand(body, v)) || layout
                 }
                 Cap::Modify => {
                     layout && !matches!(v, Val::Name(n) if self.core_alias(body, *n).is_some())
@@ -18956,7 +18995,7 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op(body, *o, l, r)) => {
                 vs.iter().all(|v| self.core_val_readable(body, v))
             }
-            Rhs::Prim(_, vs, _) => vs.iter().all(|v| core_operand(body, v)),
+            Rhs::Prim(_, vs, _) => vs.iter().all(|v| self.core_operand(body, v)),
             // A handed-back receiver asks nothing extra of this walk: the
             // builder states the call and the store that puts the result back
             // as two rows, and each is read where it stands (RFC-0125 M7).
@@ -18965,6 +19004,7 @@ impl<'p> Fn_<'_, 'p> {
             } => {
                 self.core_args_readable(body, args)
                     && (self.core_builtin_readable(body, callee, *kind, args)
+                        || self.core_named(callee, *kind).is_some()
                         || self.core_mem_ty(callee, args.len()).is_some()
                         || self.core_sig(callee, *kind).is_some_and(|s| {
                             // An aggregate result crosses through an out-pointer
@@ -18983,8 +19023,24 @@ impl<'p> Fn_<'_, 'p> {
             // aggregate name: this walk carries scalars (RFC-0125 M7).
             Rhs::Read(p) | Rhs::Take(p) => self
                 .core_place_ty(body, p)
-                .is_some_and(|t| core_scalar(&t) && !self.checks(&t)),
+                .is_some_and(|t| core_scalar(&self.cx.resolve(&t))),
             _ => false,
+        }
+    }
+
+    /// Whether `v` is a value one of this walk's ARITHMETIC rows computes
+    /// with — a different question from [`Fn_::core_val_readable`], which is
+    /// whether the walk can write the value at all. A `where` type computes
+    /// as its base.
+    ///
+    /// A literal has no name and carries its type in its own variant: a
+    /// `Lit::Str` is a String, which this walk applies no operation to. `"a" <
+    /// "b"` reached `Op::Lt` with two of them and not one name for the other
+    /// screen to refuse.
+    fn core_operand(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
+        match v {
+            Val::Name(n) => core_scalar(&self.cx.resolve(&body.names[*n as usize].ty)),
+            Val::Lit(l) => !matches!(l, Lit::Opaque(_) | Lit::Str(_)),
         }
     }
 }
@@ -19008,20 +19064,6 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
         } => args.first().and_then(|(v, _)| name(v)),
         St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
         _ => None,
-    }
-}
-
-/// Whether `v` is a value one of this walk's ARITHMETIC rows computes with —
-/// a different question from [`Fn_::core_val_readable`], which is whether the
-/// walk can write the value at all.
-///
-/// A literal has no name and carries its type in its own variant: a `Lit::Str`
-/// is a String, which this walk applies no operation to. `"a" < "b"` reached
-/// `Op::Lt` with two of them and not one name for the other screen to refuse.
-fn core_operand(body: &vyrn_lower::core::Body, v: &Val) -> bool {
-    match v {
-        Val::Name(n) => core_scalar(&body.names[*n as usize].ty),
-        Val::Lit(l) => !matches!(l, Lit::Opaque(_) | Lit::Str(_)),
     }
 }
 

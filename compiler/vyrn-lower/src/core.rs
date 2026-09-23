@@ -1814,7 +1814,9 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             // the result back, two rows an emitter reads, for a name, a field,
             // an element and a global alike. What such a body waits on is its
             // CALLEE, which is `@push` and its siblings, and the tag says so.
-            if !matches!(kind, Callee::Fn | Callee::Ctor) && builtin_row(callee).is_none() {
+            if !matches!(kind, Callee::Fn | Callee::Ctor | Callee::Named)
+                && builtin_row(callee).is_none()
+            {
                 out.push(format!("Call:{kind:?}:{callee}"));
             }
             for (v, _) in args {
@@ -2740,6 +2742,37 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The validated type a value of `from` crosses into at a destination
+    /// of `to`, where the core states the crossing as `to`'s constructor.
+    ///
+    /// WHICH crossings check is `validate::required`'s, which the arm asks
+    /// too. A value that owns heap is not stated here: the constructor takes
+    /// its argument, and a plain binding moves or borrows it, so the
+    /// kernel's verdict on a borrowed operand would change.
+    fn checked(&self, from: &Type, to: &Type) -> Option<String> {
+        let decls = self.proto.types();
+        vyrn_frontend::validate::required(from, to, &decls)
+            .filter(|_| !self.owns(from))
+            .map(|d| d.name.clone())
+    }
+
+    /// The constructor of the validated type `to` over `value`: the row a
+    /// checked crossing is. A literal is its own producer, because the
+    /// checker proves it against `to` (RFC-0003).
+    fn check(
+        &mut self,
+        to: &str,
+        value: &'a Expr,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Rhs, Gap> {
+        if let Some(l) = lit_of(value) {
+            return Ok(Rhs::Val(Val::Lit(l)));
+        }
+        let ty = Type::Named(to.to_string());
+        self.call(to, std::slice::from_ref(value), line, Some(ty), out)
+    }
+
     fn temp(&mut self, ty: Type, line: usize) -> Name {
         self.temps += 1;
         let owned = self.owns(&ty);
@@ -3066,10 +3099,15 @@ impl<'a> Builder<'a> {
         let sid = s as *const Stmt as usize;
         match s {
             Stmt::Let {
-                name, value, line, ..
+                name,
+                value,
+                line,
+                ty: annotation,
+                ..
             } => {
                 let ty = self.ty_of(value)?;
-                if !matches!(value, Expr::Var { .. }) && is_place_read(value) {
+                let check = annotation.as_ref().and_then(|t| self.checked(&ty, t));
+                if check.is_none() && !matches!(value, Expr::Var { .. }) && is_place_read(value) {
                     let place = self.place(value, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -3081,7 +3119,13 @@ impl<'a> Builder<'a> {
                     self.keyed_let(n, sid);
                     return Ok(());
                 }
-                let rhs = self.rhs(value, out)?;
+                // A value crossing into a validated type is that type's
+                // constructor (§2.2): `let a: Age = n` is `let a = Age(n)`,
+                // and the name has the type the reader wrote.
+                let (rhs, ty) = match check {
+                    Some(to) => (self.check(&to, value, *line, out)?, Type::Named(to)),
+                    None => (self.rhs(value, out)?, ty),
+                };
                 // A literal, or a nullary constructor, which is static in
                 // the same sense: [`Builder::val`] makes the variant and
                 // nothing allocated it.
@@ -3139,11 +3183,27 @@ impl<'a> Builder<'a> {
                 self.keyed_let(n, sid);
             }
             Stmt::Assign { name, value, line } => {
+                let n = self.lookup(name);
+                let check = match n {
+                    Some(n) => {
+                        let to = self.body.names[n as usize].ty.clone();
+                        self.checked(&self.ty_of(value)?, &to)
+                    }
+                    None => None,
+                };
                 self.rebinding = true;
-                let v = self.val(value, out);
+                let v = match check {
+                    Some(to) if lit_of(value).is_none() => {
+                        self.check(&to, value, *line, out).map(|rhs| {
+                            let t = self.temp(Type::Named(to), *line);
+                            self.bind(t, rhs, out);
+                            Val::Name(t)
+                        })
+                    }
+                    _ => self.val(value, out),
+                };
                 self.rebinding = false;
                 let v = v?;
-                let n = self.lookup(name);
                 let ty = match n {
                     Some(n) => self.body.names[n as usize].ty.clone(),
                     None => self.ty_of(value)?,

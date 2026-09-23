@@ -27501,3 +27501,28 @@ Findings:
 - the scalar element read this track measured at 15,245 bodies and dropped for the header hoist is `m7-rebuild`'s now, with the hoisting bodies kept in the arm.
 - no AST arm reached zero. `Stmt::ForIn` 1,047 to 960 rebased, `Stmt::Break` 1; nothing in `FORMS` turns false.
 Left: `Fn_::core_alias`'s clause for a root handed to `modify`, which the kernel's rule now makes redundant, not measured; a payload binder, 613, blocked by the switch's scalar binders; a `where` name, 67, blocked by the check row; a scalar `modify` argument, blocked by the spill and reload the row does not state; a layout that owns no heap, blocked by a copy row the core does not state; module state, 26, blocked by a callee's writes the kernel does not follow.
+#### A crossing into a validated type is its constructor's row (2026-09-23, `m7-where`)
+Decision: the builder states `let a: Age = n` as `let a = Age(n)`, and a store into such a name through the same constructor row, which `validate::required` decides for the arm too, and a literal stays a literal because the checker proves it; the emitter reads `Callee::Named` with the check the arm calls. Mine, on the counts below. The `modify` and `consume` layout argument is `m7-alias`'s, and a slice of it written here was dropped before the rebase.
+The count, from a temporary instrument that re-asks `Fn_::core_walkable` with each clause lifted, over `emit-wat` of `examples/` at the branch point (`m7-rebuild`), in one cache state:
+
+| clause | alone, before | with the other two lifted, before | alone, after | with the other two lifted, after |
+|---|---|---|---|---|
+| a name of a `where` type | 25 | 44 | 0 | 0 |
+| an arithmetic operand that is not a scalar | 115 | 230 | 124 | 229 |
+
+The arm validates at 119 sites over the same programs: a part of a made layout 64, a rebuild's operand 16, a `return` 13, a call argument 10, a store into a local, which is a `let` or an assignment, 9, an explicit `T(v)` 5, a validated record literal 1 and a map value 1. Every operand the second clause met was a String or a string literal, which `m7-alias`'s String operator reads since.
+Went: the `where` clause of `Fn_::core_framed`, of the store and read screens in `Fn_::core_readable` and `Fn_::core_rhs_readable`, and of `Fn_::annotates_a_check`, which reads the rows now; `Call:Named` from `core::gaps`. Stayed: a heap value crossing into a validated type (`let e: Email = s`), because the constructor takes its argument where a plain binding moves or borrows it, so the kernel's verdict on a borrowed operand would change; a validated record's part (`mk` in `inlinewhere.vyrn`) and result, because the make row states no check.
+Functions touched in `direct.rs`: `core_call`, `core_named` (new), `core_framed`, `core_run`, `core_walkable`, `annotates_a_check`, `core_readable`, `core_rhs_readable`, `core_operand` (a method now, so the `consume` arm of `core_args_readable` calls it as one), `core_prim`.
+Lines: `direct.rs` 19,492 to 19,534. `core.rs` 7,402 to 7,462. The pair grew 102: a row the builder states at two sites, and its reader. Refusals: 0 lost / 0 gained. Manifest: 15 rows in the reader's commit, written there; 0 in the builder's.
+Licence, rebased onto main at `3e4fb29a`:
+- `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, main against the head: byte-identical stdout, stderr and exit code, 338 accepted and 77 refused.
+- `coredrive --ignored`, main against the head: taken 15,304 to 15,342 of 21,512; whole 20,380 to 20,385; carried end to end 1,377 to 1,381; the callee class 1,049 to 1,044. 1 byte-identical and 167 run the same, 0 run apart.
+- the moved manifest rows, read in `wasm2wat` against main's binary: all 15 are the slot-per-temporary shape `m7-temporary` named, and every changed function calls its check as often as before.
+- `VYRN_GAP_TALLY` over `examples/`, both binaries back to back: 25,018 lines, whole 23,487 to 23,492; `Call:Named` 7 first gaps to 0.
+- `typed --ignored`: 238,188 to 238,196 stores judged, 0 findings; by constructor 19 to 23, by literal 9,017 to 9,021. `tests/typed.rs`'s witness from `m7-rebuild` pins `a = 30` into an `Age` name as a literal, and a literal crossing stays one. `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `effects --ignored`: 29,988 functions judged, 0 unlowered. `coretables --ignored`: green.
+- re-pinned: `emitter_census` the mapping 9,690 to 9,732 lines, `both, for two questions` 8,994 to 9,036 with 218 to 219 rows; RFC-0126's surface table `Type::Named` wasm column 10 to 11, 1,414 to 1,415 mentions.
+Findings:
+- the core lost the check at an annotated `let`. It named `let x: Age = n` by its value, `Int64`, so `x = x - 1` after it stated no check on the rows; the screen hid it by refusing the body. Typing the name at the annotation makes the store a crossing the builder states.
+- the arm has two rules for one fact: it checks the literal at `let a: Age = 20` and skips it at `Age(20)`, and the checker refuses a failing constant in both spellings. The rows follow the arm in both, so no byte moves on it; the check at a proven literal is dead work, and removing it is a change of its own.
+- no AST arm reached zero: `Stmt::Let` on the arm 10,839 to 10,794, `Stmt::Return` 7,531 to 7,502, `Expr::Var` 94,878 to 94,835, so nothing in `FORMS` turns false.
+Left: a heap value crossing into a validated type, blocked by a constructor row that takes its operand; a validated record's part and result, blocked by the check the make row does not state.
