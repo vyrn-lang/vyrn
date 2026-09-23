@@ -1494,7 +1494,7 @@ impl<'a> Cx<'a> {
     /// `Site::Edge`, which is the join and the edge — a position in a branch
     /// is not a key, and this is why the drop carries one. The kernel's
     /// `equalize` is the one statement of the rule, and `own.rs` states none.
-    fn edge_rows(&self, node: usize) -> Vec<(String, u32)> {
+    fn edge_rows(&self, node: usize) -> Vec<vyrn_lower::core::EdgeRow> {
         let Some(f) = self.facts.as_ref() else {
             return Vec::new();
         };
@@ -4017,6 +4017,19 @@ impl<'p> Fn_<'_, 'p> {
                             continue;
                         }
                         let at = self.cx.payload_slot(&var.payload, j);
+                        // A `consume` took the payload (`Elem.1`), and the box
+                        // it rode in is still the sum's to free.
+                        let key = format!("{}.{j}", var.name);
+                        if holes.contains(&key) {
+                            if w == Word::Boxed {
+                                b.ins(&Instruction::LocalGet(a))
+                                    .ins(&Instruction::I64Load(word_at8(l.fields[at])))
+                                    .ins(&Instruction::I32WrapI64)
+                                    .ins(&Instruction::Call(self.cx.rt.free));
+                            }
+                            continue;
+                        }
+                        self.rel_holes = vyrn_frontend::declared::holes_under(holes, &key);
                         self.rel_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
@@ -5087,7 +5100,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::Else);
                     self.block(m, b, e)?;
                     self.emit_edge_releases(m, b, &ers, 1, *line)?;
-                } else if ers.iter().any(|(_, t)| *t == 1) {
+                } else if ers.iter().any(|(_, t, _)| *t == 1) {
                     b.ins(&Instruction::Else);
                     self.emit_edge_releases(m, b, &ers, 1, *line)?;
                 }
@@ -7012,11 +7025,11 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        ers: &[(String, u32)],
+        ers: &[vyrn_lower::core::EdgeRow],
         edge: u32,
         line: usize,
     ) -> Result<(), String> {
-        for (name, t) in ers {
+        for (name, t, holes) in ers {
             if *t != edge {
                 continue;
             }
@@ -7044,6 +7057,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             match self.rel_for(&ty, line)? {
                 Some(Rel::Call(..)) | None => {}
+                Some(Rel::Deep(ty, _)) => {
+                    self.emit_rel(m, b, place, &Rel::Deep(ty, holes.clone()), line)?
+                }
                 Some(rel) => self.emit_rel(m, b, place, &rel, line)?,
             }
         }
@@ -16786,7 +16802,8 @@ impl<'p> Fn_<'_, 'p> {
     /// arm's end, an edge's release — at the place this walk gave the name.
     ///
     /// What a release of the type runs is [`Fn_::rel_for`]'s answer, as at the
-    /// `Stmt::Drop` arm, walking around the holes the row's name carries.
+    /// `Stmt::Drop` arm, walking around the holes the row carries.
+    #[allow(clippy::too_many_arguments)]
     fn core_drop(
         &mut self,
         m: &mut Module,
@@ -16794,6 +16811,7 @@ impl<'p> Fn_<'_, 'p> {
         body: &vyrn_lower::core::Body,
         w: &Walked,
         n: vyrn_lower::core::Name,
+        holes: &Option<Vec<String>>,
         line: usize,
     ) -> Result<(), String> {
         let Some((place, ty)) = self.core_place(w, body, n) else {
@@ -16807,7 +16825,7 @@ impl<'p> Fn_<'_, 'p> {
         let Some(rel) = rel else {
             return Ok(());
         };
-        let rel = around(rel, &info.holes);
+        let rel = around(rel, body.drop_holes(n, holes));
         if let Some(step) = info.binding {
             self.rel_pending.retain(|(k, _)| *k != step);
         }
@@ -17808,7 +17826,7 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     ..
                 } => self.core_switch(m, b, body, w, on, arms, *owns, *line)?,
-                St::Drop(n, _, line) => self.core_drop(m, b, body, w, *n, *line)?,
+                St::Drop(n, _, line, holes) => self.core_drop(m, b, body, w, *n, holes, *line)?,
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }

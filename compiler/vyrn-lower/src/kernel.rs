@@ -787,6 +787,87 @@ impl<'b> Kernel<'b> {
                 Some(Alias { via: Some(m), .. }) if self.owned(*m))
     }
 
+    /// A payload binder handed on leaves its payload as a hole in the
+    /// scrutinee, which the scrutinee's release walks around.
+    fn leaves_payload(&self, st: &mut State, n: Name) {
+        let Some(payload) = &self.body.names[n as usize].payload else {
+            return;
+        };
+        let Some(Alias {
+            root: Root::N(r),
+            path,
+            ..
+        }) = &st.alias[n as usize]
+        else {
+            return;
+        };
+        let (r, hole) = (*r, format!("{path}{payload}"));
+        if !st.holes.iter().any(|(h, p)| *h == r && *p == hole) {
+            st.taken_at.push((r, hole.clone(), self.here));
+            st.holes.push((r, hole));
+            st.holes.sort();
+        }
+    }
+
+    /// The payload binder live in `st` that reads the hole `h` of `n`.
+    fn payload_binder(&self, st: &State, n: Name, h: &str) -> Option<Name> {
+        (0..self.body.names.len() as Name).find(|b| {
+            match (
+                &self.body.names[*b as usize].payload,
+                &st.alias[*b as usize],
+            ) {
+                (
+                    Some(p),
+                    Some(Alias {
+                        root: Root::N(r),
+                        path,
+                        ..
+                    }),
+                ) => *r == n && format!("{path}{p}") == h,
+                _ => false,
+            }
+        })
+    }
+
+    /// A payload hole one arm left is a hole on every arm of the switch: the
+    /// other arms hold another variant, whose release never reaches it.
+    fn mirror_payloads(&self, entry: &State, on: &Val, arms: &[Arm], outs: &mut [State]) {
+        let Val::Name(s) = on else {
+            return;
+        };
+        let (root, prefix) = match &entry.alias[*s as usize] {
+            Some(Alias {
+                root: Root::N(r),
+                path,
+                ..
+            }) => (*r, path.clone()),
+            Some(_) => return,
+            None => (*s, String::new()),
+        };
+        let mut left: Vec<String> = Vec::new();
+        for (arm, out) in arms.iter().zip(outs.iter()) {
+            for b in &arm.binds {
+                if let Some(p) = &self.body.names[*b as usize].payload {
+                    let h = format!("{prefix}{p}");
+                    if out.holes.iter().any(|(r, hp)| *r == root && *hp == h) {
+                        left.push(h);
+                    }
+                }
+            }
+        }
+        for out in outs
+            .iter_mut()
+            .filter(|o| o.own[root as usize] == Own::Held)
+        {
+            for h in &left {
+                if !out.holes.iter().any(|(r, hp)| *r == root && hp == h) {
+                    out.holes.push((root, h.clone()));
+                }
+            }
+            out.holes.sort();
+        }
+    }
+
     /// What a place reads out of, through every alias on its root: the
     /// alias a binding of it would be. `let mt = h.meta` then `mt[0]` reads
     /// `h.meta.[]`.
@@ -1779,6 +1860,9 @@ impl<'b> Kernel<'b> {
                 if self.moves(*n, consume) && !self.gives(st, *n) {
                     return Err(self.alias_take(st, *n, write_back));
                 }
+                if consume {
+                    self.leaves_payload(st, *n);
+                }
                 return Ok(());
             }
             if self.owned(*n) {
@@ -2073,7 +2157,7 @@ impl<'b> Kernel<'b> {
         // recorded with (RFC-0125 M3, third slice).
         self.how = match s {
             St::Return { .. } => TookHow::Return,
-            St::Drop(_, _, line) if *line > 0 => TookHow::Drop,
+            St::Drop(_, _, line, _) if *line > 0 => TookHow::Drop,
             _ => TookHow::Other,
         };
         self.builtin = match s {
@@ -2137,7 +2221,7 @@ impl<'b> Kernel<'b> {
             // taker it records is the word the reader used. A release this
             // pass placed has neither: it stands at the binding, and nothing
             // took the value (RFC-0125 §3 M3, rows 06, 20 and 21).
-            St::Drop(n, _, line) if *line > 0 => {
+            St::Drop(n, _, line, _) if *line > 0 => {
                 self.here = *line;
                 self.by = "`drop`".to_string();
             }
@@ -2384,8 +2468,14 @@ impl<'b> Kernel<'b> {
                     }
                 }
             }
-            St::Drop(n, ..) => {
-                let holes = self.body.names[*n as usize].holes.clone();
+            // A release of a payload binder the frame may hand on is the
+            // hand-off ([`Kernel::equalize`] places one on an edge).
+            St::Drop(n, ..) if self.gives(st, *n) => {
+                self.alias_read(st, *n, "used")?;
+                self.leaves_payload(st, *n);
+            }
+            St::Drop(n, _, _, row) => {
+                let holes = self.body.drop_holes(*n, row).to_vec();
                 self.drop(st, *n, &holes, None)?;
             }
             St::Row {
@@ -2460,6 +2550,7 @@ impl<'b> Kernel<'b> {
                     }
                     outs.push(a);
                 }
+                self.mirror_payloads(st, on, arms, &mut outs);
                 let site = arms.first().map(|a| a.site).unwrap_or(0);
                 self.equalize(&mut outs, site);
                 *st = self.join(&outs)?;
@@ -2651,40 +2742,42 @@ impl<'b> Kernel<'b> {
                     if mine.iter().any(|hp| overlaps(hp, h)) {
                         continue;
                     }
+                    // A payload is no place a row can spell; the binder that
+                    // reads it is, and its release hands the payload on.
+                    let (name, kind) = match self.payload_binder(&edges[*i], n, h) {
+                        Some(b) => (b, MissingKind::Edge { edge: *i as u32 }),
+                        None => (
+                            n,
+                            MissingKind::EdgePlace {
+                                edge: *i as u32,
+                                path: h.clone(),
+                            },
+                        ),
+                    };
                     self.missing.push(Missing {
                         exit: Exit::Block,
                         site,
-                        name: n,
-                        kind: MissingKind::EdgePlace {
-                            edge: *i as u32,
-                            path: h.clone(),
-                        },
+                        name,
+                        kind,
                         holes: Vec::new(),
                     });
                     edges[*i].holes.push((n, h.clone()));
                     edges[*i].holes.sort();
                 }
             }
-            // An edge row releases the whole value, and the edge table
-            // carries no holes: a name holed on any live edge gets none,
-            // and is left to the judgment.
-            let holed = live
-                .iter()
-                .any(|i| edges[*i].holes.iter().any(|(h, _)| *h == n));
+            // The edge row walks around the holes its edge has.
             let gone = live.iter().any(|i| edges[*i].own[n as usize] == Own::Gone);
             if !gone || held.is_empty() {
                 continue;
             }
             for i in held {
-                if !holed {
-                    self.missing.push(Missing {
-                        exit: Exit::Block,
-                        site,
-                        name: n,
-                        kind: MissingKind::Edge { edge: i as u32 },
-                        holes: Vec::new(),
-                    });
-                }
+                self.missing.push(Missing {
+                    exit: Exit::Block,
+                    site,
+                    name: n,
+                    kind: MissingKind::Edge { edge: i as u32 },
+                    holes: self.holes_owned(&edges[i], n),
+                });
                 self.gone(&mut edges[i], n);
             }
         }
