@@ -2500,6 +2500,7 @@ fn lower_body(
             slot: vec![None; core.names.len()],
             held: None,
             landed: None,
+            walks: vec![None; core.names.len()],
         };
     }
 
@@ -16682,6 +16683,9 @@ struct Walked {
     /// The temporary built in the caller's storage, which the `return` after
     /// it hands back without a copy ([`Fn_::core_lands`]).
     landed: Option<vyrn_lower::core::Name>,
+    /// The header of each borrow a loop walks, taken apart where the borrow
+    /// is bound ([`NameInfo::walked`](vyrn_lower::core::NameInfo::walked)).
+    walks: Vec<Option<Walk>>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17319,6 +17323,22 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
+                // A HEADER a loop walks: the container's value in a local,
+                // taken apart once here, so every element and length read of
+                // the loop reads the parts (RFC-0125 M7). The kernel ends the
+                // borrow at any write under the container, and a read after
+                // one is refused, so the parts cannot go stale.
+                St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
+                    let info = &body.names[*n as usize];
+                    let (line, ty) = (info.line, info.ty.clone());
+                    if let Repr::Agg(_) = self.cx.repr(&ty, line)? {
+                        let (_, off) = self.core_addr(m, b, body, w, p, line)?;
+                        self.core_step(b, off);
+                    } else {
+                        self.core_read(m, b, body, w, p, line)?;
+                    }
+                    w.walks[*n as usize] = Some(self.walk(b, &ty, line)?);
+                }
                 // A LAYOUT READ OUT OF A PLACE, held as the place's address in
                 // a local, the way a layout parameter is (RFC-0125 M7).
                 St::Let(n, Rhs::Read(p)) if self.core_alias(body, *n).is_some() => {
@@ -17952,6 +17972,11 @@ impl<'p> Fn_<'_, 'p> {
         // it reads is the base's value: an address for a layout, the pointer
         // for a String.
         if let vyrn_lower::core::Place::Field(base, f) = p {
+            if let Some(walk) = core_header(w, base).filter(|_| f == "length" || f == "byteLength")
+            {
+                b.ins(&Instruction::LocalGet(walk.len));
+                return Ok(Type::Int);
+            }
             if let Some(bty) = self
                 .core_place_ty(body, base)
                 .filter(|t| length_ty(f, &self.cx.resolve(t)).is_some())
@@ -18042,9 +18067,14 @@ impl<'p> Fn_<'_, 'p> {
             // three [`Fn_::at`] emits for `a[i]`. A String's element is a byte
             // widened on load, which is no load of the element's own type.
             At::Elem(base, i) => {
-                let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
-                self.core_step(b, off);
-                let walk = self.walk(b, &bty, line)?;
+                let walk = match core_header(w, base) {
+                    Some(walk) => walk,
+                    None => {
+                        let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
+                        self.core_step(b, off);
+                        self.walk(b, &bty, line)?
+                    }
+                };
                 if walk.byte {
                     return unsupported("a read of a String's byte", line);
                 }
@@ -18100,6 +18130,19 @@ impl<'p> Fn_<'_, 'p> {
             },
             At::Key(..) => None,
         }
+    }
+
+    /// Whether `n` is a header a loop walks: a borrow of an array, a small
+    /// array or a String, which a `for` binds its container to and a `while`
+    /// binds a container it indexes and never writes to.
+    fn core_walked(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
+        let info = &body.names[n as usize];
+        info.walked
+            && info.borrow
+            && matches!(
+                self.cx.resolve(&info.ty),
+                Type::Array(_) | Type::SmallArray(..) | Type::Str
+            )
     }
 
     /// The place a layout name holds the ADDRESS of — RFC-0125 M7, a name read
@@ -19323,6 +19366,14 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
 
 /// The names a statement writes: the root of a store, `false`, and a `modify`
 /// or `consume` argument, `true`. [`Fn_::core_alias`] reads it.
+/// The parts of the header `base` names, when it is a borrow a loop walks.
+fn core_header(w: &Walked, base: &vyrn_lower::core::Place) -> Option<Walk> {
+    match base {
+        vyrn_lower::core::Place::Name(n) => w.walks.get(*n as usize)?.clone(),
+        _ => None,
+    }
+}
+
 fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, bool)>) {
     let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, bool)>| {
         if let Rhs::Call { args, .. } = r {
