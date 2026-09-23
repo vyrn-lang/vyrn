@@ -16941,6 +16941,7 @@ impl<'p> Fn_<'_, 'p> {
                 Some(t) => sum[t].payload.clone(),
                 None => Vec::new(),
             };
+            let from = b.mark();
             for (i, bn) in arm.binds.iter().enumerate() {
                 let ty = body.names[*bn as usize].ty.clone();
                 let layout = matches!(self.cx.repr(&ty, line)?, Repr::Agg(_));
@@ -16966,7 +16967,13 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 self.core_bind(b, body, w, *bn, at, ty)?;
             }
+            let to = b.mark();
             self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
+            // A binder's scope is its arm, so the slots a binder moved out
+            // into go back at the arm's end, as the arm gives them back.
+            if from < to {
+                b.give_back(from, to);
+            }
             self.chain_leave(b, &chain, slot);
         }
         self.chain_close(b, &chain);
