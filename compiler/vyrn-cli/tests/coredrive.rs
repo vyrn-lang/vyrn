@@ -275,20 +275,28 @@ const SHAPES: [(&str, &str); 21] = [
     ),
     // A call in part position writes its result at the part's offset in the
     // parent's storage: a record's or a fixed array's, the caller's where the
-    // parent is returned, and a heap array's buffer (RFC-0125 M7).
+    // parent is returned, a heap array's buffer, and a variant's box
+    // (RFC-0125 M7).
     (
         "a call's result as a part of a literal",
         "type P = { x: Int64, y: Int64 } type N = { s: String, k: Int64 } type H = { n: N, p: P, q: P } \
+         type B = { a: Int64, b: Int64, c: Int64 } type V = { o: Option<B>, k: Int64 } \
          fn mk(k: Int64) -> P { return P { x: k, y: k + 1 } } \
          fn nm(k: Int64) -> N { return N { s: k.toString(), k: k } } \
+         fn big(k: Int64) -> B { return B { a: k, b: 2, c: 3 } } \
          fn land(k: Int64) -> H { return H { p: mk(k), n: nm(k), q: mk(k * 2) } } \
          fn bind(k: Int64) -> Int64 { let n = nm(9) let h = H { n: n.copy(), q: mk(k), p: mk(1) } \
          return h.n.k + h.q.y * 10 + h.p.x * 100 + h.n.s.byteLength + n.k } \
          fn arr(k: Int64) -> Array<P> { return [mk(k), P { x: 5, y: 6 }, mk(k + 1)] } \
          fn grow(k: Int64) -> Int64 { let mut xs: Array<N> = [nm(k), nm(k * 3)] xs.push(nm(4)) \
          let fs: Array<P, 2> = [mk(3), mk(k)] return xs[1].s.byteLength + xs.length * 10 + fs[1].y * 100 } \
+         fn deep(k: Int64) -> Option<Option<B>> { return Some(Some(big(k))) } \
+         fn inrec(k: Int64) -> V { return V { o: Some(big(k)), k: k } } \
+         fn boxed(k: Int64) -> Int64 { let v = inrec(k) let r = match v.o { Some(b) => b.a + v.k, None => 0 } \
+         return r + match deep(k) { Some(o) => match o { Some(b) => b.c, None => 0 }, None => 0 } } \
          fn vyrnTestMain() -> Int64 { let h = land(4) let a = arr(2) \
-         return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 }",
+         return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 \
+         + boxed(6) * 100000000000 }",
     ),
 ];
 

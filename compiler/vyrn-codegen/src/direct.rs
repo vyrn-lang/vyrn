@@ -1963,6 +1963,8 @@ enum PartIn {
     Parent,
     /// A heap array's element buffer, of this many bytes.
     Buffer(u32),
+    /// A variant's boxed payload, of this many bytes.
+    Box(u32),
 }
 
 /// How one `std/mem` primitive lowers (PLAN-0125-runtime §2.2): a `call` of
@@ -2056,6 +2058,17 @@ impl<'a> Parts<'a, '_> {
         match self {
             Parts::Ast(es) => es.len(),
             Parts::Core(_, vs, ..) => vs.len(),
+        }
+    }
+
+    /// Where the `i`th part's own row wrote it ([`Fn_::core_part_at`]).
+    fn built(&mut self, i: usize) -> Option<Dest> {
+        match self {
+            Parts::Ast(_) => None,
+            Parts::Core(_, vs, w) => match vs[i] {
+                Val::Name(n) => w.built[n as usize].take(),
+                Val::Lit(_) => None,
+            },
         }
     }
 }
@@ -11489,6 +11502,9 @@ impl<'p> Fn_<'_, 'p> {
         ty: &Type,
         line: usize,
     ) -> Result<(), String> {
+        if parts.built(i).is_some() {
+            return Ok(());
+        }
         match parts {
             Parts::Ast(es) => {
                 let e = es[i];
@@ -11499,9 +11515,6 @@ impl<'p> Fn_<'_, 'p> {
                 if let Val::Name(n) = v {
                     if let Some(rhs) = w.nested[*n as usize].take() {
                         return self.core_make(m, b, body, w, dest, ty, &rhs, None, line);
-                    }
-                    if w.built[*n as usize].take().is_some() {
-                        return Ok(());
                     }
                 }
                 dest.addr(b, 0);
@@ -12766,8 +12779,16 @@ impl<'p> Fn_<'_, 'p> {
                 });
             } else {
                 dest.addr(b, l.fields[at]);
-                self.part(m, b, args, i, t, line)?;
-                self.encode_word2(b, t, line)?;
+                match args.built(i) {
+                    Some(boxed) => {
+                        boxed.addr(b, 0);
+                        b.ins(&Instruction::I64ExtendI32U);
+                    }
+                    None => {
+                        self.part(m, b, args, i, t, line)?;
+                        self.encode_word2(b, t, line)?;
+                    }
+                }
                 b.ins(&Instruction::I64Store(word8()));
             }
             filled = at + self.cx.words(t);
@@ -18880,10 +18901,11 @@ impl<'p> Fn_<'_, 'p> {
             .is_some_and(|(j, ..)| j == i)
     }
 
-    /// The row of the record or array literal whose part the call at `ss[i]`
-    /// makes, the literal's name, the part's offset, and the storage the
-    /// offset is in: RFC-0125 M7, a call in part position. A variant
-    /// constructor is such a call where [`Fn_::core_nests`] does not hold it.
+    /// The row of the record or array literal, or of the variant with a boxed
+    /// payload, whose part the call at `ss[i]` makes, the parent's name, the
+    /// part's offset, and the storage the offset is in: RFC-0125 M7, a call
+    /// in part position. A variant constructor is such a call where
+    /// [`Fn_::core_nests`] does not hold it.
     ///
     /// The call writes its result at the part's offset, as the arm's
     /// [`Fn_::agg_into`] lets it, so the parent's storage is taken before the
@@ -18909,19 +18931,43 @@ impl<'p> Fn_<'_, 'p> {
         {
             return None;
         }
-        let j = (i + 1..ss.len()).find(
-            |&j| matches!(&ss[j], St::Let(_, Rhs::Make(_, ps)) if ps.contains(&Val::Name(*t))),
-        )?;
+        let j = (i + 1..ss.len()).find(|&j| match &ss[j] {
+            St::Let(_, Rhs::Make(_, ps)) => ps.contains(&Val::Name(*t)),
+            St::Let(
+                _,
+                Rhs::Call {
+                    args,
+                    kind: Callee::Ctor,
+                    ..
+                },
+            ) => args.iter().any(|(v, _)| *v == Val::Name(*t)),
+            _ => false,
+        })?;
         if ss[i + 1..j].iter().any(core_leaves) {
             return None;
         }
-        let St::Let(p, Rhs::Make(ctor, ps)) = &ss[j] else {
+        let St::Let(p, rhs) = &ss[j] else {
             return None;
         };
         let ty = if self.core_lands(body, ss, j, &w.reads) {
             &self.ret_ty
         } else {
             &body.names[*p as usize].ty
+        };
+        let (ctor, ps) = match rhs {
+            Rhs::Make(c, ps) => (c, ps),
+            Rhs::Call { callee, args, .. } => {
+                let (_, payload) = self.core_variant(ty, callee)?;
+                let at = args.iter().position(|(v, _)| *v == Val::Name(*t))?;
+                let part = payload.get(at)?;
+                let Ok(Repr::Agg(l)) = self.cx.repr(part, 0) else {
+                    return None;
+                };
+                return (self.word2(part).ok()? == Word::Boxed
+                    && self.core_payload_layout(body, &Val::Name(*t), part))
+                .then_some((j, *p, 0, PartIn::Box(l.size)));
+            }
+            _ => return None,
         };
         let at = ps.iter().position(|v| *v == Val::Name(*t))?;
         let (part, off, into) = match (ctor, self.cx.resolve(ty)) {
@@ -18950,8 +18996,9 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Where the call at `ss[i]` writes a part of its parent
     /// ([`Fn_::core_part_at`]): the caller's storage when the parent lands
-    /// there, the parent's own slot otherwise, and a heap array's buffer. A
-    /// slot and a buffer are taken at the parent's first such part.
+    /// there, the parent's own slot otherwise, a heap array's buffer, and a
+    /// box of its own for a variant's payload. A slot and a buffer are taken
+    /// at the parent's first such part.
     fn core_part_dest(
         &mut self,
         b: &mut Frame,
@@ -18968,6 +19015,7 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(Some(Dest::Addr(self.core_out(line)?, off)));
         }
         let base = match (w.built[p as usize], into) {
+            (_, PartIn::Box(bytes)) => return Ok(Some(Dest::Addr(self.heap_buf(b, bytes), 0))),
             (Some(d), _) => d,
             (None, PartIn::Parent) => {
                 let r = self.cx.repr(&body.names[p as usize].ty, line)?;
