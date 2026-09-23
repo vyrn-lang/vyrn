@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 15] = [
+const SHAPES: [(&str, &str); 16] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -237,6 +237,14 @@ const SHAPES: [(&str, &str); 15] = [
         "a pop and a swapRemove the rows carry",
         "type P = { x: Int64, s: String }          fn vyrnTestMain() -> Int64 { let mut ps: Array<P> = [P { x: 1, s: \"a\" }, P { x: 2, s: \"bb\" }]          let q = ps.swapRemove(0) let o = ps.pop() let mut xs: Array<Int64> = [5, 6, 7]          let a = xs.swapRemove(0) let mut t = q.x * 10 + q.s.byteLength + a * 1000          if let Some(p) = o { t = t + p.x * 100 } return t + xs.length * 10000 }",
     ),
+    // A scrutinee that is a call's result is the storage the call wrote. Every
+    // element of `words(n)` leaves through `w`, so the loop gives back the
+    // buffer alone; the deep walk frees `kept`'s strings under `keep`'s caller,
+    // and the core walk printed 307 where the arm prints 317 (RFC-0125 M7).
+    (
+        "a `for` and a `match` over a call result",
+        "fn words(n: Int64) -> Array<String> { let mut out: Array<String> = [] let mut i = 0          while i < n { out.push(i.toString() + \"w\") i = i + 1 } return out }          fn keep(n: Int64) -> Array<String> { let mut kept: Array<String> = []          for w in words(n) { kept.push(w) } return kept }          fn pick(n: Int64) -> Option<Array<Int64>> { if n > 0 { return Some([n, n + 1]) } return None }          fn vyrnTestMain() -> Int64 { let kept = keep(3) let again = words(4)          let t = match pick(4) { Some(xs) => xs[1] + xs.length, None => 0 }          let same = if kept[2] == \"2w\" && again[3] == \"3w\" { 1 } else { 0 }          return kept.length * 100 + same * 10 + t }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -246,7 +254,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 15] = [
+const SHAPE_PIN: [(&str, usize, usize); 16] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -270,6 +278,7 @@ const SHAPE_PIN: [(&str, usize, usize); 15] = [
         0,
     ),
     ("a pop and a swapRemove the rows carry", 0, 0),
+    ("a `for` and a `match` over a call result", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

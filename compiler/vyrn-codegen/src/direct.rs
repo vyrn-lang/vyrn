@@ -17501,7 +17501,8 @@ impl<'p> Fn_<'_, 'p> {
                 // `return f(a)`: [`Fn_::agg_into`]'s destination, then the
                 // call's own convention ([`Fn_::out_ptr`]). Any other
                 // temporary is the storage the call wrote, and its name holds
-                // that address, as the arm hands the call's own slot on.
+                // that address, as the arm hands the call's own slot on: to
+                // the reader, or to the `match` or `for` the plan keys it by.
                 St::Let(
                     n,
                     rhs @ (Rhs::Call { .. } | Rhs::Read(vyrn_lower::core::Place::Key(..))),
@@ -17520,7 +17521,7 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let (dest, place) = if lands {
                         (Some(Dest::Addr(self.core_out(line)?, 0)), None)
-                    } else if body.names[*n as usize].binding.is_none() {
+                    } else if body.names[*n as usize].source.starts_with('@') {
                         (None, None)
                     } else {
                         let off = self.core_slot(b, w, *n, &r, line)?;
@@ -19152,13 +19153,8 @@ impl<'p> Fn_<'_, 'p> {
             }
             // An aggregate call result has a slot of its own, which the
             // reader's `let` takes before the call, the storage the call
-            // wrote, or the caller's storage. A temporary with a binding is a
-            // scrutinee the plan keys by its `match`, and the arm hands the
-            // call's own slot to the switch with nothing bound.
-            St::Let(n, rhs) if self.core_agg_call(body, rhs) => {
-                let info = &body.names[*n as usize];
-                info.binding.is_none() || !info.source.starts_with('@')
-            }
+            // wrote, or the caller's storage.
+            St::Let(_, rhs) if self.core_agg_call(body, rhs) => true,
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
             }
