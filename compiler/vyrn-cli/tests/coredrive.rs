@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 50] = [
+const SHAPES: [(&str, &str); 51] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -480,6 +480,13 @@ const SHAPES: [(&str, &str); 50] = [
         "a push whose result is returned, not stored back",
         "fn one(j: Int64) -> Array<String> { let mut out: Array<String> = []          return out.push(j.toString() + \"x\") }          fn two(j: Int64) -> Array<String> { let mut out: Array<String> = []          if j > 0 { return out.push(j.toString()) } return out.push(\"none\") }          fn vyrnTestMain() -> Int64 { let a = one(7) let b = two(0) let c = two(55)          return a[0].byteLength * 100 + b[0].byteLength * 10 + c[0].byteLength }",
     ),
+    // A stream is linear (RFC-0081), so the callee disposes a stream it is
+    // handed: `keep` hands it back, and a close after the call ended the
+    // stream `two` returned.
+    (
+        "a stream handed to a function that returns it",
+        "fn feed(n: Int64) -> Stream<Int64> { let mut xs: Array<Int64> = [] let mut i = 0 while i < n { xs.push(i + 1) i = i + 1 } return fromArray(xs) }          fn keep(s: Stream<Int64>) -> Stream<Int64> { return s }          fn two(n: Int64) -> Stream<Int64> { return keep(feed(n)) }          fn vyrnTestMain() -> Int64 { let mut t = 0 for v in two(3) { t = t * 10 + v } return t }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -489,7 +496,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 50] = [
+const SHAPE_PIN: [(&str, usize, usize); 51] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -576,6 +583,7 @@ const SHAPE_PIN: [(&str, usize, usize); 50] = [
         0,
     ),
     ("a push whose result is returned, not stored back", 0, 0),
+    ("a stream handed to a function that returns it", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

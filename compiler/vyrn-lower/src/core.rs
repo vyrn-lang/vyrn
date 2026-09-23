@@ -6811,6 +6811,17 @@ impl<'a> Builder<'a> {
             // result.
             caps[0] = Capability::Consume;
         }
+        // A stream is linear (RFC-0081): the callee disposes what it is
+        // handed, so a position a stream fills takes it, whatever the
+        // position's word says. Every builtin that takes one says `consume`.
+        for (c, a) in caps.iter_mut().zip(args) {
+            if self
+                .ty_of(a)
+                .is_ok_and(|t| matches!(vyrn_frontend::types::resolve(&t, decls), Type::Stream(_)))
+            {
+                *c = Capability::Consume;
+            }
+        }
         let drains = !lends_here;
         if drains {
             self.drain += 1;
