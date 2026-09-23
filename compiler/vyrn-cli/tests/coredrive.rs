@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 39] = [
+const SHAPES: [(&str, &str); 40] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -419,6 +419,12 @@ const SHAPES: [(&str, &str); 39] = [
         "a `serveStream` in a compiled build",
         "fn feed(k: Int64) -> Stream<String> { let xs: Array<String> = [k.toString(), \"b\".copy()] return fromArray(xs) }          fn open(k: Int64) -> Int64 { if k > 1 { serveStream(feed(k)) } return k }          fn vyrnTestMain() -> Int64 { return open(1) + open(2) }",
     ),
+    // `jsonSchema<T>()` is the String literal its declaration renders, and a
+    // name bound to it owns nothing (RFC-0125 M7).
+    (
+        "a `jsonSchema` bound, stored into and concatenated",
+        "type Age = Int64 where value >= 18          type U = { name: String, age: Age }          fn vyrnTestMain() -> Int64 { let s = jsonSchema<U>() let mut t = jsonSchema<Age>() t = t + \"!\"          let n = (s + jsonSchema<U>()).byteLength return n * 1000 + t.byteLength }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -428,7 +434,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 39] = [
+const SHAPE_PIN: [(&str, usize, usize); 40] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -492,6 +498,7 @@ const SHAPE_PIN: [(&str, usize, usize); 39] = [
     ("a store into a nested place", 0, 0),
     ("an element read off a receiver that is no place", 0, 0),
     ("a `serveStream` in a compiled build", 0, 0),
+    ("a `jsonSchema` bound, stored into and concatenated", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

@@ -3567,11 +3567,14 @@ impl<'a> Builder<'a> {
                 // A literal, or a nullary constructor, which is static in
                 // the same sense: [`Builder::val`] makes the variant and
                 // nothing allocated it.
-                let static_value = matches!(
-                    value,
-                    Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
-                ) || matches!(&rhs, Rhs::Val(Val::Name(m))
-                    if matches!(self.body.names[*m as usize].not_owned, Some(NotOwned::Static)));
+                let static_value = match &rhs {
+                    Rhs::Val(Val::Lit(l)) => !matches!(l, Lit::Opaque(_)),
+                    Rhs::Val(Val::Name(m)) => matches!(
+                        self.body.names[*m as usize].not_owned,
+                        Some(NotOwned::Static)
+                    ),
+                    _ => false,
+                };
                 // A call whose result points into an argument — a lending
                 // prelude row, a projection — binds a borrow whatever its
                 // type says, and that screen is the one thing about the
@@ -5487,7 +5490,7 @@ impl<'a> Builder<'a> {
         // inside it: `n = n + size(if c { names } else { .. })` stores an
         // Int64 and the join still binds an owning temporary.
         let rebinding = std::mem::take(&mut self.rebinding);
-        if let Some(l) = lit_of(e) {
+        if let Some(l) = lit_of(e).or_else(|| self.schema(e)) {
             return Ok(Val::Lit(l));
         }
         match e {
@@ -5966,6 +5969,26 @@ impl<'a> Builder<'a> {
     /// the binding that follows; the ones queued by an enclosing expression
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
+    /// The String `jsonSchema<T>()` renders from `T`'s declaration at compile
+    /// time, and `None` for every other expression. The arm's rewrite
+    /// (`direct::Fn_::reflected`) renders the same declaration.
+    fn schema(&self, e: &Expr) -> Option<Lit> {
+        let Expr::Call {
+            name, type_args, ..
+        } = e
+        else {
+            return None;
+        };
+        let [Type::Named(t) | Type::App(t, _)] = type_args.as_slice() else {
+            return None;
+        };
+        let types = self.proto.types();
+        let decl = types.get(t).filter(|_| name == "jsonSchema")?;
+        Some(Lit::Str(vyrn_frontend::types::json_schema_string(
+            decl, types,
+        )))
+    }
+
     /// Whether `name(args)` at `e` is a read that owns no heap: an element of
     /// a builtin array, a String's byte, or a map's entry, whose `Option` the
     /// runtime's lookup builds. A receiver that is no place is bound to a
@@ -6171,6 +6194,9 @@ impl<'a> Builder<'a> {
                     .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
                 {
                     return self.call(&f, fwd, *line, self.produced(e), out);
+                }
+                if let Some(l) = self.schema(e) {
+                    return Ok(Rhs::Val(Val::Lit(l)));
                 }
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {
