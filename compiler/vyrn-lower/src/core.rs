@@ -1957,16 +1957,15 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             vals(vs, out);
         }
         Rhs::Prim(_, vs, _) => vals(vs, out),
-        // Since RFC-0125 M7 a record literal and an array literal are read off
-        // the row (`direct::Fn_::core_make`), so neither is a gap. What refuses
-        // a part the emitter cannot place is the emitter's own screen, the way
-        // a `Callee::Fn` whose parameter crosses by address is not a gap
-        // either. A map literal and a `where`-checked constructor have no
+        // Since RFC-0125 M7 a record literal, an array literal and a map
+        // literal are read off the row (`direct::Fn_::core_make`), so none is
+        // a gap. What refuses a part the emitter cannot place is the emitter's
+        // own screen, the way a `Callee::Fn` whose parameter crosses by
+        // address is not a gap either. A `where`-checked constructor has no
         // reader at all.
         Rhs::Make(c, vs) => {
             match c {
-                Ctor::Record(..) | Ctor::Array => {}
-                Ctor::Map => out.push("Make:Map".into()),
+                Ctor::Record(..) | Ctor::Array | Ctor::Map => {}
                 Ctor::Try(_) => out.push("Make:Try".into()),
             }
             vals(vs, out);

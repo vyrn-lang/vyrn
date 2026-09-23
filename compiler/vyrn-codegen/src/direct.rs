@@ -5477,8 +5477,9 @@ impl<'p> Fn_<'_, 'p> {
                     let drop_old = !vyrn_frontend::ast::mentions_place(value, name)
                         && !vyrn_frontend::ast::mentions_place(index, name);
                     // The entry's release is `map_set`'s own two questions.
+                    let mut parts = Parts::Ast(vec![index, value]);
                     return self
-                        .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
+                        .map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, drop_old, *line);
                 }
                 let w = match cached {
                     Some(w) => w,
@@ -13926,26 +13927,46 @@ impl<'p> Fn_<'_, 'p> {
             (None, Some((ke, _))) => self.peek(ke, line)?,
             (None, None) => Type::Str,
         };
-        let mty = Type::Map(Box::new(key_t.clone()), Box::new(val.clone()));
+        let mty = Type::Map(Box::new(key_t), Box::new(val));
         let l = self.layout_of(&mty, line)?;
         let off = b.alloc(l.size, l.align);
+        let mut parts = Parts::Ast(entries.iter().flat_map(|(k, v)| [k, v]).collect());
+        self.map_into(m, b, Dest::Slot(off), &mty, &mut parts, line)?;
         b.slot(off);
+        Ok(mty)
+    }
+
+    /// A map literal of type `mty` built at `dest`: the header zeroed, then
+    /// each key and value of `parts`, in pairs, inserted in written order, so
+    /// a duplicate key updates in place and keeps its slot —
+    /// `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first. The
+    /// value a repeated key shadows has no owner left, so the insert releases
+    /// it; inside a `region` the arena owns it. The AST arm and
+    /// [`Fn_::core_make`] both call this.
+    fn map_into(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        mty: &Type,
+        parts: &mut Parts,
+        line: usize,
+    ) -> Result<(), String> {
+        let Type::Map(key_t, val) = self.cx.resolve(mty) else {
+            return unsupported(&format!("a map literal of `{mty}`"), line);
+        };
+        let l = self.layout_of(mty, line)?;
+        dest.addr(b, 0);
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32Const(l.size as i32));
         b.ins(&Instruction::MemoryFill(0));
         let hdr = b.local(ValType::I32);
-        b.slot(off);
+        dest.addr(b, 0);
         b.ins(&Instruction::LocalSet(hdr));
-        // Written order, so a duplicate key updates in place and keeps its slot —
-        // `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first.
-        // A repeated key updates in place, so the value it shadows has no owner
-        // left — `["usd": 1, "usd": 3]`. Inside a `region` the arena owns it.
-        let drop_old = true;
-        for (ke, ve) in entries {
-            self.map_set(m, b, hdr, &l, ke, ve, &key_t, &val, drop_old, line)?;
+        for i in (0..parts.len()).step_by(2) {
+            self.map_set(m, b, hdr, &l, parts, i, &key_t, &val, true, line)?;
         }
-        b.slot(off);
-        Ok(mty)
+        Ok(())
     }
 
     /// `m[k] = v` — update in place on a hit, append on a miss.
@@ -14195,8 +14216,8 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         hdr: u32,
         l: &Layout,
-        key: &Expr,
-        value: &Expr,
+        parts: &mut Parts,
+        key: usize,
         key_t: &Type,
         val: &Type,
         drop_old: bool,
@@ -14214,19 +14235,19 @@ impl<'p> Fn_<'_, 'p> {
         let k = match mk {
             MapKey::I64 => {
                 let k = b.local(ValType::I64);
-                self.expr_as(m, b, key, &Type::Int)?;
+                self.part(m, b, parts, key, &Type::Int, line)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
             MapKey::Pack(_) => {
                 let raw = b.local(ValType::I32);
-                self.expr_as(m, b, key, key_t)?;
+                self.part(m, b, parts, key, key_t, line)?;
                 b.ins(&Instruction::LocalSet(raw));
                 self.pack_key(b, raw, key_t, line)?
             }
             MapKey::Str => {
                 let k = b.local(ValType::I32);
-                self.expr_as(m, b, key, &Type::Str)?;
+                self.part(m, b, parts, key, &Type::Str, line)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
@@ -14236,7 +14257,7 @@ impl<'p> Fn_<'_, 'p> {
             Repr::Agg(_) => ValType::I32,
             Repr::Unit => return unsupported("a Map of Unit", line),
         });
-        self.expr_as(m, b, value, val)?;
+        self.part(m, b, parts, key + 1, val, line)?;
         b.ins(&Instruction::LocalSet(v));
 
         let idx = b.local(ValType::I32);
@@ -18526,6 +18547,11 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 _ => return unsupported("an array literal the row does not place", line),
             },
+            Rhs::Make(Ctor::Map, vs) => {
+                let mut parts = Parts::Core(body, vs, w);
+                self.map_into(m, b, dest, ty, &mut parts, line)?;
+                dest.addr(b, 0);
+            }
             _ => return unsupported("a made layout this walk does not build", line),
         }
         // `dest_used` is the AST arm's answer to [`Fn_::agg_into`], and this
@@ -18679,7 +18705,12 @@ impl<'p> Fn_<'_, 'p> {
                 Type::ArrayN(inner, n) => n == vs.len() && n > 0 && part(&inner),
                 _ => false,
             },
-            Ctor::Map | Ctor::Try(_) => false,
+            // A key and a value per entry, each a part this walk writes.
+            Ctor::Map => match self.cx.resolve(ty) {
+                Type::Map(k, v) => vs.len() % 2 == 0 && part(&k) && part(&v),
+                _ => false,
+            },
+            Ctor::Try(_) => false,
         }
     }
 
