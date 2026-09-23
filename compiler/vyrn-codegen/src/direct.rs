@@ -2493,6 +2493,7 @@ fn lower_body(
             landed: None,
             walks: vec![None; core.names.len()],
             nested: vec![None; core.names.len()],
+            built: vec![None; core.names.len()],
         };
     }
 
@@ -11488,6 +11489,9 @@ impl<'p> Fn_<'_, 'p> {
                     if let Some(rhs) = w.nested[*n as usize].take() {
                         return self.core_make(m, b, body, w, dest, ty, &rhs, line);
                     }
+                    if w.built[*n as usize].take().is_some() {
+                        return Ok(());
+                    }
                 }
                 dest.addr(b, 0);
                 self.core_val(m, b, body, w, v, ty, line)?;
@@ -16745,6 +16749,11 @@ struct Walked {
     /// `let` to the parent's build, which writes it at the part's offset
     /// ([`Fn_::core_nests`]).
     nested: Vec<Option<Rhs>>,
+    /// The storage a name's value is built in when it was taken before the
+    /// name's own row: a parent's, at the first of its parts that a call
+    /// writes, and that part's, at its offset in the parent's
+    /// ([`Fn_::core_part_at`]).
+    built: Vec<Option<Dest>>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17424,6 +17433,13 @@ impl<'p> Fn_<'_, 'p> {
                 {
                     let info = &body.names[*n as usize];
                     let line = info.line;
+                    if let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? {
+                        let ty = info.ty.clone();
+                        mark = b.mark();
+                        self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
+                        w.built[*n as usize] = Some(dest);
+                        continue;
+                    }
                     if self.core_lands(body, ss, i, &w.reads) {
                         let dest = Dest::Addr(self.core_out(line)?, 0);
                         let ty = self.ret_ty.clone();
@@ -17439,7 +17455,10 @@ impl<'p> Fn_<'_, 'p> {
                     if !matches!(r, Repr::Agg(_)) {
                         return unsupported("a made layout with no layout", line);
                     }
-                    let place = Place::Slot(self.core_slot(b, w, *n, &r, line)?);
+                    let place = match w.built[*n as usize].take() {
+                        Some(Dest::Slot(off)) => Place::Slot(off),
+                        _ => Place::Slot(self.core_slot(b, w, *n, &r, line)?),
+                    };
                     let dest = Dest::of(place).expect("a slot is a destination");
                     self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
@@ -17512,8 +17531,12 @@ impl<'p> Fn_<'_, 'p> {
                     let Repr::Agg(l) = &r else {
                         return unsupported("an aggregate call with no layout", line);
                     };
+                    let part = self.core_part_dest(b, body, w, ss, i, line)?;
+                    mark = b.mark();
                     let (dest, place) = if lands {
                         (Some(Dest::Addr(self.core_out(line)?, 0)), None)
+                    } else if part.is_some() {
+                        (part, None)
                     } else if body.names[*n as usize].source.starts_with('@') {
                         (None, None)
                     } else {
@@ -17562,6 +17585,7 @@ impl<'p> Fn_<'_, 'p> {
                             agg_landed(b, l.size, used);
                             match place {
                                 Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
+                                None if part.is_some() => w.built[*n as usize] = part,
                                 None => w.landed = Some(*n),
                             }
                         }
@@ -18778,10 +18802,11 @@ impl<'p> Fn_<'_, 'p> {
                 || match self.core_held(body, ss, i, v) {
                     Some((k, held)) => self.core_built(body, ss, k, t, held),
                     None => {
-                        self.core_payload_layout(body, v, t)
+                        (self.core_payload_layout(body, v, t)
                             && matches!(v, Val::Name(n)
                                 if body.names[*n as usize].binding.is_some()
-                                    || self.core_alias(body, *n).is_some())
+                                    || self.core_alias(body, *n).is_some()))
+                            || self.core_part_of(body, ss, i, v)
                     }
                 }
         })
@@ -18807,6 +18832,102 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         };
         (self.core_nests(body, ss, k, &self.core_w.occurs) == Some(i)).then_some((k, rhs))
+    }
+
+    /// Whether the part `v` of the layout made at `ss[i]` is written at its
+    /// offset by its own row ([`Fn_::core_part_at`]).
+    fn core_part_of(&self, body: &vyrn_lower::core::Body, ss: &[St], i: usize, v: &Val) -> bool {
+        let Val::Name(n) = v else {
+            return false;
+        };
+        ss[..i]
+            .iter()
+            .rposition(|s| matches!(s, St::Let(l, _) if l == n))
+            .and_then(|k| self.core_part_at(body, ss, k, &self.core_w))
+            .is_some_and(|(j, ..)| j == i)
+    }
+
+    /// The row of the record literal whose part the call at `ss[i]` makes,
+    /// the literal's name, and the part's offset in it: RFC-0125 M7, a call
+    /// in part position. A variant constructor is such a call where
+    /// [`Fn_::core_nests`] does not hold it.
+    ///
+    /// The call writes its result at the part's offset, as the arm's
+    /// [`Fn_::agg_into`] lets it, so the parent's storage is taken before the
+    /// call ([`Fn_::core_part_dest`]). The call row stays where it stands,
+    /// so no effect moves. Nothing names that storage until the parent's
+    /// row, and no row between leaves the list, so a part written early is
+    /// never left in storage no row owns. The temporary is named twice, by
+    /// its `let` and by the parent, so no release row reads it.
+    fn core_part_at(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        i: usize,
+        w: &Walked,
+    ) -> Option<(usize, vyrn_lower::core::Name, u32)> {
+        let St::Let(t, rhs @ Rhs::Call { .. }) = &ss[i] else {
+            return None;
+        };
+        if body.names[*t as usize].binding.is_some()
+            || w.occurs.get(*t as usize) != Some(&2)
+            || !(self.core_agg_call(body, rhs) || self.core_ctor(rhs))
+            || self.core_nests(body, ss, i, &w.occurs).is_some()
+        {
+            return None;
+        }
+        let j = (i + 1..ss.len()).find(
+            |&j| matches!(&ss[j], St::Let(_, Rhs::Make(_, ps)) if ps.contains(&Val::Name(*t))),
+        )?;
+        if ss[i + 1..j].iter().any(core_leaves) {
+            return None;
+        }
+        let St::Let(p, Rhs::Make(Ctor::Record(_, names), ps)) = &ss[j] else {
+            return None;
+        };
+        let ty = if self.core_lands(body, ss, j, &w.reads) {
+            &self.ret_ty
+        } else {
+            &body.names[*p as usize].ty
+        };
+        let Ok(Repr::Agg(l)) = self.cx.repr(ty, 0) else {
+            return None;
+        };
+        let name = &names[ps.iter().position(|v| *v == Val::Name(*t))?];
+        let decl = self.cx.fields(ty)?;
+        let k = decl.iter().position(|f| f.name == *name)?;
+        self.core_payload_layout(body, &Val::Name(*t), &decl[k].ty)
+            .then_some((j, *p, l.fields[k]))
+    }
+
+    /// Where the call at `ss[i]` writes a part of its parent
+    /// ([`Fn_::core_part_at`]): the caller's storage when the parent lands
+    /// there, and the parent's own slot otherwise, taken at its first part.
+    fn core_part_dest(
+        &mut self,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        ss: &[St],
+        i: usize,
+        line: usize,
+    ) -> Result<Option<Dest>, String> {
+        let Some((j, p, off)) = self.core_part_at(body, ss, i, w) else {
+            return Ok(None);
+        };
+        if self.core_lands(body, ss, j, &w.reads) {
+            return Ok(Some(Dest::Addr(self.core_out(line)?, off)));
+        }
+        let base = match w.built[p as usize] {
+            Some(d) => d,
+            None => {
+                let r = self.cx.repr(&body.names[p as usize].ty, line)?;
+                let d = Dest::Slot(self.core_slot(b, w, p, &r, line)?);
+                w.built[p as usize] = Some(d);
+                d
+            }
+        };
+        Ok(Some(base.at(off)))
     }
 
     /// The index of the record or array literal that builds the layout made
@@ -19921,6 +20042,18 @@ fn core_returns(s: &St) -> bool {
         }
         St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_returns)),
         _ => false,
+    }
+}
+
+/// Whether a run leaves the list it stands in anywhere under it: a `return`,
+/// or a `break` or a `continue` outside a loop of its own.
+fn core_leaves(s: &St) -> bool {
+    match s {
+        St::Break { .. } | St::Continue { .. } => true,
+        St::If { then, els, .. } => then.iter().chain(els).any(core_leaves),
+        St::Block { body: inner, .. } => inner.iter().any(core_leaves),
+        St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_leaves)),
+        s => core_returns(s),
     }
 }
 

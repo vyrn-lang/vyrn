@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 20] = [
+const SHAPES: [(&str, &str); 21] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -273,6 +273,19 @@ const SHAPES: [(&str, &str); 20] = [
         "a `while` over module state, and one whose call replaces it",
         "let mut xs: Array<Int64> = [1, 2, 3]          fn bump() { xs = [4, 5, 6, 7] }          fn sum() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] if i == 0 { bump() } i = i + 1 } return sum() * 100 + t }",
     ),
+    // A call in part position writes its result at the part's offset in the
+    // parent's storage, which is the caller's where the parent is returned
+    // (RFC-0125 M7).
+    (
+        "a call's result as a part of a literal",
+        "type P = { x: Int64, y: Int64 } type N = { s: String, k: Int64 } type H = { n: N, p: P, q: P } \
+         fn mk(k: Int64) -> P { return P { x: k, y: k + 1 } } \
+         fn nm(k: Int64) -> N { return N { s: k.toString(), k: k } } \
+         fn land(k: Int64) -> H { return H { p: mk(k), n: nm(k), q: mk(k * 2) } } \
+         fn bind(k: Int64) -> Int64 { let n = nm(9) let h = H { n: n.copy(), q: mk(k), p: mk(1) } \
+         return h.n.k + h.q.y * 10 + h.p.x * 100 + h.n.s.byteLength + n.k } \
+         fn vyrnTestMain() -> Int64 { let h = land(4) return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -282,7 +295,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 20] = [
+const SHAPE_PIN: [(&str, usize, usize); 21] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -315,6 +328,7 @@ const SHAPE_PIN: [(&str, usize, usize); 20] = [
         0,
         0,
     ),
+    ("a call's result as a part of a literal", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
