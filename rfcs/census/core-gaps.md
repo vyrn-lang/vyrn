@@ -385,6 +385,54 @@ By lines of the tally made whole per line written. The third column counts a lin
 
 Step 6 counts the 7 lines that call `schemaOf`, which wait for its memo.
 
+## What the emitter's screen refuses, fourth count (2026-09-23)
+
+Measured on main at `3af4ca52`, before any code of `m7-tail` moved, and again at that track's head. A temporary instrument in `Fn_::core_walkable` and the statement screen under it made every refusing clause record its name and pass, so one compile gives each body's first clause and every clause it meets; the instrument is not committed. It ran over `emit-wat` of the 174 programs of `examples/` that emit, second pass, one line per body per program: on main 1,281 bodies refused, 1,083 of them with no gap; at the head 1,054 and 856. This count replaces the third one, which `m7-screen3` took over the 415 roots at `7751ce7b`.
+
+"Only" means no other statement clause refused the body; "met" counts the bodies that meet the clause anywhere; the first three counts are main's. A clause the instrument read "with no type" is a place whose type `Fn_::core_place_ty` does not find: for a field read, a field of a layout element; for a map key store, a map whose value type the walk does not find. The last column is who holds the clause.
+
+| first statement clause, bodies with no gap | first | only | met | first at the head | held by |
+|---|---|---|---|---|---|
+| a take of a field that is an array | 206 | 0 | 215 | 30 | taken here, in part |
+| a store into a name that is a record | 177 | 2 | 184 | 178 | `m7-store` |
+| `@str` of a String temporary | 94 | 86 | 102 | 94 | `m7-str` |
+| a move of an enum (Rhs::Val) | 88 | 1 | 161 | 107 | `m7-move` |
+| a store into a name that is an array | 80 | 18 | 134 | 80 | `m7-store` |
+| a return of a String from an enum result | 50 | 22 | 50 | 50 | `m7-screen3` |
+| discarded: a move of unit (Rhs::Val) | 48 | 29 | 124 | 0 | taken here |
+| a move of an array (Rhs::Val) | 48 | 17 | 121 | 48 | `m7-move` |
+| a switch on an enum with no place (named) | 29 | 28 | 34 | 29 | `m7-screen3` |
+| a call (Fn) with no signature | 29 | 22 | 35 | 18 | left here |
+| an operator on vectors | 27 | 6 | 29 | 0 | taken here |
+| a rebuild @push with no store after it | 23 | 14 | 54 | 23 | `m7-store` |
+| a read of a field whose base is a layout element | 23 | 14 | 23 | 23 | `m7-read` |
+| a store into a field that is a String | 19 | 15 | 22 | 19 | `m7-store` |
+| a store into a name that is an enum | 16 | 0 | 98 | 16 | `m7-store` |
+| a store into a map key whose type the walk does not find | 15 | 13 | 20 | 15 | `m7-store` |
+| a read of an element that is an enum | 14 | 14 | 30 | 14 | left here |
+| a rebuild @append with no store after it | 14 | 0 | 14 | 14 | `m7-store` |
+| a read of an element that is a record | 10 | 3 | 19 | 10 | `m7-read` |
+| a take of a field that is a String | 10 | 2 | 22 | 10 | `m7-read` |
+| a move of a record (Rhs::Val) | 5 | 4 | 9 | 3 | taken here, in part |
+| a read of a field that is an array | 5 | 1 | 198 | 5 | left here |
+| a read of module state that is a record | 5 | 0 | 9 | 5 | left here |
+| a store into a map key of module state whose type the walk does not find | 4 | 4 | 4 | 4 | `m7-store` |
+| a valueless return | 4 | 3 | 4 | 4 | `m7-screen3` |
+| a store into a name that is unit | 4 | 0 | 11 | 4 | `m7-store` |
+| a read of an element of module state whose base is a layout element | 4 | 0 | 4 | 4 | `m7-read` |
+| a discarded removal of a layout | 3 | 3 | 3 | 3 | left here |
+| a store into module state that is an enum | 3 | 3 | 3 | 3 | `m7-store` |
+| a take of a field that is an enum | 3 | 1 | 9 | 2 | left here |
+| a take of a field of module state that is an array | 3 | 0 | 4 | 3 | left here |
+| a take of module state that is an array | 3 | 0 | 3 | 3 | left here |
+| a discarded lane store | 2 | 1 | 4 | 0 | taken here |
+| a store into a name that is a vector | 0 | 0 | 19 | 19 | `m7-store` |
+| 36 more clauses | 15 | 8 | | 16 | |
+
+A name the screen refuses is never alone: every such body also fails a statement clause. The names the name clause refused on main, bodies with no gap, met: an array 598 (321 a name the core minted, 277 a `let`), an enum 254, Unit 124, all minted and 11 at the head, where an arm stores a Unit value into the join, a record 66, a map 3 and a small array 2.
+
+The 198 bodies with a gap are the same on main and at the head, by first gap: `Opaque:Static` 43, `toJson` 19, `Lambda` 19, `fromJson` 18, `@at` 12, a call through a function value 28 over nine names, `logger` 6, `@tally` 6, `Make:Try` 5, `jsonSchema` 5, `fromArray` 5, `serveStream` 4, `Switch:Impl` 3, `@has` 3, `lineAt` 3, `@list` 3, and 13 more tags with 16 bodies between them.
+
 ## What the tracks since have changed
 
 Each track below retired tags, so every table above is the state before them
@@ -486,3 +534,5 @@ The part track (`m7-part`) changed no gap: every body it moved was whole in the 
 The layout-read track (`m7-read`) changed no gap: every body it moved was whole in the rows and stood down at the emitter's screen. An owned `for` variable over a container the loop alone owns binds the element's address in the buffer, as a borrow does, and a `consume` of it hands the element on; a take of a String out of a field loads the pointer the field held, and the release rows carry the hole. Over `examples/` a read or take of an element that is a record was the first clause the screen refused in 10 bodies and is in 1, and a read or take of a field that is a String in 22 and is in 0. `coredrive --ignored` reads 21,333 with no gap and 1,643 carried end to end, both unmoved, and the emitter takes 20,231 bodies where it took 20,213, on main at `363c013e`. A `for` over a container it alone owns that leaves by `return` leaks the elements it never reached, on main and under both walks.
 
 The early-exit track (`m7-forexit`) changed no gap. A `for` whose every element leaves through the loop variable frees its buffer alone, and a `return`, a `?` or a `break` out of it leaked the elements from the counter to the end under both walks. The builder states their release as rows before the exit's own, a loop that reads each unreached element and drops it, and `Facts::unreached` names the exits that owe it for the AST walk. Over `examples/` 11 exits owe it, all `return` in generated decoders, and 10 manifest rows moved. `coredrive --ignored` reads 21,330 with no gap, 1,642 carried end to end and 20,169 bodies taken, all unmoved.
+
+The small-clause track (`m7-tail`) changed no gap. It counted every clause the emitter's screen refuses on main, which is the fourth count above, and took the clauses no other track holds, in order of bodies. A vector is an arithmetic operand; a `match` statement's Unit join, which no row names once the builder states no `do` of a bare value, needs no place; a discarded lane builtin is typed by the row's producer type; an `extern` call is `Fn_::extern_call`, which both walks call; a layout taken out of a field into a part of a literal moves its header to the part's offset, the hole already in the root's release; and `let mut b = a` of a heapless record is `core_copies`' copy. On the way it fixed a float literal left of a `Float32` operand, which the core walk typed `Float64` into invalid wasm. The screen refuses 1,054 bodies where it refused 1,281, 856 with no gap. On `3af4ca52` the emitter took 20,381 bodies where it took 20,169; rebased onto `81065b21`, `coredrive --ignored` reads 21,333 with no gap and 1,643 carried end to end, both unmoved, and the emitter takes 20,444 bodies where it took 20,231.
