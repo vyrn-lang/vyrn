@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 28] = [
+const SHAPES: [(&str, &str); 29] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -349,6 +349,12 @@ const SHAPES: [(&str, &str); 28] = [
         "a `match` statement with block arms",
         "fn vyrnTestMain() -> Int64 { let o = Some(3) let mut t = 0          match o { Some(n) => { t = t + n } None => { t = 1 } } return t }",
     ),
+    // A lane store's type is the row's, which the emitter decides only as it
+    // writes the store.
+    (
+        "a lane store whose result is discarded",
+        "fn vyrnTestMain() -> Int64 { let mut xs: Array<Float32> = [0.0, 0.0, 0.0, 0.0, 0.0]          F32x4.store(xs, 1, F32x4.splat(2.5)) if xs[4] > 2.0 { return 1 } return 0 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -358,7 +364,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 28] = [
+const SHAPE_PIN: [(&str, usize, usize); 29] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -411,6 +417,7 @@ const SHAPE_PIN: [(&str, usize, usize); 28] = [
     ("a float literal left of a `Float32` operand", 0, 0),
     ("a lane-wise operator on vectors", 0, 0),
     ("a `match` statement with block arms", 0, 0),
+    ("a lane store whose result is discarded", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

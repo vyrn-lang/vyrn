@@ -18101,13 +18101,22 @@ impl<'p> Fn_<'_, 'p> {
     fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
         match rhs {
             Rhs::Call {
-                callee, kind, args, ..
+                callee,
+                kind,
+                args,
+                ret: at,
+                ..
             } => match (
                 builtin_spec(callee, args.len()),
                 core_builtin(callee, *kind),
             ) {
                 (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
                 (None, Some(Spec::Traps)) => Ok(Type::Never),
+                // [`Fn_::lanes`] decides a lane builtin's type as it emits, and
+                // the row carries the checker's answer for the site.
+                (None, Some(Spec::Lanes)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a lane builtin the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(callee, *kind) {
