@@ -3447,47 +3447,34 @@ impl<'a> Builder<'a> {
                 let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
                 let key = self.store_key(sid);
                 let releases = !handed_back && placed_store(key);
-                let Some(n) = n else {
-                    // Module state owns what it holds for the whole module
-                    // and nothing may `consume` it, so a store into one
-                    // releases what it replaces whenever that owns heap.
-                    let owns = self.owns(&ty);
-                    out.push(St::Store {
-                        place: Place::Global(name.clone()),
-                        value: v,
-                        old: if handed_back {
-                            Old::Transferred
-                        } else if !owns {
-                            Old::Nothing
-                        } else if releases {
-                            Old::Released
-                        } else {
-                            Old::Pending
-                        },
-                        line: *line,
-                        site: Site::Node(key),
-                        releases,
-                    });
-                    return Ok(());
+                // Module state owns what it holds for the whole module and
+                // nothing may `consume` it, so a store into one releases what
+                // it replaces whenever that owns heap.
+                let (place, owes) = match n {
+                    None => (Place::Global(name.clone()), self.owns(&ty)),
+                    Some(n) => {
+                        // A rebind carries the same ownership answer a `let`
+                        // does, which is the other half of the same sentence:
+                        // `let t = d.title` is a projection of `d` and so is
+                        // `t = d.title`. RFC-0092's two-spellings-two-verdicts
+                        // defect, stated once — a `mut` slot is released by
+                        // its FINAL value in all three engines, so a slot ever
+                        // assigned somebody else's place is not this frame's
+                        // to release.
+                        if self.borrows(&v) && self.body.names[n as usize].releases {
+                            self.body.names[n as usize].releases = false;
+                            self.body.names[n as usize].borrow = true;
+                        }
+                        (Place::Name(n), self.body.names[n as usize].releases)
+                    }
                 };
-                // A rebind carries the same ownership answer a `let` does,
-                // which is the other half of the same sentence: `let t =
-                // d.title` is a projection of `d` and so is `t = d.title`.
-                // RFC-0092's two-spellings-two-verdicts defect, stated once
-                // — a `mut` slot is released by its FINAL value in all three
-                // engines, so a slot ever assigned somebody else's place is
-                // not this frame's to release.
-                if self.borrows(&v) && self.body.names[n as usize].releases {
-                    self.body.names[n as usize].releases = false;
-                    self.body.names[n as usize].borrow = true;
-                }
                 // The hand-back is read off the STATEMENT, so it is stated
-                // before the name's own obligation is: a name that owes no
+                // before the place's own obligation is: a name that owes no
                 // release still hands its buffer back, and the census reads
                 // the word to tell the two reasons for `false` apart.
                 let old = if handed_back {
                     Old::Transferred
-                } else if !self.body.names[n as usize].releases {
+                } else if !owes {
                     Old::Nothing
                 } else if releases {
                     Old::Released
@@ -3495,7 +3482,7 @@ impl<'a> Builder<'a> {
                     Old::Pending
                 };
                 out.push(St::Store {
-                    place: Place::Name(n),
+                    place,
                     value: v,
                     old,
                     line: *line,
