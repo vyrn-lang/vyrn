@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 34] = [
+const SHAPES: [(&str, &str); 37] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -304,6 +304,19 @@ const SHAPES: [(&str, &str); 34] = [
          fn vyrnTestMain() -> Int64 { let h = land(4) let a = arr(2) \
          return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 + boxed(6) * 100000000000 + made(3) * 10000000000000 }",
     ),
+    // A field read out of a root handed to `modify` holds the field's address
+    // where no `modify` of the root falls in the read's extent: after the call,
+    // or before it in the same turn.
+    (
+        "a field read beside a `modify` of its root",
+        "type P = { src: Array<Int64>, at: Int64 }          fn step(p: modify P) { p.at = p.at + 1 }          fn grow(p: modify P) { p.src.push(p.at) }          fn total(xs: Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn after(p: modify P) -> Int64 { step(p) let n = total(p.src) return n + p.at * 100 }          fn turns(p: modify P) -> Int64 { let mut t = 0 let mut i = 0 while i < 3 { t = t + total(p.src) grow(p) i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut p = P { src: [1, 2], at: 5 } let a = after(p) let b = turns(p) return a + b * 1000 + p.src.length * 1000000 }",
+    ),
+    // A call to a generic function calls the instance the checker solved,
+    // from the arguments or from the type the call's result is bound to.
+    (
+        "a call to a generic function's instance",
+        "type Box<T> = { v: T, n: Int64 }          fn wrap<T>(v: consume T) -> Box<T> { return Box { v: v, n: 1 } }          fn empty<T>() -> Array<T> { let xs: Array<T> = [] return xs }          fn size<T>(b: Box<T>) -> Int64 { return b.n }          fn pair<A, B>(a: A, b: B) -> Int64 { return 2 }          fn outer<T>(v: T) -> Int64 { let b = wrap(v.copy()) return size(b) + pair(v, 3) }          fn vyrnTestMain() -> Int64 { let b = wrap(7) let s = wrap(\"ab\") let e: Array<String> = empty()          return size(b) + size(s) * 10 + e.length * 100 + pair(1, \"x\") * 1000 + outer(\"q\") * 10000 + outer(5) * 100000 }",
+    ),
     // A scalar handed to `modify` lives in a local, which has no address, so
     // the call spills it to a slot and reloads it after (RFC-0125 M7).
     // `examples/` hands `modify` only layouts.
@@ -317,6 +330,12 @@ const SHAPES: [(&str, &str); 34] = [
     (
         "an element a `for` hands on out of a container it alone owns",
         "type F = { key: String, n: Int64 }          fn mk(k: Int64) -> Array<F> { return [F { key: k.toString(), n: k }, F { key: \"b\".copy(), n: 2 }, F { key: \"cc\".copy(), n: 3 }] }          fn pick(k: Int64) -> Int64 { let mut out: Array<F> = [] for f in mk(k) { if f.n != 2 { out.push(f) } }          return out.length * 10 + out[0].key.byteLength + out[1].key.byteLength * 100 }          fn eat(f: consume F) -> Int64 { return f.key.byteLength + f.n }          fn sum(k: Int64) -> Int64 { let mut t = 0 for x in mk(k) { if x.n > 2 { t = t + eat(x) } } return t }          fn vyrnTestMain() -> Int64 { return pick(40) + sum(123) * 1000 }",
+    ),
+    // The element may be any layout: an enum and an array are bound at their
+    // address in the buffer as a record is, and leave the same ways.
+    (
+        "an enum and an array element a `for` hands on",
+        "type N = | A(String) | B(Int64)          fn mk(k: Int64) -> Array<N> { return [A(k.toString()), B(k), A(\"cc\".copy())] }          fn size(n: consume N) -> Int64 { return match n { A(s) => s.byteLength, B(k) => k } }          fn keep(k: Int64) -> Int64 { let mut out: Array<N> = [] for n in mk(k) { out.push(n) } return out.length }          fn sum(k: Int64) -> Int64 { let mut t = 0 for n in mk(k) { t = t + size(n) } return t }          fn skim(k: Int64) -> Int64 { let mut t = 0 for n in mk(k) { t = t + 1 } return t }          fn first(k: Int64) -> Int64 { for n in mk(k) { return size(n) } return 0 }          fn rows(k: Int64) -> Array<Array<String>> { return [[k.toString(), \"a\".copy()], [\"bb\".copy()], []] }          fn eat(r: consume Array<String>) -> Int64 { let mut t = 0 for s in r { t = t + s.byteLength } return t }          fn flat(k: Int64) -> Int64 { let mut out: Array<Array<String>> = [] for r in rows(k) { if r.length > 0 { out.push(r) } } return out.length }          fn total(k: Int64) -> Int64 { let mut t = 0 for r in rows(k) { t = t + eat(r) } return t }          fn vyrnTestMain() -> Int64 { return keep(40) + sum(123) * 10 + skim(1) * 10000 + first(5) * 100000 + (flat(7) + total(12) * 10) * 10000000 }",
     ),
     // A String taken out of a field is the pointer the field held, and the
     // release of the record it left walks around the hole (RFC-0125 M7).
@@ -397,7 +416,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 34] = [
+const SHAPE_PIN: [(&str, usize, usize); 37] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -431,12 +450,15 @@ const SHAPE_PIN: [(&str, usize, usize); 34] = [
         0,
     ),
     ("a part built at its offset where its own row stands", 0, 0),
+    ("a field read beside a `modify` of its root", 0, 0),
+    ("a call to a generic function's instance", 0, 0),
     ("a scalar `modify` argument", 0, 0),
     (
         "an element a `for` hands on out of a container it alone owns",
         0,
         0,
     ),
+    ("an enum and an array element a `for` hands on", 0, 0),
     (
         "a String taken out of a field, on one edge and in a loop",
         0,

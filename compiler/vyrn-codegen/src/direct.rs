@@ -1661,21 +1661,10 @@ impl<'a> Cx<'a> {
         type_args: Vec<Type>,
         subst: HashMap<String, Type>,
     ) -> Result<Sig, String> {
-        let mut sf = shell_of(f);
-        for p in &f.params {
-            sf.params.push(Param {
-                name: p.name.clone(),
-                capability: p.capability,
-                ty: ftypes::substitute(&p.ty, &subst),
-                line: p.line,
-                col: p.col,
-            });
-        }
-        sf.ret = ftypes::substitute(&f.ret, &subst);
         self.enqueue(
             m,
             Key::Generic(f.name.clone(), type_args),
-            Rc::new(sf),
+            Rc::new(instance_shell(f, &subst)),
             Body::Block(&f.body),
             subst,
             HashMap::new(),
@@ -17625,7 +17614,7 @@ impl<'p> Fn_<'_, 'p> {
                             line,
                         )?;
                     } else {
-                        self.core_call(m, b, body, w, callee, *kind, args, None, line)?;
+                        self.core_call(m, b, body, w, callee, *kind, &[], args, None, line)?;
                         b.ins(&Instruction::Drop);
                     }
                     w.at[*n as usize] = self.core_place(w, body, *x);
@@ -17803,10 +17792,14 @@ impl<'p> Fn_<'_, 'p> {
                     self.dest_used = false;
                     match rhs {
                         Rhs::Call {
-                            callee, kind, args, ..
+                            callee,
+                            kind,
+                            args,
+                            solved,
+                            ..
                         } => {
                             let hint = dest.map(|d| (d, ty.clone()));
-                            self.core_call(m, b, body, w, callee, *kind, args, hint, line)?;
+                            self.core_call(m, b, body, w, callee, *kind, solved, args, hint, line)?;
                         }
                         Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                             let (mty, off) = self.core_addr(m, b, body, w, base, line)?;
@@ -18215,9 +18208,13 @@ impl<'p> Fn_<'_, 'p> {
                 self.coerce(m, b, None, &got, want, line)
             }
             Rhs::Call {
-                callee, args, kind, ..
+                callee,
+                args,
+                kind,
+                solved,
+                ..
             } => {
-                let got = self.core_call(m, b, body, w, callee, *kind, args, None, line)?;
+                let got = self.core_call(m, b, body, w, callee, *kind, solved, args, None, line)?;
                 self.coerce(m, b, None, &got, want, line)
             }
             // A read and a take load the same address; what parts them is the
@@ -18241,6 +18238,7 @@ impl<'p> Fn_<'_, 'p> {
                 kind,
                 args,
                 ret: at,
+                solved,
                 ..
             } => match (
                 builtin_spec(callee, args.len()),
@@ -18255,7 +18253,7 @@ impl<'p> Fn_<'_, 'p> {
                     .ok_or_else(|| gap("a lane builtin the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
-                    None => match self.core_sig(callee, *kind) {
+                    None => match self.core_sig(callee, *kind, solved) {
                         Some(s) => Ok(s.ret_ty),
                         None if *kind == Callee::Fn && self.is_extern(callee) => Ok(self
                             .cx
@@ -18287,6 +18285,7 @@ impl<'p> Fn_<'_, 'p> {
         w: &mut Walked,
         callee: &str,
         kind: Callee,
+        solved: &[(String, Type)],
         args: &[(Val, vyrn_frontend::ast::Capability)],
         hint: Option<(Dest, Type)>,
         line: usize,
@@ -18321,7 +18320,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("`copy` of other than one value", line);
                 };
                 if let Some(f) = self.core_copy_impl(body, callee, kind, args) {
-                    return self.core_call(m, b, body, w, &f, Callee::Fn, args, hint, line);
+                    return self.core_call(m, b, body, w, &f, Callee::Fn, &[], args, hint, line);
                 }
                 let ty = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &ty, line)?;
@@ -18475,8 +18474,12 @@ impl<'p> Fn_<'_, 'p> {
             };
             return self.extern_call(m, b, callee, args.len(), &mut operand, line);
         }
-        let Some(sig) = self.core_sig(callee, kind) else {
-            return unsupported("a core call this walk does not read", line);
+        let sig = match self.core_instance(callee, kind, solved) {
+            Some((f, targs, subst)) => self.cx.instantiate(m, f, targs, subst)?,
+            None => match self.core_sig(callee, kind, solved) {
+                Some(sig) => sig,
+                None => return unsupported("a core call this walk does not read", line),
+            },
         };
         let dest = self.out_ptr(b, &sig, hint);
         let mut spilled = Vec::new();
@@ -18738,11 +18741,13 @@ impl<'p> Fn_<'_, 'p> {
     /// `consume` of it hands the element on.
     ///
     /// `None` where the program can observe the copy. A binding the body
-    /// stores into, or hands to `modify`, writes a
-    /// value of its own. A callee handed the root, or any root on the chain,
-    /// to `modify` writes where the kernel does not look (`freeNode` in
-    /// `tree.vyrn`). A store into the root is the kernel's, which ends the
-    /// alias there; for module state, a callee's store into it too.
+    /// stores into, or hands to `modify`, writes a value of its own. A root on
+    /// the chain handed to `consume` anywhere in the body may be freed under
+    /// the name. A row of the name's extent that hands a root on the chain to
+    /// `modify` ([`vyrn_lower::kernel::modifies`]) may replace what the name
+    /// points into. Outside the extent the kernel ends the alias at that call
+    /// and refuses a read after it, as it does at a store into the root; for
+    /// module state, a callee's store too.
     fn core_alias<'b>(
         &self,
         body: &'b vyrn_lower::core::Body,
@@ -18777,6 +18782,7 @@ impl<'p> Fn_<'_, 'p> {
             }
         };
         let place = read(n)?;
+        let extent = core_extent(&body.stmts, n, &body.occurrences())?;
         if written
             .iter()
             .any(|(m, c)| *m == n && !(owned && *c == Some(Capability::Consume)))
@@ -18795,7 +18801,16 @@ impl<'p> Fn_<'_, 'p> {
             let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
                 return Some(place);
             };
-            if written.iter().any(|(m, c)| *m == root && c.is_some()) {
+            if written
+                .iter()
+                .any(|(m, c)| *m == root && *c == Some(Capability::Consume))
+                || vyrn_lower::kernel::modifies(
+                    extent,
+                    vyrn_lower::kernel::Root::N(root),
+                    &body.names,
+                    &body.name,
+                )
+            {
                 return None;
             }
             match read(root) {
@@ -19465,7 +19480,7 @@ impl<'p> Fn_<'_, 'p> {
     /// miss is one of the thirteen above it. The audited instrument is the
     /// one name that hits and must not be called — an unaudited build drops
     /// its four hooks rather than emitting them.
-    fn core_sig(&self, callee: &str, kind: Callee) -> Option<Sig> {
+    fn core_sig(&self, callee: &str, kind: Callee, solved: &[(String, Type)]) -> Option<Sig> {
         // A routed builtin is a call to the function its row names.
         let (callee, kind) = match core_builtin(callee, kind) {
             Some(Spec::Routes(f)) => (*f, Callee::Fn),
@@ -19478,7 +19493,29 @@ impl<'p> Fn_<'_, 'p> {
         // which [`Fn_::core_args_readable`] admits for a layout alone. An
         // aggregate result crosses through the out-pointer, which
         // [`Fn_::out_ptr`] states for both walks.
-        self.cx.sigs.get(callee).cloned()
+        match self.core_instance(callee, kind, solved) {
+            Some((f, _, subst)) => self.cx.signature(&instance_shell(f, &subst)).ok(),
+            None => self.cx.sigs.get(callee).cloned(),
+        }
+    }
+
+    /// The generic function a call row names and the instance the checker
+    /// solved for it (the row's `solved`): the type arguments in the
+    /// function's own order, and the substitution. `None` for a callee with
+    /// no type parameters, and where a type parameter is unsolved or still
+    /// names a parameter. The walk solves nothing itself.
+    fn core_instance(
+        &self,
+        callee: &str,
+        kind: Callee,
+        solved: &[(String, Type)],
+    ) -> Option<(&'p Function, Vec<Type>, HashMap<String, Type>)> {
+        let f = (self.cx.generics.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
+        let subst: HashMap<String, Type> = solved.iter().cloned().collect();
+        let targs: Vec<Type> = (f.type_params.iter())
+            .map(|p| subst.get(p).cloned())
+            .collect::<Option<_>>()?;
+        (!targs.iter().any(vyrn_frontend::types::mentions_param)).then_some((f, targs, subst))
     }
 
     /// The declared function a `x.copy()` row calls when the receiver's type
@@ -19671,10 +19708,14 @@ impl<'p> Fn_<'_, 'p> {
             },
             Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
             Rhs::Call {
-                callee, kind, args, ..
+                callee,
+                kind,
+                args,
+                solved,
+                ..
             } => match self.core_mem_ty(callee, args.len()) {
                 Some(t) => t,
-                None => self.core_sig(callee, *kind)?.ret_ty,
+                None => self.core_sig(callee, *kind, solved)?.ret_ty,
             },
             Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
@@ -20043,7 +20084,11 @@ impl<'p> Fn_<'_, 'p> {
     fn core_agg_call(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Call {
-                callee, args, kind, ..
+                callee,
+                args,
+                kind,
+                solved,
+                ..
             } => {
                 self.core_removes(body, callee, *kind, args) == Some(true)
                     || self.core_args_readable(body, args)
@@ -20055,16 +20100,18 @@ impl<'p> Fn_<'_, 'p> {
                             // declaration's function, a call like any other.
                             Some(Spec::OwnType) => {
                                 match self.core_copy_impl(body, callee, *kind, args) {
-                                    Some(f) => self.core_sig(&f, Callee::Fn).is_some_and(|s| {
-                                        s.params.len() == 1 && s.ret.agg().is_some()
-                                    }),
+                                    Some(f) => {
+                                        self.core_sig(&f, Callee::Fn, &[]).is_some_and(|s| {
+                                            s.params.len() == 1 && s.ret.agg().is_some()
+                                        })
+                                    }
                                     None => matches!(args.as_slice(), [(Val::Name(n), _)]
                                 if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
                                 }
                             }
                             _ => false,
                         } || self
-                            .core_sig(callee, *kind)
+                            .core_sig(callee, *kind, solved)
                             .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
@@ -20308,14 +20355,18 @@ impl<'p> Fn_<'_, 'p> {
             // builder states the call and the store that puts the result back
             // as two rows, and each is read where it stands (RFC-0125 M7).
             Rhs::Call {
-                callee, args, kind, ..
+                callee,
+                args,
+                kind,
+                solved,
+                ..
             } => {
                 self.core_args_readable(body, args)
                     && (self.core_builtin_readable(body, callee, *kind, args)
                         || (*kind == Callee::Fn && self.is_extern(callee))
                         || self.core_named(callee, *kind).is_some()
                         || self.core_mem_ty(callee, args.len()).is_some()
-                        || self.core_sig(callee, *kind).is_some_and(|s| {
+                        || self.core_sig(callee, *kind, solved).is_some_and(|s| {
                             // An aggregate result crosses through an out-pointer
                             // the caller allocates, and this walk writes a plain
                             // `call`: the frame it would need is the callee's
@@ -20479,6 +20530,45 @@ fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability
         }
         _ => {}
     }
+}
+
+/// The rows of `ss`, or of a list inside it, from the `let` of `n` to the row
+/// its extent ends at ([`vyrn_lower::core::extent_ends`]). `None` where no
+/// list both binds `n` and holds every row that names it.
+fn core_extent<'r>(ss: &'r [St], n: vyrn_lower::core::Name, occurs: &[u32]) -> Option<&'r [St]> {
+    if let Some(at) = ss
+        .iter()
+        .position(|s| matches!(s, St::Let(m, _) if *m == n))
+    {
+        let ends = vyrn_lower::core::extent_ends(ss, occurs);
+        let end = ends.iter().position(|e| e.contains(&n))?;
+        return Some(&ss[at..=end]);
+    }
+    ss.iter().find_map(|s| match s {
+        St::If { then, els, .. } => {
+            core_extent(then, n, occurs).or_else(|| core_extent(els, n, occurs))
+        }
+        St::Loop { body, .. } | St::Block { body, .. } => core_extent(body, n, occurs),
+        St::Switch { arms, .. } => arms.iter().find_map(|a| core_extent(&a.body, n, occurs)),
+        _ => None,
+    })
+}
+
+/// The signature of one instance of the generic `f`: its parameters and its
+/// result under `subst`, with no type parameters and no body.
+fn instance_shell(f: &Function, subst: &HashMap<String, Type>) -> Function {
+    let mut sf = shell_of(f);
+    for p in &f.params {
+        sf.params.push(Param {
+            name: p.name.clone(),
+            capability: p.capability,
+            ty: ftypes::substitute(&p.ty, subst),
+            line: p.line,
+            col: p.col,
+        });
+    }
+    sf.ret = ftypes::substitute(&f.ret, subst);
+    sf
 }
 
 /// The names a run's switches account for themselves — RFC-0125 M7: every

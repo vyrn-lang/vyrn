@@ -164,6 +164,11 @@ pub struct Row<'a> {
     /// engines are right about a different question. M1 measured that single
     /// difference as 21,140 of its 22,283 disagreements.
     pub has: Option<Type>,
+    /// At a call to a generic function, or a `?` on a generic `Fallible`,
+    /// the type arguments the checker solved, by parameter name in the
+    /// callee's own order, under this body's substitution: the instance the
+    /// call names. Empty elsewhere.
+    pub solved: Vec<(String, Type)>,
 }
 
 impl Row<'_> {
@@ -886,6 +891,7 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
         node: Node::Stmt(s),
         ty: None,
         has: None,
+        solved: Vec::new(),
     });
     let d = depth + 1;
     match s {
@@ -1021,15 +1027,17 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
         node: Node::Expr(e),
         ty,
         has: None,
+        solved: Vec::new(),
     });
     // A generic call solves its callee's parameters, and the answer governs the
     // subtree it was solved from — see [`Chain`].
     let pushed = match w.recorded.node_substs.get(&key) {
         Some((callee, args)) => {
-            let solved: HashMap<String, Type> = args
+            let at: Vec<(String, Type)> = args
                 .iter()
                 .map(|(p, t)| (p.clone(), apply(t, chain)))
                 .collect();
+            let solved: HashMap<String, Type> = at.iter().cloned().collect();
             // A record literal solves parameters too, and it is not a call:
             // only a call adds an instance to the worklist.
             //
@@ -1041,6 +1049,7 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
             // `examples/falliblegeneric.vyrn` does (RFC-0126 §8.16).
             if matches!(e, Expr::Call { .. } | Expr::Try { .. }) {
                 w.calls.push((callee.as_str(), solved.clone()));
+                w.rows[here].solved = at;
             }
             chain.push(solved);
             true
