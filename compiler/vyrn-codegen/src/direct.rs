@@ -17371,7 +17371,7 @@ impl<'p> Fn_<'_, 'p> {
                 return None;
             }
         }
-        self.core_readable(body, run, &self.core_w.reads)
+        self.core_readable(body, run, &self.core_w.reads, &[])
             .then(|| run.clone())
     }
 
@@ -19468,7 +19468,7 @@ impl<'p> Fn_<'_, 'p> {
             return false;
         }
         let reads = body.reads();
-        self.core_readable(body, &body.stmts, &reads)
+        self.core_readable(body, &body.stmts, &reads, &[])
     }
 
     /// Whether any `let` of `blk` is annotated with a type that carries a
@@ -19498,7 +19498,14 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
-    fn core_readable(&self, body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
+    /// `bound` holds the payload binders of the arms `ss` is inside.
+    fn core_readable(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        reads: &[u32],
+        bound: &[vyrn_lower::core::Name],
+    ) -> bool {
         ss.iter().enumerate().all(|(i, s)| match s {
             // A made layout is built into the name's own slot, which the
             // name holds to the end of its extent, or into the caller's
@@ -19557,11 +19564,11 @@ impl<'p> Fn_<'_, 'p> {
                 cond, then, els, ..
             } => {
                 self.core_val_readable(body, cond)
-                    && self.core_readable(body, then, reads)
-                    && self.core_readable(body, els, reads)
+                    && self.core_readable(body, then, reads, bound)
+                    && self.core_readable(body, els, reads, bound)
             }
-            St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
-            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads),
+            St::Block { body: inner, .. } => self.core_readable(body, inner, reads, bound),
+            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads, bound),
             St::Break { .. } | St::Continue { .. } => true,
             // A tag is read and an arm is chosen off the row
             // ([`Fn_::core_switch`]). What that needs is a scrutinee this walk
@@ -19572,9 +19579,11 @@ impl<'p> Fn_<'_, 'p> {
                     return false;
                 };
                 // The place is the one this walk bound (a layout the run MAKES,
-                // which the `let` arm slots before the switch is reached) or
-                // the one the AST arm bound.
-                let placed = self.core_place(&self.core_w, body, *n).is_some()
+                // which the `let` arm slots before the switch is reached, or a
+                // payload binder, which the enclosing switch binds when it
+                // enters the arm) or the one the AST arm bound.
+                let placed = bound.contains(n)
+                    || self.core_place(&self.core_w, body, *n).is_some()
                     || self.core_alias(body, *n).is_some()
                     || self.core_copies(body, *n)
                     || ss[..i].iter().any(|p| {
@@ -19599,7 +19608,12 @@ impl<'p> Fn_<'_, 'p> {
                             && a.binds
                                 .iter()
                                 .all(|bn| self.core_payload(&body.names[*bn as usize].ty))
-                            && self.core_readable(body, &a.body[a.reads(on).len()..], reads)
+                            && self.core_readable(
+                                body,
+                                &a.body[a.reads(on).len()..],
+                                reads,
+                                &[bound, &a.binds[..]].concat(),
+                            )
                     })
             }
             // A release is the row's, at every exit, and the walk emits it
