@@ -6615,7 +6615,17 @@ impl<'p> Fn_<'_, 'p> {
                 line,
             } => self.try_(m, b, operand, *line, e as *const Expr as usize)?,
             Expr::TryConstruct { name, args, line } => {
-                self.try_construct(m, b, name, args, *line)?
+                let [arg] = args.as_slice() else {
+                    return unsupported(&format!("`{name}?` at this arity"), *line);
+                };
+                self.try_construct(
+                    m,
+                    b,
+                    name,
+                    *line,
+                    |s, m, b, base| s.expr_as(m, b, arg, base).map(|_| ()),
+                    |b, l| Dest::Slot(b.alloc(l.size, l.align)),
+                )?
             }
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
             Expr::Call {
@@ -13493,7 +13503,10 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `Age?(n)` — a validated construction whose refinement answers with a tag
-    /// instead of a trap, yielding `Option<Age>` (RFC-0003).
+    /// instead of a trap, yielding `Option<Age>` (RFC-0003). Both walks call it:
+    /// `operand` pushes the value at the base type it is handed, and `dest`
+    /// names the storage the `Option` is written into, whose address is left
+    /// on the stack.
     ///
     /// This is the one flow that deliberately steps AROUND the M2d coercion seam,
     /// and the reason is the whole point of the form: `expr_as(n, Age)` would emit
@@ -13508,8 +13521,9 @@ impl<'p> Fn_<'_, 'p> {
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        args: &[Expr],
         line: usize,
+        operand: impl FnOnce(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        dest: impl FnOnce(&mut Frame, &Layout) -> Dest,
     ) -> Result<Type, String> {
         let decl = self
             .cx
@@ -13517,15 +13531,12 @@ impl<'p> Fn_<'_, 'p> {
             .get(name)
             .cloned()
             .ok_or_else(|| gap(&format!("a fallible construction of `{name}`"), line))?;
-        if args.len() != 1 {
-            return unsupported(&format!("`{name}?` at this arity"), line);
-        }
         let ty = Type::option(Type::Named(name.to_string()));
         let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
             return unsupported("a fallible construction of a non-aggregate Option", line);
         };
         let base = decl.base.clone();
-        self.expr_as(m, b, &args[0], &base)?;
+        operand(self, m, b, &base)?;
         // `predicate_holds` parks the value where the `where` clause binds it, so
         // both halves of the answer are in locals before either store.
         let (held, base_v) = match self.cx.repr(&base, line)? {
@@ -13553,21 +13564,21 @@ impl<'p> Fn_<'_, 'p> {
         };
         let tag = self.scratch(b, ValType::I32, 0);
         b.ins(&Instruction::LocalSet(tag));
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
+        let at = dest(b, &l);
+        at.addr(b, l.fields[0]);
         b.ins(&Instruction::LocalGet(tag));
         b.ins(&Instruction::I64ExtendI32U);
         b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[1]);
+        at.addr(b, l.fields[1]);
         b.ins(&Instruction::LocalGet(held));
         self.encode_word2(b, &base, line)?;
         b.ins(&Instruction::I64Store(word8()));
         for f in &l.fields[2..] {
-            b.slot(off + f);
+            at.addr(b, *f);
             b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
         }
-        b.slot(off);
+        at.addr(b, 0);
         Ok(ty)
     }
 
@@ -18880,6 +18891,15 @@ impl<'p> Fn_<'_, 'p> {
                 self.map_into(m, b, dest, ty, &mut parts, line)?;
                 dest.addr(b, 0);
             }
+            Rhs::Make(Ctor::Try(name), vs) => {
+                let [v] = vs.as_slice() else {
+                    return unsupported(&format!("`{name}?` at this arity"), line);
+                };
+                let operand = |s: &mut Self, m: &mut Module, b: &mut Frame, base: &Type| {
+                    s.core_val(m, b, body, w, v, base, line)
+                };
+                self.try_construct(m, b, name, line, operand, |_, _| dest)?;
+            }
             _ => return unsupported("a made layout this walk does not build", line),
         }
         // `dest_used` is the AST arm's answer to [`Fn_::agg_into`], and this
@@ -19027,8 +19047,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The type of each part of a record, an array or a map literal of `ty`,
-    /// in the order the row lists the `n` parts. `None` when the row does not
-    /// fill the layout exactly, or makes a checked constructor.
+    /// in the order the row lists the `n` parts, and the one operand of `T?(v)`
+    /// at `T`'s base where the base is one wasm local ([`Fn_::try_construct`]).
+    /// `None` when the row does not fill the layout exactly.
     fn core_part_tys(&self, ty: &Type, ctor: &Ctor, n: usize) -> Option<Vec<Type>> {
         match (ctor, self.cx.resolve(ty)) {
             (Ctor::Record(_, names), _) => {
@@ -19055,6 +19076,10 @@ impl<'p> Fn_<'_, 'p> {
                     })
                     .collect(),
             ),
+            (Ctor::Try(name), _) if n == 1 => {
+                let base = &self.cx.types.get(name)?.base;
+                self.core_framed(base).then(|| vec![base.clone()])
+            }
             _ => None,
         }
     }

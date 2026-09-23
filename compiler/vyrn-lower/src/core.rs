@@ -1930,8 +1930,8 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 ///
 /// An empty answer means the rows carry the body end to end. A tag names the
 /// family one form track closes: `Call:<who>:<name>` for a callee the
-/// emitter's function table does not answer, `Make:<what>` for a layout,
-/// `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>` for a row
+/// emitter's function table does not answer, `Read:<kind>` and
+/// `Take:<kind>` for a place, `Opaque:<what>` for a row
 /// that names no value, and `Lambda`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
@@ -2083,15 +2083,9 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
         // literal are read off the row (`direct::Fn_::core_make`), so none is
         // a gap. What refuses a part the emitter cannot place is the emitter's
         // own screen, the way a `Callee::Fn` whose parameter crosses by
-        // address is not a gap either. A `where`-checked constructor has no
-        // reader at all.
-        Rhs::Make(c, vs) => {
-            match c {
-                Ctor::Record(..) | Ctor::Array | Ctor::Map => {}
-                Ctor::Try(_) => out.push("Make:Try".into()),
-            }
-            vals(vs, out);
-        }
+        // address is not a gap either. A checked construction `T?(v)` is read
+        // there too.
+        Rhs::Make(_, vs) => vals(vs, out),
     }
 }
 

@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 40] = [
+const SHAPES: [(&str, &str); 41] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -425,6 +425,12 @@ const SHAPES: [(&str, &str); 40] = [
         "a `jsonSchema` bound, stored into and concatenated",
         "type Age = Int64 where value >= 18          type U = { name: String, age: Age }          fn vyrnTestMain() -> Int64 { let s = jsonSchema<U>() let mut t = jsonSchema<Age>() t = t + \"!\"          let n = (s + jsonSchema<U>()).byteLength return n * 1000 + t.byteLength }",
     ),
+    // `T?(v)` is a `Ctor::Try` row, and both walks call one check (RFC-0003,
+    // RFC-0125 M7): a scalar base, a String base, no `where` clause, and a part.
+    (
+        "a checked construction the rows carry",
+        "type Age = Int64 where value >= 18          type Root = String where value.byteLength > 0          type Any = Int64          fn age(n: Int64) -> Int64 { return match Age?(n) { Some(a) => a, None => 0 - 1 } }          fn root(s: consume String) -> Int64 { if let Some(r) = Root?(s) { return r.byteLength } return 0 - 1 }          fn any(n: Int64) -> Int64 { let o = Any?(n) return match o { Some(a) => a, None => 0 } }          fn some(k: Int64) -> Int64 { let xs = [Age?(k), Age?(k + 10)] let mut t = 0 for x in xs { if let Some(a) = x { t = t + a } } return t }          fn vyrnTestMain() -> Int64 { return age(30) + age(3) * 100 + root(\"abc\".copy()) * 10000 + root(\"\") * 100000 + any(7) * 1000000 + some(12) * 100000000 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -434,7 +440,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 40] = [
+const SHAPE_PIN: [(&str, usize, usize); 41] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -499,6 +505,7 @@ const SHAPE_PIN: [(&str, usize, usize); 40] = [
     ("an element read off a receiver that is no place", 0, 0),
     ("a `serveStream` in a compiled build", 0, 0),
     ("a `jsonSchema` bound, stored into and concatenated", 0, 0),
+    ("a checked construction the rows carry", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
