@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 44] = [
+const SHAPES: [(&str, &str); 45] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -450,6 +450,13 @@ const SHAPES: [(&str, &str); 44] = [
         "`@str` of a String temporary",
         "type U = { name: String } fn id(a: String) -> String { return a + \"!\" }          fn show(u: U, n: Int64) -> String { return \"<\\{u.name}|\\{u.name + u.name}|\\{id(u.name)}|\\{n.toString()}>\" }          fn vyrnTestMain() -> Int64 { let u = U { name: \"ab\" } return show(u, 7).byteLength }",
     ),
+    // A store into a name of a layout copies the value's bytes into the name's
+    // place and releases what the place held where the row says so, in a loop
+    // and out of one (RFC-0125 M7, `m7-store`).
+    (
+        "a store into a name of an array, an enum and a record",
+        "type R = { s: String, n: Int64 }          fn mk(n: Int64) -> R { return R { s: n.toString() + \"r\", n: n } }          fn fill(n: Int64) -> Array<String> { let mut xs: Array<String> = [] let mut i = 0          while i < n { xs.push(i.toString()) i = i + 1 } return xs }          fn opt(n: Int64) -> Option<String> { if n > 0 { return Some(n.toString()) } return None }          fn vyrnTestMain() -> Int64 { let mut xs = fill(2) let mut i = 0          while i < 3 { xs = fill(i + 3) i = i + 1 } let mut o = opt(1) o = opt(22)          let mut r = mk(1) r = mk(333) let t = match o { Some(s) => s.byteLength, None => 7 }          o = opt(0) return xs.length * 1000 + xs[4].byteLength * 100 + r.s.byteLength * 10 + t }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -459,7 +466,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 44] = [
+const SHAPE_PIN: [(&str, usize, usize); 45] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -528,6 +535,11 @@ const SHAPE_PIN: [(&str, usize, usize); 44] = [
     ("a method call on a concrete receiver", 0, 0),
     ("a discarded removal and a discarded layout result", 0, 0),
     ("`@str` of a String temporary", 0, 0),
+    (
+        "a store into a name of an array, an enum and a record",
+        0,
+        0,
+    ),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

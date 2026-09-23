@@ -17780,7 +17780,7 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     releases,
                     ..
-                } => {
+                } if self.core_framed(&body.names[*n as usize].ty) => {
                     // The temporary an `if` expression joins through is stored
                     // by each branch and bound by the `let` after them
                     // (RFC-0030), so the first store it meets takes its slot.
@@ -17816,11 +17816,12 @@ impl<'p> Fn_<'_, 'p> {
                         disown(b, Place::Slot(at));
                     }
                 }
-                // A field or module state: its address with the field's offset
-                // added, the value, and the store, which is the `SetField`
-                // arm's order for a scalar field. A String in module state is
-                // released where the row says so, and its word cleared, as a
-                // String name's.
+                // A place with an address: the address, what the place held
+                // kept aside where the row releases it, the value landed, and
+                // the kept value freed, the arm's order at `x = v`, `r.f = v`
+                // and `a[i] = v`. A layout lands as a copy of its bytes. A
+                // String in module state has its word cleared, as a String
+                // name's.
                 St::Store {
                     place,
                     value,
@@ -17838,7 +17839,12 @@ impl<'p> Fn_<'_, 'p> {
                         None
                     };
                     self.core_val(m, b, body, w, value, &ty, *line)?;
-                    b.ins(&store_of(&self.cx.ll(&ty)));
+                    match self.cx.repr(&ty, *line)? {
+                        Repr::Agg(l) => agg_landed(b, l.size, false),
+                        _ => {
+                            b.ins(&store_of(&self.cx.ll(&ty)));
+                        }
+                    }
                     self.free_snap(m, b, snap, *line)?;
                     if let vyrn_lower::core::Place::Global(g) = place {
                         if let Some(&word) = self.cx.gappend.get(g) {
@@ -19849,28 +19855,37 @@ impl<'p> Fn_<'_, 'p> {
             }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
-            // A store into a field or into module state owns no heap when its
-            // type is a scalar, so the displaced value needs no release.
+            // A store into a place with an address ([`Fn_::core_stmts`]). A
+            // layout's value is a name of its type, whose bytes are copied.
             St::Store { place, value, .. } => {
+                use vyrn_lower::core::Place as At;
                 let ty = match place {
-                    vyrn_lower::core::Place::Name(n) => Some(body.names[*n as usize].ty.clone()),
+                    At::Name(n) => Some(body.names[*n as usize].ty.clone()),
                     p => self.core_place_ty(body, p),
                 };
+                let named = matches!(place, At::Name(_));
+                // Module state takes a String too, released by the row's
+                // `releases`, with its accumulator's word cleared.
+                let global = matches!(place, At::Global(_));
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
-                // A String name or module state takes the store too: the
-                // release is the row's `releases`, and an accumulator's word is
-                // cleared after it.
-                let whole = matches!(
-                    place,
-                    vyrn_lower::core::Place::Name(_) | vyrn_lower::core::Place::Global(_)
-                );
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
-                    (core_scalar(&r) || (whole && r == Type::Str))
-                        && (!self.checks(&t)
-                            || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
-                }) && self.core_val_readable(body, value)
+                    let fits = match self.cx.repr(&t, 0) {
+                        _ if !named => {
+                            (core_scalar(&r) || (global && r == Type::Str))
+                                && self.core_val_readable(body, value)
+                        }
+                        Ok(Repr::Scalar(_)) => self.core_val_readable(body, value),
+                        Ok(Repr::Agg(_)) => {
+                            matches!(value, Val::Name(v)
+                                    if self.cx.resolve(&body.names[*v as usize].ty) == r)
+                        }
+                        _ => false,
+                    };
+                    fits && (!self.checks(&t)
+                        || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
+                })
             }
             St::If {
                 cond, then, els, ..
@@ -20201,7 +20216,12 @@ impl<'p> Fn_<'_, 'p> {
             {
                 None
             }
-            St::Store { place, .. } if !matches!(place, vyrn_lower::core::Place::Name(_)) => None,
+            St::Store { place, .. }
+                if !matches!(place, vyrn_lower::core::Place::Name(n)
+                    if self.core_framed(&body.names[*n as usize].ty)) =>
+            {
+                None
+            }
             s => first_read(s),
         }
     }
