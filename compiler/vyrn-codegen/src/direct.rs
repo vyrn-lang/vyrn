@@ -17230,7 +17230,31 @@ impl<'p> Fn_<'_, 'p> {
         w: &mut Walked,
         ss: &[St],
     ) -> Result<(), String> {
+        // A statement's slots are its own ([`Frame::alloc`]), and on the rows
+        // a temporary is dead after the last row of this list that names it.
+        // A name the plan keys keeps everything taken before it, as a `let`
+        // does in the arm's [`Fn_::block`].
+        let mut last = HashMap::new();
         for (i, s) in ss.iter().enumerate() {
+            let mut named = Vec::new();
+            vyrn_lower::core::names_in(s, &mut named);
+            for n in named {
+                last.insert(n, i);
+            }
+        }
+        let (mut mark, mut open) = (b.mark(), Vec::new());
+        for (i, s) in ss.iter().enumerate() {
+            if let Some(St::Let(n, _)) = i.checked_sub(1).map(|j| &ss[j]) {
+                if body.names[*n as usize].binding.is_some() {
+                    (mark, open) = (b.mark(), Vec::new());
+                } else {
+                    open.push(*n);
+                }
+            }
+            if open.iter().all(|n| last[n] < i) {
+                b.reset(mark.max(self.rel_floor()));
+                open.clear();
+            }
             match s {
                 // A receiver rebuilt in place: the result is the receiver's
                 // own storage, so the name takes the receiver's place.
@@ -17315,7 +17339,9 @@ impl<'p> Fn_<'_, 'p> {
                 // when the `return` after it hands the temporary back. The
                 // bytes are the AST arm's at `let p = f(a)` and at
                 // `return f(a)`: [`Fn_::agg_into`]'s destination, then the
-                // call's own convention ([`Fn_::out_ptr`]).
+                // call's own convention ([`Fn_::out_ptr`]). Any other
+                // temporary is the storage the call wrote, and its name holds
+                // that address, as the arm hands the call's own slot on.
                 St::Let(
                     n,
                     rhs @ (Rhs::Call { .. } | Rhs::Read(vyrn_lower::core::Place::Key(..))),
@@ -17332,18 +17358,22 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("an aggregate call with no layout", line);
                     };
                     let (dest, place) = if lands {
-                        (Dest::Addr(self.core_out(line)?, 0), None)
+                        (Some(Dest::Addr(self.core_out(line)?, 0)), None)
+                    } else if body.names[*n as usize].binding.is_none() {
+                        (None, None)
                     } else {
                         let off = b.alloc(l.size, l.align);
-                        (Dest::Slot(off), Some(Place::Slot(off)))
+                        (Some(Dest::Slot(off)), Some(Place::Slot(off)))
                     };
-                    dest.addr(b, 0);
+                    if let Some(d) = dest {
+                        d.addr(b, 0);
+                    }
                     self.dest_used = false;
                     match rhs {
                         Rhs::Call {
                             callee, kind, args, ..
                         } => {
-                            let hint = Some((dest, ty.clone()));
+                            let hint = dest.map(|d| (d, ty.clone()));
                             self.core_call(m, b, body, w, callee, *kind, args, hint, line)?;
                         }
                         Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
@@ -17362,10 +17392,20 @@ impl<'p> Fn_<'_, 'p> {
                         }
                         _ => return unsupported("an aggregate row that is no call", line),
                     }
-                    agg_landed(b, l.size, std::mem::take(&mut self.dest_used));
-                    match place {
-                        Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
-                        None => w.landed = Some(*n),
+                    let used = std::mem::take(&mut self.dest_used);
+                    match (dest, place) {
+                        (None, _) => {
+                            let a = b.local(ValType::I32);
+                            b.ins(&Instruction::LocalSet(a));
+                            self.core_bind(b, body, w, *n, Place::Local(a), ty)?;
+                        }
+                        (Some(_), place) => {
+                            agg_landed(b, l.size, used);
+                            match place {
+                                Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
+                                None => w.landed = Some(*n),
+                            }
+                        }
                     }
                 }
                 St::Let(n, rhs) => {
@@ -17723,10 +17763,10 @@ impl<'p> Fn_<'_, 'p> {
                 let [(v, _)] = args else {
                     return unsupported("`copy` of other than one value", line);
                 };
-                let ty = self.core_ty(body, v, &Type::Int);
-                if ftypes::copy_impl(&self.cx.impls, &ty).is_some() {
-                    return unsupported("a `copy` the receiver's type declares", line);
+                if let Some(f) = self.core_copy_impl(body, callee, kind, args) {
+                    return self.core_call(m, b, body, w, &f, Callee::Fn, args, hint, line);
                 }
+                let ty = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &ty, line)?;
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
@@ -18261,14 +18301,30 @@ impl<'p> Fn_<'_, 'p> {
                 kind: Callee::Ctor,
                 ..
             } => {
-                args.iter().all(|(v, _)| self.core_val_readable(body, v))
-                    && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
+                matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
                     && self.core_variant(ty, callee).is_some_and(|(_, p)| {
-                        p.len() == args.len() && p.iter().all(|t| self.core_part_ty(t))
+                        p.len() == args.len()
+                            && args.iter().zip(&p).all(|((v, _), t)| {
+                                (self.core_val_readable(body, v) && self.core_part_ty(t))
+                                    || self.core_payload_layout(body, v, t)
+                            })
                     })
             }
             _ => false,
         }
+    }
+
+    /// Whether `v` is a layout name that fills a payload of `t` from its
+    /// address: [`Fn_::build_variant`] boxes it or copies its two words, and
+    /// [`Fn_::core_val`] pushes the address, as the arm's `Expr::Var` does.
+    fn core_payload_layout(&self, body: &vyrn_lower::core::Body, v: &Val, t: &Type) -> bool {
+        matches!(v, Val::Name(n) if {
+            let nt = &body.names[*n as usize].ty;
+            matches!(self.cx.repr(nt, 0), Ok(Repr::Agg(_)))
+                && !self.checks(nt)
+                && !self.checks(t)
+                && self.cx.ll(nt) == self.cx.ll(t)
+        })
     }
 
     /// Whether this walk builds the layout a [`Rhs::Make`] row states —
@@ -18407,6 +18463,23 @@ impl<'p> Fn_<'_, 'p> {
         // aggregate result crosses through the out-pointer, which
         // [`Fn_::out_ptr`] states for both walks.
         self.cx.sigs.get(callee).cloned()
+    }
+
+    /// The declared function a `x.copy()` row calls when the receiver's type
+    /// declares `impl Copy for T` (RFC-0091 M1), as the arm's `@copy` does.
+    fn core_copy_impl(
+        &self,
+        body: &vyrn_lower::core::Body,
+        callee: &str,
+        kind: Callee,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+    ) -> Option<String> {
+        match (core_builtin(callee, kind), args) {
+            (Some(Spec::OwnType), [(v, _)]) => {
+                ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int))
+            }
+            _ => None,
+        }
     }
 
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
@@ -18727,14 +18800,13 @@ impl<'p> Fn_<'_, 'p> {
                     && self.core_makes(body, &body.names[*n as usize].ty, rhs)
             }
             // An aggregate call result has a slot of its own, which the
-            // reader's `let` takes before the call, or it is the caller's
-            // storage. A temporary with a binding is a scrutinee the plan
-            // keys by its `match`, and the arm hands the call's own slot to
-            // the switch with nothing bound.
+            // reader's `let` takes before the call, the storage the call
+            // wrote, or the caller's storage. A temporary with a binding is a
+            // scrutinee the plan keys by its `match`, and the arm hands the
+            // call's own slot to the switch with nothing bound.
             St::Let(n, rhs) if self.core_agg_call(body, rhs) => {
                 let info = &body.names[*n as usize];
-                (info.binding.is_some() && !info.source.starts_with('@'))
-                    || self.core_lands(body, ss, i, reads)
+                info.binding.is_none() || !info.source.starts_with('@')
             }
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
@@ -18842,7 +18914,8 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// A value that owns heap crosses as its pointer, and who owns it after
     /// the call is the call arm's decision: this walk writes the pointer and
-    /// nothing else, which is what a `read` argument is. A layout crosses as
+    /// nothing else, which is what a `read` or a `consume` argument is. A
+    /// String literal is static data, which `free` refuses. A layout crosses as
     /// its address the same way ([`Fn_::core_val`]), whatever the capability:
     /// every layout this walk names lives in a slot, and a `modify` callee
     /// copies its result back into it. A scalar `modify` argument lives in a
@@ -18861,10 +18934,7 @@ impl<'p> Fn_<'_, 'p> {
                 matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
             });
             match c {
-                Cap::Read => self.core_val_readable(body, v) || layout,
-                Cap::Consume => {
-                    (self.core_val_readable(body, v) && self.core_operand(body, v)) || layout
-                }
+                Cap::Read | Cap::Consume => self.core_val_readable(body, v) || layout,
                 Cap::Modify => {
                     layout && !matches!(v, Val::Name(n) if self.core_alias(body, *n).is_some())
                 }
@@ -18887,10 +18957,24 @@ impl<'p> Fn_<'_, 'p> {
                 callee, args, kind, ..
             } => {
                 self.core_args_readable(body, args)
-                    && (matches!(core_builtin(callee, *kind), Some(Spec::Builds(_)))
-                        || self
-                            .core_sig(callee, *kind)
-                            .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
+                    && (match core_builtin(callee, *kind) {
+                        Some(Spec::Builds(_)) => true,
+                        // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
+                        // the copy in a slot of its own, as `Builds` does.
+                        // A type that declares `impl Copy` is copied by that
+                        // declaration's function, a call like any other.
+                        Some(Spec::OwnType) => match self.core_copy_impl(body, callee, *kind, args)
+                        {
+                            Some(f) => self
+                                .core_sig(&f, Callee::Fn)
+                                .is_some_and(|s| s.params.len() == 1 && s.ret.agg().is_some()),
+                            None => matches!(args.as_slice(), [(Val::Name(n), _)]
+                                if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
+                        },
+                        _ => false,
+                    } || self
+                        .core_sig(callee, *kind)
+                        .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                 self.core_val_readable(body, k)
@@ -18946,9 +19030,9 @@ impl<'p> Fn_<'_, 'p> {
     /// back, so the value is built in the caller's storage (RFC-0125 M7).
     ///
     /// A temporary, read once, by the `return` after it with nothing but
-    /// releases between, at the declared result's own type: the AST arm
-    /// builds `return f(a)` and `return Some(a)` into `dest` the same way
-    /// ([`Fn_::ret_value`]).
+    /// releases of other names between, at the declared result's own type:
+    /// the AST arm builds `return f(a)` and `return Some(a)` into `dest` the
+    /// same way ([`Fn_::ret_value`]).
     fn core_lands(
         &self,
         body: &vyrn_lower::core::Body,
@@ -18964,7 +19048,9 @@ impl<'p> Fn_<'_, 'p> {
             && info.binding.is_none()
             && reads[*n as usize] == 1
             && self.cx.resolve(&info.ty) == self.cx.resolve(&self.ret_ty)
-            && matches!(ss[i + 1..].iter().find(|s| !matches!(s, St::Row { .. })),
+            && matches!(ss[i + 1..].iter().find(|s| {
+                    !matches!(s, St::Row { .. }) && !matches!(s, St::Drop(d, ..) if d != n)
+                }),
                 Some(St::Return { value: Some(Val::Name(r)), .. }) if r == n)
     }
 
@@ -19002,12 +19088,9 @@ impl<'p> Fn_<'_, 'p> {
     ) -> bool {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
-            Some(Spec::OwnType) => match args {
-                [(v, _)] => {
-                    ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int)).is_none()
-                }
-                _ => false,
-            },
+            Some(Spec::OwnType) => {
+                matches!(args, [_]) && self.core_copy_impl(body, callee, kind, args).is_none()
+            }
             // `@str` frees a String temporary once it has copied it
             // (`str_temporary`), and the rows state that release as a row of
             // their own. A name this pass minted is that temporary.
