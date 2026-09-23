@@ -19492,6 +19492,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
             });
         }
+        let occurs = body.occurrences();
         for (n, info) in body.names.iter().enumerate() {
             // A value with a place of its own: one wasm local, whatever the
             // type in it (RFC-0125 M7, the frame). A `where` type is not one —
@@ -19519,8 +19520,13 @@ impl<'p> Fn_<'_, 'p> {
             // it ([`Fn_::out_ptr`]). A temporary made or returned into is
             // one [`Fn_::core_readable`] asks about where it stands, because
             // what places it is the `return` after it.
-            if !(self.core_framed(&info.ty)
-                || (n < body.params.len() && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
+            //
+            // Or a name no row names, such as the Unit join of a `match`
+            // statement, which needs no place.
+            if occurs[n] != 0
+                && !(self.core_framed(&info.ty)
+                    || (n < body.params.len()
+                        && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
                 && !(info.binding.is_none_or(|at| {
                     annotated
                         .iter()
