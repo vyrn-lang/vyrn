@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 22] = [
+const SHAPES: [(&str, &str); 24] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -311,6 +311,19 @@ const SHAPES: [(&str, &str); 22] = [
         "a scalar `modify` argument",
         "fn bump(n: modify Int64, by: Int64) { n = n + by }          fn flip(b: modify Bool) { b = !b }          fn thrice(n: modify Int64) { bump(n, 3) }          fn vyrnTestMain() -> Int64 { let mut x = 1 bump(x, 2) thrice(x)          let mut f = false flip(f) if f { x = x + 100 } return x }",
     ),
+    // A `for` over a container it alone owns binds each element at its
+    // address in the buffer, and the element leaves by a push or a `consume`
+    // or is released there (RFC-0125 M7).
+    (
+        "an element a `for` hands on out of a container it alone owns",
+        "type F = { key: String, n: Int64 }          fn mk(k: Int64) -> Array<F> { return [F { key: k.toString(), n: k }, F { key: \"b\".copy(), n: 2 }, F { key: \"cc\".copy(), n: 3 }] }          fn pick(k: Int64) -> Int64 { let mut out: Array<F> = [] for f in mk(k) { if f.n != 2 { out.push(f) } }          return out.length * 10 + out[0].key.byteLength + out[1].key.byteLength * 100 }          fn eat(f: consume F) -> Int64 { return f.key.byteLength + f.n }          fn sum(k: Int64) -> Int64 { let mut t = 0 for x in mk(k) { if x.n > 2 { t = t + eat(x) } } return t }          fn vyrnTestMain() -> Int64 { return pick(40) + sum(123) * 1000 }",
+    ),
+    // A String taken out of a field is the pointer the field held, and the
+    // release of the record it left walks around the hole (RFC-0125 M7).
+    (
+        "a String taken out of a field, on one edge and in a loop",
+        "type F = { key: String, value: String, n: Int64 }          fn mk(k: Int64) -> F { return F { key: k.toString(), value: \"vv\".copy(), n: k } }          fn fields(k: Int64) -> Array<F> { return [mk(k), mk(k + 1), mk(1)] }          fn one(k: Int64) -> Int64 { let mut out: Array<String> = [] let f = mk(k)          if f.n > 1 { out.push(consume f.key) } return out.length * 100 + f.value.byteLength }          fn all(k: Int64) -> Int64 { let mut keys: Array<String> = []          for f in fields(k) { if f.n != 1 { keys.push(consume f.key) } } return keys.length * 10 + keys[1].byteLength }          fn vyrnTestMain() -> Int64 { return one(5) + one(0) * 1000 + all(99) * 1000000 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -320,7 +333,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 22] = [
+const SHAPE_PIN: [(&str, usize, usize); 24] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -355,6 +368,16 @@ const SHAPE_PIN: [(&str, usize, usize); 22] = [
     ),
     ("a part built at its offset where its own row stands", 0, 0),
     ("a scalar `modify` argument", 0, 0),
+    (
+        "an element a `for` hands on out of a container it alone owns",
+        0,
+        0,
+    ),
+    (
+        "a String taken out of a field, on one edge and in a loop",
+        0,
+        0,
+    ),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
