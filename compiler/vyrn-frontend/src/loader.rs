@@ -1027,16 +1027,27 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
         .map(|(_, reserved)| *reserved)
 }
 
-/// The function a builtin call is a call to where its argument names the callee
-/// (RFC-0125 M7), or `None` for any other call. `contractOf(C)` calls the entry
-/// `vyrn-genwasm` appends for `C`. The builder, the emitter's arm and the engine
-/// ask this one function, and the builder and the arm read the call as a call to
-/// the function only where the program declares it.
-pub fn routed_callee(name: &str, args: &[crate::ast::Expr]) -> Option<String> {
-    match (name, args) {
-        ("contractOf", [crate::ast::Expr::Var { name: c, .. }]) => {
-            Some(crate::checker::gen_entry_contract_of(c))
+/// The function a builtin call is a call to where its argument's type or name
+/// names the callee (RFC-0125 M7), and the arguments the call hands on; `None`
+/// for any other call. `ty_of` answers the static type of an argument.
+///
+/// `contractOf(C)` calls the entry `vyrn-genwasm` appends for `C` and hands on
+/// nothing, since `C` is a declaration. `toJson(x)` calls the encoder wrapper of
+/// `x`'s type, and `fromJson<T>(s)` the decoder of `T`, which
+/// [`crate::check_and_synthesize`] appends. The builder and the emitter's arm
+/// read the call as a call to the function only where the program declares it.
+pub fn routed_callee<'e>(
+    name: &str,
+    type_args: &[Type],
+    args: &'e [Expr],
+    ty_of: impl FnOnce(&Expr) -> Option<Type>,
+) -> Option<(String, &'e [Expr])> {
+    match (name, type_args, args) {
+        ("contractOf", _, [Expr::Var { name: c, .. }]) => {
+            Some((crate::checker::gen_entry_contract_of(c), &[]))
         }
+        ("toJson", _, [a]) => Some((crate::jsonenc::wrap_name(&ty_of(a)?), args)),
+        ("fromJson", [t], [_]) => Some((crate::jsondec::top_name(t), args)),
         _ => None,
     }
 }

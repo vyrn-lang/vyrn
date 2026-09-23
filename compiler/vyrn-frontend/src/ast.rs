@@ -1710,11 +1710,11 @@ impl Expr {
 /// local names in scope at each one — the ONE descent this workspace makes over
 /// a `Block`.
 ///
-/// Eight readers ask the same question and used to write the same thirty-five
+/// Seven readers ask the same question and used to write the same thirty-five
 /// arms out to ask it (RFC-0125 §3 M6). Three are the loader's — `scope_*`
 /// collects the free names, `rewrite_*` renames them, `NsResolver` resolves the
-/// namespace-qualified ones; three are this file's — `lambdas`,
-/// `node_addrs` and `alias_embedded`; one is `project::walk_block`, the
+/// namespace-qualified ones; two are this file's — `lambdas` and
+/// `node_addrs`; one is `project::walk_block`, the
 /// shared mutable walk seven passes call; and one is the direct backend's
 /// hoist. They had drifted, and each drift was a defect: only two of the
 /// loader's three put an `Ok(x) =>` arm's binding in scope, so a rename map
@@ -1723,9 +1723,8 @@ impl Expr {
 /// What differs between the readers is one line at a SITE, never the traversal.
 /// The loader's collector records a namespace-sugar call under its DOTTED
 /// spelling; its renamer SKIPS a namespace receiver; its resolver DELETES the
-/// receiver argument; `lambdas` keeps the body a literal holds;
-/// `alias_embedded` stops at a subtree equal to the one it is pairing; the
-/// hoist stops at a lambda. So the visitor is handed the node and the scope and
+/// receiver argument; `lambdas` keeps the body a literal holds; the hoist
+/// stops at a lambda. So the visitor is handed the node and the scope and
 /// writes its own line, and the walk owns the descent and the scope stack and
 /// nothing else.
 ///
@@ -2144,39 +2143,6 @@ pub fn node_addrs_one(s: &Stmt, out: &mut Vec<usize>) {
 /// no original; the expression inside does).
 pub fn node_addrs_val(e: &Expr, out: &mut Vec<usize>) {
     ast_expr(e, &std::collections::HashSet::new(), &mut Addrs(out));
-}
-
-/// Pair every subtree of `tree` structurally equal to `orig` with it,
-/// node-for-node — how a rewrite's embedded argument clone is aliased
-/// (RFC-0114 §26): `toJson(x)` becomes a synthesized encoder call holding a
-/// clone of `x`, and the plan's rows live on the original.
-///
-/// A subtree that matches is paired whole and not descended into, which is the
-/// walk's `false`: its children are already paired, node for node, by the two
-/// address lists.
-pub fn alias_embedded(tree: &Expr, orig: &Expr, out: &mut Vec<(usize, usize)>) {
-    struct Alias<'o> {
-        orig: &'o Expr,
-        out: &'o mut Vec<(usize, usize)>,
-    }
-    impl AstVisit<'_> for Alias<'_> {
-        const SCOPED: bool = false;
-        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
-            if e != self.orig {
-                return true;
-            }
-            let (mut c, mut o) = (Vec::new(), Vec::new());
-            node_addrs_val(e, &mut c);
-            node_addrs_val(self.orig, &mut o);
-            self.out.extend(c.into_iter().zip(o));
-            false
-        }
-    }
-    ast_expr(
-        tree,
-        &std::collections::HashSet::new(),
-        &mut Alias { orig, out },
-    );
 }
 
 // ---------------------------------------------------------------------------

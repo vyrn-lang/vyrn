@@ -390,11 +390,13 @@ fn the_direct_backend_carries_the_census_too() {
         // and `examples/storage.vyrn` calls it — so the invisibility is fixed at
         // both ends and this row is gone.
     ];
-    // The names a backend spells with a Rust constant rather than a literal.
+    // The names a backend spells with a Rust constant, or reaches through the
+    // frontend function that names their callee, rather than a literal.
     let alias = |n: &str| match n {
         "@panicAt" => Some("PANIC_AT"),
         "@at" => Some("project::AT"),
         "@slot" => Some("ELEM"),
+        "contractOf" | "toJson" | "fromJson" => Some("routed_callee"),
         _ => None,
     };
     let direct = include_str!("../../vyrn-codegen/src/direct.rs");

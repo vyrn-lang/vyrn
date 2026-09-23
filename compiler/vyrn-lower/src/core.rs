@@ -6117,10 +6117,21 @@ impl<'a> Builder<'a> {
                 name,
                 args,
                 line,
-                type_args: _,
+                type_args,
             } => {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
+                }
+                // A builtin whose argument names its callee is a call to that
+                // function where the program declares it (RFC-0125 M7).
+                // Elsewhere the builtin stays, with the effect its row states.
+                if let Some((f, fwd)) =
+                    vyrn_frontend::loader::routed_callee(name, type_args, args, |a| {
+                        self.ty_of(a).ok()
+                    })
+                    .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
+                {
+                    return self.call(&f, fwd, *line, self.produced(e), out);
                 }
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {
@@ -6611,22 +6622,6 @@ impl<'a> Builder<'a> {
         ret: Option<Type>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
-        // A builtin whose argument names its callee is a call to that
-        // function where the program declares it (RFC-0125 M7). The argument
-        // names a declaration, so the call hands on no value. Elsewhere the
-        // builtin stays, with the effect its row states.
-        if let Some(callee) = vyrn_frontend::loader::routed_callee(name, args)
-            .filter(|f| self.program.functions.iter().any(|d| &d.name == f))
-        {
-            return Ok(Rhs::Call {
-                callee,
-                args: Vec::new(),
-                write_back: false,
-                kind: Callee::Fn,
-                ret,
-                solved: Vec::new(),
-            });
-        }
         // The capability of each argument position, by who the callee is.
         let decls = self.proto.types();
         let method = self

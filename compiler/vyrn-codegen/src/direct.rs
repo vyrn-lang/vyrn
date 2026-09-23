@@ -7690,9 +7690,10 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The M3b entry the engine synthesized for a structured builtin, if it did.
     ///
-    /// `lex`, `moduleInterface` and `contractOf` each return a value of a known
-    /// named type, and the engine appends an ordinary Vyrn function that asks the
-    /// host for it and DECODES it by walking that type. So there is nothing to lower
+    /// `lex` and `moduleInterface` each return a value of a known named type,
+    /// and the engine appends an ordinary Vyrn function that asks the host for
+    /// it and DECODES it by walking that type; `contractOf`'s entry is
+    /// [`vyrn_frontend::loader::routed_callee`]'s. So there is nothing to lower
     /// here: the call site is redirected, and the decode is compiled by the same
     /// emitter every other Vyrn function gets — which is what makes the two walks
     /// unable to disagree about a record's field order.
@@ -7700,11 +7701,11 @@ impl<'p> Fn_<'_, 'p> {
     /// Conditional on the entry existing, which is how the shadowing rule survives
     /// without being restated: the engine emits one for `lex` only when no user
     /// function claims the name.
-    fn gen_entry(&self, name: &str, args: &[Expr]) -> Option<String> {
+    fn gen_entry(&self, name: &str) -> Option<String> {
         let e = match name {
             "moduleInterface" => crate::GEN_ENTRY_MODULE_INTERFACE.to_string(),
             "lex" => crate::GEN_ENTRY_LEX.to_string(),
-            _ => vyrn_frontend::loader::routed_callee(name, args)?,
+            _ => return None,
         };
         self.cx.sigs.contains_key(&e).then_some(e)
     }
@@ -7736,9 +7737,8 @@ impl<'p> Fn_<'_, 'p> {
             .cx
             .gen
             .expect("the caller checked there is a generator host");
-        if let Some(e) = self.gen_entry(name, args) {
-            let fwd: &[Expr] = if name == "contractOf" { &[] } else { args };
-            return self.call(m, b, &e, fwd, &[], line).map(Some);
+        if let Some(e) = self.gen_entry(name) {
+            return self.call(m, b, &e, args, &[], line).map(Some);
         }
         // A surface name a user function claims is that function's call; the
         // `@`-spelled two are unspellable.
@@ -8168,6 +8168,15 @@ impl<'p> Fn_<'_, 'p> {
             // Otherwise fall through to `unsupported("the call \`{name}\`")` below,
             // which is this backend's own wording for something it cannot reach.
         }
+        // RFC-0125 M7: a builtin whose argument names its callee is a call to
+        // that function, where this module defines it.
+        if let Some((f, fwd)) =
+            vyrn_frontend::loader::routed_callee(name, type_args, args, |a| self.peek(a, line).ok())
+        {
+            if self.cx.sigs.contains_key(&f) {
+                return self.call(m, b, &f, fwd, &[], line);
+            }
+        }
         // RFC-0094 M3: a type the language cannot render renders itself. `@str`
         // BECOMES the `show` call; `print` and `value` take the String it hands
         // back, so each keeps the one lowering below. Dispatched on `peek`
@@ -8514,51 +8523,6 @@ impl<'p> Fn_<'_, 'p> {
             "jsonSchema" | "schemaOf" if type_args.len() == 1 => {
                 let e = self.reflected(name, &type_args[0], line)?;
                 return self.expr(m, b, &e);
-            }
-            // `toJson(x)` is the same shape one size up (RFC-0078 M2b): the
-            // type-directed walk is a shared AST builder in the frontend and the
-            // serializer is `std/json`'s `emit`, injected into the link. So this
-            // backend gets `toJson` for the price of typing the argument — no DOM,
-            // no escaping table, no number formatter of its own.
-            "toJson" if args.len() == 1 => {
-                let ty = self.peek(&args[0], line)?;
-                let e = vyrn_frontend::jsonenc::encode_expr(args[0].clone(), &ty, line);
-                // RFC-0114 §26: the rewrite EMBEDS a clone of the argument —
-                // pair the whole synthesized tree's occurrences of it with
-                // the original for the emission, then unwind: the tree dies
-                // here.
-                let mark = self.cx.plan.alias_scope();
-                let mut pairs = Vec::new();
-                vyrn_frontend::ast::alias_embedded(&e, &args[0], &mut pairs);
-                self.cx.plan.alias_clones_scoped(&pairs);
-                let r = self.expr(m, b, &e);
-                self.cx.plan.alias_unwind(mark);
-                return r;
-            }
-            // `fromJson(T, s)` is the mirror (RFC-0078 M3), and it needs less: the
-            // target is a type NAME, so there is nothing to peek. The reader is
-            // `std/jsonread` and the walk is generated per target, so this backend
-            // gets `fromJson` without a DOM, a number parser or a message
-            // assembler — the two rows RFC-0077 had left unlowered.
-            "fromJson" if type_args.len() == 1 && args.len() == 1 => {
-                let target = type_args[0].clone();
-                if !self
-                    .cx
-                    .sigs
-                    .contains_key(&vyrn_frontend::jsondec::top_name(&target))
-                {
-                    return unsupported("`fromJson` without the JSON runtime linked", line);
-                }
-                let e = vyrn_frontend::jsondec::decode_expr(&target, args[0].clone(), line);
-                // RFC-0114 §26: the rewrite embeds a clone of the payload
-                // argument — `toJson`'s twin, treated identically.
-                let mark = self.cx.plan.alias_scope();
-                let mut pairs = Vec::new();
-                vyrn_frontend::ast::alias_embedded(&e, &args[0], &mut pairs);
-                self.cx.plan.alias_clones_scoped(&pairs);
-                let r = self.expr(m, b, &e);
-                self.cx.plan.alias_unwind(mark);
-                return r;
             }
             // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
             // is picked by the argument's type and built by the ordinary enum path,
