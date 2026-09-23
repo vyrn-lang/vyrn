@@ -932,10 +932,20 @@ pub enum Test {
     /// No arm before it was chosen: `_` (RFC-0121's refutable `let`), and the
     /// `else` block of an `if let`.
     Else,
-    /// A predicate the PROGRAM states: `?` on a declared `Fallible`
-    /// (RFC-0080 M3) asks the impl's own `failed`, which is a call this row
-    /// does not carry. The one shape of the family that is still a gap.
-    Impl,
+    /// The `Bool` this name holds is true: a predicate the PROGRAM states,
+    /// which the builder calls before the switch. `?` on a declared
+    /// `Fallible` (RFC-0080 M3) asks the impl's `isSuccess`.
+    Holds(Name),
+}
+
+impl Test {
+    /// The name the test reads, where it reads one.
+    pub fn reads(&self) -> Option<Name> {
+        match self {
+            Test::Holds(n) => Some(*n),
+            Test::Tag(_) | Test::Else => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1598,6 +1608,9 @@ impl Reads {
                 St::Block { body, .. } => self.stmts(body, depth),
                 St::Return { value: Some(v), .. } => self.hand(v),
                 St::Switch { on, arms, .. } => {
+                    arms.iter()
+                        .filter_map(|a| a.test.reads())
+                        .for_each(|n| self.val(&Val::Name(n)));
                     self.val(on);
                     if let (Val::Name(n), Some(a)) = (on, arms.first()) {
                         self.switches.push((a.site, *n, depth, self.order));
@@ -1882,7 +1895,7 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// family one form track closes: `Call:<who>:<name>` for a callee the
 /// emitter's function table does not answer, `Make:<what>` for a layout,
 /// `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>` for a row
-/// that names no value, `Lambda` and `Switch:Impl`.
+/// that names no value, and `Lambda`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
@@ -1894,15 +1907,13 @@ pub fn gaps(body: &Body) -> Vec<String> {
 }
 
 /// Ends every list of `ss` at its `trap`, because nothing after one runs.
+/// An `if` or a `switch` whose every arm ends at one is a `trap` too.
 ///
 /// The builders extend a list after a `panic` in value position: the join's
 /// store, the call its argument feeds, an arm's releases. A builder cannot
 /// cut its own list, because its caller extends the list after it returns.
 fn cut(ss: &mut Vec<St>) {
-    if let Some(i) = ss.iter().position(|s| matches!(s, St::Trap)) {
-        ss.truncate(i + 1);
-    }
-    for s in ss {
+    for s in ss.iter_mut() {
         match s {
             St::If { then, els, .. } => {
                 cut(then);
@@ -1920,6 +1931,21 @@ fn cut(ss: &mut Vec<St>) {
             | St::Continue { .. }
             | St::Trap => {}
         }
+    }
+    if let Some(i) = ss.iter().position(traps) {
+        ss.truncate(i + 1);
+    }
+}
+
+/// Whether every path through `s` ends at a `trap`. A `loop` or a `block`
+/// may be left by a `break` before its last row, so neither is one.
+fn traps(s: &St) -> bool {
+    let ends = |ss: &[St]| ss.last().is_some_and(traps);
+    match s {
+        St::Trap => true,
+        St::If { then, els, .. } => ends(then) && ends(els),
+        St::Switch { arms, .. } => !arms.is_empty() && arms.iter().all(|a| ends(&a.body)),
+        _ => false,
     }
 }
 
@@ -1952,14 +1978,9 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
                     gaps_val(v, out);
                 }
             }
-            // Since RFC-0125 M7 the arm says which tag reaches it, so the
-            // emitter chooses the arm off the row (`direct::Fn_::core_switch`).
-            // A `?` on a declared `Fallible` is the one shape left: its arms
-            // are picked by a call the row does not carry.
+            // Since RFC-0125 M7 the arm says what reaches it, so the emitter
+            // chooses the arm off the row (`direct::Fn_::core_switch`).
             St::Switch { on, arms, .. } => {
-                if arms.iter().any(|a| a.test == Test::Impl) {
-                    out.push("Switch:Impl".into());
-                }
                 gaps_val(on, out);
                 for a in arms {
                     gaps_of(&a.body, out);
@@ -2220,6 +2241,7 @@ fn build_seeded(
         pending_closure: None,
         appends: std::collections::HashSet::new(),
         region: 0,
+        ret: None,
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -2228,6 +2250,7 @@ fn build_seeded(
     // RFC-0037 collected its stored sources under. Every other type in the
     // core comes from the instance's rows and is substituted already.
     let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
+    b.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
     // A declared release (`impl Owned for T { fn release(consume self) }`) IS
     // the release of `self`: its body frees the parts, and nothing releases
     // `self` again — so `self` is not a name the kernel owns there.
@@ -2330,6 +2353,7 @@ pub fn build_module_state<'a>(
         pending_closure: None,
         appends: std::collections::HashSet::new(),
         region: 0,
+        ret: None,
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -2439,6 +2463,7 @@ fn build_outside_seeded<'a>(
         pending_closure: None,
         appends: std::collections::HashSet::new(),
         region: 0,
+        ret: None,
     };
     b.appends = crate::append::append_candidates(block);
     let mut out = Vec::new();
@@ -2522,6 +2547,10 @@ struct Builder<'a> {
     /// How many `region`s enclose the statement being lowered. An arena
     /// buffer cannot grow, so an append inside one is the `concat` call.
     region: u32,
+    /// The frame's declared result, which a `?` on an `Option` fails with
+    /// `None` of. `None` for module state, an outside block and a lambda the
+    /// checker did not type.
+    ret: Option<Type>,
 }
 
 impl<'a> Builder<'a> {
@@ -5175,12 +5204,7 @@ impl<'a> Builder<'a> {
                 // nobody else's.
                 None if name == "None" || self.is_variant(name) => {
                     let ty = self.ty_of(e)?;
-                    let rhs = self.call(name, &[], *line, Some(ty.clone()), out)?;
-                    let t = self.name("@nullary", ty, false, *line);
-                    self.body.names[t as usize].borrow = false;
-                    self.body.names[t as usize].not_owned = Some(NotOwned::Static);
-                    out.push(St::Let(t, rhs));
-                    Ok(Val::Name(t))
+                    self.nullary(name, ty, *line, out)
                 }
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
@@ -5255,6 +5279,22 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The nullary constructor `name` of `ty`, bound to a temporary.
+    fn nullary(
+        &mut self,
+        name: &str,
+        ty: Type,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        let rhs = self.call(name, &[], line, Some(ty.clone()), out)?;
+        let t = self.name("@nullary", ty, false, line);
+        self.body.names[t as usize].borrow = false;
+        self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+        out.push(St::Let(t, rhs));
+        Ok(Val::Name(t))
+    }
+
     /// A lambda literal (RFC-0023). Its captures are reads of the enclosing
     /// names — a capture is by read, and a stored closure snapshots what it
     /// captured (RFC-0037), so the enclosing frame still owns its value. In an
@@ -5291,11 +5331,13 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         let decls = self.proto.types();
-        let ptys: Vec<Type> = match self.ty_of(e).ok() {
+        let (ptys, ret): (Vec<Type>, Option<Type>) = match self.ty_of(e).ok() {
             // A `lazy T` field's initializer is a nullary closure (RFC-0085).
-            Some(t) if vyrn_frontend::types::deferred(&t).is_some() => Vec::new(),
+            Some(t) if vyrn_frontend::types::deferred(&t).is_some() => {
+                (Vec::new(), vyrn_frontend::types::deferred(&t).cloned())
+            }
             Some(t) => match vyrn_frontend::types::resolve(&t, &decls) {
-                Type::Fn(ptys, _) => ptys,
+                Type::Fn(ptys, r) => (ptys, Some(*r)),
                 _ => return gap("a lambda the checker did not type as a function", *line),
             },
             // The checker did not type the literal: an argument of a generic
@@ -5304,7 +5346,7 @@ impl<'a> Builder<'a> {
             None => {
                 let (mut vars, mut calls) = (Vec::new(), Vec::new());
                 mentions_in_lambda(body, &mut vars, &mut calls);
-                params
+                let ptys = params
                     .iter()
                     .map(|p| {
                         vars.iter()
@@ -5313,7 +5355,8 @@ impl<'a> Builder<'a> {
                             .cloned()
                             .unwrap_or(Type::Unit)
                     })
-                    .collect()
+                    .collect();
+                (ptys, None)
             }
         };
         if ptys.len() != params.len() {
@@ -5345,6 +5388,7 @@ impl<'a> Builder<'a> {
             std::mem::replace(&mut self.drain, 0),
             std::mem::take(&mut self.stream_loops),
         );
+        let outer_ret = std::mem::replace(&mut self.ret, ret);
         for c in caps {
             let Val::Name(n) = c else {
                 continue;
@@ -5388,6 +5432,7 @@ impl<'a> Builder<'a> {
             self.drain,
             self.stream_loops,
         ) = saved;
+        self.ret = outer_ret;
         r?;
         self.body.lambdas.push(frame);
         Ok(())
@@ -6007,8 +6052,30 @@ impl<'a> Builder<'a> {
                 )?;
                 self.close_streams(&mut fail);
                 self.drops_at(Exit::Try, tid, &mut fail)?;
+                // An `Option` fails with no binder, and the value it returns
+                // is `None` of the frame's result. A `Result` fails with its
+                // error binder, taken into `Err` of the frame's result.
+                let value = match (fb.first(), self.ret.clone()) {
+                    (Some(n), Some(rt)) => {
+                        let t = self.temp(rt.clone(), *line);
+                        fail.push(St::Let(
+                            t,
+                            Rhs::Call {
+                                callee: "Err".into(),
+                                args: vec![(Val::Name(*n), Capability::Consume)],
+                                write_back: false,
+                                kind: Callee::Ctor,
+                                ret: Some(rt),
+                            },
+                        ));
+                        Some(Val::Name(t))
+                    }
+                    (Some(n), None) => Some(Val::Name(*n)),
+                    (None, Some(rt)) => Some(self.nullary("None", rt, *line, &mut fail)?),
+                    (None, None) => None,
+                };
                 fail.push(St::Return {
-                    value: fb.first().map(|n| Val::Name(*n)),
+                    value,
                     site: tid,
                     is_try: true,
                     line: *line,
@@ -6097,8 +6164,30 @@ impl<'a> Builder<'a> {
         let Some(key) = vyrn_frontend::types::type_key(&ity) else {
             return gap("a `?` on a type with no impl key", line);
         };
-        let success =
-            vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, "success");
+        let method = |m: &str| {
+            vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, m)
+        };
+        let success = method("success");
+        // The impl's `isSuccess` chooses the arm, and the failing arm is the
+        // one its answer does not hold for. Both impl calls are functions
+        // this program declares under the dispatched name, which reads the
+        // value it is handed.
+        let held = self.temp(Type::Bool, line);
+        out.push(St::Let(
+            held,
+            Rhs::Call {
+                callee: method("isSuccess"),
+                args: vec![(sv.clone(), Capability::Read)],
+                write_back: false,
+                kind: Callee::Fn,
+                ret: Some(Type::Bool),
+            },
+        ));
+        let failed = self.temp(Type::Bool, line);
+        out.push(St::Let(
+            failed,
+            Rhs::Prim(Op::Un(UnOp::Not), vec![Val::Name(held)], Some(Type::Bool)),
+        ));
         let mut fail = Vec::new();
         self.close_streams(&mut fail);
         self.drops_at(Exit::Try, tid, &mut fail)?;
@@ -6116,8 +6205,7 @@ impl<'a> Builder<'a> {
                 callee: success,
                 args: vec![(sv.clone(), Capability::Read)],
                 write_back: false,
-                // The impl's method, which reads the value it is handed.
-                kind: Callee::Method,
+                kind: Callee::Fn,
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
@@ -6143,7 +6231,7 @@ impl<'a> Builder<'a> {
                     frees: Some(Vec::new()),
                     binds: Vec::new(),
                     body: fail,
-                    test: Test::Impl,
+                    test: Test::Holds(failed),
                     site: tid,
                     index: 0,
                 },
@@ -6151,7 +6239,7 @@ impl<'a> Builder<'a> {
                     frees: Some(Vec::new()),
                     binds: Vec::new(),
                     body: ok,
-                    test: Test::Impl,
+                    test: Test::Else,
                     site: tid,
                     index: 1,
                 },
@@ -6850,7 +6938,12 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
             St::Store { value, .. } => hit(value, out),
             St::Return { value: Some(v), .. } => hit(v, out),
             St::If { cond, .. } => hit(cond, out),
-            St::Switch { on, .. } => hit(on, out),
+            St::Switch { on, arms, .. } => {
+                hit(on, out);
+                arms.iter()
+                    .filter_map(|a| a.test.reads())
+                    .for_each(|n| out[n as usize] += 1);
+            }
             // A release reads the name, so the name holds a place until then.
             St::Drop(n, ..) => out[*n as usize] += 1,
             _ => {}
@@ -6902,6 +6995,7 @@ pub fn names_in(s: &St, out: &mut Vec<Name>) {
         St::Switch { on, arms, .. } => {
             names_in_val(on, out);
             for a in arms {
+                out.extend(a.test.reads());
                 a.body.iter().for_each(|s| names_in(s, out));
             }
         }

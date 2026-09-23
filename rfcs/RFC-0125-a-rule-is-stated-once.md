@@ -28033,3 +28033,79 @@ Licence, rebased onto main `3af4ca52`:
 - `coredrive --ignored`: taken 20,169 of 21,512, whole 21,330, carried 1,642, all unmoved; 1 byte-identical, 167 run the same, 0 run apart. `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `effects`: 29,988 judged, 10,315 pure, 0 unattributed. `typed`: 238,193 stores judged, 0 unjudged. `coretables` green.
 - `cargo test --release -p vyrn-cli` as `--lib --bins` and four `--test` groups over all 85 targets: 661 passed, 0 failed, 47 ignored. Both formatters clean; the release build has no warning. `emitter_census` re-pinned: the mapping 10,804 to 10,838 lines, `neither` 6,533 to 6,546, `both, for two questions` 9,526 to 9,547.
 Findings: the rows gave each spill its own slot before `m7-slot`, 32 bytes of frame against the arm's 16. On main the rows give a row's slots back when it ends, and the witness's module is byte-identical on both walks, with a 16-byte frame.
+
+
+#### A failing `?` names the value it returns, a binder is a place the screen knows, and a `Fallible` switch tests a call the row states (2026-09-23, `m7-screen3`)
+Decision: the three clauses are the lead's, stated as the brief named them; the cut, the `Callee::Fn` on the impl calls and the switch that stays a switch are mine, on the counts below.
+Went: the valueless `return` of a `?` on an `Option`, into `None` of the frame's declared result (`Builder::nullary`, `Builder::ret`); the switch screen's refusal of a payload binder, which reads the binders of the arms its list is inside; `Test::Impl`, its `Switch:Impl` gap tag and `coredrive`'s class for it, into `Test::Holds` over the impl's `isSuccess` call and its negation, stated before the switch; `Callee::Method` on the two impl calls, which are functions the program declares; the failing `return` of a `?` on a `Result`, which returned its error binder, into `Err` of the frame's declared result with the binder taken into it. Came: `core::cut` ends a list at an `if` or a `switch` whose every arm traps. Stayed: the switch on the `Fallible` value, because the take rule finds a `?` by its switch; a valueless `return` in a lambda the checker did not type, which has no result to name.
+Lines, on main `8f290457`: `direct.rs` 20,500 to 20,500, 20,500, 20,514, 20,527 and 20,527 over the five code commits; `core.rs` 8,054 to 8,085, 8,098, 8,098, 8,133 and 8,148; `coredrive.rs` 697 to 695. The pair grew 121: the result the builder carries into a lambda, the `Err` row, the cut's predicate, the test's read in three walks, and the probe. Refusals: 0 lost / 0 gained. Manifest: 2, 0, 25, 1 and 16 rows of 174, each written in the commit that moved it; the first four are the same rows on `7751ce7b`, on `m7-hole`, on `47d62d0d`, on `3af4ca52` and on main `8f290457`.
+Licence:
+- `coredrive --ignored`, rebased onto `m7-hole` and main `47d62d0d`, whose records give the base: taken 20,034 to 20,060 of 21,512, and 20,078 after the `Result`'s take; on main `3af4ca52` and `8f290457`, 20,169 (`m7-part`'s and the spill's records) to 20,213; whole 21,330 to 21,333, carried end to end 1,642 to 1,643; 1 byte-identical, 167 run the same, 0 run apart.
+- `coredrive --ignored` on `7751ce7b`: 168 programs, 21,556 bodies. Taken 19,622 to 19,625 after the `None`, 19,625 after the cut, 19,647 after the binder and 19,648 after the `Fallible` switch, of 21,512. Whole 21,330 to 21,333 and carried end to end 1,642 to 1,643, both in the last commit. 1 byte-identical, 167 run the same, 0 run apart, throughout.
+- the moved rows in `wat` against the base: `branchtypes` and `releaseacrosstry` build `None` in the caller's storage where the arm copied the scrutinee's 16 bytes, and return from inside the arm (`m7-binder`'s shape); `substring` in 9 programs and `strpredbytes`'s `sl` return from inside each arm with a local per temporary, and 15 programs move only their static data, laid out in the order the rows state the literals; `fallible`'s `greet` reads the value where the call wrote it (frame 32 to 16 bytes), calls `success` in the `else` of a two-way branch, and the module loses one of two byte-identical copies of `Http`'s release walker. The `Result`'s take moved 16 rows: `option` and `releaseacrosstry`, read in `wat`, build `Err` of the error binder in the caller's storage and return from inside the arm, where the arm copied the scrutinee's 16 bytes; the scrutinee is the storage the call wrote, so nothing releases it after the take. Their functions gain 3 and 4 wasm locals; no frame in linear memory grew. The 16 programs run the same under both binaries with `VYRN_LEAK_CHECK=1`. Each moved program runs the same under both binaries with `VYRN_LEAK_CHECK=1`, and `substring`'s two traps print the same sentence under both.
+- `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, an `m7-hole` binary against the head before and after the `Result`'s take, and a `47d62d0d`, a `3af4ca52` and an `8f290457` binary against each rebased head, both reading the head's `std/`: byte-identical stdout, stderr and exit code, 338 accepted and 77 refused.
+- `kernel --ignored` after each commit that touched the core, on `m7-hole` before and after the `Result`'s take, and on `47d62d0d`, `3af4ca52` and `8f290457`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `effects` 29,988 judged, 0 differ; `typed` 238,193 judged, 0 unjudged; `coretables` green. At `f12b654d` on `m7-hole`, `residue --release --ignored`, 364 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed. `VYRN_LEAK_CHECK=1 vyrn bench <f> --check` over the 17 bench programs: 78 ok, 0 failed.
+- on `7751ce7b`, the bench programs whose rows moved, `contractquery`, `knucleotide` and `langbench`, base and head interleaved, three rounds, best of three: 13 rows, median ratio 0.994, from 0.923 to 1.032, median noise band 1.086. `vyrn bench --compare` at x1.50 against the base's best: 3 of 3 clean. At `f12b654d` against an `m7-hole` binary, the bench corpus, 17 programs and 78 benches, interleaved, three rounds, best of three: median ratio 1.000, from 0.954 to 1.034, median noise band 1.137, no row outside its band; `vyrn bench --compare` at x1.50: 17 of 17 clean.
+- `cargo test -p vyrn-cli` as `--bins` and four `--test` groups: 650 passed on `7751ce7b`, 659 on `m7-hole`, `47d62d0d`, `3af4ca52` and `8f290457` under `--release`, 0 failed, 47 ignored; `fieldstore` 7 passed. `cargo test -p vyrn-lower -p vyrn-codegen` on `7751ce7b`: 47 passed. Both formatters clean; the release build has no warning; the manifest check green after each write. `emitter_census` re-pinned on `8f290457`: the mapping 10,838 to 10,852 to 10,865 lines with 821 to 822 rows, `both, for two questions` 9,547 to 9,561 to 9,574.
+Findings:
+- the screen hid a read of a name no row binds. `substring`'s inner `match` panics in both arms, and the builder stated the outer arm's join after it; with the binder admitted, `strings.vyrn` stopped emitting and `coredrive` loaded 162 of 168 programs, until the cut.
+- the brief's counts were per program over `examples/`: over the 415 roots the valueless `return` stood in 4 bodies with no gap, and `Switch:Impl` in 9 lines, which are 3 bodies of `examples/`.
+- `?` on a `Result` had the `Option`'s defect: its failing `return` named the error binder in a frame whose result is a `Result`, and the screen refused it, 148 bodies first and 73 alone over the 415 roots. The kernel accepts the take into `Err` over the whole corpus. Whether a corpus `?` on a named local leaves a hole the release row covers was not measured; the kernel refuses a row that does not cover one.
+- `twice` and `shout` in `falliblegeneric` stop at `Fallible__Slot__isSuccess`, a generic callee `Cx::sigs` does not hold (`m7-result`'s family).
+Left: the generic impl calls, blocked by `Cx::sigs`; the rest in the order below, whose largest clauses are `m7-made`'s.
+
+##### What the whole-body screen refuses, third count (2026-09-23, `m7-screen3`)
+
+Measured at `7751ce7b`, before any code moved. A temporary instrument in `Fn_::core_walkable` and the statement screen under it made every refusing clause record its name and pass, so one compile gives each body's first clause and every clause it meets; the instrument is not committed. It ran with `VYRN_GAP_TALLY` over `emit-wat` of the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, second pass, in one cache state. One line per body per root: 61,505 compiles, 54,014 taken, 6,858 refused with no gap and 633 with one.
+
+A name the screen refuses is first in 5,766 of the 6,858 and never alone: every such body also fails a statement clause. So the table ranks the first statement clause. "Only" means no other statement clause refused the body; "met" counts the bodies that meet the clause anywhere.
+
+| first statement clause, bodies with no gap | first | only | met | in flight |
+|---|---|---|---|---|
+| a made array this walk does not build | 1,877 | 600 | 1,924 | `m7-made` |
+| a made layout returned into the caller's storage | 1,852 | 1,496 | 2,210 | `m7-made` |
+| `@str` of a String temporary | 405 | 390 | 531 | |
+| a made record this walk does not build | 334 | 1 | 388 | `m7-made` |
+| a move of an enum (`Rhs::Val`) | 273 | 1 | 581 | |
+| a made array into a temporary | 246 | 94 | 473 | `m7-made` |
+| a store into a name that is an array | 242 | 8 | 579 | `m7-box` |
+| a read or take of module state that is an enum | 215 | 9 | 216 | `m7-state` |
+| a store into module state that is a String | 205 | 105 | 212 | `m7-state` |
+| a `return` of a String, the failing arm of `?` on a `Result` | 148 | 73 | 176 | |
+| a switch on a payload binder | 119 | 116 | 120 | this track |
+| a read or take of a field that is an array | 94 | 4 | 808 | `m7-hole` |
+| a read or take of an element that is a record | 89 | 37 | 190 | |
+| a rebuild with no store after it | 85 | 1 | 237 | |
+| a made record into a temporary | 82 | 16 | 705 | `m7-made` |
+| a store into a field that is a String | 76 | 63 | 97 | |
+| a move of an array (`Rhs::Val`) | 57 | 54 | 485 | |
+| a store into a map key | 55 | 55 | 93 | |
+| a read or take of module state that is an array | 49 | 27 | 64 | `m7-state` |
+| a store into a name that is an enum | 44 | 0 | 338 | `m7-box` |
+| a read or take of a field that is a String | 41 | 37 | 178 | |
+| 46 more clauses | 270 | 146 | | |
+
+Notes: `substring`, compiled in 115 roots, is 115 of the 119 switches on a payload binder, and this track took it. 85 of the 94 array field rows are the take that binds a name out of the field, the hole `m7-hole` states. `m7-writes`' write points were not matched to a row here. The valueless `return` of a `?` on an `Option` was first in 4 bodies and alone in 3; `Switch:Impl` refused no body with no gap, because the gap walk named it first.
+
+| first gap, bodies with a gap | lines | only gap |
+|---|---|---|
+| `Opaque:Static` | 139 | 109 |
+| `Call:Reserved:@codeText` | 138 | 0 |
+| a call through a function value (`Call:Value`) | 119 | 118 |
+| `Call:Builtin:toJson` | 107 | 100 |
+| `Call:Builtin:contractOf` | 80 | 0 |
+| `lineAt`, `colAt` and `rawAt` | 76 | 50 |
+| `Call:Builtin:fromJson` | 71 | 42 |
+| `serveStream`, `logger`, `boxStream` and `unboxStream` | 64 | 18 |
+| `Call:Builtin:@at` | 62 | 62 |
+| `Call:Reserved:@codeSplice` | 55 | 0 |
+| `Lambda` | 41 | 22 |
+| `Call:Method:show` | 19 | 19 |
+| `Call:Reserved:@remove` | 12 | 0 |
+| `Call:Builtin:fromArray` | 11 | 6 |
+| `Make:Try` | 11 | 11 |
+| `Call:Builtin:jsonSchema` | 10 | 10 |
+| `Switch:Impl` | 9 | 0 |
+| 26 more tags | 48 | 21 |
+
+The gap tally reads 71,467 lines over the same pass, 70,395 whole and 1,072 with a gap; it counts every frame the core builds, the emitter's screen only the bodies the emitter compiles. At the head `Switch:Impl` is no tag: the three bodies of `examples/` have no gap.

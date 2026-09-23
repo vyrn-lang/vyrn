@@ -243,6 +243,62 @@ The bodies the emitter TAKES stand at 953. `Fn_::core_walkable`'s
 is a String or an array, so the clause that asks every name to be a scalar
 refuses the same frames. That clause is the layout families' to move.
 
+## What the emitter's screen refuses, third count (2026-09-23)
+
+Measured at `7751ce7b`, before any code moved. A temporary instrument in `Fn_::core_walkable` and the statement screen under it made every refusing clause record its name and pass, so one compile gives each body's first clause and every clause it meets; the instrument is not committed. It ran with `VYRN_GAP_TALLY` over `emit-wat` of the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, second pass, in one cache state. One line per body per root: 61,505 compiles, 54,014 taken, 6,858 refused with no gap and 633 with one.
+
+A name the screen refuses is first in 5,766 of the 6,858 and never alone: every such body also fails a statement clause. So the table ranks the first statement clause. "Only" means no other statement clause refused the body; "met" counts the bodies that meet the clause anywhere.
+
+| first statement clause, bodies with no gap | first | only | met | in flight |
+|---|---|---|---|---|
+| a made array this walk does not build | 1,877 | 600 | 1,924 | `m7-made` |
+| a made layout returned into the caller's storage | 1,852 | 1,496 | 2,210 | `m7-made` |
+| `@str` of a String temporary | 405 | 390 | 531 | |
+| a made record this walk does not build | 334 | 1 | 388 | `m7-made` |
+| a move of an enum (`Rhs::Val`) | 273 | 1 | 581 | |
+| a made array into a temporary | 246 | 94 | 473 | `m7-made` |
+| a store into a name that is an array | 242 | 8 | 579 | `m7-box` |
+| a read or take of module state that is an enum | 215 | 9 | 216 | `m7-state` |
+| a store into module state that is a String | 205 | 105 | 212 | `m7-state` |
+| a `return` of a String, the failing arm of `?` on a `Result` | 148 | 73 | 176 | |
+| a switch on a payload binder | 119 | 116 | 120 | this track |
+| a read or take of a field that is an array | 94 | 4 | 808 | `m7-hole` |
+| a read or take of an element that is a record | 89 | 37 | 190 | |
+| a rebuild with no store after it | 85 | 1 | 237 | |
+| a made record into a temporary | 82 | 16 | 705 | `m7-made` |
+| a store into a field that is a String | 76 | 63 | 97 | |
+| a move of an array (`Rhs::Val`) | 57 | 54 | 485 | |
+| a store into a map key | 55 | 55 | 93 | |
+| a read or take of module state that is an array | 49 | 27 | 64 | `m7-state` |
+| a store into a name that is an enum | 44 | 0 | 338 | `m7-box` |
+| a read or take of a field that is a String | 41 | 37 | 178 | |
+| 46 more clauses | 270 | 146 | | |
+
+Notes: `substring`, compiled in 115 roots, is 115 of the 119 switches on a payload binder, and this track took it. 85 of the 94 array field rows are the take that binds a name out of the field, the hole `m7-hole` states. `m7-writes`' write points were not matched to a row here. The valueless `return` of a `?` on an `Option` was first in 4 bodies and alone in 3; `Switch:Impl` refused no body with no gap, because the gap walk named it first.
+
+| first gap, bodies with a gap | lines | only gap |
+|---|---|---|
+| `Opaque:Static` | 139 | 109 |
+| `Call:Reserved:@codeText` | 138 | 0 |
+| a call through a function value (`Call:Value`) | 119 | 118 |
+| `Call:Builtin:toJson` | 107 | 100 |
+| `Call:Builtin:contractOf` | 80 | 0 |
+| `lineAt`, `colAt` and `rawAt` | 76 | 50 |
+| `Call:Builtin:fromJson` | 71 | 42 |
+| `serveStream`, `logger`, `boxStream` and `unboxStream` | 64 | 18 |
+| `Call:Builtin:@at` | 62 | 62 |
+| `Call:Reserved:@codeSplice` | 55 | 0 |
+| `Lambda` | 41 | 22 |
+| `Call:Method:show` | 19 | 19 |
+| `Call:Reserved:@remove` | 12 | 0 |
+| `Call:Builtin:fromArray` | 11 | 6 |
+| `Make:Try` | 11 | 11 |
+| `Call:Builtin:jsonSchema` | 10 | 10 |
+| `Switch:Impl` | 9 | 0 |
+| 26 more tags | 48 | 21 |
+
+The gap tally reads 71,467 lines over the same pass, 70,395 whole and 1,072 with a gap; it counts every frame the core builds, the emitter's screen only the bodies the emitter compiles. At the head `Switch:Impl` is no tag: the three bodies of `examples/` have no gap.
+
 ## What the tracks since have changed
 
 Each track below retired tags, so every table above is the state before them
@@ -326,6 +382,8 @@ The String accumulator track (`m7-append`) changed no gap. `s = s + a + b` on an
 The builtin-row track (`m7-rows`) retired `Call:Builtin:@concat`, `Make:Map`, the I/O builtins, `parse`, `listDir`, `@pop`, `@swapRemove`, `@keys`, the SIMD builtins, `moduleInterface`, `lex` and `@charCount`, and most of what was left of `@at`. `@concat` is the String `+` row the core already states, a String's byte is an element read, and a map entry whose `Option` owns no heap is a key read. The rest are rows of four kinds, `Spec::Builds`, `Spec::Removes`, `Spec::Lanes` and `Spec::Routes`, and each kind's emission is one function both walks call; a routed builtin is read as a call to the function its row names. Rebased onto `m7-append`, over `examples/` the tally reads 24,719 lines whole where it read 23,492, of 25,018. `coredrive --ignored` reads 21,330 with no gap where it read 20,385, with 1,642 distinct bodies carried end to end where it read 1,381, and the emitter takes 18,591 bodies where it took 18,122. `@at` keeps 8 first gaps under `coredrive`: a user container's `place at` and a temporary receiver. `contractOf` stays a gap, because its argument is a contract name the row carries as `Opaque:Static`.
 
 The scrutinee track (`m7-scrutinee`) changed no gap. A temporary a `match`, an `if let`, a `?` or a `for` is keyed by holds the address its call wrote, as an unbound one does, and the switch, the loop and the release at the construct's exit read that place. Over `examples/` the keyed temporary was the first clause the screen refused in 1,287 bodies and is in 0; 1,225 of them are taken, `runtime$intStr` among them, 27 wait on a switch on a payload binder and 24 on the valueless `return` of a `?` on an `Option`. The walk reads a `for` container's buffer-only release where the arm reads it, which three programs ran apart without, and gives a binder's slot back at its arm's end. Rebased onto `m7-rows`, `coredrive --ignored` reads 21,330 with no gap and 1,642 carried end to end, both unmoved, and the emitter takes 19,622 bodies where it took 18,591.
+
+The third screen track (`m7-screen3`) retired `Switch:Impl`. A `?` on a declared `Fallible` states the impl's `isSuccess` call and its negation before the switch, and the failing arm tests that name (`Test::Holds`); the two impl calls are `Callee::Fn`, functions the program declares, where `Callee::Method` read as a callee gap. The failing arm of a `?` on an `Option` returns `None` of the frame's result, the failing arm of a `?` on a `Result` returns `Err` of its error binder, taken, and the emitter's screen reads a switch on a payload binder as a switch on a place. `core::cut` ends a list at an `if` or a `switch` whose every arm traps, which `substring`'s nested `match` needed once the screen admitted it. `coredrive --ignored` reads 21,333 bodies whole where it read 21,330 and 1,643 carried end to end where it read 1,642, and the emitter takes 20,213 of 21,512 where it took 20,169 on main `8f290457`. The section above tables what the screen refused before the track moved: made layouts lead, then `@str` of a String temporary and the failing `return` of a `?` on a `Result`, which the track took.
 
 The displaced-value track (`m7-box`) changed no gap. A store into an owned place released buffers at flat offsets and payload boxes, so a box's contents, an element and a String in a payload word leaked at every store the core marks as releasing: 15 blocks over the eleven stores of `a_store_releases_the_whole_value_it_displaces`, 0 under the head. The emitter keeps the displaced value whole and runs the release a `let` exit runs on it, so the release row has one reader for a drop and a store. A store runs the declared `release` of what it displaces; a stream is the one value a store leaves alone. `coredrive --ignored` is unmoved at 21,330 whole, 1,642 carried end to end and 19,622 taken.
 
