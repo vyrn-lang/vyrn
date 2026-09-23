@@ -18327,8 +18327,8 @@ impl<'p> Fn_<'_, 'p> {
     /// stores into, or hands to `modify`, writes a
     /// value of its own. A callee handed the root, or any root on the chain,
     /// to `modify` writes where the kernel does not look (`freeNode` in
-    /// `tree.vyrn`). Module state has no root: any callee may write it. A
-    /// store into the root is the kernel's, which ends the alias there.
+    /// `tree.vyrn`). A store into the root is the kernel's, which ends the
+    /// alias there; for module state, a callee's store into it too.
     fn core_alias<'b>(
         &self,
         body: &'b vyrn_lower::core::Body,
@@ -18368,7 +18368,9 @@ impl<'p> Fn_<'_, 'p> {
         // the walk ends within `body.names.len()` steps.
         let mut on = place;
         for _ in 0..body.names.len() {
-            let (root, _) = vyrn_lower::kernel::root_of(on)?;
+            let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
+                return Some(place);
+            };
             if written.contains(&(root, true)) {
                 return None;
             }
