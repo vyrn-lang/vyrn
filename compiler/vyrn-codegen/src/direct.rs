@@ -7989,6 +7989,114 @@ impl<'p> Fn_<'_, 'p> {
         !self.cx.audit && vyrn_frontend::loader::audit_hook(name)
     }
 
+    /// Whether `name` is an `extern fn` (RFC-0012) or one of RFC-0043's
+    /// host-boundary names, which [`Fn_::extern_call`] writes.
+    fn is_extern(&self, name: &str) -> bool {
+        crate::host_boundary_extern(name).is_some() || self.cx.externs.contains_key(name)
+    }
+
+    /// One call to an `extern fn` or a host-boundary name, `argc` operands
+    /// written by `operand` at each parameter's type. Both walks call it:
+    /// [`Fn_::call_inner`] over the source and [`Fn_::core_call`] over the
+    /// rows.
+    fn extern_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        argc: usize,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        // RFC-0043's host boundary. These three are not `vyrn` host imports like
+        // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
+        // honouring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`, which is what makes a
+        // clock example a three-way parity citizen instead of a browser-only one.
+        //
+        // M2i got them by reaching that shim, and M2j took it back out: a shape
+        // that only works linked cannot be what `vyrn build --target wasm` does,
+        // because M5's criterion is no clang. WASI has `clock_time_get` and
+        // `random_get`, the env injection is `environ_get`, and wasi-libc's
+        // `timespec_get`/`getentropy` are thin wrappers over the first two — so
+        // the emitted runtime reads the same syscalls by a shorter route.
+        if let Some(sym) = crate::host_boundary_extern(name) {
+            // Each reader takes the interned name of its injected value
+            // (`VYRN_FIXED_TIME=`, `VYRN_FIXED_SEED=`), which is how the
+            // harness fixes a clock example (RFC-0043).
+            let (f, key) = match sym {
+                "__vyrn_now_millis" => (self.cx.rt.now_millis, self.cx.rt.fixed_time),
+                "__vyrn_monotonic_nanos" => (self.cx.rt.mono_nanos, self.cx.rt.fixed_time),
+                _ => (self.cx.rt.random_seed, self.cx.rt.fixed_seed),
+            };
+            if argc != 0 {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            b.ins(&Instruction::I32Const(key as i32));
+            // What it returns is the declaration's business, not this file's, and
+            // the boundary hands back an `i64`. Anything else spelled over one of
+            // these reserved names would read the wrong bytes silently.
+            let ret = self
+                .cx
+                .externs
+                .get(name)
+                .map(|e| e.ret.clone())
+                .unwrap_or(Type::Unit);
+            if self.cx.repr(&ret, line)? != Repr::Scalar(ValType::I64) {
+                return unsupported(&format!("`{name}` declared as returning `{ret}`"), line);
+            }
+            b.ins(&Instruction::Call(f));
+            return Ok(ret);
+        }
+        // RFC-0012 M1: a real call into the host, through the `vyrn` import
+        // declared from this `extern fn`'s own signature.
+        //
+        // Every ABI conversion the textual backend's `to_extern_abi` performs is
+        // already done here by the carrier invariant (M2h): a `Bool` and every
+        // sub-64-bit int ride an `i32`, correctly extended, which is exactly what
+        // the ABI widens them to. `String` is the one shape that is not one word,
+        // and it is the one thing this loop does.
+        if let Some(ext) = self.cx.externs.get(name).cloned() {
+            let Some(index) = ext.index else {
+                // A host-boundary name handled above; anything else here is a
+                // declaration this backend has no route for.
+                return unsupported(&format!("the call `{name}`"), line);
+            };
+            if ext.params.len() != argc {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            for (i, p) in ext.params.iter().enumerate() {
+                operand(self, m, b, i, p)?;
+                if matches!(self.cx.resolve(p), Type::Str) {
+                    // (ptr, len): the host decodes UTF-8 out of linear memory, so
+                    // it needs the length a NUL-terminated pointer does not carry.
+                    // Its own scratch number per argument — one local for two live
+                    // values is the M2g bug, and here it would send the host a
+                    // length taken from the wrong string.
+                    let s = self.scratch(b, ValType::I32, 20 + i as u8);
+                    b.ins(&Instruction::LocalTee(s))
+                        .ins(&Instruction::LocalGet(s));
+                    str_len(b);
+                    b.ins(&Instruction::I64ExtendI32U);
+                }
+            }
+            b.ins(&Instruction::Call(index));
+            // The host returns an `i32` for every narrow width, and a JS number
+            // out of range would otherwise be a carrier the rest of this backend
+            // reads as in-range. `from_extern_abi`'s `trunc` on the other backend.
+            if let Some(n) = Num::of(&self.cx.resolve(&ext.ret)) {
+                renorm(b, n);
+            }
+            return Ok(ext.ret.clone());
+        }
+        unsupported(&format!("the call `{name}`"), line)
+    }
+
     fn call_inner(
         &mut self,
         m: &mut Module,
@@ -8749,85 +8857,11 @@ impl<'p> Fn_<'_, 'p> {
             let sig = self.cx.instantiate(m, &f, type_args, subst)?;
             return self.emit_call(m, b, &sig, args, hint);
         }
-        // RFC-0043's host boundary. These three are not `vyrn` host imports like
-        // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
-        // honouring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`, which is what makes a
-        // clock example a three-way parity citizen instead of a browser-only one.
-        //
-        // M2i got them by reaching that shim, and M2j took it back out: a shape
-        // that only works linked cannot be what `vyrn build --target wasm` does,
-        // because M5's criterion is no clang. WASI has `clock_time_get` and
-        // `random_get`, the env injection is `environ_get`, and wasi-libc's
-        // `timespec_get`/`getentropy` are thin wrappers over the first two — so
-        // the emitted runtime reads the same syscalls by a shorter route.
-        if let Some(sym) = crate::host_boundary_extern(name) {
-            // Each reader takes the interned name of its injected value
-            // (`VYRN_FIXED_TIME=`, `VYRN_FIXED_SEED=`), which is how the
-            // harness fixes a clock example (RFC-0043).
-            let (f, key) = match sym {
-                "__vyrn_now_millis" => (self.cx.rt.now_millis, self.cx.rt.fixed_time),
-                "__vyrn_monotonic_nanos" => (self.cx.rt.mono_nanos, self.cx.rt.fixed_time),
-                _ => (self.cx.rt.random_seed, self.cx.rt.fixed_seed),
+        if self.is_extern(name) {
+            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
+                s.expr_as(m, b, &args[i], p).map(|_| ())
             };
-            if !args.is_empty() {
-                return unsupported(&format!("the call `{name}` at this arity"), line);
-            }
-            b.ins(&Instruction::I32Const(key as i32));
-            // What it returns is the declaration's business, not this file's, and
-            // the boundary hands back an `i64`. Anything else spelled over one of
-            // these reserved names would read the wrong bytes silently.
-            let ret = self
-                .cx
-                .externs
-                .get(name)
-                .map(|e| e.ret.clone())
-                .unwrap_or(Type::Unit);
-            if self.cx.repr(&ret, line)? != Repr::Scalar(ValType::I64) {
-                return unsupported(&format!("`{name}` declared as returning `{ret}`"), line);
-            }
-            b.ins(&Instruction::Call(f));
-            return Ok(ret);
-        }
-        // RFC-0012 M1: a real call into the host, through the `vyrn` import
-        // declared from this `extern fn`'s own signature.
-        //
-        // Every ABI conversion the textual backend's `to_extern_abi` performs is
-        // already done here by the carrier invariant (M2h): a `Bool` and every
-        // sub-64-bit int ride an `i32`, correctly extended, which is exactly what
-        // the ABI widens them to. `String` is the one shape that is not one word,
-        // and it is the one thing this loop does.
-        if let Some(ext) = self.cx.externs.get(name).cloned() {
-            let Some(index) = ext.index else {
-                // A host-boundary name handled above; anything else here is a
-                // declaration this backend has no route for.
-                return unsupported(&format!("the call `{name}`"), line);
-            };
-            if ext.params.len() != args.len() {
-                return unsupported(&format!("the call `{name}` at this arity"), line);
-            }
-            for (i, (a, p)) in args.iter().zip(&ext.params).enumerate() {
-                self.expr_as(m, b, a, p)?;
-                if matches!(self.cx.resolve(p), Type::Str) {
-                    // (ptr, len): the host decodes UTF-8 out of linear memory, so
-                    // it needs the length a NUL-terminated pointer does not carry.
-                    // Its own scratch number per argument — one local for two live
-                    // values is the M2g bug, and here it would send the host a
-                    // length taken from the wrong string.
-                    let s = self.scratch(b, ValType::I32, 20 + i as u8);
-                    b.ins(&Instruction::LocalTee(s))
-                        .ins(&Instruction::LocalGet(s));
-                    str_len(b);
-                    b.ins(&Instruction::I64ExtendI32U);
-                }
-            }
-            b.ins(&Instruction::Call(index));
-            // The host returns an `i32` for every narrow width, and a JS number
-            // out of range would otherwise be a carrier the rest of this backend
-            // reads as in-range. `from_extern_abi`'s `trunc` on the other backend.
-            if let Some(n) = Num::of(&self.cx.resolve(&ext.ret)) {
-                renorm(b, n);
-            }
-            return Ok(ext.ret.clone());
+            return self.extern_call(m, b, name, args.len(), &mut operand, line);
         }
         // RFC-0120: a named projection dispatches here exactly as `a[i]` does —
         // the same table, its own method name. Last, so every callable of the
@@ -17593,6 +17627,23 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
+                // A LAYOUT TAKEN OUT OF A FIELD in part position: the header
+                // moves to the part's offset, as the arm's `consume t.d` in a
+                // literal moves it, and the field is the hole the root's
+                // release carries.
+                St::Let(n, rhs @ Rhs::Take(p)) if self.core_take_part(body, rhs) => {
+                    let line = body.names[*n as usize].line;
+                    let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? else {
+                        return unsupported("a taken layout with no parent", line);
+                    };
+                    let Repr::Agg(l) = self.cx.repr(&body.names[*n as usize].ty, line)? else {
+                        return unsupported("a taken layout with no layout", line);
+                    };
+                    dest.addr(b, 0);
+                    let (_, off) = self.core_addr(m, b, body, w, p, line)?;
+                    self.core_step(b, off);
+                    agg_landed(b, l.size, false);
+                }
                 // A HEADER a loop walks: the container's value in a local,
                 // taken apart once here, so every element and length read of
                 // the loop reads the parts (RFC-0125 M7). The kernel ends the
@@ -17622,7 +17673,15 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(l));
                     self.core_bind(b, body, w, *n, Place::Local(l), ty)?;
                 }
-                St::Let(n, Rhs::Read(p)) if self.core_copies(body, *n) => {
+                St::Let(n, rhs @ (Rhs::Read(_) | Rhs::Val(Val::Name(_))))
+                    if self.core_copies(body, *n) =>
+                {
+                    let p = match rhs {
+                        Rhs::Val(Val::Name(src)) => vyrn_lower::core::Place::Name(*src),
+                        Rhs::Read(p) => p.clone(),
+                        _ => return unsupported("a copy of no place", 0),
+                    };
+                    let p = &p;
                     let line = body.names[*n as usize].line;
                     let ty = body.names[*n as usize].ty.clone();
                     let r = self.cx.repr(&ty, line)?;
@@ -18101,17 +18160,31 @@ impl<'p> Fn_<'_, 'p> {
     fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
         match rhs {
             Rhs::Call {
-                callee, kind, args, ..
+                callee,
+                kind,
+                args,
+                ret: at,
+                ..
             } => match (
                 builtin_spec(callee, args.len()),
                 core_builtin(callee, *kind),
             ) {
                 (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
                 (None, Some(Spec::Traps)) => Ok(Type::Never),
+                // [`Fn_::lanes`] decides a lane builtin's type as it emits, and
+                // the row carries the checker's answer for the site.
+                (None, Some(Spec::Lanes)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a lane builtin the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(callee, *kind) {
                         Some(s) => Ok(s.ret_ty),
+                        None if *kind == Callee::Fn && self.is_extern(callee) => Ok(self
+                            .cx
+                            .externs
+                            .get(callee)
+                            .map_or(Type::Unit, |e| e.ret.clone())),
                         None => unsupported("a core call this walk does not read", line),
                     },
                 },
@@ -18301,6 +18374,12 @@ impl<'p> Fn_<'_, 'p> {
                 self.emit_validation(b, &decl, line)?;
             }
             return Ok(Type::Named(decl.name));
+        }
+        if kind == Callee::Fn && self.is_extern(callee) {
+            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
+                s.core_val(m, b, body, w, &args[i].0, p, line)
+            };
+            return self.extern_call(m, b, callee, args.len(), &mut operand, line);
         }
         let Some(sig) = self.core_sig(callee, kind) else {
             return unsupported("a core call this walk does not read", line);
@@ -18657,6 +18736,11 @@ impl<'p> Fn_<'_, 'p> {
                         .core_place_ty(body, p)
                         .is_some_and(|t| self.cx.resolve(&t) == self.cx.resolve(&info.ty))
             }
+            // `let mut next = a` of a layout that owns no heap is the same
+            // copy: the value of `a`, at `a`'s place.
+            (Some((_, Rhs::Val(Val::Name(src)))), None) => {
+                self.cx.resolve(&body.names[*src as usize].ty) == self.cx.resolve(&info.ty)
+            }
             _ => false,
         }
     }
@@ -18995,14 +19079,15 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         };
         let made = matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs);
+        let taken = self.core_take_part(body, rhs);
         if body.names[*t as usize].binding.is_some()
             || w.occurs.get(*t as usize) != Some(&2)
-            || !(made || self.core_agg_call(body, rhs))
+            || !(made || taken || self.core_agg_call(body, rhs))
         {
             return None;
         }
-        // A literal is made at the part's type, and a call's result must
-        // already have its layout.
+        // A literal is made at the part's type, and a call's result or a
+        // taken field must already have its layout.
         let fits = |part: &Type| {
             !self.checks(part)
                 && if made {
@@ -19081,6 +19166,17 @@ impl<'p> Fn_<'_, 'p> {
             into,
             ty: part,
         })
+    }
+
+    /// Whether a row takes a layout out of a field, which in part position
+    /// moves the header to the part's offset ([`Fn_::core_part_at`]). The
+    /// field is a hole from the take on, and the release of its root carries
+    /// the hole ([`vyrn_lower::core::Body::drop_holes`]).
+    fn core_take_part(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
+        matches!(rhs, Rhs::Take(p @ vyrn_lower::core::Place::Field(..))
+        if self.core_place_ty(body, p).is_some_and(|t| {
+            !self.checks(&t) && matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_)))
+        }))
     }
 
     /// Where the row at `ss[i]` writes a part of its parent
@@ -19310,7 +19406,14 @@ impl<'p> Fn_<'_, 'p> {
                 self.str_bin(b, *o, line)
             }
             (Op::Bin(o), [l, r]) => {
-                let lt = self.core_ty(body, l, &Type::Int);
+                // A float literal has the type the checker gave it, which is
+                // its sibling's: `0.0 - o` with `o: Float32` runs at
+                // `Float32`, the type of the local the row binds. An integer
+                // literal widens by [`Fn_::op_width`] below.
+                let lt = match (l, r) {
+                    (Val::Lit(Lit::Float(_)), Val::Name(_)) => self.core_ty(body, r, &Type::Int),
+                    _ => self.core_ty(body, l, &Type::Int),
+                };
                 let lt = self.cx.resolve(&lt);
                 self.core_val(m, b, body, w, l, &lt, line)?;
                 let opty = match Num::of(&lt) {
@@ -19485,6 +19588,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
             });
         }
+        let occurs = body.occurrences();
         for (n, info) in body.names.iter().enumerate() {
             // A value with a place of its own: one wasm local, whatever the
             // type in it (RFC-0125 M7, the frame). A `where` type is not one —
@@ -19512,8 +19616,13 @@ impl<'p> Fn_<'_, 'p> {
             // it ([`Fn_::out_ptr`]). A temporary made or returned into is
             // one [`Fn_::core_readable`] asks about where it stands, because
             // what places it is the `return` after it.
-            if !(self.core_framed(&info.ty)
-                || (n < body.params.len() && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
+            //
+            // Or a name no row names, such as the Unit join of a `match`
+            // statement, which needs no place.
+            if occurs[n] != 0
+                && !(self.core_framed(&info.ty)
+                    || (n < body.params.len()
+                        && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
                 && !(info.binding.is_none_or(|at| {
                     annotated
                         .iter()
@@ -19522,6 +19631,7 @@ impl<'p> Fn_<'_, 'p> {
                     *b as usize == n
                         && (self.core_makes(body, &info.ty, rhs)
                             || self.core_agg_call(body, rhs)
+                            || self.core_take_part(body, rhs)
                             || self.core_rebuild(body, rhs))
                 }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
@@ -19597,12 +19707,16 @@ impl<'p> Fn_<'_, 'p> {
             // reader's `let` takes before the call, the storage the call
             // wrote, or the caller's storage.
             St::Let(_, rhs) if self.core_agg_call(body, rhs) => true,
+            St::Let(_, rhs) if self.core_take_part(body, rhs) => {
+                self.core_part_at(body, ss, i, &self.core_w).is_some()
+            }
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
             }
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
             }
+            St::Let(n, Rhs::Val(Val::Name(_))) if self.core_copies(body, *n) => true,
             St::Let(n, Rhs::Read(_))
                 if self.core_alias(body, *n).is_some() || self.core_copies(body, *n) =>
             {
@@ -20007,6 +20121,7 @@ impl<'p> Fn_<'_, 'p> {
             } => {
                 self.core_args_readable(body, args)
                     && (self.core_builtin_readable(body, callee, *kind, args)
+                        || (*kind == Callee::Fn && self.is_extern(callee))
                         || self.core_named(callee, *kind).is_some()
                         || self.core_mem_ty(callee, args.len()).is_some()
                         || self.core_sig(callee, *kind).is_some_and(|s| {
@@ -20037,7 +20152,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether `v` is a value one of this walk's ARITHMETIC rows computes
     /// with — a different question from [`Fn_::core_val_readable`], which is
     /// whether the walk can write the value at all. A `where` type computes
-    /// as its base.
+    /// as its base. A vector is one wasm `v128`, and [`Fn_::bin_ins`] and
+    /// [`Fn_::un_ins`] write its lane-wise operators (RFC-0083).
     ///
     /// A literal has no name and carries its type in its own variant: a
     /// `Lit::Str` is a String, which this walk applies no operation to. `"a" <
@@ -20045,7 +20161,14 @@ impl<'p> Fn_<'_, 'p> {
     /// screen to refuse.
     fn core_operand(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
         match v {
-            Val::Name(n) => core_scalar(&self.cx.resolve(&body.names[*n as usize].ty)),
+            Val::Name(n) => {
+                let t = self.cx.resolve(&body.names[*n as usize].ty);
+                core_scalar(&t)
+                    || matches!(
+                        t,
+                        Type::F32x4 | Type::I32x4 | Type::F64x2 | Type::Mask32x4 | Type::Mask64x2
+                    )
+            }
             Val::Lit(l) => !matches!(l, Lit::Opaque(_) | Lit::Str(_)),
         }
     }
