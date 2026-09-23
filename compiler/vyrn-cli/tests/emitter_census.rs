@@ -311,24 +311,9 @@ fn sections() -> Vec<Section> {
             "§2.3's \"`drop` to a call\", and that call's body. `rel_for` reads \n             [`Owned::release_kind`]'s row and adds the byte offsets, `rel_at` \n             emits the call, and `rel_body` is the body, written once per type. \n             It DERIVED the row a second time from the type's shape until the \n             release slice; what is left is the shape, and a shape here is a \n             list of byte offsets",
         ),
         sec(
-            "fn store_bufs(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, bool)>, String> {",
-            Decision, Neither,
-            "which buffers a STORE hands back — a deliberate subset of the release \n             row, taken here rather than named by the core's store row. \n             `St::Store` states WHETHER a store releases; nothing states what \n             it releases, and the three exceptions a store leaves alone are a \n             rule this file states by itself",
-        ),
-        sec(
             "fn addr_local(&mut self, b: &mut Frame, p: Place, off: u32) -> u32 {",
             Mapping, Neither,
-            "an address in a local, and the snapshot a store takes through it: the \n             loads before the store, under a tag test where a payload box needs \n             one — typed loads at computed addresses, which is §2.3",
-        ),
-        sec(
-            "fn store_boxes(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, Type)>, String> {",
-            Decision, Neither,
-            "the second half of the store's subset rule: the sums a value holds, \n             whose reclamation needs a tag and so cannot be a flat offset. The \n             same walk and the same blocker as `store_bufs`",
-        ),
-        sec(
-            "fn free_snap(&mut self, b: &mut Frame, snap: &[(u32, bool)]) {",
-            Mapping, Neither,
-            "the snapshot handed back after the store that replaced it: one call \n             each",
+            "an address in a local, and the snapshot a store takes through it: the \n             whole value it displaces, kept before the store and released after \n             it by the release a `let` exit runs, which is §2.3",
         ),
         sec(
             "fn region_enter(&mut self, b: &mut Frame) {",
@@ -829,8 +814,8 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 10375, 821),
-        ("a decision §2.3 says it must not make", 1266, 216),
+        ("the mapping §2.3 names", 10405, 815),
+        ("a decision §2.3 says it must not make", 1148, 214),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4478, 834),
         ("the wasm format", 343, 0),
@@ -909,11 +894,11 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 51, 6584, 0, 0),
+        ("neither", 48, 6492, 0, 0),
         ("the core's rows", 5, 2360, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
         ("the source, and the core has no row", 10, 1964, 81, 0),
-        ("both, for two questions", 15, 9119, 105, 239),
+        ("both, for two questions", 15, 9123, 105, 239),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
     assert_eq!(
