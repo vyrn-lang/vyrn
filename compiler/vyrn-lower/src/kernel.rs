@@ -232,6 +232,146 @@ pub fn root_of(p: &Place) -> Option<(Name, String)> {
     }
 }
 
+/// Whether a row of `ss` writes `n` where the judgment would end a borrow of
+/// it: a store into `n` or under it, a take, a drop, a move of `n`, a
+/// `modify` or `consume` argument naming it, or a closure capturing it. A
+/// name `ss` binds by a read of `n`, or by a switch over such a name, is `n`
+/// here too, and a borrow of a place bound outside `ss` may be, so a write
+/// through one counts. Every row at which [`Kernel::wrote`] or
+/// [`Kernel::wrote_by_call`] ends such a borrow is one of these, stated over
+/// rows and not over a state, so the builder can ask before the judgment
+/// (RFC-0125 M7, the hoisted header). A release that only an exit follows
+/// is not one: no row after it reads the borrow.
+pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo]) -> bool {
+    let mut inside = Vec::new();
+    for s in ss {
+        crate::core::names_bound(s, &mut inside);
+    }
+    let mut w = Writes {
+        n,
+        alias: vec![n],
+        inside,
+        names,
+        depth: 0,
+    };
+    w.list(ss)
+}
+
+struct Writes<'a> {
+    n: Name,
+    /// `n`, and every borrow bound so far by a read of one of these.
+    alias: Vec<Name>,
+    /// Every name `ss` binds.
+    inside: Vec<Name>,
+    names: &'a [crate::core::NameInfo],
+    /// How many loops inside `ss` enclose the row being asked about.
+    depth: usize,
+}
+
+impl Writes<'_> {
+    /// Whether a write rooted at `r` may land under `n`.
+    fn under(&self, r: Name) -> bool {
+        let info = &self.names[r as usize];
+        self.alias.contains(&r)
+            || (info.borrow && info.borrow_kind.is_none() && !self.inside.contains(&r))
+    }
+
+    fn place(&self, p: &Place) -> bool {
+        root_of(p).is_some_and(|(r, _)| self.under(r))
+    }
+
+    fn rhs(&self, r: &Rhs) -> bool {
+        match r {
+            Rhs::Val(v) => *v == Val::Name(self.n),
+            Rhs::Make(_, vs) => vs.contains(&Val::Name(self.n)),
+            Rhs::Prim(crate::core::Op::Closure, vs, _) => vs
+                .iter()
+                .any(|v| matches!(v, Val::Name(k) if self.alias.contains(k))),
+            Rhs::Prim(..) | Rhs::Read(_) => false,
+            Rhs::Take(p) => self.place(p),
+            Rhs::Call { args, .. } => args.iter().any(|(v, c)| {
+                matches!(c, Capability::Modify | Capability::Consume)
+                    && matches!(v, Val::Name(k) if self.under(*k))
+            }),
+        }
+    }
+
+    /// A release in an exit's tail writes nothing a later row reads: every
+    /// row after it is another release or leaves the loop.
+    fn list(&mut self, ss: &[St]) -> bool {
+        let depth = self.depth;
+        ss.iter().enumerate().any(|(i, s)| {
+            let tail = matches!(s, St::Drop(..) | St::Row { .. })
+                && ss[i + 1..].iter().all(|t| match t {
+                    St::Drop(..) | St::Row { .. } | St::Return { .. } | St::Trap => true,
+                    St::Break { .. } => depth == 0,
+                    _ => false,
+                });
+            !tail && self.st(s)
+        })
+    }
+
+    fn st(&mut self, s: &St) -> bool {
+        match s {
+            St::Let(k, r) => {
+                let reads = match r {
+                    Rhs::Read(p) => root_of(p).is_some_and(|(r, _)| self.alias.contains(&r)),
+                    Rhs::Val(Val::Name(j)) => self.alias.contains(j),
+                    _ => false,
+                };
+                if reads && self.names[*k as usize].borrow {
+                    self.alias.push(*k);
+                }
+                self.rhs(r)
+            }
+            St::Do { rhs, .. } => self.rhs(rhs),
+            St::Store { place, value, .. } => self.place(place) || *value == Val::Name(self.n),
+            St::Drop(k, ..) | St::Row { name: k, .. } => self.alias.contains(k),
+            St::If { then, els, .. } => {
+                let t = self.list(then);
+                t || self.list(els)
+            }
+            St::Block { body, .. } => self.list(body),
+            St::Loop { body, .. } => {
+                self.depth += 1;
+                let w = self.list(body);
+                self.depth -= 1;
+                w
+            }
+            St::Switch {
+                on,
+                arms,
+                consuming,
+                ..
+            } => {
+                let over = matches!(on, Val::Name(k) if self.alias.contains(k));
+                if over && *consuming && *on == Val::Name(self.n) {
+                    return true;
+                }
+                for a in arms {
+                    // A binder read out of the scrutinee is its address
+                    // whatever it holds ([`Kernel::read_out`]).
+                    if over {
+                        let names = self.names;
+                        self.alias
+                            .extend(a.binds.iter().filter(|b| names[**b as usize].borrow));
+                        self.alias
+                            .extend(a.reads(on).iter().filter_map(|r| match r {
+                                St::Let(b, _) => Some(*b),
+                                _ => None,
+                            }));
+                    }
+                    if self.list(&a.body) {
+                        return true;
+                    }
+                }
+                false
+            }
+            St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap => false,
+        }
+    }
+}
+
 /// One refusal, worded for the author of the program in the checker's voice
 /// (`movecheck.rs`): the name, the line it was moved on and what took it, the
 /// line it is used again on. `line` is the line the diagnostic is at, and

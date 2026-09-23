@@ -1176,9 +1176,10 @@ fn gate() {
     // stopped deriving it would otherwise read as green, with every one of
     // those falling back to a rule. Only the AST walk answers, so the count
     // falls as the core walk takes bodies from it: 21,154 before the driver,
-    // 9,911 when a temporary took a slot (RFC-0125 M7).
+    // 9,911 when a temporary took a slot, 4,831 when the rows took a `while`
+    // that hoists its header (RFC-0125 M7).
     assert!(
-        t.answered_has > 5_000,
+        t.answered_has > 2_500,
         "only {} backend answers matched the pair's has-type — the form stopped          carrying it",
         t.answered_has
     );
