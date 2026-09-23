@@ -118,7 +118,9 @@ pub struct NameInfo {
     pub must_use_param: bool,
     /// A String accumulator [`crate::append::append_candidates`] admits: its
     /// `let` gives it the ownership word, and `s = s + e` on it is one
-    /// `@strAppend` row ([`Spec::Rebuilds`]).
+    /// `@strAppend` row ([`Spec::Rebuilds`]). A read of a module-state
+    /// accumulator ([`crate::append::global_append_candidates`]) is the
+    /// receiver of that row for `g = g + e`.
     pub grows: bool,
     /// The path the READER wrote, for a temporary this pass minted to hold a
     /// read of a place: `p.name`, `xs[i]`, `d.title`. A refusal about the
@@ -3377,6 +3379,31 @@ impl<'a> Builder<'a> {
                 let grown = match (n, &check) {
                     (Some(n), None) if self.region == 0 && self.body.names[n as usize].grows => {
                         crate::append::self_append_spine(name, value).map(|parts| (n, parts))
+                    }
+                    // Module state grows through a read of it, which the row
+                    // names as its receiver.
+                    (None, _)
+                        if self.region == 0
+                            && crate::append::global_grows(name)
+                            && vyrn_frontend::types::resolve(
+                                &self.ty_of(value)?,
+                                self.proto.types(),
+                            ) == Type::Str =>
+                    {
+                        match crate::append::self_append_spine(name, value) {
+                            Some(parts) => {
+                                let mut root = value;
+                                while let Expr::Binary { lhs, .. } = root {
+                                    root = lhs;
+                                }
+                                let Val::Name(g) = self.global_read(root, name, *line, out)? else {
+                                    return gap("a module-state read that names no value", *line);
+                                };
+                                self.body.names[g as usize].grows = true;
+                                Some((g, parts))
+                            }
+                            None => None,
+                        }
                     }
                     _ => None,
                 };
@@ -7229,6 +7256,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let js = vyrn_frontend::prof::phase("placer: judgments");
     let memo = vyrn_frontend::movecheck::Judgments::open(program);
     drop(js);
+    let _held = crate::append::Held::new(program);
     // Every body is built before any is placed, because the kernel asks the
     // effect judgment whether a callee writes module state (RFC-0125 M7), and
     // the judgment joins every body. A body the memo serves is not built, and
