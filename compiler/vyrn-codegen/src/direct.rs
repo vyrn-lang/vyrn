@@ -7261,15 +7261,21 @@ impl<'p> Fn_<'_, 'p> {
         // (RFC-0054). Both sides are handles, so the concatenation happens in the
         // HOST's arena and this is one import call (RFC-0076 M3a). Equality needs no
         // import: the checker permits only `+`.
-        if let (Some(g), Type::Named(n)) = (self.cx.gen, &lt) {
-            if n == "Code" {
-                if op != BinOp::Add {
-                    return unsupported(&format!("`{op:?}` on a code quote"), line);
-                }
-                self.expr_as(m, b, rhs, &lt)?;
-                b.ins(&Instruction::Call(g.concat));
-                return Ok(l);
+        if self.cx.gen.is_some() && matches!(&lt, Type::Named(n) if n == "Code") {
+            if op != BinOp::Add {
+                return unsupported(&format!("`{op:?}` on a code quote"), line);
             }
+            // The left operand is on the stack already.
+            let mut ty = |_: &mut Self, _: usize| unsupported("a concatenation's type", line);
+            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                if i == 0 {
+                    return Ok(());
+                }
+                s.expr_as(m, b, rhs, t).map(|_| ())
+            };
+            return self
+                .host(m, b, "+", 2, &mut ty, &mut operand, line)
+                .map(|_| l);
         }
         // The width the operator RUNS at, which may be the right operand's
         // (`op_width`), and the left operand already on the stack moving to it
@@ -7746,35 +7752,105 @@ impl<'p> Fn_<'_, 'p> {
             .cx
             .gen
             .expect("the caller checked there is a generator host");
-        let code = Type::Named("Code".to_string());
         if let Some(e) = self.gen_entry(name, args) {
             let fwd: &[Expr] = if name == "contractOf" { &[] } else { args };
             return self.call(m, b, &e, fwd, &[], line).map(Some);
         }
+        // A surface name a user function claims is that function's call; the
+        // `@`-spelled two are unspellable.
+        if matches!(vyrn_lower::core::builtin_row(name), Some(Spec::Host))
+            && (name.starts_with('@') || !self.user_claims(name))
+        {
+            let mut ty = |s: &mut Self, i: usize| Ok(s.cx.resolve(&s.peek(&args[i], line)?));
+            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                s.expr_as(m, b, &args[i], t).map(|_| ())
+            };
+            return self
+                .host(m, b, name, args.len(), &mut ty, &mut operand, line)
+                .map(Some);
+        }
         match (name, args.len()) {
+            // M3b's atom stream. `reflect` computes the value host-side and leaves
+            // it as atoms; the two `next` calls pull them back. Nothing about the
+            // value's SHAPE is encoded here — the synthesized decoder walks the
+            // type, and so does the host.
+            (crate::GEN_REFLECT, 2) => {
+                self.expr_as(m, b, &args[0], &Type::Int)?;
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                b.ins(&Instruction::Call(g.reflect));
+                Ok(Some(Type::Unit))
+            }
+            (crate::GEN_NEXT_INT, 0) => {
+                b.ins(&Instruction::Call(g.next_int));
+                Ok(Some(Type::Int))
+            }
+            (crate::GEN_NEXT_STR, 0) => {
+                b.ins(&Instruction::Call(g.next_str));
+                self.fetch_str(b, g);
+                Ok(Some(Type::Str))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// A generator host import ([`Spec::Host`]): the operands at the types
+    /// the import takes, and the call. The arm over the source and
+    /// [`Fn_::core_call`] over the rows both call this.
+    ///
+    /// `ty` answers operand `i`'s own type without writing it, and `operand`
+    /// writes operand `i` at the type given.
+    fn host(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        argc: usize,
+        ty: &mut dyn FnMut(&mut Self, usize) -> Result<Type, String>,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some(g) = self.cx.gen else {
+            return unsupported(&format!("`{name}` outside a generator"), line);
+        };
+        let code = Type::Named("Code".to_string());
+        match (name, argc) {
             // `raw(s)` IS `@codeText(s)` in the interpreter — one verbatim piece,
             // no origin — so it is the same import.
-            ("@codeText", 1) | ("raw", 1) if !self.user_claims(name) => {
-                self.expr_as(m, b, &args[0], &Type::Str)?;
+            ("@codeText", 1) | ("raw", 1) => {
+                operand(self, m, b, 0, &Type::Str)?;
                 b.ins(&Instruction::Call(g.text));
-                Ok(Some(code))
+                Ok(code)
             }
-            ("rawAt", 4) if !self.user_claims(name) => {
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                self.expr_as(m, b, &args[2], &Type::Int)?;
-                self.expr_as(m, b, &args[3], &Type::Int)?;
+            ("rawAt", 4) => {
+                operand(self, m, b, 0, &Type::Str)?;
+                operand(self, m, b, 1, &Type::Str)?;
+                operand(self, m, b, 2, &Type::Int)?;
+                operand(self, m, b, 3, &Type::Int)?;
                 b.ins(&Instruction::Call(g.raw_at));
-                Ok(Some(code))
+                Ok(code)
             }
             // The host renders and stashes; the guest asks for the length,
             // allocates, and fetches — the same protocol every host result uses,
             // because the host must not allocate inside guest memory.
-            ("render", 1) if !self.user_claims(name) => {
-                self.expr_as(m, b, &args[0], &code)?;
+            ("render", 1) => {
+                operand(self, m, b, 0, &code)?;
                 b.ins(&Instruction::Call(g.render));
                 self.fetch_str(b, g);
-                Ok(Some(Type::Str))
+                Ok(Type::Str)
+            }
+            // `Code + Code` concatenates fragments with their origins carried
+            // (RFC-0054), in the HOST's arena (RFC-0076 M3a).
+            ("+", 2) => {
+                operand(self, m, b, 0, &code)?;
+                operand(self, m, b, 1, &code)?;
+                b.ins(&Instruction::Call(g.concat));
+                Ok(code)
             }
             // The spliced value crosses as a TAG plus one 64-bit word (plus a
             // pointer when it is a String), because the host needs the value itself
@@ -7782,11 +7858,10 @@ impl<'p> Fn_<'_, 'p> {
             // interpreter `Val` the host rebuilds and is a COMPILE-TIME constant —
             // the static type is known here — so there is no runtime dispatch.
             //
-            // Peeked before it is evaluated, unlike the textual emitter's version:
-            // the tag is the FIRST argument on the stack and the value is the
-            // second, so the type has to be known before the value is pushed.
+            // The tag is the FIRST argument on the stack and the value is the
+            // second, so the type is asked before the value is written.
             ("@codeSplice", 2) => {
-                let vty = self.cx.resolve(&self.peek(&args[0], line)?);
+                let vty = ty(self, 0)?;
                 let tag = match &vty {
                     Type::Str => crate::TAG_STR,
                     Type::Named(n) if n == "Code" => crate::TAG_CODE,
@@ -7809,9 +7884,9 @@ impl<'p> Fn_<'_, 'p> {
                 // word, everything else as the word and a null pointer.
                 if vty == Type::Str {
                     b.ins(&Instruction::I64Const(0));
-                    self.expr_as(m, b, &args[0], &Type::Str)?;
+                    operand(self, m, b, 0, &Type::Str)?;
                 } else {
-                    self.expr_as(m, b, &args[0], &vty)?;
+                    operand(self, m, b, 0, &vty)?;
                     match &vty {
                         // Lossless, and it leaves the formatting where it belongs.
                         Type::Float => {
@@ -7836,30 +7911,11 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     b.ins(&Instruction::I32Const(0));
                 }
-                self.expr_as(m, b, &args[1], &Type::Int)?;
+                operand(self, m, b, 1, &Type::Int)?;
                 b.ins(&Instruction::Call(g.splice));
-                Ok(Some(code))
+                Ok(code)
             }
-            // M3b's atom stream. `reflect` computes the value host-side and leaves
-            // it as atoms; the two `next` calls pull them back. Nothing about the
-            // value's SHAPE is encoded here — the synthesized decoder walks the
-            // type, and so does the host.
-            (crate::GEN_REFLECT, 2) => {
-                self.expr_as(m, b, &args[0], &Type::Int)?;
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                b.ins(&Instruction::Call(g.reflect));
-                Ok(Some(Type::Unit))
-            }
-            (crate::GEN_NEXT_INT, 0) => {
-                b.ins(&Instruction::Call(g.next_int));
-                Ok(Some(Type::Int))
-            }
-            (crate::GEN_NEXT_STR, 0) => {
-                b.ins(&Instruction::Call(g.next_str));
-                self.fetch_str(b, g);
-                Ok(Some(Type::Str))
-            }
-            _ => Ok(None),
+            _ => unsupported(&format!("`{name}` at {argc} operands"), line),
         }
     }
 
@@ -18314,6 +18370,23 @@ impl<'p> Fn_<'_, 'p> {
                 let lane_at = |i: usize, lanes: i64| core_lane(args, i, lanes);
                 return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, line);
             }
+            // A generator host import: each operand at the type the import
+            // takes, and `@codeSplice`'s tag from the type the row put on its
+            // operand.
+            Some(Spec::Host) => {
+                let mut ty = |s: &mut Self, i: usize| match args.get(i) {
+                    Some((v, _)) => Ok(s.cx.resolve(&s.core_ty(body, v, &Type::Int))),
+                    None => unsupported(&format!("`{callee}` with too few operands"), line),
+                };
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
+                        .get(i)
+                    {
+                        Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
+                        None => unsupported(&format!("`{callee}` with too few operands"), line),
+                    };
+                return self.host(m, b, callee, args.len(), &mut ty, &mut operand, line);
+            }
             // `xs.pop()` and `xs.swapRemove(i)`: the receiver's address, which
             // the call shrinks in place, and the index the row names.
             Some(Spec::Removes) => {
@@ -19405,6 +19478,14 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, r, &Type::Str, line)?;
                 self.str_bin(b, *o, line)
             }
+            (Op::Bin(o), [l, r]) if self.core_code_concat(body, *o, l, r) => {
+                let mut ty = |_: &mut Self, _: usize| unsupported("a concatenation's type", line);
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.core_val(m, b, body, w, [l, r][i], t, line)
+                    };
+                self.host(m, b, "+", 2, &mut ty, &mut operand, line)
+            }
             (Op::Bin(o), [l, r]) => {
                 // A float literal has the type the checker gave it, which is
                 // its sibling's: `0.0 - o` with `o: Float32` runs at
@@ -20075,6 +20156,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::Lanes) => {
                 !matches!(callee, "@lane" | "@replaceLane") || core_lane(args, 1, 4).is_some()
             }
+            Some(Spec::Host) => self.cx.gen.is_some(),
             // A removal that hands back a scalar leaves it on the stack; one
             // that hands back an aggregate is an aggregate call.
             Some(Spec::Removes) => self.core_removes(body, callee, kind, args) == Some(false),
@@ -20084,6 +20166,13 @@ impl<'p> Fn_<'_, 'p> {
             // call [`Fn_::core_sig`] answers for; none alone.
             Some(Spec::Rebuilds | Spec::Builds(_) | Spec::Routes(_)) | None => false,
         }
+    }
+
+    /// Whether `l o r` is `Code + Code`, the host's concatenation
+    /// ([`Fn_::host`]), which exists only while a generator runs.
+    fn core_code_concat(&self, body: &vyrn_lower::core::Body, o: BinOp, l: &Val, r: &Val) -> bool {
+        let is_code = |v: &Val| matches!(self.cx.resolve(&self.core_ty(body, v, &Type::Int)), Type::Named(n) if n == "Code");
+        self.cx.gen.is_some() && o == BinOp::Add && is_code(l) && is_code(r)
     }
 
     /// Whether `l o r` is a String operator [`Fn_::str_bin`] or
@@ -20110,6 +20199,9 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Val(v) => self.core_val_readable(body, v),
             Rhs::Prim(Op::Closure, ..) => false,
             Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op(body, *o, l, r)) => {
+                vs.iter().all(|v| self.core_val_readable(body, v))
+            }
+            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_code_concat(body, *o, l, r)) => {
                 vs.iter().all(|v| self.core_val_readable(body, v))
             }
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| self.core_operand(body, v)),
