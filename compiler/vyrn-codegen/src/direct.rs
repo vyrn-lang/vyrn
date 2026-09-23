@@ -1474,6 +1474,15 @@ impl<'a> Cx<'a> {
             .is_some_and(|f| f.loop_buffer_only.contains(&self.plan.key_of(node)))
     }
 
+    /// The loops whose unreached elements the exit at `node` releases,
+    /// innermost first ([`vyrn_lower::core::Facts::unreached`]).
+    fn unreached(&self, node: usize) -> Vec<usize> {
+        self.facts
+            .as_ref()
+            .and_then(|f| f.unreached.get(&self.plan.key_of(node)).cloned())
+            .unwrap_or_default()
+    }
+
     /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
     /// slice): does the caller free this argument's value after the call or
     /// operator above it? The core carries the key on the name the argument
@@ -2225,6 +2234,10 @@ struct Fn_<'a, 'p> {
     /// such a walk is still frame structure, so a step registered before the
     /// cursor is a frame outside the loop and the cursor runs first.
     cursors: Vec<(Place, Type, u32)>,
+    /// The `for` loops the body is inside whose unreached elements an exit
+    /// releases ([`vyrn_lower::core::Facts::unreached`]): the loop's key, its
+    /// walk and its index local, innermost last.
+    walking: Vec<(usize, Walk, u32)>,
     /// Lexical `region` nesting depth within this body, so an exit edge knows how
     /// many arena scopes it is leaving. The runtime counter is dynamic (a callee's
     /// region nests inside its caller's); this is only the part one body can see,
@@ -2333,6 +2346,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         rel_pending: Vec::new(),
         placed: HashMap::new(),
         cursors: Vec::new(),
+        walking: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
         arg_frees: Vec::new(),
@@ -2493,6 +2507,7 @@ fn lower_body(
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
         cursors: Vec::new(),
+        walking: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
         arg_frees: Vec::new(),
@@ -3527,6 +3542,37 @@ impl<'p> Fn_<'_, 'p> {
         }
         for (p, k) in run {
             self.emit_rel(m, b, p, &k, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Release the elements after the one the turn bound, to the end, of
+    /// every loop the core says the exit at `at` leaves early
+    /// ([`Cx::unreached`]). The element the turn bound is the body's.
+    fn release_unreached(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        at: usize,
+        line: usize,
+    ) -> Result<(), String> {
+        for k in self.cx.unreached(at) {
+            let Some((_, w, i)) = self.walking.iter().rev().find(|(l, ..)| *l == k).cloned() else {
+                continue;
+            };
+            let (buf, count) = (b.local(ValType::I32), b.local(ValType::I32));
+            self.elem_addr(b, &w, i);
+            b.ins(&Instruction::I32Const(w.stride as i32));
+            b.ins(&Instruction::I32Add);
+            b.ins(&Instruction::LocalSet(buf));
+            b.ins(&Instruction::LocalGet(w.len));
+            b.ins(&Instruction::LocalGet(i));
+            b.ins(&Instruction::I64Sub);
+            b.ins(&Instruction::I32WrapI64);
+            b.ins(&Instruction::I32Const(1));
+            b.ins(&Instruction::I32Sub);
+            b.ins(&Instruction::LocalSet(count));
+            self.each(m, b, true, buf, count, w.stride, &w.elem, line)?;
         }
         Ok(())
     }
@@ -5104,6 +5150,7 @@ impl<'p> Fn_<'_, 'p> {
                 // disturb it — M2d's note that a value may sit under a block.
                 // Ownership analysis has un-tracked anything the return escapes, so
                 // this cannot release what is being handed back.
+                self.release_unreached(m, b, s as *const Stmt as usize, *line)?;
                 self.emit_releases(m, b, ExitKind::Return, s as *const Stmt as usize)?;
                 // And every region scope, for the same reason the interpreter
                 // decrements its counter on this path: a `return` out of a region
@@ -5360,7 +5407,9 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Block(BlockType::Empty));
                 self.depth += 1;
                 self.loops.push((brk, cont, self.region_depth));
+                self.walking.push((self.cx.plan.key_of(key), w, i));
                 self.block(m, b, body)?;
+                self.walking.pop();
                 self.loops.pop();
                 self.depth -= 1;
                 b.ins(&Instruction::End);
@@ -5501,6 +5550,7 @@ impl<'p> Fn_<'_, 'p> {
                     .loops
                     .last()
                     .ok_or_else(|| gap("`break` outside a loop", *line))?;
+                self.release_unreached(m, b, s as *const Stmt as usize, *line)?;
                 self.emit_releases(m, b, ExitKind::Break, s as *const Stmt as usize)?;
                 self.exit_regions_above(b, regions, true);
                 let d = self.br_to(brk);
@@ -13294,6 +13344,7 @@ impl<'p> Fn_<'_, 'p> {
         // raised, and the 65th such call aborted where the interpreter kept
         // going. The value is already copied through `dest`, so neither of these
         // can disturb it — the same reason the `return` arm does them here.
+        self.release_unreached(m, b, at, 0)?;
         self.emit_releases(m, b, ExitKind::Try, at)?;
         self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));
@@ -13407,6 +13458,7 @@ impl<'p> Fn_<'_, 'p> {
             dst_mem: 0,
         });
         // The same two unwinds `?` owes as `return`-minus-the-keyword.
+        self.release_unreached(m, b, at, 0)?;
         self.emit_releases(m, b, ExitKind::Try, at)?;
         self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));

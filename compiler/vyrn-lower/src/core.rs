@@ -985,6 +985,10 @@ pub struct Body {
     /// goes back, and an emitter reads it at the loop rather than reading a
     /// plan row's KIND.
     pub(crate) loop_buffers: Vec<usize>,
+    /// `(exit, loop)`: the `return`, `?` or `break` node that releases the
+    /// elements no turn of that `for` reached, innermost loop first
+    /// ([`Facts::unreached`]).
+    pub(crate) unreached: Vec<(usize, usize)>,
 }
 
 /// What a candidate construct is, which is what [`last_owner`] has to ask of
@@ -1077,6 +1081,9 @@ impl Body {
                     // row names the node the plan keys the exit by, which is
                     // this statement's (RFC-0125 M7).
                     St::Row { site, .. } if *site == node => {}
+                    // The only loop this pass makes up: the elements an
+                    // exit leaves unreached ([`Builder::release_unreached`]).
+                    St::Loop { site: 0, .. } => {}
                     St::Let(n, rhs)
                         if self.names[*n as usize].binding.is_none() && need.contains(n) =>
                     {
@@ -2223,6 +2230,7 @@ fn build_seeded(
             lambdas: Vec::new(),
             cands: Vec::new(),
             loop_buffers: Vec::new(),
+            unreached: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2232,6 +2240,7 @@ fn build_seeded(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        walks: Vec::new(),
         reading: Vec::new(),
         seed,
         loop_marks: Vec::new(),
@@ -2335,6 +2344,7 @@ pub fn build_module_state<'a>(
             lambdas: Vec::new(),
             cands: Vec::new(),
             loop_buffers: Vec::new(),
+            unreached: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2344,6 +2354,7 @@ pub fn build_module_state<'a>(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        walks: Vec::new(),
         reading: Vec::new(),
         seed,
         loop_marks: Vec::new(),
@@ -2445,6 +2456,7 @@ fn build_outside_seeded<'a>(
             lambdas: Vec::new(),
             cands: Vec::new(),
             loop_buffers: Vec::new(),
+            unreached: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2454,6 +2466,7 @@ fn build_outside_seeded<'a>(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        walks: Vec::new(),
         reading: Vec::new(),
         seed,
         loop_marks: Vec::new(),
@@ -2471,6 +2484,19 @@ fn build_outside_seeded<'a>(
     cut(&mut out);
     b.body.stmts = out;
     Ok(b.body)
+}
+
+/// A `for` whose every element leaves through the loop variable
+/// ([`Body::loop_buffers`]): the container, its length, and the counter,
+/// which steps past an element as the turn binds it.
+#[derive(Clone)]
+struct Unreached {
+    it: Name,
+    n: Name,
+    i: Name,
+    elem: Type,
+    line: usize,
+    site: usize,
 }
 
 struct Builder<'a> {
@@ -2506,6 +2532,10 @@ struct Builder<'a> {
     /// or a `?` inside such a loop closes every one of them on its way out
     /// (the direct backend's cursor stack), and the loop's end closes its own.
     stream_loops: Vec<Name>,
+    /// One entry per loop enclosing the statement being built, innermost
+    /// last: the `for` whose elements no turn reached yet, or `None`. A
+    /// `return`, a `?` and a `break` release them ([`Builder::release_unreached`]).
+    walks: Vec<Option<Unreached>>,
     /// The constructs this build may take their named scrutinee at — what
     /// [`last_owner`] decided over the build before it. Empty on the first
     /// build, which is where the candidates come from.
@@ -3160,13 +3190,13 @@ impl<'a> Builder<'a> {
     /// is not stated at all: the frame cannot give back what it hands out
     /// (RFC-0125 §3 M3, row 17).
     fn return_exit(
-        &self,
+        &mut self,
         v: Option<Val>,
         sid: usize,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
-        self.close_streams(out);
+        self.leave_loops(sid, out);
         self.drops_at_but(Exit::Return, sid, self.reads_out_of(&v), out)?;
         out.push(St::Return {
             value: v,
@@ -3646,6 +3676,9 @@ impl<'a> Builder<'a> {
                 self.return_exit(v, sid, *line, out)?;
             }
             Stmt::Break { .. } => {
+                if let Some(Some(u)) = self.walks.last().cloned() {
+                    self.release_unreached(&u, sid, out);
+                }
                 self.drops_at(Exit::Break, sid, out)?;
                 out.push(St::Break { site: sid });
             }
@@ -3747,7 +3780,9 @@ impl<'a> Builder<'a> {
                     site: 0,
                 });
                 self.loop_marks.push(self.body.names.len());
+                self.walks.push(None);
                 let r = self.block(body, &mut l);
+                self.walks.pop();
                 self.loop_marks.pop();
                 r?;
                 self.hoist_headers(&mut l, *line, out);
@@ -3937,8 +3972,17 @@ impl<'a> Builder<'a> {
                 // is what is left to give back. Round fourteen is what a
                 // wrong answer costs: a blanket buffer-only free took
                 // somebody else's storage.
+                let mut unreached = None;
                 if owned && matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Array(_)) {
                     self.body.loop_buffers.push(sid);
+                    unreached = counter.map(|(n, i)| Unreached {
+                        it,
+                        i,
+                        n,
+                        elem: ety.clone(),
+                        line: *line,
+                        site: sid,
+                    });
                 }
                 // In front of the variable: each turn binds its own element,
                 // so handing THAT out of a join arm frees once per turn. The
@@ -3969,7 +4013,9 @@ impl<'a> Builder<'a> {
                 }
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), x));
+                self.walks.push(unreached);
                 let r = self.block_with(body, head, &mut l);
+                self.walks.pop();
                 self.loop_marks.pop();
                 r?;
                 self.scope.truncate(mark);
@@ -4199,14 +4245,49 @@ impl<'a> Builder<'a> {
         frees
     }
 
-    /// The streams every enclosing `for` walks, closed on the way out of the
-    /// function, innermost first.
-    fn close_streams(&self, out: &mut Vec<St>) {
+    /// The rows a `return` or a `?` runs for every enclosing `for`, innermost
+    /// first: the elements no turn reached, then the stream it walks, closed.
+    fn leave_loops(&mut self, exit: usize, out: &mut Vec<St>) {
+        for u in self.walks.clone().iter().rev().flatten() {
+            self.release_unreached(u, exit, out);
+        }
         for it in self.stream_loops.iter().rev() {
             if self.body.names[*it as usize].releases {
                 out.push(St::Drop(*it, Site::None, 0, None));
             }
         }
+    }
+
+    /// Releases the elements of `u`'s container from its counter to its
+    /// length, which no turn bound: the rows a `return`, a `?` or a `break`
+    /// runs before its own. The element the turn bound is the body's.
+    fn release_unreached(&mut self, u: &Unreached, exit: usize, out: &mut Vec<St>) {
+        self.body.unreached.push((exit, u.site));
+        let c = self.temp(Type::Bool, u.line);
+        let mut l = vec![
+            St::Let(
+                c,
+                Rhs::Prim(
+                    Op::Bin(BinOp::Lt),
+                    vec![Val::Name(u.i), Val::Name(u.n)],
+                    Some(Type::Bool),
+                ),
+            ),
+            St::If {
+                cond: Val::Name(c),
+                then: Vec::new(),
+                els: vec![St::Break { site: 0 }],
+                site: 0,
+            },
+        ];
+        let e = self.temp(u.elem.clone(), u.line);
+        l.push(St::Let(
+            e,
+            Rhs::Read(Place::Elem(Box::new(Place::Name(u.it)), Val::Name(u.i))),
+        ));
+        self.step(u.i, &mut l);
+        l.push(St::Drop(e, Site::None, 0, None));
+        out.push(St::Loop { body: l, site: 0 });
     }
 
     /// RFC-0114 Rule N: the drops one edge of a join owes.
@@ -5376,6 +5457,7 @@ impl<'a> Builder<'a> {
                 lambdas: Vec::new(),
                 cands: Vec::new(),
                 loop_buffers: Vec::new(),
+                unreached: Vec::new(),
             },
         );
         self.body.name = format!("{}@lambda:{line}", outer.name);
@@ -5387,6 +5469,7 @@ impl<'a> Builder<'a> {
             self.pending_receiver.take(),
             std::mem::replace(&mut self.drain, 0),
             std::mem::take(&mut self.stream_loops),
+            std::mem::take(&mut self.walks),
         );
         let outer_ret = std::mem::replace(&mut self.ret, ret);
         for c in caps {
@@ -5431,6 +5514,7 @@ impl<'a> Builder<'a> {
             self.pending_receiver,
             self.drain,
             self.stream_loops,
+            self.walks,
         ) = saved;
         self.ret = outer_ret;
         r?;
@@ -6050,7 +6134,7 @@ impl<'a> Builder<'a> {
                     borrow_root(&sv, owns),
                     &mut fail,
                 )?;
-                self.close_streams(&mut fail);
+                self.leave_loops(tid, &mut fail);
                 self.drops_at(Exit::Try, tid, &mut fail)?;
                 // An `Option` fails with no binder, and the value it returns
                 // is `None` of the frame's result. A `Result` fails with its
@@ -6189,7 +6273,7 @@ impl<'a> Builder<'a> {
             Rhs::Prim(Op::Un(UnOp::Not), vec![Val::Name(held)], Some(Type::Bool)),
         ));
         let mut fail = Vec::new();
-        self.close_streams(&mut fail);
+        self.leave_loops(tid, &mut fail);
         self.drops_at(Exit::Try, tid, &mut fail)?;
         fail.push(St::Return {
             value: Some(sv.clone()),
@@ -6808,6 +6892,11 @@ pub struct Facts {
     /// emitter read the KIND of the plan's own row for it until RFC-0125 §3
     /// M3's container slice, which is the last thing that table was asked.
     pub loop_buffer_only: std::collections::HashSet<usize>,
+    /// Per `return`, `?` or `break` node inside such a `for`: the loops, by
+    /// node and innermost first, whose elements from the counter to the end
+    /// the exit releases before its own rows. The core states them as rows
+    /// ([`Builder::release_unreached`]); the AST walk reads this.
+    pub unreached: std::collections::HashMap<usize, Vec<usize>>,
     /// RFC-0114 M1: the call-argument nodes whose temporary the caller
     /// releases after the call — [`NameInfo::arg_drop`], which the core sets
     /// wherever it lowers such an argument.
@@ -7245,6 +7334,12 @@ fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
     fold_facts(body, proto, &body.stmts, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
+    for (exit, walk) in &body.unreached {
+        let loops = out.unreached.entry(*exit).or_default();
+        if !loops.contains(walk) {
+            loops.push(*walk);
+        }
+    }
     let mut released = std::collections::HashSet::new();
     collect_drops(&body.stmts, &mut released);
     for (i, info) in body.names.iter().enumerate() {
