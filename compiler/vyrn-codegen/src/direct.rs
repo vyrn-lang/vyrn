@@ -2544,6 +2544,7 @@ fn lower_body(
             walks: vec![None; core.names.len()],
             built: vec![None; core.names.len()],
             bufs: vec![None; core.names.len()],
+            over: Vec::new(),
         };
     }
 
@@ -16966,6 +16967,7 @@ struct Walked {
     /// A heap array's element buffer, taken at the first of its parts whose
     /// own row writes it.
     bufs: Vec<Option<u32>>,
+    over: Vec<(vyrn_lower::core::Name, vyrn_lower::core::Name)>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17971,6 +17973,18 @@ impl<'p> Fn_<'_, 'p> {
                 // infinite loop the row states, so the back edge is this
                 // walk's and unconditional.
                 St::Loop { body: inner, .. } => {
+                    let over = w.over.len();
+                    for p in ss[..i].iter().rev() {
+                        match p {
+                            St::Let(h, Rhs::Read(vyrn_lower::core::Place::Name(r)))
+                                if body.names[*h as usize].walked
+                                    == Some(vyrn_lower::core::Walk::While) =>
+                            {
+                                w.over.push((*r, *h))
+                            }
+                            _ => break,
+                        }
+                    }
                     let brk = self.depth;
                     b.ins(&Instruction::Block(BlockType::Empty));
                     self.depth += 1;
@@ -17982,6 +17996,7 @@ impl<'p> Fn_<'_, 'p> {
                     let r = self.core_stmts(m, b, body, w, inner);
                     self.scope.truncate(scope);
                     self.loops.pop();
+                    w.over.truncate(over);
                     r?;
                     let back = self.br_to(cont);
                     b.ins(&Instruction::Br(back));
@@ -20425,7 +20440,10 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
 /// The parts of the header `base` names, when it is a borrow a loop walks.
 fn core_header(w: &Walked, base: &vyrn_lower::core::Place) -> Option<Walk> {
     match base {
-        vyrn_lower::core::Place::Name(n) => w.walks.get(*n as usize)?.clone(),
+        vyrn_lower::core::Place::Name(n) => w.walks.get(*n as usize)?.clone().or_else(|| {
+            let (_, h) = w.over.iter().rev().find(|(r, _)| r == n)?;
+            w.walks[*h as usize].clone()
+        }),
         _ => None,
     }
 }
