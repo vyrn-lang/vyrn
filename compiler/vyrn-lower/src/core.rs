@@ -1735,10 +1735,35 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@append", Spec::Rebuilds),
             ("@copyFrom", Spec::Rebuilds),
             ("@strAppend", Spec::Rebuilds),
-            ("bytes", Spec::Builds(Type::Array(Box::new(u8_)))),
+            ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),
             (
                 "stringFromBytes",
                 Spec::Builds(Type::result(Type::Str, Type::Str)),
+            ),
+            // RFC-0014 and RFC-0044's I/O: the runtime writes the whole result
+            // into the caller's slot, and a failure is its `Err` message.
+            ("args", Spec::Builds(Type::Array(Box::new(Type::Str)))),
+            ("readLine", Spec::Builds(Type::option(Type::Str))),
+            ("readFile", Spec::Builds(Type::result(Type::Str, Type::Str))),
+            (
+                "readFileBytes",
+                Spec::Builds(Type::result(Type::Array(Box::new(u8_)), Type::Str)),
+            ),
+            (
+                "fsyncFile",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
+            ),
+            (
+                "writeFile",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
+            ),
+            (
+                "renameFile",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
+            ),
+            (
+                "writeFileBytes",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
             ),
         ]
     })

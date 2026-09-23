@@ -4446,6 +4446,122 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
+    /// An RFC-0014 or RFC-0044 I/O builtin: one runtime function that writes
+    /// its whole result through a slot allocated here, the hidden destination
+    /// an aggregate-returning call gets. The destination leads, the operands
+    /// follow, then what the function needs after them. Under a generation
+    /// (`Cx::gen`) the two readers are their host twins, which take the host's
+    /// read mode after the path and read through the loader's resolver rather
+    /// than `path_open` (RFC-0076 M7).
+    ///
+    /// `operand` writes argument `i` at the type asked for. The arm over the
+    /// source and [`Fn_::core_call`] over the rows both call this.
+    fn io_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some(ty) = io_arity(name).and_then(|n| io_builtin_ty(name, n)) else {
+            return unsupported(&format!("`{name}` as an I/O builtin"), line);
+        };
+        let l = self.layout_of(&ty, line)?;
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        let rt = self.cx.rt;
+        let gen = self.cx.gen.is_some();
+        let halves = |b: &mut Frame, (pre, post): (u32, u32)| {
+            b.ins(&Instruction::I32Const(pre as i32))
+                .ins(&Instruction::I32Const(post as i32));
+        };
+        let f = match name {
+            "args" => rt.args,
+            "readLine" => {
+                b.ins(&Instruction::I32Const(rt.utf8d as i32));
+                rt.read_line
+            }
+            "readFile" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                if gen {
+                    b.ins(&Instruction::I32Const(crate::GEN_MODE_READ));
+                }
+                b.ins(&Instruction::I32Const(rt.utf8d as i32));
+                halves(b, rt.readerr);
+                halves(b, rt.nulerr);
+                halves(b, rt.utf8err);
+                if gen {
+                    rt.read_file_gen
+                } else {
+                    rt.read_file
+                }
+            }
+            "readFileBytes" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                if gen {
+                    b.ins(&Instruction::I32Const(crate::GEN_MODE_READ_BYTES));
+                }
+                halves(b, rt.readerr);
+                if gen {
+                    halves(b, rt.nulerr);
+                    rt.read_file_bytes_gen
+                } else {
+                    rt.read_file_bytes
+                }
+            }
+            "fsyncFile" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                halves(b, rt.writeerr);
+                rt.fsync_file
+            }
+            // RFC-0111: the array arrives as a POINTER to its `{ ptr, len, cap }`
+            // record, so the two words are loaded out of it and pushed
+            // separately. The buffer may hold NULs, which the String writer's
+            // `strlen` could not have measured.
+            "writeFileBytes" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                let bytes = Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }));
+                operand(self, m, b, 1, &bytes)?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                halves(b, rt.writeerr);
+                rt.write_file_bytes
+            }
+            // `renameFile` differs from `writeFile` only in the cross-device
+            // message and the runtime function.
+            _ => {
+                operand(self, m, b, 0, &Type::Str)?;
+                operand(self, m, b, 1, &Type::Str)?;
+                halves(b, rt.writeerr);
+                if name == "renameFile" {
+                    halves(b, rt.xdeverr);
+                    rt.rename_file
+                } else {
+                    rt.write_file
+                }
+            }
+        };
+        b.ins(&Instruction::Call(f));
+        b.slot(off);
+        Ok(ty)
+    }
+
     /// `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
     /// A copy, because the array is growable and the string is not: a `push`
     /// on the result must not write into the string's storage.
@@ -8323,119 +8439,14 @@ impl<'p> Fn_<'_, 'p> {
             // arm was cheap; the RUNTIME FUNCTION behind it was a third copy of the
             // range check, and RFC-0079 M3 deleted both — `slice` routes into
             // `std/strpred`'s `sliceV` at the top of this dispatch now.)
-            // RFC-0014's input I/O. Every one of these is a runtime function that
-            // writes its whole result through a slot allocated here — the same
-            // hidden destination an aggregate-returning Vyrn call gets, which is
-            // why none of them needed a case outside M2b's four ABI rules.
-            "args" if args.is_empty() => {
-                let ty = io_builtin_ty(name, 0).expect("`args` is an I/O builtin");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(self.cx.rt.args));
-                b.slot(off);
-                return Ok(ty);
-            }
-            "readLine" if args.is_empty() => {
-                let ty = io_builtin_ty(name, 0).expect("`readLine` is an I/O builtin");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::I32Const(self.cx.rt.utf8d as i32));
-                b.ins(&Instruction::Call(self.cx.rt.read_line));
-                b.slot(off);
-                return Ok(ty);
-            }
-            // One path in, a `Result<_, String>` out through a destination slot.
-            // RFC-0044's `fsyncFile` is the same shape as the two readers and
-            // differs only in the runtime function — which is exactly why it was
-            // missed: it reads as a writer, so the arm it belonged in was the one
-            // keyed on TWO arguments.
-            //
-            // The destination leads, as it does for every aggregate a
-            // `std/runtime` function answers; the path follows, then what the
-            // function needs after it. Under a generation (`Cx::gen`) the two
-            // readers are their host twins, which take the host's read mode
-            // after the path and read through the loader's resolver rather
-            // than `path_open` (RFC-0076 M7).
-            "readFile" | "readFileBytes" | "fsyncFile" if args.len() == 1 => {
-                let ty = io_builtin_ty(name, 1).expect("all three are I/O builtins");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let rt = self.cx.rt;
-                let gen = self.cx.gen.is_some();
-                let halves = |b: &mut Frame, (pre, post): (u32, u32)| {
-                    b.ins(&Instruction::I32Const(pre as i32))
-                        .ins(&Instruction::I32Const(post as i32));
-                };
-                let f = match name {
-                    "readFile" => {
-                        if gen {
-                            b.ins(&Instruction::I32Const(crate::GEN_MODE_READ));
-                        }
-                        b.ins(&Instruction::I32Const(rt.utf8d as i32));
-                        halves(b, rt.readerr);
-                        halves(b, rt.nulerr);
-                        halves(b, rt.utf8err);
-                        if gen {
-                            rt.read_file_gen
-                        } else {
-                            rt.read_file
-                        }
-                    }
-                    "readFileBytes" => {
-                        if gen {
-                            b.ins(&Instruction::I32Const(crate::GEN_MODE_READ_BYTES));
-                        }
-                        halves(b, rt.readerr);
-                        if gen {
-                            halves(b, rt.nulerr);
-                            rt.read_file_bytes_gen
-                        } else {
-                            rt.read_file_bytes
-                        }
-                    }
-                    _ => {
-                        halves(b, rt.writeerr);
-                        rt.fsync_file
-                    }
-                };
-                b.ins(&Instruction::Call(f));
-                b.slot(off);
-                return Ok(ty);
-            }
-            // RFC-0111: a path and an `Array<UInt8>`, into the same destination
-            // slot `writeFile` uses. The array arrives as a POINTER to its
-            // `{ ptr, len, cap }` record, so the two words are loaded out of it
-            // and pushed separately — the buffer may hold NULs, which is exactly
-            // what the String writer's `strlen` could not have measured.
-            "writeFileBytes" if args.len() == 2 => {
-                let ty = io_builtin_ty(name, 2).expect("writeFileBytes is an I/O builtin");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let bytes = Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }));
-                self.expr_as(m, b, &args[1], &bytes)?;
-                let src = self.scratch(b, ValType::I32, 0);
-                let al = self.layout_of(&bytes, line)?;
-                b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I64Load(at(al.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
-                let (pre, post) = self.cx.rt.writeerr;
-                b.ins(&Instruction::I32Const(pre as i32));
-                b.ins(&Instruction::I32Const(post as i32));
-                b.ins(&Instruction::Call(self.cx.rt.write_file_bytes));
-                b.slot(off);
-                return Ok(ty);
+            // RFC-0014 and RFC-0044's I/O, one runtime function each
+            // ([`Fn_::io_call`]).
+            n if io_builtin_ty(n, args.len()).is_some() => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.expr_as(m, b, &args[i], t).map(|_| ())
+                    };
+                return self.io_call(m, b, n, &mut operand, line);
             }
             // RFC-0111: `print` for bytes. `write_all` is already the gathered
             // stdout writer every printed line goes through, so this is that call
@@ -8460,31 +8471,6 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(self.cx.rt.write_all));
                 b.ins(&Instruction::Drop);
                 return Ok(Type::Unit);
-            }
-            // Two strings in, a `Result<Bool, String>` out, through a destination
-            // slot — the same shape, so one arm. RFC-0044's `renameFile` differs
-            // from `writeFile` only in which runtime function it calls.
-            "writeFile" | "renameFile" if args.len() == 2 => {
-                let ty = io_builtin_ty(name, 2).expect("both writers are I/O builtins");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                let rt = self.cx.rt;
-                b.ins(&Instruction::I32Const(rt.writeerr.0 as i32));
-                b.ins(&Instruction::I32Const(rt.writeerr.1 as i32));
-                if name == "renameFile" {
-                    b.ins(&Instruction::I32Const(rt.xdeverr.0 as i32));
-                    b.ins(&Instruction::I32Const(rt.xdeverr.1 as i32));
-                }
-                b.ins(&Instruction::Call(if name == "writeFile" {
-                    rt.write_file
-                } else {
-                    rt.rename_file
-                }));
-                b.slot(off);
-                return Ok(ty);
             }
             // The two builtins RFC-0078 refused to route, and therefore the two
             // this backend owes a loop. `text_runtime` is where those loops are and
@@ -16337,15 +16323,6 @@ const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 // bought it: 330 ns hand-written here against 721 ns compiled, and no difference
 // a program could observe.)
 
-/// The result type of an RFC-0014/RFC-0044 I/O builtin, or `None` if the name is
-/// not one.
-///
-/// ONE spelling, read by the emitting path (which sizes a destination slot with
-/// it) and by [`Fn_::peek`] (which needs the same answer when the call is a
-/// branch's value). M2l's rule is that a builtin `call` lowers owes `peek` a row;
-/// this is that row and that lowering reading one function, because two
-/// spellings of `Result<Bool, String>` are two chances to size a slot one field
-/// differently from the value written into it.
 /// `listDir`'s type (RFC-0021), in one place so the lowering and [`Fn_::peek`]
 /// cannot size a destination slot differently from the value written into it —
 /// M2l's rule, and the shape `io_builtin_ty` exists for on the other builtins.
@@ -16375,20 +16352,29 @@ fn length_ty(field: &str, base: &Type) -> Option<Type> {
     .then_some(Type::Int)
 }
 
+/// The result type of an RFC-0014/RFC-0044 I/O builtin at `argc` operands, or
+/// `None` where it is not one.
+///
+/// The type is the core's `Spec::Builds` row, read by the emitting path, which
+/// sizes a destination slot with it, and by [`Fn_::peek`], which needs the same
+/// answer when the call is a branch's value: two spellings of
+/// `Result<Bool, String>` are two chances to size a slot one field differently
+/// from the value written into it.
 fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
-    let str_err = |ok| Type::result(ok, Type::Str);
-    Some(match (name, argc) {
-        ("args", 0) => Type::Array(Box::new(Type::Str)),
-        ("readLine", 0) => Type::option(Type::Str),
-        ("readFile", 1) => str_err(Type::Str),
-        ("readFileBytes", 1) => str_err(Type::Array(Box::new(Type::IntN {
-            bits: 8,
-            signed: false,
-        }))),
-        ("fsyncFile", 1) => str_err(Type::Bool),
-        ("writeFile", 2) | ("renameFile", 2) | ("writeFileBytes", 2) => str_err(Type::Bool),
-        _ => return None,
-    })
+    match vyrn_lower::core::builtin_row(name) {
+        Some(Spec::Builds(t)) if io_arity(name) == Some(argc) => Some(t.clone()),
+        _ => None,
+    }
+}
+
+/// How many operands an I/O builtin takes, or `None` where the name is not one.
+fn io_arity(name: &str) -> Option<usize> {
+    match name {
+        "args" | "readLine" => Some(0),
+        "readFile" | "readFileBytes" | "fsyncFile" => Some(1),
+        "writeFile" | "renameFile" | "writeFileBytes" => Some(2),
+        _ => None,
+    }
 }
 
 fn expr_name(e: &Expr) -> String {
@@ -17975,7 +17961,7 @@ impl<'p> Fn_<'_, 'p> {
                 return match callee {
                     "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
                     "stringFromBytes" => self.string_from_bytes(m, b, &mut operand, line),
-                    _ => unsupported(&format!("`{callee}` builds nothing this walk emits"), line),
+                    _ => self.io_call(m, b, callee, &mut operand, line),
                 };
             }
             None => {}
