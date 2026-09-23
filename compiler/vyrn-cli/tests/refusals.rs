@@ -2865,9 +2865,9 @@ fn a_call_that_writes_module_state_ends_its_borrows() {
 /// RFC-0125 M7, `m7-hole`: a payload binder read out of a value whose type
 /// declares `release` may not be handed to a `consume` parameter, because the
 /// declared release reads every payload. The hand-off freed the payload twice
-/// or leaked the node. Both ways out the sentence names print 6. Consuming `n`
-/// runs clean under the free audit; the copy leaks `n`, as it does without this
-/// rule, because the arm's edge row skips a declared `release` (RFC-0114).
+/// or leaked the node. Both ways out the sentence names run clean under the
+/// free audit; the copy's arm releases `n` on its edge through the declared
+/// `release`.
 #[test]
 fn a_payload_of_a_type_that_declares_release_is_not_handed_on() {
     let src = "type Node =\n  | Elem(String, Array<Int64>)\n  | Text(String)\n\
@@ -2901,10 +2901,10 @@ fn a_payload_of_a_type_that_declares_release_is_not_handed_on() {
         bad.push(format!("`run m.vyrn` ran or said {err}"));
     }
     let ways = [
-        ("copy", "sum(kids)", "sum(kids.copy())", false),
-        ("consume", "match n {", "match consume n {", true),
+        ("copy", "sum(kids)", "sum(kids.copy())"),
+        ("consume", "match n {", "match consume n {"),
     ];
-    for (name, from, to, audit) in ways {
+    for (name, from, to) in ways {
         let file = format!("{name}.vyrn");
         let fixed = src.replace(from, to);
         let fixed = if name == "consume" {
@@ -2913,12 +2913,12 @@ fn a_payload_of_a_type_that_declares_release_is_not_handed_on() {
             fixed
         };
         std::fs::write(dir.join(&file), fixed).expect("write the program");
-        let mut run = vyrn();
-        run.current_dir(&dir).args(["run", &file]);
-        if audit {
-            run.env("VYRN_LEAK_CHECK", "1");
-        }
-        let out = run.output().expect("vyrn run");
+        let out = vyrn()
+            .current_dir(&dir)
+            .env("VYRN_LEAK_CHECK", "1")
+            .args(["run", &file])
+            .output()
+            .expect("vyrn run");
         if out.status.code() != Some(0) || String::from_utf8_lossy(&out.stdout).trim() != "6" {
             bad.push(format!(
                 "`run {file}` exited {:?} and said {}{}",

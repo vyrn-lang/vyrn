@@ -7016,11 +7016,11 @@ impl<'p> Fn_<'_, 'p> {
     /// when it recorded the temporary.
     /// RFC-0114 Rule N: release the bindings the OTHER branch of this `if`
     /// consumed, on the edge where they are still this frame's. A declared
-    /// `impl Owned` release is skipped — its body is user code whose timing
-    /// all three engines must agree on, and the RFC refuses to put it on an
-    /// edge. A `region` is not asked: the arena refuses its own blocks at
-    /// `free`, and an `Array` or a `Map` bound inside one was never the
-    /// arena's — this edge used to hand both to nobody.
+    /// `impl Owned` release runs here as at a scope's end: a value that reaches
+    /// its end without it leaks (RFC-0125 M7, `m7-hole`). A `region` is not
+    /// asked: the arena refuses its own blocks at `free`, and an `Array` or a
+    /// `Map` bound inside one was never the arena's — this edge used to hand
+    /// both to nobody.
     fn emit_edge_releases(
         &mut self,
         m: &mut Module,
@@ -7056,7 +7056,7 @@ impl<'p> Fn_<'_, 'p> {
                 continue;
             }
             match self.rel_for(&ty, line)? {
-                Some(Rel::Call(..)) | None => {}
+                None => {}
                 Some(Rel::Deep(ty, _)) => {
                     self.emit_rel(m, b, place, &Rel::Deep(ty, holes.clone()), line)?
                 }
