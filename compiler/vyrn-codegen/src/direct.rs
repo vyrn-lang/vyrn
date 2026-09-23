@@ -18130,26 +18130,36 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The element's address is the walk's: the header read, the bounds
             // check the language states, and one stride multiply — the same
-            // three [`Fn_::at`] emits for `a[i]`. A String's element is a byte
-            // widened on load, which is no load of the element's own type.
+            // three [`Fn_::at`] emits for `a[i]`. A String is walked from its
+            // pointer, which is its value and not its address, and its element
+            // is a `UInt8` where the walk hands a `for` the byte widened.
             At::Elem(base, i) => {
                 let walk = match core_header(w, base) {
                     Some(walk) => walk,
                     None => {
-                        let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
-                        self.core_step(b, off);
+                        let bty = match self.core_place_ty(body, base) {
+                            Some(t) if self.cx.resolve(&t) == Type::Str => {
+                                self.core_read(m, b, body, w, base, line)?
+                            }
+                            _ => {
+                                let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
+                                self.core_step(b, off);
+                                bty
+                            }
+                        };
                         self.walk(b, &bty, line)?
                     }
                 };
-                if walk.byte {
-                    return unsupported("a read of a String's byte", line);
-                }
                 self.core_val(m, b, body, w, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
-                self.bounds_check(b, &walk, ix, false);
+                self.bounds_check(b, &walk, ix, walk.byte);
                 self.elem_addr(b, &walk, ix);
-                Ok((walk.elem, None))
+                let byte = Type::IntN {
+                    bits: 8,
+                    signed: false,
+                };
+                Ok((if walk.byte { byte } else { walk.elem }, None))
             }
             // A key has no address: its read is the runtime's lookup, which
             // the aggregate `let` arm of [`Fn_::core_stmts`] writes.
@@ -18192,6 +18202,10 @@ impl<'p> Fn_<'_, 'p> {
             }
             At::Elem(base, _) => match self.cx.resolve(&self.core_place_ty(body, base)?) {
                 Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => Some(*e),
+                Type::Str => Some(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }),
                 _ => None,
             },
             At::Key(..) => None,

@@ -5449,7 +5449,8 @@ impl<'a> Builder<'a> {
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
     /// Whether `name(args)` at `e` is an element read of a builtin array
-    /// whose element owns no heap, off a receiver that is a place.
+    /// whose element owns no heap, or a String's byte, off a receiver that is
+    /// a place.
     fn reads_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
         name == vyrn_frontend::project::AT
             && args.len() == 2
@@ -5458,7 +5459,7 @@ impl<'a> Builder<'a> {
             && self.ty_of(&args[0]).is_ok_and(|t| {
                 matches!(
                     vyrn_frontend::types::resolve(&t, self.proto.types()),
-                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
+                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
                 )
             })
     }
