@@ -299,6 +299,92 @@ Notes: `substring`, compiled in 115 roots, is 115 of the 119 switches on a paylo
 
 The gap tally reads 71,467 lines over the same pass, 70,395 whole and 1,072 with a gap; it counts every frame the core builds, the emitter's screen only the bodies the emitter compiles. At the head `Switch:Impl` is no tag: the three bodies of `examples/` have no gap.
 
+## What each gap tag needs, and the decision it waits on (2026-09-23)
+
+Measured on main `363c013e` with no code moved. `VYRN_GAP_TALLY` ran over `emit-wat` of the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, one process per root from the root's directory. A first pass warmed the generator cache and the second was counted; a third, with one tally file per root, read the same 71,798 lines, 70,735 whole and 1,063 with a gap. Tag for tag the first gaps equal the third screen count above, less the 9 lines of `Switch:Impl` that `m7-screen3` retired.
+
+A line is one body per root, so a `std` body counts once for every root that compiles it. "Alone" counts the lines whose every gap is in the group, and "met" the lines that name the group at all. "Spellings" counts each module path and function once; a module that two roots reach by two relative paths is two spellings, so the column is a ceiling on distinct bodies.
+
+| group | tags | first | alone | met | spellings | std / site / examples / tests |
+|---|---|---|---|---|---|---|
+| function values | `Call:Value:*`, `Lambda`, `Opaque:Static` of a function | 299 | 271 | 340 | 207 | 55 / 15 / 134 / 3 |
+| generator host imports | `@codeText`, `@codeSplice`, `render`, `raw`, `rawAt` | 219 | 219 | 219 | 33 | 30 / 0 / 3 / 0 |
+| JSON routes | `toJson`, `fromJson` | 178 | 176 | 181 | 144 | 4 / 10 / 129 / 1 |
+| contract reflection | `contractOf` and the contract name it reads | 80 | 80 | 80 | 8 | 8 / 0 / 0 / 0 |
+| an element of a temporary | `Call:Builtin:@at` | 62 | 62 | 63 | 28 | 14 / 3 / 11 / 0 |
+| line and column | `lineAt`, `colAt` | 51 | 51 | 51 | 5 | 4 / 0 / 1 / 0 |
+| streams | `fromStep`, `boxStream`, `unboxStream`, `pullAt`, `close`, `fromArray`, `Opaque:Pull` | 45 | 22 | 68 | 43 | 9 / 0 / 30 / 4 |
+| method dispatch | `Call:Method:*` | 33 | 28 | 38 | 32 | 0 / 6 / 26 / 0 |
+| the map and array tail | `@remove`, `@has`, `@tally`, `@list`, `@toArray` | 26 | 8 | 26 | 26 | 0 / 0 / 26 / 0 |
+| logging | `logger`, `@error`, `@warn` | 18 | 18 | 18 | 16 | 0 / 0 / 16 / 0 |
+| the served stream | `serveStream` | 18 | 18 | 18 | 4 | 4 / 0 / 0 / 0 |
+| type reflection | `jsonSchema`, `schemaOf` | 17 | 17 | 18 | 13 | 0 / 3 / 10 / 0 |
+| a checked construction | `Make:Try` | 11 | 11 | 11 | 8 | 0 / 3 / 5 / 0 |
+
+Ten lines are in no group: the 5 refusal witnesses whose gap is a rule the program breaks, which stay a gap by design, one `writeStdout`, and 4 that also name `value` or `@tallyBytes`.
+
+### What each group waits on
+
+**Function values** are two mechanisms, and the core states neither. RFC-0023 specializes a function with `fn`-typed parameters per call target (`direct::Fn_::ho_call`): the instance's signature replaces each such parameter with the target's captures, and a call through the parameter is a direct call (`Fn_::target_call`) read off `fn_binds`. The core builds one instance per type arguments, so its frame for `map<Int64, Int64>` keeps the parameter `f`, which no emitted function has. RFC-0037 stores a function value as the signature's closure enum (`Fn_::build_fnval`), whose tag the emitter's dispatch registry chooses, and a call through it is one call to the signature's dispatcher (`Fn_::fnval_call`). The core states a stored function name as `Opaque:Static`, a lambda as `Op::Closure`, and both calls as `Callee::Value`. The missing facts are the targets and captures of a specialization, and the target of a value made for storage. A signature grep over the 181 distinct call sites finds 86 that call a parameter of the enclosing function; the rest are locals, fields read into a local, lambda captures, and parameters in signatures that span lines (`std/graphql`). Kind (d). No one module accounts for most: `std/http`, `std/arrays`, `std/graphql`, `std/ui` and the generated RPC clients share them.
+
+**Generator host imports** are calls a compiled generator makes to its host while it runs (`Fn_::gen_builtin`: `g.text`, `g.raw_at`, `g.render`, `g.splice`). Nothing is expanded when the generator is compiled, so the group is not kind (b). It is a row kind the core lacks, with `Spec::Lanes` as the precedent: the row names the import, `@codeSplice`'s tag is the operand's static type, which the row carries on the operand's name, and `render` reads its String back through `Fn_::fetch_str`. `std/vyx`, `std/ui`, `std/i18n`, `std/tw`, `std/symbolmap` and `std/icons` hold the `std` bodies. Kind (a).
+
+**The JSON routes** are rewrites to a call of a generated function: `jsonenc::encode_expr` names `json$w<key>` from the argument's static type, and `jsondec::decode_expr` names the target's decoder. The emitter's two arms call the rewrite and then pair the clone the tree embeds with the original (RFC-0114 section 26). A call to a declared function is a row the core states; the missing fact is the name, which the builder can compute from a type it holds. Kind (a), with `Spec::Routes` as the precedent. 129 of the 144 spellings are in `examples/`.
+
+**Contract reflection** is a call to the nullary entry that `vyrn-genwasm` appends per contract, `__vyrnGenContractOf_<C>` (`Fn_::gen_entry`). The core states the builtin with the contract name as `Opaque:Static`, and each of the 80 lines holds that pair and nothing else. Kind (a): the route `moduleInterface` has, with a callee the argument names. `std/vyx`, `std/ui` and `std/rpc` hold all 8 bodies.
+
+**An element of a temporary** is `bytes(s)[i]` or `chars(s)[i]` in 56 of the 63 lines. `Builder::reads_an_element` admits a receiver only where `is_place_read` holds, so the builder states the `@at` as a call. The owned path of `Builder::read_val_inner` binds any receiver through `Builder::place` and releases it after the read, so the rule exists and the heapless read does not ask it. The other 7 lines are a user container's `place at` or a projection, which RFC-0120 resolves. Kind (a).
+
+**Line and column** are stated twice in Vyrn. `runtime$lineAt` and `runtime$colAt` read a pointer and a length, and the arm calls them. `text$lineAtV` and `text$colAtV` read an `Array<UInt8>`, and nothing calls them. The prelude row keeps the builtin for a line-start memo that lived in the interpreter, and no Rust code holds one. `lineAtV` has the prelude row's signature, and `std/text` is linked into every program (`RtModule::always`). Kind (a): a route. `std/vyx`'s `vyxLineAt` and `vyxColAt` are 50 of the 51 lines.
+
+**Streams** are about 500 lines of inline emission over a six-word header, from `Fn_::stream_from_array` to `Fn_::stream_next`. Kind (c): runtime entries the runtime in Vyrn does not have. The `std` bodies are `std/stream`'s combinators and their lambdas, which also make a function value (`fromStep` takes the step), so they wait on that decision too.
+
+**Method dispatch** is decided in section 2.1: a method is a call after dispatch. The builder states `Callee::Method`, and the emitter mangles the impl's name from the receiver's concrete type (`ftypes::impl_method_name`, `protocol_methods`). `m7-screen3` stated the `Fallible` impl calls as `Callee::Fn` by the same function. A generic impl callee waits on `Cx::sigs`, as `m7-screen3` left it. Kind (a).
+
+**The map and array tail** is 8 lines alone. `@remove` is 15 of its 26 lines, and 12 of those are the generated RPC clients, which also call a stored callback. Kind (a): `@remove` on a map is `Spec::Removes` with a key.
+
+**Logging** is `logger(n)`, the identity on a String, and a level call that is written only when the configured level clears it. This census read the arm for `logger` only; a track reads the level write before it starts. Kind (a).
+
+**The served stream** is a trap with a constant sentence (`serve_stream_trap`). It is a `Spec::Traps` row whose message the builder states as a literal. Kind (a). The bodies are `std/http`'s `httpOpen` and `httpOpenSocket`.
+
+**Type reflection** is a compile-time value: `jsonSchema<T>()` is one String, and `schemaOf<T>()` is a record literal (`Fn_::reflected`). The builder can state the first as a literal. The second is a tree, which needs a memo with the lifetime `project::site`'s has. Kind (b).
+
+**A checked construction**, `T?(v)`, has a row (`Ctor::Try`) and no reader. `Fn_::try_construct` evaluates the argument and tests `predicate_holds` in one body. Kind (a): a reader.
+
+### The decisions proposed
+
+The line counts below are estimates from reading the code, not measured diffs.
+
+**Line and column, proposed.** `lineAt` and `colAt` route to `std/text`'s `lineAtV` and `colAtV`, which state the rule the runtime states a second time. The arm, `runtime$lineAt`, `runtime$colAt`, their `Rt` entries and the prelude's note on the memo go in the same commit. Two rows in `RT_MODULES` come and about 70 lines go. The licence is the manifest, where `textbytes` moves, and the site export's time, because `lineAtV` reads a checked element where the runtime reads a raw byte.
+
+**Contract reflection and the JSON routes, proposed.** A builtin whose callee is a function the program declares, named by a type or a declaration the call names, is a call to that function. One frontend function states each name (`contractOf`, `toJson`, `fromJson`), and the builder, the arm and `vyrn-genwasm` ask it. The builder states `Callee::Fn` where the program declares the name and the gap otherwise, as it reads a `Spec::Routes` row. The arm calls the function on its own arguments, so the clone pairing goes. About 40 lines come in `core.rs` and the frontend, and about 20 go from `direct.rs`. The licence is the kernel corpus and the refusal corpus, because a declared callee reads its argument by the declared capability where a builtin stored it, and the manifest for the `examples/` bodies.
+
+**The generator host imports, proposed.** They are one row kind, `Spec::Host`, with the shape of `Spec::Lanes`: the row names the import, one emission function reads the operands' types, and both walks call it. `gen_builtin` splits into that function and the atom stream. About 60 lines in `core.rs` and `direct.rs`. No example's wasm holds a host import, so the manifest cannot witness it; the licence is `vyrn emit-gen` over the corpus and the site export, byte-identical, and the kernel corpus.
+
+**An element of a temporary, proposed.** A heapless element read of a receiver that is not a place binds the receiver to a temporary and releases it after the read, by the rule the owned read states. `reads_an_element` stops asking `is_place_read`, and the two paths read one rule. A few lines in `core.rs`. The licence is the kernel corpus, the manifest and the residue ratchet, because the temporary's release moves into the rows.
+
+**The small readers, proposed.** `serveStream` is a `Spec::Traps` row with its sentence as a literal, and `serve_stream_trap` moves to the frontend. `jsonSchema<T>()` is a String literal the builder states; `schemaOf` waits for a memo. `Ctor::Try` gets a reader, and `try_construct` splits so that the arm and the reader call one check. A method is a `Callee::Fn` call to the impl `impl_method_name` names, as the `Fallible` switch states it. Each is under 30 lines and closes 11 to 33 lines of the tally.
+
+**Function values, for the lead to decide.** The core states both mechanisms, and the emitter's registry stays the one home of a tag. A function value made for storage is a `Make` of the signature's closure enum, with the target named and the captures as parts, and the emitter reads it through `build_fnval`. A call through a stored value stays `Callee::Value`, read as the call to the signature's dispatcher. A specialization is an instance the core builds per target: a `fn`-typed parameter becomes the target's captures, a call through it is `Callee::Fn` to the target, and a function name or a lambda in argument position states no value. The stored half is about 80 lines. The specialization half moves the per-target instance from `ho_call` into the lowering's instance enumeration, about 250 lines against as many that leave `direct.rs` when its arm reads zero. The other choice, dispatching every call through the closure enum and deleting the specialization, changes the cost of every higher-order call, so a bench number decides it and this census does not. Streams follow this decision and then move into the runtime in Vyrn.
+
+### The order
+
+By lines of the tally made whole per line written. The third column counts a line once every group it names is closed, so step 7 also takes the lines that wait on a function value and on a group before it.
+
+| step | group | lines whole | cumulative |
+|---|---|---|---|
+| 1 | line and column, which deletes lines | 51 | 51 |
+| 2 | contract reflection | 80 | 131 |
+| 3 | JSON routes | 176 | 307 |
+| 4 | an element of a temporary | 62 | 369 |
+| 5 | generator host imports | 219 | 588 |
+| 6 | the served stream, type reflection, the checked construction, method dispatch, logging | 93 | 681 |
+| 7 | function values | 282 | 963 |
+| 8 | streams and the map and array tail | 90 | 1,053 |
+
+
+Step 6 counts the 7 lines that call `schemaOf`, which wait for its memo.
+
 ## What the tracks since have changed
 
 Each track below retired tags, so every table above is the state before them
