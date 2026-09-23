@@ -27526,3 +27526,47 @@ Findings:
 - the arm has two rules for one fact: it checks the literal at `let a: Age = 20` and skips it at `Age(20)`, and the checker refuses a failing constant in both spellings. The rows follow the arm in both, so no byte moves on it; the check at a proven literal is dead work, and removing it is a change of its own.
 - no AST arm reached zero: `Stmt::Let` on the arm 10,839 to 10,794, `Stmt::Return` 7,531 to 7,502, `Expr::Var` 94,878 to 94,835, so nothing in `FORMS` turns false.
 Left: a heap value crossing into a validated type, blocked by a constructor row that takes its operand; a validated record's part and result, blocked by the check the make row does not state.
+
+#### A String read is the load the rows state, and a temporary's slot was the clause no row could replace (2026-09-23, `m7-screen2`)
+Decision: a read of a place whose value lives in one wasm local passes the statement screen, a String's pointer as much as an `Int64`; a temporary's slot stays in the arm, because the arm gives it back at the end of its source statement and no row states that extent. Mine, on the counts below.
+The count, before any code moved, from a temporary instrument in `Fn_::core_walkable` (every refusing clause records a name and passes) and `VYRN_GAP_TALLY`, over the gate list in one cache state: `cargo test -p vyrn-cli` as four `--test` groups and `--bins`, and `coredrive --ignored`. One line per body per compile, deduplicated per process: 121,083 bodies, 69,943 taken, 40,710 refused with no gap, 10,430 with a gap.
+
+| first clause of a body with no gap | first | only |
+|---|---|---|
+| a `while` that hoists a header (`hoists_a_header`) | 9,413 | 8,398 |
+| a name of an array the body makes | 3,945 | 0 |
+| a read of a field that is a String | 2,967 | 1,289 |
+| a name of an array read from a name | 2,721 | 0 |
+| a store into a name that is a String | 2,479 | 1,957 |
+| an aggregate call a `match` scrutinizes | 2,325 | 812 |
+| a name of a record the body makes | 2,235 | 0 |
+| an aggregate call into a temporary that does not land | 1,714 | 1,179 |
+| a read of an element that is a String | 1,412 | 855 |
+| a store into module state that is a String | 340 | 111 |
+| a made record into a temporary | 227 | 223 |
+| a read of module state that is a String | 163 | 144 |
+
+| first gap | lines | only gap |
+|---|---|---|
+| `Call:Builtin:@at` | 5,766 | 5,734 |
+| `Call:Builtin:@concat` | 3,819 | 3,662 |
+| `Call:Builtin:moduleInterface` | 1,227 | 1,043 |
+| `Call:Builtin:readFile` | 878 | 846 |
+| `Make:Map` | 803 | 486 |
+| `Opaque:Static` | 495 | 375 |
+
+Went: `Fn_::core_rhs_readable`'s scalar clause for a `Rhs::Read`, which asks `Fn_::core_framed` now; `vyrn-cli`'s install lines, into one `install` that `real_main` and the serve doors test call. Stayed: a take, scalar, because a String take leaves a hole the row does not read; an unbound aggregate call and an unbound made layout, 1,179 and 223 alone, because the walk's slot outlives the statement; the String store, 1,957 alone, because the arm grows the buffer in place (`self_append_spine`) and the row states a concat and a store; the hoist, 8,398 alone, because the rows state no hoisted header (RFC-0125 M1).
+Lines: `direct.rs` 19,492 to 19,496. `main.rs` 7,096 to 7,104. Refusals: not run; no pass that refuses was touched. Manifest: 27 of 176 rows, written in the read commit.
+Licence:
+- `coredrive --ignored`: 168 programs, 21,556 bodies. Taken 15,304 to 15,427 of 21,512 on `m7-alias`; rebased onto `m7-where`, 15,342 to 15,467, with 20,385 whole and 1,381 carried end to end, both unmoved by this track. 1 byte-identical, 167 run the same, 0 run apart.
+- the moved rows, 25 on `m7-alias` and 27 rebased, read in `wat` against the branch-point binary: a local per temporary and a load after the index, the `m7-temporary` shape. Each moved example runs the same under both binaries with `VYRN_LEAK_CHECK=1`.
+- `VYRN_FORM_TALLY` over the gate list at the head, with a core: `Stmt::Break` 3 compiles, all `jchain.vyrn`'s `main`, and 0 from the unit-test binary, which emitted 13 before the install; `Stmt::IfLet` 1,456, `Stmt::Drop` 6,154, `Stmt::ForIn` 15,570, `Stmt::While` 71,905, `Stmt::Let` 118,401. No arm reads zero; nothing in `FORMS` turns false.
+- `residue --ignored`, 495 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed. `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- the bench corpus, 17 programs and 78 benches, base and head interleaved per program, three rounds, best of three: median ratio 1.000, from 0.826 to 1.045, median noise band 1.062. No row outside its band, none past x1.50.
+- `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `effects`: 29,988 judged, 0 unattributed. `typed`: 238,188 stores judged, 0 unjudged. `coretables`: 175 programs, green.
+- `cargo test -p vyrn-cli` as four `--test` groups and `--bins`: 649 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed. Both formatters clean; the release build has no warning; the manifest check green after the write. Re-pinned: `emitter_census` the mapping 9,690 to 9,694, `both, for two questions` 8,994 to 8,998; `cli_census` a command's own path 5,125 to 5,114, shared machinery 1,529 to 1,547, tests 856 to 857, `(dispatch)` 269 to 258.
+Findings:
+- the screen's `binding` clause on an aggregate call and on a made layout stated the frame rule of RFC-0125 M1: the arm resets the frame after a source statement that bound nothing, and the whole-body walk has no statement to reset at. Both were admitted and measured, 15,427 to 15,489 to 15,534 taken and every program running the same; `fieldstore.rs`'s `a_statements_temporaries_are_given_back_at_its_end` then read a frame of 48 bytes where it pins 16, and a frame that sums its temporaries can pass `FRAME_LIMIT` where the arm's does not. Both slices were dropped.
+- the hoist clause is the largest one left alone: 8,398 bodies, most of them nine `std/text` and `std/num` functions compiled once per program.
+- a copy of `vyrn` outside the tree finds no std root, and a module compare with one reads every program as unmoved. `VYRN_STD` fixes it.
+Left: the hoist, blocked by a header the rows re-walk at every read; the unbound temporary and the unbound made layout, blocked by a slot extent the rows do not state; the String store, blocked by the in-place append the rows do not state; the `match` scrutinee of an aggregate call and `runtime$intStr`, blocked by the slot the arm hands the switch and by the hoist; `jchain.vyrn`'s `break`, blocked by `@concat` and `@at` on a user container; scalar `modify` arguments, `@lane`, `@f32x4Load`, `@at` of a map entry, the stream pull and `Switch:Impl`, not reached in the budget.
