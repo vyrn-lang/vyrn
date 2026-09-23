@@ -201,6 +201,18 @@ pub const GEN_REFLECT: &str = "__vyrnGenReflect";
 pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
 pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
 
+/// The generator-host entry points the ENGINE synthesizes (RFC-0076 M3b).
+///
+/// Each is an ordinary Vyrn function the engine appends to the wrapper program:
+/// it asks the host to compute the value, then decodes it by walking the static
+/// type. A builtin's call site is redirected to it, so the decode is compiled by
+/// the ordinary emitter. Declared here so the core's route rows and the engine
+/// name one function (RFC-0125 M7).
+pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
+pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
+/// Suffixed with the contract's name: the argument is a declaration, not a value.
+pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
+
 /// What one of those three answers, at that arity.
 fn gen_host_primitive(name: &str, argc: usize) -> Option<Type> {
     if !GEN_HOST.with(|g| g.get()) {

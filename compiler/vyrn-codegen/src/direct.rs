@@ -18105,7 +18105,9 @@ impl<'p> Fn_<'_, 'p> {
                     _ => self.slot_call(m, b, callee, &mut operand, line),
                 };
             }
-            None => {}
+            // A routed builtin is the declared call below, through the
+            // signature [`Fn_::core_sig`] answers for the function it names.
+            Some(Spec::Routes(_)) | None => {}
         }
         // `T(v)` of a validated type: the operand at the base, then the check
         // (RFC-0125 §2.2). A literal was proven by the checker, which refuses
@@ -18787,6 +18789,11 @@ impl<'p> Fn_<'_, 'p> {
     /// one name that hits and must not be called — an unaudited build drops
     /// its four hooks rather than emitting them.
     fn core_sig(&self, callee: &str, kind: Callee) -> Option<Sig> {
+        // A routed builtin is a call to the function its row names.
+        let (callee, kind) = match core_builtin(callee, kind) {
+            Some(Spec::Routes(f)) => (*f, Callee::Fn),
+            _ => (callee, kind),
+        };
         if kind != Callee::Fn || self.audit_dropped(callee) {
             return None;
         }
@@ -19479,9 +19486,10 @@ impl<'p> Fn_<'_, 'p> {
             // that hands back an aggregate is an aggregate call.
             Some(Spec::Removes) => self.core_removes(body, callee, kind, args) == Some(false),
             // A rebuild is read together with the store after it
-            // ([`Fn_::core_rebuilt`]), and a built aggregate as an aggregate
-            // call ([`Fn_::core_agg_call`]); neither alone.
-            Some(Spec::Rebuilds | Spec::Builds(_)) | None => false,
+            // ([`Fn_::core_rebuilt`]), a built aggregate as an aggregate call
+            // ([`Fn_::core_agg_call`]), and a routed builtin as the declared
+            // call [`Fn_::core_sig`] answers for; none alone.
+            Some(Spec::Rebuilds | Spec::Builds(_) | Spec::Routes(_)) | None => false,
         }
     }
 

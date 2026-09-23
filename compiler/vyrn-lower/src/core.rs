@@ -1675,6 +1675,12 @@ pub enum Spec {
     /// lane index is a literal the row carries, which the checker proved
     /// constant and in range.
     Lanes,
+    /// The call is a call to the named function, which the program links:
+    /// an entry a generator host's engine synthesizes, or a `std` function a
+    /// builtin routes to (`loader::RT_MODULES`). The emitter reads it as a
+    /// declared callee, and where the program does not define the function it
+    /// reads no such call.
+    Routes(&'static str),
     /// An array receiver, and for `@swapRemove` an index at `Int64`. The call
     /// shrinks the receiver in its own storage and hands back what it
     /// removed: `@pop` an `Option` of the last element, `@swapRemove` the
@@ -1760,6 +1766,11 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@i32x4Store", Spec::Lanes),
             ("@f64x2Load", Spec::Lanes),
             ("@f64x2Store", Spec::Lanes),
+            (
+                "moduleInterface",
+                Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_MODULE_INTERFACE),
+            ),
+            ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
             ("@pop", Spec::Removes),
             ("@swapRemove", Spec::Removes),
             ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),
@@ -1807,6 +1818,14 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 Spec::Builds(Type::Array(Box::new(Type::Param("K".into())))),
             ),
         ]
+        .into_iter()
+        .chain(
+            vyrn_frontend::loader::RT_MODULES
+                .iter()
+                .flat_map(|rt| rt.routes)
+                .map(|(builtin, f)| (*builtin, Spec::Routes(*f))),
+        )
+        .collect()
     })
 }
 
