@@ -116,6 +116,10 @@ pub struct NameInfo {
     /// the ownership half: it excepts the take, and [`NameInfo::borrow_kind`]
     /// keeps the words.
     pub must_use_param: bool,
+    /// A String accumulator [`crate::append::append_candidates`] admits: its
+    /// `let` gives it the ownership word, and `s = s + e` on it is one
+    /// `@strAppend` row ([`Spec::Rebuilds`]).
+    pub grows: bool,
     /// The path the READER wrote, for a temporary this pass minted to hold a
     /// read of a place: `p.name`, `xs[i]`, `d.title`. A refusal about the
     /// temporary is a refusal about that read, and `@borrow` is a name no
@@ -1654,10 +1658,16 @@ pub enum Spec {
     /// literal. The call writes the line and returns to nobody; the
     /// [`St::Trap`] the builder states after it is what ends the path.
     Traps,
-    /// An array receiver first, and at most one operand at whatever type the
-    /// row put on its name. The runtime writes the new triple into the
-    /// receiver's own storage, so the result is the receiver, and the store
-    /// the builder states after the call puts back what is already there.
+    /// A receiver first, rebuilt in place by the runtime. An array's
+    /// receiver takes at most one operand at whatever type the row put on
+    /// its name: the runtime writes the new triple into the receiver's own
+    /// storage, so the result is the receiver, and the store the builder
+    /// states after the call puts back what is already there.
+    /// `@strAppend`'s receiver is a String accumulator ([`NameInfo::grows`])
+    /// and its operands are Strings: the runtime grows the buffer when the
+    /// accumulator's ownership word says this path allocated it and copies
+    /// it otherwise, and the store after the call puts the new address
+    /// into the name.
     Rebuilds,
     /// Operands at whatever type the row put on their names, and a result at
     /// the stated type that the call builds in storage of its own. The caller
@@ -1724,6 +1734,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@clear", Spec::Rebuilds),
             ("@append", Spec::Rebuilds),
             ("@copyFrom", Spec::Rebuilds),
+            ("@strAppend", Spec::Rebuilds),
             ("bytes", Spec::Builds(Type::Array(Box::new(u8_)))),
             (
                 "stringFromBytes",
@@ -2086,6 +2097,8 @@ fn build_seeded(
         rebinding: false,
         call_keeps: None,
         pending_closure: None,
+        appends: std::collections::HashSet::new(),
+        region: 0,
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -2120,6 +2133,7 @@ fn build_seeded(
         b.keyed(n, p as *const _ as usize);
         b.body.params.push(n);
     }
+    b.appends = crate::append::append_candidates(&f.body);
     let mut out = Vec::new();
     b.block(&f.body, &mut out)?;
     cut(&mut out);
@@ -2193,6 +2207,8 @@ pub fn build_module_state<'a>(
         rebinding: false,
         call_keeps: None,
         pending_closure: None,
+        appends: std::collections::HashSet::new(),
+        region: 0,
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -2300,7 +2316,10 @@ fn build_outside_seeded<'a>(
         rebinding: false,
         call_keeps: None,
         pending_closure: None,
+        appends: std::collections::HashSet::new(),
+        region: 0,
     };
+    b.appends = crate::append::append_candidates(block);
     let mut out = Vec::new();
     b.block(block, &mut out)?;
     cut(&mut out);
@@ -2377,6 +2396,11 @@ struct Builder<'a> {
     /// receiver's last owner however the substituted name reads
     /// ([`Builder::takes_scrutinee`]).
     reading: Vec<Name>,
+    /// The body's String accumulators ([`crate::append::append_candidates`]).
+    appends: std::collections::HashSet<String>,
+    /// How many `region`s enclose the statement being lowered. An arena
+    /// buffer cannot grow, so an append inside one is the `concat` call.
+    region: u32,
 }
 
 impl<'a> Builder<'a> {
@@ -2401,6 +2425,7 @@ impl<'a> Builder<'a> {
             arg_drop: None,
             holes: Vec::new(),
             receiver_malloc: false,
+            grows: false,
             must_use_param: false,
             path: None,
             for_consume: false,
@@ -3178,6 +3203,7 @@ impl<'a> Builder<'a> {
                         self.report_reason(&rhs, &ty, false, false, self.lends(value));
                     out.push(St::Let(n, rhs));
                     self.release_receiver(value, out, true);
+                    self.grows(n, name);
                     self.scope.push((name.clone(), n));
                     self.keyed_let(n, sid);
                     return Ok(());
@@ -3242,6 +3268,7 @@ impl<'a> Builder<'a> {
                 if let Expr::Field { .. } = value {
                     self.release_receiver(value, out, false);
                 }
+                self.grows(n, name);
                 self.scope.push((name.clone(), n));
                 self.keyed_let(n, sid);
             }
@@ -3254,9 +3281,16 @@ impl<'a> Builder<'a> {
                     }
                     None => None,
                 };
-                self.rebinding = true;
-                let v = match check {
-                    Some(to) if lit_of(value).is_none() => {
+                let grown = match (n, &check) {
+                    (Some(n), None) if self.region == 0 && self.body.names[n as usize].grows => {
+                        crate::append::self_append_spine(name, value).map(|parts| (n, parts))
+                    }
+                    _ => None,
+                };
+                self.rebinding = grown.is_none();
+                let v = match (check, grown) {
+                    (_, Some((n, parts))) => self.str_append(n, &parts, *line, out),
+                    (Some(to), None) if lit_of(value).is_none() => {
                         self.check(&to, value, *line, out).map(|rhs| {
                             let t = self.temp(Type::Named(to), *line);
                             self.bind(t, rhs, out);
@@ -3348,6 +3382,11 @@ impl<'a> Builder<'a> {
                     site: Site::Node(key),
                     releases,
                 });
+                // An append's operand temporaries, which [`Builder::str_append`]
+                // left queued so the store stays next to its row.
+                for t in std::mem::take(&mut self.after_of_rhs) {
+                    out.push(St::Drop(t, Site::None, 0));
+                }
             }
             Stmt::SetField {
                 name,
@@ -3834,7 +3873,10 @@ impl<'a> Builder<'a> {
             // runtime's. So the body is an ordinary block here and this pass
             // asks nothing about the depth.
             Stmt::Region { body, .. } => {
-                self.block(body, out)?;
+                self.region += 1;
+                let r = self.block(body, out);
+                self.region -= 1;
+                r?;
                 if let Some(St::Block { region, .. }) = out.last_mut() {
                     *region = true;
                 }
@@ -3881,6 +3923,50 @@ impl<'a> Builder<'a> {
     /// whole names, and a sub-place the plan knows to be empty — a payload
     /// already taken out, an `Option` already `None` — is not a name it can
     /// see. Sub-place ownership is M3's judgment, not M2's.
+    /// Marks `n`, bound by a `let` of `name`, as a String accumulator where
+    /// the whitelist admits the name.
+    fn grows(&mut self, n: Name, name: &str) {
+        let info = &mut self.body.names[n as usize];
+        info.grows = self.appends.contains(name)
+            && vyrn_frontend::types::resolve(&info.ty, self.proto.types()) == Type::Str;
+    }
+
+    /// `s = s + a + b` on an accumulator: one `@strAppend` row that reads
+    /// `s` and each part in written order, which the store after it puts
+    /// back into `s`. The parts are the operands the `+` chain would read,
+    /// at the same argument keys, and their temporaries stay queued, as
+    /// [`Builder::rhs`] queues them, until the caller has pushed the store.
+    fn str_append(
+        &mut self,
+        s: Name,
+        parts: &[&'a Expr],
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        let outer = std::mem::take(&mut self.after);
+        self.drain += 1;
+        let mut args = vec![(Val::Name(s), Capability::Read)];
+        let read = parts.iter().try_for_each(|p| {
+            args.push((self.read_arg(p, out, "@concat", 1)?, Capability::Read));
+            Ok(())
+        });
+        self.drain -= 1;
+        self.after_of_rhs = std::mem::replace(&mut self.after, outer);
+        read?;
+        let t = self.temp(Type::Str, line);
+        out.push(St::Let(
+            t,
+            Rhs::Call {
+                callee: "@strAppend".into(),
+                args,
+                write_back: false,
+                kind: Callee::Reserved,
+                ret: Some(Type::Str),
+            },
+        ));
+        Ok(Val::Name(t))
+    }
+
     /// A String concatenation builds a fresh buffer whatever it reads, so
     /// `s = s + x` displaces the old one and does not hand it back. Both
     /// compiled backends spell this exception `fresh_str`; it stands here so

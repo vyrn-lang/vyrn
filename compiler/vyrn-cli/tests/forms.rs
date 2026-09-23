@@ -75,6 +75,9 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
             // moved here with the rule (RFC-0125 §3 M3, the obligation
             // slice). A form it walks is a form this column states.
             "vyrn-lower/src/typed.rs",
+            // The String accumulator whitelist the builder and the emitter
+            // both ask (RFC-0125 M7, the accumulator row).
+            "vyrn-lower/src/append.rs",
         ],
     ),
     ("shared", &["vyrn-codegen/src/lib.rs"]),

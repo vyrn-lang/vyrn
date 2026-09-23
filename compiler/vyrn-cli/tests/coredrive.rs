@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 12] = [
+const SHAPES: [(&str, &str); 13] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -216,6 +216,14 @@ const SHAPES: [(&str, &str); 12] = [
         "a payload binder that is a layout",
         "type P = { x: Int64, y: Int64 } fn f(o: Option<Array<Int64>>) -> Int64 { let mut t = 0          if let Some(xs) = o { t = xs[0] + xs.length } return t }          fn g(o: Option<P>) -> Int64 { return match o { Some(p) => p.x + p.y * 10, None => 0 } }          fn vyrnTestMain() -> Int64 { return f(Some([7, 8, 9])) + f(None) + g(Some(P { x: 1, y: 2 })) * 100 }",
     ),
+    // An accumulator's append is one `@strAppend` row, and its ownership word
+    // is the `let`'s (RFC-0125 M7). `examples/` seeds every accumulator it
+    // grows from a literal or a call and never stores into one between
+    // appends, so a borrowed seed and a store that clears the word are here.
+    (
+        "a String accumulator seeded, stored into and borrowed",
+        "type R = { name: String, n: Int64 }          fn grow(n: Int64) -> String { let mut s = \"[\" let mut i = 0          while i < n { s = s + i.toString() + \",\" i = i + 1 } return s }          fn tail(r: R) -> String { let mut s = r.name s = s + \"!\" + r.name return s }          fn vyrnTestMain() -> Int64 { let mut s = grow(3) s = s + \"x\" s = \"y\" s = s + grow(2)          let r = R { name: \"ab\", n: 1 } let t = tail(r) return s.byteLength * 100 + t.byteLength }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -225,7 +233,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 12] = [
+const SHAPE_PIN: [(&str, usize, usize); 13] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -238,6 +246,11 @@ const SHAPE_PIN: [(&str, usize, usize); 12] = [
     ("a map key read the rows carry", 0, 0),
     ("a copy of a layout that owns no heap", 0, 0),
     ("a payload binder that is a layout", 0, 0),
+    (
+        "a String accumulator seeded, stored into and borrowed",
+        0,
+        0,
+    ),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
