@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 42] = [
+const SHAPES: [(&str, &str); 43] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -437,6 +437,12 @@ const SHAPES: [(&str, &str); 42] = [
         "a method call on a concrete receiver",
         "type Tally = { counts: Array<Int64>, running: Int64 }          protocol Counting { fn record(modify self, n: Int64) fn sum(read self) -> Int64 }          impl Counting for Tally { fn record(modify self, n: Int64) { self.counts.push(n) self.running = self.running + n } fn sum(read self) -> Int64 { return self.running + self.counts.length } }          protocol Label { fn label(self) -> String }          impl Label for Int64 { fn label(self) -> String { return \"i\" + self.toString() } }          impl Label for Bool { fn label(self) -> String { if self { return \"yes\" } return \"no\" } }          fn both(x: Int64, flag: Bool) -> String { return label(x) + \"/\" + flag.label() }          fn vyrnTestMain() -> Int64 { let mut t = Tally { counts: [], running: 0 } t.record(5) record(t, 7) return t.sum() * 1000 + both(42, true).byteLength }",
     ),
+    // A discarded call whose result is a layout lands in a slot of the row's own,
+    // given back when the row ends, and a popped record is released (RFC-0125 M7).
+    (
+        "a discarded removal and a discarded layout result",
+        "type P = { x: Int64, y: Int64 }          type Q = { k: Int64 }          fn mk(k: Int64) -> P { return P { x: k, y: k * 2 } }          fn vyrnTestMain() -> Int64 { let mut xs: Array<Int64> = [1, 2, 3, 4] let mut qs: Array<Q> = [Q { k: 1 }, Q { k: 2 }, Q { k: 3 }] let mut ps: Array<P> = [mk(1), mk(2), mk(3), mk(4), mk(5)] let mut i = 0          while i < 2 { xs.pop() qs.pop() ps.swapRemove(0) mk(i) i = i + 1 }          return xs.length * 1000 + qs.length * 100 + ps.length * 10 + ps[0].x }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -446,7 +452,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 42] = [
+const SHAPE_PIN: [(&str, usize, usize); 43] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -513,6 +519,7 @@ const SHAPE_PIN: [(&str, usize, usize); 42] = [
     ("a `jsonSchema` bound, stored into and concatenated", 0, 0),
     ("a checked construction the rows carry", 0, 0),
     ("a method call on a concrete receiver", 0, 0),
+    ("a discarded removal and a discarded layout result", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

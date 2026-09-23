@@ -18161,6 +18161,11 @@ impl<'p> Fn_<'_, 'p> {
                 (None, Some(Spec::Lanes)) => at
                     .clone()
                     .ok_or_else(|| gap("a lane builtin the checker did not type", line)),
+                // What a removal hands back is the element, or an `Option` of
+                // it, at the type the row states.
+                (None, Some(Spec::Removes)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a removal the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(callee, *kind, solved) {
@@ -19942,8 +19947,12 @@ impl<'p> Fn_<'_, 'p> {
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
             // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
+            // A discarded layout is the storage its call wrote, a slot of the
+            // row's own that the row's end gives back, as an unbound
+            // temporary's is.
             St::Do { rhs, line, .. } => {
-                self.core_rhs_readable(body, rhs) && self.core_rhs_ty(rhs, *line).is_ok()
+                (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))
+                    && self.core_rhs_ty(rhs, *line).is_ok()
             }
             // A release stated as a statement ([`Fn_::core_drop`]) needs the
             // name's place: one wasm local, or a layout the walk bound, which
