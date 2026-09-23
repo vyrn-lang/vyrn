@@ -17816,6 +17816,28 @@ impl<'p> Fn_<'_, 'p> {
                         disown(b, Place::Slot(at));
                     }
                 }
+                // A map entry: the insert or update the arm and a map literal
+                // make ([`Fn_::map_set`]), which releases the value it
+                // displaces where the row says so.
+                St::Store {
+                    place: vyrn_lower::core::Place::Key(base, k),
+                    value,
+                    line,
+                    releases,
+                    ..
+                } => {
+                    let (mty, off) = self.core_addr(m, b, body, w, base, *line)?;
+                    self.core_step(b, off);
+                    let Type::Map(key_t, val) = self.cx.resolve(&mty) else {
+                        return unsupported("a key store into no map", *line);
+                    };
+                    let hdr = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalSet(hdr));
+                    let l = self.layout_of(&mty, *line)?;
+                    let kv = [k.clone(), value.clone()];
+                    let mut parts = Parts::Core(body, &kv, w);
+                    self.map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, *releases, *line)?;
+                }
                 // A place with an address: the address, what the place held
                 // kept aside where the row releases it, the value landed, and
                 // the kept value freed, the arm's order at `x = v`, `r.f = v`
@@ -19862,11 +19884,18 @@ impl<'p> Fn_<'_, 'p> {
             // accumulator's word cleared.
             St::Store { place, value, .. } => {
                 use vyrn_lower::core::Place as At;
+                let scalar_only = vyrn_lower::kernel::root_of(place).is_none();
                 let ty = match place {
                     At::Name(n) => Some(body.names[*n as usize].ty.clone()),
+                    At::Key(_, k) if scalar_only || !self.core_val_readable(body, k) => None,
+                    At::Key(m, _) => {
+                        match self.core_place_ty(body, m).map(|t| self.cx.resolve(&t)) {
+                            Some(Type::Map(_, v)) => Some(*v),
+                            _ => None,
+                        }
+                    }
                     p => self.core_place_ty(body, p),
                 };
-                let scalar_only = vyrn_lower::kernel::root_of(place).is_none();
                 let global = matches!(place, At::Global(_));
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
