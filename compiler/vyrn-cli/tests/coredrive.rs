@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 35] = [
+const SHAPES: [(&str, &str); 36] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -304,6 +304,13 @@ const SHAPES: [(&str, &str); 35] = [
          fn vyrnTestMain() -> Int64 { let h = land(4) let a = arr(2) \
          return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 + boxed(6) * 100000000000 + made(3) * 10000000000000 }",
     ),
+    // A field read out of a root handed to `modify` holds the field's address
+    // where no `modify` of the root falls in the read's extent: after the call,
+    // or before it in the same turn.
+    (
+        "a field read beside a `modify` of its root",
+        "type P = { src: Array<Int64>, at: Int64 }          fn step(p: modify P) { p.at = p.at + 1 }          fn grow(p: modify P) { p.src.push(p.at) }          fn total(xs: Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn after(p: modify P) -> Int64 { step(p) let n = total(p.src) return n + p.at * 100 }          fn turns(p: modify P) -> Int64 { let mut t = 0 let mut i = 0 while i < 3 { t = t + total(p.src) grow(p) i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut p = P { src: [1, 2], at: 5 } let a = after(p) let b = turns(p) return a + b * 1000 + p.src.length * 1000000 }",
+    ),
     // A scalar handed to `modify` lives in a local, which has no address, so
     // the call spills it to a slot and reloads it after (RFC-0125 M7).
     // `examples/` hands `modify` only layouts.
@@ -403,7 +410,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 35] = [
+const SHAPE_PIN: [(&str, usize, usize); 36] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -437,6 +444,7 @@ const SHAPE_PIN: [(&str, usize, usize); 35] = [
         0,
     ),
     ("a part built at its offset where its own row stands", 0, 0),
+    ("a field read beside a `modify` of its root", 0, 0),
     ("a scalar `modify` argument", 0, 0),
     (
         "an element a `for` hands on out of a container it alone owns",

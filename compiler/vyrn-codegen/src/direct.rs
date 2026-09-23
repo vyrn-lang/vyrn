@@ -18738,11 +18738,13 @@ impl<'p> Fn_<'_, 'p> {
     /// `consume` of it hands the element on.
     ///
     /// `None` where the program can observe the copy. A binding the body
-    /// stores into, or hands to `modify`, writes a
-    /// value of its own. A callee handed the root, or any root on the chain,
-    /// to `modify` writes where the kernel does not look (`freeNode` in
-    /// `tree.vyrn`). A store into the root is the kernel's, which ends the
-    /// alias there; for module state, a callee's store into it too.
+    /// stores into, or hands to `modify`, writes a value of its own. A root on
+    /// the chain handed to `consume` anywhere in the body may be freed under
+    /// the name. A row of the name's extent that hands a root on the chain to
+    /// `modify` ([`vyrn_lower::kernel::modifies`]) may replace what the name
+    /// points into. Outside the extent the kernel ends the alias at that call
+    /// and refuses a read after it, as it does at a store into the root; for
+    /// module state, a callee's store too.
     fn core_alias<'b>(
         &self,
         body: &'b vyrn_lower::core::Body,
@@ -18777,6 +18779,7 @@ impl<'p> Fn_<'_, 'p> {
             }
         };
         let place = read(n)?;
+        let extent = core_extent(&body.stmts, n, &body.occurrences())?;
         if written
             .iter()
             .any(|(m, c)| *m == n && !(owned && *c == Some(Capability::Consume)))
@@ -18795,7 +18798,16 @@ impl<'p> Fn_<'_, 'p> {
             let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
                 return Some(place);
             };
-            if written.iter().any(|(m, c)| *m == root && c.is_some()) {
+            if written
+                .iter()
+                .any(|(m, c)| *m == root && *c == Some(Capability::Consume))
+                || vyrn_lower::kernel::modifies(
+                    extent,
+                    vyrn_lower::kernel::Root::N(root),
+                    &body.names,
+                    &body.name,
+                )
+            {
                 return None;
             }
             match read(root) {
@@ -20479,6 +20491,28 @@ fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability
         }
         _ => {}
     }
+}
+
+/// The rows of `ss`, or of a list inside it, from the `let` of `n` to the row
+/// its extent ends at ([`vyrn_lower::core::extent_ends`]). `None` where no
+/// list both binds `n` and holds every row that names it.
+fn core_extent<'r>(ss: &'r [St], n: vyrn_lower::core::Name, occurs: &[u32]) -> Option<&'r [St]> {
+    if let Some(at) = ss
+        .iter()
+        .position(|s| matches!(s, St::Let(m, _) if *m == n))
+    {
+        let ends = vyrn_lower::core::extent_ends(ss, occurs);
+        let end = ends.iter().position(|e| e.contains(&n))?;
+        return Some(&ss[at..=end]);
+    }
+    ss.iter().find_map(|s| match s {
+        St::If { then, els, .. } => {
+            core_extent(then, n, occurs).or_else(|| core_extent(els, n, occurs))
+        }
+        St::Loop { body, .. } | St::Block { body, .. } => core_extent(body, n, occurs),
+        St::Switch { arms, .. } => arms.iter().find_map(|a| core_extent(&a.body, n, occurs)),
+        _ => None,
+    })
 }
 
 /// The names a run's switches account for themselves — RFC-0125 M7: every

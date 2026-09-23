@@ -319,6 +319,24 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<
 /// no call is one, and `augment` builds again every body where that answer
 /// could differ.
 pub fn writes(ss: &[St], on: Root, names: &[crate::core::NameInfo], body: &str) -> bool {
+    walk_writes(ss, on, names, body, false)
+}
+
+/// Whether a row of `ss` hands `on`, or a name that may alias it, to a
+/// `modify` parameter: [`writes`] with only its `modify` write points
+/// counted, and a closure that captures an alias as there. The judgment
+/// ends every borrow of `on` at such a call (RFC-0125 M7).
+pub fn modifies(ss: &[St], on: Root, names: &[crate::core::NameInfo], body: &str) -> bool {
+    walk_writes(ss, on, names, body, true)
+}
+
+fn walk_writes(
+    ss: &[St],
+    on: Root,
+    names: &[crate::core::NameInfo],
+    body: &str,
+    modify: bool,
+) -> bool {
     let mut inside = Vec::new();
     ss.iter()
         .for_each(|s| crate::core::names_bound(s, &mut inside));
@@ -334,6 +352,7 @@ pub fn writes(ss: &[St], on: Root, names: &[crate::core::NameInfo], body: &str) 
         inside,
         names,
         depth: 0,
+        modify,
     };
     w.list(ss)
 }
@@ -351,6 +370,8 @@ struct Writes<'a> {
     names: &'a [crate::core::NameInfo],
     /// How many loops inside `ss` enclose the row being asked about.
     depth: usize,
+    /// Whether only a `modify` argument is a write ([`modifies`]).
+    modify: bool,
 }
 
 impl Writes<'_> {
@@ -388,6 +409,8 @@ impl Writes<'_> {
         let hit = writes_of(s, self.names, self.body)
             .into_iter()
             .any(|w| match w {
+                Write::Modify(v) => matches!(v, Val::Name(k) if self.under(&Root::N(*k))),
+                _ if self.modify => false,
                 Write::Store(p) => {
                     let (r, path) = root(p);
                     self.under(&r)
@@ -397,7 +420,6 @@ impl Writes<'_> {
                 Write::Take(p) => self.under(&root(p).0),
                 Write::Hand(v, _) => matches!((v, &self.on), (Val::Name(k), Root::N(n)) if k == n),
                 Write::Release(k) => self.alias.contains(&k),
-                Write::Modify(v) => matches!(v, Val::Name(k) if self.under(&Root::N(*k))),
                 Write::State(gs) => match &self.on {
                     Root::N(_) => true,
                     Root::G(g) => gs.contains(g),
