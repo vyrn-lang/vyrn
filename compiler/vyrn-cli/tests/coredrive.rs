@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 45] = [
+const SHAPES: [(&str, &str); 46] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -401,8 +401,8 @@ const SHAPES: [(&str, &str); 45] = [
     ),
     // A store into a nested place is one store into its path: a field of an
     // element that holds heap, an element of a field, and a field of an
-    // element of a field (RFC-0125 M7, `m7-move`). A String stored into a
-    // field is a store the screen refuses, so `name` is the arm's witness.
+    // element of a field (RFC-0125 M7, `m7-move`), and a String stored into
+    // a field of an element (`m7-store`).
     (
         "a store into a nested place",
         "type Q = { name: String, y: Int64 } type R = { qs: Array<Q>, ns: Array<Int64>, n: Int64 }          fn bump(qs: consume Array<Q>, i: Int64) -> Array<Q> { let mut a = qs a[i].y = 7 return a }          fn deep(r: consume R) -> R { let mut s = r s.ns[1] = s.n * 2 s.qs[0].y = 3 return s }          fn name(qs: consume Array<Q>) -> Array<Q> { let mut a = qs a[0].name = \"r\" + a[0].y.toString() return a }          fn vyrnTestMain() -> Int64 { let qs: Array<Q> = [Q { name: \"n\" + \"0\", y: 2 }, Q { name: \"m\", y: 1 }]          let out = name(bump(qs, 1)) let d = deep(R { qs: [Q { name: \"a\" + \"b\", y: 0 }], ns: [5, 6], n: 4 })          return out[1].y * 1000 + out[0].name.byteLength * 100 + d.ns[1] * 10 + d.qs[0].y }",
@@ -457,6 +457,10 @@ const SHAPES: [(&str, &str); 45] = [
         "a store into a name of an array, an enum and a record",
         "type R = { s: String, n: Int64 }          fn mk(n: Int64) -> R { return R { s: n.toString() + \"r\", n: n } }          fn fill(n: Int64) -> Array<String> { let mut xs: Array<String> = [] let mut i = 0          while i < n { xs.push(i.toString()) i = i + 1 } return xs }          fn opt(n: Int64) -> Option<String> { if n > 0 { return Some(n.toString()) } return None }          fn vyrnTestMain() -> Int64 { let mut xs = fill(2) let mut i = 0          while i < 3 { xs = fill(i + 3) i = i + 1 } let mut o = opt(1) o = opt(22)          let mut r = mk(1) r = mk(333) let t = match o { Some(s) => s.byteLength, None => 7 }          o = opt(0) return xs.length * 1000 + xs[4].byteLength * 100 + r.s.byteLength * 10 + t }",
     ),
+    (
+        "a store into a field of a String, a record, an array and an enum",
+        "type P = { x: Int64, s: String }          type R = { name: String, p: P, xs: Array<Int64>, o: Option<String> }          fn mkp(x: Int64) -> P { return P { x: x, s: x.toString() + \"p\" } }          fn mkr() -> R { let p = mkp(1) let xs: Array<Int64> = [1, 2]          return R { name: \"a\", p: p, xs: xs, o: None } }          fn seq(n: Int64) -> Array<Int64> { let mut xs: Array<Int64> = [] let mut i = 0          while i < n { xs.push(i) i = i + 1 } return xs }          fn some(n: Int64) -> Option<String> { return Some(n.toString()) }          fn vyrnTestMain() -> Int64 { let mut r = mkr() let mut i = 0          while i < 3 { r.name = i.toString() + \"n\" i = i + 1 }          r.p = mkp(77) r.xs = seq(3) r.o = some(123)          let t = match r.o { Some(s) => s.byteLength, None => 0 }          return r.name.byteLength * 10000 + r.p.x * 100 + r.p.s.byteLength * 10 + r.xs.length + t }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -466,7 +470,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 45] = [
+const SHAPE_PIN: [(&str, usize, usize); 46] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -537,6 +541,11 @@ const SHAPE_PIN: [(&str, usize, usize); 45] = [
     ("`@str` of a String temporary", 0, 0),
     (
         "a store into a name of an array, an enum and a record",
+        0,
+        0,
+    ),
+    (
+        "a store into a field of a String, a record, an array and an enum",
         0,
         0,
     ),

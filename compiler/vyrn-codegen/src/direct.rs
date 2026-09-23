@@ -19857,22 +19857,24 @@ impl<'p> Fn_<'_, 'p> {
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
             // A store into a place with an address ([`Fn_::core_stmts`]). A
             // layout's value is a name of its type, whose bytes are copied.
+            // Module state takes a scalar, and a String stored into the
+            // global itself, released by the row's `releases` with its
+            // accumulator's word cleared.
             St::Store { place, value, .. } => {
                 use vyrn_lower::core::Place as At;
                 let ty = match place {
                     At::Name(n) => Some(body.names[*n as usize].ty.clone()),
                     p => self.core_place_ty(body, p),
                 };
-                let named = matches!(place, At::Name(_));
-                // Module state takes a String too, released by the row's
-                // `releases`, with its accumulator's word cleared.
+                let scalar_only = !matches!(place, At::Name(_) | At::Field(..))
+                    || vyrn_lower::kernel::root_of(place).is_none();
                 let global = matches!(place, At::Global(_));
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
                     let fits = match self.cx.repr(&t, 0) {
-                        _ if !named => {
+                        _ if scalar_only => {
                             (core_scalar(&r) || (global && r == Type::Str))
                                 && self.core_val_readable(body, value)
                         }
