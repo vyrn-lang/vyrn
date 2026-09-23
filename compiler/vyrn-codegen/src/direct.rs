@@ -2232,8 +2232,8 @@ struct Fn_<'a, 'p> {
     /// and why no function table exists.
     fn_binds: HashMap<String, FnBinding>,
     /// The local `String` accumulators `s = s + …` may grow in place, from
-    /// [`crate::append_candidates`] — the SAME whitelist the textual backend
-    /// clears, not a second one. Two copies of that rule would be two answers to
+    /// [`vyrn_lower::append::append_candidates`] — the SAME whitelist the core's
+    /// builder asks, not a second one. Two copies of that rule would be two answers to
     /// "may this buffer move", and one of them a use-after-free.
     append_ok: std::collections::HashSet<String>,
     /// Whether this body is a declared `release` (RFC-0086): the CALLER walks
@@ -2478,7 +2478,9 @@ fn lower_body(
         // A lambda's bare expression cannot qualify a name: the whitelist is
         // grown by `x = x + ..`, which is a STATEMENT, and there is one
         // expression here.
-        append_ok: stmts.map(crate::append_candidates).unwrap_or_default(),
+        append_ok: stmts
+            .map(vyrn_lower::append::append_candidates)
+            .unwrap_or_default(),
         is_release: cx.owned.is_release_fn(&f.name),
         str_append: HashMap::new(),
         dest_hint: None,
@@ -4858,7 +4860,7 @@ impl<'p> Fn_<'_, 'p> {
                 // below copies instead.
                 if self.region_depth == 0 {
                     if let Some(own) = shadow {
-                        if let Some(parts) = crate::self_append_spine(name, value) {
+                        if let Some(parts) = vyrn_lower::append::self_append_spine(name, value) {
                             // The spine handles this store's ownership itself
                             // (§22's own state machine) — and the fold's
                             // per-statement answer decides one more thing
