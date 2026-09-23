@@ -20342,14 +20342,24 @@ impl<'p> Fn_<'_, 'p> {
 }
 
 /// Give back the slots the row `s` took for its own work once it is written:
-/// every slot above the one its name holds, or above `mark`, the frame before
-/// the row. A row that holds rows of its own gives back through each of them.
+/// every slot above `mark`, the frame before the row, and above each slot the
+/// row took for a name. A name's slot need not be the row's own name's: a part
+/// written at its parent's offset takes the parent's slot in the part's row
+/// ([`Fn_::core_part_dest`]). A row that holds rows of its own gives back
+/// through each of them.
 fn core_row_done(b: &mut Frame, w: &Walked, s: &St, mark: u32) {
-    let from = match s {
-        St::If { .. } | St::Loop { .. } | St::Block { .. } | St::Switch { .. } => return,
-        St::Let(n, _) => w.slot[*n as usize].map_or(mark, |(_, end)| end.max(mark)),
-        _ => mark,
-    };
+    if matches!(
+        s,
+        St::If { .. } | St::Loop { .. } | St::Block { .. } | St::Switch { .. }
+    ) {
+        return;
+    }
+    let from = w
+        .slot
+        .iter()
+        .flatten()
+        .filter(|&&(at, _)| at >= mark)
+        .fold(mark, |top, &(_, end)| top.max(end));
     if from < b.mark() {
         b.give_back(from, b.mark());
     }
