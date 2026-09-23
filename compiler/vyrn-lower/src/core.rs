@@ -1732,6 +1732,12 @@ pub enum Spec {
     /// lane index is a literal the row carries, which the checker proved
     /// constant and in range.
     Lanes,
+    /// A host import a compiled generator calls while it runs (RFC-0076 M7,
+    /// RFC-0054): `@codeText`, `raw`, `rawAt` and `@codeSplice` hand the host
+    /// a piece and get back a `Code` handle, and `render` hands it a handle
+    /// and gets back a String. `@codeSplice`'s tag is its operand's own type.
+    /// Outside a generator no body reaches one.
+    Host,
     /// The call is a call to the named function, which the program links:
     /// an entry a generator host's engine synthesizes, or a `std` function a
     /// builtin routes to (`loader::RT_MODULES`). The emitter reads it as a
@@ -1823,6 +1829,11 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@i32x4Store", Spec::Lanes),
             ("@f64x2Load", Spec::Lanes),
             ("@f64x2Store", Spec::Lanes),
+            ("@codeText", Spec::Host),
+            ("@codeSplice", Spec::Host),
+            ("raw", Spec::Host),
+            ("rawAt", Spec::Host),
+            ("render", Spec::Host),
             (
                 "moduleInterface",
                 Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_MODULE_INTERFACE),
