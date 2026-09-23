@@ -509,6 +509,32 @@ pub type GenEngine = dyn Fn(
 
 static GEN_ENGINE: std::sync::OnceLock<Box<GenEngine>> = std::sync::OnceLock::new();
 
+/// Which build of the compiler is running: the crate version, then the
+/// executable's size and mtime. Every build of a release has one version, and
+/// the executable changes on every rebuild, which is when a persisted generator
+/// output or artifact stops being this compiler's.
+pub fn compiler_identity() -> String {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let m = std::env::current_exe().and_then(std::fs::metadata);
+        let exe = match m {
+            Ok(m) => format!(
+                "{}:{:?}",
+                m.len(),
+                m.modified().ok().and_then(|t| t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_nanos()))
+            ),
+            // No answer is not "any answer": an output that cannot be tied to a
+            // build must not be reused across processes at all.
+            Err(_) => format!("unknown-{}", std::process::id()),
+        };
+        format!("{}:{exe}", env!("CARGO_PKG_VERSION"))
+    })
+    .clone()
+}
+
 /// Install the alternative generation engine. Called once, by the driver, before
 /// any load. A second call is ignored rather than racing.
 pub fn set_gen_engine(engine: Box<GenEngine>) {

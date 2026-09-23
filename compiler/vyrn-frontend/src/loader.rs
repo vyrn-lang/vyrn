@@ -1995,7 +1995,13 @@ fn run_generator(
             }
         }
     }
-    let sources_hash = generator_cache_key(&gen_mod_key, name, &arg_repr, &allowed);
+    let sources_hash = generator_cache_key(
+        &crate::gen::compiler_identity(),
+        &gen_mod_key,
+        name,
+        &arg_repr,
+        &allowed,
+    );
     let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
     // 5a. Cache hit: the entry is one this compiler wrote for THIS key, it
@@ -2157,8 +2163,10 @@ fn run_generator(
     Ok((gen_key, Some(out.source)))
 }
 
-/// The cache LOOKUP key: `sha256(generator module ++ name ++ args ++ resolved
-/// input roots)`. Deliberately does NOT hash the generator's sources.
+/// The cache LOOKUP key: `sha256(compiler identity ++ generator module ++ name ++
+/// args ++ resolved input roots)`. Deliberately does NOT hash the generator's
+/// sources. The identity is [`crate::gen::compiler_identity`], because the
+/// entry's recorded inputs cannot tell one compiler's output from another's.
 ///
 /// It used to. Encoding the generator's code in the key meant discovering its
 /// transitive module closure, which meant a full recursive parse-walk of that
@@ -2172,13 +2180,14 @@ fn run_generator(
 /// by parsing. The trade is that two versions of a generator now collide on one
 /// key and take turns owning the entry, rather than each keeping their own.
 fn generator_cache_key(
+    identity: &str,
     gen_mod_key: &str,
     name: &str,
     arg_repr: &str,
     resolved_inputs: &[String],
 ) -> String {
     let mut blob: Vec<u8> = Vec::new();
-    for part in [gen_mod_key, name, arg_repr] {
+    for part in [identity, gen_mod_key, name, arg_repr] {
         blob.extend_from_slice(part.as_bytes());
         blob.push(0);
     }
@@ -4875,5 +4884,11 @@ mod tests {
         let body = format!("{}\ndata/a.txt\tdeadbeef\nout", u64::MAX);
         let entry = format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body));
         assert!(read_cache_entry(key, &entry).is_none());
+    }
+
+    #[test]
+    fn two_compilers_do_not_share_a_generator_output() {
+        let key = |id: &str| generator_cache_key(id, "m.vyrn", "g", "x", &[]);
+        assert_ne!(key("0.1.0:1:2"), key("0.1.0:1:3"));
     }
 }
