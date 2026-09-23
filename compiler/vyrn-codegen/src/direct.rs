@@ -4446,7 +4446,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
-    /// An RFC-0014 or RFC-0044 I/O builtin, or `parse`: one runtime function
+    /// An RFC-0014 or RFC-0044 I/O builtin, a directory listing, or `parse`: one runtime function
     /// that writes its whole result through a slot allocated here, the hidden
     /// destination an aggregate-returning call gets (`wasm_sig`). The
     /// destination leads, the operands follow, then what the function needs
@@ -4520,6 +4520,29 @@ impl<'p> Fn_<'_, 'p> {
             "parse" => {
                 operand(self, m, b, 0, &Type::Str)?;
                 rt.parse_i64
+            }
+            // `listDir` (RFC-0021) and `listDirKinds` (RFC-0119). Where the
+            // listing comes from is the twin called: the generator host's
+            // resolver under a generation, told the host's list mode, and
+            // WASI's `fd_readdir` on an ordinary build (RFC-0125 §3 M5), told
+            // whether names carry kinds, so `vyrn run` lists the real
+            // filesystem.
+            "listDir" | "listDirKinds" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                let kinds = name == "listDirKinds";
+                let f = if gen {
+                    b.ins(&Instruction::I32Const(if kinds {
+                        crate::GEN_MODE_LIST_KINDS
+                    } else {
+                        crate::GEN_MODE_LIST
+                    }));
+                    rt.list_dir_gen
+                } else {
+                    b.ins(&Instruction::I32Const(kinds as i32));
+                    rt.list_dir
+                };
+                halves(b, rt.listerr);
+                f
             }
             "fsyncFile" => {
                 operand(self, m, b, 0, &Type::Str)?;
@@ -8038,38 +8061,6 @@ impl<'p> Fn_<'_, 'p> {
             if let Some(t) = self.gen_builtin(m, b, name, args, line)? {
                 return Ok(t);
             }
-        }
-        // `listDir` (RFC-0021) and `listDirKinds` (RFC-0119): one path in, a
-        // `Result<Array<String>, String>` out through a destination slot, the
-        // shape `readFile` has. Where the listing comes from is the twin the
-        // emitter calls: the generator host's resolver under a generation,
-        // told the host's list mode, and WASI's `fd_readdir` on an ordinary
-        // build (RFC-0125 §3 M5), told whether names carry kinds, so `vyrn
-        // run` lists the real filesystem.
-        if matches!(name, "listDir" | "listDirKinds") && args.len() == 1 {
-            let ty = gen_list_dir_ty();
-            let l = self.layout_of(&ty, line)?;
-            let off = b.alloc(l.size, l.align);
-            b.slot(off);
-            self.expr_as(m, b, &args[0], &Type::Str)?;
-            let rt = self.cx.rt;
-            let kinds = name == "listDirKinds";
-            let f = if self.cx.gen.is_some() {
-                b.ins(&Instruction::I32Const(if kinds {
-                    crate::GEN_MODE_LIST_KINDS
-                } else {
-                    crate::GEN_MODE_LIST
-                }));
-                rt.list_dir_gen
-            } else {
-                b.ins(&Instruction::I32Const(kinds as i32));
-                rt.list_dir
-            };
-            b.ins(&Instruction::I32Const(rt.listerr.0 as i32));
-            b.ins(&Instruction::I32Const(rt.listerr.1 as i32));
-            b.ins(&Instruction::Call(f));
-            b.slot(off);
-            return Ok(ty);
         }
         // RFC-0125 M7, the builtin family: a builtin the core's row specifies
         // is its operands at the row's types and one instruction, and
@@ -16425,13 +16416,6 @@ const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 // bought it: 330 ns hand-written here against 721 ns compiled, and no difference
 // a program could observe.)
 
-/// `listDir`'s type (RFC-0021), in one place so the lowering and [`Fn_::peek`]
-/// cannot size a destination slot differently from the value written into it —
-/// M2l's rule, and the shape `slot_ty` exists for on the other builtins.
-fn gen_list_dir_ty() -> Type {
-    Type::result(Type::Array(Box::new(Type::Str)), Type::Str)
-}
-
 /// The receivers that have a `.length` or a `.byteLength`, in ONE list.
 ///
 /// Neither name is a field, so both paths that meet one have to know the list:
@@ -16471,7 +16455,9 @@ fn slot_ty(name: &str, argc: usize) -> Option<Type> {
 fn slot_arity(name: &str) -> Option<usize> {
     match name {
         "args" | "readLine" => Some(0),
-        "readFile" | "readFileBytes" | "fsyncFile" | "parse" => Some(1),
+        "readFile" | "readFileBytes" | "fsyncFile" | "parse" | "listDir" | "listDirKinds" => {
+            Some(1)
+        }
         "writeFile" | "renameFile" | "writeFileBytes" => Some(2),
         _ => None,
     }

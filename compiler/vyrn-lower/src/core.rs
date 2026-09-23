@@ -1793,6 +1793,14 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 Spec::Builds(Type::result(Type::Bool, Type::Str)),
             ),
             ("parse", Spec::Builds(Type::option(Type::Int))),
+            (
+                "listDir",
+                Spec::Builds(Type::result(Type::Array(Box::new(Type::Str)), Type::Str)),
+            ),
+            (
+                "listDirKinds",
+                Spec::Builds(Type::result(Type::Array(Box::new(Type::Str)), Type::Str)),
+            ),
             // A snapshot of a map's keys, at the prelude's own parameter.
             (
                 "@keys",
