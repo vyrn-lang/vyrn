@@ -3362,9 +3362,7 @@ impl<'a> Builder<'a> {
         let mark = self.scope.len();
         let site = blk as *const Block as usize;
         let mut body = head;
-        for s in &blk.stmts {
-            self.stmt(s, &mut body)?;
-        }
+        self.stmt_list(&blk.stmts, &mut body)?;
         self.drops_at(Exit::Block, site, &mut body)?;
         self.scope.truncate(mark);
         out.push(St::Block {
@@ -3373,6 +3371,143 @@ impl<'a> Builder<'a> {
             region: false,
         });
         Ok(())
+    }
+
+    /// The statements of a list, where a store into a nested place is one
+    /// store into the place's path (RFC-0125 M7).
+    ///
+    /// The parser writes `b[i].vx = v` as RFC-0082's move-out: `let mut b[] =
+    /// b[b[]idx]`, the store into `b[]`, and `b[b[]idx] = b[]`, one temp per
+    /// level and one store back per temp ([`vyrn_frontend::parser::store_stmts`]).
+    /// The rows state the store alone, into `b[i].vx`, as the arm stores the
+    /// field in place: the kernel judges it as the root's store into that
+    /// part, and the part's old value is the store's to release.
+    fn stmt_list(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<(), Gap> {
+        let mut k = 0;
+        while k < ss.len() {
+            k += match self.nested_store(&ss[k..], out)? {
+                Some(n) => n,
+                None => {
+                    self.stmt(&ss[k], out)?;
+                    1
+                }
+            };
+        }
+        Ok(())
+    }
+
+    /// The store at the head of `ss` when it is a move-out window
+    /// ([`Builder::stmt_list`]), stated into its path; how many statements it
+    /// spans, or `None` when `ss` does not start with one.
+    fn nested_store(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<Option<usize>, Gap> {
+        let lets = ss
+            .iter()
+            .take_while(|s| {
+                matches!(s, Stmt::Let { name, mutable: true, .. }
+                    if vyrn_frontend::ast::is_place_temp(name))
+            })
+            .count();
+        if lets == 0 || ss.len() < 2 * lets + 1 {
+            return Ok(None);
+        }
+        // Each temp reads a field or an element of the one before it, the
+        // first of a named root, and each is put back where it was read,
+        // innermost first.
+        let mut parts = Vec::new();
+        for (i, s) in ss[..lets].iter().enumerate() {
+            let Stmt::Let { name, value, .. } = s else {
+                return Ok(None);
+            };
+            let (parent, part) = match value {
+                Expr::Field { expr, field, .. } => match &**expr {
+                    Expr::Var { name: p, .. } => (p, Ok(field)),
+                    _ => return Ok(None),
+                },
+                Expr::Call { name: at, args, .. } if at == "@at" && args.len() == 2 => {
+                    match (&args[0], &args[1]) {
+                        (Expr::Var { name: p, .. }, idx @ Expr::Var { .. }) => (p, Err(idx)),
+                        _ => return Ok(None),
+                    }
+                }
+                _ => return Ok(None),
+            };
+            let back = &ss[2 * lets - i];
+            let put = match (back, &part) {
+                (
+                    Stmt::SetField {
+                        name: p,
+                        field,
+                        value: Expr::Var { name: v, .. },
+                        ..
+                    },
+                    Ok(f),
+                ) => p == parent && field == *f && v == name,
+                (
+                    Stmt::IndexSet {
+                        name: p,
+                        index: Expr::Var { name: j, .. },
+                        value: Expr::Var { name: v, .. },
+                        ..
+                    },
+                    Err(Expr::Var { name: i2, .. }),
+                ) => p == parent && j == i2 && v == name,
+                _ => false,
+            };
+            let chained = i == 0 || matches!(&ss[i - 1], Stmt::Let { name: n, .. } if n == parent);
+            if !put || !chained {
+                return Ok(None);
+            }
+            parts.push((parent, part));
+        }
+        let store = &ss[lets];
+        let (Stmt::SetField { name, line, .. } | Stmt::IndexSet { name, line, .. }) = store else {
+            return Ok(None);
+        };
+        let Stmt::Let { name: last, .. } = &ss[lets - 1] else {
+            return Ok(None);
+        };
+        if name != last {
+            return Ok(None);
+        }
+        // The path is a record's fields and an array's elements. A map's
+        // entry is a key read and a user container's element is its `place
+        // at`, which the rows state apart.
+        let (mut place, mut ty) = self.named_place(parts[0].0, *line)?;
+        let mut t = ty.clone();
+        for (_, part) in &parts {
+            let next = match part {
+                Ok(f) => self.field_ty(&t, f, *line),
+                Err(_) if self.is_map(&t) => return Ok(None),
+                Err(_) => self.elem_ty(&t, *line),
+            };
+            let Ok(next) = next else {
+                return Ok(None);
+            };
+            t = next;
+        }
+        for (_, part) in &parts {
+            (place, ty) = match part {
+                Ok(f) => (
+                    Place::Field(Box::new(place), f.to_string()),
+                    self.field_ty(&ty, f, *line)?,
+                ),
+                Err(idx) => (
+                    Place::Elem(Box::new(place), self.read_val(idx, out)?),
+                    self.elem_ty(&ty, *line)?,
+                ),
+            };
+        }
+        let sid = store as *const Stmt as usize;
+        match store {
+            Stmt::SetField { field, value, .. } => {
+                self.set_field((place, ty), name, field, value, sid, *line, out)?
+            }
+            Stmt::IndexSet { index, value, .. } => {
+                self.index_set((place, ty), name, index, value, sid, *line, out)?
+            }
+            _ => return Ok(None),
+        }
+        Ok(Some(2 * lets + 1))
     }
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
@@ -3598,31 +3733,8 @@ impl<'a> Builder<'a> {
                 value,
                 line,
             } => {
-                let v = self.val(value, out)?;
-                let (base, bty) = self.named_place(name, *line)?;
-                let fty = self.field_ty(&bty, field, *line)?;
-                // `s.dense.push(i)` IS `s.dense = s.dense.push(i)`: the
-                // receiver comes back through the result, so the store hands
-                // the buffer back and releases nothing — the same rule a
-                // store to a name takes, one dot down, with the same
-                // exception for a String concatenation, which builds a fresh
-                // buffer whatever it reads (RFC-0125 §3 M3, the store slice).
-                let handed_back =
-                    vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
-                let key = self.store_key(sid);
-                let releases = !handed_back && placed_store(key);
-                out.push(St::Store {
-                    place: Place::Field(Box::new(base), field.clone()),
-                    value: v,
-                    old: if handed_back {
-                        Old::Transferred
-                    } else {
-                        self.old_for(&fty, releases)
-                    },
-                    line: *line,
-                    site: Site::Node(key),
-                    releases,
-                });
+                let base = self.named_place(name, *line)?;
+                self.set_field(base, name, field, value, sid, *line, out)?;
             }
             Stmt::IndexSet {
                 name,
@@ -3630,49 +3742,8 @@ impl<'a> Builder<'a> {
                 value,
                 line,
             } => {
-                let (base, bty) = self.named_place(name, *line)?;
-                let place = if self.is_map(&bty) {
-                    let k = self.val(index, out)?;
-                    Place::Key(Box::new(base), k)
-                } else {
-                    let i = self.read_val(index, out)?;
-                    Place::Elem(Box::new(base), i)
-                };
-                let v = self.val(value, out)?;
-                // A user container's `place at` yields the element's place
-                // (RFC-0091 M2), and the element's type is the value's. Such
-                // a store is REWRITTEN into a block of its own before the
-                // checker walks it, so the node a reader keys it by is the
-                // rewrite's and not this statement's — which is what
-                // `key_of` says, and why every store above keys by it too
-                // (RFC-0125 §3 M3, the store slice). This pass judges the
-                // SOURCE statement and files the answer where the emitters
-                // look.
-                let ety = match self.elem_ty(&bty, *line) {
-                    Ok(t) => t,
-                    Err(_) => self.ty_of(value)?,
-                };
-                let key = self.store_key(sid);
-                let site = Site::Node(key);
-                // The same hand-back, and the INDEX counts as well: `xs[i] =
-                // xs[j]` and `xs[xs.length - 1] = v` both read the buffer the
-                // store writes into, and neither displaces anything the
-                // container did not keep.
-                let handed_back = vyrn_frontend::ast::mentions_place(value, name)
-                    || vyrn_frontend::ast::mentions_place(index, name);
-                let releases = !handed_back && placed_store(key);
-                out.push(St::Store {
-                    place,
-                    value: v,
-                    old: if handed_back {
-                        Old::Transferred
-                    } else {
-                        self.old_for(&ety, releases)
-                    },
-                    line: *line,
-                    site,
-                    releases,
-                });
+                let base = self.named_place(name, *line)?;
+                self.index_set(base, name, index, value, sid, *line, out)?;
             }
             Stmt::Return { value, line } => {
                 if let Some(e) = value {
@@ -4350,6 +4421,105 @@ impl<'a> Builder<'a> {
 
     /// A name as a place: a binding of this body, or module state with its
     /// declared type.
+    /// A store into `field` of the place `base`, which the source names `name`.
+    #[allow(clippy::too_many_arguments)]
+    fn set_field(
+        &mut self,
+        base: (Place, Type),
+        name: &str,
+        field: &str,
+        value: &'a Expr,
+        sid: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        let v = self.val(value, out)?;
+        let (base, bty) = base;
+        let fty = self.field_ty(&bty, field, line)?;
+        // `s.dense.push(i)` IS `s.dense = s.dense.push(i)`: the
+        // receiver comes back through the result, so the store hands
+        // the buffer back and releases nothing — the same rule a
+        // store to a name takes, one dot down, with the same
+        // exception for a String concatenation, which builds a fresh
+        // buffer whatever it reads (RFC-0125 §3 M3, the store slice).
+        let handed_back =
+            vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
+        let key = self.store_key(sid);
+        let releases = !handed_back && placed_store(key);
+        out.push(St::Store {
+            place: Place::Field(Box::new(base), field.to_string()),
+            value: v,
+            old: if handed_back {
+                Old::Transferred
+            } else {
+                self.old_for(&fty, releases)
+            },
+            line,
+            site: Site::Node(key),
+            releases,
+        });
+        Ok(())
+    }
+
+    /// A store into the element or the entry of the place `base` at `index`,
+    /// which the source names `name`.
+    #[allow(clippy::too_many_arguments)]
+    fn index_set(
+        &mut self,
+        base: (Place, Type),
+        name: &str,
+        index: &'a Expr,
+        value: &'a Expr,
+        sid: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        let (base, bty) = base;
+        let place = if self.is_map(&bty) {
+            let k = self.val(index, out)?;
+            Place::Key(Box::new(base), k)
+        } else {
+            let i = self.read_val(index, out)?;
+            Place::Elem(Box::new(base), i)
+        };
+        let v = self.val(value, out)?;
+        // A user container's `place at` yields the element's place
+        // (RFC-0091 M2), and the element's type is the value's. Such
+        // a store is REWRITTEN into a block of its own before the
+        // checker walks it, so the node a reader keys it by is the
+        // rewrite's and not this statement's — which is what
+        // `key_of` says, and why every store above keys by it too
+        // (RFC-0125 §3 M3, the store slice). This pass judges the
+        // SOURCE statement and files the answer where the emitters
+        // look.
+        let ety = match self.elem_ty(&bty, line) {
+            Ok(t) => t,
+            Err(_) => self.ty_of(value)?,
+        };
+        let key = self.store_key(sid);
+        let site = Site::Node(key);
+        // The same hand-back, and the INDEX counts as well: `xs[i] =
+        // xs[j]` and `xs[xs.length - 1] = v` both read the buffer the
+        // store writes into, and neither displaces anything the
+        // container did not keep.
+        let handed_back = vyrn_frontend::ast::mentions_place(value, name)
+            || vyrn_frontend::ast::mentions_place(index, name);
+        let releases = !handed_back && placed_store(key);
+        out.push(St::Store {
+            place,
+            value: v,
+            old: if handed_back {
+                Old::Transferred
+            } else {
+                self.old_for(&ety, releases)
+            },
+            line,
+            site,
+            releases,
+        });
+        Ok(())
+    }
+
     fn named_place(&self, name: &str, line: usize) -> Result<(Place, Type), Gap> {
         if let Some(n) = self.lookup(name) {
             return Ok((Place::Name(n), self.body.names[n as usize].ty.clone()));

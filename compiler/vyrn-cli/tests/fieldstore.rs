@@ -2,12 +2,11 @@
 //!
 //! `a[i].f = v` reaches every engine as the parser's idiom: the element copied
 //! out into an unspellable temp, the field stored on the temp, the temp copied
-//! back. The direct wasm backend recognises the idiom on a HEAPLESS element and
-//! emits one store through the element's address instead (`elem_field_store`).
-//! These tests pin the two halves of that rule by counting `memory.copy` in the
-//! emitted function: none for a heapless element, and the idiom's two for an
-//! element that holds heap, whose releases the placement accounted for and the
-//! peephole must not disturb.
+//! back. The core's rows state it as one store into the element's field
+//! (RFC-0125 M7), and the AST arm recognises the idiom on a HEAPLESS element
+//! (`elem_field_store`). These tests pin the rule by counting `memory.copy` in
+//! the emitted function: none, for a heapless element and for one that holds
+//! heap.
 //!
 //! The count is the whole claim. RFC-0125 §1.4 measured the copies at 21 per
 //! inner iteration of nbody's `advance`, and the same wasm 13x slower under
@@ -207,8 +206,11 @@ fn a_loop_that_grows_the_array_it_indexes_reloads_the_header() {
     );
 }
 
+/// A store into a field of an element is one store into that place, whatever
+/// the element holds: no copy of the element out and none back (RFC-0125 M7,
+/// `m7-move`). The field's old value is the store's to release.
 #[test]
-fn a_field_write_into_an_element_that_holds_heap_keeps_the_idiom() {
+fn a_field_write_into_an_element_that_holds_heap_is_one_store() {
     let body = wat_func_containing(
         "type Q = { name: String, y: Float64 }\n\
          fn bump(qs: consume Array<Q>, i: Int64) -> Array<Q> {\n\
@@ -225,13 +227,11 @@ fn a_field_write_into_an_element_that_holds_heap_keeps_the_idiom() {
         MARK,
     );
     // `Q`'s own size is whatever the layout says, so the claim is on the
-    // idiom's shape: a copy out and a copy back, two copies of a size other
-    // than the header's.
+    // copies of a size other than the header's.
     let elem_copies = body.matches("memory.copy").count() - copies_of(&body, 24);
-    assert!(
-        elem_copies >= 2,
-        "a heap-holding element must still go through the idiom, whose releases \
-         the placement accounted for:\n{body}"
+    assert_eq!(
+        elem_copies, 0,
+        "a field write copies the element it writes into:\n{body}"
     );
 }
 
