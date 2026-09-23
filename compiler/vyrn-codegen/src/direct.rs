@@ -18010,9 +18010,12 @@ impl<'p> Fn_<'_, 'p> {
     /// at every store, take and drop of the place, and refuses a read after
     /// one.
     ///
-    /// `None` where the program can observe the copy. A layout that owns no
-    /// heap is a value, and the kernel lets its place be written while it
-    /// lives. A binding the body stores into, or hands to `modify`, writes a
+    /// A layout that owns no heap is a borrow only where the core minted the
+    /// name, a `for` head's or a scrutinee's, which the arm reads by address.
+    /// A `let` the reader wrote binds a value ([`Fn_::core_copies`]).
+    ///
+    /// `None` where the program can observe the copy. A binding the body
+    /// stores into, or hands to `modify`, writes a
     /// value of its own. A callee handed the root, or any root on the chain,
     /// to `modify` writes where the kernel does not look (`freeNode` in
     /// `tree.vyrn`). Module state has no root: any callee may write it. A
@@ -18023,7 +18026,8 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<&'b vyrn_lower::core::Place> {
         let info = &body.names[n as usize];
-        if !info.borrow
+        let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
+        if !(info.borrow || minted)
             || self.checks(&info.ty)
             || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
         {
