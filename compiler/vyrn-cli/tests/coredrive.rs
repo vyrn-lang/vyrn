@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 46] = [
+const SHAPES: [(&str, &str); 47] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -461,6 +461,10 @@ const SHAPES: [(&str, &str); 46] = [
         "a store into a field of a String, a record, an array and an enum",
         "type P = { x: Int64, s: String }          type R = { name: String, p: P, xs: Array<Int64>, o: Option<String> }          fn mkp(x: Int64) -> P { return P { x: x, s: x.toString() + \"p\" } }          fn mkr() -> R { let p = mkp(1) let xs: Array<Int64> = [1, 2]          return R { name: \"a\", p: p, xs: xs, o: None } }          fn seq(n: Int64) -> Array<Int64> { let mut xs: Array<Int64> = [] let mut i = 0          while i < n { xs.push(i) i = i + 1 } return xs }          fn some(n: Int64) -> Option<String> { return Some(n.toString()) }          fn vyrnTestMain() -> Int64 { let mut r = mkr() let mut i = 0          while i < 3 { r.name = i.toString() + \"n\" i = i + 1 }          r.p = mkp(77) r.xs = seq(3) r.o = some(123)          let t = match r.o { Some(s) => s.byteLength, None => 0 }          return r.name.byteLength * 10000 + r.p.x * 100 + r.p.s.byteLength * 10 + r.xs.length + t }",
     ),
+    (
+        "a store into an element of a String and a record",
+        "type P = { x: Int64, s: String }          fn mkp(x: Int64) -> P { return P { x: x, s: x.toString() + \"p\" } }          fn strs(n: Int64) -> Array<String> { let mut xs: Array<String> = [] let mut i = 0          while i < n { xs.push(i.toString()) i = i + 1 } return xs }          fn ps(n: Int64) -> Array<P> { let mut xs: Array<P> = [] let mut i = 0          while i < n { xs.push(mkp(i)) i = i + 1 } return xs }          fn vyrnTestMain() -> Int64 { let mut ss = strs(3) let mut qs = ps(3) let mut i = 0          while i < 3 { ss[i] = i.toString() + \"ss\" qs[i] = mkp(i * 11) i = i + 1 } ss[1] = \"x\"          return ss[0].byteLength * 1000 + ss[1].byteLength * 100 + qs[2].x + qs[2].s.byteLength * 10 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -470,7 +474,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 46] = [
+const SHAPE_PIN: [(&str, usize, usize); 47] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -549,6 +553,7 @@ const SHAPE_PIN: [(&str, usize, usize); 46] = [
         0,
         0,
     ),
+    ("a store into an element of a String and a record", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

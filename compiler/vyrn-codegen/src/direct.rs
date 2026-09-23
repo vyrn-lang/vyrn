@@ -19866,8 +19866,7 @@ impl<'p> Fn_<'_, 'p> {
                     At::Name(n) => Some(body.names[*n as usize].ty.clone()),
                     p => self.core_place_ty(body, p),
                 };
-                let scalar_only = !matches!(place, At::Name(_) | At::Field(..))
-                    || vyrn_lower::kernel::root_of(place).is_none();
+                let scalar_only = vyrn_lower::kernel::root_of(place).is_none();
                 let global = matches!(place, At::Global(_));
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
