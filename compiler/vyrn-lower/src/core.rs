@@ -150,9 +150,11 @@ pub struct NameInfo {
     /// found. Making it a kind refused `std/vyx.vyrn`'s `for s in kids` and
     /// twenty-two programs of the corpus with it.
     pub loop_var: Option<String>,
-    /// Whether this is the borrow a `for` reads its container through, from
-    /// the head to the end. A `modify` argument over the container ends it
-    /// ([`crate::kernel`]), where it ends no other borrow.
+    /// Whether this is a borrow a loop walks: the one a `for` reads its
+    /// container through, from the head to the end, or the header a `while`
+    /// reads a container it never writes through ([`Builder::hoist_headers`]).
+    /// A `modify` argument over the container ends it whatever the container
+    /// holds ([`crate::kernel`]).
     pub walked: bool,
     /// Whether the type is LINEAR — a `Stream`, a `Task`, a type that declares
     /// `impl MustUse` (RFC-0075). Such a value is disposed, not stored, and the
@@ -3503,7 +3505,7 @@ impl<'a> Builder<'a> {
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
-            Stmt::While { cond, body, .. } => {
+            Stmt::While { cond, body, line } => {
                 let mut l = Vec::new();
                 let c = self.read_val(cond, &mut l)?;
                 l.push(St::If {
@@ -3516,6 +3518,7 @@ impl<'a> Builder<'a> {
                 let r = self.block(body, &mut l);
                 self.loop_marks.pop();
                 r?;
+                self.hoist_headers(&mut l, *line, out);
                 out.push(St::Loop { body: l, site: sid });
             }
             Stmt::ForIn {
@@ -3999,6 +4002,45 @@ impl<'a> Builder<'a> {
                 .find(|f| &f.name == name)
                 .map(|f| f.ret.clone()),
             _ => None,
+        }
+    }
+
+    /// Bind the header of every container the loop `l` indexes and no row of
+    /// it writes, once, before the loop, and point the loop's element and
+    /// length reads at it (RFC-0125 M7, the hoisted header). The header is a
+    /// borrow the loop walks, as a `for`'s container is, so the kernel keeps
+    /// its alias and an emitter takes the header apart once. A container
+    /// that owns no heap is a value and not a borrow, so it is read in place
+    /// each turn; module state is a `Place::Global` and never a candidate.
+    fn hoist_headers(&mut self, l: &mut [St], line: usize, out: &mut Vec<St>) {
+        let mut read = Vec::new();
+        l.iter_mut().for_each(|s| header_reads(s, None, &mut read));
+        read.sort_unstable();
+        read.dedup();
+        let mut bound = Vec::new();
+        l.iter().for_each(|s| names_bound(s, &mut bound));
+        let decls = self.proto.types();
+        for n in read {
+            let info = &self.body.names[n as usize];
+            let indexed = matches!(
+                vyrn_frontend::types::resolve(&info.ty, &decls),
+                Type::Array(_) | Type::SmallArray(..) | Type::Str
+            );
+            if !indexed
+                || !info.heap
+                || bound.contains(&n)
+                || crate::kernel::writes(l, n, &self.body.names)
+            {
+                continue;
+            }
+            let ty = info.ty.clone();
+            let path = info.path.clone().unwrap_or_else(|| info.source.clone());
+            let h = self.name("@borrow", ty, false, line);
+            self.body.names[h as usize].walked = true;
+            self.body.names[h as usize].path = Some(path);
+            out.push(St::Let(h, Rhs::Read(Place::Name(n))));
+            l.iter_mut()
+                .for_each(|s| header_reads(s, Some((n, h)), &mut Vec::new()));
         }
     }
 
@@ -6602,6 +6644,72 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
         }
     }
     out
+}
+
+/// The names whose header a read in `s` walks: an element read, or a
+/// length read, straight off the name. With `rebase`, each such read of the
+/// first name reads the second instead. A store and a take keep their place:
+/// a loop that stores into the container or takes from it writes it, and
+/// [`Builder::hoist_headers`] binds it no header.
+fn header_reads(s: &mut St, rebase: Option<(Name, Name)>, out: &mut Vec<Name>) {
+    fn place(p: &mut Place, rebase: Option<(Name, Name)>, out: &mut Vec<Name>) {
+        let header = match p {
+            Place::Elem(b, _) => Some(b),
+            Place::Field(b, f) if f == "length" || f == "byteLength" => Some(b),
+            _ => None,
+        };
+        if let Some(b) = header {
+            if let Place::Name(n) = **b {
+                match rebase {
+                    Some((from, to)) if from == n => **b = Place::Name(to),
+                    Some(_) => {}
+                    None => out.push(n),
+                }
+                return;
+            }
+        }
+        match p {
+            Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => place(b, rebase, out),
+            Place::Name(_) | Place::Global(_) => {}
+        }
+    }
+    let each = |ss: &mut Vec<St>, out: &mut Vec<Name>| {
+        ss.iter_mut().for_each(|s| header_reads(s, rebase, out))
+    };
+    match s {
+        St::Let(_, Rhs::Read(p))
+        | St::Do {
+            rhs: Rhs::Read(p), ..
+        } => place(p, rebase, out),
+        St::If { then, els, .. } => {
+            each(then, out);
+            each(els, out);
+        }
+        St::Loop { body, .. } | St::Block { body, .. } => each(body, out),
+        St::Switch { arms, .. } => arms.iter_mut().for_each(|a| each(&mut a.body, out)),
+        _ => {}
+    }
+}
+
+/// Every name `s` binds, at any depth: a `let` and a switch arm's binders.
+pub fn names_bound(s: &St, out: &mut Vec<Name>) {
+    match s {
+        St::Let(n, _) => out.push(*n),
+        St::If { then, els, .. } => {
+            then.iter().for_each(|s| names_bound(s, out));
+            els.iter().for_each(|s| names_bound(s, out));
+        }
+        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
+            b.iter().for_each(|s| names_bound(s, out))
+        }
+        St::Switch { arms, .. } => {
+            for a in arms {
+                out.extend(&a.binds);
+                a.body.iter().for_each(|s| names_bound(s, out));
+            }
+        }
+        _ => {}
+    }
 }
 
 fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
