@@ -126,6 +126,12 @@ pub fn writes_state(body: &str, callee: &str) -> Vec<String> {
     })
 }
 
+/// Whether the body named `body` calls a function that stores into module
+/// state, by the judgment of the program being placed.
+pub fn stores_state(body: &str) -> bool {
+    STATE_CALLEES.with(|m| m.borrow().contains_key(body))
+}
+
 /// Record the judgment's module-state callees for every frame of `refs`.
 /// `None` clears them.
 pub(crate) fn set_state_callees(judged: Option<(&Judged, &[&Body])>) {

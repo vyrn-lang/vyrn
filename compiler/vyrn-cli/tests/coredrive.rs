@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 19] = [
+const SHAPES: [(&str, &str); 20] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -266,6 +266,13 @@ const SHAPES: [(&str, &str); 19] = [
         "a payload handed on from a scrutinee the frame keeps",
         "type N = | E(String, Array<Int64>) | T(String) type One = { n: N, k: Int64 }          fn sum(xs: consume Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn f(n: consume N) -> One { return match n { E(s, xs) => One { n: T(\"x\"), k: sum(xs) }, T(s) => One { n: n, k: 0 } } }          fn vyrnTestMain() -> Int64 { return f(E(\"a\", [1, 2, 3])).k + f(T(\"b\")).k * 10 }",
     ),
+    // A `while` hoists the header of module state no call of the loop stores
+    // into, and not one a call replaces: the second is built again once the
+    // effect judgment is held (RFC-0125 M7, `m7-statehoist`).
+    (
+        "a `while` over module state, and one whose call replaces it",
+        "let mut xs: Array<Int64> = [1, 2, 3]          fn bump() { xs = [4, 5, 6, 7] }          fn sum() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] if i == 0 { bump() } i = i + 1 } return sum() * 100 + t }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -275,7 +282,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 19] = [
+const SHAPE_PIN: [(&str, usize, usize); 20] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -303,6 +310,11 @@ const SHAPE_PIN: [(&str, usize, usize); 19] = [
     ("a literal nested in a literal", 0, 0),
     ("module state reset, grown and matched", 0, 0),
     ("a payload handed on from a scrutinee the frame keeps", 0, 0),
+    (
+        "a `while` over module state, and one whose call replaces it",
+        0,
+        0,
+    ),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

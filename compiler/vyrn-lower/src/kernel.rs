@@ -197,7 +197,7 @@ fn covers(r: &str, h: &str) -> bool {
 
 /// What an alias reads out of: a name of this body, or module state.
 #[derive(Clone, PartialEq, Eq, Debug)]
-enum Root {
+pub enum Root {
     N(Name),
     G(String),
 }
@@ -215,19 +215,27 @@ struct Alias {
 
 /// The root name of a place and the path under it; `None` for module state.
 pub fn root_of(p: &Place) -> Option<(Name, String)> {
+    match root(p) {
+        (Root::N(n), path) => Some((n, path)),
+        (Root::G(_), _) => None,
+    }
+}
+
+/// The root of a place and the path under it.
+fn root(p: &Place) -> (Root, String) {
     match p {
-        Place::Name(n) => Some((*n, String::new())),
-        Place::Global(_) => None,
+        Place::Name(n) => (Root::N(*n), String::new()),
+        Place::Global(g) => (Root::G(g.clone()), String::new()),
         Place::Field(b, f) => {
-            let (n, mut path) = root_of(b)?;
+            let (r, mut path) = root(b);
             path.push('.');
             path.push_str(f);
-            Some((n, path))
+            (r, path)
         }
         Place::Elem(b, _) | Place::Key(b, _) => {
-            let (n, mut path) = root_of(b)?;
+            let (r, mut path) = root(b);
             path.push_str(".[]");
-            Some((n, path))
+            (r, path)
         }
     }
 }
@@ -297,26 +305,31 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<
     }
 }
 
-/// Whether a row of `ss` writes `n` where the judgment would end a borrow of
-/// it ([`writes_of`]), or a closure captures it. A name `ss` binds by a read
-/// of `n`, or by a switch over such a name, is `n` here too, and a borrow of
-/// a place bound outside `ss` may be, so a write through one counts. A store
-/// into an element of `n` is not one ([`in_element`]). The
-/// builder asks before the judgment runs (RFC-0125 M7, the hoisted header).
-/// A release or a `return` that only an exit follows is not one: no row
-/// after it reads the borrow.
+/// Whether a row of `ss` writes `on` where the judgment would end a borrow
+/// of it ([`writes_of`]), or a closure captures it. A name `ss` binds by a
+/// read of `on`, or by a switch over such a name, is `on` here too, and a
+/// borrow of a place bound outside `ss` may be, so a write through one
+/// counts. A store into an element of `on` is not one ([`in_element`]). The
+/// builder asks to hoist a header (RFC-0125 M7). A release or a `return`
+/// that only an exit follows is not one: no row after it reads the borrow.
 ///
-/// A call that stores into module state is one whatever `n` reads, because a
-/// name does not record the global it reads. The builder asks before the
-/// judgment is held, and there no call is one.
-pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo], body: &str) -> bool {
+/// A call that stores into module state is one whatever a name reads,
+/// because a name does not record the global it reads; for a global, a call
+/// that stores into that global. Before `augment` holds the effect judgment
+/// no call is one, and `augment` builds again every body where that answer
+/// could differ.
+pub fn writes(ss: &[St], on: Root, names: &[crate::core::NameInfo], body: &str) -> bool {
     let mut inside = Vec::new();
     ss.iter()
         .for_each(|s| crate::core::names_bound(s, &mut inside));
+    let alias = match on {
+        Root::N(n) => vec![n],
+        Root::G(_) => Vec::new(),
+    };
     let mut w = Writes {
-        n,
+        on,
         body,
-        alias: vec![n],
+        alias,
         elem: Vec::new(),
         inside,
         names,
@@ -326,11 +339,12 @@ pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo], body: &str) -
 }
 
 struct Writes<'a> {
-    n: Name,
+    on: Root,
     body: &'a str,
-    /// `n`, and every borrow bound so far by a read of one of these.
+    /// `on` where it is a name, and every borrow bound so far by a read of
+    /// `on` or of one of these.
     alias: Vec<Name>,
-    /// Those of `alias` that read inside an element of `n`.
+    /// Those of `alias` that read inside an element of `on`.
     elem: Vec<Name>,
     /// Every name `ss` binds.
     inside: Vec<Name>,
@@ -340,11 +354,21 @@ struct Writes<'a> {
 }
 
 impl Writes<'_> {
-    /// Whether a write rooted at `r` may land under `n`.
-    fn under(&self, r: Name) -> bool {
-        let info = &self.names[r as usize];
-        self.alias.contains(&r)
-            || (info.borrow && info.borrow_kind.is_none() && !self.inside.contains(&r))
+    /// Whether `r` is `on` or an alias of it.
+    fn aliased(&self, r: &Root) -> bool {
+        match r {
+            Root::N(k) => self.alias.contains(k),
+            Root::G(_) => *r == self.on,
+        }
+    }
+
+    /// Whether a write rooted at `r` may land under `on`.
+    fn under(&self, r: &Root) -> bool {
+        self.aliased(r)
+            || matches!(r, Root::N(k) if {
+                let info = &self.names[*k as usize];
+                info.borrow && info.borrow_kind.is_none() && !self.inside.contains(k)
+            })
     }
 
     fn list(&mut self, ss: &[St]) -> bool {
@@ -364,16 +388,20 @@ impl Writes<'_> {
         let hit = writes_of(s, self.names, self.body)
             .into_iter()
             .any(|w| match w {
-                Write::Store(p) => root_of(p).is_some_and(|(r, path)| {
-                    self.under(r)
-                        && !(self.elem.contains(&r)
-                            || (self.alias.contains(&r) && in_element(&path)))
-                }),
-                Write::Take(p) => root_of(p).is_some_and(|(r, _)| self.under(r)),
-                Write::Hand(v, _) => *v == Val::Name(self.n),
+                Write::Store(p) => {
+                    let (r, path) = root(p);
+                    self.under(&r)
+                        && !(matches!(r, Root::N(k) if self.elem.contains(&k))
+                            || (self.aliased(&r) && in_element(&path)))
+                }
+                Write::Take(p) => self.under(&root(p).0),
+                Write::Hand(v, _) => matches!((v, &self.on), (Val::Name(k), Root::N(n)) if k == n),
                 Write::Release(k) => self.alias.contains(&k),
-                Write::Modify(v) => matches!(v, Val::Name(k) if self.under(*k)),
-                Write::State(_) => true,
+                Write::Modify(v) => matches!(v, Val::Name(k) if self.under(&Root::N(*k))),
+                Write::State(gs) => match &self.on {
+                    Root::N(_) => true,
+                    Root::G(g) => gs.contains(g),
+                },
             });
         if hit {
             return true;
@@ -381,14 +409,14 @@ impl Writes<'_> {
         match s {
             St::Let(k, r) => {
                 let from = match r {
-                    Rhs::Read(p) => root_of(p),
-                    Rhs::Val(Val::Name(j)) => Some((*j, String::new())),
+                    Rhs::Read(p) => Some(root(p)),
+                    Rhs::Val(Val::Name(j)) => Some((Root::N(*j), String::new())),
                     _ => None,
                 };
                 if let Some((r, path)) = from {
-                    if self.alias.contains(&r) && self.names[*k as usize].borrow {
+                    if self.aliased(&r) && self.names[*k as usize].borrow {
                         self.alias.push(*k);
-                        if self.elem.contains(&r) || in_element(&path) {
+                        if matches!(r, Root::N(j) if self.elem.contains(&j)) || in_element(&path) {
                             self.elem.push(*k);
                         }
                     }

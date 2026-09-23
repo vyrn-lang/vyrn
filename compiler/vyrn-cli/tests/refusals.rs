@@ -2823,7 +2823,8 @@ fn a_write_to_the_scrutinee_a_payload_binder_reads_is_refused() {
 /// RFC-0125 M7, module state: a call whose callee stores into a global ends
 /// every borrow of that global, by the effect judgment's write half. The
 /// emitter read the freed array and printed 3 and 0 where the language says
-/// 3 and 1.
+/// 3 and 1. The fix names the `let` of the borrow, also where a `while`
+/// walks it.
 #[test]
 fn a_call_that_writes_module_state_ends_its_borrows() {
     let src = "let mut xs: Array<Int64> = [1, 2, 3]\n\
@@ -2837,6 +2838,27 @@ fn a_call_that_writes_module_state_ends_its_borrows() {
     let (ok, text) = refusal_in(dir.to_path_buf(), "state.vyrn", false);
     if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
         bad.push(format!("`check state.vyrn` said {text}"));
+    }
+    // A `while` that walks `a` hoists no header the call writes: the fix
+    // names the `let` on line 4, not the loop on line 6.
+    let walked = "let mut xs: Array<Int64> = [1, 2, 3]\n\
+                  fn reset() { xs = [7, 8, 9, 10] }\n\
+                  fn main() -> Int64 {\n  let a = xs\n  let mut i = 0\n  \
+                  while i < a.length {\n    reset()\n    print(a[i])\n    i = i + 1\n  }\n  \
+                  return 0\n}\n";
+    std::fs::write(dir.join("walked.vyrn"), walked).expect("write the program");
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["check", "walked.vyrn"])
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.success()
+        || !err.contains(want)
+        || !err.contains("fix: `xs.copy()` on line 4,")
+        || err.contains("on line 6,")
+    {
+        bad.push(format!("`check walked.vyrn` said {err}"));
     }
     let out = vyrn()
         .current_dir(&dir)
