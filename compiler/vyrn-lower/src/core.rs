@@ -4265,10 +4265,9 @@ impl<'a> Builder<'a> {
             Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Stream(e) => {
                 Ok(*e)
             }
-            Type::Str => Ok(Type::IntN {
-                bits: 8,
-                signed: false,
-            }),
+            // A `for` over a String yields each byte as an `Int64`, the
+            // checker's type; `s[i]` is a `UInt8` and never reaches here.
+            Type::Str => Ok(Type::Int),
             Type::Map(_, v) => Ok(*v),
             t => gap_d("an element of a non-container", &t.to_string(), line),
         }
