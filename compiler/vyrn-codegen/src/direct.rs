@@ -8626,43 +8626,6 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Drop);
                 return Ok(Type::Unit);
             }
-            // The two builtins RFC-0078 refused to route, and therefore the two
-            // this backend owes a loop. `text_runtime` is where those loops are and
-            // why they are not `std/num` and `std/text`. `parse` is the other,
-            // and [`Fn_::slot_call`] writes it.
-            // `lineAt(bytes, off)` / `colAt(bytes, off)`. The buffer goes through
-            // `walk`, so an `Array`, a fixed `ArrayN` and a `SmallArray` all arrive
-            // as one base-and-count — the same three the checker accepts — and the
-            // helper is handed exactly what the C one is handed natively.
-            //
-            // The offset lands in a FRESH local rather than a scratch: the two
-            // pushes below it have to survive whatever evaluating it does, and a
-            // scratch key is shared (the M2g `box_value` bug).
-            "lineAt" | "colAt" if args.len() == 2 => {
-                let bty = self.expr(m, b, &args[0])?;
-                let w = self.walk(b, &bty, line)?;
-                // A byte buffer, i.e. stride 1. The interpreter takes `v as u8` of
-                // whatever the elements are and the native helper reads
-                // `unsigned char*` off the data pointer, so a wider element would
-                // have three engines reading three different things — and nothing
-                // but `bytes(s)` ever reaches here.
-                if w.stride != 1 {
-                    return unsupported(&format!("`{name}` over a buffer of `{}`", w.elem), line);
-                }
-                self.expr_as(m, b, &args[1], &Type::Int)?;
-                let o = b.local(ValType::I64);
-                b.ins(&Instruction::LocalSet(o));
-                b.ins(&Instruction::LocalGet(w.data));
-                b.ins(&Instruction::LocalGet(w.len));
-                b.ins(&Instruction::LocalGet(o));
-                let f = if name == "lineAt" {
-                    self.cx.rt.line_at
-                } else {
-                    self.cx.rt.col_at
-                };
-                b.ins(&Instruction::Call(f));
-                return Ok(Type::Int);
-            }
             n if matches!(vyrn_lower::core::builtin_row(n), Some(Spec::Lanes)) => {
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
@@ -15983,16 +15946,6 @@ const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
         &[ValType::I32],
     ),
     (
-        "lineAt",
-        &[ValType::I32, ValType::I64, ValType::I64],
-        &[ValType::I64],
-    ),
-    (
-        "colAt",
-        &[ValType::I32, ValType::I64, ValType::I64],
-        &[ValType::I64],
-    ),
-    (
         "regexRun",
         &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
         &[ValType::I32],
@@ -16157,9 +16110,9 @@ struct Rt {
     /// Vyrn since PLAN-0125-runtime §6 step 4, with `concat`, `str_append`
     /// and `str_from_bytes` below.
     str_new: u32,
-    /// Of the ten functions `std/runtime` supplies (PLAN-0125-runtime §6 step
-    /// 1), the seven this emitter calls: `strlen`, `strcmp`, `int_str`,
-    /// `regex_run`, `parse_i64`, `line_at`, `col_at`. `utf8Valid`, `starts` and
+    /// Of the eight functions `std/runtime` supplies (PLAN-0125-runtime §6 step
+    /// 1), the five this emitter calls: `strlen`, `strcmp`, `int_str`,
+    /// `regex_run`, `parse_i64`. `utf8Valid`, `starts` and
     /// `strI64` are the other three, and no field carries them, because nothing
     /// here calls them: `starts` and `strI64` were reached by the hand-emitted
     /// runtime that §6 deleted, and `utf8Valid` is reached from inside
@@ -16270,22 +16223,10 @@ struct Rt {
     /// in the table it is handed — which is the same split the textual backend's
     /// `@__vyrn_regex_run` makes.
     regex_run: u32,
-    /// The two builtins RFC-0078 refused to route into Vyrn, for two DIFFERENT
-    /// reasons — which is why they are three emitted functions here rather than a
-    /// library this backend already compiles.
-    ///
-    /// `parse` wraps on overflow where `std/num`'s `parseInt64` declines, so the
-    /// two are not one function and folding them would be a language change
-    /// (RFC-0078 M4a). `lineAt`/`colAt` exist because the obvious loop is
-    /// O(offset) and the interpreter memoizes a line-start table a Vyrn library
-    /// cannot hold — generators may not touch module state.
-    ///
-    /// All three are a loop over a buffer, and each has exactly one counterpart to
-    /// agree with: `parse` with the interpreter's `parse_int`, the other two with
-    /// `__vyrn_line_at`/`__vyrn_col_at` in `toolchain.rs`.
+    /// `parse`, which RFC-0078 refused to route into Vyrn: it wraps on overflow
+    /// where `std/num`'s `parseInt64` declines, so the two are not one function
+    /// and folding them would be a language change (RFC-0078 M4a).
     parse_i64: u32,
-    line_at: u32,
-    col_at: u32,
     /// `regionEnter() -> mark` and `regionExit(mark)` — the bump arena of
     /// PLAN-0125-runtime §4.3, in `std/runtime`. A `return` out of a region
     /// calls NEITHER: the value it carries out is a block the arena bumped and
@@ -16429,8 +16370,6 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.strcmp = v.get("strCmp");
     rt.int_str = v.get("intStr");
     rt.parse_i64 = v.get("parseI64");
-    rt.line_at = v.get("lineAt");
-    rt.col_at = v.get("colAt");
     rt.regex_run = v.get("regexRun");
     rt.map_find = v.get("mapFind");
     rt.map_put = v.get("mapPut");

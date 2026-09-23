@@ -396,13 +396,8 @@ fn rows() -> Vec<Function> {
         // byte at the same stride, and an `Array` is covariant in its element
         // with a `Named` decaying to its base, so the row accepts it.
         //
-        // They are builtins rather than a library loop because the obvious loop
-        // is quadratic: counting newlines from byte 0 on every call is
-        // O(offset), and a scanner asks once per node. `std/vyx` spent 122 ms
-        // of a 291 ms page compile in exactly that shape. The interpreter
-        // memoizes a line-start table per buffer, which a Vyrn library cannot
-        // do — generators may not touch module state (comptime purity), so the
-        // cache has to live below them. Any generator gets it, not just std.
+        // Both route to `std/text`'s `lineAtV` and `colAtV`
+        // (`loader::RT_MODULES`), which carry this row's signature.
         row(
             "lineAt",
             &[],

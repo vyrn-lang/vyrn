@@ -915,10 +915,8 @@ pub const RT_MODULES: &[RtModule] = &[
     //
     // `chars` was the other route here and RFC-0094 M2 took it: it has a free
     // spelling, so `import { chars } from "std/text"` is the whole of what routing
-    // was doing for it. `lineAt`/`colAt` never routed at all, and M2 left them
-    // alone — see the M4c note in RFC-0078 and the doc on `lineAtV`: the
-    // interpreter memoizes a line-start table that a Vyrn library cannot, worth
-    // 122 ms of a 291 ms `std/vyx` page compile.
+    // was doing for it. `lineAt` and `colAt` route to `lineAtV` and `colAtV`,
+    // which carry the prelude row's signature (RFC-0125 M7).
     //
     // RFC-0125 §3 M6 (the third judgment's fifth slice) added `stringFromBytes`
     // as a DESUGAR rather than a route: only the CHECK half moved here
@@ -940,7 +938,11 @@ pub const RT_MODULES: &[RtModule] = &[
         spec: "std/text",
         prefix: "text$",
         desugared: &["stringFromBytes"],
-        routes: &[("@charCount", "text$charCountV")],
+        routes: &[
+            ("@charCount", "text$charCountV"),
+            ("lineAt", "text$lineAtV"),
+            ("colAt", "text$colAtV"),
+        ],
         always: true,
     },
     // RFC-0081 M2: the six decimal places. Listed as DESUGARED rather than routed

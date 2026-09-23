@@ -109,14 +109,12 @@ mod tests {
             }
         }
         assert!(routed_builtin("print").is_none());
-        assert!(
-            routed_builtin("lineAt").is_none(),
-            "`lineAt` keeps its interpreter cache"
-        );
         // RFC-0094 M2: a routed builtin with a FREE spelling needs no route — an
         // import does the same work and costs the compiler nothing. Eleven rows
-        // left this table; `@charCount` is what remains, because a method-only
-        // name has no spelling an import can bring into scope.
+        // left this table; `@charCount` stays, because a method-only name has
+        // no spelling an import can bring into scope. `lineAt` and `colAt` have
+        // a free spelling and route anyway (RFC-0125 M7): programs call them
+        // without an import, and M7 changes no surface.
         for (name, gone) in vyrn_frontend::checker::MOVED_TO_STD {
             assert!(
                 routed_builtin(name).is_none(),
@@ -130,7 +128,7 @@ mod tests {
             .flat_map(|rt| rt.routes)
             .map(|(b, _)| *b)
             .collect();
-        assert_eq!(routes, vec!["@charCount"]);
+        assert_eq!(routes, vec!["@charCount", "lineAt", "colAt"]);
     }
 
     /// RFC-0081 M2: [`F64_STR`] is a name two backends emit a call to, so the

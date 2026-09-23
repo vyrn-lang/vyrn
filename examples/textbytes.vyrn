@@ -1,15 +1,12 @@
 /// UTF-8 decoding and byte-offset line/column — `std/text` (RFC-0078 M4b(2),
 /// converted by M4c).
 ///
-/// Three builtins written as ordinary Vyrn: `chars`, `lineAt`, `colAt`. **One of
-/// the three moved.** `chars` IS `std/text`'s declaration now — Rust's `str::chars`
-/// in the interpreter and 82 lines of emitted IR are both gone, and RFC-0094 M2
-/// made the name an ordinary import — so its rows are pinned as LITERALS, captured
-/// before the swap. `lineAt` and `colAt` did not move:
-/// the interpreter memoizes a line-start table that a Vyrn library cannot (a
-/// generator may not touch module state), so retiring them is a decision about that
-/// cache rather than about capability. Their rows therefore stay a live oracle,
-/// printing the builtin's answer beside `lineAtV`/`colAtV`'s.
+/// Three builtins written as ordinary Vyrn: `chars`, `lineAt`, `colAt`. `chars`
+/// IS `std/text`'s declaration: Rust's `str::chars` in the interpreter and 82
+/// lines of emitted IR are both gone, and RFC-0094 M2 made the name an ordinary
+/// import, so its rows are pinned as LITERALS, captured before the swap.
+/// `lineAt` and `colAt` route into `lineAtV` and `colAtV` (RFC-0125 M7), so their
+/// rows print one function's answer twice, and the fixture pins the values.
 ///
 /// The interesting rows are the malformed ones. A `String` cannot hold invalid
 /// UTF-8, so `chars` never sees a bad byte and the only place two decoders can

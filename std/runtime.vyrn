@@ -17,9 +17,8 @@
 /// module holds an address, which is the whole of PLAN-0125-runtime §3.3.
 ///
 /// **Step 1, the pure strings** (PLAN-0125-runtime §6): `strLen`, `strCmp`,
-/// `starts`, `intStr`, `parseI64`, `strI64`, `utf8Valid`, `lineAt`, `colAt`
-/// and `regexRun`. Their C twins stay in the shim until step 3 moves the
-/// native route.
+/// `starts`, `intStr`, `parseI64`, `strI64`, `utf8Valid` and `regexRun`.
+/// Their C twins stay in the shim until step 3 moves the native route.
 ///
 /// **Step 2, the allocator:** `malloc` and `free`, the segregated free list
 /// of PLAN-0125-runtime §4.2, over `load32`, `store32`, `memorySize`, `grow`
@@ -257,44 +256,6 @@ export fn utf8Valid(s: Int32, len: Int32, table: Int32) -> Bool {
         i = i + 1
     }
     return st == 0
-}
-
-/// `line_at`: the 1-based line of byte offset `off` in the `len` bytes at
-/// `d`. `off` is clamped to `len` and not below zero: a negative `off` never
-/// enters the loop, which is line 1, the interpreter's `.max(0)`.
-export fn lineAt(d: Int32, len: Int64, off: Int64) -> Int64 {
-    let mut o = off
-    if o > len {
-        o = len
-    }
-    let mut out: Int64 = 1
-    let mut i: Int64 = 0
-    while i < o {
-        if load8(d + Int32(i)) == '\n' {
-            out = out + 1
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// `col_at`: the 1-based column of byte offset `off`, and a column counts
-/// BYTES (RFC-0078 M4b(2)): the `x` in `éx` is column 3. `off` is the cursor,
-/// walked down to the byte after the previous LF.
-export fn colAt(d: Int32, len: Int64, off: Int64) -> Int64 {
-    let mut o = off
-    if o > len {
-        o = len
-    }
-    let mut out: Int64 = 1
-    while o > 0 {
-        if load8(d + Int32(o) - 1) == '\n' {
-            break
-        }
-        out = out + 1
-        o = o - 1
-    }
-    return out
 }
 
 /// `regex_run`: whether the NUL-terminated bytes at `s` match the DFA
