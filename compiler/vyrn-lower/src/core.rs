@@ -4641,10 +4641,14 @@ impl<'a> Builder<'a> {
             }
             _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
                 Some((size, _)) => Rhs::Call {
+                    kind: if self.concrete_fn(&size) {
+                        Callee::Fn
+                    } else {
+                        Callee::Method
+                    },
                     callee: size,
                     args: vec![(Val::Name(it), Capability::Read)],
                     write_back: false,
-                    kind: Callee::Method,
                     ret: Some(Type::Int),
                     solved: Vec::new(),
                 },
@@ -6886,14 +6890,49 @@ impl<'a> Builder<'a> {
                 ret,
             ));
         }
+        // A method is a call after dispatch (section 2.1), as the `Fallible`
+        // switch states it.
+        let (callee, kind) = match args.first().and_then(|r| self.dispatched(name, r)) {
+            Some(f) if kind == Callee::Method => (f, Callee::Fn),
+            _ => (name.to_string(), kind),
+        };
         Ok(Rhs::Call {
-            callee: name.to_string(),
+            callee,
             args: vs,
             write_back,
             kind,
             ret,
             solved: Vec::new(),
         })
+    }
+
+    /// The impl function the method `name` dispatches to on `recv`'s type:
+    /// the one function the program declares under a name some protocol with
+    /// that method mangles, and no generic function. A generic impl waits on
+    /// `Cx::sigs`, which holds no instance of one.
+    fn dispatched(&self, name: &str, recv: &Expr) -> Option<String> {
+        let key = vyrn_frontend::types::type_key(&self.ty_of(recv).ok()?)?;
+        let fs: std::collections::BTreeSet<String> = self
+            .program
+            .impls
+            .iter()
+            .filter(|i| i.methods.iter().any(|m| m.name == name))
+            .map(|i| vyrn_frontend::types::impl_method_name(&i.protocol, &key, name))
+            .filter(|f| self.concrete_fn(f))
+            .collect();
+        let mut fs = fs.into_iter();
+        match (fs.next(), fs.next()) {
+            (Some(f), None) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Whether the program declares `f` as a function that is no generic one.
+    fn concrete_fn(&self, f: &str) -> bool {
+        self.program
+            .functions
+            .iter()
+            .any(|g| g.name == f && g.type_params.is_empty())
     }
 
     fn is_variant(&self, name: &str) -> bool {
