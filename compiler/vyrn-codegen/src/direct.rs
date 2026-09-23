@@ -1467,8 +1467,7 @@ impl<'a> Cx<'a> {
     /// Does the container's release at this `for` walk the BUFFER alone? The
     /// core states it at the loop
     /// ([`vyrn_lower::core::Facts::loop_buffer_only`]), out of the same
-    /// sentence that says whose an element is; this emitter read the KIND of
-    /// the plan's own row until RFC-0125 §3 M3's container slice.
+    /// sentence that says whose an element is.
     fn loop_buffer_only(&self, node: usize) -> bool {
         self.facts
             .as_ref()
@@ -3704,6 +3703,19 @@ impl<'p> Fn_<'_, 'p> {
         Ok(base)
     }
 
+    /// The release a value of `ty` bound at the node `key` owes:
+    /// [`Fn_::rel_for`]'s, or the buffer alone, the triple's field 0, where
+    /// `key` is a `for` whose every element left through the loop variable
+    /// ([`Cx::loop_buffer_only`]). The deep walk would free values somebody
+    /// else owns there; a blanket buffer-only free took somebody else's
+    /// storage in round fourteen.
+    fn rel_owed(&mut self, key: usize, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
+        let buffer = self.cx.loop_buffer_only(key);
+        Ok(self
+            .rel_for(ty, line)?
+            .map(|r| if buffer { Rel::Buffers(vec![0]) } else { r }))
+    }
+
     /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
     ///
     /// [`vyrn_frontend::declared::Owned::release_kind`]'s row, and nothing
@@ -5310,19 +5322,7 @@ impl<'p> Fn_<'_, 'p> {
                 // this emitter asked the plan's droppable table until
                 // RFC-0125 §3 M3's container slice.
                 if self.releases_whole(key) || self.cx.loop_gives_back(key) {
-                    if let Some(r) = self.rel_for(&it, *line)? {
-                        // WHAT the release walks is the other half of the
-                        // element sentence. Where every element left through
-                        // the loop variable the deep walk `rel_for` builds
-                        // would free values somebody else now owns — the trap
-                        // that turned round fourteen's blanket downgrade back
-                        // — so the buffer, which is the triple's field 0, is
-                        // all the loop still owns.
-                        let r = if self.cx.loop_buffer_only(key) {
-                            Rel::Buffers(vec![0])
-                        } else {
-                            r
-                        };
+                    if let Some(r) = self.rel_owed(key, &it, *line)? {
                         // `expr` leaves one I32 — an aggregate's address or a
                         // String's pointer — and `walk` wants it back, so it is
                         // stashed rather than teed into two shapes.
@@ -16846,7 +16846,11 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("a release of a name with no place", line);
         };
         let info = &body.names[n as usize];
-        let Some(rel) = self.rel_for(&ty, line)? else {
+        let rel = match info.binding {
+            Some(key) => self.rel_owed(key, &ty, line)?,
+            None => self.rel_for(&ty, line)?,
+        };
+        let Some(rel) = rel else {
             return Ok(());
         };
         let rel = around(rel, &info.holes);
@@ -18760,7 +18764,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         self.scope.push((info.source.clone(), place, ty.clone()));
         if self.releases_whole(key) {
-            if let Some(r) = self.rel_for(&ty, info.line)? {
+            if let Some(r) = self.rel_owed(key, &ty, info.line)? {
                 self.register_rel(b, key, place, r);
             }
         }
