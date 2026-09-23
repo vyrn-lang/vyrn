@@ -18506,6 +18506,12 @@ impl<'p> Fn_<'_, 'p> {
     /// name, a `for` head's or a scrutinee's, which the arm reads by address.
     /// A `let` the reader wrote binds a value ([`Fn_::core_copies`]).
     ///
+    /// An owned name read out of an element is the element itself: a `for`
+    /// over a container it alone owns hands each element on through the
+    /// variable, and the container's release frees the buffer alone
+    /// ([`Fn_::rel_owed`]). The name's release is its own row, and a
+    /// `consume` of it hands the element on.
+    ///
     /// `None` where the program can observe the copy. A binding the body
     /// stores into, or hands to `modify`, writes a
     /// value of its own. A callee handed the root, or any root on the chain,
@@ -18519,7 +18525,8 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Option<&'b vyrn_lower::core::Place> {
         let info = &body.names[n as usize];
         let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
-        if !(info.borrow || minted)
+        let owned = info.releases && !info.borrow;
+        if !(info.borrow || minted || owned)
             || self.checks(&info.ty)
             || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
         {
@@ -18539,8 +18546,11 @@ impl<'p> Fn_<'_, 'p> {
             }
         };
         let place = read(n)?;
-        if written.iter().any(|(m, _)| *m == n)
+        if written
+            .iter()
+            .any(|(m, c)| *m == n && !(owned && *c == Some(Capability::Consume)))
             || matches!(place, vyrn_lower::core::Place::Key(..))
+            || (owned && !matches!(place, vyrn_lower::core::Place::Elem(..)))
             || self
                 .core_place_ty(body, place)
                 .is_none_or(|t| self.cx.resolve(&t) != self.cx.resolve(&info.ty))
@@ -18554,7 +18564,7 @@ impl<'p> Fn_<'_, 'p> {
             let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
                 return Some(place);
             };
-            if written.contains(&(root, true)) {
+            if written.iter().any(|(m, c)| *m == root && c.is_some()) {
                 return None;
             }
             match read(root) {
@@ -20046,8 +20056,6 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
     }
 }
 
-/// The names a statement writes: the root of a store, `false`, and a `modify`
-/// or `consume` argument, `true`. [`Fn_::core_alias`] reads it.
 /// The parts of the header `base` names, when it is a borrow a loop walks.
 fn core_header(w: &Walked, base: &vyrn_lower::core::Place) -> Option<Walk> {
     match base {
@@ -20056,12 +20064,14 @@ fn core_header(w: &Walked, base: &vyrn_lower::core::Place) -> Option<Walk> {
     }
 }
 
-fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, bool)>) {
-    let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, bool)>| {
+/// The names a statement writes: the root of a store, `None`, and a `modify`
+/// or `consume` argument, with its capability. [`Fn_::core_alias`] reads it.
+fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>) {
+    let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>| {
         if let Rhs::Call { args, .. } = r {
             for (v, c) in args {
                 if let (Val::Name(n), Capability::Modify | Capability::Consume) = (v, c) {
-                    out.push((*n, true));
+                    out.push((*n, Some(*c)));
                 }
             }
         }
@@ -20069,7 +20079,7 @@ fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, bool)>) {
     match s {
         St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
         St::Store { place, .. } => {
-            out.extend(vyrn_lower::kernel::root_of(place).map(|(n, _)| (n, false)))
+            out.extend(vyrn_lower::kernel::root_of(place).map(|(n, _)| (n, None)))
         }
         St::If { then, els, .. } => {
             then.iter().for_each(|s| core_written(s, out));
