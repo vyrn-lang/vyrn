@@ -2049,16 +2049,6 @@ impl<'a> Parts<'a, '_> {
             Parts::Core(_, vs, ..) => vs.len(),
         }
     }
-
-    /// The part as an EXPRESSION, which an aggregate part is built from. The
-    /// core states such a part as a name of its own, and this walk binds a made
-    /// layout without reading one back, so there is no expression to hand over.
-    fn expr(&self, i: usize, line: usize) -> Result<&'a Expr, String> {
-        match self {
-            Parts::Ast(es) => Ok(es[i]),
-            Parts::Core(..) => unsupported("an aggregate part of a made layout", line),
-        }
-    }
 }
 /// The spelling a lifted lambda's shell is named by, followed by the name of
 /// the function that holds the literal: `@lambda main`. Reserved, so no Vyrn
@@ -2502,6 +2492,7 @@ fn lower_body(
             held: None,
             landed: None,
             walks: vec![None; core.names.len()],
+            nested: vec![None; core.names.len()],
         };
     }
 
@@ -11386,10 +11377,7 @@ impl<'p> Fn_<'_, 'p> {
                     self.part(m, b, elems, i, elem, line)?;
                     b.ins(&store_of(&self.cx.ll(elem)));
                 }
-                Repr::Agg(_) => {
-                    let e = elems.expr(i, line)?;
-                    self.agg_into(m, b, dest.at(at), stride, e, elem, true)?;
-                }
+                Repr::Agg(_) => self.agg_part(m, b, elems, i, dest.at(at), stride, elem, line)?,
                 Repr::Unit => return unsupported("an array of Unit", line),
             }
         }
@@ -11424,8 +11412,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 Repr::Agg(fl) => {
                     let at = dest.at(l.fields[i]);
-                    let e = parts.expr(order[i], line)?;
-                    self.agg_into(m, b, at, fl.size, e, &f.ty, true)?;
+                    self.agg_part(m, b, parts, order[i], at, fl.size, &f.ty, line)?;
                 }
                 Repr::Unit => return unsupported("a Unit field", line),
             }
@@ -11453,6 +11440,43 @@ impl<'p> Fn_<'_, 'p> {
             Parts::Core(body, vs, w) => {
                 let (body, v) = (*body, &vs[i]);
                 self.core_val(m, b, body, w, v, want, line)
+            }
+        }
+    }
+
+    /// One layout part of a literal, left at `dest`, which is the parent's
+    /// storage at the part's offset (RFC-0125 M7). The AST arm builds the
+    /// expression there. The core's row names the part: a layout made for this
+    /// part alone is built there from its own row ([`Fn_::core_nests`]), and any
+    /// other layout name is copied from its place, as the arm copies a variable.
+    #[allow(clippy::too_many_arguments)]
+    fn agg_part(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        parts: &mut Parts,
+        i: usize,
+        dest: Dest,
+        size: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match parts {
+            Parts::Ast(es) => {
+                let e = es[i];
+                self.agg_into(m, b, dest, size, e, ty, true)
+            }
+            Parts::Core(body, vs, w) => {
+                let (body, v) = (*body, &vs[i]);
+                if let Val::Name(n) = v {
+                    if let Some(rhs) = w.nested[*n as usize].take() {
+                        return self.core_make(m, b, body, w, dest, ty, &rhs, line);
+                    }
+                }
+                dest.addr(b, 0);
+                self.core_val(m, b, body, w, v, ty, line)?;
+                agg_landed(b, size, false);
+                Ok(())
             }
         }
     }
@@ -16685,6 +16709,10 @@ struct Walked {
     /// The header of each borrow a loop walks, taken apart where the borrow
     /// is bound ([`NameInfo::walked`](vyrn_lower::core::NameInfo::walked)).
     walks: Vec<Option<Walk>>,
+    /// The row of a layout made for one part of its parent, held from its own
+    /// `let` to the parent's build, which writes it at the part's offset
+    /// ([`Fn_::core_nests`]).
+    nested: Vec<Option<Rhs>>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17327,6 +17355,11 @@ impl<'p> Fn_<'_, 'p> {
                 // The store that puts the rebuilt receiver back, which the
                 // rebuild already wrote.
                 St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => {}
+                // A layout made for one part of its parent: the parent's build
+                // writes it at the part's offset ([`Fn_::agg_part`]).
+                St::Let(n, rhs) if self.core_nests(body, ss, i, &w.occurs).is_some() => {
+                    w.nested[*n as usize] = Some(rhs.clone());
+                }
                 // A LAYOUT MADE, built into the binding's own slot — RFC-0125
                 // M7. It is a `let` arm of its own because the slot has to
                 // exist before the parts are written: the arm below evaluates
@@ -18474,13 +18507,11 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Whether this walk writes one PART of a made layout at the type the
-    /// layout puts it at — RFC-0125 M7.
+    /// Whether this walk stores one PART of a made layout at the type the
+    /// layout puts it at through [`Fn_::part`] (RFC-0125 M7).
     ///
     /// A value in one wasm local, which a String is as much as an `Int64`
-    /// ([`Fn_::core_framed`]): the builders store it through [`Fn_::part`] for
-    /// both walks. A layout part is built from an expression, which the row
-    /// does not carry.
+    /// ([`Fn_::core_framed`]). A layout part is [`Fn_::agg_part`]'s.
     fn core_part_ty(&self, t: &Type) -> bool {
         self.core_framed(t)
     }
@@ -18567,9 +18598,10 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Whether `v` is a layout name that fills a payload of `t` from its
-    /// address: [`Fn_::build_variant`] boxes it or copies its two words, and
-    /// [`Fn_::core_val`] pushes the address, as the arm's `Expr::Var` does.
+    /// Whether `v` is a layout name that fills a payload or a part of `t` from
+    /// its address: [`Fn_::build_variant`] boxes it or copies its two words,
+    /// [`Fn_::agg_part`] copies its bytes, and [`Fn_::core_val`] pushes the
+    /// address, as the arm's `Expr::Var` does.
     fn core_payload_layout(&self, body: &vyrn_lower::core::Body, v: &Val, t: &Type) -> bool {
         matches!(v, Val::Name(n) if {
             let nt = &body.names[*n as usize].ty;
@@ -18586,44 +18618,185 @@ impl<'p> Fn_<'_, 'p> {
     /// It asks what [`Fn_::core_make`] needs: a layout with an offset for every
     /// part, parts this walk emits, and no check at the construction that the
     /// row does not carry.
+    ///
+    /// A layout part of a record or an array is a layout name here, and
+    /// [`Fn_::core_built`] asks where its bytes come from, which needs the
+    /// row's list. [`Fn_::map_into`] stores a map's parts through
+    /// [`Fn_::part`], so each is a value in one local.
     fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
-        let part = |t: &Type| self.core_part_ty(t);
-        if !vs.iter().all(|v| self.core_val_readable(body, v))
-            || !matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
+        let layout = |t: &Type| matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t);
+        // A cross-field `where` runs on the finished literal (RFC-0079) and
+        // the row states no check.
+        if !layout(ty)
+            || matches!(ctor, Ctor::Record(name, _)
+                if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()))
         {
             return false;
         }
-        match ctor {
-            Ctor::Record(name, names) => {
-                // A cross-field `where` runs on the finished literal (RFC-0079)
-                // and the row states no check.
-                if self
-                    .cx
-                    .types
-                    .get(name)
-                    .is_some_and(|d| d.predicate.is_some())
-                {
-                    return false;
+        self.core_part_tys(ty, ctor, vs.len()).is_some_and(|tys| {
+            vs.iter().zip(&tys).all(|(v, t)| {
+                (self.core_val_readable(body, v) && self.core_part_ty(t))
+                    || (layout(t)
+                        && !matches!(ctor, Ctor::Map)
+                        && matches!(v, Val::Name(n) if layout(&body.names[*n as usize].ty)))
+            })
+        })
+    }
+
+    /// The type of each part of a record, an array or a map literal of `ty`,
+    /// in the order the row lists the `n` parts. `None` when the row does not
+    /// fill the layout exactly, or makes a checked constructor.
+    fn core_part_tys(&self, ty: &Type, ctor: &Ctor, n: usize) -> Option<Vec<Type>> {
+        match (ctor, self.cx.resolve(ty)) {
+            (Ctor::Record(_, names), _) => {
+                let decl = self.cx.fields(ty)?;
+                if decl.len() != n || names.len() != n {
+                    return None;
                 }
-                let Some(decl) = self.cx.fields(ty) else {
-                    return false;
-                };
-                decl.len() == vs.len()
-                    && names.len() == vs.len()
-                    && decl.iter().all(|f| part(&f.ty) && names.contains(&f.name))
+                names
+                    .iter()
+                    .map(|nm| decl.iter().find(|f| f.name == *nm).map(|f| f.ty.clone()))
+                    .collect()
             }
-            Ctor::Array => match self.cx.resolve(ty) {
-                Type::Array(inner) => part(&inner),
-                Type::ArrayN(inner, n) => n == vs.len() && n > 0 && part(&inner),
-                _ => false,
-            },
-            // A key and a value per entry, each a part this walk writes.
-            Ctor::Map => match self.cx.resolve(ty) {
-                Type::Map(k, v) => vs.len() % 2 == 0 && part(&k) && part(&v),
-                _ => false,
-            },
-            Ctor::Try(_) => false,
+            (Ctor::Array, Type::Array(inner)) => Some(vec![*inner; n]),
+            (Ctor::Array, Type::ArrayN(inner, k)) if k == n && n > 0 => Some(vec![*inner; n]),
+            // A key and a value per entry.
+            (Ctor::Map, Type::Map(k, v)) if n % 2 == 0 => Some(
+                (0..n)
+                    .map(|i| {
+                        if i % 2 == 0 {
+                            (*k).clone()
+                        } else {
+                            (*v).clone()
+                        }
+                    })
+                    .collect(),
+            ),
+            _ => None,
         }
+    }
+
+    /// Whether this walk builds the layout the row at `ss[i]` makes, at `ty`:
+    /// RFC-0125 M7, the layout-made family's screen with the row's list.
+    ///
+    /// A layout part of a record or an array is built at its offset from a
+    /// row held for it ([`Fn_::core_nests`]), which is asked at the part's
+    /// type, or copied from a name of the part's own layout that a reader
+    /// bound or that holds a place's address. A temporary's slot would stay
+    /// live beside the parent's storage, where the arm writes the part in
+    /// place, so such a part stays in the arm.
+    fn core_built(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        i: usize,
+        ty: &Type,
+        rhs: &Rhs,
+    ) -> bool {
+        if !self.core_makes(body, ty, rhs) {
+            return false;
+        }
+        let Rhs::Make(ctor, vs) = rhs else {
+            return true;
+        };
+        let Some(tys) = self.core_part_tys(ty, ctor, vs.len()) else {
+            return false;
+        };
+        vs.iter().zip(&tys).all(|(v, t)| {
+            self.core_framed(t)
+                || match self.core_held(body, ss, i, v) {
+                    Some((k, held)) => self.core_built(body, ss, k, t, held),
+                    None => {
+                        self.core_payload_layout(body, v, t)
+                            && matches!(v, Val::Name(n)
+                                if body.names[*n as usize].binding.is_some()
+                                    || self.core_alias(body, *n).is_some())
+                    }
+                }
+        })
+    }
+
+    /// The row held for the part `v` of the layout made at `ss[i]`, and its
+    /// index: `v` names a layout made for this part alone
+    /// ([`Fn_::core_nests`]).
+    fn core_held<'r>(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &'r [St],
+        i: usize,
+        v: &Val,
+    ) -> Option<(usize, &'r Rhs)> {
+        let Val::Name(n) = v else {
+            return None;
+        };
+        let k = ss[..i]
+            .iter()
+            .rposition(|s| matches!(s, St::Let(l, _) if l == n))?;
+        let St::Let(_, rhs) = &ss[k] else {
+            return None;
+        };
+        (self.core_nests(body, ss, k, &self.core_w.occurs) == Some(i)).then_some((k, rhs))
+    }
+
+    /// The index of the record or array literal that builds the layout made
+    /// at `ss[i]` as one of its parts, where the build can wait for it:
+    /// RFC-0125 M7, a literal nested in a literal.
+    ///
+    /// The arm builds a nested literal in its parent's storage. The rows make
+    /// the part first, as a temporary the parent names once, and this walk
+    /// holds that row until the parent is built ([`Fn_::agg_part`]). The
+    /// build moves later, so the rows between, which compute the parent's
+    /// other parts, must write nothing: a `let` of a value, a read, an
+    /// operator, a literal, or a call whose arguments are all `read`. What the
+    /// held row reads must outlive it with no slot: a literal, a value in one
+    /// local, or a row held for it in turn, because a slot's extent ends at
+    /// the held row and the frame may give it to a row between.
+    fn core_nests(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        i: usize,
+        occurs: &[u32],
+    ) -> Option<usize> {
+        use vyrn_frontend::ast::Capability as Cap;
+        let St::Let(t, rhs) = &ss[i] else {
+            return None;
+        };
+        let vs: Vec<&Val> = match rhs {
+            Rhs::Make(Ctor::Record(..) | Ctor::Array, vs) => vs.iter().collect(),
+            Rhs::Call {
+                args,
+                kind: Callee::Ctor,
+                ..
+            } => args.iter().map(|(v, _)| v).collect(),
+            _ => return None,
+        };
+        if body.names[*t as usize].binding.is_some() || occurs.get(*t as usize) != Some(&2) {
+            return None;
+        }
+        let j = ss
+            .iter()
+            .enumerate()
+            .skip(i + 1)
+            .find_map(|(j, s)| match s {
+                St::Let(_, Rhs::Make(Ctor::Record(..) | Ctor::Array, ps))
+                    if ps.contains(&Val::Name(*t)) =>
+                {
+                    Some(Some(j))
+                }
+                St::Let(_, Rhs::Val(_) | Rhs::Read(_) | Rhs::Prim(..) | Rhs::Make(..)) => None,
+                St::Let(_, Rhs::Call { args, .. }) if args.iter().all(|(_, c)| *c == Cap::Read) => {
+                    None
+                }
+                _ => Some(None),
+            })??;
+        let held = matches!(rhs, Rhs::Make(..));
+        vs.iter()
+            .all(|v| {
+                self.core_val_readable(body, v)
+                    || (held && self.core_held(body, ss, i, v).is_some())
+            })
+            .then_some(j)
     }
 
     /// The local holding the caller's out-pointer.
@@ -19058,10 +19231,15 @@ impl<'p> Fn_<'_, 'p> {
             // storage where the `return` after it hands it back
             // ([`Fn_::core_lands`]) (RFC-0125 M7).
             St::Let(n, rhs) if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) => {
-                if self.core_lands(body, ss, i, reads) {
-                    return self.core_makes(body, &self.ret_ty, rhs);
+                if self.core_nests(body, ss, i, &self.core_w.occurs).is_some() {
+                    return true;
                 }
-                self.core_makes(body, &body.names[*n as usize].ty, rhs)
+                let ty = if self.core_lands(body, ss, i, reads) {
+                    &self.ret_ty
+                } else {
+                    &body.names[*n as usize].ty
+                };
+                self.core_built(body, ss, i, ty, rhs)
             }
             // An aggregate call result has a slot of its own, which the
             // reader's `let` takes before the call, the storage the call
