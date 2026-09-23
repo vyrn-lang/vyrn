@@ -13101,7 +13101,9 @@ impl<'p> Fn_<'_, 'p> {
             .enumerate()
         {
             let arm = &arms[arm_ix];
-            self.chain_enter(b, &mut chain, slot, addr, tags[arm_ix].map(|t| t as u64));
+            self.chain_enter(b, &mut chain, slot, |b| {
+                Self::tag_is(b, addr, tags[arm_ix].map(|t| t as u64))
+            });
 
             let mark = self.scope.len();
             let binds = self.pattern_binds(&sum, arm.pattern, line)?;
@@ -13606,7 +13608,7 @@ impl<'p> Fn_<'_, 'p> {
         pat: &Pattern,
         line: usize,
     ) -> Result<(), String> {
-        self.tag_is(b, addr, tag_of(sum, pat, line)?.map(|t| t as u64));
+        Self::tag_is(b, addr, tag_of(sum, pat, line)?.map(|t| t as u64));
         Ok(())
     }
 
@@ -13646,20 +13648,21 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Enter arm `slot` of the chain: its test, and the block it writes into.
+    /// `probe` pushes the test's `i32`, which a two-way branch's second side
+    /// does not ask.
     fn chain_enter(
         &mut self,
         b: &mut Frame,
         c: &mut Chain,
         slot: usize,
-        addr: u32,
-        tag: Option<u64>,
+        probe: impl FnOnce(&mut Frame),
     ) {
         if c.two.is_some() && slot == 1 {
             c.els = Some(b.here());
             b.ins(&Instruction::Else);
             return;
         }
-        self.tag_is(b, addr, tag);
+        probe(b);
         // A chain arm carries its value out on the branch, so only the
         // two-way branch's own `if` is the join.
         let bt = if c.two.is_some() {
@@ -13713,7 +13716,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The arm above asks it of a PATTERN and the core walk asks it of the row
     /// ([`vyrn_lower::core::Test`], RFC-0125 M7), so the two spellings of
     /// "a tag is read and an arm is chosen" are one.
-    fn tag_is(&self, b: &mut Frame, addr: u32, tag: Option<u64>) {
+    fn tag_is(b: &mut Frame, addr: u32, tag: Option<u64>) {
         b.ins(&Instruction::LocalGet(addr));
         // The refutable-`let` desugar's default arm (RFC-0121): the probe is
         // constant truth — the address read above is discarded, and the one
@@ -16962,16 +16965,19 @@ impl<'p> Fn_<'_, 'p> {
         // declared `release` taking its own receiver apart, and a construct
         // whose own copy the plan releases.
         let free_box = owns;
-        let tags: Vec<Option<usize>> = arms
-            .iter()
-            .map(|a| match a.test {
-                vyrn_lower::core::Test::Tag(t) => Ok(Some(t as usize)),
-                vyrn_lower::core::Test::Else => Ok(None),
-                vyrn_lower::core::Test::Impl => {
-                    Err(gap("a switch whose arms a call chooses", line))
-                }
-            })
-            .collect::<Result<_, _>>()?;
+        // A named `Bool` is the arm's own probe: the local that holds it.
+        let mut probes = Vec::new();
+        for a in arms {
+            probes.push(match a.test {
+                vyrn_lower::core::Test::Tag(t) => (Some(t as usize), None),
+                vyrn_lower::core::Test::Else => (None, None),
+                vyrn_lower::core::Test::Holds(h) => match self.core_place(w, body, h) {
+                    Some((Place::Local(l), _)) => (Some(0), Some(l)),
+                    _ => return unsupported("a switch on a predicate with no local", line),
+                },
+            });
+        }
+        let tags: Vec<Option<usize>> = probes.iter().map(|p| p.0).collect();
         // The switch carries no value: the core stores each arm's own into the
         // name the reader bound, so the join is empty and there is no
         // destination for it to write through.
@@ -16981,7 +16987,12 @@ impl<'p> Fn_<'_, 'p> {
             .enumerate()
         {
             let arm = &arms[ix];
-            self.chain_enter(b, &mut chain, slot, addr, tags[ix].map(|t| t as u64));
+            self.chain_enter(b, &mut chain, slot, |b| match probes[ix] {
+                (_, Some(l)) => {
+                    b.ins(&Instruction::LocalGet(l));
+                }
+                (tag, None) => Self::tag_is(b, addr, tag.map(|t| t as u64)),
+            });
             // A payload's slot is the width of the ones before it (RFC-0126
             // §8.4), so the binder needs the whole variant's list and not its
             // own type. The row binds them in payload order.
@@ -19604,7 +19615,9 @@ impl<'p> Fn_<'_, 'p> {
                     // states the release and not the copy.
                     && !self.releases_whole(*site)
                     && arms.iter().all(|a| {
-                        a.test != vyrn_lower::core::Test::Impl
+                        a.test
+                            .reads()
+                            .is_none_or(|h| self.core_framed(&body.names[h as usize].ty))
                             && a.binds
                                 .iter()
                                 .all(|bn| self.core_payload(&body.names[*bn as usize].ty))
