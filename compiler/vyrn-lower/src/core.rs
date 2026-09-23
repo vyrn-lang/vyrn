@@ -5506,9 +5506,9 @@ impl<'a> Builder<'a> {
     /// the binding that follows; the ones queued by an enclosing expression
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
-    /// Whether `name(args)` at `e` is an element read of a builtin array
-    /// whose element owns no heap, or a String's byte, off a receiver that is
-    /// a place.
+    /// Whether `name(args)` at `e` is a read that owns no heap off a receiver
+    /// that is a place: an element of a builtin array, a String's byte, or a
+    /// map's entry, whose `Option` the runtime's lookup builds.
     fn reads_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
         name == vyrn_frontend::project::AT
             && args.len() == 2
@@ -5517,7 +5517,11 @@ impl<'a> Builder<'a> {
             && self.ty_of(&args[0]).is_ok_and(|t| {
                 matches!(
                     vyrn_frontend::types::resolve(&t, self.proto.types()),
-                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
+                    Type::Array(_)
+                        | Type::ArrayN(..)
+                        | Type::SmallArray(..)
+                        | Type::Str
+                        | Type::Map(..)
                 )
             })
     }
@@ -5670,10 +5674,11 @@ impl<'a> Builder<'a> {
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
             }
-            // `xs[i]` of a heapless element is section 2.1's element read, one load at
-            // an address, and not a call: the seeded `place at` row yields
-            // `@slot(self, i)` and nothing else. A String's byte, a map's
-            // entry and a user container's projection are other reads.
+            // `xs[i]` of a heapless element and a String's byte are section
+            // 2.1's element read, one load at an address, and a map's entry is
+            // a key read through the runtime's lookup; none is a call. The
+            // seeded `place at` row yields `@slot(self, i)` and nothing else.
+            // A user container's projection is another read.
             Expr::Call {
                 name,
                 args,
