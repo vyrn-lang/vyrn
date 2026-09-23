@@ -83,7 +83,7 @@
 //! Every other name the body does not own — a pattern binder of a
 //! non-consuming switch over a value that owns heap — is invisible here.
 
-use crate::core::{Arm, Body, BorrowKind, Name, Old, Place, Rhs, St, Val};
+use crate::core::{Arm, Body, BorrowKind, Name, Old, Place, Rhs, St, Val, Walk};
 use vyrn_frontend::ast::Capability;
 use vyrn_frontend::own::Exit;
 
@@ -245,6 +245,12 @@ enum Write<'s> {
     Modify(&'s Val),
 }
 
+/// Whether a store at `rel`, a path under a container's header, lands in an
+/// element. An element store moves no header (RFC-0125 M1, `fieldstore.rs`).
+fn in_element(rel: &str) -> bool {
+    rel.starts_with(".[]")
+}
+
 /// Every write point of the row `s`, in the order the judgment reaches them,
 /// without the rows of a list inside `s`. The judgment's state walk and
 /// [`writes`] both read this, so the two agree on what a row writes.
@@ -286,7 +292,8 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo]) -> Vec<Write<'s>> {
 /// Whether a row of `ss` writes `n` where the judgment would end a borrow of
 /// it ([`writes_of`]), or a closure captures it. A name `ss` binds by a read
 /// of `n`, or by a switch over such a name, is `n` here too, and a borrow of
-/// a place bound outside `ss` may be, so a write through one counts. The
+/// a place bound outside `ss` may be, so a write through one counts. A store
+/// into an element of `n` is not one ([`in_element`]). The
 /// builder asks before the judgment runs (RFC-0125 M7, the hoisted header).
 /// A release or a `return` that only an exit follows is not one: no row
 /// after it reads the borrow.
@@ -297,6 +304,7 @@ pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo]) -> bool {
     let mut w = Writes {
         n,
         alias: vec![n],
+        elem: Vec::new(),
         inside,
         names,
         depth: 0,
@@ -308,6 +316,8 @@ struct Writes<'a> {
     n: Name,
     /// `n`, and every borrow bound so far by a read of one of these.
     alias: Vec<Name>,
+    /// Those of `alias` that read inside an element of `n`.
+    elem: Vec<Name>,
     /// Every name `ss` binds.
     inside: Vec<Name>,
     names: &'a [crate::core::NameInfo],
@@ -338,7 +348,11 @@ impl Writes<'_> {
 
     fn st(&mut self, s: &St) -> bool {
         let hit = writes_of(s, self.names).into_iter().any(|w| match w {
-            Write::Store(p) | Write::Take(p) => root_of(p).is_some_and(|(r, _)| self.under(r)),
+            Write::Store(p) => root_of(p).is_some_and(|(r, path)| {
+                self.under(r)
+                    && !(self.elem.contains(&r) || (self.alias.contains(&r) && in_element(&path)))
+            }),
+            Write::Take(p) => root_of(p).is_some_and(|(r, _)| self.under(r)),
             Write::Hand(v, _) => *v == Val::Name(self.n),
             Write::Release(k) => self.alias.contains(&k),
             Write::Modify(v) => matches!(v, Val::Name(k) if self.under(*k)),
@@ -348,13 +362,18 @@ impl Writes<'_> {
         }
         match s {
             St::Let(k, r) => {
-                let reads = match r {
-                    Rhs::Read(p) => root_of(p).is_some_and(|(r, _)| self.alias.contains(&r)),
-                    Rhs::Val(Val::Name(j)) => self.alias.contains(j),
-                    _ => false,
+                let from = match r {
+                    Rhs::Read(p) => root_of(p),
+                    Rhs::Val(Val::Name(j)) => Some((*j, String::new())),
+                    _ => None,
                 };
-                if reads && self.names[*k as usize].borrow {
-                    self.alias.push(*k);
+                if let Some((r, path)) = from {
+                    if self.alias.contains(&r) && self.names[*k as usize].borrow {
+                        self.alias.push(*k);
+                        if self.elem.contains(&r) || in_element(&path) {
+                            self.elem.push(*k);
+                        }
+                    }
                 }
                 matches!(r, Rhs::Prim(crate::core::Op::Closure, vs, _)
                     if vs.iter().any(|v| matches!(v, Val::Name(k) if self.alias.contains(k))))
@@ -377,13 +396,17 @@ impl Writes<'_> {
                     // whatever it holds ([`Kernel::read_out`]).
                     if over {
                         let names = self.names;
-                        self.alias
-                            .extend(a.binds.iter().filter(|b| names[**b as usize].borrow));
-                        self.alias
-                            .extend(a.reads(on).iter().filter_map(|r| match r {
+                        let binders = (a.binds.iter().filter(|b| names[**b as usize].borrow))
+                            .copied()
+                            .chain(a.reads(on).iter().filter_map(|r| match r {
                                 St::Let(b, _) => Some(*b),
                                 _ => None,
                             }));
+                        let binders: Vec<Name> = binders.collect();
+                        if matches!(on, Val::Name(k) if self.elem.contains(k)) {
+                            self.elem.extend(&binders);
+                        }
+                        self.alias.extend(binders);
                     }
                     self.list(&a.body)
                 })
@@ -812,9 +835,10 @@ impl<'b> Kernel<'b> {
     /// the write goes through. A take that copies a value that owns no heap
     /// writes nothing, and the take of an alias is refused before it writes.
     /// A store into a binding writes the binding's own slot, not the place it
-    /// reads. A `modify` argument writes what it reads, because the callee
-    /// may replace or free it, and it ends a walked borrow whatever the
-    /// container holds.
+    /// reads, and a store into an element ends no header a `while` walks
+    /// ([`in_element`]). A `modify` argument writes what it reads, because
+    /// the callee may replace or free it, and it ends a walked borrow
+    /// whatever the container holds.
     fn end(&self, st: &mut State, w: Write) {
         let name;
         let p = match w {
@@ -832,6 +856,7 @@ impl<'b> Kernel<'b> {
             Write::Hand(..) | Write::Modify(_) => return,
         };
         let by_call = matches!(w, Write::Modify(_));
+        let store = matches!(w, Write::Store(_));
         // Spelled through the aliases, as the reader wrote it: `t.xs[..]`,
         // not the desugar's `t.xs[][..]`.
         let (root, path, what) = match p {
@@ -854,11 +879,16 @@ impl<'b> Kernel<'b> {
             // through. A name the body owns read a value out, and a value
             // that owns no heap was copied out; neither aliases the place,
             // but a payload binder is its address ([`Kernel::read_out`]).
-            let copied = self.owned(k as Name) && !self.read_out[k] && !(by_call && info.walked);
+            let copied =
+                self.owned(k as Name) && !self.read_out[k] && !(by_call && info.walked.is_some());
             let Some(x) = &st.alias[k] else {
                 continue;
             };
+            let element = store
+                && info.walked == Some(Walk::While)
+                && path.strip_prefix(x.path.as_str()).is_some_and(in_element);
             if !copied
+                && !element
                 && !chain.contains(&(k as Name))
                 && x.root == root
                 && overlaps(&x.path, &path)

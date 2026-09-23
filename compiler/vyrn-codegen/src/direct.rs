@@ -18267,10 +18267,10 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether `n` is a header a loop walks: a borrow of an array, a small
     /// array or a String, which a `for` binds its container to and a `while`
-    /// binds a container it indexes and never writes to.
+    /// binds a container it indexes and never rebuilds.
     fn core_walked(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
         let info = &body.names[n as usize];
-        info.walked
+        info.walked.is_some()
             && info.borrow
             && matches!(
                 self.cx.resolve(&info.ty),

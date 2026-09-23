@@ -154,12 +154,9 @@ pub struct NameInfo {
     /// found. Making it a kind refused `std/vyx.vyrn`'s `for s in kids` and
     /// twenty-two programs of the corpus with it.
     pub loop_var: Option<String>,
-    /// Whether this is a borrow a loop walks: the one a `for` reads its
-    /// container through, from the head to the end, or the header a `while`
-    /// reads a container it never writes through ([`Builder::hoist_headers`]).
-    /// A `modify` argument over the container ends it whatever the container
-    /// holds ([`crate::kernel`]).
-    pub walked: bool,
+    /// The loop that walks this borrow, if one does. A `modify` argument over
+    /// the container ends it whatever the container holds ([`crate::kernel`]).
+    pub walked: Option<Walk>,
     /// Whether the type is LINEAR — a `Stream`, a `Task`, a type that declares
     /// `impl MustUse` (RFC-0075). Such a value is disposed, not stored, and the
     /// builtin that disposes it (`close`, `@join`, `boxStream`) is the one
@@ -197,6 +194,18 @@ pub struct NameInfo {
     /// report says out loud, so the report and the ownership rule are one
     /// statement rather than two walks that could disagree.
     pub not_owned: Option<NotOwned>,
+}
+
+/// A loop that reads its container through a borrow ([`NameInfo::walked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walk {
+    /// A `for` reads its container through the borrow from its head to its
+    /// end.
+    For,
+    /// A `while` reads the header of a container it indexes and never
+    /// rebuilds ([`Builder::hoist_headers`]). An element store moves no
+    /// header, so it ends no such borrow.
+    While,
 }
 
 /// Why a `let` binds a value the frame does not own — the report's reasons,
@@ -2515,7 +2524,7 @@ impl<'a> Builder<'a> {
             for_consume: false,
             fields: Vec::new(),
             loop_var: None,
-            walked: false,
+            walked: None,
             linear,
             bound_by_let: false,
             closure_reads: None,
@@ -3725,7 +3734,7 @@ impl<'a> Builder<'a> {
                             // still walking.
                             owner = Some(n);
                             let t = self.borrow_name(iter, ity.clone(), *line);
-                            self.body.names[t as usize].walked = true;
+                            self.body.names[t as usize].walked = Some(Walk::For);
                             out.push(St::Let(t, Rhs::Read(Place::Name(n))));
                             t
                         }
@@ -3739,7 +3748,7 @@ impl<'a> Builder<'a> {
                         // judgment says so.
                         self.pending_receiver = None;
                         let t = self.borrow_name(iter, ity.clone(), *line);
-                        self.body.names[t as usize].walked = true;
+                        self.body.names[t as usize].walked = Some(Walk::For);
                         out.push(St::Let(t, Rhs::Read(place)));
                         t
                     }
@@ -4203,12 +4212,13 @@ impl<'a> Builder<'a> {
     }
 
     /// Bind the header of every container the loop `l` indexes and no row of
-    /// it writes, once, before the loop, and point the loop's element and
-    /// length reads at it (RFC-0125 M7, the hoisted header). The header is a
-    /// borrow the loop walks, as a `for`'s container is, so the kernel keeps
-    /// its alias and an emitter takes the header apart once. A container
-    /// that owns no heap is a value and not a borrow, so it is read in place
-    /// each turn; module state is a `Place::Global` and never a candidate.
+    /// it rebuilds ([`crate::kernel::writes`]), once, before the loop, and
+    /// point the loop's element and length reads at it (RFC-0125 M7, the
+    /// hoisted header). The header is a borrow the loop walks, as a `for`'s
+    /// container is, so the kernel keeps its alias and an emitter takes the
+    /// header apart once. A container that owns no heap is a value and not a
+    /// borrow, so it is read in place each turn; module state is a
+    /// `Place::Global` and never a candidate.
     fn hoist_headers(&mut self, l: &mut [St], line: usize, out: &mut Vec<St>) {
         let mut read = Vec::new();
         l.iter_mut().for_each(|s| header_reads(s, None, &mut read));
@@ -4233,7 +4243,7 @@ impl<'a> Builder<'a> {
             let ty = info.ty.clone();
             let path = info.path.clone().unwrap_or_else(|| info.source.clone());
             let h = self.name("@borrow", ty, false, line);
-            self.body.names[h as usize].walked = true;
+            self.body.names[h as usize].walked = Some(Walk::While);
             self.body.names[h as usize].path = Some(path);
             out.push(St::Let(h, Rhs::Read(Place::Name(n))));
             l.iter_mut()
@@ -6865,9 +6875,8 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
 
 /// The names whose header a read in `s` walks: an element read, or a
 /// length read, straight off the name. With `rebase`, each such read of the
-/// first name reads the second instead. A store and a take keep their place:
-/// a loop that stores into the container or takes from it writes it, and
-/// [`Builder::hoist_headers`] binds it no header.
+/// first name reads the second instead. A store and a take keep their place,
+/// so a store into an element writes the container and not its header.
 fn header_reads(s: &mut St, rebase: Option<(Name, Name)>, out: &mut Vec<Name>) {
     fn place(p: &mut Place, rebase: Option<(Name, Name)>, out: &mut Vec<Name>) {
         let header = match p {

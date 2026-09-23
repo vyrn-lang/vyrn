@@ -149,6 +149,36 @@ fn a_loop_that_only_reads_an_array_loads_its_header_once() {
     );
 }
 
+/// A `while` that stores into the elements it indexes moves no header, so its
+/// reads use the header read once before the loop. The store writes through
+/// the container's own place and reads the header there.
+#[test]
+fn a_loop_that_stores_into_its_elements_reads_them_through_one_header() {
+    let body = wat_func_containing(
+        "fn twice(xs: modify Array<Int64>, n: Int64) {
+         let mut i = 0
+         while i < n {
+         xs[i] = xs[i] + xs[i] + 1234567
+         i = i + 1
+         }
+         }
+         fn main() -> Int64 {
+         let mut xs: Array<Int64> = [1, 2, 3]
+         twice(xs, 3)
+         print(xs[0])
+         return 0
+         }
+",
+        MARK,
+    );
+    assert_eq!(
+        word_loads(&body),
+        2,
+        "the reads reload the header inside the loop:
+{body}"
+    );
+}
+
 /// The refusal: a loop that grows the array it indexes moves the header, so
 /// nothing is hoisted and every access reloads it.
 #[test]
