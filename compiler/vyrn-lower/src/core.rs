@@ -521,6 +521,12 @@ pub enum Rhs {
         /// call's own type arguments already substituted. `None` for a call
         /// the checker did not type.
         ret: Option<Type>,
+        /// The instance a call to a generic function names: its type
+        /// arguments as the checker solved them at this site, by parameter
+        /// name in the callee's order ([`crate::Row::solved`]). Empty for a
+        /// callee with no type parameters and for a call the checker did not
+        /// solve.
+        solved: Vec<(String, Type)>,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
     /// The first field is WHAT it computes; the last is the producer type —
@@ -2194,25 +2200,40 @@ fn build_twice(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Resul
     build_seeded(program, inst, own, &seed)
 }
 
+/// What the rows of a body say per expression node: the type it must end up
+/// as, the type its own code produces, and at a generic call the type
+/// arguments the checker solved ([`crate::Row::solved`]).
+type RowFacts = (
+    HashMap<usize, Type>,
+    HashMap<usize, Type>,
+    HashMap<usize, Vec<(String, Type)>>,
+);
+
+fn row_facts(rows: &[crate::Row<'_>]) -> RowFacts {
+    let (mut types, mut produced, mut solved) = (HashMap::new(), HashMap::new(), HashMap::new());
+    for r in rows {
+        if let Node::Expr(_) = r.node {
+            if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
+                types.insert(r.node.id(), t.clone());
+            }
+            if let Some(t) = r.has.as_ref().or(r.ty.as_ref()) {
+                produced.insert(r.node.id(), t.clone());
+            }
+            if !r.solved.is_empty() {
+                solved.insert(r.node.id(), r.solved.clone());
+            }
+        }
+    }
+    (types, produced, solved)
+}
+
 fn build_seeded(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
     seed: &std::collections::HashSet<usize>,
 ) -> Result<Body, Gap> {
-    let mut types: HashMap<usize, Type> = HashMap::new();
-    let mut produced: HashMap<usize, Type> = HashMap::new();
-    for r in &inst.rows {
-        if let Node::Expr(_) = r.node {
-            if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
-                types.insert(r.node.id(), t.clone());
-            }
-            // The other half of the pair: what the node's own code produces.
-            if let Some(t) = r.has.as_ref().or(r.ty.as_ref()) {
-                produced.insert(r.node.id(), t.clone());
-            }
-        }
-    }
+    let (types, produced, solved) = row_facts(&inst.rows);
     // The placed releases, by the exit they are at — the PLAN's own rows and
     // not the instance's copy of them. The copy is made where the lowering
     // names the instance, which is before [`augment`] places the rows the plan
@@ -2230,6 +2251,7 @@ fn build_seeded(
         proto: &own.proto,
         types,
         produced,
+        solved,
         placed,
         body: Body {
             name: inst.spelling(),
@@ -2325,25 +2347,14 @@ pub fn build_module_state<'a>(
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
     let seed = &seed;
-    let mut types: HashMap<usize, Type> = HashMap::new();
-    let mut produced: HashMap<usize, Type> = HashMap::new();
-    for r in rows {
-        if let Node::Expr(_) = r.node {
-            if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
-                types.insert(r.node.id(), t.clone());
-            }
-            // The other half of the pair: what the node's own code produces.
-            if let Some(t) = r.has.as_ref().or(r.ty.as_ref()) {
-                produced.insert(r.node.id(), t.clone());
-            }
-        }
-    }
+    let (types, produced, solved) = row_facts(rows);
     let mut b = Builder {
         program,
         own,
         proto: &own.proto,
         types,
         produced,
+        solved,
         placed: HashMap::new(),
         body: Body {
             name: String::new(),
@@ -2430,18 +2441,7 @@ fn build_outside_seeded<'a>(
     rows: &[crate::Row<'a>],
     seed: &std::collections::HashSet<usize>,
 ) -> Result<Body, Gap> {
-    let mut types: HashMap<usize, Type> = HashMap::new();
-    let mut produced: HashMap<usize, Type> = HashMap::new();
-    for r in rows {
-        if let Node::Expr(_) = r.node {
-            if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
-                types.insert(r.node.id(), t.clone());
-            }
-            if let Some(t) = r.has.as_ref().or(r.ty.as_ref()) {
-                produced.insert(r.node.id(), t.clone());
-            }
-        }
-    }
+    let (types, produced, solved) = row_facts(rows);
     // The plan's rows for this body. No substitution: the body has no type
     // parameters, so `own`'s answer is already the concrete one.
     let no_steps: Vec<Release> = Vec::new();
@@ -2456,6 +2456,7 @@ fn build_outside_seeded<'a>(
         proto: &own.proto,
         types,
         produced,
+        solved,
         placed,
         body: Body {
             name: name.to_string(),
@@ -2519,6 +2520,8 @@ struct Builder<'a> {
     /// HAS, before the destination's coercion (see [`Rhs`]). `types` above is
     /// the other half of the same pair — what the value must end up as.
     produced: HashMap<usize, Type>,
+    /// The type arguments the checker solved at each generic call node.
+    solved: HashMap<usize, Vec<(String, Type)>>,
     placed: HashMap<(Exit, usize), Vec<&'a Release>>,
     body: Body,
     scope: Vec<(String, Name)>,
@@ -4258,6 +4261,7 @@ impl<'a> Builder<'a> {
                 write_back: false,
                 kind: Callee::Reserved,
                 ret: Some(Type::Str),
+                solved: Vec::new(),
             },
         ));
         Ok(Val::Name(t))
@@ -4626,6 +4630,7 @@ impl<'a> Builder<'a> {
                     write_back: false,
                     kind: Callee::Method,
                     ret: Some(Type::Int),
+                    solved: Vec::new(),
                 },
                 None => return gap("a `for` over a container with no length", line),
             },
@@ -6117,7 +6122,20 @@ impl<'a> Builder<'a> {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
                 }
-                self.call(name, args, *line, self.produced(e), out)
+                let mut r = self.call(name, args, *line, self.produced(e), out)?;
+                if let Rhs::Call {
+                    kind: Callee::Fn,
+                    solved,
+                    ..
+                } = &mut r
+                {
+                    *solved = self
+                        .solved
+                        .get(&(e as *const Expr as usize))
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                Ok(r)
             }
             Expr::TryConstruct { name, args, .. } => {
                 let mut vs = Vec::new();
@@ -6336,6 +6354,7 @@ impl<'a> Builder<'a> {
                                 write_back: false,
                                 kind: Callee::Ctor,
                                 ret: Some(rt),
+                                solved: Vec::new(),
                             },
                         ));
                         Some(Val::Name(t))
@@ -6451,6 +6470,7 @@ impl<'a> Builder<'a> {
                 write_back: false,
                 kind: Callee::Fn,
                 ret: Some(Type::Bool),
+                solved: Vec::new(),
             },
         ));
         let failed = self.temp(Type::Bool, line);
@@ -6479,6 +6499,7 @@ impl<'a> Builder<'a> {
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
+                solved: Vec::new(),
             },
         ));
         if let Val::Name(n) = sv {
@@ -6797,6 +6818,7 @@ impl<'a> Builder<'a> {
             write_back,
             kind,
             ret,
+            solved: Vec::new(),
         })
     }
 
