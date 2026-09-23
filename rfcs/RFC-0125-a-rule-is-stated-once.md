@@ -25502,6 +25502,35 @@ the order the count ranks them:
   the function-value decision and are not a track before it lands.
 - The five refusal witnesses stay a gap by design.
 
+**Six small decisions, on the fourth count (2026-09-23).** `m7-tail`'s
+count on main (the fourth count in `rfcs/census/core-gaps.md`) and
+`m7-read`'s report each stopped at a clause the paragraphs above do not
+decide. The decisions:
+
+- A call names the instance the checker solved. The builder writes the
+  monomorphized symbol, with its type arguments, into the call row, and
+  `core_sig` reads `Cx::sigs` by that name. The emitter solves no type
+  argument a second time.
+- A discarded call whose result is a layout binds a temporary whose extent
+  is the row, as an owned result does. `@pop` and `@swapRemove` of a
+  heapless record are the payers.
+- The element reader covers every layout element type: a record, an enum, an
+  array. The name is the element's address in the buffer. For a `for` that
+  consumes its container, the container's release is buffer-only, as the
+  arm's is, and the exit rule of `m7-forexit` covers the turns no body
+  reached.
+- The screen asks about a `modify` only while the alias lives. The kernel
+  ends every borrow at a call that takes the root as `modify`
+  (`m7-alias`), so the clause reads the name's extent and not the whole
+  body; the kernel exports where each borrow ends, and the emitter reads
+  that fact instead of scanning for the call.
+- An owned value crossing into a validated type at a `let` is the
+  constructor row that consumes it. A literal is the annotation with no
+  check, because the checker proved it.
+- A store into a name that is a vector is one admission in the store arm,
+  by `core_operand`'s rule, after `m7-store` lands: a vector is one `v128`
+  local with no heap.
+
 **Two deletions, after the measure reads all.** First, the AST walk in
 `direct.rs` goes with `VYRN_NO_CORE_WALK` and `FORMS`, because nothing reaches
 it; `emitter_census` re-pins to what the core's reader costs. Second, the
