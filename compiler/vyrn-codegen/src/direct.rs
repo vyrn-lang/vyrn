@@ -2544,6 +2544,7 @@ fn lower_body(
             walks: vec![None; core.names.len()],
             built: vec![None; core.names.len()],
             bufs: vec![None; core.names.len()],
+            over: Vec::new(),
         };
     }
 
@@ -16966,6 +16967,7 @@ struct Walked {
     /// A heap array's element buffer, taken at the first of its parts whose
     /// own row writes it.
     bufs: Vec<Option<u32>>,
+    over: Vec<(vyrn_lower::core::Name, vyrn_lower::core::Name)>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17716,9 +17718,10 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     w.walks[*n as usize] = Some(self.walk(b, &ty, line)?);
                 }
-                // A LAYOUT READ OUT OF A PLACE, held as the place's address in
-                // a local, the way a layout parameter is (RFC-0125 M7).
-                St::Let(n, Rhs::Read(p)) if self.core_alias(body, *n).is_some() => {
+                // A LAYOUT READ OUT OF A PLACE, or taken out of one and handed
+                // back, held as the place's address in a local, the way a
+                // layout parameter is (RFC-0125 M7).
+                St::Let(n, Rhs::Read(p) | Rhs::Take(p)) if self.core_alias(body, *n).is_some() => {
                     let line = body.names[*n as usize].line;
                     let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
                     self.core_step(b, off);
@@ -17729,16 +17732,21 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(l));
                     self.core_bind(b, body, w, *n, Place::Local(l), ty)?;
                 }
-                St::Let(n, rhs @ (Rhs::Read(_) | Rhs::Val(Val::Name(_))))
-                    if self.core_copies(body, *n) =>
-                {
-                    let p = match rhs {
-                        Rhs::Val(Val::Name(src)) => vyrn_lower::core::Place::Name(*src),
-                        Rhs::Read(p) => p.clone(),
-                        _ => return unsupported("a copy of no place", 0),
+                // A MOVE of a layout: the name takes the place the moved name
+                // held, and its slot's extent with it.
+                St::Let(n, Rhs::Val(Val::Name(x))) if self.core_renames(body, *n).is_some() => {
+                    let info = &body.names[*n as usize];
+                    let Some((place, _)) = self.core_place(w, body, *x) else {
+                        return unsupported("a move of a name with no place", info.line);
                     };
-                    let p = &p;
+                    w.slot[*n as usize] = w.slot[*x as usize].take();
+                    self.core_bind(b, body, w, *n, place, info.ty.clone())?;
+                }
+                St::Let(n, _) if self.core_copies(body, *n).is_some() => {
                     let line = body.names[*n as usize].line;
+                    let Some(p) = self.core_copies(body, *n) else {
+                        return unsupported("a copy of no place", line);
+                    };
                     let ty = body.names[*n as usize].ty.clone();
                     let r = self.cx.repr(&ty, line)?;
                     let Repr::Agg(l) = &r else {
@@ -17746,7 +17754,7 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let slot = self.core_slot(b, w, *n, &r, line)?;
                     b.slot(slot);
-                    let (_, off) = self.core_addr(m, b, body, w, p, line)?;
+                    let (_, off) = self.core_addr(m, b, body, w, &p, line)?;
                     self.core_step(b, off);
                     agg_landed(b, l.size, false);
                     self.core_bind(b, body, w, *n, Place::Slot(slot), ty)?;
@@ -17965,6 +17973,18 @@ impl<'p> Fn_<'_, 'p> {
                 // infinite loop the row states, so the back edge is this
                 // walk's and unconditional.
                 St::Loop { body: inner, .. } => {
+                    let over = w.over.len();
+                    for p in ss[..i].iter().rev() {
+                        match p {
+                            St::Let(h, Rhs::Read(vyrn_lower::core::Place::Name(r)))
+                                if body.names[*h as usize].walked
+                                    == Some(vyrn_lower::core::Walk::While) =>
+                            {
+                                w.over.push((*r, *h))
+                            }
+                            _ => break,
+                        }
+                    }
                     let brk = self.depth;
                     b.ins(&Instruction::Block(BlockType::Empty));
                     self.depth += 1;
@@ -17976,6 +17996,7 @@ impl<'p> Fn_<'_, 'p> {
                     let r = self.core_stmts(m, b, body, w, inner);
                     self.scope.truncate(scope);
                     self.loops.pop();
+                    w.over.truncate(over);
                     r?;
                     let back = self.br_to(cont);
                     b.ins(&Instruction::Br(back));
@@ -18728,12 +18749,18 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<&'b vyrn_lower::core::Place> {
         let info = &body.names[n as usize];
+        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
+            return None;
+        }
+        // A take a rebuild hands back is the place it was taken from: the
+        // arm rebuilds a field in place (`s.keys.push(k)`), and the hole the
+        // take leaves is the rebuild's own until the store fills it.
+        if let Some(p) = core_taken(body, n) {
+            return self.core_hands_back(body, &body.stmts, n).then_some(p);
+        }
         let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
         let owned = info.releases && !info.borrow;
-        if !(info.borrow || minted || owned)
-            || self.checks(&info.ty)
-            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
-        {
+        if !(info.borrow || minted || owned) {
             return None;
         }
         let mut lets = Vec::new();
@@ -18779,43 +18806,80 @@ impl<'p> Fn_<'_, 'p> {
         None
     }
 
-    /// Whether the layout name `n` holds a COPY of the place it reads —
-    /// RFC-0125 M7, a layout that owns no heap.
+    /// The place the layout name `n` holds a COPY of — RFC-0125 M7, a layout
+    /// that owns no heap, and a take.
     ///
-    /// Such a layout is a value, and the kernel lets its place be written
-    /// while the name lives ([`Fn_::core_alias`]), so the name takes a slot and
-    /// the bytes, which is what the AST arm's `let` writes ([`Fn_::agg_into`]).
-    fn core_copies(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
+    /// A layout that owns no heap is a value, and the kernel lets its place be
+    /// written while the name lives ([`Fn_::core_alias`]). A take leaves a hole
+    /// in its place, and a store may fill the hole while the name lives. So
+    /// the name takes a slot and the bytes, which is what the AST arm's `let`
+    /// writes ([`Fn_::agg_into`]).
+    fn core_copies(
+        &self,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<vyrn_lower::core::Place> {
         let info = &body.names[n as usize];
+        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
+            return None;
+        }
         // A name this pass minted, a `for` head's borrow or a scrutinee, is
         // read by address in the arm.
-        if info.source.starts_with('@')
-            || info.heap
-            || self.owns_heap(&info.ty)
-            || self.checks(&info.ty)
-            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
-        {
-            return false;
-        }
+        let value = !info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
         let mut lets = Vec::new();
         for s in &body.stmts {
             core_lets(s, &mut lets);
         }
         let mut at = lets.iter().filter(|(b, _)| *b == n);
-        match (at.next(), at.next()) {
-            (Some((_, Rhs::Read(p))), None) => {
-                !matches!(p, vyrn_lower::core::Place::Key(..))
-                    && self
-                        .core_place_ty(body, p)
-                        .is_some_and(|t| self.cx.resolve(&t) == self.cx.resolve(&info.ty))
-            }
-            // `let mut next = a` of a layout that owns no heap is the same
-            // copy: the value of `a`, at `a`'s place.
-            (Some((_, Rhs::Val(Val::Name(src)))), None) => {
-                self.cx.resolve(&body.names[*src as usize].ty) == self.cx.resolve(&info.ty)
-            }
-            _ => false,
+        let p = match (at.next(), at.next()) {
+            (Some((_, Rhs::Take(p))), None) => p.clone(),
+            (Some((_, Rhs::Read(p))), None) if value => p.clone(),
+            (Some((_, Rhs::Val(Val::Name(x)))), None) if value => vyrn_lower::core::Place::Name(*x),
+            _ => return None,
+        };
+        (!matches!(p, vyrn_lower::core::Place::Key(..))
+            && self
+                .core_place_ty(body, &p)
+                .is_some_and(|t| self.cx.resolve(&t) == self.cx.resolve(&info.ty)))
+        .then_some(p)
+    }
+
+    /// The name whose place the layout name `n` takes over — RFC-0125 M7, a
+    /// move is a rename.
+    ///
+    /// `let y = x` of an owned layout that owns heap moves `x`, and the kernel
+    /// refuses a read of `x` after it. So `y` is `x`'s place, with no slot and
+    /// no copy of its own, and the release the driver placed for the value is
+    /// `y`'s. `None` where the body stores into `x`, because a store after the
+    /// move writes the storage `y` holds.
+    fn core_renames(
+        &self,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<vyrn_lower::core::Name> {
+        let info = &body.names[n as usize];
+        if info.borrow
+            || !self.owns_heap(&info.ty)
+            || self.checks(&info.ty)
+            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
+        {
+            return None;
         }
+        let mut lets = Vec::new();
+        let mut written = Vec::new();
+        for s in &body.stmts {
+            core_lets(s, &mut lets);
+            core_written(s, &mut written);
+        }
+        let mut at = lets.iter().filter(|(b, _)| *b == n);
+        let (Some((_, Rhs::Val(Val::Name(x)))), None) = (at.next(), at.next()) else {
+            return None;
+        };
+        let from = &body.names[*x as usize];
+        (!from.borrow
+            && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
+            && !written.iter().any(|(m, _)| m == x))
+        .then_some(*x)
     }
 
     /// Whether [`Fn_::core_switch`] gives a payload binder of `ty` a place —
@@ -19687,8 +19751,12 @@ impl<'p> Fn_<'_, 'p> {
             //
             // Or a layout read out of a place, which holds the place's address
             // ([`Fn_::core_alias`]) or, where it owns no heap, a copy of its
-            // bytes ([`Fn_::core_copies`]), or a header a loop walks, which
-            // holds its parts ([`Fn_::core_walked`]).
+            // bytes, as a take out of a place does ([`Fn_::core_copies`]), or
+            // a header a loop walks, which holds its parts
+            // ([`Fn_::core_walked`]).
+            //
+            // Or a layout bound by a move, which holds the place the moved
+            // name held ([`Fn_::core_renames`]).
             //
             // Or a payload binder, whose place the switch gives it
             // ([`Fn_::core_payload`]).
@@ -19716,7 +19784,12 @@ impl<'p> Fn_<'_, 'p> {
                             || self.core_rebuild(body, rhs))
                 }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
-                && !self.core_copies(body, n as vyrn_lower::core::Name)
+                && self
+                    .core_copies(body, n as vyrn_lower::core::Name)
+                    .is_none()
+                && self
+                    .core_renames(body, n as vyrn_lower::core::Name)
+                    .is_none()
                 && !binders.contains(&(n as vyrn_lower::core::Name))
                 && !self.core_walked(body, n as vyrn_lower::core::Name)
             {
@@ -19797,9 +19870,10 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
             }
-            St::Let(n, Rhs::Val(Val::Name(_))) if self.core_copies(body, *n) => true,
-            St::Let(n, Rhs::Read(_))
-                if self.core_alias(body, *n).is_some() || self.core_copies(body, *n) =>
+            St::Let(n, _)
+                if self.core_alias(body, *n).is_some()
+                    || self.core_copies(body, *n).is_some()
+                    || self.core_renames(body, *n).is_some() =>
             {
                 true
             }
@@ -19853,7 +19927,8 @@ impl<'p> Fn_<'_, 'p> {
                 let placed = bound.contains(n)
                     || self.core_place(&self.core_w, body, *n).is_some()
                     || self.core_alias(body, *n).is_some()
-                    || self.core_copies(body, *n)
+                    || self.core_copies(body, *n).is_some()
+                    || self.core_renames(body, *n).is_some()
                     || ss[..i].iter().any(|p| {
                         matches!(p, St::Let(l, rhs) if l == n
                             && (matches!(rhs, Rhs::Make(..))
@@ -20043,8 +20118,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
-    /// is the store that puts the result back into that receiver: one
-    /// address, which [`Fn_::arr_rebuild`] has already written.
+    /// is the store that puts the result back into that receiver, or into the
+    /// place the receiver was taken from: one address, which
+    /// [`Fn_::arr_rebuild`] has already written ([`Fn_::core_alias`]).
     fn core_rebuilt(
         &self,
         body: &vyrn_lower::core::Body,
@@ -20067,10 +20143,33 @@ impl<'p> Fn_<'_, 'p> {
         };
         let back = match place {
             vyrn_lower::core::Place::Name(x) => x == r,
-            vyrn_lower::core::Place::Global(g) => core_global(body, *r) == Some(g.as_str()),
-            _ => false,
+            vyrn_lower::core::Place::Global(g) if core_global(body, *r) == Some(g.as_str()) => true,
+            p => core_taken(body, *r) == Some(p),
         };
         (t == v && back && self.core_rebuild(body, rhs)).then_some((*r, *t))
+    }
+
+    /// Whether a rebuild in `ss` hands `n` back to the place it was taken
+    /// from ([`Fn_::core_rebuilt`]).
+    fn core_hands_back(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ss: &[St],
+        n: vyrn_lower::core::Name,
+    ) -> bool {
+        (1..ss.len()).any(|i| {
+            matches!(ss[i], St::Store { .. })
+                && self.core_rebuilt(body, ss, i).is_some_and(|(r, _)| r == n)
+        }) || ss.iter().any(|s| match s {
+            St::If { then, els, .. } => {
+                self.core_hands_back(body, then, n) || self.core_hands_back(body, els, n)
+            }
+            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+                self.core_hands_back(body, inner, n)
+            }
+            St::Switch { arms, .. } => arms.iter().any(|a| self.core_hands_back(body, &a.body, n)),
+            _ => false,
+        })
     }
 
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands
@@ -20302,6 +20401,22 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
     }
 }
 
+/// The place the name `n` was taken from, when its one `let` is a take.
+fn core_taken(
+    body: &vyrn_lower::core::Body,
+    n: vyrn_lower::core::Name,
+) -> Option<&vyrn_lower::core::Place> {
+    let mut lets = Vec::new();
+    for s in &body.stmts {
+        core_lets(s, &mut lets);
+    }
+    let mut at = lets.iter().filter(|(b, _)| *b == n);
+    match (at.next(), at.next()) {
+        (Some((_, Rhs::Take(p))), None) => Some(p),
+        _ => None,
+    }
+}
+
 /// Every `let` a statement's rows bind, itself and everything under it.
 fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
     match s {
@@ -20325,7 +20440,10 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
 /// The parts of the header `base` names, when it is a borrow a loop walks.
 fn core_header(w: &Walked, base: &vyrn_lower::core::Place) -> Option<Walk> {
     match base {
-        vyrn_lower::core::Place::Name(n) => w.walks.get(*n as usize)?.clone(),
+        vyrn_lower::core::Place::Name(n) => w.walks.get(*n as usize)?.clone().or_else(|| {
+            let (_, h) = w.over.iter().rev().find(|(r, _)| r == n)?;
+            w.walks[*h as usize].clone()
+        }),
         _ => None,
     }
 }

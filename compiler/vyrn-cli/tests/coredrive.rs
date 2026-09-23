@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 32] = [
+const SHAPES: [(&str, &str); 34] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -373,6 +373,21 @@ const SHAPES: [(&str, &str); 32] = [
         "a heapless record copied by `let`",
         "type P = { x: Int64, y: Int64 }          fn bump(a: P) -> P { let mut b = a b.x = b.x + 10 return b }          fn vyrnTestMain() -> Int64 { let a = P { x: 1, y: 2 } let b = bump(a) return a.x * 100 + b.x }",
     ),
+    // A move is a rename: `zs` and `b` hold the place the moved name held. A
+    // layout taken out of a field is a copy into a slot, and so is `let q = p`
+    // of a layout that owns no heap (RFC-0125 M7, `m7-move`).
+    (
+        "a move of a layout, and a take out of a field",
+        "type R = { xs: Array<Int64>, s: String, n: Int64 } type P = { x: Int64, y: Int64 }          fn grab(r: consume R) -> Int64 { let t = consume r.s let ys = consume r.xs let mut zs = ys          zs.push(t.byteLength) return zs.length * 100 + zs[3] * 10 + r.n }          fn two(p: P) -> Int64 { let q = p return q.x + q.y * 10 }          fn pair(n: Int64) -> Int64 { let a = [1, n] let b = a return b[1] }          fn vyrnTestMain() -> Int64 { let r = R { xs: [4, 5, 6], s: \"abc\", n: 1 }          return grab(r) * 1000 + pair(2) * 100 + two(P { x: 1, y: 2 }) }",
+    ),
+    // A store into a nested place is one store into its path: a field of an
+    // element that holds heap, an element of a field, and a field of an
+    // element of a field (RFC-0125 M7, `m7-move`). A String stored into a
+    // field is a store the screen refuses, so `name` is the arm's witness.
+    (
+        "a store into a nested place",
+        "type Q = { name: String, y: Int64 } type R = { qs: Array<Q>, ns: Array<Int64>, n: Int64 }          fn bump(qs: consume Array<Q>, i: Int64) -> Array<Q> { let mut a = qs a[i].y = 7 return a }          fn deep(r: consume R) -> R { let mut s = r s.ns[1] = s.n * 2 s.qs[0].y = 3 return s }          fn name(qs: consume Array<Q>) -> Array<Q> { let mut a = qs a[0].name = \"r\" + a[0].y.toString() return a }          fn vyrnTestMain() -> Int64 { let qs: Array<Q> = [Q { name: \"n\" + \"0\", y: 2 }, Q { name: \"m\", y: 1 }]          let out = name(bump(qs, 1)) let d = deep(R { qs: [Q { name: \"a\" + \"b\", y: 0 }], ns: [5, 6], n: 4 })          return out[1].y * 1000 + out[0].name.byteLength * 100 + d.ns[1] * 10 + d.qs[0].y }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -382,7 +397,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 32] = [
+const SHAPE_PIN: [(&str, usize, usize); 34] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -429,7 +444,7 @@ const SHAPE_PIN: [(&str, usize, usize); 32] = [
     ),
     (
         "a `for` left early over the elements it never reached",
-        1,
+        0,
         0,
     ),
     ("a float literal left of a `Float32` operand", 0, 0),
@@ -439,6 +454,8 @@ const SHAPE_PIN: [(&str, usize, usize); 32] = [
     ("a call to a host-boundary extern", 0, 0),
     ("a field taken into a part", 0, 0),
     ("a heapless record copied by `let`", 0, 0),
+    ("a move of a layout, and a take out of a field", 0, 0),
+    ("a store into a nested place", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
