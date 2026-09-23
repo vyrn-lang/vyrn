@@ -2516,6 +2516,7 @@ fn lower_body(
             walks: vec![None; core.names.len()],
             nested: vec![None; core.names.len()],
             built: vec![None; core.names.len()],
+            bufs: vec![None; core.names.len()],
         };
     }
 
@@ -16796,10 +16797,13 @@ struct Walked {
     /// ([`Fn_::core_nests`]).
     nested: Vec<Option<Rhs>>,
     /// The storage a name's value is built in when it was taken before the
-    /// name's own row: a parent's slot, or a heap array's buffer, at the
-    /// first of its parts that a call writes, and that part's, at its offset
-    /// in the parent's ([`Fn_::core_part_at`]).
+    /// name's own row: a parent's, at the first of its parts whose own row
+    /// writes it, and a part's, at its offset in the parent's
+    /// ([`Fn_::core_part_at`]).
     built: Vec<Option<Dest>>,
+    /// A heap array's element buffer, taken at the first of its parts whose
+    /// own row writes it.
+    bufs: Vec<Option<u32>>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17479,20 +17483,15 @@ impl<'p> Fn_<'_, 'p> {
                 {
                     let info = &body.names[*n as usize];
                     let line = info.line;
+                    let taken = w.bufs[*n as usize].take();
                     if let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? {
                         let ty = info.ty.clone();
                         mark = b.mark();
-                        self.core_make(m, b, body, w, dest, &ty, rhs, None, line)?;
-                        w.built[*n as usize] = Some(dest);
+                        self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
                         continue;
                     }
-                    // The storage a part took before this row: the literal's
-                    // slot, or a heap array's buffer.
+                    // The storage a part took before this row.
                     let pre = w.built[*n as usize].take();
-                    let taken = match pre {
-                        Some(Dest::Addr(buf, _)) => Some(buf),
-                        _ => None,
-                    };
                     if self.core_lands(body, ss, i, &w.reads) {
                         let dest = Dest::Addr(self.core_out(line)?, 0);
                         let ty = self.ret_ty.clone();
@@ -17638,7 +17637,7 @@ impl<'p> Fn_<'_, 'p> {
                             agg_landed(b, l.size, used);
                             match place {
                                 Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
-                                None if part.is_some() => w.built[*n as usize] = part,
+                                None if part.is_some() => {}
                                 None => w.landed = Some(*n),
                             }
                         }
@@ -18902,15 +18901,15 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The row of the record or array literal, or of the variant with a boxed
-    /// payload, whose part the call at `ss[i]` makes, the parent's name, the
-    /// part's offset, and the storage the offset is in: RFC-0125 M7, a call
-    /// in part position. A variant constructor is such a call where
-    /// [`Fn_::core_nests`] does not hold it.
+    /// payload, whose part the row at `ss[i]` makes, the parent's name, the
+    /// part's offset, and the storage the offset is in: RFC-0125 M7, a part
+    /// written where its row stands. The row is a call, a variant or a
+    /// literal that [`Fn_::core_nests`] does not hold.
     ///
-    /// The call writes its result at the part's offset, as the arm's
-    /// [`Fn_::agg_into`] lets it, so the parent's storage is taken before the
-    /// call ([`Fn_::core_part_dest`]). The call row stays where it stands,
-    /// so no effect moves. Nothing names that storage until the parent's
+    /// The row writes the part at its offset, as the arm's [`Fn_::agg_into`]
+    /// lets a call, so the parent's storage is taken before it
+    /// ([`Fn_::core_part_dest`]). Every row stays where it stands, so no
+    /// effect moves. Nothing names that storage until the parent's
     /// row, and no row between leaves the list, so a part written early is
     /// never left in storage no row owns. The temporary is named twice, by
     /// its `let` and by the parent, so no release row reads it.
@@ -18921,12 +18920,13 @@ impl<'p> Fn_<'_, 'p> {
         i: usize,
         w: &Walked,
     ) -> Option<(usize, vyrn_lower::core::Name, u32, PartIn)> {
-        let St::Let(t, rhs @ Rhs::Call { .. }) = &ss[i] else {
+        let St::Let(t, rhs) = &ss[i] else {
             return None;
         };
+        let made = matches!(rhs, Rhs::Make(..));
         if body.names[*t as usize].binding.is_some()
             || w.occurs.get(*t as usize) != Some(&2)
-            || !(self.core_agg_call(body, rhs) || self.core_ctor(rhs))
+            || !(made || self.core_agg_call(body, rhs) || self.core_ctor(rhs))
             || self.core_nests(body, ss, i, &w.occurs).is_some()
         {
             return None;
@@ -18994,11 +18994,12 @@ impl<'p> Fn_<'_, 'p> {
             .then_some((j, *p, off, into))
     }
 
-    /// Where the call at `ss[i]` writes a part of its parent
-    /// ([`Fn_::core_part_at`]): the caller's storage when the parent lands
-    /// there, the parent's own slot otherwise, a heap array's buffer, and a
-    /// box of its own for a variant's payload. A slot and a buffer are taken
-    /// at the parent's first such part.
+    /// Where the row at `ss[i]` writes a part of its parent
+    /// ([`Fn_::core_part_at`]): a box of its own for a variant's payload, a
+    /// heap array's buffer, and otherwise the parent's own storage, which is
+    /// the caller's where the parent lands there, its offset in its own
+    /// parent where it is a part in turn, and a slot of its own otherwise.
+    /// The parent's storage and a buffer are taken at the first such part.
     fn core_part_dest(
         &mut self,
         b: &mut Frame,
@@ -19011,20 +19012,42 @@ impl<'p> Fn_<'_, 'p> {
         let Some((j, p, off, into)) = self.core_part_at(body, ss, i, w) else {
             return Ok(None);
         };
-        if into == PartIn::Parent && self.core_lands(body, ss, j, &w.reads) {
-            return Ok(Some(Dest::Addr(self.core_out(line)?, off)));
-        }
-        let base = match (w.built[p as usize], into) {
-            (_, PartIn::Box(bytes)) => return Ok(Some(Dest::Addr(self.heap_buf(b, bytes), 0))),
-            (Some(d), _) => d,
-            (None, PartIn::Parent) => {
-                let r = self.cx.repr(&body.names[p as usize].ty, line)?;
-                Dest::Slot(self.core_slot(b, w, p, &r, line)?)
-            }
-            (None, PartIn::Buffer(bytes)) => Dest::Addr(self.heap_buf(b, bytes), 0),
+        let St::Let(t, _) = &ss[i] else {
+            return Ok(None);
         };
-        w.built[p as usize] = Some(base);
-        Ok(Some(base.at(off)))
+        if let Some(d) = w.built[*t as usize] {
+            return Ok(Some(d));
+        }
+        let d = match into {
+            PartIn::Box(bytes) => Dest::Addr(self.heap_buf(b, bytes), 0),
+            PartIn::Buffer(bytes) => {
+                let buf = match w.bufs[p as usize] {
+                    Some(buf) => buf,
+                    None => self.heap_buf(b, bytes),
+                };
+                w.bufs[p as usize] = Some(buf);
+                Dest::Addr(buf, off)
+            }
+            PartIn::Parent => {
+                let base = match w.built[p as usize] {
+                    Some(d) => d,
+                    None if self.core_lands(body, ss, j, &w.reads) => {
+                        Dest::Addr(self.core_out(line)?, 0)
+                    }
+                    None => match self.core_part_dest(b, body, w, ss, j, line)? {
+                        Some(d) => d,
+                        None => {
+                            let r = self.cx.repr(&body.names[p as usize].ty, line)?;
+                            Dest::Slot(self.core_slot(b, w, p, &r, line)?)
+                        }
+                    },
+                };
+                w.built[p as usize] = Some(base);
+                base.at(off)
+            }
+        };
+        w.built[*t as usize] = Some(d);
+        Ok(Some(d))
     }
 
     /// The index of the record or array literal that builds the layout made

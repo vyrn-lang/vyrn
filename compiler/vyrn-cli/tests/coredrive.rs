@@ -273,14 +273,17 @@ const SHAPES: [(&str, &str); 21] = [
         "a `while` over module state, and one whose call replaces it",
         "let mut xs: Array<Int64> = [1, 2, 3]          fn bump() { xs = [4, 5, 6, 7] }          fn sum() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] if i == 0 { bump() } i = i + 1 } return sum() * 100 + t }",
     ),
-    // A call in part position writes its result at the part's offset in the
-    // parent's storage: a record's or a fixed array's, the caller's where the
-    // parent is returned, a heap array's buffer, and a variant's box
-    // (RFC-0125 M7).
+    // A part is written at its offset in the parent's storage where its own
+    // row stands, whether a call, a variant or a literal makes it: a record's
+    // or a fixed array's, the caller's where the parent is returned, its
+    // offset in a parent of its own, a heap array's buffer, and a variant's
+    // box (RFC-0125 M7).
     (
-        "a call's result as a part of a literal",
+        "a part built at its offset where its own row stands",
         "type P = { x: Int64, y: Int64 } type N = { s: String, k: Int64 } type H = { n: N, p: P, q: P } \
          type B = { a: Int64, b: Int64, c: Int64 } type V = { o: Option<B>, k: Int64 } \
+         type G = { h: H, k: Int64 } type J = | JStr(String) | JNum(String) type F = { key: String, value: J } \
+         type R = { a: String, m: Map<String, String> } \
          fn mk(k: Int64) -> P { return P { x: k, y: k + 1 } } \
          fn nm(k: Int64) -> N { return N { s: k.toString(), k: k } } \
          fn big(k: Int64) -> B { return B { a: k, b: 2, c: 3 } } \
@@ -294,9 +297,13 @@ const SHAPES: [(&str, &str); 21] = [
          fn inrec(k: Int64) -> V { return V { o: Some(big(k)), k: k } } \
          fn boxed(k: Int64) -> Int64 { let v = inrec(k) let r = match v.o { Some(b) => b.a + v.k, None => 0 } \
          return r + match deep(k) { Some(o) => match o { Some(b) => b.c, None => 0 }, None => 0 } } \
+         fn fields(k: Int64) -> Array<F> { return [F { key: \"f\", value: JStr(\"f\".copy()) }, F { key: \"k\", value: JNum(k.toString()) }] } \
+         fn outer(k: Int64) -> G { return G { h: H { n: nm(k), p: mk(k), q: P { x: 1, y: 2 } }, k: k } } \
+         fn inbox(k: Int64) -> Option<H> { return Some(H { n: nm(k), p: mk(1), q: mk(2) }) } \
+         fn made(k: Int64) -> Int64 { let fs = fields(k) let g = outer(k) let r = R { a: k.toString(), m: [:] } \
+         let b = match inbox(k) { Some(h) => h.q.x, None => 0 } return fs.length + g.h.p.y * 10 + r.a.byteLength * 100 + b * 1000 } \
          fn vyrnTestMain() -> Int64 { let h = land(4) let a = arr(2) \
-         return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 \
-         + boxed(6) * 100000000000 }",
+         return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 + boxed(6) * 100000000000 + made(3) * 10000000000000 }",
     ),
 ];
 
@@ -340,7 +347,7 @@ const SHAPE_PIN: [(&str, usize, usize); 21] = [
         0,
         0,
     ),
-    ("a call's result as a part of a literal", 0, 0),
+    ("a part built at its offset where its own row stands", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
