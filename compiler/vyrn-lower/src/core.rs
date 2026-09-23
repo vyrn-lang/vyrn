@@ -1894,15 +1894,13 @@ pub fn gaps(body: &Body) -> Vec<String> {
 }
 
 /// Ends every list of `ss` at its `trap`, because nothing after one runs.
+/// An `if` or a `switch` whose every arm ends at one is a `trap` too.
 ///
 /// The builders extend a list after a `panic` in value position: the join's
 /// store, the call its argument feeds, an arm's releases. A builder cannot
 /// cut its own list, because its caller extends the list after it returns.
 fn cut(ss: &mut Vec<St>) {
-    if let Some(i) = ss.iter().position(|s| matches!(s, St::Trap)) {
-        ss.truncate(i + 1);
-    }
-    for s in ss {
+    for s in ss.iter_mut() {
         match s {
             St::If { then, els, .. } => {
                 cut(then);
@@ -1920,6 +1918,21 @@ fn cut(ss: &mut Vec<St>) {
             | St::Continue { .. }
             | St::Trap => {}
         }
+    }
+    if let Some(i) = ss.iter().position(traps) {
+        ss.truncate(i + 1);
+    }
+}
+
+/// Whether every path through `s` ends at a `trap`. A `loop` or a `block`
+/// may be left by a `break` before its last row, so neither is one.
+fn traps(s: &St) -> bool {
+    let ends = |ss: &[St]| ss.last().is_some_and(traps);
+    match s {
+        St::Trap => true,
+        St::If { then, els, .. } => ends(then) && ends(els),
+        St::Switch { arms, .. } => !arms.is_empty() && arms.iter().all(|a| ends(&a.body)),
+        _ => false,
     }
 }
 
