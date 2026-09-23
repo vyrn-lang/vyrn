@@ -25458,6 +25458,50 @@ a global in a loop (4 over `examples/`) and nothing else. The hoist then
 admits a module-state container the loop's calls do not write, by the same
 rule as a local one, and the fix line names the `let` again.
 
+**The gap tail, decided on `m7-gaps`'s count (2026-09-23).** `m7-gaps` counted
+the 1,063 lines with a gap over the 415 roots and read what each tag needs
+("What each gap tag needs" in `rfcs/census/core-gaps.md`). Two tags the
+earlier tables called expansions are not: `@codeText` and `@codeSplice` are
+host imports a compiled generator calls while it runs, and `toJson` and
+`fromJson` each lower to one call of a generated function. The decisions, in
+the order the count ranks them:
+
+- `lineAt` and `colAt` route to `text$lineAtV` and `text$colAtV`, which have
+  the prelude row's signature and no caller. `runtime$lineAt`,
+  `runtime$colAt`, their `Rt` entries and the arm go. The licence is the
+  manifest and the site export time before and after, because `lineAtV`
+  reads a checked element.
+- `contractOf`, `toJson` and `fromJson` are routes whose target the argument's
+  type names: `__vyrnGenContractOf_<C>`, `json$w<key>`, the decoder's top
+  name. One frontend function names the callee; the builder states it as
+  `Callee::Fn`, and the arm and `vyrn-genwasm` ask the same function. The
+  arm's clone pairing (RFC-0114, section 26) goes with the arm.
+- The generator host imports (`@codeText`, `@codeSplice`, `render`, `raw`,
+  `rawAt`) are one row, `Spec::Host`, with the shape of `Spec::Lanes`. One
+  emission function serves both walks and `gen_builtin` splits. The manifest
+  cannot witness a generator, so the licence is `emit-gen` and the site export
+  byte-identical, with the kernel corpus.
+- `@at` of `bytes(s)[i]` or `chars(s)[i]` is a heapless element read of a
+  receiver that is not a place: the row binds a temporary and releases it
+  after the read, by the owned path's rule. No copy of the container.
+- The small readers: `serveStream` is a `Spec::Traps` row whose message is a
+  literal; `jsonSchema` is a String literal; `Ctor::Try` gets a reader with
+  `try_construct` split so both walks call one check; a method is
+  `Callee::Fn` through `impl_method_name`, as the `Fallible` switch is.
+  `schemaOf` waits for a memo. A generic impl callee waits on `Cx::sigs`.
+- Function values keep both mechanisms, and the core models both. A
+  specialization (RFC-0023) is a core instance per target whose
+  function-valued parameter is erased, and a call through that parameter is
+  `Callee::Fn` to the target. A stored value (RFC-0037) is a `Make` of the
+  closure enum with its target named, and a call through it is `Callee::Fn`
+  to the dispatcher. Nothing routes every higher-order call through the enum:
+  RFC-0023's cost is a promise the bench licence guards, interleaved at
+  x1.50. `ho_call` and `fn_binds` leave when the core's instance carries the
+  target.
+- Streams are runtime entries and wait for the runtime in Vyrn; they follow
+  the function-value decision and are not a track before it lands.
+- The five refusal witnesses stay a gap by design.
+
 **Two deletions, after the measure reads all.** First, the AST walk in
 `direct.rs` goes with `VYRN_NO_CORE_WALK` and `FORMS`, because nothing reaches
 it; `emitter_census` re-pins to what the core's reader costs. Second, the

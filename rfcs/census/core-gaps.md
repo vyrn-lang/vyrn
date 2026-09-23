@@ -414,7 +414,7 @@ it read 13,798.
 
 The tag track (`m7-tag`) closed the family but for one shape. `core::Arm`
 names the tag its arm tests, `direct.rs` chooses the arm off that, and
-`core::gaps` stops naming `Switch` — so every table above is the state
+`core::gaps` stops naming `Switch`, so every table above is the state
 BEFORE it. What is left is `?` on a declared `Fallible` (RFC-0080 M3), whose
 arms the impl's own `failed` predicate picks: the row carries no call,
 `Test::Impl` says so, and the family's row in table (b) now counts those 3
