@@ -19018,10 +19018,14 @@ impl<'p> Fn_<'_, 'p> {
                                 )
                         }))
             }
-            // A place this walk addresses, whose value is one it loads. An
-            // aggregate read is refused by the same clause that refuses an
-            // aggregate name: this walk carries scalars (RFC-0125 M7).
-            Rhs::Read(p) | Rhs::Take(p) => self
+            // A place this walk addresses, whose value is one it loads: any
+            // value in one wasm local, which a String's pointer is as much as
+            // an `Int64` ([`Fn_::core_read`]). An aggregate read is refused by
+            // the same clause that refuses an aggregate name.
+            Rhs::Read(p) => self
+                .core_place_ty(body, p)
+                .is_some_and(|t| self.core_framed(&t)),
+            Rhs::Take(p) => self
                 .core_place_ty(body, p)
                 .is_some_and(|t| core_scalar(&self.cx.resolve(&t))),
             _ => false,
