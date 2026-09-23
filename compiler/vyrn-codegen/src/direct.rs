@@ -17339,7 +17339,9 @@ impl<'p> Fn_<'_, 'p> {
                 // when the `return` after it hands the temporary back. The
                 // bytes are the AST arm's at `let p = f(a)` and at
                 // `return f(a)`: [`Fn_::agg_into`]'s destination, then the
-                // call's own convention ([`Fn_::out_ptr`]).
+                // call's own convention ([`Fn_::out_ptr`]). Any other
+                // temporary is the storage the call wrote, and its name holds
+                // that address, as the arm hands the call's own slot on.
                 St::Let(
                     n,
                     rhs @ (Rhs::Call { .. } | Rhs::Read(vyrn_lower::core::Place::Key(..))),
@@ -17356,18 +17358,22 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("an aggregate call with no layout", line);
                     };
                     let (dest, place) = if lands {
-                        (Dest::Addr(self.core_out(line)?, 0), None)
+                        (Some(Dest::Addr(self.core_out(line)?, 0)), None)
+                    } else if body.names[*n as usize].binding.is_none() {
+                        (None, None)
                     } else {
                         let off = b.alloc(l.size, l.align);
-                        (Dest::Slot(off), Some(Place::Slot(off)))
+                        (Some(Dest::Slot(off)), Some(Place::Slot(off)))
                     };
-                    dest.addr(b, 0);
+                    if let Some(d) = dest {
+                        d.addr(b, 0);
+                    }
                     self.dest_used = false;
                     match rhs {
                         Rhs::Call {
                             callee, kind, args, ..
                         } => {
-                            let hint = Some((dest, ty.clone()));
+                            let hint = dest.map(|d| (d, ty.clone()));
                             self.core_call(m, b, body, w, callee, *kind, args, hint, line)?;
                         }
                         Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
@@ -17386,10 +17392,20 @@ impl<'p> Fn_<'_, 'p> {
                         }
                         _ => return unsupported("an aggregate row that is no call", line),
                     }
-                    agg_landed(b, l.size, std::mem::take(&mut self.dest_used));
-                    match place {
-                        Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
-                        None => w.landed = Some(*n),
+                    let used = std::mem::take(&mut self.dest_used);
+                    match (dest, place) {
+                        (None, _) => {
+                            let a = b.local(ValType::I32);
+                            b.ins(&Instruction::LocalSet(a));
+                            self.core_bind(b, body, w, *n, Place::Local(a), ty)?;
+                        }
+                        (Some(_), place) => {
+                            agg_landed(b, l.size, used);
+                            match place {
+                                Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
+                                None => w.landed = Some(*n),
+                            }
+                        }
                     }
                 }
                 St::Let(n, rhs) => {
@@ -18768,14 +18784,13 @@ impl<'p> Fn_<'_, 'p> {
                     && self.core_makes(body, &body.names[*n as usize].ty, rhs)
             }
             // An aggregate call result has a slot of its own, which the
-            // reader's `let` takes before the call, or it is the caller's
-            // storage. A temporary with a binding is a scrutinee the plan
-            // keys by its `match`, and the arm hands the call's own slot to
-            // the switch with nothing bound.
+            // reader's `let` takes before the call, the storage the call
+            // wrote, or the caller's storage. A temporary with a binding is a
+            // scrutinee the plan keys by its `match`, and the arm hands the
+            // call's own slot to the switch with nothing bound.
             St::Let(n, rhs) if self.core_agg_call(body, rhs) => {
                 let info = &body.names[*n as usize];
-                (info.binding.is_some() && !info.source.starts_with('@'))
-                    || self.core_lands(body, ss, i, reads)
+                info.binding.is_none() || !info.source.starts_with('@')
             }
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
@@ -19001,9 +19016,9 @@ impl<'p> Fn_<'_, 'p> {
     /// back, so the value is built in the caller's storage (RFC-0125 M7).
     ///
     /// A temporary, read once, by the `return` after it with nothing but
-    /// releases between, at the declared result's own type: the AST arm
-    /// builds `return f(a)` and `return Some(a)` into `dest` the same way
-    /// ([`Fn_::ret_value`]).
+    /// releases of other names between, at the declared result's own type:
+    /// the AST arm builds `return f(a)` and `return Some(a)` into `dest` the
+    /// same way ([`Fn_::ret_value`]).
     fn core_lands(
         &self,
         body: &vyrn_lower::core::Body,
@@ -19019,7 +19034,9 @@ impl<'p> Fn_<'_, 'p> {
             && info.binding.is_none()
             && reads[*n as usize] == 1
             && self.cx.resolve(&info.ty) == self.cx.resolve(&self.ret_ty)
-            && matches!(ss[i + 1..].iter().find(|s| !matches!(s, St::Row { .. })),
+            && matches!(ss[i + 1..].iter().find(|s| {
+                    !matches!(s, St::Row { .. }) && !matches!(s, St::Drop(d, ..) if d != n)
+                }),
                 Some(St::Return { value: Some(Val::Name(r)), .. }) if r == n)
     }
 
