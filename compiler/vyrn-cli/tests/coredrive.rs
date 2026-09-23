@@ -274,8 +274,8 @@ const SHAPES: [(&str, &str); 21] = [
         "let mut xs: Array<Int64> = [1, 2, 3]          fn bump() { xs = [4, 5, 6, 7] }          fn sum() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] if i == 0 { bump() } i = i + 1 } return sum() * 100 + t }",
     ),
     // A call in part position writes its result at the part's offset in the
-    // parent's storage, which is the caller's where the parent is returned
-    // (RFC-0125 M7).
+    // parent's storage: a record's or a fixed array's, the caller's where the
+    // parent is returned, and a heap array's buffer (RFC-0125 M7).
     (
         "a call's result as a part of a literal",
         "type P = { x: Int64, y: Int64 } type N = { s: String, k: Int64 } type H = { n: N, p: P, q: P } \
@@ -284,7 +284,11 @@ const SHAPES: [(&str, &str); 21] = [
          fn land(k: Int64) -> H { return H { p: mk(k), n: nm(k), q: mk(k * 2) } } \
          fn bind(k: Int64) -> Int64 { let n = nm(9) let h = H { n: n.copy(), q: mk(k), p: mk(1) } \
          return h.n.k + h.q.y * 10 + h.p.x * 100 + h.n.s.byteLength + n.k } \
-         fn vyrnTestMain() -> Int64 { let h = land(4) return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 }",
+         fn arr(k: Int64) -> Array<P> { return [mk(k), P { x: 5, y: 6 }, mk(k + 1)] } \
+         fn grow(k: Int64) -> Int64 { let mut xs: Array<N> = [nm(k), nm(k * 3)] xs.push(nm(4)) \
+         let fs: Array<P, 2> = [mk(3), mk(k)] return xs[1].s.byteLength + xs.length * 10 + fs[1].y * 100 } \
+         fn vyrnTestMain() -> Int64 { let h = land(4) let a = arr(2) \
+         return h.p.x + h.q.y * 10 + h.n.k * 100 + bind(7) * 1000 + (a[2].y + grow(5) * 10) * 1000000 }",
     ),
 ];
 

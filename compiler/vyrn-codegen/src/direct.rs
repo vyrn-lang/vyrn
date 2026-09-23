@@ -1956,6 +1956,15 @@ enum Dest {
     Addr(u32, u32),
 }
 
+/// The storage a call in part position writes into ([`Fn_::core_part_at`]).
+#[derive(Clone, Copy, PartialEq)]
+enum PartIn {
+    /// The parent's own: its slot, or the caller's where it lands.
+    Parent,
+    /// A heap array's element buffer, of this many bytes.
+    Buffer(u32),
+}
+
 /// How one `std/mem` primitive lowers (PLAN-0125-runtime §2.2): a `call` of
 /// the host import `wasi_imports` declared, or this emitter's own
 /// instruction. A host import the build declares none of is `unreachable`,
@@ -11303,6 +11312,7 @@ impl<'p> Fn_<'_, 'p> {
                         dest,
                         &inner,
                         &mut Parts::of(elems),
+                        None,
                         line,
                         true,
                     );
@@ -11322,7 +11332,8 @@ impl<'p> Fn_<'_, 'p> {
             if !matches!(**inner, Type::Param(_)) {
                 let l = self.layout_of(&Type::Array(inner.clone()), line)?;
                 let dest = Dest::Slot(b.alloc(l.size, l.align));
-                return self.array_lit_heap(m, b, dest, inner, &mut Parts::of(elems), line, false);
+                let parts = &mut Parts::of(elems);
+                return self.array_lit_heap(m, b, dest, inner, parts, None, line, false);
             }
         }
         // An empty `[]` in a `SmallArray<T, N>` position is the inline empty state,
@@ -11487,7 +11498,7 @@ impl<'p> Fn_<'_, 'p> {
                 let (body, v) = (*body, &vs[i]);
                 if let Val::Name(n) = v {
                     if let Some(rhs) = w.nested[*n as usize].take() {
-                        return self.core_make(m, b, body, w, dest, ty, &rhs, line);
+                        return self.core_make(m, b, body, w, dest, ty, &rhs, None, line);
                     }
                     if w.built[*n as usize].take().is_some() {
                         return Ok(());
@@ -11505,7 +11516,9 @@ impl<'p> Fn_<'_, 'p> {
     /// (RFC-0125 M1): the buffer is taken first, the elements are built in it,
     /// and the `{ptr, len, cap}` triple is written at `dest`. `len` and `cap`
     /// are both N, the schedule [`Fn_::heapify`] gives a literal. The empty
-    /// literal is the empty triple, `data` null, as it always was.
+    /// literal is the empty triple, `data` null, as it always was. `taken`
+    /// is the buffer a part took before the literal's row
+    /// ([`Fn_::core_part_dest`]).
     #[allow(clippy::too_many_arguments)]
     fn array_lit_heap(
         &mut self,
@@ -11514,21 +11527,24 @@ impl<'p> Fn_<'_, 'p> {
         dest: Dest,
         inner: &Type,
         elems: &mut Parts,
+        taken: Option<u32>,
         line: usize,
         used: bool,
     ) -> Result<Type, String> {
         let ty = Type::Array(Box::new(inner.clone()));
         let l = self.layout_of(&ty, line)?;
         let n = elems.len();
-        let buf = b.local(ValType::I32);
-        if n == 0 {
-            b.ins(&Instruction::I32Const(0));
-            b.ins(&Instruction::LocalSet(buf));
-        } else {
-            let bytes = self.extent(inner, n, line)? as i32;
-            b.ins(&Instruction::I64Const(bytes.max(1) as i64));
-            b.ins(&Instruction::Call(self.cx.rt.malloc));
-            b.ins(&Instruction::LocalSet(buf));
+        let buf = match taken {
+            Some(buf) => buf,
+            None if n == 0 => {
+                let buf = b.local(ValType::I32);
+                b.ins(&Instruction::I32Const(0));
+                b.ins(&Instruction::LocalSet(buf));
+                buf
+            }
+            None => self.heap_buf(b, self.extent(inner, n, line)?),
+        };
+        if n > 0 {
             self.fixed_elems(m, b, Dest::Addr(buf, 0), inner, elems, line)?;
         }
         dest.addr(b, l.fields[0]);
@@ -11542,6 +11558,15 @@ impl<'p> Fn_<'_, 'p> {
         dest.addr(b, 0);
         self.dest_used = used;
         Ok(ty)
+    }
+
+    /// A heap buffer of `bytes`, in a local of its own.
+    fn heap_buf(&mut self, b: &mut Frame, bytes: u32) -> u32 {
+        let buf = b.local(ValType::I32);
+        b.ins(&Instruction::I64Const(bytes.max(1) as i64));
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalSet(buf));
+        buf
     }
 
     /// `[N x T]` → the growable `{ptr, len, cap}` triple: a heap buffer with a
@@ -16750,9 +16775,9 @@ struct Walked {
     /// ([`Fn_::core_nests`]).
     nested: Vec<Option<Rhs>>,
     /// The storage a name's value is built in when it was taken before the
-    /// name's own row: a parent's, at the first of its parts that a call
-    /// writes, and that part's, at its offset in the parent's
-    /// ([`Fn_::core_part_at`]).
+    /// name's own row: a parent's slot, or a heap array's buffer, at the
+    /// first of its parts that a call writes, and that part's, at its offset
+    /// in the parent's ([`Fn_::core_part_at`]).
     built: Vec<Option<Dest>>,
 }
 
@@ -17436,14 +17461,21 @@ impl<'p> Fn_<'_, 'p> {
                     if let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? {
                         let ty = info.ty.clone();
                         mark = b.mark();
-                        self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
+                        self.core_make(m, b, body, w, dest, &ty, rhs, None, line)?;
                         w.built[*n as usize] = Some(dest);
                         continue;
                     }
+                    // The storage a part took before this row: the literal's
+                    // slot, or a heap array's buffer.
+                    let pre = w.built[*n as usize].take();
+                    let taken = match pre {
+                        Some(Dest::Addr(buf, _)) => Some(buf),
+                        _ => None,
+                    };
                     if self.core_lands(body, ss, i, &w.reads) {
                         let dest = Dest::Addr(self.core_out(line)?, 0);
                         let ty = self.ret_ty.clone();
-                        self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
+                        self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
                         w.landed = Some(*n);
                         continue;
                     }
@@ -17455,12 +17487,12 @@ impl<'p> Fn_<'_, 'p> {
                     if !matches!(r, Repr::Agg(_)) {
                         return unsupported("a made layout with no layout", line);
                     }
-                    let place = match w.built[*n as usize].take() {
+                    let place = match pre {
                         Some(Dest::Slot(off)) => Place::Slot(off),
                         _ => Place::Slot(self.core_slot(b, w, *n, &r, line)?),
                     };
                     let dest = Dest::of(place).expect("a slot is a destination");
-                    self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
+                    self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
                 // A HEADER a loop walks: the container's value in a local,
@@ -18540,6 +18572,7 @@ impl<'p> Fn_<'_, 'p> {
         dest: Dest,
         ty: &Type,
         rhs: &Rhs,
+        taken: Option<u32>,
         line: usize,
     ) -> Result<(), String> {
         dest.addr(b, 0);
@@ -18578,7 +18611,7 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Make(Ctor::Array, vs) => match self.cx.resolve(ty) {
                 Type::Array(inner) => {
                     let mut parts = Parts::Core(body, vs, w);
-                    self.array_lit_heap(m, b, dest, &inner, &mut parts, line, true)?;
+                    self.array_lit_heap(m, b, dest, &inner, &mut parts, taken, line, true)?;
                 }
                 Type::ArrayN(inner, n) if n == vs.len() => {
                     let mut parts = Parts::Core(body, vs, w);
@@ -18847,10 +18880,10 @@ impl<'p> Fn_<'_, 'p> {
             .is_some_and(|(j, ..)| j == i)
     }
 
-    /// The row of the record literal whose part the call at `ss[i]` makes,
-    /// the literal's name, and the part's offset in it: RFC-0125 M7, a call
-    /// in part position. A variant constructor is such a call where
-    /// [`Fn_::core_nests`] does not hold it.
+    /// The row of the record or array literal whose part the call at `ss[i]`
+    /// makes, the literal's name, the part's offset, and the storage the
+    /// offset is in: RFC-0125 M7, a call in part position. A variant
+    /// constructor is such a call where [`Fn_::core_nests`] does not hold it.
     ///
     /// The call writes its result at the part's offset, as the arm's
     /// [`Fn_::agg_into`] lets it, so the parent's storage is taken before the
@@ -18865,7 +18898,7 @@ impl<'p> Fn_<'_, 'p> {
         ss: &[St],
         i: usize,
         w: &Walked,
-    ) -> Option<(usize, vyrn_lower::core::Name, u32)> {
+    ) -> Option<(usize, vyrn_lower::core::Name, u32, PartIn)> {
         let St::Let(t, rhs @ Rhs::Call { .. }) = &ss[i] else {
             return None;
         };
@@ -18882,7 +18915,7 @@ impl<'p> Fn_<'_, 'p> {
         if ss[i + 1..j].iter().any(core_leaves) {
             return None;
         }
-        let St::Let(p, Rhs::Make(Ctor::Record(_, names), ps)) = &ss[j] else {
+        let St::Let(p, Rhs::Make(ctor, ps)) = &ss[j] else {
             return None;
         };
         let ty = if self.core_lands(body, ss, j, &w.reads) {
@@ -18890,19 +18923,35 @@ impl<'p> Fn_<'_, 'p> {
         } else {
             &body.names[*p as usize].ty
         };
-        let Ok(Repr::Agg(l)) = self.cx.repr(ty, 0) else {
-            return None;
+        let at = ps.iter().position(|v| *v == Val::Name(*t))?;
+        let (part, off, into) = match (ctor, self.cx.resolve(ty)) {
+            (Ctor::Record(_, names), _) => {
+                let Ok(Repr::Agg(l)) = self.cx.repr(ty, 0) else {
+                    return None;
+                };
+                let decl = self.cx.fields(ty)?;
+                let k = decl.iter().position(|f| f.name == names[at])?;
+                (decl[k].ty.clone(), l.fields[k], PartIn::Parent)
+            }
+            (Ctor::Array, Type::ArrayN(inner, n)) if n == ps.len() => {
+                let off = self.stride(&inner, 0).ok()? * at as u32;
+                (*inner, off, PartIn::Parent)
+            }
+            (Ctor::Array, Type::Array(inner)) => {
+                let off = self.stride(&inner, 0).ok()? * at as u32;
+                let bytes = self.extent(&inner, ps.len(), 0).ok()?;
+                (*inner, off, PartIn::Buffer(bytes))
+            }
+            _ => return None,
         };
-        let name = &names[ps.iter().position(|v| *v == Val::Name(*t))?];
-        let decl = self.cx.fields(ty)?;
-        let k = decl.iter().position(|f| f.name == *name)?;
-        self.core_payload_layout(body, &Val::Name(*t), &decl[k].ty)
-            .then_some((j, *p, l.fields[k]))
+        self.core_payload_layout(body, &Val::Name(*t), &part)
+            .then_some((j, *p, off, into))
     }
 
     /// Where the call at `ss[i]` writes a part of its parent
     /// ([`Fn_::core_part_at`]): the caller's storage when the parent lands
-    /// there, and the parent's own slot otherwise, taken at its first part.
+    /// there, the parent's own slot otherwise, and a heap array's buffer. A
+    /// slot and a buffer are taken at the parent's first such part.
     fn core_part_dest(
         &mut self,
         b: &mut Frame,
@@ -18912,21 +18961,21 @@ impl<'p> Fn_<'_, 'p> {
         i: usize,
         line: usize,
     ) -> Result<Option<Dest>, String> {
-        let Some((j, p, off)) = self.core_part_at(body, ss, i, w) else {
+        let Some((j, p, off, into)) = self.core_part_at(body, ss, i, w) else {
             return Ok(None);
         };
-        if self.core_lands(body, ss, j, &w.reads) {
+        if into == PartIn::Parent && self.core_lands(body, ss, j, &w.reads) {
             return Ok(Some(Dest::Addr(self.core_out(line)?, off)));
         }
-        let base = match w.built[p as usize] {
-            Some(d) => d,
-            None => {
+        let base = match (w.built[p as usize], into) {
+            (Some(d), _) => d,
+            (None, PartIn::Parent) => {
                 let r = self.cx.repr(&body.names[p as usize].ty, line)?;
-                let d = Dest::Slot(self.core_slot(b, w, p, &r, line)?);
-                w.built[p as usize] = Some(d);
-                d
+                Dest::Slot(self.core_slot(b, w, p, &r, line)?)
             }
+            (None, PartIn::Buffer(bytes)) => Dest::Addr(self.heap_buf(b, bytes), 0),
         };
+        w.built[p as usize] = Some(base);
         Ok(Some(base.at(off)))
     }
 
