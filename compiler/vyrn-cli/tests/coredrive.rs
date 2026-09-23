@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 13] = [
+const SHAPES: [(&str, &str); 12] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -216,13 +216,6 @@ const SHAPES: [(&str, &str); 13] = [
         "a payload binder that is a layout",
         "type P = { x: Int64, y: Int64 } fn f(o: Option<Array<Int64>>) -> Int64 { let mut t = 0          if let Some(xs) = o { t = xs[0] + xs.length } return t }          fn g(o: Option<P>) -> Int64 { return match o { Some(p) => p.x + p.y * 10, None => 0 } }          fn vyrnTestMain() -> Int64 { return f(Some([7, 8, 9])) + f(None) + g(Some(P { x: 1, y: 2 })) * 100 }",
     ),
-    // The kernel lets a `modify` write a scrutinee the frame owns while a
-    // binder of a payload that owns no heap lives, and the binder keeps the
-    // old value. An address would read the new one: 5050 for 5001.
-    (
-        "a payload binder over a scrutinee handed to `modify`",
-        "type P = { x: Int64, y: Int64 } fn mk(x: Int64) -> Option<P> { return Some(P { x: x, y: 0 }) }          fn reset(o: modify Option<P>) { o = Some(P { x: 50, y: 0 }) }          fn vyrnTestMain() -> Int64 { let mut o = mk(1) let mut t = 0          if let Some(p) = o { reset(o) t = p.x } if let Some(q) = o { t = t + q.x * 100 } return t }",
-    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -232,7 +225,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 13] = [
+const SHAPE_PIN: [(&str, usize, usize); 12] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -245,7 +238,6 @@ const SHAPE_PIN: [(&str, usize, usize); 13] = [
     ("a map key read the rows carry", 0, 0),
     ("a copy of a layout that owns no heap", 0, 0),
     ("a payload binder that is a layout", 0, 0),
-    ("a payload binder over a scrutinee handed to `modify`", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

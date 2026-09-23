@@ -16768,8 +16768,9 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// The payload binder is the PLACE the row names (§2.1): the walk binds it
     /// where the arm is entered and the arm's own rows read it there. A layout
-    /// the construct owns moves out into a slot, as the arm moves it; any
-    /// other layout is its address inside the scrutinee's storage.
+    /// the row reads out of the scrutinee is its address inside the
+    /// scrutinee's storage; any other layout moves out into a slot, as the arm
+    /// moves it.
     #[allow(clippy::too_many_arguments)]
     fn core_switch(
         &mut self,
@@ -16839,10 +16840,14 @@ impl<'p> Fn_<'_, 'p> {
             for (i, bn) in arm.binds.iter().enumerate() {
                 let ty = body.names[*bn as usize].ty.clone();
                 let layout = matches!(self.cx.repr(&ty, line)?, Repr::Agg(_));
+                let read = arm
+                    .reads(on)
+                    .iter()
+                    .any(|r| matches!(r, St::Let(x, _) if x == bn));
                 let at = match self.word2(&ty)? {
-                    // A layout the construct does not own is read where it
-                    // lies ([`Fn_::core_payload`]).
-                    k @ (Word::Inline2 | Word::Boxed) if layout && !owns => {
+                    // A layout the row reads out of the scrutinee is read
+                    // where it lies ([`vyrn_lower::core::Arm::reads`]).
+                    k @ (Word::Inline2 | Word::Boxed) if layout && read => {
                         let off = sl.fields[self.cx.payload_slot(&ptys, i)];
                         payload_at(b, addr, off, matches!(k, Word::Inline2));
                         let Place::Local(l) =
@@ -16857,7 +16862,7 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 self.core_bind(b, body, w, *bn, at, ty)?;
             }
-            self.core_stmts(m, b, body, w, arm_rows(on, arm))?;
+            self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
             self.chain_leave(b, &chain, slot);
         }
         self.chain_close(b, &chain);
@@ -18159,55 +18164,16 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Whether [`Fn_::core_switch`] gives the payload binder `bn` a place —
+    /// Whether [`Fn_::core_switch`] gives a payload binder of `ty` a place —
     /// RFC-0125 M7, a payload binder that is a layout.
     ///
-    /// A value in one wasm local is loaded into one. A layout the construct
-    /// owns moves out, as the arm moves it. Any other layout holds its
-    /// address inside the scrutinee's storage for the arm's extent, which is
-    /// [`Fn_::core_alias`]'s rule, so nothing may write the binder or the
-    /// storage it points into: the scrutinee, and every root it reads through.
-    /// The kernel refuses such a write where the scrutinee is a borrow, and
-    /// accepts it over a scrutinee the frame owns or a layout that owns no
-    /// heap, where the arm's copy keeps the old value.
-    fn core_payload(
-        &self,
-        body: &vyrn_lower::core::Body,
-        on: vyrn_lower::core::Name,
-        owns: bool,
-        bn: vyrn_lower::core::Name,
-    ) -> bool {
-        let ty = &body.names[bn as usize].ty;
-        if self.core_framed(ty) {
-            return true;
-        }
-        if !matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_))) || self.checks(ty) {
-            return false;
-        }
-        if owns {
-            return true;
-        }
-        let mut written = Vec::new();
-        for s in &body.stmts {
-            core_written(s, &mut written);
-        }
-        let free = |n: vyrn_lower::core::Name| !written.iter().any(|(m, _)| *m == n);
-        // Each alias on the chain reads a name bound before it, so the walk
-        // ends within `body.names.len()` steps.
-        let mut root = on;
-        for _ in 0..body.names.len() {
-            if !free(root) {
-                return false;
-            }
-            match self.core_alias(body, root) {
-                Some(p) => match vyrn_lower::kernel::root_of(p) {
-                    Some((r, _)) => root = r,
-                    None => return false,
-                },
-                None => return free(bn),
-            }
-        }
-        false
+    /// A value in one wasm local is loaded into one. A layout the row reads
+    /// out of the scrutinee holds its address there, and the kernel refuses a
+    /// write to the scrutinee while the binder lives; any other layout moves
+    /// out, as the arm moves it.
+    fn core_payload(&self, ty: &Type) -> bool {
+        self.core_framed(ty)
+            || (matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_))) && !self.checks(ty))
     }
 
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
@@ -18918,13 +18884,7 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_switch`]). What that needs is a scrutinee this walk
             // can take the address of, a tag on every arm, and a place for
             // every payload binder ([`Fn_::core_payload`]).
-            St::Switch {
-                on,
-                arms,
-                site,
-                owns,
-                ..
-            } => {
+            St::Switch { on, arms, site, .. } => {
                 let Val::Name(n) = on else {
                     return false;
                 };
@@ -18955,8 +18915,8 @@ impl<'p> Fn_<'_, 'p> {
                         a.test != vyrn_lower::core::Test::Impl
                             && a.binds
                                 .iter()
-                                .all(|bn| self.core_payload(body, *n, *owns, *bn))
-                            && self.core_readable(body, arm_rows(on, a), reads)
+                                .all(|bn| self.core_payload(&body.names[*bn as usize].ty))
+                            && self.core_readable(body, &a.body[a.reads(on).len()..], reads)
                     })
             }
             // A release is the row's, at every exit, and the walk emits it
@@ -19427,21 +19387,6 @@ fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
         b.ins(&Instruction::I64Load(at(off)));
         b.ins(&Instruction::I32WrapI64);
     }
-}
-
-/// An arm's rows past the ones that name each binder a second name for the
-/// scrutinee. Those state the alias the kernel reads, and emit nothing: the
-/// switch binds the binder where it enters the arm.
-fn arm_rows<'a>(on: &Val, a: &'a vyrn_lower::core::Arm) -> &'a [St] {
-    let aliases = a
-        .body
-        .iter()
-        .take_while(|s| {
-            matches!(s, St::Let(n, Rhs::Read(vyrn_lower::core::Place::Name(m)))
-                if a.binds.contains(n) && matches!(on, Val::Name(o) if o == m))
-        })
-        .count();
-    &a.body[aliases..]
 }
 
 fn core_scalar(t: &Type) -> bool {

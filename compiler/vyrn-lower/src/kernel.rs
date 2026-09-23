@@ -314,6 +314,10 @@ struct Kernel<'b> {
     /// read is keyed by the arm, and an arm binder is no binding of the frame
     /// that an exit row could name.
     arms: Vec<(usize, u32, Vec<Name>)>,
+    /// The binders an arm binds as a read out of its scrutinee
+    /// ([`crate::core::Arm::reads`]): an alias whether or not the value owns
+    /// heap, because the emitter holds the payload's address.
+    read_out: Vec<bool>,
 }
 
 /// What took one name, for the memory report (RFC-0125 §3 M3): where, in
@@ -423,6 +427,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
         builtin: false,
         took: std::cell::RefCell::new(vec![None; body.names.len()]),
         released: std::cell::RefCell::new(vec![None; body.names.len()]),
+        read_out: vec![false; body.names.len()],
     };
     let mut st = State {
         own: vec![Own::Gone; body.names.len()],
@@ -571,6 +576,15 @@ impl<'b> Kernel<'b> {
         self.body.names[n as usize].borrow
     }
 
+    /// Whether `n` is a payload binder read out of a scrutinee the frame
+    /// owns. Its payload is the frame's to hand on (`vyxProcessElem` in
+    /// `std/vyx.vyrn`), and the name it is handed to reads nothing.
+    fn gives(&self, st: &State, n: Name) -> bool {
+        self.read_out[n as usize]
+            && matches!(&st.alias[n as usize],
+                Some(Alias { via: Some(m), .. }) if self.owned(*m))
+    }
+
     /// What a place reads out of, through every alias on its root: the
     /// alias a binding of it would be. `let mt = h.meta` then `mt[0]` reads
     /// `h.meta.[]`.
@@ -653,7 +667,7 @@ impl<'b> Kernel<'b> {
                 continue;
             };
             if !chain.contains(&(k as Name))
-                && (info.walked || !self.owned(k as Name))
+                && (info.walked || !self.owned(k as Name) || self.read_out[k])
                 && x.root == a.root
                 && overlaps(&x.path, &a.path)
                 && st.dead[k].is_none()
@@ -694,8 +708,9 @@ impl<'b> Kernel<'b> {
             }
             // RFC-0090 is a rule about a buffer two names would see the write
             // through. A name the body owns read a value out, and a value
-            // that owns no heap was copied out; neither aliases the place.
-            if self.owned(n as Name) {
+            // that owns no heap was copied out; neither aliases the place,
+            // but a payload binder is its address ([`Kernel::read_out`]).
+            if self.owned(n as Name) && !self.read_out[n] {
                 continue;
             }
             let Some(x) = &st.alias[n] else {
@@ -1538,7 +1553,7 @@ impl<'b> Kernel<'b> {
             }
             if st.alias[*n as usize].is_some() {
                 self.alias_read(st, *n, "used")?;
-                if self.moves(*n, consume) {
+                if self.moves(*n, consume) && !self.gives(st, *n) {
                     return Err(self.alias_take(st, *n, write_back));
                 }
                 return Ok(());
@@ -1986,7 +2001,7 @@ impl<'b> Kernel<'b> {
                 st.dead[*n as usize] = None;
                 st.alias[*n as usize] = None;
                 match rhs {
-                    Rhs::Read(p) if self.borrowed(*n) => {
+                    Rhs::Read(p) if self.borrowed(*n) || self.read_out[*n as usize] => {
                         st.alias[*n as usize] = Some(self.src_of(st, p));
                     }
                     // A read of module state is an alias of it whatever it
@@ -1997,7 +2012,9 @@ impl<'b> Kernel<'b> {
                     Rhs::Read(p @ Place::Global(_)) if self.owned(*n) => {
                         st.alias[*n as usize] = Some(self.src_of(st, p));
                     }
-                    Rhs::Val(Val::Name(m)) if self.borrowed(*n) && self.borrowed(*m) => {
+                    Rhs::Val(Val::Name(m))
+                        if self.borrowed(*n) && self.borrowed(*m) && !self.gives(st, *m) =>
+                    {
                         self.read(st, &Val::Name(*m))?;
                         st.alias[*n as usize] = Some(self.src_of(st, &Place::Name(*m)));
                         return Ok(());
@@ -2024,7 +2041,7 @@ impl<'b> Kernel<'b> {
                 // A borrow's binding rebound to another borrow (`t = d.title`
                 // after `let t = s.name`): the alias travels, as at a `let`.
                 if let (Place::Name(n), Val::Name(m)) = (place, value) {
-                    if self.borrowed(*n) && st.alias[*m as usize].is_some() {
+                    if self.borrowed(*n) && st.alias[*m as usize].is_some() && !self.gives(st, *m) {
                         self.read(st, value)?;
                         self.wrote(st, place, self.src(*n));
                         st.alias[*n as usize] = st.alias[*m as usize].clone();
@@ -2201,14 +2218,19 @@ impl<'b> Kernel<'b> {
                     self.read(st, on)?;
                 }
                 let mut outs = Vec::new();
-                for Arm {
-                    binds,
-                    body,
-                    site,
-                    index,
-                    ..
-                } in arms
-                {
+                for arm in arms {
+                    for r in arm.reads(on) {
+                        if let St::Let(b, _) = r {
+                            self.read_out[*b as usize] = true;
+                        }
+                    }
+                    let Arm {
+                        binds,
+                        body,
+                        site,
+                        index,
+                        ..
+                    } = arm;
                     let mut a = st.clone();
                     for b in binds {
                         if self.owned(*b) {
