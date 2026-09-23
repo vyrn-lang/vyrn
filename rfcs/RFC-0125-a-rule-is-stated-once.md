@@ -27827,3 +27827,31 @@ Findings:
 - the screen passed a `return` with no value in a function with a result, which is the failing arm of `?` on an `Option`, and `branchtypes` and `releaseacrosstry` stopped emitting. The screen refuses it.
 - on `m7-rows` a binder the switch moved out of an owned scrutinee kept its slot to the end of the body, so a scrutinee temporary's slot below it could not go back: `std/scan`'s `quotedString` grew from 112 to 144 bytes, and 7 functions grew in all, before the binder commit. After it none grows.
 Left: a switch on a payload binder, 27 bodies, blocked by the placed clause, which knows no binder; the `?` on an `Option`, 24 bodies, blocked by a failing `return` that names no value; `Switch:Impl`, 3 bodies, blocked by the impl's `failed` call the row does not carry.
+
+#### A store releases the whole value it displaces, by the release a `let` exit runs (2026-09-23, `m7-box`)
+Decision: the core's `releases` word on `St::Store` stays the one answer to whether a store releases; what it releases is the release a `let` exit runs (`Fn_::emit_rel`), over the whole displaced value kept before the store, a scalar in a local and an aggregate in a frame slot. Mine.
+Went: `Fn_::store_bufs` and `Fn_::store_boxes`, a second and shallower walk of the release row that reached buffers at flat offsets and payload boxes under a tag test and never an element, a box's contents or a String in a payload word. Stayed: a stream and a type that declares `release`, at the top of the displaced value, because both are observable from inside the language; `Fn_::replaced_releases` states the exception once for a store and a map entry.
+Lines: `direct.rs` 19,596 to 19,514, `memory.rs` 2,099 to 2,155, `emitter_census.rs` 962 to 947. Refusals: 0 lost / 0 gained. Manifest: 30 of 174 rows, written in the fix's commit.
+The count, blocks never freed under `VYRN_LEAK_CHECK=1 vyrn run`, base `4c7ffa07` against the head. The route, built under the audit, agrees on every row at the head and on the first and the test at the base:
+
+| the store | base | head |
+|---|---|---|
+| `o = Some([..])` into an `Option<Array<Int64>>` local, a whole record, `r.o = ..`, `a[0] = ..`, module state | 1 each | 0 |
+| the same local in a loop of 5 turns | 5 | 0 |
+| an `Option<String>` local; a user enum `A(String)` twice, then `B(3)` | 1; 2 | 0 |
+| an `Array<String>` local; a user enum `A(Array<String>)` | 2; 2 | 0 |
+| a move out of the payload first, `let t = consume r.o` then `r = R { o: t, .. }` | 1 | 0 |
+| `a_store_releases_the_whole_value_it_displaces` in `memory.rs`, eleven stores | 15 | 0 |
+| a record whose field declares `release`, then a store of the declared type itself | 2 | 1 |
+
+Licence:
+- `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, base against the head: byte-identical stdout, stderr and exit code, 338 accepted and 77 refused.
+- the 30 manifest rows, read in `emit-wat` under both binaries and grouped by normalized hunk: at a releasing store of an aggregate, the buffer loads before the store became a `memory.copy` into a frame slot and the frees after it read through the slot or call the type's release body; a payload box read under a tag test is gone, freed by that body with what it holds; 8 programs gain the release body a store first asks for; function indices, local counts and frame sizes shift. A first cut that kept a String in a slot too moved 52 rows and gave functions with no frame a prologue; `emit_rel` keeps the String and buffer frees inline.
+- `coredrive --ignored`: unmoved. Whole 20,385, carried end to end 1,381, taken 15,470 of 21,512, 1 byte-identical, 167 run the same.
+- `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `effects`, `typed` and `coretables --ignored` green. `residue --ignored`, 402 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed. `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- the bench corpus, 17 programs and 78 benches, base and head interleaved, three rounds: 15 harness modules byte-identical, `langbench` and `tryplace` not. Best of three, median ratio 1.025, from 0.648 to 1.771, median noise band 1.270. Every row outside its band is in an identical harness. `tryplace`'s `get` read x1.24 in a band of 1.28, and 33 ns under both binaries over five more rounds. `vyrn bench --compare` at x1.50: 16 of 17 clean; `spectralnorm`, identical harness, flagged x1.63 once and passed on a rerun.
+- `cargo test -p vyrn-cli` as four `--test` groups with `--lib --bins`: 652 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen`: 47 passed. Both formatters clean; the release build has no warning; the manifest check green after the write. `emitter_census` re-pinned: the mapping 9,794 to 9,809 lines and 804 to 796 instructions, the decision kind 1,262 to 1,165, `neither` 51 to 48 sections. RFC-0126's surface table: the wasm column of `Array`, `SmallArray` and `Map` down one each, 1,415 to 1,412 mentions.
+Findings:
+- the store's subset rested on the interpreter, which reclaimed a cell, a stream and a declared `release` from the `let`'s value. No interpreter is left; observability is the reason that stays.
+- a declared `release` under a field or a payload runs when a store displaces it, as it did for a map entry. A program that prints in its `release` prints once more per such store.
+Left: a displaced value whose own type declares `release` leaks, 1 block in the last row, blocked by the decision whether a store runs a declared `release`, which the language has not made.
