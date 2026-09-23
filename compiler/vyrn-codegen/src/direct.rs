@@ -10089,6 +10089,28 @@ impl<'p> Fn_<'_, 'p> {
         cap_srcs: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        let Repr::Agg(l) = self.cx.repr(sig_ty, line)? else {
+            return unsupported("a function value that is not an aggregate", line);
+        };
+        let off = b.alloc(l.size, l.align);
+        self.fnval_into(m, b, Dest::Slot(off), sig_ty, target, cap_srcs, line)?;
+        b.slot(off);
+        Ok(sig_ty.clone())
+    }
+
+    /// Write a stored function value into `dest`: its tag, and its payload,
+    /// which [`Fn_::build_fnval`] states.
+    #[allow(clippy::too_many_arguments)]
+    fn fnval_into(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        sig_ty: &Type,
+        target: FnTarget,
+        cap_srcs: &[Expr],
+        line: usize,
+    ) -> Result<(), String> {
         let cap_tys = target.sig.params[..target.ncaps].to_vec();
         if cap_tys.len() != cap_srcs.len() {
             return unsupported(
@@ -10100,7 +10122,6 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Agg(l) = self.cx.repr(sig_ty, line)? else {
             return unsupported("a function value that is not an aggregate", line);
         };
-        let off = b.alloc(l.size, l.align);
         // The payload first, because building the block needs scratch the tag
         // store would otherwise be sitting on top of.
         let payload = if cap_tys.is_empty() {
@@ -10160,10 +10181,10 @@ impl<'p> Fn_<'_, 'p> {
             }
             Some(p)
         };
-        b.slot(off + l.fields[0]);
+        dest.addr(b, l.fields[0]);
         b.ins(&Instruction::I64Const(tag));
         b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[1]);
+        dest.addr(b, l.fields[1]);
         match payload {
             Some(p) => {
                 b.ins(&Instruction::LocalGet(p));
@@ -10174,8 +10195,7 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         b.ins(&Instruction::I64Store(word8()));
-        b.slot(off);
-        Ok(sig_ty.clone())
+        Ok(())
     }
 
     /// A stored value from a lambda literal: lift the body through the SAME
@@ -18904,6 +18924,12 @@ impl<'p> Fn_<'_, 'p> {
         taken: Option<u32>,
         line: usize,
     ) -> Result<(), String> {
+        if let Rhs::Make(Ctor::Closure(t), vs) = rhs {
+            let Some((sig_ty, target)) = self.core_closure(ty, t, vs) else {
+                return unsupported("a function value this walk does not make", line);
+            };
+            return self.fnval_into(m, b, dest, &sig_ty, target, &[], line);
+        }
         dest.addr(b, 0);
         match rhs {
             // A variant: its tag, then its payload in the slots the sum gives
@@ -19099,6 +19125,9 @@ impl<'p> Fn_<'_, 'p> {
         {
             return false;
         }
+        if let Ctor::Closure(t) = ctor {
+            return self.core_closure(ty, t, vs).is_some();
+        }
         self.core_part_tys(ty, ctor, vs.len()).is_some_and(|tys| {
             vs.iter().zip(&tys).all(|(v, t)| {
                 (self.core_val_readable(body, v) && self.core_part_ty(t))
@@ -19143,6 +19172,8 @@ impl<'p> Fn_<'_, 'p> {
                 let base = &self.cx.types.get(name)?.base;
                 self.core_framed(base).then(|| vec![base.clone()])
             }
+            // A function value that captures nothing has no part.
+            (Ctor::Closure(_), _) if n == 0 => Some(Vec::new()),
             _ => None,
         }
     }
@@ -19535,17 +19566,33 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         }
         let bound = (targets.iter())
-            .map(|t| match t {
-                Target::Fn(name) => (self.cx.sigs.get(name))
-                    .filter(|s| !s.modify.iter().any(|m| *m))
-                    .map(|s| FnTarget {
-                        sig: s.clone(),
-                        ncaps: 0,
-                    }),
-                Target::Param(_) => None,
-            })
+            .map(|t| self.core_target(t))
             .collect::<Option<_>>()?;
         Some((f, targs, subst, bound))
+    }
+
+    /// The function a [`Target`] calls: one this module defines and calls
+    /// directly, with no captures. `None` for a pass-through, which only a
+    /// specialization binds, and for a function taking a `modify` parameter,
+    /// which no function value may name.
+    fn core_target(&self, t: &Target) -> Option<FnTarget> {
+        let Target::Fn(name) = t else { return None };
+        let sig = (self.cx.sigs.get(name)).filter(|s| !s.modify.iter().any(|m| *m))?;
+        Some(FnTarget {
+            sig: sig.clone(),
+            ncaps: 0,
+        })
+    }
+
+    /// The signature and the target of a function value a row makes
+    /// (RFC-0037), [`Fn_::core_target`]'s with no parts. `None` where `ty` is
+    /// no function type.
+    fn core_closure(&self, ty: &Type, t: &Target, parts: &[Val]) -> Option<(Type, FnTarget)> {
+        let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
+        let (Type::Fn(..), []) = (&sig_ty, parts) else {
+            return None;
+        };
+        Some((sig_ty, self.core_target(t)?))
     }
 
     /// The declared function a `x.copy()` row calls when the receiver's type

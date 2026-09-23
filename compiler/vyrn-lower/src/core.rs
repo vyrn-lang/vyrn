@@ -546,7 +546,7 @@ pub enum Rhs {
 /// What a `fn`-typed parameter of a specialization calls (RFC-0023): the
 /// instance of a higher-order function is one per target, and a call through
 /// the parameter is a direct call to it ([`specialize`]).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// A function the program declares, called with no captures.
     Fn(String),
@@ -699,6 +699,9 @@ pub enum Ctor {
     /// `T?(v)` (RFC-0079): the constructor of a `where`-checked type, which
     /// answers an `Option<T>` rather than a `T`.
     Try(String),
+    /// A function value made for storage (RFC-0037): the variant of the
+    /// signature's closure enum its target names, with the captures as parts.
+    Closure(Target),
 }
 
 /// What a store displaces.
@@ -1264,6 +1267,7 @@ impl Body {
                     Ctor::Array => "array".into(),
                     Ctor::Map => "map".into(),
                     Ctor::Try(t) => format!("{t}?"),
+                    Ctor::Closure(t) => format!("closure {t:?}"),
                 },
                 vs.iter()
                     .map(|v| self.val(v))
@@ -5524,6 +5528,33 @@ impl<'a> Builder<'a> {
                 None if name == "None" || self.is_variant(name) => {
                     let ty = self.ty_of(e)?;
                     self.nullary(name, ty, *line, out)
+                }
+                // A function's name stored as a value: the closure enum's
+                // variant for it, which captures nothing and so owns nothing.
+                // The type is the one the value ends up as, where the row has
+                // it.
+                None if self
+                    .program
+                    .functions
+                    .iter()
+                    .any(|f| &f.name == name && f.type_params.is_empty())
+                    && self
+                        .types
+                        .get(&(e as *const Expr as usize))
+                        .is_some_and(|t| {
+                            matches!(
+                                vyrn_frontend::types::resolve(t, self.proto.types()),
+                                Type::Fn(..)
+                            )
+                        }) =>
+                {
+                    let ty = self.types[&(e as *const Expr as usize)].clone();
+                    let t = self.name("@closure", ty, false, *line);
+                    self.body.names[t as usize].borrow = false;
+                    self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+                    let made = Ctor::Closure(Target::Fn(name.clone()));
+                    out.push(St::Let(t, Rhs::Make(made, Vec::new())));
+                    Ok(Val::Name(t))
                 }
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and

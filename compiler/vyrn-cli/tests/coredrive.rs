@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 52] = [
+const SHAPES: [(&str, &str); 53] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -494,6 +494,12 @@ const SHAPES: [(&str, &str); 52] = [
         "a call through a `fn` parameter bound to a named function",
         "fn inc(x: Int64) -> Int64 { return x + 1 }          fn twice(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(f(x)) }          fn four(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return twice(twice(x, f), f) }          fn mapAll<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> { let mut out: Array<U> = [] for x in xs { out.push(f(x)) } return out }          fn vyrnTestMain() -> Int64 { let xs: Array<Int64> = [1, 2, 3] let ys = mapAll(xs, inc) return four(10, inc) * 100 + ys[2] }",
     ),
+    // A stored value is the closure enum's variant for its target (RFC-0037):
+    // a function's name returned or stored in a field is a make of it.
+    (
+        "a function's name stored as a value",
+        "fn inc(x: Int64) -> Int64 { return x + 1 }          fn dbl(x: Int64) -> Int64 { return x * 2 }          type Op = { f: fn(Int64) -> Int64, n: Int64 }          fn pick(b: Bool) -> fn(Int64) -> Int64 { if b { return inc } return dbl }          fn vyrnTestMain() -> Int64 { let o = Op { f: dbl, n: 3 } let g = pick(true) let h = o.f return g(10) * 100 + h(o.n) }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -503,7 +509,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 52] = [
+const SHAPE_PIN: [(&str, usize, usize); 53] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -596,6 +602,7 @@ const SHAPE_PIN: [(&str, usize, usize); 52] = [
         0,
         0,
     ),
+    ("a function's name stored as a value", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

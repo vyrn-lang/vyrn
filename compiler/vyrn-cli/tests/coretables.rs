@@ -265,6 +265,7 @@ fn operation(rhs: &Rhs, ops: &mut BTreeMap<String, usize>) {
                 Ctor::Array => "array",
                 Ctor::Map => "map",
                 Ctor::Try(_) => "try",
+                Ctor::Closure(_) => "closure",
             };
             *ops.entry(format!("make {what}")).or_default() += 1;
             for v in vs {
