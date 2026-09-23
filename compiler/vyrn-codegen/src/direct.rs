@@ -17646,12 +17646,8 @@ impl<'p> Fn_<'_, 'p> {
                     ..
                 } => self.core_switch(m, b, body, w, on, arms, *owns, *line)?,
                 St::Drop(n, _, line) => self.core_drop(m, b, body, w, *n, *line)?,
-                // Nothing after it in this list runs, so nothing after it is
-                // written: the value a `panic` in value position leaves is
-                // read only there.
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
-                    break;
                 }
                 // An expression for its effect. What it leaves on the stack
                 // is dropped, or the enclosing block's type will not check —
@@ -18883,12 +18879,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
     fn core_readable(&self, body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
-        // [`Fn_::core_stmts`] writes nothing after a `trap` in its list.
-        let live = ss
-            .iter()
-            .position(|s| matches!(s, St::Trap))
-            .unwrap_or(ss.len());
-        ss[..live].iter().enumerate().all(|(i, s)| match s {
+        ss.iter().enumerate().all(|(i, s)| match s {
             // A made layout is built into the name's own slot, which the
             // name holds to the end of its extent, or into the caller's
             // storage where the `return` after it hands it back

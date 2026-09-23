@@ -402,8 +402,8 @@ pub enum Opaque {
     /// read at. A stream is pulled and not indexed, so both are the one call
     /// that answers the next element or none, and the row states no such call.
     Pull,
-    /// The result of a call that traps (`panic`), which the `St::Trap` after
-    /// it makes unreachable.
+    /// The result of a call that traps (`panic`). Only a row after the
+    /// `St::Trap` reads it, and no finished body holds one ([`cut`]).
     Trapped,
     /// The value a `?` stores where its ok arm binds nothing.
     Unbound,
@@ -1760,11 +1760,38 @@ pub fn gaps(body: &Body) -> Vec<String> {
     out
 }
 
+/// Ends every list of `ss` at its `trap`, because nothing after one runs.
+///
+/// The builders extend a list after a `panic` in value position: the join's
+/// store, the call its argument feeds, an arm's releases. A builder cannot
+/// cut its own list, because its caller extends the list after it returns.
+fn cut(ss: &mut Vec<St>) {
+    if let Some(i) = ss.iter().position(|s| matches!(s, St::Trap)) {
+        ss.truncate(i + 1);
+    }
+    for s in ss {
+        match s {
+            St::If { then, els, .. } => {
+                cut(then);
+                cut(els);
+            }
+            St::Loop { body, .. } | St::Block { body, .. } => cut(body),
+            St::Switch { arms, .. } => arms.iter_mut().for_each(|a| cut(&mut a.body)),
+            St::Let(..)
+            | St::Do { .. }
+            | St::Store { .. }
+            | St::Drop(..)
+            | St::Row { .. }
+            | St::Return { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Trap => {}
+        }
+    }
+}
+
 fn gaps_of(ss: &[St], out: &mut Vec<String>) {
-    // Nothing after a `trap` in its list runs, so nothing there is a gap: the
-    // value a `panic` in value position leaves ([`Opaque::Trapped`]) is read
-    // only by the statement after the `trap`.
-    for s in ss.iter().take_while(|s| !matches!(s, St::Trap)) {
+    for s in ss {
         match s {
             St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(r, out),
             St::Store { place, value, .. } => {
@@ -2095,6 +2122,7 @@ fn build_seeded(
     }
     let mut out = Vec::new();
     b.block(&f.body, &mut out)?;
+    cut(&mut out);
     b.body.stmts = out;
     Ok(b.body)
 }
@@ -2178,6 +2206,7 @@ pub fn build_module_state<'a>(
             releases: false,
         });
     }
+    cut(&mut out);
     b.body.stmts = out;
     Ok(b.body)
 }
@@ -2274,6 +2303,7 @@ fn build_outside_seeded<'a>(
     };
     let mut out = Vec::new();
     b.block(block, &mut out)?;
+    cut(&mut out);
     b.body.stmts = out;
     Ok(b.body)
 }
@@ -3781,10 +3811,7 @@ impl<'a> Builder<'a> {
             Stmt::Expr(e) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
-                if matches!(rhs, Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped)))) {
-                    // A `panic` for its effect: the `trap` is already stated,
-                    // and nothing after it runs to discard a value.
-                } else if self.owns(&ty) {
+                if self.owns(&ty) {
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
                     if self.discards(e) {
@@ -4942,6 +4969,11 @@ impl<'a> Builder<'a> {
                     return Ok(Val::Name(t));
                 }
                 let rhs = self.rhs(e, out)?;
+                // A `panic` leaves no value to name: every row that reads
+                // this one follows the `trap`, and [`cut`] drops it.
+                if let Rhs::Val(v @ Val::Lit(Lit::Opaque(Opaque::Trapped))) = rhs {
+                    return Ok(v);
+                }
                 // An `if` or `match` expression whose arm yields a borrow
                 // yields a borrow (`movecheck::names_a_place`).
                 let borrows = matches!(&rhs, Rhs::Val(v) if self.borrows(v));
@@ -5087,6 +5119,7 @@ impl<'a> Builder<'a> {
                 })
             }),
         };
+        cut(&mut stmts);
         self.body.stmts = stmts;
         let frame = std::mem::replace(&mut self.body, outer);
         (
