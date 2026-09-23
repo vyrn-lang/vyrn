@@ -2952,3 +2952,87 @@ fn a_payload_of_a_type_that_declares_release_is_not_handed_on() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
+
+/// A refusal in a gen body is said once, at its own file and line, whether the
+/// generator cache is cold or warm. A cold cache compiles the generator, and
+/// that compile's kernel refusals reached the host's list with no file.
+#[test]
+fn a_gen_body_is_refused_once_at_its_own_line_cold_and_warm() {
+    let dir = common::scratch("gen-body-refusal");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "fn sink(t: consume String) -> Int64 { drop t return 0 }\n\
+         \n\
+         export gen fn gen1(d: String) -> String {\n\
+         \x20   if d == \"never\" {\n\
+         \x20       let x = \"a\" + \"b\"\n\
+         \x20       let n = sink(x)\n\
+         \x20       region { let x = 9 }\n\
+         \x20       return x + \"!\"\n\
+         \x20   }\n\
+         \x20   return \"export fn v() -> Int64 { return 7 }\"\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { gen1 } from \"./lib\"\n\
+         import { v } from gen1(\"x\")\n\
+         \n\
+         fn main() -> Int64 { return v() }\n",
+    )
+    .expect("write host.vyrn");
+    let check = || {
+        let out = vyrn()
+            .current_dir(&*dir)
+            .env("VYRN_GEN_CACHE_DIR", dir.join("cache"))
+            .env_remove("VYRN_NO_GEN_CACHE")
+            .args(["check", "host.vyrn"])
+            .output()
+            .expect("vyrn check");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"),
+        )
+    };
+    let (cold_ok, cold) = check();
+    let (warm_ok, warm) = check();
+    assert!(!cold_ok && !warm_ok, "accepted:\n{cold}\n{warm}");
+    assert_eq!(cold, warm, "the answer depends on the generator cache");
+    assert_eq!(cold.matches("is used here but").count(), 1, "{cold}");
+    assert!(cold.starts_with("lib.vyrn:8:"), "{cold}");
+}
+
+/// A gen fn no program runs as a generator is judged by the program that
+/// holds it, which is the only build that sees it.
+#[test]
+fn a_gen_body_no_program_runs_is_refused() {
+    let dir = common::scratch("gen-body-unran");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "fn sink(t: consume String) -> Int64 { drop t return 0 }\n\
+         \n\
+         export fn plain() -> Int64 { return 3 }\n\
+         \n\
+         export gen fn unran(d: String) -> String {\n\
+         \x20   let x = \"a\" + \"b\"\n\
+         \x20   let n = sink(x)\n\
+         \x20   region { let x = 9 }\n\
+         \x20   return x + \"!\"\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { plain } from \"./lib\"\n\nfn main() -> Int64 { return plain() }\n",
+    )
+    .expect("write host.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "host.vyrn"])
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(!out.status.success(), "accepted:\n{err}");
+    assert!(err.starts_with("lib.vyrn:9:"), "{err}");
+}
