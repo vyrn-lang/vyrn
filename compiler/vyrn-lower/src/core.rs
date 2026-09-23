@@ -2220,6 +2220,7 @@ fn build_seeded(
         pending_closure: None,
         appends: std::collections::HashSet::new(),
         region: 0,
+        ret: None,
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -2228,6 +2229,7 @@ fn build_seeded(
     // RFC-0037 collected its stored sources under. Every other type in the
     // core comes from the instance's rows and is substituted already.
     let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
+    b.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
     // A declared release (`impl Owned for T { fn release(consume self) }`) IS
     // the release of `self`: its body frees the parts, and nothing releases
     // `self` again — so `self` is not a name the kernel owns there.
@@ -2330,6 +2332,7 @@ pub fn build_module_state<'a>(
         pending_closure: None,
         appends: std::collections::HashSet::new(),
         region: 0,
+        ret: None,
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -2439,6 +2442,7 @@ fn build_outside_seeded<'a>(
         pending_closure: None,
         appends: std::collections::HashSet::new(),
         region: 0,
+        ret: None,
     };
     b.appends = crate::append::append_candidates(block);
     let mut out = Vec::new();
@@ -2522,6 +2526,10 @@ struct Builder<'a> {
     /// How many `region`s enclose the statement being lowered. An arena
     /// buffer cannot grow, so an append inside one is the `concat` call.
     region: u32,
+    /// The frame's declared result, which a `?` on an `Option` fails with
+    /// `None` of. `None` for module state, an outside block and a lambda the
+    /// checker did not type.
+    ret: Option<Type>,
 }
 
 impl<'a> Builder<'a> {
@@ -5175,12 +5183,7 @@ impl<'a> Builder<'a> {
                 // nobody else's.
                 None if name == "None" || self.is_variant(name) => {
                     let ty = self.ty_of(e)?;
-                    let rhs = self.call(name, &[], *line, Some(ty.clone()), out)?;
-                    let t = self.name("@nullary", ty, false, *line);
-                    self.body.names[t as usize].borrow = false;
-                    self.body.names[t as usize].not_owned = Some(NotOwned::Static);
-                    out.push(St::Let(t, rhs));
-                    Ok(Val::Name(t))
+                    self.nullary(name, ty, *line, out)
                 }
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
@@ -5255,6 +5258,22 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The nullary constructor `name` of `ty`, bound to a temporary.
+    fn nullary(
+        &mut self,
+        name: &str,
+        ty: Type,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        let rhs = self.call(name, &[], line, Some(ty.clone()), out)?;
+        let t = self.name("@nullary", ty, false, line);
+        self.body.names[t as usize].borrow = false;
+        self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+        out.push(St::Let(t, rhs));
+        Ok(Val::Name(t))
+    }
+
     /// A lambda literal (RFC-0023). Its captures are reads of the enclosing
     /// names — a capture is by read, and a stored closure snapshots what it
     /// captured (RFC-0037), so the enclosing frame still owns its value. In an
@@ -5291,11 +5310,13 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         let decls = self.proto.types();
-        let ptys: Vec<Type> = match self.ty_of(e).ok() {
+        let (ptys, ret): (Vec<Type>, Option<Type>) = match self.ty_of(e).ok() {
             // A `lazy T` field's initializer is a nullary closure (RFC-0085).
-            Some(t) if vyrn_frontend::types::deferred(&t).is_some() => Vec::new(),
+            Some(t) if vyrn_frontend::types::deferred(&t).is_some() => {
+                (Vec::new(), vyrn_frontend::types::deferred(&t).cloned())
+            }
             Some(t) => match vyrn_frontend::types::resolve(&t, &decls) {
-                Type::Fn(ptys, _) => ptys,
+                Type::Fn(ptys, r) => (ptys, Some(*r)),
                 _ => return gap("a lambda the checker did not type as a function", *line),
             },
             // The checker did not type the literal: an argument of a generic
@@ -5304,7 +5325,7 @@ impl<'a> Builder<'a> {
             None => {
                 let (mut vars, mut calls) = (Vec::new(), Vec::new());
                 mentions_in_lambda(body, &mut vars, &mut calls);
-                params
+                let ptys = params
                     .iter()
                     .map(|p| {
                         vars.iter()
@@ -5313,7 +5334,8 @@ impl<'a> Builder<'a> {
                             .cloned()
                             .unwrap_or(Type::Unit)
                     })
-                    .collect()
+                    .collect();
+                (ptys, None)
             }
         };
         if ptys.len() != params.len() {
@@ -5345,6 +5367,7 @@ impl<'a> Builder<'a> {
             std::mem::replace(&mut self.drain, 0),
             std::mem::take(&mut self.stream_loops),
         );
+        let outer_ret = std::mem::replace(&mut self.ret, ret);
         for c in caps {
             let Val::Name(n) = c else {
                 continue;
@@ -5388,6 +5411,7 @@ impl<'a> Builder<'a> {
             self.drain,
             self.stream_loops,
         ) = saved;
+        self.ret = outer_ret;
         r?;
         self.body.lambdas.push(frame);
         Ok(())
@@ -6007,8 +6031,15 @@ impl<'a> Builder<'a> {
                 )?;
                 self.close_streams(&mut fail);
                 self.drops_at(Exit::Try, tid, &mut fail)?;
+                // An `Option` fails with no binder, and the value it returns
+                // is `None` of the frame's result.
+                let value = match (fb.first(), self.ret.clone()) {
+                    (Some(n), _) => Some(Val::Name(*n)),
+                    (None, Some(rt)) => Some(self.nullary("None", rt, *line, &mut fail)?),
+                    (None, None) => None,
+                };
                 fail.push(St::Return {
-                    value: fb.first().map(|n| Val::Name(*n)),
+                    value,
                     site: tid,
                     is_try: true,
                     line: *line,
