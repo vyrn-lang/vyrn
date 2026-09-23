@@ -864,6 +864,23 @@ pub struct Arm {
     pub index: u32,
 }
 
+impl Arm {
+    /// The rows at the head of the arm that bind a binder as a read out of
+    /// the scrutinee `on`. The kernel judges each binder so bound as a read
+    /// binding for the arm's extent, and an emitter writes nothing for them.
+    pub fn reads(&self, on: &Val) -> &[St] {
+        let n = self
+            .body
+            .iter()
+            .take_while(|s| {
+                matches!(s, St::Let(b, Rhs::Read(Place::Name(m)))
+                    if self.binds.contains(b) && matches!(on, Val::Name(o) if o == m))
+            })
+            .count();
+        &self.body[..n]
+    }
+}
+
 /// How one [`Arm`] of a [`St::Switch`] is chosen.
 ///
 /// The arms are tried in order, so a [`Test::Else`] runs when no arm before it
@@ -1304,12 +1321,11 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
     refuse(format!("{says}\n  fix: {drop_it}"), line)
 }
 
-/// The scrutinee a binder borrows: its name, where the construct did not
-/// consume it. `None` for a consumed scrutinee, whose binders own what they
-/// name.
-fn borrow_root(sv: &Val, consuming: bool) -> Option<Name> {
+/// The scrutinee a binder borrows: its name, where the construct does not
+/// own it. `None` where it does, whose payloads are the construct's to give.
+fn borrow_root(sv: &Val, owns: bool) -> Option<Name> {
     match sv {
-        Val::Name(n) if !consuming => Some(*n),
+        Val::Name(n) if !owns => Some(*n),
         _ => None,
     }
 }
@@ -1534,7 +1550,9 @@ impl Reads {
                         for b in &a.binds {
                             self.bound[*b as usize] = depth;
                         }
-                        self.stmts(&a.body, depth);
+                        // The rows that read a binder out of the scrutinee
+                        // are the binder's, not a read of the scrutinee.
+                        self.stmts(&a.body[a.reads(on).len()..], depth);
                     }
                 }
                 St::Do { rhs: r, .. } => self.rhs(r),
@@ -3016,7 +3034,7 @@ impl<'a> Builder<'a> {
                         &sty,
                         consuming,
                         *mline,
-                        borrow_root(&sv, consuming),
+                        borrow_root(&sv, owns),
                         &mut body,
                     )?;
                     let ArmBody::Expr(ae) = &arm.body else {
@@ -3433,7 +3451,7 @@ impl<'a> Builder<'a> {
                 let owns = consuming || self.made_scrutinee(scrutinee);
                 let mut t = Vec::new();
                 let mark = self.scope.len();
-                let from = borrow_root(&sv, consuming);
+                let from = borrow_root(&sv, owns);
                 let binds = self.bind_pattern(pattern, &sty, consuming, *line, from, &mut t)?;
                 self.block(then_block, &mut t)?;
                 let frees = self.arm_frees(sid, 0, &binds, &mut t);
@@ -4340,6 +4358,15 @@ impl<'a> Builder<'a> {
         let mut binds = Vec::new();
         for (name, ty, key) in payloads {
             let owned = consuming && self.owns(&ty);
+            let layout = matches!(
+                vyrn_frontend::types::resolve(&ty, &decls),
+                Type::Record(_)
+                    | Type::Enum(_)
+                    | Type::Array(_)
+                    | Type::ArrayN(..)
+                    | Type::SmallArray(..)
+                    | Type::Map(..)
+            );
             let n = self.name(&name, ty, owned, line);
             // A binder the arm OWNS is a binding of the frame like any other,
             // and the frame's exit rule is stated for it once: the kernel
@@ -4377,10 +4404,16 @@ impl<'a> Builder<'a> {
                     // the frame's to give, and `std/vyx.vyrn`'s
                     // `vyxProcessElem` hands one to a `consume` parameter on
                     // the arm that does not return the value whole.
-                    if self.body.names[m as usize].borrow {
-                        if self.body.names[n as usize].borrow_kind.is_none() {
-                            self.body.names[n as usize].borrow_kind = Some(BorrowKind::Place);
-                        }
+                    if self.body.names[m as usize].borrow
+                        && self.body.names[n as usize].borrow_kind.is_none()
+                    {
+                        self.body.names[n as usize].borrow_kind = Some(BorrowKind::Place);
+                    }
+                    // A binder of a layout, or of a value that owns heap, is
+                    // a read out of the scrutinee for the arm's extent,
+                    // whoever owns the scrutinee ([`Arm::reads`]): a write to
+                    // it while the binder lives is the kernel's refusal.
+                    if layout || self.body.names[n as usize].borrow {
                         out.push(St::Let(n, Rhs::Read(Place::Name(m))));
                     }
                 }
@@ -5541,7 +5574,7 @@ impl<'a> Builder<'a> {
                         &sty,
                         consuming,
                         *line,
-                        borrow_root(&sv, consuming),
+                        borrow_root(&sv, owns),
                         &mut body,
                     )?;
                     match &arm.body {
@@ -5618,7 +5651,7 @@ impl<'a> Builder<'a> {
                     &ity,
                     consuming,
                     *line,
-                    borrow_root(&sv, consuming),
+                    borrow_root(&sv, owns),
                     &mut fail,
                 )?;
                 self.close_streams(&mut fail);
@@ -5637,7 +5670,7 @@ impl<'a> Builder<'a> {
                     &ity,
                     consuming,
                     *line,
-                    borrow_root(&sv, consuming),
+                    borrow_root(&sv, owns),
                     &mut ok,
                 )?;
                 ok.push(St::Store {

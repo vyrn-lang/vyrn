@@ -2751,3 +2751,71 @@ fn a_modify_of_the_place_a_read_binding_reads_is_refused() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
+
+/// A payload binder of a layout reads out of the scrutinee for the arm's
+/// extent, whoever owns the scrutinee (RFC-0125 M7, `m7-binder`): a store, or
+/// a `modify` argument, that writes the scrutinee while the binder lives is
+/// refused, for a payload that owns heap and for one that owns none. The
+/// emitter holds the binder as the payload's address, so the second printed
+/// 5050 where the language says 5001.
+#[test]
+fn a_write_to_the_scrutinee_a_payload_binder_reads_is_refused() {
+    let cases = [
+        (
+            "store",
+            "fn main() -> Int64 {\n  let mut o: Option<Array<Int64>> = Some([1, 2, 3])\n  \
+             let mut t = 0\n  match o {\n    Some(xs) => {\n      o = Some([7, 8, 9, 10])\n      \
+             t = xs[0] + xs.length\n    }\n    None => {}\n  }\n  print(t)\n  return 0\n}\n",
+            "`o` is written here while `xs` still reads out of it",
+            "match o {",
+            "match o.copy() {",
+            "4",
+        ),
+        (
+            "modify",
+            "type P = { x: Int64, y: Int64 }\n\
+             fn reset(o: modify Option<P>) { o = Some(P { x: 50, y: 0 }) }\n\
+             fn main() -> Int64 {\n  let mut o: Option<P> = Some(P { x: 1, y: 0 })\n  \
+             let mut t = 0\n  if let Some(p) = o {\n    reset(o)\n    t = p.x\n  }\n  \
+             if let Some(q) = o { t = t + q.x * 100 }\n  print(t)\n  return 0\n}\n",
+            "`o` is written here while `p` still reads out of it",
+            "if let Some(p) = o {",
+            "if let Some(p) = o.copy() {",
+            "5001",
+        ),
+    ];
+    let dir = common::scratch("binder-write");
+    let mut bad: Vec<String> = Vec::new();
+    for (name, src, want, from, to, prints) in cases {
+        let file = format!("{name}.vyrn");
+        std::fs::write(dir.join(&file), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &file, false);
+        if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+            bad.push(format!("`check {file}` said {text}"));
+        }
+        let out = vyrn()
+            .current_dir(&dir)
+            .args(["run", &file])
+            .output()
+            .expect("vyrn");
+        let err = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() || !out.stdout.is_empty() || !err.contains(want) {
+            bad.push(format!("`run {file}` ran or said {err}"));
+        }
+        // The way out the menu names: the binder reads a value of its own.
+        let copy = format!("{name}-copy.vyrn");
+        std::fs::write(dir.join(&copy), src.replace(from, to)).expect("write the program");
+        let out = vyrn()
+            .current_dir(&dir)
+            .args(["run", &copy])
+            .output()
+            .expect("vyrn run");
+        if String::from_utf8_lossy(&out.stdout).trim() != prints {
+            bad.push(format!(
+                "`run {copy}` printed {:?}",
+                String::from_utf8_lossy(&out.stdout)
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}

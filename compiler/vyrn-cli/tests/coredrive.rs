@@ -144,7 +144,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 11] = [
+const SHAPES: [(&str, &str); 12] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -209,6 +209,13 @@ const SHAPES: [(&str, &str); 11] = [
         "a copy of a layout that owns no heap",
         "type P = { x: Int64, y: Int64 } type S = { a: P, n: Int64 }          fn pick(xs: Array<P>, i: Int64) -> Int64 { let e = xs[i] return e.x + e.y * 100 }          fn inner(s: S) -> Int64 { let p = s.a return p.x + p.y * 10 + s.n }          fn vyrnTestMain() -> Int64 { let xs: Array<P> = [P { x: 1, y: 2 }, P { x: 3, y: 4 }]          let s = S { a: P { x: 5, y: 6 }, n: 7 } return pick(xs, 1) + inner(s) * 1000 }",
     ),
+    // A payload binder of a layout the construct does not own holds the
+    // payload's address in the scrutinee's storage: a box for the array, the
+    // sum itself for a two-word record (RFC-0125 M7).
+    (
+        "a payload binder that is a layout",
+        "type P = { x: Int64, y: Int64 } fn f(o: Option<Array<Int64>>) -> Int64 { let mut t = 0          if let Some(xs) = o { t = xs[0] + xs.length } return t }          fn g(o: Option<P>) -> Int64 { return match o { Some(p) => p.x + p.y * 10, None => 0 } }          fn vyrnTestMain() -> Int64 { return f(Some([7, 8, 9])) + f(None) + g(Some(P { x: 1, y: 2 })) * 100 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -218,7 +225,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 11] = [
+const SHAPE_PIN: [(&str, usize, usize); 12] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -230,6 +237,7 @@ const SHAPE_PIN: [(&str, usize, usize); 11] = [
     ("a `for` over a String literal beside a `continue`", 0, 0),
     ("a map key read the rows carry", 0, 0),
     ("a copy of a layout that owns no heap", 0, 0),
+    ("a payload binder that is a layout", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

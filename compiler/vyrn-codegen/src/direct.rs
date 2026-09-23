@@ -13938,9 +13938,7 @@ impl<'p> Fn_<'_, 'p> {
             Word::Inline2 => {
                 let slot = b.alloc(16, 8);
                 b.slot(slot);
-                b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::I32Const(off as i32));
-                b.ins(&Instruction::I32Add);
+                payload_at(b, addr, off, true);
                 b.ins(&Instruction::I32Const(16));
                 b.ins(&Instruction::MemoryCopy {
                     src_mem: 0,
@@ -13952,9 +13950,7 @@ impl<'p> Fn_<'_, 'p> {
             // arm's value is as independent as every other binding's.
             Word::Boxed => {
                 let p = self.scratch(b, ValType::I32, 1);
-                b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                payload_at(b, addr, off, false);
                 b.ins(&Instruction::LocalSet(p));
                 let place = match self.cx.repr(t, line)? {
                     Repr::Scalar(v) => {
@@ -16771,7 +16767,10 @@ impl<'p> Fn_<'_, 'p> {
     /// this row does not have.
     ///
     /// The payload binder is the PLACE the row names (§2.1): the walk binds it
-    /// where the arm is entered and the arm's own rows read it there.
+    /// where the arm is entered and the arm's own rows read it there. A layout
+    /// the row reads out of the scrutinee is its address inside the
+    /// scrutinee's storage; any other layout moves out into a slot, as the arm
+    /// moves it.
     #[allow(clippy::too_many_arguments)]
     fn core_switch(
         &mut self,
@@ -16840,10 +16839,30 @@ impl<'p> Fn_<'_, 'p> {
             };
             for (i, bn) in arm.binds.iter().enumerate() {
                 let ty = body.names[*bn as usize].ty.clone();
-                let at = self.bind_payload(b, addr, &sl, &ptys, i, &ty, line, free_box)?;
-                w.at[*bn as usize] = Some((at, ty));
+                let layout = matches!(self.cx.repr(&ty, line)?, Repr::Agg(_));
+                let read = arm
+                    .reads(on)
+                    .iter()
+                    .any(|r| matches!(r, St::Let(x, _) if x == bn));
+                let at = match self.word2(&ty)? {
+                    // A layout the row reads out of the scrutinee is read
+                    // where it lies ([`vyrn_lower::core::Arm::reads`]).
+                    k @ (Word::Inline2 | Word::Boxed) if layout && read => {
+                        let off = sl.fields[self.cx.payload_slot(&ptys, i)];
+                        payload_at(b, addr, off, matches!(k, Word::Inline2));
+                        let Place::Local(l) =
+                            self.place_for(b, &Repr::Scalar(ValType::I32), line)?
+                        else {
+                            return unsupported("an address with no local", line);
+                        };
+                        b.ins(&Instruction::LocalSet(l));
+                        Place::Local(l)
+                    }
+                    _ => self.bind_payload(b, addr, &sl, &ptys, i, &ty, line, free_box)?,
+                };
+                self.core_bind(b, body, w, *bn, at, ty)?;
             }
-            self.core_stmts(m, b, body, w, &arm.body)?;
+            self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
             self.chain_leave(b, &chain, slot);
         }
         self.chain_close(b, &chain);
@@ -17158,7 +17177,7 @@ impl<'p> Fn_<'_, 'p> {
             if matches!(st, St::Row { .. }) {
                 continue;
             }
-            core_switched(st, &mut switched);
+            core_switched(st, true, &mut switched);
             vyrn_lower::core::names_in(st, &mut names);
         }
         for n in &names {
@@ -18145,6 +18164,18 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Whether [`Fn_::core_switch`] gives a payload binder of `ty` a place —
+    /// RFC-0125 M7, a payload binder that is a layout.
+    ///
+    /// A value in one wasm local is loaded into one. A layout the row reads
+    /// out of the scrutinee holds its address there, and the kernel refuses a
+    /// write to the scrutinee while the binder lives; any other layout moves
+    /// out, as the arm moves it.
+    fn core_payload(&self, ty: &Type) -> bool {
+        self.core_framed(ty)
+            || (matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_))) && !self.checks(ty))
+    }
+
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
     /// layout-made family.
     ///
@@ -18684,8 +18715,10 @@ impl<'p> Fn_<'_, 'p> {
             return false;
         }
         let mut lets = Vec::new();
+        let mut binders = Vec::new();
         for st in &body.stmts {
             core_lets(st, &mut lets);
+            core_switched(st, false, &mut binders);
         }
         // A made layout is built into the ANNOTATION's layout, and the
         // per-body walk builds into the name's, which is the type of the
@@ -18719,6 +18752,9 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_alias`]) or, where it owns no heap, a copy of its
             // bytes ([`Fn_::core_copies`]).
             //
+            // Or a payload binder, whose place the switch gives it
+            // ([`Fn_::core_payload`]).
+            //
             // Or an aggregate a call returns into the slot this walk takes for
             // it ([`Fn_::out_ptr`]). A temporary made or returned into is
             // one [`Fn_::core_readable`] asks about where it stands, because
@@ -18737,6 +18773,7 @@ impl<'p> Fn_<'_, 'p> {
                 }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
                 && !self.core_copies(body, n as vyrn_lower::core::Name)
+                && !binders.contains(&(n as vyrn_lower::core::Name))
             {
                 return false;
             }
@@ -18845,9 +18882,8 @@ impl<'p> Fn_<'_, 'p> {
             St::Break { .. } | St::Continue { .. } => true,
             // A tag is read and an arm is chosen off the row
             // ([`Fn_::core_switch`]). What that needs is a scrutinee this walk
-            // can take the address of, a tag on every arm, and a payload
-            // binder it can hold in a local — which is the scalar question
-            // again, because every wider payload lands in a slot.
+            // can take the address of, a tag on every arm, and a place for
+            // every payload binder ([`Fn_::core_payload`]).
             St::Switch { on, arms, site, .. } => {
                 let Val::Name(n) = on else {
                     return false;
@@ -18879,8 +18915,8 @@ impl<'p> Fn_<'_, 'p> {
                         a.test != vyrn_lower::core::Test::Impl
                             && a.binds
                                 .iter()
-                                .all(|bn| core_scalar(&body.names[*bn as usize].ty))
-                            && self.core_readable(body, &a.body, reads)
+                                .all(|bn| self.core_payload(&body.names[*bn as usize].ty))
+                            && self.core_readable(body, &a.body[a.reads(on).len()..], reads)
                     })
             }
             // A release is the row's, at every exit, and the walk emits it
@@ -19265,29 +19301,30 @@ fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, bool)>) {
     }
 }
 
-/// The names a run's switches account for themselves — RFC-0125 M7.
+/// The names a run's switches account for themselves — RFC-0125 M7: every
+/// payload binder, and each scrutinee where `ons`.
 ///
-/// A payload binder is a local [`Fn_::core_switch`] binds when it enters the
+/// A payload binder is a place [`Fn_::core_switch`] binds when it enters the
 /// arm, and a scrutinee is read as an ADDRESS rather than as a value. So the
 /// screen's scalar clause is asked about neither: a sum is not a scalar, and
 /// asking would refuse every run that switches at all.
-fn core_switched(s: &St, out: &mut Vec<vyrn_lower::core::Name>) {
+fn core_switched(s: &St, ons: bool, out: &mut Vec<vyrn_lower::core::Name>) {
     match s {
         St::Switch { on, arms, .. } => {
-            if let Val::Name(n) = on {
+            if let (Val::Name(n), true) = (on, ons) {
                 out.push(*n);
             }
             for a in arms {
                 out.extend(a.binds.iter().copied());
-                a.body.iter().for_each(|s| core_switched(s, out));
+                a.body.iter().for_each(|s| core_switched(s, ons, out));
             }
         }
         St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_switched(s, out));
-            els.iter().for_each(|s| core_switched(s, out));
+            then.iter().for_each(|s| core_switched(s, ons, out));
+            els.iter().for_each(|s| core_switched(s, ons, out));
         }
         St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_switched(s, out));
+            inner.iter().for_each(|s| core_switched(s, ons, out));
         }
         _ => {}
     }
@@ -19339,6 +19376,19 @@ fn core_returns(s: &St) -> bool {
 
 /// A type this walk reads a name of: a scalar that needs no validation. A
 /// `where` type (RFC-0079) is a `check` row the core does not carry.
+/// Push the address of the payload at `off` in the sum at `addr`: inside the
+/// sum where the payload is two words `inline`, and the box's otherwise.
+fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
+    b.ins(&Instruction::LocalGet(addr));
+    if inline {
+        b.ins(&Instruction::I32Const(off as i32));
+        b.ins(&Instruction::I32Add);
+    } else {
+        b.ins(&Instruction::I64Load(at(off)));
+        b.ins(&Instruction::I32WrapI64);
+    }
+}
+
 fn core_scalar(t: &Type) -> bool {
     matches!(
         t,
