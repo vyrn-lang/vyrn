@@ -19972,13 +19972,12 @@ impl<'p> Fn_<'_, 'p> {
             // A place this walk addresses, whose value is one it loads: any
             // value in one wasm local, which a String's pointer is as much as
             // an `Int64` ([`Fn_::core_read`]). An aggregate read is refused by
-            // the same clause that refuses an aggregate name.
-            Rhs::Read(p) => self
+            // the same clause that refuses an aggregate name. A take loads
+            // the same value and leaves a hole, which the release rows of the
+            // place it left carry.
+            Rhs::Read(p) | Rhs::Take(p) => self
                 .core_place_ty(body, p)
                 .is_some_and(|t| self.core_framed(&t)),
-            Rhs::Take(p) => self
-                .core_place_ty(body, p)
-                .is_some_and(|t| core_scalar(&self.cx.resolve(&t))),
             _ => false,
         }
     }
