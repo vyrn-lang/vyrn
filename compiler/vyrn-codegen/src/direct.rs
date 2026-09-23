@@ -19237,12 +19237,15 @@ impl<'p> Fn_<'_, 'p> {
             // where it stands ([`Fn_::core_release`]). What it needs is the
             // node the plan keys the slot by, which is the name's binding.
             St::Row { name, .. } => body.names[*name as usize].binding.is_some(),
-            St::Return { value, .. } => value.as_ref().is_none_or(|v| match v {
-                Val::Name(n) if matches!(self.ret, Repr::Agg(_)) => {
+            // A `?` on an `Option` returns `None` with no value on the row,
+            // which is the return type's tag and no value this walk writes.
+            St::Return { value, .. } => match value {
+                None => matches!(self.ret, Repr::Unit),
+                Some(Val::Name(n)) if matches!(self.ret, Repr::Agg(_)) => {
                     self.cx.resolve(&body.names[*n as usize].ty) == self.cx.resolve(&self.ret_ty)
                 }
-                _ => self.core_val_readable(body, v),
-            }),
+                Some(v) => self.core_val_readable(body, v),
+            },
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
             // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
