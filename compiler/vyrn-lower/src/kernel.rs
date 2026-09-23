@@ -232,21 +232,68 @@ pub fn root_of(p: &Place) -> Option<(Name, String)> {
     }
 }
 
+/// A write point of one row: where the judgment ends the borrows that read
+/// what the row writes (RFC-0090).
+enum Write<'s> {
+    Store(&'s Place),
+    Take(&'s Place),
+    /// A value handed on, and whether a declared `consume` parameter takes
+    /// it. It writes the name where the take moves it ([`Kernel::moves`]).
+    Hand(&'s Val, bool),
+    Release(Name),
+    /// A `modify` argument: the callee may replace or free what it names.
+    Modify(&'s Val),
+}
+
+/// Every write point of the row `s`, in the order the judgment reaches them,
+/// without the rows of a list inside `s`. The judgment's state walk and
+/// [`writes`] both read this, so the two agree on what a row writes.
+fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo]) -> Vec<Write<'s>> {
+    match s {
+        // A second name for a borrow reads it; nothing is handed on.
+        St::Let(n, Rhs::Val(Val::Name(m)))
+            if names[*n as usize].borrow && names[*m as usize].borrow =>
+        {
+            vec![]
+        }
+        St::Let(_, r) | St::Do { rhs: r, .. } => match r {
+            Rhs::Val(v) => vec![Write::Hand(v, false)],
+            Rhs::Make(_, vs) => vs.iter().map(|v| Write::Hand(v, false)).collect(),
+            Rhs::Take(p) => vec![Write::Take(p)],
+            Rhs::Call { args, kind, .. } => {
+                let consumed = args.iter().filter(|(_, c)| *c == Capability::Consume);
+                let modified = args.iter().filter(|(_, c)| *c == Capability::Modify);
+                (consumed.map(|(v, _)| Write::Hand(v, kind.declared())))
+                    .chain(modified.map(|(v, _)| Write::Modify(v)))
+                    .collect()
+            }
+            Rhs::Read(_) | Rhs::Prim(..) => vec![],
+        },
+        St::Store { place, value, .. } => {
+            let mut w = vec![Write::Hand(value, false), Write::Store(place)];
+            if let Place::Key(_, k) = place {
+                w.push(Write::Hand(k, false));
+            }
+            w
+        }
+        St::Drop(n, ..) | St::Row { name: n, .. } => vec![Write::Release(*n)],
+        St::Return { value: Some(v), .. } => vec![Write::Hand(v, false)],
+        St::Switch { on, consuming, .. } if *consuming => vec![Write::Hand(on, false)],
+        _ => vec![],
+    }
+}
+
 /// Whether a row of `ss` writes `n` where the judgment would end a borrow of
-/// it: a store into `n` or under it, a take, a drop, a move of `n`, a
-/// `modify` or `consume` argument naming it, or a closure capturing it. A
-/// name `ss` binds by a read of `n`, or by a switch over such a name, is `n`
-/// here too, and a borrow of a place bound outside `ss` may be, so a write
-/// through one counts. Every row at which [`Kernel::wrote`] or
-/// [`Kernel::wrote_by_call`] ends such a borrow is one of these, stated over
-/// rows and not over a state, so the builder can ask before the judgment
-/// (RFC-0125 M7, the hoisted header). A release that only an exit follows
-/// is not one: no row after it reads the borrow.
+/// it ([`writes_of`]), or a closure captures it. A name `ss` binds by a read
+/// of `n`, or by a switch over such a name, is `n` here too, and a borrow of
+/// a place bound outside `ss` may be, so a write through one counts. The
+/// builder asks before the judgment runs (RFC-0125 M7, the hoisted header).
+/// A release or a `return` that only an exit follows is not one: no row
+/// after it reads the borrow.
 pub fn writes(ss: &[St], n: Name, names: &[crate::core::NameInfo]) -> bool {
     let mut inside = Vec::new();
-    for s in ss {
-        crate::core::names_bound(s, &mut inside);
-    }
+    ss.iter()
+        .for_each(|s| crate::core::names_bound(s, &mut inside));
     let mut w = Writes {
         n,
         alias: vec![n],
@@ -276,32 +323,10 @@ impl Writes<'_> {
             || (info.borrow && info.borrow_kind.is_none() && !self.inside.contains(&r))
     }
 
-    fn place(&self, p: &Place) -> bool {
-        root_of(p).is_some_and(|(r, _)| self.under(r))
-    }
-
-    fn rhs(&self, r: &Rhs) -> bool {
-        match r {
-            Rhs::Val(v) => *v == Val::Name(self.n),
-            Rhs::Make(_, vs) => vs.contains(&Val::Name(self.n)),
-            Rhs::Prim(crate::core::Op::Closure, vs, _) => vs
-                .iter()
-                .any(|v| matches!(v, Val::Name(k) if self.alias.contains(k))),
-            Rhs::Prim(..) | Rhs::Read(_) => false,
-            Rhs::Take(p) => self.place(p),
-            Rhs::Call { args, .. } => args.iter().any(|(v, c)| {
-                matches!(c, Capability::Modify | Capability::Consume)
-                    && matches!(v, Val::Name(k) if self.under(*k))
-            }),
-        }
-    }
-
-    /// A release in an exit's tail writes nothing a later row reads: every
-    /// row after it is another release or leaves the loop.
     fn list(&mut self, ss: &[St]) -> bool {
         let depth = self.depth;
         ss.iter().enumerate().any(|(i, s)| {
-            let tail = matches!(s, St::Drop(..) | St::Row { .. })
+            let tail = matches!(s, St::Drop(..) | St::Row { .. } | St::Return { .. })
                 && ss[i + 1..].iter().all(|t| match t {
                     St::Drop(..) | St::Row { .. } | St::Return { .. } | St::Trap => true,
                     St::Break { .. } => depth == 0,
@@ -312,6 +337,15 @@ impl Writes<'_> {
     }
 
     fn st(&mut self, s: &St) -> bool {
+        let hit = writes_of(s, self.names).into_iter().any(|w| match w {
+            Write::Store(p) | Write::Take(p) => root_of(p).is_some_and(|(r, _)| self.under(r)),
+            Write::Hand(v, _) => *v == Val::Name(self.n),
+            Write::Release(k) => self.alias.contains(&k),
+            Write::Modify(v) => matches!(v, Val::Name(k) if self.under(*k)),
+        });
+        if hit {
+            return true;
+        }
         match s {
             St::Let(k, r) => {
                 let reads = match r {
@@ -322,11 +356,9 @@ impl Writes<'_> {
                 if reads && self.names[*k as usize].borrow {
                     self.alias.push(*k);
                 }
-                self.rhs(r)
+                matches!(r, Rhs::Prim(crate::core::Op::Closure, vs, _)
+                    if vs.iter().any(|v| matches!(v, Val::Name(k) if self.alias.contains(k))))
             }
-            St::Do { rhs, .. } => self.rhs(rhs),
-            St::Store { place, value, .. } => self.place(place) || *value == Val::Name(self.n),
-            St::Drop(k, ..) | St::Row { name: k, .. } => self.alias.contains(k),
             St::If { then, els, .. } => {
                 let t = self.list(then);
                 t || self.list(els)
@@ -338,17 +370,9 @@ impl Writes<'_> {
                 self.depth -= 1;
                 w
             }
-            St::Switch {
-                on,
-                arms,
-                consuming,
-                ..
-            } => {
+            St::Switch { on, arms, .. } => {
                 let over = matches!(on, Val::Name(k) if self.alias.contains(k));
-                if over && *consuming && *on == Val::Name(self.n) {
-                    return true;
-                }
-                for a in arms {
+                arms.iter().any(|a| {
                     // A binder read out of the scrutinee is its address
                     // whatever it holds ([`Kernel::read_out`]).
                     if over {
@@ -361,13 +385,10 @@ impl Writes<'_> {
                                 _ => None,
                             }));
                     }
-                    if self.list(&a.body) {
-                        return true;
-                    }
-                }
-                false
+                    self.list(&a.body)
+                })
             }
-            St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap => false,
+            _ => false,
         }
     }
 }
@@ -786,54 +807,40 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    /// `p` is written: every alias reading a place that overlaps it ends
-    /// here. `what` is the place, in the checker's words.
-    /// Ends the borrows that read what a `modify` argument `m` names: the
-    /// callee may replace or free it, so a later read is refused as a read
-    /// after a write. A binding that owns no heap copied its value out, and a
-    /// `for` borrow is ended whatever its container holds.
-    fn wrote_by_call(&self, st: &mut State, m: Name) {
-        let a = self.src_of(st, &Place::Name(m));
-        let what = self.alias_text(&a);
-        // A write through an alias is that alias's own, and its chain's.
-        let mut chain = Vec::new();
-        let mut via = Some(m);
-        while let Some(n) = via {
-            chain.push(n);
-            via = st.alias[n as usize].as_ref().and_then(|x| x.via);
-        }
-        for (k, info) in self.body.names.iter().enumerate() {
-            let Some(x) = &st.alias[k] else {
-                continue;
-            };
-            if !chain.contains(&(k as Name))
-                && (info.walked || !self.owned(k as Name) || self.read_out[k])
-                && x.root == a.root
-                && overlaps(&x.path, &a.path)
-                && st.dead[k].is_none()
+    /// Ends every alias the write point `w` of this row ends ([`writes_of`]):
+    /// each that reads a place overlapping the one written, less the chain
+    /// the write goes through. A take that copies a value that owns no heap
+    /// writes nothing, and the take of an alias is refused before it writes.
+    /// A store into a binding writes the binding's own slot, not the place it
+    /// reads. A `modify` argument writes what it reads, because the callee
+    /// may replace or free it, and it ends a walked borrow whatever the
+    /// container holds.
+    fn end(&self, st: &mut State, w: Write) {
+        let name;
+        let p = match w {
+            Write::Store(p) | Write::Take(p) => p,
+            Write::Hand(Val::Name(n), consume)
+                if self.owned(*n) && st.alias[*n as usize].is_none() && self.moves(*n, consume) =>
             {
-                st.dead[k] = Some((self.here, what.clone()));
+                name = Place::Name(*n);
+                &name
             }
-        }
-    }
-
-    fn wrote(&self, st: &mut State, p: &Place, what: &str) {
-        // A store into a binding writes the binding's own slot, not the
-        // place it reads.
-        let a = match p {
-            Place::Name(n) => Alias {
-                root: Root::N(*n),
-                path: String::new(),
-                via: None,
-            },
-            _ => self.src_of(st, p),
+            Write::Release(n) | Write::Modify(&Val::Name(n)) => {
+                name = Place::Name(n);
+                &name
+            }
+            Write::Hand(..) | Write::Modify(_) => return,
         };
+        let by_call = matches!(w, Write::Modify(_));
         // Spelled through the aliases, as the reader wrote it: `t.xs[..]`,
         // not the desugar's `t.xs[][..]`.
-        let what = if matches!(p, Place::Name(_)) {
-            what.to_string()
-        } else {
-            self.alias_text(&a)
+        let (root, path, what) = match p {
+            Place::Name(n) if !by_call => (Root::N(*n), String::new(), self.src(*n).to_string()),
+            _ => {
+                let a = self.src_of(st, p);
+                let what = self.alias_text(&a);
+                (a.root, a.path, what)
+            }
         };
         // A write through an alias is that alias's own, and its chain's.
         let mut chain = Vec::new();
@@ -842,23 +849,29 @@ impl<'b> Kernel<'b> {
             chain.push(n);
             via = st.alias[n as usize].as_ref().and_then(|x| x.via);
         }
-        for n in 0..self.body.names.len() {
-            if chain.contains(&(n as Name)) {
-                continue;
-            }
+        for (k, info) in self.body.names.iter().enumerate() {
             // RFC-0090 is a rule about a buffer two names would see the write
             // through. A name the body owns read a value out, and a value
             // that owns no heap was copied out; neither aliases the place,
             // but a payload binder is its address ([`Kernel::read_out`]).
-            if self.owned(n as Name) && !self.read_out[n] {
-                continue;
-            }
-            let Some(x) = &st.alias[n] else {
+            let copied = self.owned(k as Name) && !self.read_out[k] && !(by_call && info.walked);
+            let Some(x) = &st.alias[k] else {
                 continue;
             };
-            if x.root == a.root && overlaps(&x.path, &a.path) && st.dead[n].is_none() {
-                st.dead[n] = Some((self.here, what.clone()));
+            if !copied
+                && !chain.contains(&(k as Name))
+                && x.root == root
+                && overlaps(&x.path, &path)
+                && st.dead[k].is_none()
+            {
+                st.dead[k] = Some((self.here, what.clone()));
             }
+        }
+    }
+
+    fn ends(&self, st: &mut State, s: &St) {
+        for w in writes_of(s, &self.body.names) {
+            self.end(st, w);
         }
     }
 
@@ -1721,11 +1734,8 @@ impl<'b> Kernel<'b> {
                         ),
                     );
                 }
-                // The new owner may release the buffer while an alias still
-                // reads it, as a drop does (RFC-0125 M7).
                 if self.moves(*n, consume) {
                     self.gone(st, *n);
-                    self.wrote(st, &Place::Name(*n), self.src(*n));
                 }
             }
         }
@@ -1747,12 +1757,6 @@ impl<'b> Kernel<'b> {
             {
                 let s = self.src(n);
                 let (here, l) = (self.here, self.hole_line(st, n, h));
-                // Both lines name the STORAGE that moved, not the longer path
-                // that reads it — the rule `used_after_at` states and the one
-                // `movecheck::check_use` states. A read of `d.a.byteLength`
-                // after `consume d.a` was the one refusal in the tree that
-                // broke it, and it dropped the menu with it: the reader wanted
-                // a value on both sides (RFC-0125 §3 M3, row 07).
                 // Both lines name the STORAGE that moved, not the longer path
                 // that reads it — the rule `used_after_at` states and the one
                 // `movecheck::check_use` states. A read of `d.a.byteLength`
@@ -1785,11 +1789,9 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    /// A take out of a sub-place: the root keeps a hole there, and every
-    /// alias of the place ends.
+    /// A take out of a sub-place: the root keeps a hole there.
     fn take_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
         self.place(st, p)?;
-        self.wrote(st, p, &self.place_text(p));
         if let Some((n, path)) = root_of(p) {
             if self.owned(n) && !path.is_empty() {
                 st.taken_at.push((n, path.clone(), self.here));
@@ -1800,9 +1802,6 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
-    /// A store into a sub-place fills the hole there, and anything under it.
-    /// A store under a hole writes into what left. Every alias of the place
-    /// ends.
     /// Record a store whose place this path still holds — RFC-0125 §3 M3, the
     /// store slice.
     ///
@@ -1829,9 +1828,10 @@ impl<'b> Kernel<'b> {
         });
     }
 
+    /// A store into a sub-place fills the hole there, and anything under it.
+    /// A store under a hole writes into what left.
     fn store_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
         self.indices(st, p)?;
-        self.wrote(st, p, &self.place_text(p));
         let Some((n, path)) = root_of(p) else {
             return Ok(());
         };
@@ -1886,14 +1886,6 @@ impl<'b> Kernel<'b> {
                         // builtin sink and a variant constructor store the
                         // value, and storing one that owns no heap copies it.
                         self.take_arg(st, v, *write_back && i == 0, kind.declared())?;
-                    }
-                }
-                // A `modify` argument ends every borrow that reads what it
-                // names: the callee may replace or free it (RFC-0125 M7). A
-                // `for` walking the container is one such borrow.
-                for (v, cap) in args {
-                    if let (Capability::Modify, Val::Name(m)) = (cap, v) {
-                        self.wrote_by_call(st, *m);
                     }
                 }
                 Ok(())
@@ -2093,6 +2085,15 @@ impl<'b> Kernel<'b> {
             }
             _ => {}
         }
+        self.judge(s, st, bound_here)?;
+        // A switch and a `return` end their take's writes before arms and exit.
+        if !matches!(s, St::Switch { .. } | St::Return { .. }) {
+            self.ends(st, s);
+        }
+        Ok(())
+    }
+
+    fn judge(&mut self, s: &St, st: &mut State, bound_here: &mut Vec<Name>) -> Result<(), Refusal> {
         match s {
             St::Let(n, rhs) => {
                 // A LITERAL owns no heap yet: `let mut acc = ""` names the
@@ -2183,7 +2184,6 @@ impl<'b> Kernel<'b> {
                 if let (Place::Name(n), Val::Name(m)) = (place, value) {
                     if self.borrowed(*n) && st.alias[*m as usize].is_some() && !self.gives(st, *m) {
                         self.read(st, value)?;
-                        self.wrote(st, place, self.src(*n));
                         st.alias[*n as usize] = st.alias[*m as usize].clone();
                         st.dead[*n as usize] = None;
                         return Ok(());
@@ -2200,7 +2200,6 @@ impl<'b> Kernel<'b> {
                         .is_some_and(|a| a.root == into.root && a.path == into.path);
                     if back {
                         self.read(st, value)?;
-                        self.wrote(st, place, &self.place_text(place));
                         st.dead[*m as usize] = Some((self.here, self.place_text(place)));
                         return Ok(());
                     }
@@ -2218,7 +2217,6 @@ impl<'b> Kernel<'b> {
                 };
                 self.take(st, value)?;
                 if let Place::Name(n) = place {
-                    self.wrote(st, place, self.src(*n));
                     // A borrow's binding given a fresh value (`out = out +
                     // s`) is no alias afterwards.
                     if self.borrowed(*n) {
@@ -2319,7 +2317,6 @@ impl<'b> Kernel<'b> {
             St::Drop(n, ..) => {
                 let holes = self.body.names[*n as usize].holes.clone();
                 self.drop(st, *n, &holes, None)?;
-                self.wrote(st, &Place::Name(*n), self.src(*n));
             }
             St::Row {
                 name,
@@ -2328,7 +2325,6 @@ impl<'b> Kernel<'b> {
                 site,
             } => {
                 self.drop(st, *name, holes, Some((*exit, *site)))?;
-                self.wrote(st, &Place::Name(*name), self.src(*name));
             }
             St::If {
                 cond,
@@ -2354,6 +2350,7 @@ impl<'b> Kernel<'b> {
             } => {
                 if *consuming {
                     self.take(st, on)?;
+                    self.ends(st, s);
                 } else {
                     self.read(st, on)?;
                 }
@@ -2493,6 +2490,7 @@ impl<'b> Kernel<'b> {
             } => {
                 if let Some(v) = value {
                     self.take(st, v)?;
+                    self.ends(st, s);
                 }
                 let exit = if *is_try { Exit::Try } else { Exit::Return };
                 self.scope_end(st, &all_names(self.body), exit, *site)?;
