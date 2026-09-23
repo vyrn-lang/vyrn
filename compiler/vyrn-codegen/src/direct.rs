@@ -48,7 +48,7 @@ use vyrn_frontend::types::INT32;
 /// RFC-0125 §2.3's own vocabulary: the statements the emitter walks, what each
 /// one computes, and the values it computes it from. `Body` is spelled out at
 /// each use, because this file's own `Body` is the AST's.
-use vyrn_lower::core::{Callee, Ctor, Lit, Op, Rhs, Spec, St, Val};
+use vyrn_lower::core::{Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
@@ -1653,6 +1653,35 @@ impl<'a> Cx<'a> {
         Ok(sig)
     }
 
+    /// The function this module defines that `t` calls with no captures, by
+    /// the name [`Cx::sigs`] holds it under.
+    fn named(&self, t: &FnTarget) -> Option<String> {
+        (self.sigs.iter())
+            .find(|(_, s)| t.ncaps == 0 && s.index == t.sig.index)
+            .map(|(n, _)| n.clone())
+    }
+
+    /// An RFC-0023 specialization: [`Cx::enqueue`] of `f` with each `fn`
+    /// parameter bound to its target, under the shell [`ho_shell`] states.
+    fn specialize(
+        &self,
+        m: &mut Module,
+        f: &'a Function,
+        type_args: Vec<Type>,
+        subst: HashMap<String, Type>,
+        targets: Vec<FnTarget>,
+    ) -> Result<Sig, String> {
+        let (sf, binds) = ho_shell(f, &subst, &targets);
+        self.enqueue(
+            m,
+            Key::Ho(f.name.clone(), type_args, targets),
+            Rc::new(sf),
+            Body::Block(&f.body),
+            subst,
+            binds,
+        )
+    }
+
     /// A generic instantiation (M2e): [`Cx::enqueue`] with no `fn` parameters.
     fn instantiate(
         &self,
@@ -2471,6 +2500,7 @@ fn lower_body(
         .unwrap_or_else(|| f.name.clone());
 
     let mut b = Frame::new(params.len(), &[], 0);
+    let core = core_body(&f.name, &binds, cx).map(std::rc::Rc::new);
     let mut cx_fn = Fn_ {
         cx,
         scope: Vec::new(),
@@ -2515,7 +2545,7 @@ fn lower_body(
         dest_used: false,
         call_dest: None,
         owner,
-        core: vyrn_lower::core::body_of(&f.name).map(std::rc::Rc::new),
+        core,
         core_at: HashMap::new(),
         core_rows: Vec::new(),
         core_w: Walked::default(),
@@ -2745,6 +2775,29 @@ fn lower_body(
     }
     frame_fits(&b, &f.name, f.line)?;
     Ok(b)
+}
+
+/// The core body a queued function reads: its own, and for an RFC-0023
+/// specialization the instance [`vyrn_lower::core::specialize`] states for
+/// its targets. A specialization with a target the core does not name reads
+/// the declaration's body, whose calls through the parameter the screen
+/// stands down at.
+fn core_body(
+    name: &str,
+    binds: &HashMap<String, FnBinding>,
+    cx: &Cx<'_>,
+) -> Option<vyrn_lower::core::Body> {
+    let body = vyrn_lower::core::body_of(name)?;
+    let bound: Option<Vec<(vyrn_lower::core::Name, Target)>> = (body.params.iter())
+        .filter_map(|&n| Some((n, binds.get(&body.names[n as usize].source)?)))
+        .map(|(n, b)| Some((n, Target::Fn(cx.named(&b.target)?))))
+        .collect();
+    match bound {
+        Some(bound) if !binds.is_empty() && bound.len() == binds.len() => {
+            Some(vyrn_lower::core::specialize(&body, &bound).unwrap_or(body))
+        }
+        _ => Some(body),
+    }
 }
 
 /// Refuse a frame this backend's stack cannot hold at every depth the call
@@ -9498,7 +9551,6 @@ impl<'p> Fn_<'_, 'p> {
         // Pass 2: resolve each `fn`-typed argument to its target, and solve the
         // outbound parameter (`U` in `map<T, U>`) from the target's own return.
         let mut targets: Vec<FnTarget> = Vec::new();
-        let mut cap_tys: Vec<Vec<Type>> = Vec::new();
         let mut cap_srcs: Vec<Vec<Expr>> = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             let Type::Fn(dptys, dret) = &p.ty else {
@@ -9509,13 +9561,12 @@ impl<'p> Fn_<'_, 'p> {
                 .map(|t| ftypes::substitute(t, &subst))
                 .collect();
             let dret_sub = ftypes::substitute(dret, &subst);
-            let (target, srcs, tys) = self.resolve_fn_arg(m, &args[i], &ptys, &dret_sub, line)?;
+            let (target, srcs, _) = self.resolve_fn_arg(m, &args[i], &ptys, &dret_sub, line)?;
             if generic {
                 crate::solve_param(dret, &target.sig.ret_ty, &mut subst);
             }
             targets.push(target);
             cap_srcs.push(srcs);
-            cap_tys.push(tys);
         }
         let mut type_args = Vec::new();
         for tp in &f.type_params {
@@ -9532,24 +9583,12 @@ impl<'p> Fn_<'_, 'p> {
                 }
             }
         }
-        // The specialization's own signature, and the argument list to call it
-        // with, built in ONE walk of the callee's parameters: an ordinary
-        // parameter keeps its place, and a `fn` parameter becomes its captures at
-        // that same place. A synthesized `Function` rather than a hand-built
-        // signature, so `lower_fn` lowers it with no case of its own — the
-        // prologue's by-value copy of an aggregate parameter is exactly what a
-        // captured record wants.
-        //
-        // Interleaved rather than ordinary-then-captures, because a wasm argument
-        // is evaluated where its operand is pushed, and a `fn`-typed argument can
-        // be an expression that prints or traps (a stored value read from a
-        // place). Collecting the captures at the end evaluated that expression
-        // after every ordinary argument, which the other two engines do not do.
-        let mut sf = shell_of(f);
-        let mut params: Vec<Param> = Vec::new();
+        // The argument list, in the order [`ho_shell`] lays the parameters
+        // out: an ordinary argument keeps its place, and a `fn` argument
+        // becomes its captures, read from the caller's own scope — which is
+        // what fixes them at this site.
         let mut call_args: Vec<Expr> = Vec::new();
-        let mut binds: HashMap<String, FnBinding> = HashMap::new();
-        let mut fi = 0usize;
+        let mut srcs = cap_srcs.iter();
         let mark = self.cx.plan.alias_scope();
         // RFC-0114 §26: `call_args` holds CLONES of the caller's argument
         // expressions, so plan rows on the originals would go undischarged —
@@ -9558,51 +9597,16 @@ impl<'p> Fn_<'_, 'p> {
         // still after the last push).
         let mut src_lists: Vec<Vec<usize>> = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
-            if !matches!(p.ty, Type::Fn(..)) {
-                params.push(Param {
-                    name: p.name.clone(),
-                    capability: p.capability,
-                    ty: ftypes::substitute(&p.ty, &subst),
-                    line: p.line,
-                    col: p.col,
-                });
-                call_args.push(args[i].clone());
-                let mut v = Vec::new();
-                vyrn_frontend::ast::node_addrs_val(&args[i], &mut v);
-                src_lists.push(v);
-                continue;
-            }
-            let mut srcs = Vec::new();
-            for t in &cap_tys[fi] {
-                // A reserved spelling: no Vyrn identifier can contain `@`, so an
-                // instance's capture parameter cannot shadow or be shadowed by
-                // anything the callee's body names.
-                let n = format!("@cap{}", params.len());
-                params.push(Param {
-                    name: n.clone(),
-                    capability: Capability::Read,
-                    ty: t.clone(),
-                    line: 0,
-                    col: 0,
-                });
-                srcs.push(n);
-            }
-            binds.insert(
-                p.name.clone(),
-                FnBinding {
-                    target: targets[fi].clone(),
-                    cap_srcs: srcs,
-                },
-            );
-            // The capture values, read from the caller's own scope — which is
-            // what fixes them at this site.
-            for src in &cap_srcs[fi] {
+            let from: &[Expr] = match p.ty {
+                Type::Fn(..) => srcs.next().map_or(&[], Vec::as_slice),
+                _ => std::slice::from_ref(&args[i]),
+            };
+            for src in from {
                 call_args.push(src.clone());
                 let mut v = Vec::new();
                 vyrn_frontend::ast::node_addrs_val(src, &mut v);
                 src_lists.push(v);
             }
-            fi += 1;
         }
         {
             let mut pairs: Vec<(usize, usize)> = Vec::new();
@@ -9613,16 +9617,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             self.cx.plan.alias_clones_scoped(&pairs);
         }
-        sf.params = params;
-        sf.ret = ftypes::substitute(&f.ret, &subst);
-        let sig = self.cx.enqueue(
-            m,
-            Key::Ho(f.name.clone(), type_args, targets),
-            Rc::new(sf),
-            Body::Block(&f.body),
-            subst,
-            binds,
-        )?;
+        let sig = self.cx.specialize(m, f, type_args, subst, targets)?;
         let r = self.emit_call(m, b, &sig, &call_args, None);
         // The clones die with this frame; their aliases must die first, or a
         // later node at a recycled address would resolve to somebody's row.
@@ -17526,7 +17521,7 @@ impl<'p> Fn_<'_, 'p> {
                             line,
                         )?;
                     } else {
-                        self.core_call(m, b, body, w, callee, *kind, &[], args, None, line)?;
+                        self.core_call(m, b, body, w, callee, *kind, &[], &[], args, None, line)?;
                         b.ins(&Instruction::Drop);
                     }
                     w.at[*n as usize] = self.core_place(w, body, *x);
@@ -17716,10 +17711,13 @@ impl<'p> Fn_<'_, 'p> {
                             kind,
                             args,
                             solved,
+                            targets,
                             ..
                         } => {
                             let hint = dest.map(|d| (d, ty.clone()));
-                            self.core_call(m, b, body, w, callee, *kind, solved, args, hint, line)?;
+                            self.core_call(
+                                m, b, body, w, callee, *kind, solved, targets, args, hint, line,
+                            )?;
                         }
                         Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                             let (mty, off) = self.core_addr(m, b, body, w, base, line)?;
@@ -18160,9 +18158,12 @@ impl<'p> Fn_<'_, 'p> {
                 args,
                 kind,
                 solved,
+                targets,
                 ..
             } => {
-                let got = self.core_call(m, b, body, w, callee, *kind, solved, args, None, line)?;
+                let got = self.core_call(
+                    m, b, body, w, callee, *kind, solved, targets, args, None, line,
+                )?;
                 self.coerce(m, b, None, &got, want, line)
             }
             // A read and a take load the same address; what parts them is the
@@ -18187,6 +18188,7 @@ impl<'p> Fn_<'_, 'p> {
                 args,
                 ret: at,
                 solved,
+                targets,
                 ..
             } => match (
                 builtin_spec(callee, args.len()),
@@ -18206,7 +18208,7 @@ impl<'p> Fn_<'_, 'p> {
                     .ok_or_else(|| gap("a removal the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
-                    None => match self.core_sig(callee, *kind, solved) {
+                    None => match self.core_sig(callee, *kind, solved, targets) {
                         Some(s) => Ok(s.ret_ty),
                         None if *kind == Callee::Fn && self.is_extern(callee) => Ok(self
                             .cx
@@ -18239,6 +18241,7 @@ impl<'p> Fn_<'_, 'p> {
         callee: &str,
         kind: Callee,
         solved: &[(String, Type)],
+        targets: &[Target],
         args: &[(Val, vyrn_frontend::ast::Capability)],
         hint: Option<(Dest, Type)>,
         line: usize,
@@ -18273,7 +18276,19 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("`copy` of other than one value", line);
                 };
                 if let Some(f) = self.core_copy_impl(body, callee, kind, args) {
-                    return self.core_call(m, b, body, w, &f, Callee::Fn, &[], args, hint, line);
+                    return self.core_call(
+                        m,
+                        b,
+                        body,
+                        w,
+                        &f,
+                        Callee::Fn,
+                        &[],
+                        &[],
+                        args,
+                        hint,
+                        line,
+                    );
                 }
                 let ty = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &ty, line)?;
@@ -18427,9 +18442,14 @@ impl<'p> Fn_<'_, 'p> {
             };
             return self.extern_call(m, b, callee, args.len(), &mut operand, line);
         }
-        let sig = match self.core_instance(callee, kind, solved) {
-            Some((f, targs, subst)) => self.cx.instantiate(m, f, targs, subst)?,
-            None => match self.core_sig(callee, kind, solved) {
+        let ho = match targets {
+            [] => None,
+            _ => self.core_ho(callee, kind, solved, targets),
+        };
+        let sig = match (ho, self.core_instance(callee, kind, solved)) {
+            (Some((f, targs, subst, bound)), _) => self.cx.specialize(m, f, targs, subst, bound)?,
+            (None, Some((f, targs, subst))) => self.cx.instantiate(m, f, targs, subst)?,
+            (None, None) => match self.core_sig(callee, kind, solved, targets) {
                 Some(sig) => sig,
                 None => return unsupported("a core call this walk does not read", line),
             },
@@ -19447,7 +19467,17 @@ impl<'p> Fn_<'_, 'p> {
     /// miss is one of the thirteen above it. The audited instrument is the
     /// one name that hits and must not be called — an unaudited build drops
     /// its four hooks rather than emitting them.
-    fn core_sig(&self, callee: &str, kind: Callee, solved: &[(String, Type)]) -> Option<Sig> {
+    fn core_sig(
+        &self,
+        callee: &str,
+        kind: Callee,
+        solved: &[(String, Type)],
+        targets: &[Target],
+    ) -> Option<Sig> {
+        if !targets.is_empty() {
+            let (f, _, subst, bound) = self.core_ho(callee, kind, solved, targets)?;
+            return self.cx.signature(&ho_shell(f, &subst, &bound).0).ok();
+        }
         // A routed builtin is a call to the function its row names.
         let (callee, kind) = match core_builtin(callee, kind) {
             Some(Spec::Routes(f)) => (*f, Callee::Fn),
@@ -19467,10 +19497,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The generic function a call row names and the instance the checker
-    /// solved for it (the row's `solved`): the type arguments in the
-    /// function's own order, and the substitution. `None` for a callee with
-    /// no type parameters, and where a type parameter is unsolved or still
-    /// names a parameter. The walk solves nothing itself.
+    /// solved for it ([`solved_instance`]). `None` for a callee with no type
+    /// parameters.
     fn core_instance(
         &self,
         callee: &str,
@@ -19478,11 +19506,46 @@ impl<'p> Fn_<'_, 'p> {
         solved: &[(String, Type)],
     ) -> Option<(&'p Function, Vec<Type>, HashMap<String, Type>)> {
         let f = (self.cx.generics.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
-        let subst: HashMap<String, Type> = solved.iter().cloned().collect();
-        let targs: Vec<Type> = (f.type_params.iter())
-            .map(|p| subst.get(p).cloned())
+        let (targs, subst) = solved_instance(f, solved)?;
+        Some((f, targs, subst))
+    }
+
+    /// The specialization a call row names (RFC-0023): the higher-order
+    /// function, its type arguments and substitution, and the target of each
+    /// `fn`-typed parameter as the row names it. `None` where a target is not
+    /// a function this module defines and calls directly, and where a type
+    /// parameter is unsolved.
+    #[allow(clippy::type_complexity)]
+    fn core_ho(
+        &self,
+        callee: &str,
+        kind: Callee,
+        solved: &[(String, Type)],
+        targets: &[Target],
+    ) -> Option<(
+        &'p Function,
+        Vec<Type>,
+        HashMap<String, Type>,
+        Vec<FnTarget>,
+    )> {
+        let f = (self.cx.higher_order.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
+        let (targs, subst) = solved_instance(f, solved)?;
+        let fns = f.params.iter().filter(|p| matches!(p.ty, Type::Fn(..)));
+        if fns.count() != targets.len() {
+            return None;
+        }
+        let bound = (targets.iter())
+            .map(|t| match t {
+                Target::Fn(name) => (self.cx.sigs.get(name))
+                    .filter(|s| !s.modify.iter().any(|m| *m))
+                    .map(|s| FnTarget {
+                        sig: s.clone(),
+                        ncaps: 0,
+                    }),
+                Target::Param(_) => None,
+            })
             .collect::<Option<_>>()?;
-        (!targs.iter().any(vyrn_frontend::types::mentions_param)).then_some((f, targs, subst))
+        Some((f, targs, subst, bound))
     }
 
     /// The declared function a `x.copy()` row calls when the receiver's type
@@ -19679,10 +19742,11 @@ impl<'p> Fn_<'_, 'p> {
                 kind,
                 args,
                 solved,
+                targets,
                 ..
             } => match self.core_mem_ty(callee, args.len()) {
                 Some(t) => t,
-                None => self.core_sig(callee, *kind, solved)?.ret_ty,
+                None => self.core_sig(callee, *kind, solved, targets)?.ret_ty,
             },
             Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
@@ -20080,6 +20144,7 @@ impl<'p> Fn_<'_, 'p> {
                 args,
                 kind,
                 solved,
+                targets,
                 ..
             } => {
                 self.core_removes(body, callee, *kind, args) == Some(true)
@@ -20093,7 +20158,7 @@ impl<'p> Fn_<'_, 'p> {
                             Some(Spec::OwnType) => {
                                 match self.core_copy_impl(body, callee, *kind, args) {
                                     Some(f) => {
-                                        self.core_sig(&f, Callee::Fn, &[]).is_some_and(|s| {
+                                        self.core_sig(&f, Callee::Fn, &[], &[]).is_some_and(|s| {
                                             s.params.len() == 1 && s.ret.agg().is_some()
                                         })
                                     }
@@ -20103,7 +20168,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => false,
                         } || self
-                            .core_sig(callee, *kind, solved)
+                            .core_sig(callee, *kind, solved, targets)
                             .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
@@ -20350,6 +20415,7 @@ impl<'p> Fn_<'_, 'p> {
                 args,
                 kind,
                 solved,
+                targets,
                 ..
             } => {
                 self.core_args_readable(body, args)
@@ -20357,17 +20423,19 @@ impl<'p> Fn_<'_, 'p> {
                         || (*kind == Callee::Fn && self.is_extern(callee))
                         || self.core_named(callee, *kind).is_some()
                         || self.core_mem_ty(callee, args.len()).is_some()
-                        || self.core_sig(callee, *kind, solved).is_some_and(|s| {
-                            // An aggregate result crosses through an out-pointer
-                            // the caller allocates, and this walk writes a plain
-                            // `call`: the frame it would need is the callee's
-                            // destination and not a name of this body.
-                            s.params.len() == args.len()
-                                && matches!(
-                                    self.cx.repr(&s.ret_ty, 0),
-                                    Ok(Repr::Scalar(_) | Repr::Unit)
-                                )
-                        }))
+                        || self
+                            .core_sig(callee, *kind, solved, targets)
+                            .is_some_and(|s| {
+                                // An aggregate result crosses through an out-pointer
+                                // the caller allocates, and this walk writes a plain
+                                // `call`: the frame it would need is the callee's
+                                // destination and not a name of this body.
+                                s.params.len() == args.len()
+                                    && matches!(
+                                        self.cx.repr(&s.ret_ty, 0),
+                                        Ok(Repr::Scalar(_) | Repr::Unit)
+                                    )
+                            }))
             }
             // A place this walk addresses, whose value is one it loads: any
             // value in one wasm local, which a String's pointer is as much as
@@ -20570,6 +20638,71 @@ fn instance_shell(f: &Function, subst: &HashMap<String, Type>) -> Function {
     }
     sf.ret = ftypes::substitute(&f.ret, subst);
     sf
+}
+
+/// The instance of `f` a call row names by the checker's solution (the row's
+/// `solved`): the type arguments in `f`'s own order, and the substitution.
+/// `None` where a type parameter is unsolved or still names a parameter; the
+/// walk solves nothing itself.
+fn solved_instance(
+    f: &Function,
+    solved: &[(String, Type)],
+) -> Option<(Vec<Type>, HashMap<String, Type>)> {
+    let subst: HashMap<String, Type> = solved.iter().cloned().collect();
+    let targs: Vec<Type> = (f.type_params.iter())
+        .map(|p| subst.get(p).cloned())
+        .collect::<Option<_>>()?;
+    (!targs.iter().any(vyrn_frontend::types::mentions_param)).then_some((targs, subst))
+}
+
+/// The signature of `f`'s specialization per `targets` (RFC-0023), and what
+/// each `fn` parameter is bound to inside it. An ordinary parameter keeps its
+/// place, and a `fn` parameter becomes its target's captures at that same
+/// place, so a wasm argument is evaluated where the interpreter evaluates it.
+/// A capture parameter's name holds an `@`, which no Vyrn identifier can, so
+/// nothing the body names shadows it.
+fn ho_shell(
+    f: &Function,
+    subst: &HashMap<String, Type>,
+    targets: &[FnTarget],
+) -> (Function, HashMap<String, FnBinding>) {
+    let mut sf = shell_of(f);
+    let mut binds = HashMap::new();
+    let mut bound = targets.iter();
+    for p in &f.params {
+        if !matches!(p.ty, Type::Fn(..)) {
+            sf.params.push(Param {
+                name: p.name.clone(),
+                capability: p.capability,
+                ty: ftypes::substitute(&p.ty, subst),
+                line: p.line,
+                col: p.col,
+            });
+            continue;
+        }
+        let Some(target) = bound.next() else { break };
+        let mut cap_srcs = Vec::new();
+        for t in &target.sig.params[..target.ncaps] {
+            let n = format!("@cap{}", sf.params.len());
+            sf.params.push(Param {
+                name: n.clone(),
+                capability: Capability::Read,
+                ty: t.clone(),
+                line: 0,
+                col: 0,
+            });
+            cap_srcs.push(n);
+        }
+        binds.insert(
+            p.name.clone(),
+            FnBinding {
+                target: target.clone(),
+                cap_srcs,
+            },
+        );
+    }
+    sf.ret = ftypes::substitute(&f.ret, subst);
+    (sf, binds)
 }
 
 /// The names a run's switches account for themselves — RFC-0125 M7: every
