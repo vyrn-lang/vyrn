@@ -17530,6 +17530,14 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::Drop);
                     }
                     w.at[*n as usize] = self.core_place(w, body, *x);
+                    // With no store to put it back, the result holds the
+                    // receiver's slot for its own extent.
+                    if self
+                        .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        .is_none()
+                    {
+                        w.slot[*n as usize] = w.slot[*x as usize].take();
+                    }
                 }
                 // The store that puts the rebuilt receiver back, which the
                 // rebuild already wrote.
@@ -19864,9 +19872,13 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs) if self.core_take_part(body, rhs) => {
                 self.core_part_at(body, ss, i, &self.core_w).is_some()
             }
-            St::Let(_, rhs) if self.core_rebuild(body, rhs) => self
-                .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
-                .is_some(),
+            // An accumulator's append is read with the store after it.
+            St::Let(_, rhs @ Rhs::Call { args, .. }) if self.core_rebuild(body, rhs) => {
+                !matches!(args.first(), Some((Val::Name(x), _)) if body.names[*x as usize].grows)
+                    || self
+                        .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        .is_some()
+            }
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
             }
