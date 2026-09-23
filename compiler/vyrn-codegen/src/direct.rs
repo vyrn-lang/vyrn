@@ -17483,7 +17483,9 @@ impl<'p> Fn_<'_, 'p> {
                     if body.names[*x as usize].grows {
                         // `@strAppend`: the store after it states whether the
                         // buffer the accumulator held is this path's to free.
-                        let Some(St::Store { releases, .. }) = ss.get(i + 1) else {
+                        let Some(St::Store { releases, .. }) =
+                            ss.get(i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        else {
                             return unsupported("an append with no store", line);
                         };
                         // Module state grows at its fixed address, with the
@@ -19862,9 +19864,9 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs) if self.core_take_part(body, rhs) => {
                 self.core_part_at(body, ss, i, &self.core_w).is_some()
             }
-            St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
-                self.core_rebuilt(body, ss, i + 1).is_some()
-            }
+            St::Let(_, rhs) if self.core_rebuild(body, rhs) => self
+                .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
+                .is_some(),
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
             }
@@ -20142,16 +20144,18 @@ impl<'p> Fn_<'_, 'p> {
             .then(|| callee == "@pop" || matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))))
     }
 
-    /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
+    /// The receiver and the result of the rebuild before `ss[i]` when `ss[i]`
     /// is the store that puts the result back into that receiver, or into the
     /// place the receiver was taken from: one address, which
     /// [`Fn_::arr_rebuild`] has already written ([`Fn_::core_alias`]).
+    /// Between the two stand the releases of the call's argument temporaries.
     fn core_rebuilt(
         &self,
         body: &vyrn_lower::core::Body,
         ss: &[St],
         i: usize,
     ) -> Option<(vyrn_lower::core::Name, vyrn_lower::core::Name)> {
+        let k = drops_ahead(ss[..i].iter().rev());
         let (
             St::Let(t, rhs @ Rhs::Call { args, .. }),
             St::Store {
@@ -20159,7 +20163,7 @@ impl<'p> Fn_<'_, 'p> {
                 value: Val::Name(v),
                 ..
             },
-        ) = (ss.get(i.checked_sub(1)?)?, ss.get(i)?)
+        ) = (ss.get(i.checked_sub(k + 1)?)?, ss.get(i)?)
         else {
             return None;
         };
@@ -20654,6 +20658,12 @@ fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
         b.ins(&Instruction::I64Load(at(off)));
         b.ins(&Instruction::I32WrapI64);
     }
+}
+
+/// How many releases lead `ss`: the argument temporaries the builder releases
+/// between a rebuild and its store ([`Fn_::core_rebuilt`]).
+fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
+    ss.take_while(|s| matches!(s, St::Drop(..))).count()
 }
 
 fn core_scalar(t: &Type) -> bool {

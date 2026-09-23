@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 48] = [
+const SHAPES: [(&str, &str); 49] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -469,6 +469,12 @@ const SHAPES: [(&str, &str); 48] = [
         "a store into a map key, on a hit and on a miss",
         "type P = { x: Int64, s: String }          fn mkp(x: Int64) -> P { return P { x: x, s: x.toString() + \"p\" } }          fn names() -> Map<String, String> { let mut m: Map<String, String> = [:] return m }          fn counts() -> Map<Int64, Int64> { let mut m: Map<Int64, Int64> = [:] return m }          fn recs() -> Map<String, P> { let mut m: Map<String, P> = [:] return m }          fn vyrnTestMain() -> Int64 { let mut m = names() let mut c = counts() let mut r = recs()          let mut i = 0 while i < 4 { m[(i % 2).toString()] = i.toString() + \"v\" c[i % 3] = i          r[\"k\"] = mkp(i) i = i + 1 } return m.length * 1000 + c.length * 100 + r.length * 10 }",
     ),
+    // `std/html`'s `escapeText`: the argument temporary of an `append` is
+    // released between the rebuild and the store that puts it back.
+    (
+        "an append whose argument is released before its store",
+        "fn esc(s: String) -> Array<UInt8> { let raw = bytes(s) let mut out: Array<UInt8> = []          for b in raw { if b == '&' { out.append(bytes(\"&amp;\")) } else { out.push(b) } }          return out }          fn vyrnTestMain() -> Int64 { let o = esc(\"a&b&&c\") return o.length * 100 + Int64(o[1]) }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -478,7 +484,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 48] = [
+const SHAPE_PIN: [(&str, usize, usize); 49] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -559,6 +565,11 @@ const SHAPE_PIN: [(&str, usize, usize); 48] = [
     ),
     ("a store into an element of a String and a record", 0, 0),
     ("a store into a map key, on a hit and on a miss", 0, 0),
+    (
+        "an append whose argument is released before its store",
+        0,
+        0,
+    ),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
