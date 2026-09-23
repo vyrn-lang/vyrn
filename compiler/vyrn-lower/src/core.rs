@@ -4211,7 +4211,8 @@ impl<'a> Builder<'a> {
     /// inside its argument, a variant constructor builds a value that
     /// outlives the call in what it built, a `panic` returns to nobody, and
     /// an `@`-spelled desugar is freed by the site that reads it (RFC-0096
-    /// M3). `own.rs` decided the same rule over a declared-types reading of
+    /// M3). A removal (`@pop`, `@swapRemove`) hands back what it took out,
+    /// and a statement that discards it is no site that reads it. `own.rs` decided the same rule over a declared-types reading of
     /// the program; the core asks the checker's own type, which is why this
     /// is a second opinion and not a filter.
     fn discards(&self, e: &Expr) -> bool {
@@ -4219,7 +4220,7 @@ impl<'a> Builder<'a> {
             return false;
         };
         !vyrn_frontend::ast::is_panic(name)
-            && !name.starts_with('@')
+            && (!name.starts_with('@') || matches!(builtin_row(name), Some(Spec::Removes)))
             && !self.lends(e)
             && !self.constructs(name)
     }
