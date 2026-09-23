@@ -83,7 +83,7 @@
 //! Every other name the body does not own — a pattern binder of a
 //! non-consuming switch over a value that owns heap — is invisible here.
 
-use crate::core::{Arm, Body, BorrowKind, Name, Old, Place, Rhs, St, Val, Walk};
+use crate::core::{Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Val, Walk};
 use vyrn_frontend::ast::Capability;
 use vyrn_frontend::own::Exit;
 
@@ -788,10 +788,24 @@ impl<'b> Kernel<'b> {
     }
 
     /// A payload binder handed on leaves its payload as a hole in the
-    /// scrutinee, which the scrutinee's release walks around.
-    fn leaves_payload(&self, st: &mut State, n: Name) {
-        let Some(payload) = &self.body.names[n as usize].payload else {
-            return;
+    /// scrutinee, which the scrutinee's release walks around. A type that
+    /// declares `release` owns the whole of its value, so the hand-off is
+    /// refused.
+    fn leaves_payload(&self, st: &mut State, n: Name) -> Result<(), Refusal> {
+        let payload = match &self.body.names[n as usize].payload {
+            None => return Ok(()),
+            Some(Payload::Sealed(ty)) => {
+                let b = self.src(n);
+                let m = match &st.alias[n as usize] {
+                    Some(Alias { via: Some(m), .. }) => self.src(*m),
+                    _ => b,
+                };
+                return self.refuse(format!(
+                    "`{b}` may not be handed to a `consume` parameter: `{ty}` declares \
+                     `release`, which reads it; consume `{m}` or copy `{b}`"
+                ));
+            }
+            Some(Payload::Hole(p)) => p,
         };
         let Some(Alias {
             root: Root::N(r),
@@ -799,7 +813,7 @@ impl<'b> Kernel<'b> {
             ..
         }) = &st.alias[n as usize]
         else {
-            return;
+            return Ok(());
         };
         let (r, hole) = (*r, format!("{path}{payload}"));
         if !st.holes.iter().any(|(h, p)| *h == r && *p == hole) {
@@ -807,6 +821,7 @@ impl<'b> Kernel<'b> {
             st.holes.push((r, hole));
             st.holes.sort();
         }
+        Ok(())
     }
 
     /// The payload binder live in `st` that reads the hole `h` of `n`.
@@ -817,7 +832,7 @@ impl<'b> Kernel<'b> {
                 &st.alias[*b as usize],
             ) {
                 (
-                    Some(p),
+                    Some(Payload::Hole(p)),
                     Some(Alias {
                         root: Root::N(r),
                         path,
@@ -847,7 +862,7 @@ impl<'b> Kernel<'b> {
         let mut left: Vec<String> = Vec::new();
         for (arm, out) in arms.iter().zip(outs.iter()) {
             for b in &arm.binds {
-                if let Some(p) = &self.body.names[*b as usize].payload {
+                if let Some(Payload::Hole(p)) = &self.body.names[*b as usize].payload {
                     let h = format!("{prefix}{p}");
                     if out.holes.iter().any(|(r, hp)| *r == root && *hp == h) {
                         left.push(h);
@@ -1861,7 +1876,7 @@ impl<'b> Kernel<'b> {
                     return Err(self.alias_take(st, *n, write_back));
                 }
                 if consume {
-                    self.leaves_payload(st, *n);
+                    self.leaves_payload(st, *n)?;
                 }
                 return Ok(());
             }
@@ -2472,7 +2487,7 @@ impl<'b> Kernel<'b> {
             // hand-off ([`Kernel::equalize`] places one on an edge).
             St::Drop(n, ..) if self.gives(st, *n) => {
                 self.alias_read(st, *n, "used")?;
-                self.leaves_payload(st, *n);
+                self.leaves_payload(st, *n)?;
             }
             St::Drop(n, _, _, row) => {
                 let holes = self.body.drop_holes(*n, row).to_vec();

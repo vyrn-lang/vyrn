@@ -98,11 +98,9 @@ pub struct NameInfo {
     /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
     /// the name walks around exactly these; a placed row may carry its own.
     pub holes: Vec<String>,
-    /// For a payload binder read out of its scrutinee ([`Arm::reads`]): the
-    /// payload it reads, spelled as a hole of the scrutinee (`.Elem.1`, the
-    /// variant and the position). A `consume` handed the binder leaves that
-    /// hole in the scrutinee.
-    pub payload: Option<String>,
+    /// For a payload binder read out of its scrutinee ([`Arm::reads`]): what a
+    /// `consume` handed the binder leaves in the scrutinee.
+    pub payload: Option<Payload>,
     /// RFC-0125 §3 M3, row 11b: for a receiver ([`NameInfo::receiver`]), was
     /// the block a CALLEE allocated? A callee's block is malloc-side
     /// whatever `region` is open at the call site, so the free stands there
@@ -907,6 +905,17 @@ impl Arm {
             .count();
         &self.body[..n]
     }
+}
+
+/// What a payload binder read out of its scrutinee leaves there when a
+/// `consume` parameter takes it — RFC-0125 M7.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Payload {
+    /// A hole the scrutinee's release walks around, spelled `.Variant.i`.
+    Hole(String),
+    /// Nothing may leave: the scrutinee's type, spelled here, declares a
+    /// `release` that reads every payload.
+    Sealed(String),
 }
 
 /// How one [`Arm`] of a [`St::Switch`] is chosen.
@@ -4711,16 +4720,21 @@ impl<'a> Builder<'a> {
                     // whoever owns the scrutinee ([`Arm::reads`]): a write to
                     // it while the binder lives is the kernel's refusal.
                     if layout || self.body.names[n as usize].borrow {
-                        // A hole the release walk cannot skip is not stated,
-                        // as at a take ([`vyrn_frontend::declared::skippable`]).
+                        // The walk skips a payload hole on its live tag, and
+                        // only a declared `release` cannot skip one
+                        // ([`vyrn_frontend::declared::skippable`]).
                         let at = format!("{variant}.{i}");
-                        if vyrn_frontend::declared::skippable(
-                            &self.own.proto,
-                            sty,
-                            std::slice::from_ref(&at),
-                        ) {
-                            self.body.names[n as usize].payload = Some(format!(".{at}"));
-                        }
+                        self.body.names[n as usize].payload = Some(
+                            if vyrn_frontend::declared::skippable(
+                                &self.own.proto,
+                                sty,
+                                std::slice::from_ref(&at),
+                            ) {
+                                Payload::Hole(format!(".{at}"))
+                            } else {
+                                Payload::Sealed(sty.to_string())
+                            },
+                        );
                         out.push(St::Let(n, Rhs::Read(Place::Name(m))));
                     }
                 }

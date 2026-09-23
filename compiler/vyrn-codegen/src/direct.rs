@@ -19443,12 +19443,6 @@ impl<'p> Fn_<'_, 'p> {
     /// local with no address, and the arm spills and reloads it, which the
     /// row does not state; nor may a name that holds another place's address
     /// ([`Fn_::core_alias`]) be written through.
-    ///
-    /// A borrow handed to `consume` is a take the release rows do not follow:
-    /// `vyxProcessElem` hands `kids`, read out of the scrutinee `n`, to a
-    /// `consume` parameter, and the core then drops `n` whole, so the rows
-    /// free `kids` twice. Such a call stays in the arm, which releases `n`
-    /// around the hole.
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
@@ -19461,11 +19455,7 @@ impl<'p> Fn_<'_, 'p> {
                 matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
             });
             match c {
-                Cap::Read => self.core_val_readable(body, v) || layout,
-                Cap::Consume => {
-                    (self.core_val_readable(body, v) || layout)
-                        && !matches!(v, Val::Name(n) if body.names[*n as usize].borrow)
-                }
+                Cap::Read | Cap::Consume => self.core_val_readable(body, v) || layout,
                 Cap::Modify => {
                     layout && !matches!(v, Val::Name(n) if self.core_alias(body, *n).is_some())
                 }

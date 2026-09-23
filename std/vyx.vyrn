@@ -984,15 +984,18 @@ fn vyxElemHasDir(n: VyxNode, name: String) -> Bool {
 /// projection of a place the frame owns and `VyxNode` refers to itself — so the
 /// only other way out was a deep copy of the subtree at every branch of every
 /// `v-if`.
+///
+/// The match takes `n`: `VyxNode` declares `release`, so `kids` may leave it
+/// only when the node is taken apart, and the other arms build it again.
 fn vyxProcessElem(n: consume VyxNode, srcFile: String) -> VyxOne {
-    return match n {
+    return match consume n {
         VNElem(tag, isComp, attrs, kids, line) => vyxProcessElemInner(tag, isComp, attrs, kids, line, srcFile),
-        VNText(s) => VyxOne { node: n, err: "" },
-        VNInterp(x, l, c) => VyxOne { node: n, err: "" },
-        VNRaw(x, l, c) => VyxOne { node: n, err: "" },
-        VNChildren => VyxOne { node: n, err: "" },
-        VNIf(cs, cl, cc, bs, e, h) => VyxOne { node: n, err: "" },
-        VNFor(v, it, k, bd, l, c) => VyxOne { node: n, err: "" },
+        VNText(s) => VyxOne { node: VNText(s), err: "" },
+        VNInterp(x, l, c) => VyxOne { node: VNInterp(x, l, c), err: "" },
+        VNRaw(x, l, c) => VyxOne { node: VNRaw(x, l, c), err: "" },
+        VNChildren => VyxOne { node: VNChildren, err: "" },
+        VNIf(cs, cl, cc, bs, e, h) => VyxOne { node: VNIf(cs, cl, cc, bs, e, h), err: "" },
+        VNFor(v, it, k, bd, l, c) => VyxOne { node: VNFor(v, it, k, bd, l, c), err: "" },
     }
 }
 
