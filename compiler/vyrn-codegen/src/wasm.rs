@@ -918,6 +918,10 @@ pub struct Frame {
     /// The most `frame` has ever been: what the prologue claims. `frame`
     /// itself comes back down at a statement's end ([`Frame::reset`]).
     high: u32,
+    /// Slots given back below the top, as the mark before each was taken and
+    /// its end. One returns to the frame when every slot above it has
+    /// ([`Frame::give_back`]).
+    freed: Vec<(u32, u32)>,
     /// Local holding the frame's base address, valid for the whole body.
     base: u32,
 }
@@ -934,6 +938,7 @@ impl Frame {
             next_local: base + 1 + locals.len() as u32,
             frame,
             high: frame,
+            freed: Vec::new(),
             base,
         }
     }
@@ -988,7 +993,8 @@ impl Frame {
     /// a literal on its way to the heap — are the next statement's to reuse.
     /// Before this, every temporary of a body was added up: a generated page
     /// body of nine hundred statements needed 23 KB of frame for values no two
-    /// of which were ever live together.
+    /// of which were ever live together. The core's walk gives a name's slot
+    /// back at the end of the name's extent instead ([`Frame::give_back`]).
     pub fn alloc(&mut self, size: u32, align: u32) -> u32 {
         debug_assert!(align.is_power_of_two());
         let at = round_up(self.frame, align.max(1));
@@ -1003,10 +1009,25 @@ impl Frame {
     }
 
     /// Give back every slot taken since `mark`. Only the caller can know that
-    /// nothing still names one of them; the rule is on [`Frame::alloc`].
+    /// nothing still names one of them; the rule is on [`Frame::alloc`]. A
+    /// frame already below `mark` stays where it is: [`Frame::give_back`]
+    /// took it there.
     pub fn reset(&mut self, mark: u32) {
-        debug_assert!(mark <= self.frame);
-        self.frame = mark;
+        if mark < self.frame {
+            self.frame = mark;
+            self.freed.retain(|&(_, end)| end <= mark);
+        }
+    }
+
+    /// Give back the slot taken at `from`, the [`Frame::mark`] before its
+    /// [`Frame::alloc`], and ending at `to`. A slot below the top waits until
+    /// every slot above it is given back, so the frame falls only past slots
+    /// nothing names.
+    pub fn give_back(&mut self, from: u32, to: u32) {
+        self.freed.push((from, to));
+        while let Some(i) = self.freed.iter().position(|&(_, end)| end == self.frame) {
+            self.frame = self.freed.swap_remove(i).0;
+        }
     }
 
     /// Push the address of the frame slot at `off`.

@@ -2496,6 +2496,8 @@ fn lower_body(
         cx_fn.core_w = Walked {
             at: vec![None; core.names.len()],
             reads: core.reads(),
+            occurs: core.occurrences(),
+            slot: vec![None; core.names.len()],
             held: None,
             landed: None,
         };
@@ -16670,6 +16672,11 @@ struct Walked {
     at: Vec<Option<(Place, Type)>>,
     /// How many times each name is READ over the whole body.
     reads: Vec<u32>,
+    /// [`vyrn_lower::core::Body::occurrences`], for the slot's extent.
+    occurs: Vec<u32>,
+    /// The frame slot each name took, as the mark before it and its end,
+    /// until [`Fn_::core_give_back`] hands it back.
+    slot: Vec<Option<(u32, u32)>>,
     /// The name the operand stack is holding, if any.
     held: Option<vyrn_lower::core::Name>,
     /// The temporary built in the caller's storage, which the `return` after
@@ -17249,31 +17256,15 @@ impl<'p> Fn_<'_, 'p> {
         w: &mut Walked,
         ss: &[St],
     ) -> Result<(), String> {
-        // A statement's slots are its own ([`Frame::alloc`]), and on the rows
-        // a temporary is dead after the last row of this list that names it.
-        // A name the plan keys keeps everything taken before it, as a `let`
-        // does in the arm's [`Fn_::block`].
-        let mut last = HashMap::new();
+        let ends = vyrn_lower::core::extent_ends(ss, &w.occurs);
+        let mut due = Vec::new();
+        let (mut last, mut mark): (Option<usize>, u32) = (None, b.mark());
         for (i, s) in ss.iter().enumerate() {
-            let mut named = Vec::new();
-            vyrn_lower::core::names_in(s, &mut named);
-            for n in named {
-                last.insert(n, i);
+            if let Some(j) = last {
+                core_row_done(b, w, &ss[j], mark);
+                self.core_give_back(b, w, &mut due, &ends[j]);
             }
-        }
-        let (mut mark, mut open) = (b.mark(), Vec::new());
-        for (i, s) in ss.iter().enumerate() {
-            if let Some(St::Let(n, _)) = i.checked_sub(1).map(|j| &ss[j]) {
-                if body.names[*n as usize].binding.is_some() {
-                    (mark, open) = (b.mark(), Vec::new());
-                } else {
-                    open.push(*n);
-                }
-            }
-            if open.iter().all(|n| last[n] < i) {
-                b.reset(mark.max(self.rel_floor()));
-                open.clear();
-            }
+            (last, mark) = (Some(i), b.mark());
             match s {
                 // A receiver rebuilt in place: the result is the receiver's
                 // own storage, so the name takes the receiver's place.
@@ -17319,10 +17310,11 @@ impl<'p> Fn_<'_, 'p> {
                     // reader wrote one: the arm takes the slot and writes the
                     // hint from it, and the row states the value's type instead.
                     let ty = self.core_bound.take().unwrap_or_else(|| info.ty.clone());
-                    let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+                    let r = self.cx.repr(&ty, line)?;
+                    if !matches!(r, Repr::Agg(_)) {
                         return unsupported("a made layout with no layout", line);
-                    };
-                    let place = Place::Slot(b.alloc(l.size, l.align));
+                    }
+                    let place = Place::Slot(self.core_slot(b, w, *n, &r, line)?);
                     let dest = Dest::of(place).expect("a slot is a destination");
                     self.core_make(m, b, body, w, dest, &ty, rhs, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
@@ -17343,10 +17335,11 @@ impl<'p> Fn_<'_, 'p> {
                 St::Let(n, Rhs::Read(p)) if self.core_copies(body, *n) => {
                     let line = body.names[*n as usize].line;
                     let ty = body.names[*n as usize].ty.clone();
-                    let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+                    let r = self.cx.repr(&ty, line)?;
+                    let Repr::Agg(l) = &r else {
                         return unsupported("a copy of no layout", line);
                     };
-                    let slot = b.alloc(l.size, l.align);
+                    let slot = self.core_slot(b, w, *n, &r, line)?;
                     b.slot(slot);
                     let (_, off) = self.core_addr(m, b, body, w, p, line)?;
                     self.core_step(b, off);
@@ -17373,7 +17366,8 @@ impl<'p> Fn_<'_, 'p> {
                         Some(t) => t,
                         None => body.names[*n as usize].ty.clone(),
                     };
-                    let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+                    let r = self.cx.repr(&ty, line)?;
+                    let Repr::Agg(l) = &r else {
                         return unsupported("an aggregate call with no layout", line);
                     };
                     let (dest, place) = if lands {
@@ -17381,9 +17375,10 @@ impl<'p> Fn_<'_, 'p> {
                     } else if body.names[*n as usize].binding.is_none() {
                         (None, None)
                     } else {
-                        let off = b.alloc(l.size, l.align);
+                        let off = self.core_slot(b, w, *n, &r, line)?;
                         (Some(Dest::Slot(off)), Some(Place::Slot(off)))
                     };
+                    let from = b.mark();
                     if let Some(d) = dest {
                         d.addr(b, 0);
                     }
@@ -17413,7 +17408,10 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     let used = std::mem::take(&mut self.dest_used);
                     match (dest, place) {
+                        // The name holds the call's own slot, to the end of
+                        // its extent.
                         (None, _) => {
+                            w.slot[*n as usize] = Some((from, b.mark()));
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalSet(a));
                             self.core_bind(b, body, w, *n, Place::Local(a), ty)?;
@@ -17669,7 +17667,50 @@ impl<'p> Fn_<'_, 'p> {
                 }
             }
         }
+        if let Some(j) = last {
+            core_row_done(b, w, &ss[j], mark);
+            self.core_give_back(b, w, &mut due, &ends[j]);
+        }
         Ok(())
+    }
+
+    /// The slot [`Fn_::place_for`] gives the core's name `n`, kept with the
+    /// mark before it until [`Fn_::core_give_back`] hands it back.
+    fn core_slot(
+        &mut self,
+        b: &mut Frame,
+        w: &mut Walked,
+        n: vyrn_lower::core::Name,
+        r: &Repr,
+        line: usize,
+    ) -> Result<u32, String> {
+        let from = b.mark();
+        let Place::Slot(off) = self.place_for(b, r, line)? else {
+            return unsupported("a layout with no slot", line);
+        };
+        w.slot[n as usize] = Some((from, b.mark()));
+        Ok(off)
+    }
+
+    /// Give back the slots of the names whose extent ended at the row just
+    /// walked ([`vyrn_lower::core::extent_ends`]). A release deferred to the
+    /// exit after the row still reads its slot, so `due` waits until
+    /// [`Fn_::core_rows`] is empty.
+    fn core_give_back(
+        &mut self,
+        b: &mut Frame,
+        w: &mut Walked,
+        due: &mut Vec<vyrn_lower::core::Name>,
+        ended: &[vyrn_lower::core::Name],
+    ) {
+        due.extend_from_slice(ended);
+        if self.core_rows.is_empty() {
+            for n in due.drain(..) {
+                if let Some((from, to)) = w.slot[n as usize].take() {
+                    b.give_back(from, to);
+                }
+            }
+        }
     }
 
     /// What produced the value a `let` binds, in `want`.
@@ -18824,17 +18865,15 @@ impl<'p> Fn_<'_, 'p> {
             .position(|s| matches!(s, St::Trap))
             .unwrap_or(ss.len());
         ss[..live].iter().enumerate().all(|(i, s)| match s {
-            // A made layout is built into the binding's own slot, so the name
-            // is one this walk BINDS and the reader screen above never sees
-            // (RFC-0125 M7). A temporary holds one only where the `return`
-            // after it hands it back ([`Fn_::core_lands`]): the slot is the
-            // reader's `let`, and a row that minted the name has none.
+            // A made layout is built into the name's own slot, which the
+            // name holds to the end of its extent, or into the caller's
+            // storage where the `return` after it hands it back
+            // ([`Fn_::core_lands`]) (RFC-0125 M7).
             St::Let(n, rhs) if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) => {
                 if self.core_lands(body, ss, i, reads) {
                     return self.core_makes(body, &self.ret_ty, rhs);
                 }
-                body.names[*n as usize].binding.is_some()
-                    && self.core_makes(body, &body.names[*n as usize].ty, rhs)
+                self.core_makes(body, &body.names[*n as usize].ty, rhs)
             }
             // An aggregate call result has a slot of its own, which the
             // reader's `let` takes before the call, the storage the call
@@ -19223,6 +19262,20 @@ impl<'p> Fn_<'_, 'p> {
             Val::Name(n) => core_scalar(&self.cx.resolve(&body.names[*n as usize].ty)),
             Val::Lit(l) => !matches!(l, Lit::Opaque(_) | Lit::Str(_)),
         }
+    }
+}
+
+/// Give back the slots the row `s` took for its own work once it is written:
+/// every slot above the one its name holds, or above `mark`, the frame before
+/// the row. A row that holds rows of its own gives back through each of them.
+fn core_row_done(b: &mut Frame, w: &Walked, s: &St, mark: u32) {
+    let from = match s {
+        St::If { .. } | St::Loop { .. } | St::Block { .. } | St::Switch { .. } => return,
+        St::Let(n, _) => w.slot[*n as usize].map_or(mark, |(_, end)| end.max(mark)),
+        _ => mark,
+    };
+    if from < b.mark() {
+        b.give_back(from, b.mark());
     }
 }
 

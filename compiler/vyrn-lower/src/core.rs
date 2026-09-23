@@ -1054,6 +1054,19 @@ impl Body {
         out
     }
 
+    /// How many times a row names each of this body's names, itself or under
+    /// it, a binding and a release included. [`extent_ends`] compares a list
+    /// against it to know that no row outside the list names a name.
+    pub fn occurrences(&self) -> Vec<u32> {
+        let mut ns = Vec::new();
+        self.stmts.iter().for_each(|s| names_in(s, &mut ns));
+        let mut out = vec![0u32; self.names.len()];
+        for n in ns {
+            out[n as usize] += 1;
+        }
+        out
+    }
+
     /// The source statement a row names, where it names one. `0` is this
     /// pass's own word for "a row I made up", so it is no statement's node.
     fn node_of(&self, s: &St) -> Option<usize> {
@@ -6544,6 +6557,51 @@ pub fn names_in(s: &St, out: &mut Vec<Name>) {
         St::Return { value: Some(v), .. } => names_in_val(v, out),
         St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap => {}
     }
+}
+
+/// Each name a `let` of `ss` binds, at the row of `ss` its extent ends at
+/// (RFC-0125 M7, the slot's extent).
+///
+/// A name holds its value from its `let` to the last row that names it,
+/// itself or under it. A release names what it releases, so a name that owns
+/// heap holds to its release. A name read out of a place may hold the
+/// place's address, so the place's root holds as long as the name. A name
+/// that `occurs` (from [`Body::occurrences`]) counts outside `ss` ends at no
+/// row of `ss`.
+pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
+    let mut seen: HashMap<Name, (usize, u32)> = HashMap::new();
+    let mut ns = Vec::new();
+    for (i, s) in ss.iter().enumerate() {
+        ns.clear();
+        names_in(s, &mut ns);
+        for &n in &ns {
+            let e = seen.entry(n).or_insert((i, 0));
+            *e = (i, e.1 + 1);
+        }
+    }
+    let mut end: HashMap<Name, Option<usize>> = seen
+        .iter()
+        .map(|(&n, &(i, k))| (n, (k == occurs[n as usize]).then_some(i)))
+        .collect();
+    for s in ss.iter().rev() {
+        if let St::Let(n, Rhs::Read(p)) = s {
+            let held = end.get(n).copied().flatten();
+            if let Some(Val::Name(r)) = root_name(p) {
+                if let Some(e) = end.get_mut(&r) {
+                    *e = e.zip(held).map(|(a, b)| a.max(b));
+                }
+            }
+        }
+    }
+    let mut out = vec![Vec::new(); ss.len()];
+    for s in ss {
+        if let St::Let(n, _) = s {
+            if let Some(i) = end.get(n).copied().flatten() {
+                out[i].push(*n);
+            }
+        }
+    }
+    out
 }
 
 fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
