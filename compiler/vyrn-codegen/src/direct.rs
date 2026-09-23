@@ -7704,13 +7704,7 @@ impl<'p> Fn_<'_, 'p> {
         let e = match name {
             "moduleInterface" => crate::GEN_ENTRY_MODULE_INTERFACE.to_string(),
             "lex" => crate::GEN_ENTRY_LEX.to_string(),
-            // A contract name is a declaration, not an argument, so the entry is
-            // per-contract and nullary.
-            "contractOf" => match args.first() {
-                Some(Expr::Var { name: c, .. }) => format!("{}{c}", crate::GEN_ENTRY_CONTRACT_OF),
-                _ => return None,
-            },
-            _ => return None,
+            _ => vyrn_frontend::loader::routed_callee(name, args)?,
         };
         self.cx.sigs.contains_key(&e).then_some(e)
     }

@@ -6611,6 +6611,22 @@ impl<'a> Builder<'a> {
         ret: Option<Type>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
+        // A builtin whose argument names its callee is a call to that
+        // function where the program declares it (RFC-0125 M7). The argument
+        // names a declaration, so the call hands on no value. Elsewhere the
+        // builtin stays, with the effect its row states.
+        if let Some(callee) = vyrn_frontend::loader::routed_callee(name, args)
+            .filter(|f| self.program.functions.iter().any(|d| &d.name == f))
+        {
+            return Ok(Rhs::Call {
+                callee,
+                args: Vec::new(),
+                write_back: false,
+                kind: Callee::Fn,
+                ret,
+                solved: Vec::new(),
+            });
+        }
         // The capability of each argument position, by who the callee is.
         let decls = self.proto.types();
         let method = self

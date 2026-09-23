@@ -455,9 +455,7 @@ pub const REFLECT_MODULE_INTERFACE: i64 = 0;
 pub const REFLECT_CONTRACT_OF: i64 = 1;
 pub const REFLECT_LEX: i64 = 2;
 
-pub use vyrn_frontend::checker::{
-    GEN_ENTRY_CONTRACT_OF, GEN_ENTRY_LEX, GEN_ENTRY_MODULE_INTERFACE,
-};
+pub use vyrn_frontend::checker::{GEN_ENTRY_LEX, GEN_ENTRY_MODULE_INTERFACE};
 
 /// The atom-stream primitives the synthesized decoders are written against.
 ///

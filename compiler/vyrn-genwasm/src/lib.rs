@@ -620,7 +620,7 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             .collect::<Vec<_>>()
         {
             entry(
-                format!("{}{name}", vyrn_codegen::GEN_ENTRY_CONTRACT_OF),
+                vyrn_frontend::checker::gen_entry_contract_of(&name),
                 Vec::new(),
                 named("ContractInfo"),
                 vyrn_codegen::REFLECT_CONTRACT_OF,

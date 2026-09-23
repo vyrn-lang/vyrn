@@ -1027,6 +1027,20 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
         .map(|(_, reserved)| *reserved)
 }
 
+/// The function a builtin call is a call to where its argument names the callee
+/// (RFC-0125 M7), or `None` for any other call. `contractOf(C)` calls the entry
+/// `vyrn-genwasm` appends for `C`. The builder, the emitter's arm and the engine
+/// ask this one function, and the builder and the arm read the call as a call to
+/// the function only where the program declares it.
+pub fn routed_callee(name: &str, args: &[crate::ast::Expr]) -> Option<String> {
+    match (name, args) {
+        ("contractOf", [crate::ast::Expr::Var { name: c, .. }]) => {
+            Some(crate::checker::gen_entry_contract_of(c))
+        }
+        _ => None,
+    }
+}
+
 /// The synthesized source of every generator-produced module reachable from the
 /// root (RFC-0021), as `(banner, source)` pairs in load order — the data behind
 /// `vyrn emit-gen`. Runs the whole load (generators fire, cache included) but
