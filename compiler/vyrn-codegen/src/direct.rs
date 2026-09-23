@@ -8429,15 +8429,17 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Unreachable);
                 return Ok(Type::Never);
             }
-            // RFC-0074 M3a. The same runtime trap the LLVM emitter writes, from
-            // the same constant: a compiled wasm module is not `vyrn serve`, and
+            // RFC-0074 M3a: a compiled wasm module is not `vyrn serve`, and
             // `std/http`'s `mount` reaches this arm whether or not the program
-            // mounts a live route. The argument is not emitted — the producer it
-            // names has nobody to pull it here.
+            // mounts a live route. The line is the one the core's `Spec::Traps`
+            // row writes. The argument is not emitted: the producer it names has
+            // nobody to pull it here.
             "serveStream" => {
-                let msg = self.cx.rt.intern(m, &crate::serve_stream_trap());
-                b.ins(&Instruction::I32Const(msg as i32))
-                    .ins(&Instruction::Call(self.cx.rt.trap));
+                self.panic_line(m, b, None, |s, m, b| {
+                    let at = s.cx.rt.intern(m, vyrn_frontend::trap::SERVE_STREAM);
+                    b.ins(&Instruction::I32Const(at as i32));
+                    Ok(())
+                })?;
                 b.ins(&Instruction::Unreachable);
                 return Ok(Type::Never);
             }

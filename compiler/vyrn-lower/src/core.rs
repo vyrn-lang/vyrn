@@ -1730,6 +1730,8 @@ pub enum Spec {
     /// A message at `String`, and for `@panicAt` the site as a string
     /// literal. The call writes the line and returns to nobody; the
     /// [`St::Trap`] the builder states after it is what ends the path.
+    /// `serveStream`'s message is the frontend's sentence, stated as a
+    /// literal in place of the stream, which a compiled build never pulls.
     Traps,
     /// A receiver first, rebuilt in place by the runtime. An array's
     /// receiver takes at most one operand at whatever type the row put on
@@ -1826,6 +1828,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@str", Spec::Renders(Type::Str)),
             ("panic", Spec::Traps),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
+            ("serveStream", Spec::Traps),
             ("@push", Spec::Rebuilds),
             ("@reserve", Spec::Rebuilds),
             ("@clear", Spec::Rebuilds),
@@ -6121,8 +6124,21 @@ impl<'a> Builder<'a> {
                 args,
                 line,
                 type_args: _,
-            } if name == "panic" || name == "@panicAt" => {
-                let r = self.call(name, args, *line, self.produced(e), out)?;
+            } if name == "panic" || name == "@panicAt" || name == "serveStream" => {
+                let r = if name == "serveStream" {
+                    // RFC-0074 M3a: a compiled build has no accept loop.
+                    let msg = Lit::Str(vyrn_frontend::trap::SERVE_STREAM.into());
+                    Rhs::Call {
+                        callee: name.clone(),
+                        args: vec![(Val::Lit(msg), Capability::Read)],
+                        write_back: false,
+                        kind: Callee::Builtin,
+                        ret: self.produced(e),
+                        solved: Vec::new(),
+                    }
+                } else {
+                    self.call(name, args, *line, self.produced(e), out)?
+                };
                 out.push(St::Do {
                     rhs: r,
                     line: *line,

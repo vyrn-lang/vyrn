@@ -694,15 +694,6 @@ pub(crate) fn lambda_captures(
     v.out
 }
 
-/// LLVM byte-string escaping: printable ASCII as-is, everything else `\NN`,
-/// plus a trailing NUL. Returns (escaped, total byte length).
-/// The wording both compiling backends print for `serveStream` (RFC-0074 M3a).
-/// One constant so the two engines cannot drift, which is the rule every trap
-/// message in this project follows.
-pub(crate) fn serve_stream_trap() -> String {
-    vyrn_frontend::trap::line(vyrn_frontend::trap::SERVE_STREAM)
-}
-
 /// Björn Höhrmann's UTF-8 validation DFA table: 256 byte-class entries followed
 /// by a 108-entry (9 states × 12 classes) transition table. State 0 is ACCEPT,
 /// 12 is REJECT. Used by `@__vyrn_utf8valid` so the native decoders reject exactly

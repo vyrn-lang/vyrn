@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 38] = [
+const SHAPES: [(&str, &str); 39] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -413,6 +413,12 @@ const SHAPES: [(&str, &str); 38] = [
         "an element read off a receiver that is no place",
         "import { chars } from \"std/text\"          type P = { at: Int64, n: Int64 }          fn nm(k: Int64) -> String { return \"Ab\" + k.toString() }          fn m(k: Int64) -> Map<String, Int64> { let mut o: Map<String, Int64> = [:] o[\"a\"] = k return o }          fn same(a: UInt8, b: Int64) -> Int64 { if Int64(a) == b { return 1 } return 0 }          fn lead(s: String) -> Bool { return s.byteLength > 0 && bytes(s)[0] >= 'A' && bytes(s)[0] <= 'Z' }          fn vyrnTestMain() -> Int64 { let p = P { at: 2, n: 0 } let b = bytes(nm(7))[p.at]          let mut c = bytes(\"xyz\")[1] c = bytes(nm(3))[1] let d = chars(nm(5))[0]          let e = match m(9)[\"a\"] { Some(v) => v, None => 0 }          let mut t = Int64(b) + Int64(c) * 1000 + Int64(d) * 1000000 + e * 1000000000 + same(bytes(nm(1))[p.at], 49) * 10000000000          if lead(nm(2)) { t = t + 100000000000 } return t }",
     ),
+    // A compiled build has no accept loop, so `serveStream` traps with the
+    // frontend's sentence and never pulls the stream (RFC-0074 M3a, RFC-0125 M7).
+    (
+        "a `serveStream` in a compiled build",
+        "fn feed(k: Int64) -> Stream<String> { let xs: Array<String> = [k.toString(), \"b\".copy()] return fromArray(xs) }          fn open(k: Int64) -> Int64 { if k > 1 { serveStream(feed(k)) } return k }          fn vyrnTestMain() -> Int64 { return open(1) + open(2) }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -422,7 +428,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 38] = [
+const SHAPE_PIN: [(&str, usize, usize); 39] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -485,6 +491,7 @@ const SHAPE_PIN: [(&str, usize, usize); 38] = [
     ("a move of a layout, and a take out of a field", 0, 0),
     ("a store into a nested place", 0, 0),
     ("an element read off a receiver that is no place", 0, 0),
+    ("a `serveStream` in a compiled build", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
