@@ -25444,6 +25444,20 @@ as it reads `@append`. `append_candidates` stays the one home of the rule and
 the builder asks it; the arm's `str_append` path goes when `VYRN_FORM_TALLY`
 reads zero for the store it serves.
 
+**The module-state hoist, decided (2026-09-23).** `m7-state` made a borrow
+of a global place end at a call whose effect set stores into that place,
+read by the kernel through `kernel::writes_of`, and left the hoist of a
+module-state container unbuilt: the builder hoists before the judgment
+exists, so during the builds the kernel judges, no call is a state write, and
+the same gap leaves the refusal's fix line naming the loop instead of the
+`let`. The decision: after the judgment, `augment` builds again every body
+whose loop reads a module-state container, then places. The judgment is the
+one home of "this callee stores into that global"; the builder asks it and
+never walks callees itself; the second build costs the few bodies that read
+a global in a loop (4 over `examples/`) and nothing else. The hoist then
+admits a module-state container the loop's calls do not write, by the same
+rule as a local one, and the fix line names the `let` again.
+
 **Two deletions, after the measure reads all.** First, the AST walk in
 `direct.rs` goes with `VYRN_NO_CORE_WALK` and `FORMS`, because nothing reaches
 it; `emitter_census` re-pins to what the core's reader costs. Second, the
