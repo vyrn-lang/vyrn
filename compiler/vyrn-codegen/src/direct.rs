@@ -4059,11 +4059,9 @@ impl<'p> Fn_<'_, 'p> {
     /// Release what the map entry at address `a` holds — a key or a value whose
     /// slot is about to be overwritten or shifted away (RFC-0028).
     ///
-    /// [`Gen::release_entry`] on the textual backend, instruction for
-    /// instruction: deeper than [`Fn_::snap_at`] because the entry is read out
-    /// of its slot rather than overwritten under the walk, and skipping the
-    /// stream and the declared `release` because both are observable from inside
-    /// the language and the interpreter runs neither when a value is replaced.
+    /// The whole value's release, as a store's displaced value takes it
+    /// ([`Fn_::free_snap`]), under the same exceptions
+    /// ([`Fn_::replaced_releases`]).
     fn rel_entry(
         &mut self,
         m: &mut Module,
@@ -4072,10 +4070,21 @@ impl<'p> Fn_<'_, 'p> {
         ty: &Type,
         line: usize,
     ) -> Result<(), String> {
-        match self.cx.owned.release_kind(ty) {
-            None | Some(DropKind::CloseStream) | Some(DropKind::Release(..)) => Ok(()),
-            _ => self.rel_at(m, b, a, ty, line),
+        if self.replaced_releases(ty) {
+            self.rel_at(m, b, a, ty, line)?;
         }
+        Ok(())
+    }
+
+    /// Whether a value of `ty` that a store or a map entry displaces is
+    /// released. A stream and a type that declares its `release` are left
+    /// alone at the top, because both are observable from inside the language;
+    /// one under a field or a payload is released by the walk ([`Fn_::rel_at`]).
+    fn replaced_releases(&self, ty: &Type) -> bool {
+        !matches!(
+            self.cx.owned.release_kind(ty),
+            None | Some(DropKind::CloseStream) | Some(DropKind::Release(..))
+        )
     }
 
     /// Release the sum payload word at `a + off`.
@@ -4129,60 +4138,6 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// The buffers a value of `ty` holds, as `(byte offset, carries a String
-    /// header)`, for a **store** that replaces it (RFC-0089 rule 4).
-    ///
-    /// A deliberate subset of [`Fn_::rel_for`]. A cell, a stream and a declared
-    /// `release` are all observable from inside the language — a stale cell traps
-    /// and a user `release` is ordinary Vyrn that may print — and the interpreter
-    /// reclaims those from the value the binding took at its `let`, not from the
-    /// slot's last one. Releasing them on a store would make the three engines run
-    /// different programs, so a store leaves all three alone. Phase 8c deletes the
-    /// first two outright.
-    fn store_bufs(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, bool)>, String> {
-        Ok(match self.rel_for(ty, line)? {
-            Some(Rel::Str) => vec![(0, true)],
-            Some(Rel::Buffers(offs)) => offs.into_iter().map(|o| (o, false)).collect(),
-            // An `Array<T>` whose elements have a release row answers `Deep`
-            // (RFC-0092 M2). A store hands back the one buffer it always did:
-            // the elements it held leak, exactly as they did before the row
-            // landed, and freeing them here would mean reading a length the
-            // store is in the middle of replacing.
-            Some(Rel::Deep(t, _)) => match self.cx.resolve(&t) {
-                Type::Array(_) => vec![(self.layout_of(&t, line)?.fields[0], false)],
-                Type::Map(..) => {
-                    let l = self.layout_of(&t, line)?;
-                    vec![
-                        (l.fields[0], false),
-                        (l.fields[1], false),
-                        (l.fields[4], false),
-                    ]
-                }
-                Type::SmallArray(..) => vec![(self.layout_of(&t, line)?.fields[2], false)],
-                // A RECORD, shallowly (round eighteen) — the textual backend's
-                // `snap_val` twin: each heap-owning field's buffer, at the
-                // field's offset plus wherever the field's own shape keeps it,
-                // recursively. Elements and boxed payloads still leak rather
-                // than risk reading through a value the store is replacing.
-                ref rec => match vyrn_frontend::types::record_fields(rec, &self.cx.types) {
-                    Some(fields) => {
-                        let l = self.layout_of(&t, line)?;
-                        let bases: Vec<u32> = l.fields.clone();
-                        let mut out = Vec::new();
-                        for (i, f) in fields.iter().enumerate() {
-                            for (o, h) in self.store_bufs(&f.ty, line)? {
-                                out.push((bases[i] + o, h));
-                            }
-                        }
-                        out
-                    }
-                    None => Vec::new(),
-                },
-            },
-            _ => Vec::new(),
-        })
-    }
-
     // `place_owns` lived here until §26 steps 3–4: the ownedness of a field
     // or element store is the plan's per-statement answer now
     // (`store_owned_at`), folded once in `own::analyze` from module-state
@@ -4215,139 +4170,92 @@ impl<'p> Fn_<'_, 'p> {
         a
     }
 
-    /// Copy the buffer pointers a value of `ty` at `addr` holds into fresh locals,
-    /// so the store may overwrite the place before they are handed back.
+    /// Keep the value of `ty` at address `a`, for a store that is about to
+    /// overwrite it (RFC-0089 rule 4), with the release that value takes, or
+    /// `None` when displacing it releases nothing
+    /// ([`Fn_::replaced_releases`]).
     ///
-    /// The snapshot is taken BEFORE the store and freed AFTER it, which is the
-    /// same order as "compute the new value, then release the old" and survives an
-    /// aggregate that is built destination-first. It is only ever reached where the
-    /// new value does not name the place ([`vyrn_frontend::ast::mentions`]),
-    /// so nothing the store computes can read the snapshot.
+    /// A store into an owned place releases what it held; a boxed payload
+    /// displaced by a store leaked (record `m7-box`). So the whole value is
+    /// kept, and [`Fn_::free_snap`] runs the release a `let` exit runs
+    /// ([`Fn_::emit_rel`]) after the store. A scalar is kept in a local and an
+    /// aggregate in a frame slot, because `emit_rel` reads a local as the
+    /// value of the one and the address of the other. The snapshot is taken
+    /// BEFORE the store because an aggregate is built destination-first, and
+    /// it is only reached where the new value does not name the place
+    /// ([`vyrn_frontend::ast::mentions`]), so nothing the store computes can
+    /// read it.
     fn snap_at(
         &mut self,
         b: &mut Frame,
-        addr: u32,
+        a: u32,
         ty: &Type,
         line: usize,
-    ) -> Result<Vec<(u32, bool)>, String> {
-        let mut out = Vec::new();
-        for (off, hdr) in self.store_bufs(ty, line)? {
-            b.ins(&Instruction::LocalGet(addr))
-                .ins(&Instruction::I32Load(word_at(off)));
-            let t = b.local(ValType::I32);
-            b.ins(&Instruction::LocalSet(t));
-            out.push((t, hdr));
-        }
-        // A sum's payload BOX is a buffer too, and the one [`Fn_::store_bufs`]
-        // cannot answer with an offset: which slot holds it depends on the tag,
-        // so it is read under a tag test rather than off the address. Everything
-        // else about it is the flat case — snapshot before, free after.
-        //
-        // The local is zeroed FIRST. A store inside a loop reaches this code
-        // once and runs it every turn, so a local left over from a turn whose
-        // tag matched would be freed again on a turn whose tag does not.
-        // `free` refuses a null, which is what a variant with no box leaves.
-        for (off, sty) in self.store_boxes(ty, line)? {
-            let base = self.addr_local(b, Place::Local(addr), off);
-            let vs = self.cx.sum_vs(&sty).unwrap_or_default();
-            let l = self.layout_of(&sty, line)?;
-            for (tag, var) in vs.iter().enumerate() {
-                let mut boxed = Vec::new();
-                for (j, p) in var.payload.iter().enumerate() {
-                    if self.word2(p)? == Word::Boxed {
-                        boxed.push(self.cx.payload_slot(&var.payload, j));
-                    }
-                }
-                if boxed.is_empty() {
-                    continue;
-                }
-                let locals: Vec<u32> = boxed
-                    .iter()
-                    .map(|_| {
-                        let t = b.local(ValType::I32);
-                        b.ins(&Instruction::I32Const(0))
-                            .ins(&Instruction::LocalSet(t));
-                        t
-                    })
-                    .collect();
-                tag_eq(b, base, tag as i64);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                for (k, slot) in boxed.iter().enumerate() {
-                    b.ins(&Instruction::LocalGet(base))
-                        .ins(&Instruction::I64Load(at(l.fields[*slot])))
-                        .ins(&Instruction::I32WrapI64)
-                        .ins(&Instruction::LocalSet(locals[k]));
-                }
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                out.extend(locals.into_iter().map(|t| (t, false)));
-            }
-        }
-        Ok(out)
-    }
-
-    /// The sums a value of `ty` holds, each as `(byte offset, the sum's type)`
-    /// — the places whose reclamation needs a tag and so cannot be one of
-    /// [`Fn_::store_bufs`]'s flat offsets.
-    ///
-    /// The same subset that function takes, walked the same way: through record
-    /// fields, and stopping at a declared `release`, whose timing is the
-    /// language's and not a store's. An `Array`, a `Map` and a `SmallArray` stop
-    /// here as they do there — a store hands back the buffer and the elements
-    /// in it leak, which is the answer this side has always given.
-    fn store_boxes(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, Type)>, String> {
-        if matches!(
-            self.cx.owned.release_kind(ty),
-            Some(DropKind::Release(..)) | None
-        ) {
-            return Ok(Vec::new());
-        }
-        let t = self.cx.resolve(ty);
-        if self.cx.sum_vs(&t).is_some() {
-            return Ok(vec![(0, t)]);
-        }
-        let Some(fields) = vyrn_frontend::types::record_fields(&t, &self.cx.types) else {
-            return Ok(Vec::new());
+    ) -> Result<Option<(Place, Rel)>, String> {
+        let Some(rel) = self.replaced_rel(ty, line)? else {
+            return Ok(None);
         };
-        let l = self.layout_of(&t, line)?;
-        let mut out = Vec::new();
-        for (i, f) in fields.iter().enumerate() {
-            for (o, st) in self.store_boxes(&f.ty, line)? {
-                out.push((l.fields[i] + o, st));
+        let place = match self.cx.repr(ty, line)? {
+            Repr::Agg(l) => {
+                let at = b.alloc(l.size, l.align);
+                b.slot(at)
+                    .ins(&Instruction::LocalGet(a))
+                    .ins(&Instruction::I32Const(l.size as i32))
+                    .ins(&Instruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                Place::Slot(at)
             }
-        }
-        Ok(out)
+            Repr::Scalar(v) => {
+                let t = b.local(v);
+                b.ins(&Instruction::LocalGet(a))
+                    .ins(&load_of(&self.cx.ll(ty), 0, false))
+                    .ins(&Instruction::LocalSet(t));
+                Place::Local(t)
+            }
+            Repr::Unit => return Ok(None),
+        };
+        Ok(Some((place, rel)))
     }
 
-    /// Hand a snapshot back, after the store that replaced it. `free` refuses a
-    /// data-segment address and a null, so a place that held a literal or an
-    /// unspilled `SmallArray` costs one silent call and nothing else.
-    /// The snapshot of what a scalar local holds before a store replaces it:
-    /// the local IS the pointer, so it has no address to read through.
-    fn snap_local(
+    /// [`Fn_::snap_at`] for a scalar local, which IS the value and has no
+    /// address.
+    fn snap_word(
         &mut self,
         b: &mut Frame,
         l: u32,
+        v: ValType,
         ty: &Type,
         line: usize,
-    ) -> Result<Vec<(u32, bool)>, String> {
-        if self.store_bufs(ty, line)?.is_empty() {
-            return Ok(Vec::new());
-        }
-        let t = b.local(ValType::I32);
+    ) -> Result<Option<(Place, Rel)>, String> {
+        let Some(rel) = self.replaced_rel(ty, line)? else {
+            return Ok(None);
+        };
+        let t = b.local(v);
         b.ins(&Instruction::LocalGet(l))
             .ins(&Instruction::LocalSet(t));
-        Ok(vec![(t, true)])
+        Ok(Some((Place::Local(t), rel)))
     }
 
-    fn free_snap(&mut self, b: &mut Frame, snap: &[(u32, bool)]) {
-        for &(t, hdr) in snap {
-            b.ins(&Instruction::LocalGet(t));
-            if hdr {
-                str_hdr(b);
-            }
-            b.ins(&Instruction::Call(self.cx.rt.free));
+    fn replaced_rel(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
+        if !self.replaced_releases(ty) {
+            return Ok(None);
+        }
+        self.rel_for(ty, line)
+    }
+
+    /// Release what a snapshot kept, after the store that replaced it.
+    fn free_snap(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        snap: Option<(Place, Rel)>,
+        line: usize,
+    ) -> Result<(), String> {
+        match snap {
+            Some((p, rel)) => self.emit_rel(m, b, p, &rel, line),
+            None => Ok(()),
         }
     }
 
@@ -5063,17 +4971,19 @@ impl<'p> Fn_<'_, 'p> {
                     .unwrap_or(false);
                 let snap = if owned_here {
                     match (place, &r) {
-                        (Place::Local(l), Repr::Scalar(_)) => self.snap_local(b, l, &ty, *line)?,
+                        (Place::Local(l), Repr::Scalar(v)) => {
+                            self.snap_word(b, l, *v, &ty, *line)?
+                        }
                         _ => {
                             let a = self.addr_local(b, place, 0);
                             self.snap_at(b, a, &ty, *line)?
                         }
                     }
                 } else {
-                    Vec::new()
+                    None
                 };
                 self.store_into(m, b, place, &r, value, &ty.clone(), false)?;
-                self.free_snap(b, snap.as_slice());
+                self.free_snap(m, b, snap, *line)?;
                 // The place now holds a pointer this path did not allocate, so the
                 // next append copies rather than grows. Claiming ownership here
                 // instead would free a borrowed buffer wherever rule 2 still lets
@@ -5104,7 +5014,7 @@ impl<'p> Fn_<'_, 'p> {
                     let a = self.addr_local(b, place, foff);
                     self.snap_at(b, a, &fty, *line)?
                 } else {
-                    Vec::new()
+                    None
                 };
                 match &fr {
                     Repr::Scalar(_) => {
@@ -5136,7 +5046,7 @@ impl<'p> Fn_<'_, 'p> {
                     },
                     Repr::Unit => return unsupported("a Unit field", *line),
                 }
-                self.free_snap(b, snap.as_slice());
+                self.free_snap(m, b, snap, *line)?;
             }
             Stmt::Return { value, line } => {
                 match value {
@@ -5525,7 +5435,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalTee(ea));
                     self.snap_at(b, ea, &elem, *line)?
                 } else {
-                    Vec::new()
+                    None
                 };
                 match self.cx.repr(&elem, *line)? {
                     Repr::Scalar(_) => {
@@ -5544,7 +5454,7 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     Repr::Unit => return unsupported("an array of Unit", *line),
                 }
-                self.free_snap(b, snap.as_slice());
+                self.free_snap(m, b, snap, *line)?;
             }
             Stmt::Break { line } => {
                 let &(brk, _, regions) = self
@@ -17629,14 +17539,16 @@ impl<'p> Fn_<'_, 'p> {
                     // The store releases what the name held where the row says
                     // so, in the arm's order: the old value aside, the new one
                     // in, the old one freed.
-                    let snap = if *releases {
-                        self.snap_local(b, l, &ty, *line)?
-                    } else {
-                        Vec::new()
+                    let snap = match (*releases, self.cx.repr(&ty, *line)?) {
+                        (false, _) => None,
+                        (true, Repr::Scalar(v)) => self.snap_word(b, l, v, &ty, *line)?,
+                        (true, _) => {
+                            return unsupported("a core store that releases an aggregate", *line)
+                        }
                     };
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&Instruction::LocalSet(l));
-                    self.free_snap(b, &snap);
+                    self.free_snap(m, b, snap, *line)?;
                     if let Some(&at) = self.str_append.get(&l) {
                         disown(b, Place::Slot(at));
                     }

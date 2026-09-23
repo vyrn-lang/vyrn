@@ -2097,3 +2097,59 @@ fn a_name_held_at_a_returned_match_is_reported_reclaimed_and_is() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+// A store into an owned place releases what the place held, and the release
+// is the whole value's: a boxed payload's contents, an element, a String
+// riding in a payload word. Each store below displaced a value whose heap
+// the store's shallow snapshot never reached (record `m7-box`).
+const DISPLACED: &str = r#"type R = { o: Option<Array<Int64>>, n: Int64 }
+type E =
+    | A(Array<String>)
+    | B(Int64)
+
+let mut g: Option<Array<Int64>> = None
+
+fn main() -> Int64 {
+    let mut o: Option<Array<Int64>> = Some([1, 2, 3])
+    o = Some([7, 8, 9, 10])
+    for i in [1, 2, 3] {
+        o = Some([i, i])
+    }
+    let mut s: Option<String> = Some(1234567.toString())
+    s = Some(7654321.toString())
+    let mut e: E = A([1234567.toString()])
+    e = A([7654321.toString()])
+    e = B(3)
+    let mut r: R = R { o: Some([1, 2, 3]), n: 1 }
+    r = R { o: Some([4, 5]), n: 2 }
+    r.o = Some([6])
+    let mut a: Array<Option<Array<Int64>>> = [Some([1, 2, 3]), None]
+    a[0] = Some([4, 5])
+    let mut xs: Array<String> = [1234567.toString(), 7654321.toString()]
+    xs = [99999.toString()]
+    g = Some([1, 2, 3])
+    g = Some([4, 5])
+    return 0
+}
+"#;
+
+#[test]
+fn a_store_releases_the_whole_value_it_displaces() {
+    let dir = std::env::temp_dir().join(format!("vyrn-displaced-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("displaced.vyrn");
+    std::fs::write(&file, DISPLACED).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "the free audit: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
