@@ -15538,23 +15538,6 @@ impl HoistVisit<'_> for Hoist<'_, '_> {
     }
 }
 
-/// Whether a `while` of `blk` indexes a binding [`Fn_::hoist_walks`] may take
-/// apart before the loop. The rows state no hoist (RFC-0125 M1's read half),
-/// and without it `growable array element read` ran x1.13, so such a body
-/// stays in the arm. Asked on the syntax alone, so it may refuse a binding
-/// the hoist would pass over for its type or its place.
-fn hoists_a_header(blk: &Block) -> bool {
-    let mut found = false;
-    each_block(blk, &mut |_| {}, &mut |s| found |= while_hoists(s));
-    found
-}
-
-fn while_hoists(s: &Stmt) -> bool {
-    matches!(s, Stmt::While { cond, body, .. } if indexed_names(cond, body)
-        .iter()
-        .any(|n| header_invariant(cond, body, n)))
-}
-
 /// Every expression under `e`, pre-order, `e` itself first, and every
 /// statement under it through `fs` — `ast::body_scope_descent!`'s descent
 /// since RFC-0125 §3 M6, where this file wrote the arms out itself.
@@ -16990,12 +16973,8 @@ impl<'p> Fn_<'_, 'p> {
         if !self.cursors.is_empty() && run.iter().any(core_returns) {
             return None;
         }
-        // A header the arm hoists before a `while` ([`hoists_a_header`]): the
-        // `while` itself, and a statement inside it that names a binding the
-        // hoist holds in locals, which the rows would walk again.
-        if while_hoists(s) {
-            return None;
-        }
+        // A statement inside a `while` the arm emits that names a binding the
+        // arm's hoist holds in locals, which the rows would walk again.
         if !self.walks.is_empty() {
             let mut names = Vec::new();
             for st in run {
@@ -18834,7 +18813,8 @@ impl<'p> Fn_<'_, 'p> {
             //
             // Or a layout read out of a place, which holds the place's address
             // ([`Fn_::core_alias`]) or, where it owns no heap, a copy of its
-            // bytes ([`Fn_::core_copies`]).
+            // bytes ([`Fn_::core_copies`]), or a header a loop walks, which
+            // holds its parts ([`Fn_::core_walked`]).
             //
             // Or a payload binder, whose place the switch gives it
             // ([`Fn_::core_payload`]).
@@ -18858,6 +18838,7 @@ impl<'p> Fn_<'_, 'p> {
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
                 && !self.core_copies(body, n as vyrn_lower::core::Name)
                 && !binders.contains(&(n as vyrn_lower::core::Name))
+                && !self.core_walked(body, n as vyrn_lower::core::Name)
             {
                 return false;
             }
@@ -18867,7 +18848,7 @@ impl<'p> Fn_<'_, 'p> {
         // arm) except where it states the annotation's check, so a check the
         // rows do not state is a binding whose type is not the annotation's.
         // [`Fn_::core_run`] asks the same question per statement.
-        if stmts.is_some_and(|blk| self.annotates_a_check(body, blk) || hoists_a_header(blk)) {
+        if stmts.is_some_and(|blk| self.annotates_a_check(body, blk)) {
             return false;
         }
         let reads = body.reads();
@@ -18929,6 +18910,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
+            }
+            St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
+                self.core_place_ty(body, p).is_some()
             }
             St::Let(n, Rhs::Read(_))
                 if self.core_alias(body, *n).is_some() || self.core_copies(body, *n) =>
