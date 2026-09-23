@@ -27934,3 +27934,30 @@ Findings:
 - the builder's store into module state returned before it released an append's part temporaries, 48 bytes over three turns, found by the `coredrive` shape.
 - a borrow of module state that a `while` hoisted is refused at the right call, but its fix names the loop's line: `kernel::writes` reads no judgment while the builder runs.
 Left: the module-state hoist and that fix line, blocked by the builder running before the judgment (the pending decision above); the editor's memo, where a served body is not built and a call into it stores nothing, blocked by a key that excludes bodies; 31 module-state first clauses, not classed.
+#### A release row carries its holes, and a payload handed on is one (2026-09-23, `m7-hole`)
+Decision: a release row names the parts that left the value on its path, and the emitter releases the place minus them; the lead's. A payload binder names the payload it reads as a hole of its scrutinee, `.Variant.i`, where `declared::skippable` admits it; a `consume` of the binder leaves that hole; the switch mirrors it onto its other arms, whose variant never reaches it; an edge that did not give the payload releases it through the binder, because a payload is no place a row can spell. Mine.
+Went: the edge table's "carries no holes" clause in `Kernel::equalize`, and the name-only hole set of an edge release. Came: `NameInfo::payload`, `Kernel::leaves_payload`, `Kernel::mirror_payloads`, `Kernel::payload_binder`, `Body::drop_holes`, `EdgeRow`, the holes on `St::Drop`, and the payload clause of the enum release walk. Stayed: `NameInfo::holes`, read by every release that carries no set of its own.
+Lines: `core.rs` 7,878 to 7,915. `kernel.rs` 2,850 to 2,943. `direct.rs` 20,098 to 20,116. `declared.rs` 1,132 to 1,136. `memory.rs` 2,099 to 2,246. `coredrive.rs` 611 to 619. Refusals: 0 lost / 0 gained. Manifest: untouched.
+The count, on `e0d39ac6` against the head, `VYRN_LEAK_CHECK=1 vyrn run`, the core walk and `VYRN_NO_CORE_WALK=1`, same result under both:
+
+| shape | base | head |
+|---|---|---|
+| a returned `match` hands a payload on, another arm returns the scrutinee | double free | clean |
+| the same through `if let` | double free | clean |
+| a statement `match` hands a payload on, another arm gives the scrutinee whole | double free | clean |
+| the same, the payload handed on one edge of an `if` | double free | clean |
+| a take out of a record field, `for .. in consume`, a scrutinee the match takes | clean | clean |
+| a returned `match` over a type with a declared `release` | 24 bytes leaked | 24 bytes leaked |
+
+Licence:
+- `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, base against head, both binaries beside `std/`: byte-identical stdout, stderr and exit code, 338 accepted and 77 refused.
+- `VYRN_WASM_MANIFEST=check` green: no example's wasm moved. `emit-wat` of the 17 bench programs byte-identical under both binaries, so the bench corpus was not timed.
+- `coredrive --ignored`: 168 programs, 21,556 bodies; whole 21,330, carried end to end 1,642, taken 18,591 of 21,512, 1 byte-identical, 167 run the same, 0 run apart, all as `m7-rows` read them on this base. `SHAPES` gains a payload handed on from a scrutinee the frame keeps, which double-frees on the base.
+- `memory.rs`: four witnesses under the free audit, each on both walks, each a double free on the base. `VYRN_LEAK_CHECK=1 vyrn build` of the five witnesses: clean on the head, each a double free on the base; the declared-release witness leaks its 24 bytes natively too.
+- `kernel --ignored`: 175 programs, 27,416 accepted, 0 refused, 0 unlowered. `effects`: 29,988 judged, 10,315 pure. `typed`: 238,193 stores judged, 0 unjudged. `coretables` green. `residue --release --ignored`, 314 s: engine 173 clean / 0 leaking, route 173 clean / 0 leaking, 0 failed. `VYRN_LEAK_CHECK=1 vyrn bench --check`: `benching` 2, `membench` 22, `smallarray` 4, `revcomp` 1 ok, 0 failed.
+- `cargo test -p vyrn-cli` as `--bins` and four `--test` groups: 654 passed, 0 failed, 47 ignored. `cargo test -p vyrn-lower -p vyrn-codegen -p vyrn-frontend`: 1,130 passed. Both formatters clean; the release build has no warning. `emitter_census` re-pinned: the mapping 10,365 to 10,383 lines with 821 to 825 rows, `neither` 6,584 to 6,600, `both, for two questions` 9,121 to 9,123.
+Findings:
+- the AST arm double-freed the same shapes. Both walks read one edge row, which named no hole, and the arm's own hole table (`arm_row`) covers binders of a scrutinee the construct takes, not a scrutinee the frame keeps.
+- `vyxProcessElem` is not fixed by this rule. `VyxNode` declares `release`, which cannot be told to skip a payload, so no hole is stated; the arm skips a declared release on an edge and leaks the rest of the node, and the witness in the table leaks 24 bytes under both walks on this base. `m7-made` reports the payload freed again once its made-layout reading admitted the body; that was not measured here.
+- a hole taken by a rebinding (`let Tagged(tag, n) = local`) is no hand-off: the first cut gained 3 refusals in `jsonplace`, `refutablelet` and `tryplace`. Only a `consume` parameter leaves the hole.
+Left: `vyxProcessElem` and any payload handed on out of a value whose type declares `release`, blocked by a decision: release such a value by its parts and skip the declared `release`, or refuse the hand-off, which `std/vyx.vyrn` would then rewrite; `m7-made`'s screen stays until then.
