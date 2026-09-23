@@ -18914,7 +18914,8 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// A value that owns heap crosses as its pointer, and who owns it after
     /// the call is the call arm's decision: this walk writes the pointer and
-    /// nothing else, which is what a `read` argument is. A layout crosses as
+    /// nothing else, which is what a `read` or a `consume` argument is. A
+    /// String literal is static data, which `free` refuses. A layout crosses as
     /// its address the same way ([`Fn_::core_val`]), whatever the capability:
     /// every layout this walk names lives in a slot, and a `modify` callee
     /// copies its result back into it. A scalar `modify` argument lives in a
@@ -18933,10 +18934,7 @@ impl<'p> Fn_<'_, 'p> {
                 matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
             });
             match c {
-                Cap::Read => self.core_val_readable(body, v) || layout,
-                Cap::Consume => {
-                    (self.core_val_readable(body, v) && self.core_operand(body, v)) || layout
-                }
+                Cap::Read | Cap::Consume => self.core_val_readable(body, v) || layout,
                 Cap::Modify => {
                     layout && !matches!(v, Val::Name(n) if self.core_alias(body, *n).is_some())
                 }
