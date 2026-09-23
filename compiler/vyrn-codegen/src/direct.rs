@@ -17627,6 +17627,23 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
+                // A LAYOUT TAKEN OUT OF A FIELD in part position: the header
+                // moves to the part's offset, as the arm's `consume t.d` in a
+                // literal moves it, and the field is the hole the root's
+                // release carries.
+                St::Let(n, rhs @ Rhs::Take(p)) if self.core_take_part(body, rhs) => {
+                    let line = body.names[*n as usize].line;
+                    let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? else {
+                        return unsupported("a taken layout with no parent", line);
+                    };
+                    let Repr::Agg(l) = self.cx.repr(&body.names[*n as usize].ty, line)? else {
+                        return unsupported("a taken layout with no layout", line);
+                    };
+                    dest.addr(b, 0);
+                    let (_, off) = self.core_addr(m, b, body, w, p, line)?;
+                    self.core_step(b, off);
+                    agg_landed(b, l.size, false);
+                }
                 // A HEADER a loop walks: the container's value in a local,
                 // taken apart once here, so every element and length read of
                 // the loop reads the parts (RFC-0125 M7). The kernel ends the
@@ -19049,14 +19066,15 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         };
         let made = matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs);
+        let taken = self.core_take_part(body, rhs);
         if body.names[*t as usize].binding.is_some()
             || w.occurs.get(*t as usize) != Some(&2)
-            || !(made || self.core_agg_call(body, rhs))
+            || !(made || taken || self.core_agg_call(body, rhs))
         {
             return None;
         }
-        // A literal is made at the part's type, and a call's result must
-        // already have its layout.
+        // A literal is made at the part's type, and a call's result or a
+        // taken field must already have its layout.
         let fits = |part: &Type| {
             !self.checks(part)
                 && if made {
@@ -19135,6 +19153,17 @@ impl<'p> Fn_<'_, 'p> {
             into,
             ty: part,
         })
+    }
+
+    /// Whether a row takes a layout out of a field, which in part position
+    /// moves the header to the part's offset ([`Fn_::core_part_at`]). The
+    /// field is a hole from the take on, and the release of its root carries
+    /// the hole ([`vyrn_lower::core::Body::drop_holes`]).
+    fn core_take_part(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
+        matches!(rhs, Rhs::Take(p @ vyrn_lower::core::Place::Field(..))
+        if self.core_place_ty(body, p).is_some_and(|t| {
+            !self.checks(&t) && matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_)))
+        }))
     }
 
     /// Where the row at `ss[i]` writes a part of its parent
@@ -19589,6 +19618,7 @@ impl<'p> Fn_<'_, 'p> {
                     *b as usize == n
                         && (self.core_makes(body, &info.ty, rhs)
                             || self.core_agg_call(body, rhs)
+                            || self.core_take_part(body, rhs)
                             || self.core_rebuild(body, rhs))
                 }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
@@ -19664,6 +19694,9 @@ impl<'p> Fn_<'_, 'p> {
             // reader's `let` takes before the call, the storage the call
             // wrote, or the caller's storage.
             St::Let(_, rhs) if self.core_agg_call(body, rhs) => true,
+            St::Let(_, rhs) if self.core_take_part(body, rhs) => {
+                self.core_part_at(body, ss, i, &self.core_w).is_some()
+            }
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
             }

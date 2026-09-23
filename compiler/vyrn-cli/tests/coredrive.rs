@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 30] = [
+const SHAPES: [(&str, &str); 31] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -361,6 +361,12 @@ const SHAPES: [(&str, &str); 30] = [
         "a call to a host-boundary extern",
         "extern fn hostNowMillis() -> Int64          fn vyrnTestMain() -> Int64 { let t = hostNowMillis() if t > 0 { return 1 } return 0 }",
     ),
+    // A field taken into a literal moves its header to the part's offset,
+    // and the root's release carries the hole.
+    (
+        "a field taken into a part",
+        "type In = { d: Array<Int64>, k: Int64 } type Out = { d: Array<Int64>, n: Int64 }          fn mk(k: Int64) -> In { let mut a: Array<Int64> = [] a.push(k) a.push(k + 1) return In { d: a, k: k } }          fn moved(k: Int64) -> Out { let t = mk(k) return Out { d: consume t.d, n: t.k } }          fn kept(k: Int64) -> Int64 { let t = mk(k) let o = Out { d: consume t.d, n: t.k } return o.d.length + o.n }          fn vyrnTestMain() -> Int64 { let o = moved(3) return o.d.length * 100 + o.d[1] + kept(5) * 1000 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -370,7 +376,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 30] = [
+const SHAPE_PIN: [(&str, usize, usize); 31] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -425,6 +431,7 @@ const SHAPE_PIN: [(&str, usize, usize); 30] = [
     ("a `match` statement with block arms", 0, 0),
     ("a lane store whose result is discarded", 0, 0),
     ("a call to a host-boundary extern", 0, 0),
+    ("a field taken into a part", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
