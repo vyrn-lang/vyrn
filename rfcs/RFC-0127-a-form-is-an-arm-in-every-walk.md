@@ -126,7 +126,7 @@ the_form_census_as_a_table` and checked against the code by
 
 | form | parser | checker | movecheck | own | lower | shared | wasm | editor | all eight |
 |---|---|---|---|---|---|---|---|---|---|
-| `Stmt::Let` | 7 | 4 | 1 | 0 | 8 | 1 | 10 | 0 | 31 |
+| `Stmt::Let` | 7 | 4 | 1 | 0 | 9 | 0 | 10 | 0 | 31 |
 | `Stmt::Assign` | 3 | 3 | 1 | 0 | 6 | 0 | 5 | 0 | 18 |
 | `Stmt::SetField` | 4 | 3 | 1 | 0 | 5 | 0 | 3 | 0 | 16 |
 | `Stmt::IndexSet` | 3 | 3 | 2 | 0 | 5 | 0 | 2 | 0 | 15 |
@@ -134,9 +134,9 @@ the_form_census_as_a_table` and checked against the code by
 | `Stmt::Break` | 2 | 1 | 1 | 0 | 7 | 0 | 4 | 0 | 15 |
 | `Stmt::Continue` | 1 | 1 | 1 | 0 | 7 | 0 | 4 | 0 | 14 |
 | `Stmt::If` | 2 | 3 | 1 | 0 | 7 | 0 | 4 | 0 | 17 |
-| `Stmt::IfLet` | 2 | 2 | 1 | 0 | 7 | 1 | 5 | 0 | 18 |
+| `Stmt::IfLet` | 2 | 2 | 1 | 0 | 8 | 0 | 5 | 0 | 18 |
 | `Stmt::While` | 2 | 3 | 1 | 0 | 6 | 0 | 4 | 0 | 16 |
-| `Stmt::ForIn` | 1 | 4 | 1 | 0 | 6 | 1 | 5 | 0 | 18 |
+| `Stmt::ForIn` | 1 | 4 | 1 | 0 | 7 | 0 | 5 | 0 | 18 |
 | `Stmt::Drop` | 1 | 3 | 1 | 0 | 5 | 0 | 4 | 0 | 14 |
 | `Stmt::Expr` | 2 | 1 | 1 | 0 | 7 | 0 | 6 | 0 | 17 |
 | `Stmt::Region` | 1 | 3 | 1 | 0 | 7 | 0 | 1 | 0 | 13 |
@@ -157,7 +157,7 @@ the_form_census_as_a_table` and checked against the code by
 | `Expr::TryConstruct` | 1 | 3 | 1 | 0 | 4 | 0 | 3 | 0 | 12 |
 | `Expr::ArrayLit` | 5 | 2 | 1 | 0 | 7 | 1 | 3 | 1 | 20 |
 | `Expr::MapLit` | 3 | 2 | 1 | 0 | 5 | 1 | 2 | 0 | 14 |
-| `Expr::Lambda` | 1 | 7 | 3 | 0 | 10 | 2 | 8 | 0 | 31 |
+| `Expr::Lambda` | 1 | 7 | 3 | 0 | 11 | 1 | 8 | 0 | 31 |
 | `Expr::Consume` | 1 | 2 | 2 | 0 | 10 | 0 | 4 | 0 | 19 |
 | `Pattern::Variant` | 11 | 4 | 1 | 0 | 3 | 0 | 5 | 0 | 24 |
 | `Pattern::Success` | 1 | 4 | 2 | 0 | 4 | 0 | 6 | 0 | 17 |
@@ -211,7 +211,7 @@ one's.
 
 ### 3.2 The 9 declarations
 
-248 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
+243 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
 `ast.rs` by the test, so a tenth declaration form fails the census until it has
 a row.
 
@@ -219,13 +219,13 @@ a row.
 |---|---|---|---|---|---|---|---|---|
 | `imports` | 1 | 18 | 0 | 0 | 0 | 5 | 1 | 25 |
 | `type_decls` | 2 | 14 | 4 | 1 | 0 | 14 | 0 | 35 |
-| `functions` | 2 | 14 | 17 | 1 | 1 | 11 | 14 | 60 |
+| `functions` | 2 | 14 | 17 | 1 | 0 | 11 | 14 | 59 |
 | `protocols` | 1 | 8 | 7 | 0 | 0 | 8 | 0 | 24 |
 | `contracts` | 0 | 7 | 4 | 0 | 0 | 0 | 0 | 11 |
 | `impls` | 1 | 7 | 14 | 4 | 0 | 5 | 0 | 31 |
-| `globals` | 1 | 9 | 14 | 1 | 2 | 2 | 0 | 29 |
-| `tests` | 0 | 6 | 2 | 1 | 1 | 1 | 5 | 16 |
-| `benches` | 0 | 6 | 2 | 1 | 1 | 1 | 6 | 17 |
+| `globals` | 1 | 9 | 14 | 1 | 0 | 2 | 0 | 27 |
+| `tests` | 0 | 6 | 2 | 1 | 0 | 1 | 5 | 15 |
+| `benches` | 0 | 6 | 2 | 1 | 0 | 1 | 6 | 16 |
 
 **`type_decls` used to cost the parser 16 and now costs it 2.** Fourteen of
 those sixteen were the language's prelude, pushed one declaration at a time; it

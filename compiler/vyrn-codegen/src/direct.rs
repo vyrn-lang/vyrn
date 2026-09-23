@@ -553,7 +553,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     //
     // This loop is why `global_append_candidates` gives back an ORDERED set: a
     // reservation is an address, and it moves every reservation after it.
-    let gaccs: Vec<String> = crate::global_append_candidates(program)
+    let gaccs: Vec<String> = vyrn_lower::append::global_append_candidates(program)
         .into_iter()
         .filter(|n| {
             cx.globals
@@ -1342,7 +1342,7 @@ struct Cx<'a> {
     globals: HashMap<String, (Place, Type)>,
     /// Module-state `String` accumulators (census P1): name → the fixed address of
     /// its one ownership word. Present only for a global that
-    /// [`crate::global_append_candidates`] cleared, so `g = g + …` grows the
+    /// [`vyrn_lower::append::global_append_candidates`] cleared, so `g = g + …` grows the
     /// buffer in place instead of building a new one and dropping the old on the
     /// floor. The local twin of this map is [`Fn_::str_append`], keyed by wasm
     /// local; a global has no local, so it needs its own word in static memory.
