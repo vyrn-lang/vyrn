@@ -1675,8 +1675,9 @@ pub enum Spec {
     /// element at the index.
     Removes,
     /// Operands at whatever type the row put on their names, and a result at
-    /// the stated type that the call builds in storage of its own. The caller
-    /// lands it as it lands any aggregate result.
+    /// the stated type, whose parameters the operands' types solve, that the
+    /// call builds in storage of its own. The caller lands it as it lands any
+    /// aggregate result.
     Builds(Type),
 }
 
@@ -1773,6 +1774,11 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 Spec::Builds(Type::result(Type::Bool, Type::Str)),
             ),
             ("parse", Spec::Builds(Type::option(Type::Int))),
+            // A snapshot of a map's keys, at the prelude's own parameter.
+            (
+                "@keys",
+                Spec::Builds(Type::Array(Box::new(Type::Param("K".into())))),
+            ),
         ]
     })
 }

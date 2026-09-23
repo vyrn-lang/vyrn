@@ -92,7 +92,7 @@ order.
 
 ## 3. The census: what each constructor costs
 
-1,418 mentions in six files for 32 constructors — it was 2,517 in seven, and
+1,420 mentions in six files for 32 constructors — it was 2,517 in seven, and
 the seventh was `interp.rs` (RFC-0125 §3 M5); the sixth column was the text-IR
 emitter and is now the shared lowering alone, which is where the other 499 went
 (RFC-0125 §3 M4). It was 1,612 until RFC-0125 §3 M6's size slices, and 1,405 until M7's
@@ -112,7 +112,7 @@ the_surface_census_as_a_table` and checked against the code by
 
 | constructor | checker | shared | wasm | types | prelude | editor | all six |
 |---|---|---|---|---|---|---|---|---|
-| `Type::Int` | 47 | 3 | 61 | 10 | 0 | 2 | 123 |
+| `Type::Int` | 47 | 3 | 62 | 10 | 0 | 2 | 124 |
 | `Type::IntN` | 23 | 4 | 13 | 21 | 3 | 2 | 66 |
 | `Type::Float` | 20 | 3 | 22 | 5 | 0 | 2 | 52 |
 | `Type::Float32` | 23 | 3 | 18 | 5 | 0 | 1 | 50 |
@@ -137,7 +137,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::ArrayN` | 16 | 7 | 20 | 9 | 0 | 4 | 56 |
 | `Type::SmallArray` | 22 | 2 | 21 | 7 | 1 | 4 | 57 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 20 | 3 | 18 | 7 | 6 | 4 | 58 |
+| `Type::Map` | 20 | 3 | 19 | 7 | 6 | 4 | 59 |
 | `Type::Stream` | 14 | 1 | 9 | 7 | 1 | 1 | 33 |
 | `Type::Logger` | 0 | 1 | 2 | 1 | 2 | 1 | 7 |
 | `Type::Fn` | 26 | 5 | 23 | 10 | 1 | 0 | 65 |

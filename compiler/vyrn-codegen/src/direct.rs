@@ -14762,6 +14762,56 @@ impl<'p> Fn_<'_, 'p> {
         Ok(oty)
     }
 
+    /// `m.keys()` with the map's address in the local `hdr`: a snapshot
+    /// `Array<K>`, the keys copied into a buffer of their own, so the map may
+    /// be mutated afterwards without disturbing it. String keys are then dup'd
+    /// per element (RFC-0092 M2 — an array owns its elements, so a snapshot of
+    /// the map's own pointers would be freed twice); Int64 keys copy with the
+    /// buffer (RFC-0117). The arm over the source and [`Fn_::core_call`] over
+    /// the rows both call this.
+    fn map_keys(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        hdr: u32,
+        mty: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Map(key_t, _) = self.cx.resolve(mty) else {
+            return unsupported(&format!("`keys` on `{mty}`"), line);
+        };
+        let mk = self.map_key(&key_t, line)?;
+        let l = self.layout_of(mty, line)?;
+        let aty = Type::Array(key_t);
+        let al = self.layout_of(&aty, line)?;
+        let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(len));
+        let (kind, klen) = mk.kind();
+        b.ins(&Instruction::I32Const(kind));
+        b.ins(&Instruction::I32Const(klen));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
+        b.ins(&Instruction::LocalSet(buf));
+        if mk == MapKey::Str {
+            self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
+        }
+        let off = b.alloc(al.size, al.align);
+        b.slot(off + al.fields[0]);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word()));
+        for f in [al.fields[1], al.fields[2]] {
+            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(len));
+            b.ins(&Instruction::I64ExtendI32U);
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(aty)
+    }
+
     /// `m.has(k)`, `m.remove(k)` and `m.keys()`.
     fn map_method(
         &mut self,
@@ -14792,48 +14842,15 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalSet(hdr));
             (hdr, ty, false)
         };
+        if name == "@keys" {
+            return self.map_keys(m, b, hdr, &mty, line);
+        }
         let (key_t, val) = match self.cx.resolve(&mty) {
             Type::Map(k, v) => (*k, v),
             _ => return unsupported(&format!("`{name}` on `{mty}`"), line),
         };
         let mk = self.map_key(&key_t, line)?;
         let l = self.layout_of(&mty, line)?;
-
-        if name == "@keys" {
-            // A snapshot `Array<K>`: the keys copied into a buffer of their
-            // own, so the map may be mutated afterwards without disturbing it.
-            // String keys are then dup'd per element (RFC-0092 M2 — an array
-            // owns its elements, so a snapshot of the map's own pointers would
-            // be freed twice); Int64 keys copy with the buffer (RFC-0117).
-            let aty = Type::Array(Box::new(key_t.clone()));
-            let al = self.layout_of(&aty, line)?;
-            let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I64Load(at(l.fields[2])));
-            b.ins(&Instruction::I32WrapI64);
-            b.ins(&Instruction::LocalSet(len));
-            let (kind, klen) = mk.kind();
-            b.ins(&Instruction::I32Const(kind));
-            b.ins(&Instruction::I32Const(klen));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
-            b.ins(&Instruction::LocalSet(buf));
-            if mk == MapKey::Str {
-                self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
-            }
-            let off = b.alloc(al.size, al.align);
-            b.slot(off + al.fields[0]);
-            b.ins(&Instruction::LocalGet(buf));
-            b.ins(&Instruction::I32Store(word()));
-            for f in [al.fields[1], al.fields[2]] {
-                b.slot(off + f);
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I64ExtendI32U);
-                b.ins(&Instruction::I64Store(word8()));
-            }
-            b.slot(off);
-            return Ok(aty);
-        }
 
         let k = match mk {
             MapKey::I64 => {
@@ -17997,9 +18014,16 @@ impl<'p> Fn_<'_, 'p> {
                         Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
                         None => unsupported(&format!("`{callee}` with too few operands"), line),
                     };
-                return match callee {
-                    "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
-                    "stringFromBytes" => self.string_from_bytes(m, b, &mut operand, line),
+                return match (callee, args) {
+                    ("bytes", _) => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    ("stringFromBytes", _) => self.string_from_bytes(m, b, &mut operand, line),
+                    ("@keys", [(v, _)]) => {
+                        let mty = self.core_ty(body, v, &Type::Int);
+                        self.core_val(m, b, body, w, v, &mty, line)?;
+                        let hdr = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(hdr));
+                        self.map_keys(m, b, hdr, &mty, line)
+                    }
                     _ => self.slot_call(m, b, callee, &mut operand, line),
                 };
             }
