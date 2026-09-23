@@ -433,6 +433,39 @@ A name the screen refuses is never alone: every such body also fails a statement
 
 The 198 bodies with a gap are the same on main and at the head, by first gap: `Opaque:Static` 43, `toJson` 19, `Lambda` 19, `fromJson` 18, `@at` 12, a call through a function value 28 over nine names, `logger` 6, `@tally` 6, `Make:Try` 5, `jsonSchema` 5, `fromArray` 5, `serveStream` 4, `Switch:Impl` 3, `@has` 3, `lineAt` 3, `@list` 3, and 13 more tags with 16 bodies between them.
 
+## Which build judges a gen body (2026-09-24)
+
+Measured on main `5b95a16b`, with no code moved. `m7-route` left 80 lines of `contractOf` in host programs' copies of gen bodies and proposed that the core build a gen body only in the program that runs it. This count asks what that would lose. A temporary instrument in `core::augment`, not committed, wrote one line per gen body the kernel judged: the root, the build kind, the module, the function and the verdict. A host build is a root's own analysis. A generator compile is the one RFC-0076 runs with every `is_gen` cleared (`vyrn_genwasm::prepare`), and the instrument knew its gen bodies by the names `prepare` cleared. It ran `vyrn check` over the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, one process per root from the root's directory. A cold pass had `VYRN_NO_GEN_CACHE=1` and an empty `VYRN_GEN_CACHE_DIR` per root. A warm pass shared one cache directory, and its second run was counted. A body is its module's file name and its function, with the loader's `__fromN` suffix removed. A generator compile names its own module `<root>`, so those bodies were matched by function name.
+
+| build kind | judgments, cold | judgments, warm | roots, cold | distinct bodies |
+|---|---|---|---|---|
+| host build (H) | 4,437 | 4,437 | 71 | 288 |
+| generator compile (G) | 2,442 | 0 | 43 | 288 |
+
+Over the corpus, H \ G and G \ H are empty, and every judgment in both kinds accepted its body. `std/ui` holds 93 of the 288 bodies, `std/vyx` 58, `std/i18n` 49 and `std/rpc` 19. The corpus alone loses no refusal. By root, 2,344 of the 4,437 host judgments have no generator judgment in the same process. That root imports the module and runs none of its generators, or the root is the generator module itself. Both passes read 338 roots accepted and 77 refused, with the same stderr.
+
+Three witnesses in a scratch directory put the refusal of `a regions shadowing let` (`refusals.rs`) inside a gen fn:
+
+- **A generator the host runs.** Cold, `vyrn check` prints the refusal twice: once at `lib.vyrn:8`, and once at `hostA.vyrn:8`, a line the 4-line host does not have. Warm, it prints `lib.vyrn:8` once. The generator compile's refusals stay in the kernel's thread-local list until the host's drain, which reads them with no module and prints them at the root's file. So on main the stderr depends on the cache state. Under the proposal, the warm run prints nothing.
+- **A gen fn no program runs.** `unran` in a module the host imports for a plain function is judged by the host build alone. Under the proposal, no command refuses it until a program runs it.
+- **The same body outside a gen fn** is refused once, at its own line.
+
+A cache hit skips the generator compile, so a warm cache judges no gen body there. The output cache entry is written after a run that the kernel's refusal did not stop, and it is validated by the hashes of the generator's transitive sources. An edited body or import misses the cache. A compiler whose kernel states a new rule does not, because the key and the entry name no compiler identity; only the artifact key does (`compiler_identity`).
+
+What the host build spends on gen bodies, measured by the instrument (core build, placement and the facts rebuild; the effect judgment is not split out) and by a second arm that skipped them. Both arms had `VYRN_NO_GEN_CACHE=1` and a warm artifact directory, and ran interleaved, three rounds, best of three. The skipping arm's export wrote 241 files, byte-identical, and every check printed the same stderr.
+
+| root | gen bodies | gen body time | wall, building them | wall, skipping them |
+|---|---|---|---|---|
+| `vyrn run site/export.vyrn out` | 208 | 78 ms | 8,434 ms | 8,035 ms |
+| `vyrn check site/export.vyrn` | 208 | 69 ms | 3,748 ms | 3,573 ms |
+| `vyrn check examples/shelf/server.vyrn` | 233 | 64 ms | 1,078 ms | 996 ms |
+| `vyrn check examples/bin/client/boot.vyrn` | 224 | 56 ms | 769 ms | 724 ms |
+| `vyrn check examples/fullstack/server.vyrn` | 175 | 43 ms | 507 ms | 463 ms |
+
+The walls came from a loaded machine, and the rounds of one arm ranged over up to 2.4 s, so the wall columns decide nothing. The instrument's column is the cost: 2 to 9 per cent of a check, and 0.9 per cent of the export.
+
+**The decision this count supports.** A gen body is judged in the program that holds it, on every cache state, because that is the only judgment a command reports with the right file. The host build keeps building gen bodies for the kernel. `core::gaps` and `coredrive` count only bodies an emitter reads, so a gen body in a host build is judged and not counted, and the 80 `contractOf` lines leave the tally as lines no emitter reads. The generator compile's refusals are drained and dropped when it ends, since the host build states each of them. The licence is `vyrn check` over the 415 roots, byte-identical, and the three witnesses in `refusals.rs`: the run generator refused once at its own line, cold and warm; `unran` refused; the plain body unchanged. Skipping gen bodies in the host would save 43 to 78 ms per root. It would need two changes first: a generator compile's refusals reach the command, and the output cache key names the compiler. Even then a gen fn that no program runs would not be judged.
+
 ## What the tracks since have changed
 
 Each track below retired tags, so every table above is the state before them
