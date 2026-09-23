@@ -18301,14 +18301,30 @@ impl<'p> Fn_<'_, 'p> {
                 kind: Callee::Ctor,
                 ..
             } => {
-                args.iter().all(|(v, _)| self.core_val_readable(body, v))
-                    && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
+                matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
                     && self.core_variant(ty, callee).is_some_and(|(_, p)| {
-                        p.len() == args.len() && p.iter().all(|t| self.core_part_ty(t))
+                        p.len() == args.len()
+                            && args.iter().zip(&p).all(|((v, _), t)| {
+                                (self.core_val_readable(body, v) && self.core_part_ty(t))
+                                    || self.core_payload_layout(body, v, t)
+                            })
                     })
             }
             _ => false,
         }
+    }
+
+    /// Whether `v` is a layout name that fills a payload of `t` from its
+    /// address: [`Fn_::build_variant`] boxes it or copies its two words, and
+    /// [`Fn_::core_val`] pushes the address, as the arm's `Expr::Var` does.
+    fn core_payload_layout(&self, body: &vyrn_lower::core::Body, v: &Val, t: &Type) -> bool {
+        matches!(v, Val::Name(n) if {
+            let nt = &body.names[*n as usize].ty;
+            matches!(self.cx.repr(nt, 0), Ok(Repr::Agg(_)))
+                && !self.checks(nt)
+                && !self.checks(t)
+                && self.cx.ll(nt) == self.cx.ll(t)
+        })
     }
 
     /// Whether this walk builds the layout a [`Rhs::Make`] row states —
