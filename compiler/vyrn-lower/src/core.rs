@@ -6053,9 +6053,24 @@ impl<'a> Builder<'a> {
                 self.close_streams(&mut fail);
                 self.drops_at(Exit::Try, tid, &mut fail)?;
                 // An `Option` fails with no binder, and the value it returns
-                // is `None` of the frame's result.
+                // is `None` of the frame's result. A `Result` fails with its
+                // error binder, taken into `Err` of the frame's result.
                 let value = match (fb.first(), self.ret.clone()) {
-                    (Some(n), _) => Some(Val::Name(*n)),
+                    (Some(n), Some(rt)) => {
+                        let t = self.temp(rt.clone(), *line);
+                        fail.push(St::Let(
+                            t,
+                            Rhs::Call {
+                                callee: "Err".into(),
+                                args: vec![(Val::Name(*n), Capability::Consume)],
+                                write_back: false,
+                                kind: Callee::Ctor,
+                                ret: Some(rt),
+                            },
+                        ));
+                        Some(Val::Name(t))
+                    }
+                    (Some(n), None) => Some(Val::Name(*n)),
                     (None, Some(rt)) => Some(self.nullary("None", rt, *line, &mut fail)?),
                     (None, None) => None,
                 };
