@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 24] = [
+const SHAPES: [(&str, &str); 25] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -324,6 +324,14 @@ const SHAPES: [(&str, &str); 24] = [
         "a String taken out of a field, on one edge and in a loop",
         "type F = { key: String, value: String, n: Int64 }          fn mk(k: Int64) -> F { return F { key: k.toString(), value: \"vv\".copy(), n: k } }          fn fields(k: Int64) -> Array<F> { return [mk(k), mk(k + 1), mk(1)] }          fn one(k: Int64) -> Int64 { let mut out: Array<String> = [] let f = mk(k)          if f.n > 1 { out.push(consume f.key) } return out.length * 100 + f.value.byteLength }          fn all(k: Int64) -> Int64 { let mut keys: Array<String> = []          for f in fields(k) { if f.n != 1 { keys.push(consume f.key) } } return keys.length * 10 + keys[1].byteLength }          fn vyrnTestMain() -> Int64 { return one(5) + one(0) * 1000 + all(99) * 1000000 }",
     ),
+    // A `return` and a `break` out of a `for` whose every element leaves
+    // through the loop variable release the elements no turn reached
+    // (RFC-0125 M7). `examples/` writes only the `return`, in the generated
+    // decoders.
+    (
+        "a `for` left early over the elements it never reached",
+        "type Rec = { name: String, k: Int64 }          fn mk(n: Int64) -> Array<Rec> { let mut out: Array<Rec> = [] let mut i = 0          while i < n { out.push(Rec { name: \"r\" + i.toString(), k: i }) i = i + 1 } return out }          fn sink(r: consume Rec) -> Int64 { return r.k }          fn first(n: Int64) -> Int64 { for x in mk(n) { return sink(x) + 10 } return 0 }          fn until(n: Int64, stop: Int64) -> Int64 { let xs = mk(n) let mut t = 0          for x in consume xs { if x.k == stop { break } t = t + sink(x) } return t }          fn vyrnTestMain() -> Int64 { return first(3) + until(5, 3) * 100 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -333,7 +341,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 24] = [
+const SHAPE_PIN: [(&str, usize, usize); 25] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -376,6 +384,11 @@ const SHAPE_PIN: [(&str, usize, usize); 24] = [
     (
         "a String taken out of a field, on one edge and in a loop",
         0,
+        0,
+    ),
+    (
+        "a `for` left early over the elements it never reached",
+        1,
         0,
     ),
 ];

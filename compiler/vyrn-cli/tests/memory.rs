@@ -2345,3 +2345,53 @@ fn main() -> Int64 {
         assert_eq!(got, (Some(0), "10\n0\n2\n".to_string()));
     }
 }
+
+// A `for` whose elements each leave through the loop variable frees its
+// buffer alone; a `return` or a `break` out of it releases the elements no
+// turn reached first. Each exit leaked those elements under both walks.
+#[test]
+fn a_for_that_leaves_early_releases_the_elements_it_never_reached() {
+    let body = r#"type Rec = { name: String, k: Int64 }
+
+fn mk(n: Int64) -> Array<Rec> {
+    let mut out: Array<Rec> = []
+    let mut i = 0
+    while i < n {
+        out.push(Rec { name: "r" + i.toString(), k: i })
+        i = i + 1
+    }
+    return out
+}
+
+fn first(n: Int64) -> Option<Rec> {
+    for x in mk(n) {
+        return Some(x)
+    }
+    return None
+}
+
+fn until(n: Int64, stop: Int64) -> Int64 {
+    let xs = mk(n)
+    let mut keep: Array<Rec> = []
+    for x in consume xs {
+        if x.k == stop {
+            break
+        }
+        keep.push(x)
+    }
+    return keep.length
+}
+
+fn main() -> Int64 {
+    if let Some(r) = first(3) {
+        print(r.name)
+    }
+    print(until(4, 1))
+    print(until(2, 5))
+    return 0
+}
+"#;
+    for got in payload_run("forexit", body) {
+        assert_eq!(got, (Some(0), "r0\n1\n2\n".to_string()));
+    }
+}
