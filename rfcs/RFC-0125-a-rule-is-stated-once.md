@@ -25397,6 +25397,28 @@ for it is §2.1's: a builtin is a call with a specification row, a method is a
 call after dispatch, a projection is a call after RFC-0120's resolution, and
 none of the three is a node kind of its own.
 
+**The hoisted header, decided on the second screen table (2026-09-23).**
+`m7-screen2` measured a `while` that hoists a header as the first clause the
+emitter's screen refuses for 9,413 bodies and the only clause for 8,398, the
+largest family left. The arm hoists in `Fn_::hoist_walks` on a proof
+`header_invariant` makes on the syntax; the table in section 3 said the
+optimizer leaves when the core hoists, and M1's read half predicted the same.
+The decision: the core hoists. Before a `while` that indexes a binding whose
+type is an array, a fixed array, a small array or a String, the builder binds
+the binding's header, the element address and the length the emitter's `Walk`
+holds, to names of its own, as rows, when the kernel shows that no row of the
+loop writes the binding: no store into it, no take, no `modify` or `consume`
+argument that names it, no lambda that captures it, and not module state. The
+loop's element reads, bounds checks and exit test read those names. Where the
+kernel shows a write, the rows read the header each turn as they do today, and
+the price stays in the row that caused it. The proof moves from the syntax to
+the kernel's write facts, `Kernel::wrote` and `wrote_by_call`, stated once;
+`header_invariant`, `indexed_names`, `hoist_walks`, `cached_walk` and
+`hoists_a_header` go when `VYRN_FORM_TALLY` reads zero for the `while` arm they
+serve. The gate is M1's: `fieldstore.rs` pins one header read for a loop that
+only reads and a reload per access for a loop that pushes, and the bench table
+keeps `growable array element read` inside its band.
+
 **Two deletions, after the measure reads all.** First, the AST walk in
 `direct.rs` goes with `VYRN_NO_CORE_WALK` and `FORMS`, because nothing reaches
 it; `emitter_census` re-pins to what the core's reader costs. Second, the
