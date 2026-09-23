@@ -4446,17 +4446,18 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
-    /// An RFC-0014 or RFC-0044 I/O builtin: one runtime function that writes
-    /// its whole result through a slot allocated here, the hidden destination
-    /// an aggregate-returning call gets. The destination leads, the operands
-    /// follow, then what the function needs after them. Under a generation
+    /// An RFC-0014 or RFC-0044 I/O builtin, or `parse`: one runtime function
+    /// that writes its whole result through a slot allocated here, the hidden
+    /// destination an aggregate-returning call gets (`wasm_sig`). The
+    /// destination leads, the operands follow, then what the function needs
+    /// after them. Under a generation
     /// (`Cx::gen`) the two readers are their host twins, which take the host's
     /// read mode after the path and read through the loader's resolver rather
     /// than `path_open` (RFC-0076 M7).
     ///
     /// `operand` writes argument `i` at the type asked for. The arm over the
     /// source and [`Fn_::core_call`] over the rows both call this.
-    fn io_call(
+    fn slot_call(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
@@ -4470,7 +4471,7 @@ impl<'p> Fn_<'_, 'p> {
         ) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let Some(ty) = io_arity(name).and_then(|n| io_builtin_ty(name, n)) else {
+        let Some(ty) = slot_arity(name).and_then(|n| slot_ty(name, n)) else {
             return unsupported(&format!("`{name}` as an I/O builtin"), line);
         };
         let l = self.layout_of(&ty, line)?;
@@ -4515,6 +4516,10 @@ impl<'p> Fn_<'_, 'p> {
                 } else {
                     rt.read_file_bytes
                 }
+            }
+            "parse" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                rt.parse_i64
             }
             "fsyncFile" => {
                 operand(self, m, b, 0, &Type::Str)?;
@@ -8439,14 +8444,14 @@ impl<'p> Fn_<'_, 'p> {
             // arm was cheap; the RUNTIME FUNCTION behind it was a third copy of the
             // range check, and RFC-0079 M3 deleted both — `slice` routes into
             // `std/strpred`'s `sliceV` at the top of this dispatch now.)
-            // RFC-0014 and RFC-0044's I/O, one runtime function each
-            // ([`Fn_::io_call`]).
-            n if io_builtin_ty(n, args.len()).is_some() => {
+            // RFC-0014 and RFC-0044's I/O and `parse`, one runtime function
+            // each ([`Fn_::slot_call`]).
+            n if slot_ty(n, args.len()).is_some() => {
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
                         s.expr_as(m, b, &args[i], t).map(|_| ())
                     };
-                return self.io_call(m, b, n, &mut operand, line);
+                return self.slot_call(m, b, n, &mut operand, line);
             }
             // RFC-0111: `print` for bytes. `write_all` is already the gathered
             // stdout writer every printed line goes through, so this is that call
@@ -8474,23 +8479,8 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The two builtins RFC-0078 refused to route, and therefore the two
             // this backend owes a loop. `text_runtime` is where those loops are and
-            // why they are not `std/num` and `std/text`.
-            //
-            // `parse` writes its `Option<Int64>` through a slot allocated here,
-            // which is the same hidden destination `readLine` gets — the M2b
-            // aggregate rule rather than a case of its own. `parseI64` is a
-            // `std/runtime` function returning the `Option`, so the destination
-            // leads, as it does for every aggregate result (`wasm_sig`).
-            "parse" if args.len() == 1 => {
-                let ty = Type::option(Type::Int);
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                b.ins(&Instruction::Call(self.cx.rt.parse_i64));
-                b.slot(off);
-                return Ok(ty);
-            }
+            // why they are not `std/num` and `std/text`. `parse` is the other,
+            // and [`Fn_::slot_call`] writes it.
             // `lineAt(bytes, off)` / `colAt(bytes, off)`. The buffer goes through
             // `walk`, so an `Array`, a fixed `ArrayN` and a `SmallArray` all arrive
             // as one base-and-count — the same three the checker accepts — and the
@@ -16325,7 +16315,7 @@ const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 
 /// `listDir`'s type (RFC-0021), in one place so the lowering and [`Fn_::peek`]
 /// cannot size a destination slot differently from the value written into it —
-/// M2l's rule, and the shape `io_builtin_ty` exists for on the other builtins.
+/// M2l's rule, and the shape `slot_ty` exists for on the other builtins.
 fn gen_list_dir_ty() -> Type {
     Type::result(Type::Array(Box::new(Type::Str)), Type::Str)
 }
@@ -16339,7 +16329,7 @@ fn gen_list_dir_ty() -> Type {
 /// read as "a field of the non-record type `Map<String, Int64>`" while the
 /// same read outside a branch compiled. `base` is already resolved.
 ///
-/// This is `io_builtin_ty`'s rule on a second table: one spelling, two readers.
+/// This is `slot_ty`'s rule on a second table: one spelling, two readers.
 fn length_ty(field: &str, base: &Type) -> Option<Type> {
     matches!(
         (field, base),
@@ -16352,26 +16342,24 @@ fn length_ty(field: &str, base: &Type) -> Option<Type> {
     .then_some(Type::Int)
 }
 
-/// The result type of an RFC-0014/RFC-0044 I/O builtin at `argc` operands, or
-/// `None` where it is not one.
+/// The result type of a builtin [`Fn_::slot_call`] writes, at `argc` operands,
+/// or `None` where the name is not one or the arity is not its own.
 ///
-/// The type is the core's `Spec::Builds` row, read by the emitting path, which
-/// sizes a destination slot with it, and by [`Fn_::peek`], which needs the same
-/// answer when the call is a branch's value: two spellings of
-/// `Result<Bool, String>` are two chances to size a slot one field differently
-/// from the value written into it.
-fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
+/// The type is the core's `Spec::Builds` row, so the slot the call sizes and
+/// the value the row lands are one spelling.
+fn slot_ty(name: &str, argc: usize) -> Option<Type> {
     match vyrn_lower::core::builtin_row(name) {
-        Some(Spec::Builds(t)) if io_arity(name) == Some(argc) => Some(t.clone()),
+        Some(Spec::Builds(t)) if slot_arity(name) == Some(argc) => Some(t.clone()),
         _ => None,
     }
 }
 
-/// How many operands an I/O builtin takes, or `None` where the name is not one.
-fn io_arity(name: &str) -> Option<usize> {
+/// How many operands a builtin [`Fn_::slot_call`] writes takes, or `None`
+/// where the name is not one.
+fn slot_arity(name: &str) -> Option<usize> {
     match name {
         "args" | "readLine" => Some(0),
-        "readFile" | "readFileBytes" | "fsyncFile" => Some(1),
+        "readFile" | "readFileBytes" | "fsyncFile" | "parse" => Some(1),
         "writeFile" | "renameFile" | "writeFileBytes" => Some(2),
         _ => None,
     }
@@ -17961,7 +17949,7 @@ impl<'p> Fn_<'_, 'p> {
                 return match callee {
                     "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
                     "stringFromBytes" => self.string_from_bytes(m, b, &mut operand, line),
-                    _ => self.io_call(m, b, callee, &mut operand, line),
+                    _ => self.slot_call(m, b, callee, &mut operand, line),
                 };
             }
             None => {}

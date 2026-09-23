@@ -829,12 +829,12 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 10229, 817),
+        ("the mapping §2.3 names", 10234, 817),
         ("a decision §2.3 says it must not make", 1266, 216),
         ("the runtime it emits by hand", 625, 7),
-        ("one block per builtin name", 4414, 840),
+        ("one block per builtin name", 4399, 839),
         ("the wasm format", 343, 0),
-        ("shared machinery", 2697, 88),
+        ("shared machinery", 2695, 88),
         ("tests", 331, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
@@ -909,11 +909,11 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 51, 6556, 0, 0),
+        ("neither", 51, 6561, 0, 0),
         ("the core's rows", 5, 2099, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
-        ("the source, and the core has no row", 10, 1958, 81, 0),
-        ("both, for two questions", 15, 9211, 105, 237),
+        ("the source, and the core has no row", 10, 1956, 81, 0),
+        ("both, for two questions", 15, 9196, 105, 237),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
     assert_eq!(

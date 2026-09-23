@@ -1765,6 +1765,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 "writeFileBytes",
                 Spec::Builds(Type::result(Type::Bool, Type::Str)),
             ),
+            ("parse", Spec::Builds(Type::option(Type::Int))),
         ]
     })
 }
