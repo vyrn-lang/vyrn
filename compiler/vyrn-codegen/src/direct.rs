@@ -1467,8 +1467,7 @@ impl<'a> Cx<'a> {
     /// Does the container's release at this `for` walk the BUFFER alone? The
     /// core states it at the loop
     /// ([`vyrn_lower::core::Facts::loop_buffer_only`]), out of the same
-    /// sentence that says whose an element is; this emitter read the KIND of
-    /// the plan's own row until RFC-0125 §3 M3's container slice.
+    /// sentence that says whose an element is.
     fn loop_buffer_only(&self, node: usize) -> bool {
         self.facts
             .as_ref()
@@ -3704,6 +3703,19 @@ impl<'p> Fn_<'_, 'p> {
         Ok(base)
     }
 
+    /// The release a value of `ty` bound at the node `key` owes:
+    /// [`Fn_::rel_for`]'s, or the buffer alone, the triple's field 0, where
+    /// `key` is a `for` whose every element left through the loop variable
+    /// ([`Cx::loop_buffer_only`]). The deep walk would free values somebody
+    /// else owns there; a blanket buffer-only free took somebody else's
+    /// storage in round fourteen.
+    fn rel_owed(&mut self, key: usize, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
+        let buffer = self.cx.loop_buffer_only(key);
+        Ok(self
+            .rel_for(ty, line)?
+            .map(|r| if buffer { Rel::Buffers(vec![0]) } else { r }))
+    }
+
     /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
     ///
     /// [`vyrn_frontend::declared::Owned::release_kind`]'s row, and nothing
@@ -5310,19 +5322,7 @@ impl<'p> Fn_<'_, 'p> {
                 // this emitter asked the plan's droppable table until
                 // RFC-0125 §3 M3's container slice.
                 if self.releases_whole(key) || self.cx.loop_gives_back(key) {
-                    if let Some(r) = self.rel_for(&it, *line)? {
-                        // WHAT the release walks is the other half of the
-                        // element sentence. Where every element left through
-                        // the loop variable the deep walk `rel_for` builds
-                        // would free values somebody else now owns — the trap
-                        // that turned round fourteen's blanket downgrade back
-                        // — so the buffer, which is the triple's field 0, is
-                        // all the loop still owns.
-                        let r = if self.cx.loop_buffer_only(key) {
-                            Rel::Buffers(vec![0])
-                        } else {
-                            r
-                        };
+                    if let Some(r) = self.rel_owed(key, &it, *line)? {
                         // `expr` leaves one I32 — an aggregate's address or a
                         // String's pointer — and `walk` wants it back, so it is
                         // stashed rather than teed into two shapes.
@@ -16846,7 +16846,11 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("a release of a name with no place", line);
         };
         let info = &body.names[n as usize];
-        let Some(rel) = self.rel_for(&ty, line)? else {
+        let rel = match info.binding {
+            Some(key) => self.rel_owed(key, &ty, line)?,
+            None => self.rel_for(&ty, line)?,
+        };
+        let Some(rel) = rel else {
             return Ok(());
         };
         let rel = around(rel, &info.holes);
@@ -16937,6 +16941,7 @@ impl<'p> Fn_<'_, 'p> {
                 Some(t) => sum[t].payload.clone(),
                 None => Vec::new(),
             };
+            let from = b.mark();
             for (i, bn) in arm.binds.iter().enumerate() {
                 let ty = body.names[*bn as usize].ty.clone();
                 let layout = matches!(self.cx.repr(&ty, line)?, Repr::Agg(_));
@@ -16962,7 +16967,13 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 self.core_bind(b, body, w, *bn, at, ty)?;
             }
+            let to = b.mark();
             self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
+            // A binder's scope is its arm, so the slots a binder moved out
+            // into go back at the arm's end, as the arm gives them back.
+            if from < to {
+                b.give_back(from, to);
+            }
             self.chain_leave(b, &chain, slot);
         }
         self.chain_close(b, &chain);
@@ -17490,7 +17501,8 @@ impl<'p> Fn_<'_, 'p> {
                 // `return f(a)`: [`Fn_::agg_into`]'s destination, then the
                 // call's own convention ([`Fn_::out_ptr`]). Any other
                 // temporary is the storage the call wrote, and its name holds
-                // that address, as the arm hands the call's own slot on.
+                // that address, as the arm hands the call's own slot on: to
+                // the reader, or to the `match` or `for` the plan keys it by.
                 St::Let(
                     n,
                     rhs @ (Rhs::Call { .. } | Rhs::Read(vyrn_lower::core::Place::Key(..))),
@@ -17509,7 +17521,7 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let (dest, place) = if lands {
                         (Some(Dest::Addr(self.core_out(line)?, 0)), None)
-                    } else if body.names[*n as usize].binding.is_none() {
+                    } else if body.names[*n as usize].source.starts_with('@') {
                         (None, None)
                     } else {
                         let off = self.core_slot(b, w, *n, &r, line)?;
@@ -18760,7 +18772,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         self.scope.push((info.source.clone(), place, ty.clone()));
         if self.releases_whole(key) {
-            if let Some(r) = self.rel_for(&ty, info.line)? {
+            if let Some(r) = self.rel_owed(key, &ty, info.line)? {
                 self.register_rel(b, key, place, r);
             }
         }
@@ -19141,13 +19153,8 @@ impl<'p> Fn_<'_, 'p> {
             }
             // An aggregate call result has a slot of its own, which the
             // reader's `let` takes before the call, the storage the call
-            // wrote, or the caller's storage. A temporary with a binding is a
-            // scrutinee the plan keys by its `match`, and the arm hands the
-            // call's own slot to the switch with nothing bound.
-            St::Let(n, rhs) if self.core_agg_call(body, rhs) => {
-                let info = &body.names[*n as usize];
-                info.binding.is_none() || !info.source.starts_with('@')
-            }
+            // wrote, or the caller's storage.
+            St::Let(_, rhs) if self.core_agg_call(body, rhs) => true,
             St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
                 self.core_rebuilt(body, ss, i + 1).is_some()
             }
@@ -19233,12 +19240,15 @@ impl<'p> Fn_<'_, 'p> {
             // where it stands ([`Fn_::core_release`]). What it needs is the
             // node the plan keys the slot by, which is the name's binding.
             St::Row { name, .. } => body.names[*name as usize].binding.is_some(),
-            St::Return { value, .. } => value.as_ref().is_none_or(|v| match v {
-                Val::Name(n) if matches!(self.ret, Repr::Agg(_)) => {
+            // A `?` on an `Option` returns `None` with no value on the row,
+            // which is the return type's tag and no value this walk writes.
+            St::Return { value, .. } => match value {
+                None => matches!(self.ret, Repr::Unit),
+                Some(Val::Name(n)) if matches!(self.ret, Repr::Agg(_)) => {
                     self.cx.resolve(&body.names[*n as usize].ty) == self.cx.resolve(&self.ret_ty)
                 }
-                _ => self.core_val_readable(body, v),
-            }),
+                Some(v) => self.core_val_readable(body, v),
+            },
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
             // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
