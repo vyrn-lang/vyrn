@@ -1363,6 +1363,16 @@ fn is_place_read(e: &Expr) -> bool {
     }
 }
 
+/// A field read or an element read, whatever its receiver: the reads whose
+/// receiver [`Builder::place`] binds to a temporary when it names no place.
+fn reads_a_part(e: &Expr) -> bool {
+    match e {
+        Expr::Field { .. } => true,
+        Expr::Call { name, args, .. } => name == "@at" && args.len() == 2,
+        _ => false,
+    }
+}
+
 /// The two refusals a `consume` gets when what follows it names no place.
 /// `by_loop` picks the form's wording: `for x in consume xs` says the loop
 /// already owns a container, and a prefix `consume` says the value is already
@@ -3597,11 +3607,11 @@ impl<'a> Builder<'a> {
                     }
                 }
                 self.bind(n, rhs, out);
-                // The unnamed receiver of the field the binding took or read
+                // The unnamed receiver of the part the binding took or read
                 // (RFC-0114 R1′): released after the read where the plan says
                 // this frame owns it, held — and seen by the kernel — where
                 // it does not.
-                if let Expr::Field { .. } = value {
+                if reads_a_part(value) {
                     self.release_receiver(value, out, false);
                 }
                 self.grows(n, name);
@@ -5405,7 +5415,7 @@ impl<'a> Builder<'a> {
     /// consumer's binding, the same point. The placer writes the row only
     /// where such a drain encloses the read; elsewhere the receiver stays
     /// held and the judgment refuses it.
-    fn release_receiver(&mut self, e: &Expr, out: &mut Vec<St>, borrowed: bool) {
+    fn release_receiver(&mut self, e: &'a Expr, out: &mut Vec<St>, borrowed: bool) {
         let Some((r, producer, malloc)) = self.pending_receiver.take() else {
             return;
         };
@@ -5423,6 +5433,13 @@ impl<'a> Builder<'a> {
             return;
         }
         let _ = node;
+        // An element's receiver is `@at`'s argument, and the AST walk frees
+        // it by the key an argument temporary has.
+        if let (false, Expr::Call { name, args, .. }) = (took, e) {
+            if self.arg_released(&args[0], r, name, 0) {
+                self.body.names[r as usize].arg_drop = Some(producer);
+            }
+        }
         // The read that took a heap value out of the receiver leaves a hole
         // where it was, and the release walks around it. A take the walk
         // cannot be told to skip — an ELEMENT, which the plan spells `[]` —
@@ -5549,7 +5566,7 @@ impl<'a> Builder<'a> {
                 };
                 self.record_fields(t, e);
                 self.bind(t, rhs, out);
-                if let Expr::Field { .. } = e {
+                if reads_a_part(e) {
                     self.release_receiver(e, out, false);
                 }
                 Ok(Val::Name(t))
@@ -5946,13 +5963,13 @@ impl<'a> Builder<'a> {
     /// the binding that follows; the ones queued by an enclosing expression
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
-    /// Whether `name(args)` at `e` is a read that owns no heap off a receiver
-    /// that is a place: an element of a builtin array, a String's byte, or a
-    /// map's entry, whose `Option` the runtime's lookup builds.
+    /// Whether `name(args)` at `e` is a read that owns no heap: an element of
+    /// a builtin array, a String's byte, or a map's entry, whose `Option` the
+    /// runtime's lookup builds. A receiver that is no place is bound to a
+    /// temporary and released after the read, as a field's is.
     fn reads_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
         name == vyrn_frontend::project::AT
             && args.len() == 2
-            && is_place_read(&args[0])
             && self.ty_of(e).is_ok_and(|t| !self.owns(&t))
             && self.ty_of(&args[0]).is_ok_and(|t| {
                 matches!(
@@ -6582,7 +6599,11 @@ impl<'a> Builder<'a> {
             Expr::Call { name, args, .. } if name == "@at" && args.len() == 2 => {
                 let bty = self.ty_of(&args[0])?;
                 let base = self.place(&args[0], out)?;
+                // The receiver is this read's, and a field read in the index
+                // would release it as its own.
+                let receiver = self.pending_receiver.take();
                 let i = self.read_val(&args[1], out)?;
+                self.pending_receiver = receiver;
                 if self.is_map(&bty) {
                     Ok(Place::Key(Box::new(base), i))
                 } else {
