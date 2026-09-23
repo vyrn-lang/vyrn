@@ -4066,11 +4066,16 @@ impl<'a> Builder<'a> {
                         out.push(St::Drop(t, Site::Node(sid), 0, None));
                     }
                 } else {
-                    out.push(St::Do {
-                        rhs,
-                        line: e.line(),
-                        site: sid,
-                    });
+                    // A value on its own does nothing: a `match` or an `if`
+                    // statement yields its join, which no arm writes when the
+                    // type is Unit.
+                    if !matches!(rhs, Rhs::Val(_)) {
+                        out.push(St::Do {
+                            rhs,
+                            line: e.line(),
+                            site: sid,
+                        });
+                    }
                     for t in std::mem::take(&mut self.after_of_rhs) {
                         out.push(St::Drop(t, Site::None, 0, None));
                     }
