@@ -20044,7 +20044,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether `v` is a value one of this walk's ARITHMETIC rows computes
     /// with — a different question from [`Fn_::core_val_readable`], which is
     /// whether the walk can write the value at all. A `where` type computes
-    /// as its base.
+    /// as its base. A vector is one wasm `v128`, and [`Fn_::bin_ins`] and
+    /// [`Fn_::un_ins`] write its lane-wise operators (RFC-0083).
     ///
     /// A literal has no name and carries its type in its own variant: a
     /// `Lit::Str` is a String, which this walk applies no operation to. `"a" <
@@ -20052,7 +20053,14 @@ impl<'p> Fn_<'_, 'p> {
     /// screen to refuse.
     fn core_operand(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
         match v {
-            Val::Name(n) => core_scalar(&self.cx.resolve(&body.names[*n as usize].ty)),
+            Val::Name(n) => {
+                let t = self.cx.resolve(&body.names[*n as usize].ty);
+                core_scalar(&t)
+                    || matches!(
+                        t,
+                        Type::F32x4 | Type::I32x4 | Type::F64x2 | Type::Mask32x4 | Type::Mask64x2
+                    )
+            }
             Val::Lit(l) => !matches!(l, Lit::Opaque(_) | Lit::Str(_)),
         }
     }
