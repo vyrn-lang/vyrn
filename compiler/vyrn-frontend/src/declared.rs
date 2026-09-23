@@ -593,18 +593,16 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
 ///
 /// The walk carries a path and skips a place whose path is in the set, so the
 /// set has to name places the walk actually visits: a chain of RECORD fields,
-/// each hop resolved through the declarations. Two things end the chain and
-/// both answer false.
+/// and of enum payloads spelled `Variant.i`, each hop resolved through the
+/// declarations. The walk tests a payload's tag where it reaches it, so the
+/// hole is skipped when that variant is live (RFC-0125 M7). Two things end the
+/// chain and both answer false.
 ///
 /// **A declared `release`.** `impl Owned for T` is a user function, and a
 /// function cannot be told to leave one field alone.
 ///
-/// **Anything that is not a record.** An enum's live variant is a runtime tag,
-/// so a hole under a payload is not a place a static walk can skip; an array's
-/// element is chosen by an index the walk does not have. Both leak, and
-/// neither is reachable today — a take of a payload or of an element is
-/// refused (RFC-0093 M1) — so this is the guard for the rule rather than for
-/// the corpus.
+/// **A container.** An array's element is chosen by an index the walk does
+/// not have.
 ///
 /// The CORE asks it too, where it states a binding's hole at the `consume`
 /// that made it: a hole the walk cannot skip must not be stated, or a `drop`
@@ -613,17 +611,23 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
 pub fn skippable(proto: &Owned, ty: &Type, paths: &[String]) -> bool {
     paths.iter().all(|p| {
         let mut cur = ty.clone();
-        for seg in p.split('.') {
+        let mut segs = p.split('.');
+        while let Some(seg) = segs.next() {
             if matches!(proto.release_kind(&cur), Some(DropKind::Release(..))) {
                 return false;
             }
-            let Type::Record(fields) = crate::types::resolve(&cur, &proto.types) else {
+            let next = match crate::types::resolve(&cur, &proto.types) {
+                Type::Record(fields) => fields.into_iter().find(|f| f.name == seg).map(|f| f.ty),
+                Type::Enum(vs) => segs.next().and_then(|i| {
+                    let v = vs.into_iter().find(|v| v.name == seg)?;
+                    v.payload.into_iter().nth(i.parse().ok()?)
+                }),
+                _ => None,
+            };
+            let Some(next) = next else {
                 return false;
             };
-            let Some(f) = fields.iter().find(|f| f.name == seg) else {
-                return false;
-            };
-            cur = f.ty.clone();
+            cur = next;
         }
         true
     })

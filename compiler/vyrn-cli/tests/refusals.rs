@@ -2861,3 +2861,72 @@ fn a_call_that_writes_module_state_ends_its_borrows() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
+
+/// RFC-0125 M7, `m7-hole`: a payload binder read out of a value whose type
+/// declares `release` may not be handed to a `consume` parameter, because the
+/// declared release reads every payload. The hand-off freed the payload twice
+/// or leaked the node. Both ways out the sentence names run clean under the
+/// free audit; the copy's arm releases `n` on its edge through the declared
+/// `release`.
+#[test]
+fn a_payload_of_a_type_that_declares_release_is_not_handed_on() {
+    let src = "type Node =\n  | Elem(String, Array<Int64>)\n  | Text(String)\n\
+               impl Owned for Node {\n  fn release(consume self) {\n    match consume self {\n      \
+               Elem(tag, kids) => {\n        drop tag\n        drop kids\n      }\n      \
+               Text(s) => {\n        drop s\n      }\n    }\n  }\n}\n\
+               type One = { node: Node, k: Int64 }\n\
+               fn sum(xs: consume Array<Int64>) -> Int64 {\n  let mut t = 0\n  \
+               for x in xs {\n    t = t + x\n  }\n  return t\n}\n\
+               fn f(n: consume Node) -> One {\n  return match n {\n    \
+               Elem(tag, kids) => One { node: Text(\"x\"), k: sum(kids) },\n    \
+               Text(s) => One { node: n, k: 0 },\n  }\n}\n\
+               fn main() -> Int64 {\n  let a = f(Elem(\"a\", [1, 2, 3]))\n  \
+               let b = f(Text(\"b\"))\n  print(a.k + b.k)\n  return 0\n}\n";
+    let want = "`kids` may not be handed to a `consume` parameter: `Node` declares \
+                `release`, which reads it; consume `n` or copy `kids`";
+    let dir = common::scratch("sealed-payload");
+    let mut bad: Vec<String> = Vec::new();
+    std::fs::write(dir.join("m.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "m.vyrn", false);
+    if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+        bad.push(format!("`check m.vyrn` said {text}"));
+    }
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "m.vyrn"])
+        .output()
+        .expect("vyrn");
+    let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || !out.stdout.is_empty() || !err.contains(want) {
+        bad.push(format!("`run m.vyrn` ran or said {err}"));
+    }
+    let ways = [
+        ("copy", "sum(kids)", "sum(kids.copy())"),
+        ("consume", "match n {", "match consume n {"),
+    ];
+    for (name, from, to) in ways {
+        let file = format!("{name}.vyrn");
+        let fixed = src.replace(from, to);
+        let fixed = if name == "consume" {
+            fixed.replace("One { node: n, k: 0 }", "One { node: Text(s), k: 0 }")
+        } else {
+            fixed
+        };
+        std::fs::write(dir.join(&file), fixed).expect("write the program");
+        let out = vyrn()
+            .current_dir(&dir)
+            .env("VYRN_LEAK_CHECK", "1")
+            .args(["run", &file])
+            .output()
+            .expect("vyrn run");
+        if out.status.code() != Some(0) || String::from_utf8_lossy(&out.stdout).trim() != "6" {
+            bad.push(format!(
+                "`run {file}` exited {:?} and said {}{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}

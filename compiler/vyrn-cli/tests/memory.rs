@@ -2198,3 +2198,150 @@ fn a_store_runs_the_declared_release_of_what_it_displaces() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+// A payload binder read out of a scrutinee the frame owns, handed to a
+// `consume` parameter, leaves a hole in the scrutinee, and the scrutinee's
+// release walks around it (RFC-0125 M7, `vyxProcessElem` in `std/vyx.vyrn`).
+// Each program exited 134, "double or foreign free", under both walks.
+const PAYLOAD_DECLS: &str = r#"type Node =
+    | Elem(String, Array<Int64>, Int64)
+    | Text(String)
+
+fn sum(xs: consume Array<Int64>) -> Int64 {
+    let mut t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+fn size(n: consume Node) -> Int64 {
+    return match n {
+        Elem(a, b, c) => c,
+        Text(s) => s.byteLength,
+    }
+}
+"#;
+
+/// Runs `body` after the declarations under the free audit, on the core's
+/// rows and on the AST walk, and returns each walk's exit code and output.
+fn payload_run(stem: &str, body: &str) -> Vec<(Option<i32>, String)> {
+    let dir = std::env::temp_dir().join(format!("vyrn-hole-{stem}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("m.vyrn");
+    std::fs::write(&file, format!("{PAYLOAD_DECLS}\n{body}")).unwrap();
+    let out = [false, true]
+        .into_iter()
+        .map(|arm| {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+            c.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
+            if arm {
+                c.env("VYRN_NO_CORE_WALK", "1");
+            }
+            let o = c.output().expect("vyrn run");
+            let text = String::from_utf8_lossy(&o.stdout).to_string()
+                + &String::from_utf8_lossy(&o.stderr);
+            (o.status.code(), text)
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_payload_handed_on_from_a_returned_match_is_released_once() {
+    let body = r#"type One = { node: Node, k: Int64 }
+
+fn process(n: consume Node) -> One {
+    return match n {
+        Elem(tag, kids, line) => One { node: Text("x"), k: sum(kids) + line },
+        Text(s) => One { node: n, k: 0 },
+    }
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4)).k)
+    print(process(Text("b")).k)
+    return 0
+}
+"#;
+    for got in payload_run("ret", body) {
+        assert_eq!(got, (Some(0), "10\n0\n".to_string()));
+    }
+}
+
+#[test]
+fn a_payload_handed_on_from_an_if_let_is_released_once() {
+    let body = r#"fn process(n: consume Node) -> Int64 {
+    if let Elem(tag, kids, line) = n {
+        return sum(kids) + line
+    }
+    return size(n)
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4)))
+    print(process(Text("bc")))
+    return 0
+}
+"#;
+    for got in payload_run("iflet", body) {
+        assert_eq!(got, (Some(0), "10\n2\n".to_string()));
+    }
+}
+
+#[test]
+fn a_scrutinee_given_whole_on_one_arm_is_released_around_the_payload_on_the_other() {
+    let body = r#"fn process(n: consume Node) -> Int64 {
+    let mut t = 0
+    match n {
+        Elem(tag, kids, line) => {
+            t = sum(kids) + line
+        }
+        Text(s) => {
+            t = size(n)
+        }
+    }
+    return t
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4)))
+    print(process(Text("bc")))
+    return 0
+}
+"#;
+    for got in payload_run("join", body) {
+        assert_eq!(got, (Some(0), "10\n2\n".to_string()));
+    }
+}
+
+#[test]
+fn a_payload_handed_on_one_edge_is_released_on_the_other() {
+    let body = r#"fn process(n: consume Node, k: Int64) -> Int64 {
+    let mut t = 0
+    match n {
+        Elem(tag, kids, line) => {
+            if k > 0 {
+                t = sum(kids) + line
+            }
+        }
+        Text(s) => {
+            t = size(n)
+        }
+    }
+    return t
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4), 1))
+    print(process(Elem("a", [1, 2, 3], 4), 0))
+    print(process(Text("bc"), 0))
+    return 0
+}
+"#;
+    for got in payload_run("edge", body) {
+        assert_eq!(got, (Some(0), "10\n0\n2\n".to_string()));
+    }
+}

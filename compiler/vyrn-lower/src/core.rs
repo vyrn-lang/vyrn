@@ -98,6 +98,9 @@ pub struct NameInfo {
     /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
     /// the name walks around exactly these; a placed row may carry its own.
     pub holes: Vec<String>,
+    /// For a payload binder read out of its scrutinee ([`Arm::reads`]): what a
+    /// `consume` handed the binder leaves in the scrutinee.
+    pub payload: Option<Payload>,
     /// RFC-0125 §3 M3, row 11b: for a receiver ([`NameInfo::receiver`]), was
     /// the block a CALLEE allocated? A callee's block is malloc-side
     /// whatever `region` is open at the call site, so the free stands there
@@ -747,7 +750,13 @@ pub enum St {
     /// that line and calls the taker `drop`; a refusal at a placed release
     /// names neither, because a reader has no such statement to change
     /// (RFC-0125 §3 M3, rows 06, 20 and 21).
-    Drop(Name, Site, usize),
+    ///
+    /// The holes are the parts that left the value on this row's path, which
+    /// the release walks around ([`Body::drop_holes`]). `None` is the name's
+    /// own set ([`NameInfo::holes`]); an edge release carries the set the
+    /// kernel found on its edge, because one name is holed on one arm and
+    /// whole on the next (`vyxProcessElem` in `std/vyx.vyrn`).
+    Drop(Name, Site, usize, Option<Vec<String>>),
     /// A release row the plan placed at an exit, keyed as the plan keys it,
     /// walking the name around `holes`. The kernel checks the set against
     /// the holes its state has there: a row that skips a place still held
@@ -896,6 +905,17 @@ impl Arm {
             .count();
         &self.body[..n]
     }
+}
+
+/// What a payload binder read out of its scrutinee leaves there when a
+/// `consume` parameter takes it — RFC-0125 M7.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Payload {
+    /// A hole the scrutinee's release walks around, spelled `.Variant.i`.
+    Hole(String),
+    /// Nothing may leave: the scrutinee's type, spelled here, declares a
+    /// `release` that reads every payload.
+    Sealed(String),
 }
 
 /// How one [`Arm`] of a [`St::Switch`] is chosen.
@@ -1062,6 +1082,12 @@ impl Body {
         }
     }
 
+    /// The holes a release row of `n` walks around: the row's own set, else
+    /// the name's.
+    pub fn drop_holes<'b>(&'b self, n: Name, row: &'b Option<Vec<String>>) -> &'b [String] {
+        row.as_deref().unwrap_or(&self.names[n as usize].holes)
+    }
+
     /// How many times each of this body's names is READ, which is what an
     /// emitter has to know before it can leave a value on an operand stack
     /// rather than in a local (RFC-0125 §3 M3, the driver slice).
@@ -1222,7 +1248,7 @@ impl Body {
                     self.val(value),
                     old
                 )),
-                St::Drop(n, _, _) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
+                St::Drop(n, _, _, _) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
                 St::Row { name, holes, .. } => out.push_str(&format!(
                     "{pad}drop {} minus {:?}\n",
                     self.spell(*name),
@@ -1558,7 +1584,7 @@ impl Reads {
                     self.store_place(place);
                     self.hand(value);
                 }
-                St::Drop(n, _, _) => self.name(*n),
+                St::Drop(n, _, _, _) => self.name(*n),
                 // A row is the plan's, not the core's: see [`last_owner`].
                 St::Row { .. } => {}
                 St::If {
@@ -2519,6 +2545,7 @@ impl<'a> Builder<'a> {
             producer: None,
             arg_drop: None,
             holes: Vec::new(),
+            payload: None,
             receiver_malloc: false,
             grows: false,
             must_use_param: false,
@@ -2973,7 +3000,7 @@ impl<'a> Builder<'a> {
         }
         out.push(St::Let(n, rhs));
         for t in std::mem::take(&mut self.after_of_rhs) {
-            out.push(St::Drop(t, Site::None, 0));
+            out.push(St::Drop(t, Site::None, 0, None));
         }
     }
 
@@ -3492,7 +3519,7 @@ impl<'a> Builder<'a> {
                 // An append's operand temporaries, which [`Builder::str_append`]
                 // left queued so the store stays next to its row.
                 for t in std::mem::take(&mut self.after_of_rhs) {
-                    out.push(St::Drop(t, Site::None, 0));
+                    out.push(St::Drop(t, Site::None, 0, None));
                 }
             }
             Stmt::SetField {
@@ -3924,7 +3951,7 @@ impl<'a> Builder<'a> {
                     // left early: either way the loop closes it here, where
                     // the loop is the stream's last owner.
                     if self.body.names[it as usize].releases && self.taken_by_loop(it, sid) {
-                        out.push(St::Drop(it, Site::None, 0));
+                        out.push(St::Drop(it, Site::None, 0, None));
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {
                     // The loop took the container and is its last owner, so
@@ -3932,7 +3959,7 @@ impl<'a> Builder<'a> {
                     // emitters read the judgment rather than the word
                     // `consume` in the source (RFC-0125 §3 M3, the event
                     // stream's slice).
-                    out.push(St::Drop(it, Site::Node(sid), 0));
+                    out.push(St::Drop(it, Site::Node(sid), 0, None));
                 }
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
@@ -3946,7 +3973,7 @@ impl<'a> Builder<'a> {
                 // answers for its own blocks now — `free` refuses one by its
                 // class word — so a `drop` inside a region is an ordinary
                 // drop.
-                out.push(St::Drop(n, Site::None, *line));
+                out.push(St::Drop(n, Site::None, *line, None));
             }
             // RFC-0114 section 25: an unaudited build emits no audit hook, so the
             // row states neither the call nor its operand. A row for `p + 8`
@@ -3961,7 +3988,7 @@ impl<'a> Builder<'a> {
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
                     if self.discards(e) {
-                        out.push(St::Drop(t, Site::Node(sid), 0));
+                        out.push(St::Drop(t, Site::Node(sid), 0, None));
                     }
                 } else {
                     out.push(St::Do {
@@ -3970,7 +3997,7 @@ impl<'a> Builder<'a> {
                         site: sid,
                     });
                     for t in std::mem::take(&mut self.after_of_rhs) {
-                        out.push(St::Drop(t, Site::None, 0));
+                        out.push(St::Drop(t, Site::None, 0, None));
                     }
                 }
             }
@@ -4136,7 +4163,7 @@ impl<'a> Builder<'a> {
             if let Some((_, holes)) = rows.iter().find(|(n, _)| *n == src) {
                 self.body.names[*b as usize].holes =
                     holes.iter().map(|h| format!(".{h}")).collect();
-                out.push(St::Drop(*b, Site::None, 0));
+                out.push(St::Drop(*b, Site::None, 0, None));
                 frees.push(*b);
             }
         }
@@ -4148,7 +4175,7 @@ impl<'a> Builder<'a> {
     fn close_streams(&self, out: &mut Vec<St>) {
         for it in self.stream_loops.iter().rev() {
             if self.body.names[*it as usize].releases {
-                out.push(St::Drop(*it, Site::None, 0));
+                out.push(St::Drop(*it, Site::None, 0, None));
             }
         }
     }
@@ -4158,7 +4185,7 @@ impl<'a> Builder<'a> {
         let Some(ers) = placed_edges(join) else {
             return Ok(());
         };
-        for (name, e) in &ers {
+        for (name, e, holes) in &ers {
             if *e != edge {
                 continue;
             }
@@ -4185,9 +4212,11 @@ impl<'a> Builder<'a> {
                 // reader of the fold gets back the row's own name.
                 self.body.names[t as usize].source = name.clone();
                 out.push(St::Let(t, Rhs::Take(place)));
-                out.push(St::Drop(t, at, 0));
+                out.push(St::Drop(t, at, 0, None));
             } else {
-                out.push(St::Drop(n, at, 0));
+                let holes =
+                    (!holes.is_empty()).then(|| holes.iter().map(|h| format!(".{h}")).collect());
+                out.push(St::Drop(n, at, 0, holes));
             }
         }
         Ok(())
@@ -4590,8 +4619,8 @@ impl<'a> Builder<'a> {
         // the reader wrote, which is one address per binder and the same one
         // on every build (RFC-0125 §3 M3, the walk's deletion —
         // [`Builder::bind_pattern`] below says what it is for).
-        let payloads: Vec<(String, Type, usize)> = match p {
-            Pattern::Other => Vec::new(),
+        let (payloads, variant): (Vec<(String, Type, usize)>, String) = match p {
+            Pattern::Other => (Vec::new(), String::new()),
             // `??`'s pair (RFC-0079) names a TAG rather than a variant, and the
             // SCRUTINEE says which one: variant 1 succeeds, variant 0 fails. Since
             // RFC-0126 §8.11's M4b that is one list for every sum, so the two
@@ -4599,7 +4628,7 @@ impl<'a> Builder<'a> {
             Pattern::Success(n) | Pattern::Failure(n) => match &rt {
                 Type::Enum(vs) if vs.len() == 2 => {
                     let at = usize::from(matches!(p, Pattern::Success(_)));
-                    vs[at]
+                    let ps = vs[at]
                         .payload
                         .first()
                         .map(|t| {
@@ -4609,7 +4638,8 @@ impl<'a> Builder<'a> {
                                 vyrn_frontend::own::binder_key(&n.name),
                             )]
                         })
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    (ps, vs[at].name.clone())
                 }
                 _ => return gap("a `??` pattern on a scrutinee with no two tags", line),
             },
@@ -4621,17 +4651,18 @@ impl<'a> Builder<'a> {
                     if var.payload.len() != names.len() {
                         return gap("a variant pattern with the wrong arity", line);
                     }
-                    names
+                    let ps = names
                         .iter()
                         .zip(var.payload.iter().cloned())
                         .map(|(n, t)| (n.name.clone(), t, vyrn_frontend::own::binder_key(&n.name)))
-                        .collect()
+                        .collect();
+                    (ps, var.name.clone())
                 }
                 _ => return gap("a variant pattern on a non-enum", line),
             },
         };
         let mut binds = Vec::new();
-        for (name, ty, key) in payloads {
+        for (i, (name, ty, key)) in payloads.into_iter().enumerate() {
             let owned = consuming && self.owns(&ty);
             let layout = matches!(
                 vyrn_frontend::types::resolve(&ty, &decls),
@@ -4689,6 +4720,21 @@ impl<'a> Builder<'a> {
                     // whoever owns the scrutinee ([`Arm::reads`]): a write to
                     // it while the binder lives is the kernel's refusal.
                     if layout || self.body.names[n as usize].borrow {
+                        // The walk skips a payload hole on its live tag, and
+                        // only a declared `release` cannot skip one
+                        // ([`vyrn_frontend::declared::skippable`]).
+                        let at = format!("{variant}.{i}");
+                        self.body.names[n as usize].payload = Some(
+                            if vyrn_frontend::declared::skippable(
+                                &self.own.proto,
+                                sty,
+                                std::slice::from_ref(&at),
+                            ) {
+                                Payload::Hole(format!(".{at}"))
+                            } else {
+                                Payload::Sealed(sty.to_string())
+                            },
+                        );
                         out.push(St::Let(n, Rhs::Read(Place::Name(m))));
                     }
                 }
@@ -5064,7 +5110,7 @@ impl<'a> Builder<'a> {
         };
         self.body.names[r as usize].holes = holes;
         self.body.names[r as usize].receiver_malloc = malloc;
-        out.push(St::Drop(r, Site::None, 0));
+        out.push(St::Drop(r, Site::None, 0, None));
     }
 
     /// Where each part of a record literal goes, on the name the literal is
@@ -5617,7 +5663,7 @@ impl<'a> Builder<'a> {
         // A temporary the right operand read is released on the edge that
         // made it: no other path evaluates it.
         for t in self.after.split_off(mark) {
-            taken.push(St::Drop(t, Site::None, 0));
+            taken.push(St::Drop(t, Site::None, 0, None));
         }
         self.drain -= 1;
         let decided = vec![store(Val::Lit(Lit::Bool(op == BinOp::Or)))];
@@ -6061,7 +6107,7 @@ impl<'a> Builder<'a> {
         ));
         if let Val::Name(n) = sv {
             if owns && self.body.names[n as usize].releases {
-                ok.push(St::Drop(n, Site::None, 0));
+                ok.push(St::Drop(n, Site::None, 0, None));
             }
         }
         ok.push(St::Store {
@@ -6660,10 +6706,10 @@ pub struct Facts {
     /// releases after the call — [`NameInfo::arg_drop`], which the core sets
     /// wherever it lowers such an argument.
     pub arg_drops: std::collections::HashSet<usize>,
-    /// RFC-0114 Rule N: per join node, the `(name, edge)` releases one edge
-    /// owes because another edge took the name — a `St::Drop` at a
-    /// [`Site::Edge`].
-    pub edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// RFC-0114 Rule N: per join node, the `(name, edge, holes)` releases
+    /// one edge owes because another edge took the name — a `St::Drop` at a
+    /// [`Site::Edge`], with the holes it walks around in the plan's spelling.
+    pub edges: std::collections::HashMap<usize, Vec<EdgeRow>>,
     /// RFC-0125 §3 M3, row 11b: of those receivers, the ones a CALLEE
     /// allocated. Such a block is malloc-side whatever `region` is open at
     /// the call site, so the free stands inside one; an emitter still asks
@@ -6689,6 +6735,10 @@ pub struct Facts {
     pub owns_scrutinee: std::collections::HashSet<usize>,
 }
 
+/// One edge release: the name, the edge, and the holes the release walks
+/// around, spelled relative to the name (`Elem.1`, RFC-0093 M2).
+pub type EdgeRow = (String, u32, Vec<String>);
+
 /// What the kernel decided over the core's own first build, keyed the way the
 /// emitters key it — RFC-0125 §3 M3, the derivation slice.
 ///
@@ -6705,7 +6755,7 @@ pub(crate) struct Placed {
     /// RFC-0114 Rule N, derived: per join node, the `(name, edge)` releases
     /// one edge owes because another edge took the name. A sub-place row is
     /// spelled `d.line`, which every reader resolves as a place.
-    edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    edges: std::collections::HashMap<usize, Vec<EdgeRow>>,
     /// The store table, derived: the store statements the kernel found a HELD
     /// place at, which are the stores that owe the release of what they
     /// displace. Keyed by the store's own node, which is how both compiled
@@ -6739,7 +6789,7 @@ fn placed_producer(node: usize) -> bool {
 }
 
 /// Rule N's rows for one join, as the kernel equalized its edges.
-fn placed_edges(join: usize) -> Option<Vec<(String, u32)>> {
+fn placed_edges(join: usize) -> Option<Vec<EdgeRow>> {
     PLACED.with(|p| p.borrow().edges.get(&join).cloned())
 }
 
@@ -7009,7 +7059,7 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
                     out.stood_down.insert(*at);
                 }
             }
-            St::Drop(n, at, _) => match at {
+            St::Drop(n, at, _, holes) => match at {
                 Site::Node(at) => {
                     if body.names[*n as usize].for_consume {
                         out.loop_gives_back.insert(*at);
@@ -7019,11 +7069,12 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
                 }
                 Site::Edge(join, edge) => {
                     let name = body.names[*n as usize].source.clone();
+                    let holes = plan_holes(body.drop_holes(*n, holes));
                     let rows = out.edges.entry(*join).or_default();
                     // One row per name and edge: a generic instantiated twice
                     // folds the same join twice when the two share a node.
-                    if !rows.contains(&(name.clone(), *edge)) {
-                        rows.push((name, *edge));
+                    if !rows.iter().any(|(r, e, _)| *r == name && e == edge) {
+                        rows.push((name, *edge, holes));
                     }
                 }
                 Site::None => {}
@@ -7104,7 +7155,7 @@ fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
 fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
     for s in stmts {
         match s {
-            St::Drop(n, _, _) => {
+            St::Drop(n, _, _, _) => {
                 out.insert(*n);
             }
             St::If { then, els, .. } => {
@@ -7850,8 +7901,8 @@ fn place_frames(
                     PLACED.with(|p| {
                         let mut p = p.borrow_mut();
                         let rows = p.edges.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
-                            rows.push((info.source.clone(), edge));
+                        if !rows.iter().any(|(n, e, _)| *n == info.source && *e == edge) {
+                            rows.push((info.source.clone(), edge, holes));
                             touched.insert(owner.to_string());
                         }
                     });
@@ -7865,8 +7916,8 @@ fn place_frames(
                     PLACED.with(|p| {
                         let mut p = p.borrow_mut();
                         let rows = p.edges.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
-                            rows.push((name, edge));
+                        if !rows.iter().any(|(n, e, _)| *n == name && *e == edge) {
+                            rows.push((name, edge, Vec::new()));
                             touched.insert(owner.to_string());
                         }
                     });
