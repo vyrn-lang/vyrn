@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 32] = [
+const SHAPES: [(&str, &str); 33] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -373,6 +373,13 @@ const SHAPES: [(&str, &str); 32] = [
         "a heapless record copied by `let`",
         "type P = { x: Int64, y: Int64 }          fn bump(a: P) -> P { let mut b = a b.x = b.x + 10 return b }          fn vyrnTestMain() -> Int64 { let a = P { x: 1, y: 2 } let b = bump(a) return a.x * 100 + b.x }",
     ),
+    // A move is a rename: `zs` and `b` hold the place the moved name held. A
+    // layout taken out of a field is a copy into a slot, and so is `let q = p`
+    // of a layout that owns no heap (RFC-0125 M7, `m7-move`).
+    (
+        "a move of a layout, and a take out of a field",
+        "type R = { xs: Array<Int64>, s: String, n: Int64 } type P = { x: Int64, y: Int64 }          fn grab(r: consume R) -> Int64 { let t = consume r.s let ys = consume r.xs let mut zs = ys          zs.push(t.byteLength) return zs.length * 100 + zs[3] * 10 + r.n }          fn two(p: P) -> Int64 { let q = p return q.x + q.y * 10 }          fn pair(n: Int64) -> Int64 { let a = [1, n] let b = a return b[1] }          fn vyrnTestMain() -> Int64 { let r = R { xs: [4, 5, 6], s: \"abc\", n: 1 }          return grab(r) * 1000 + pair(2) * 100 + two(P { x: 1, y: 2 }) }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -382,7 +389,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 32] = [
+const SHAPE_PIN: [(&str, usize, usize); 33] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -429,7 +436,7 @@ const SHAPE_PIN: [(&str, usize, usize); 32] = [
     ),
     (
         "a `for` left early over the elements it never reached",
-        1,
+        0,
         0,
     ),
     ("a float literal left of a `Float32` operand", 0, 0),
@@ -439,6 +446,7 @@ const SHAPE_PIN: [(&str, usize, usize); 32] = [
     ("a call to a host-boundary extern", 0, 0),
     ("a field taken into a part", 0, 0),
     ("a heapless record copied by `let`", 0, 0),
+    ("a move of a layout, and a take out of a field", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
