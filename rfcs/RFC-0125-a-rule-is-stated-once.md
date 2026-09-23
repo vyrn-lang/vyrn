@@ -25419,6 +25419,31 @@ serve. The gate is M1's: `fieldstore.rs` pins one header read for a loop that
 only reads and a reload per access for a loop that pushes, and the bench table
 keeps `growable array element read` inside its band.
 
+**The slot's extent, decided on the same table (2026-09-23).** `m7-screen2`
+measured an unbound aggregate temporary as the first clause for 1,714 bodies
+and the only clause for 1,179, built the reading, and dropped it: the arm
+gives a statement's slots back at the statement's end, the whole-body walk has
+no statement to end, and `fieldstore.rs` pinned a 16-byte frame the walk grew
+to 48. The decision: a slot's extent is the rows'. A name that takes a slot
+holds it from the row that names it to the release row the driver placed for
+it, or, for a name that owns no heap, to the last row that reads it. The
+allocator gives the slot back at the end of the extent, stated once in
+`Fn_::place_for` from the rows, and the arm's per-statement reset and
+`Fn_::rel_floor` go when nothing reaches them. The gate is `fieldstore.rs`'s
+frame pins, unmoved, and `FRAME_LIMIT`.
+
+**The String accumulator, decided on the same table (2026-09-23).** A String
+store, `s = s + e`, is the first clause for 2,479 bodies and the only clause
+for 1,957. The arm grows the accumulator in place through `strAppend` when
+`append_candidates` admits the name, the one home of "may this buffer move"
+that the textual backend shares, and keeps the ownership word in the frame.
+The decision: the builder states `s = s + e` as one `Spec::Rebuilds` row,
+`strAppend` with its ownership word, when `append_candidates` admits `s`, and
+as the `concat` call and the store it is otherwise; the emitter reads the row
+as it reads `@append`. `append_candidates` stays the one home of the rule and
+the builder asks it; the arm's `str_append` path goes when `VYRN_FORM_TALLY`
+reads zero for the store it serves.
+
 **Two deletions, after the measure reads all.** First, the AST walk in
 `direct.rs` goes with `VYRN_NO_CORE_WALK` and `FORMS`, because nothing reaches
 it; `emitter_census` re-pins to what the core's reader costs. Second, the
