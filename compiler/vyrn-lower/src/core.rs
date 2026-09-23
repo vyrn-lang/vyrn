@@ -1669,6 +1669,12 @@ pub enum Spec {
     /// it otherwise, and the store after the call puts the new address
     /// into the name.
     Rebuilds,
+    /// A SIMD operation (RFC-0083): the lane constructors, a lane read or
+    /// write, a mask reduction, and a load or store of consecutive array
+    /// elements. The vector operand's own type chooses the instruction, and a
+    /// lane index is a literal the row carries, which the checker proved
+    /// constant and in range.
+    Lanes,
     /// An array receiver, and for `@swapRemove` an index at `Int64`. The call
     /// shrinks the receiver in its own storage and hands back what it
     /// removed: `@pop` an `Option` of the last element, `@swapRemove` the
@@ -1741,6 +1747,19 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@append", Spec::Rebuilds),
             ("@copyFrom", Spec::Rebuilds),
             ("@strAppend", Spec::Rebuilds),
+            ("F32x4", Spec::Lanes),
+            ("I32x4", Spec::Lanes),
+            ("F64x2", Spec::Lanes),
+            ("@lane", Spec::Lanes),
+            ("@replaceLane", Spec::Lanes),
+            ("@anyTrue", Spec::Lanes),
+            ("@allTrue", Spec::Lanes),
+            ("@f32x4Load", Spec::Lanes),
+            ("@f32x4Store", Spec::Lanes),
+            ("@i32x4Load", Spec::Lanes),
+            ("@i32x4Store", Spec::Lanes),
+            ("@f64x2Load", Spec::Lanes),
+            ("@f64x2Store", Spec::Lanes),
             ("@pop", Spec::Removes),
             ("@swapRemove", Spec::Removes),
             ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),

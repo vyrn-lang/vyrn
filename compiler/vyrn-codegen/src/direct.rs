@@ -8514,198 +8514,17 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(f));
                 return Ok(Type::Int);
             }
-            // RFC-0083 M1. Construction starts from `v128.const 0` and replaces
-            // each lane in written order; a splat is the one opcode. No lane is
-            // read back before it is written, so the zero start costs nothing that
-            // an undefined one would have saved.
-            //
-            // M3's integer width is the same two shapes with the lane-typed
-            // opcodes swapped, which is what M1 meant by "one internal name per
-            // width": nothing here decodes a receiver.
-            "F32x4" | "I32x4" | "F64x2" if !args.is_empty() => {
-                let wide = name == "F64x2";
-                let int = name == "I32x4";
-                let (vec, lane) = if int {
-                    (Type::I32x4, INT32)
-                } else if wide {
-                    (Type::F64x2, Type::Float)
-                } else {
-                    (Type::F32x4, Type::Float32)
-                };
-                b.ins(&Instruction::V128Const(0));
-                for (i, a) in args.iter().enumerate() {
-                    self.expr_as(m, b, a, &lane)?;
-                    b.ins(&if int {
-                        Instruction::I32x4ReplaceLane(i as u8)
-                    } else if wide {
-                        Instruction::F64x2ReplaceLane(i as u8)
-                    } else {
-                        Instruction::F32x4ReplaceLane(i as u8)
-                    });
-                }
-                return Ok(vec);
-            }
-            // The lane index was proven constant and in range by the checker, so
-            // this is a plain immediate and there is no bounds check to emit.
-            "@lane" if args.len() == 2 => {
-                let vt = self.expr(m, b, &args[0])?;
-                let vt = self.cx.resolve(&vt);
-                let lanes = if matches!(vt, Type::F64x2 | Type::Mask64x2) {
-                    2
-                } else {
-                    4
-                };
-                let Some(k) = ftypes::const_lane(&args[1], lanes) else {
-                    return unsupported("a lane index that is not a constant", line);
-                };
-                // A mask lane is all-ones or all-zeros; `Bool` rides an `i32` that
-                // must be 0 or 1, so the extract is followed by a test against
-                // zero rather than being handed over raw — `-1` where `1` is
-                // expected would print `true` and compare unequal to `true`. The
-                // wide mask extracts an `i64`, so its `eqz` is the 64-bit one and
-                // the second `eqz` — the one that puts the sense back — is the
-                // 32-bit one, because the first already left an `i32` behind.
-                if vt == Type::Mask64x2 {
-                    b.ins(&Instruction::I64x2ExtractLane(k));
-                    b.ins(&Instruction::I64Eqz);
-                    b.ins(&Instruction::I32Eqz);
-                    return Ok(Type::Bool);
-                }
-                if vt == Type::Mask32x4 {
-                    b.ins(&Instruction::I32x4ExtractLane(k));
-                    b.ins(&Instruction::I32Eqz);
-                    b.ins(&Instruction::I32Eqz);
-                    return Ok(Type::Bool);
-                }
-                // An `Int32` lane needs no normalising: `i32x4.extract_lane` is
-                // already the whole 32-bit value, and `Int32` rides an `i32`.
-                if vt == Type::I32x4 {
-                    b.ins(&Instruction::I32x4ExtractLane(k));
-                    return Ok(INT32);
-                }
-                if vt == Type::F64x2 {
-                    b.ins(&Instruction::F64x2ExtractLane(k));
-                    return Ok(Type::Float);
-                }
-                b.ins(&Instruction::F32x4ExtractLane(k));
-                return Ok(Type::Float32);
-            }
-            // `v.replaceLane(k, x)` — the same immediate as the read, and the same
-            // opcode the four-argument constructor above already uses one lane at a
-            // time. Vectors only: the checker refuses a mask receiver.
-            "@replaceLane" if args.len() == 3 => {
-                let vt = self.cx.resolve(&self.peek(&args[0], line)?);
-                let int = vt == Type::I32x4;
-                let wide = vt == Type::F64x2;
-                self.expr_as(m, b, &args[0], &vt)?;
-                let Some(k) = ftypes::const_lane(&args[1], if wide { 2 } else { 4 }) else {
-                    return unsupported("a lane index that is not a constant", line);
-                };
-                let lane = if int {
-                    &INT32
-                } else if wide {
-                    &Type::Float
-                } else {
-                    &Type::Float32
-                };
-                self.expr_as(m, b, &args[2], lane)?;
-                b.ins(&if int {
-                    Instruction::I32x4ReplaceLane(k)
-                } else if wide {
-                    Instruction::F64x2ReplaceLane(k)
-                } else {
-                    Instruction::F32x4ReplaceLane(k)
-                });
-                return Ok(vt);
-            }
-            // Mask reductions (RFC-0083 M2). Both push an `i32` that is already 0
-            // or 1, so unlike the mask lane read there is no normalising `i32.eqz`
-            // pair to add.
-            //
-            // `v128.any_true` is whole-vector — any bit set anywhere — where
-            // `i32x4.all_true` is per lane. They coincide here because a
-            // `Mask32x4` lane is all-ones or all-zeros and nothing else can build
-            // one; that is the same closed-inhabitants argument that let the mask
-            // be its own type. There is no `i32x4.any_true` to reach for instead:
-            // the encoder carries exactly one any-true, at v128 width.
-            //
-            // `all_true` is the one that has to know the width — `i64x2.all_true`
-            // is a different opcode reading the same 128 bits as two lanes instead
-            // of four, and reading a `Mask64x2` with the 32-bit one would answer
-            // correctly for all-true and all-false and diverge only on a mixed
-            // mask. `any_true` is unchanged because it never had a lane width.
-            "@anyTrue" | "@allTrue" => {
-                let mt = self.cx.resolve(&self.peek(&args[0], line)?);
-                let wide = mt == Type::Mask64x2;
-                self.expr_as(m, b, &args[0], &mt)?;
-                b.ins(&if name == "@anyTrue" {
-                    Instruction::V128AnyTrue
-                } else if wide {
-                    Instruction::I64x2AllTrue
-                } else {
-                    Instruction::I32x4AllTrue
-                });
-                return Ok(Type::Bool);
-            }
-            // (`@f32x4Abs` was here as `f32x4.abs`, deleted in M4 — and this is the
-            // column that kept it two milestones too long. Its census row claimed
-            // 3.5x HERE, which was four calls Cranelift declined to inline and not
-            // the instruction; written inline the walk is 54 ms against 58 ms over
-            // 102 M lanes — 1.07x, `select`'s bar. See RFC-0083's M4 note.)
-            //
-            // (`@i32x4Min`/`Max`/`Abs` were here, as `i32x4.min_s`/`max_s`/`abs`,
-            // and were deleted on their measurement. This is the column that came
-            // CLOSEST to keeping them and still did not: over 200 M lanes the
-            // builtin walk is 139 ms against the Vyrn one's 146 ms — 1.05x, and
-            // `select` was refused at 1.06x. The 273 ms the same walk shows with
-            // the Vyrn version behind a helper function is Cranelift not inlining
-            // a call, not the operation. See RFC-0083's M3 note.)
-            //
-            // Four consecutive elements of an `Array<Float32>` / `Array<Int32>` as
-            // one 16-byte access, behind ONE bounds check rather than four. Both
-            // widths are the same `v128.load`: the element stride is 4 either way,
-            // which is why `walk`/`elem_addr` need no lane knowledge.
-            "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
-            | "@f64x2Store" => {
-                let (vec, span) = if name.starts_with("@i32x4") {
-                    (Type::I32x4, 4)
-                } else if name.starts_with("@f64x2") {
-                    // Two lanes, an 8-byte stride — and `elem_addr` still needs no
-                    // lane knowledge, because it scales by the ELEMENT size the
-                    // array already carries. Only the check's span is ours.
-                    (Type::F64x2, 2)
-                } else {
-                    (Type::F32x4, 4)
-                };
-                let aty = self.expr(m, b, &args[0])?;
-                let w = self.walk(b, &aty, line)?;
-                self.expr_as(m, b, &args[1], &Type::Int)?;
-                let idx = b.local(ValType::I64);
-                b.ins(&Instruction::LocalSet(idx));
-                self.bounds_check_span(b, &w, idx, span);
-                if name.ends_with("Load") {
-                    self.elem_addr(b, &w, idx);
-                    // `align: 0` — a log2 exponent, so one byte. The buffer is an
-                    // array of elements, so nothing guarantees the 16 a
-                    // `v128.load` would like, and an overstated hint is a
-                    // validation-legal lie the engine may act on. The textual
-                    // backend understates for the same reason, in the other unit:
-                    // its `align 4` is a BYTE count, not this exponent.
-                    b.ins(&Instruction::V128Load(MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }));
-                    return Ok(vec);
-                }
-                self.elem_addr(b, &w, idx);
-                self.expr_as(m, b, &args[2], &vec)?;
-                b.ins(&Instruction::V128Store(MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }));
-                return Ok(Type::Unit);
+            n if matches!(vyrn_lower::core::builtin_row(n), Some(Spec::Lanes)) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
+                        match want {
+                            Some(t) => s.expr_as(m, b, &args[i], t).map(|_| t.clone()),
+                            None => s.expr(m, b, &args[i]),
+                        }
+                    };
+                let lane_at =
+                    |i: usize, lanes: i64| args.get(i).and_then(|a| ftypes::const_lane(a, lanes));
+                return self.lanes(m, b, n, args.len(), &mut operand, &lane_at, line);
             }
             // `Int64(x)` / `UInt16(x)` — a conversion, not a call. Which names are
             // conversions is the frontend's answer (`numeric_conv_target`), so the
@@ -14762,6 +14581,231 @@ impl<'p> Fn_<'_, 'p> {
         Ok(oty)
     }
 
+    /// A SIMD builtin (RFC-0083): a lane constructor, a lane read or write at
+    /// a constant index, a mask reduction, or a load or store of consecutive
+    /// array elements. The vector operand's own type chooses the opcode.
+    ///
+    /// `operand` writes argument `i`, at the type asked for or else at its own,
+    /// and answers the type it wrote. `lane_at` answers argument `i` as a lane
+    /// index below the count given, or `None` where it is no such constant.
+    /// The arm over the source and [`Fn_::core_call`] over the rows both call
+    /// this.
+    fn lanes(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        argc: usize,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            Option<&Type>,
+        ) -> Result<Type, String>,
+        lane_at: &dyn Fn(usize, i64) -> Option<u8>,
+        line: usize,
+    ) -> Result<Type, String> {
+        match name {
+            // RFC-0083 M1. Construction starts from `v128.const 0` and replaces
+            // each lane in written order; a splat is the one opcode. No lane is
+            // read back before it is written, so the zero start costs nothing that
+            // an undefined one would have saved.
+            //
+            // M3's integer width is the same two shapes with the lane-typed
+            // opcodes swapped, which is what M1 meant by "one internal name per
+            // width": nothing here decodes a receiver.
+            "F32x4" | "I32x4" | "F64x2" if argc > 0 => {
+                let wide = name == "F64x2";
+                let int = name == "I32x4";
+                let (vec, lane) = if int {
+                    (Type::I32x4, INT32)
+                } else if wide {
+                    (Type::F64x2, Type::Float)
+                } else {
+                    (Type::F32x4, Type::Float32)
+                };
+                b.ins(&Instruction::V128Const(0));
+                for i in 0..argc {
+                    operand(self, m, b, i, Some(&lane))?;
+                    b.ins(&if int {
+                        Instruction::I32x4ReplaceLane(i as u8)
+                    } else if wide {
+                        Instruction::F64x2ReplaceLane(i as u8)
+                    } else {
+                        Instruction::F32x4ReplaceLane(i as u8)
+                    });
+                }
+                return Ok(vec);
+            }
+            // The lane index was proven constant and in range by the checker, so
+            // this is a plain immediate and there is no bounds check to emit.
+            "@lane" if argc == 2 => {
+                let vt = operand(self, m, b, 0, None)?;
+                let vt = self.cx.resolve(&vt);
+                let lanes = if matches!(vt, Type::F64x2 | Type::Mask64x2) {
+                    2
+                } else {
+                    4
+                };
+                let Some(k) = lane_at(1, lanes) else {
+                    return unsupported("a lane index that is not a constant", line);
+                };
+                // A mask lane is all-ones or all-zeros; `Bool` rides an `i32` that
+                // must be 0 or 1, so the extract is followed by a test against
+                // zero rather than being handed over raw — `-1` where `1` is
+                // expected would print `true` and compare unequal to `true`. The
+                // wide mask extracts an `i64`, so its `eqz` is the 64-bit one and
+                // the second `eqz` — the one that puts the sense back — is the
+                // 32-bit one, because the first already left an `i32` behind.
+                if vt == Type::Mask64x2 {
+                    b.ins(&Instruction::I64x2ExtractLane(k));
+                    b.ins(&Instruction::I64Eqz);
+                    b.ins(&Instruction::I32Eqz);
+                    return Ok(Type::Bool);
+                }
+                if vt == Type::Mask32x4 {
+                    b.ins(&Instruction::I32x4ExtractLane(k));
+                    b.ins(&Instruction::I32Eqz);
+                    b.ins(&Instruction::I32Eqz);
+                    return Ok(Type::Bool);
+                }
+                // An `Int32` lane needs no normalising: `i32x4.extract_lane` is
+                // already the whole 32-bit value, and `Int32` rides an `i32`.
+                if vt == Type::I32x4 {
+                    b.ins(&Instruction::I32x4ExtractLane(k));
+                    return Ok(INT32);
+                }
+                if vt == Type::F64x2 {
+                    b.ins(&Instruction::F64x2ExtractLane(k));
+                    return Ok(Type::Float);
+                }
+                b.ins(&Instruction::F32x4ExtractLane(k));
+                return Ok(Type::Float32);
+            }
+            // `v.replaceLane(k, x)` — the same immediate as the read, and the same
+            // opcode the four-argument constructor above already uses one lane at a
+            // time. Vectors only: the checker refuses a mask receiver.
+            "@replaceLane" if argc == 3 => {
+                let vt = operand(self, m, b, 0, None)?;
+                let vt = self.cx.resolve(&vt);
+                let int = vt == Type::I32x4;
+                let wide = vt == Type::F64x2;
+                let Some(k) = lane_at(1, if wide { 2 } else { 4 }) else {
+                    return unsupported("a lane index that is not a constant", line);
+                };
+                let lane = if int {
+                    &INT32
+                } else if wide {
+                    &Type::Float
+                } else {
+                    &Type::Float32
+                };
+                operand(self, m, b, 2, Some(lane))?;
+                b.ins(&if int {
+                    Instruction::I32x4ReplaceLane(k)
+                } else if wide {
+                    Instruction::F64x2ReplaceLane(k)
+                } else {
+                    Instruction::F32x4ReplaceLane(k)
+                });
+                return Ok(vt);
+            }
+            // Mask reductions (RFC-0083 M2). Both push an `i32` that is already 0
+            // or 1, so unlike the mask lane read there is no normalising `i32.eqz`
+            // pair to add.
+            //
+            // `v128.any_true` is whole-vector — any bit set anywhere — where
+            // `i32x4.all_true` is per lane. They coincide here because a
+            // `Mask32x4` lane is all-ones or all-zeros and nothing else can build
+            // one; that is the same closed-inhabitants argument that let the mask
+            // be its own type. There is no `i32x4.any_true` to reach for instead:
+            // the encoder carries exactly one any-true, at v128 width.
+            //
+            // `all_true` is the one that has to know the width — `i64x2.all_true`
+            // is a different opcode reading the same 128 bits as two lanes instead
+            // of four, and reading a `Mask64x2` with the 32-bit one would answer
+            // correctly for all-true and all-false and diverge only on a mixed
+            // mask. `any_true` is unchanged because it never had a lane width.
+            "@anyTrue" | "@allTrue" if argc == 1 => {
+                let mt = operand(self, m, b, 0, None)?;
+                let mt = self.cx.resolve(&mt);
+                let wide = mt == Type::Mask64x2;
+                b.ins(&if name == "@anyTrue" {
+                    Instruction::V128AnyTrue
+                } else if wide {
+                    Instruction::I64x2AllTrue
+                } else {
+                    Instruction::I32x4AllTrue
+                });
+                return Ok(Type::Bool);
+            }
+            // (`@f32x4Abs` was here as `f32x4.abs`, deleted in M4 — and this is the
+            // column that kept it two milestones too long. Its census row claimed
+            // 3.5x HERE, which was four calls Cranelift declined to inline and not
+            // the instruction; written inline the walk is 54 ms against 58 ms over
+            // 102 M lanes — 1.07x, `select`'s bar. See RFC-0083's M4 note.)
+            //
+            // (`@i32x4Min`/`Max`/`Abs` were here, as `i32x4.min_s`/`max_s`/`abs`,
+            // and were deleted on their measurement. This is the column that came
+            // CLOSEST to keeping them and still did not: over 200 M lanes the
+            // builtin walk is 139 ms against the Vyrn one's 146 ms — 1.05x, and
+            // `select` was refused at 1.06x. The 273 ms the same walk shows with
+            // the Vyrn version behind a helper function is Cranelift not inlining
+            // a call, not the operation. See RFC-0083's M3 note.)
+            //
+            // Four consecutive elements of an `Array<Float32>` / `Array<Int32>` as
+            // one 16-byte access, behind ONE bounds check rather than four. Both
+            // widths are the same `v128.load`: the element stride is 4 either way,
+            // which is why `walk`/`elem_addr` need no lane knowledge.
+            "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
+            | "@f64x2Store"
+                if argc == 2 + usize::from(name.ends_with("Store")) =>
+            {
+                let (vec, span) = if name.starts_with("@i32x4") {
+                    (Type::I32x4, 4)
+                } else if name.starts_with("@f64x2") {
+                    // Two lanes, an 8-byte stride — and `elem_addr` still needs no
+                    // lane knowledge, because it scales by the ELEMENT size the
+                    // array already carries. Only the check's span is ours.
+                    (Type::F64x2, 2)
+                } else {
+                    (Type::F32x4, 4)
+                };
+                let aty = operand(self, m, b, 0, None)?;
+                let w = self.walk(b, &aty, line)?;
+                operand(self, m, b, 1, Some(&Type::Int))?;
+                let idx = b.local(ValType::I64);
+                b.ins(&Instruction::LocalSet(idx));
+                self.bounds_check_span(b, &w, idx, span);
+                if name.ends_with("Load") {
+                    self.elem_addr(b, &w, idx);
+                    // `align: 0` — a log2 exponent, so one byte. The buffer is an
+                    // array of elements, so nothing guarantees the 16 a
+                    // `v128.load` would like, and an overstated hint is a
+                    // validation-legal lie the engine may act on. The textual
+                    // backend understates for the same reason, in the other unit:
+                    // its `align 4` is a BYTE count, not this exponent.
+                    b.ins(&Instruction::V128Load(MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                    return Ok(vec);
+                }
+                self.elem_addr(b, &w, idx);
+                operand(self, m, b, 2, Some(&vec))?;
+                b.ins(&Instruction::V128Store(MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                }));
+                return Ok(Type::Unit);
+            }
+            _ => unsupported(&format!("`{name}` at this arity"), line),
+        }
+    }
+
     /// `m.keys()` with the map's address in the local `hdr`: a snapshot
     /// `Array<K>`, the keys copied into a buffer of their own, so the map may
     /// be mutated afterwards without disturbing it. String keys are then dup'd
@@ -16649,6 +16693,15 @@ fn builtin_spec(
     Some((params.as_slice(), ins, ret))
 }
 
+/// Argument `i` of a call row as a lane index below `lanes`: the literal the
+/// row carries, which the checker proved constant and in range.
+fn core_lane(args: &[(Val, vyrn_frontend::ast::Capability)], i: usize, lanes: i64) -> Option<u8> {
+    match args.get(i) {
+        Some((Val::Lit(Lit::Int(k)), _)) if (0..lanes).contains(k) => Some(*k as u8),
+        _ => None,
+    }
+}
+
 /// The specification row of the builtin a CALL ROW names, or `None` where the
 /// row names a function this program declares or a callee with no row.
 /// Clears an accumulator's ownership word at `own`: the place holds a
@@ -17982,6 +18035,24 @@ impl<'p> Fn_<'_, 'p> {
                     _ => unsupported(&format!("`{callee}` with no operand"), line),
                 };
                 return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
+            }
+            // A SIMD builtin: each operand at the type asked for or its own, and
+            // a lane index as the literal the row carries.
+            Some(Spec::Lanes) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
+                        let Some((v, _)) = args.get(i) else {
+                            return unsupported(&format!("`{callee}` with too few operands"), line);
+                        };
+                        let t = match want {
+                            Some(t) => t.clone(),
+                            None => s.core_ty(body, v, &Type::Int),
+                        };
+                        s.core_val(m, b, body, w, v, &t, line)?;
+                        Ok(t)
+                    };
+                let lane_at = |i: usize, lanes: i64| core_lane(args, i, lanes);
+                return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, line);
             }
             // `xs.pop()` and `xs.swapRemove(i)`: the receiver's address, which
             // the call shrinks in place, and the index the row names.
@@ -19383,6 +19454,10 @@ impl<'p> Fn_<'_, 'p> {
                 _ => false,
             },
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
+            // A lane index is an immediate, so the row carries it as a literal.
+            Some(Spec::Lanes) => {
+                !matches!(callee, "@lane" | "@replaceLane") || core_lane(args, 1, 4).is_some()
+            }
             // A removal that hands back a scalar leaves it on the stack; one
             // that hands back an aggregate is an aggregate call.
             Some(Spec::Removes) => self.core_removes(body, callee, kind, args) == Some(false),
