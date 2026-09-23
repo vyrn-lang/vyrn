@@ -112,8 +112,8 @@ the_surface_census_as_a_table` and checked against the code by
 
 | constructor | checker | shared | wasm | types | prelude | editor | all six |
 |---|---|---|---|---|---|---|---|---|
-| `Type::Int` | 47 | 3 | 61 | 10 | 0 | 2 | 123 |
-| `Type::IntN` | 23 | 4 | 12 | 21 | 3 | 2 | 65 |
+| `Type::Int` | 47 | 3 | 63 | 10 | 0 | 2 | 125 |
+| `Type::IntN` | 23 | 4 | 13 | 21 | 3 | 2 | 66 |
 | `Type::Float` | 20 | 3 | 22 | 5 | 0 | 2 | 52 |
 | `Type::Float32` | 23 | 3 | 18 | 5 | 0 | 1 | 50 |
 | `Type::F32x4` | 7 | 1 | 4 | 1 | 0 | 0 | 13 |
@@ -121,8 +121,8 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::F64x2` | 8 | 1 | 7 | 1 | 0 | 0 | 17 |
 | `Type::Mask32x4` | 5 | 1 | 5 | 1 | 0 | 0 | 12 |
 | `Type::Mask64x2` | 6 | 1 | 6 | 1 | 0 | 0 | 14 |
-| `Type::Bool` | 32 | 2 | 35 | 6 | 0 | 2 | 77 |
-| `Type::Str` | 46 | 2 | 85 | 8 | 0 | 4 | 145 |
+| `Type::Bool` | 32 | 2 | 33 | 6 | 0 | 2 | 75 |
+| `Type::Str` | 46 | 2 | 83 | 8 | 0 | 4 | 143 |
 | `Type::Unit` | 25 | 4 | 31 | 9 | 2 | 0 | 71 |
 | `Type::Named` | 36 | 3 | 11 | 9 | 3 | 6 | 68 |
 | `Type::Record` | 12 | 3 | 5 | 18 | 0 | 5 | 43 |
@@ -133,11 +133,11 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Enum` | 12 | 5 | 9 | 12 | 0 | 3 | 41 |
 | `Type::Param` | 19 | 2 | 9 | 4 | 8 | 1 | 43 |
 | `Type::App` | 13 | 3 | 2 | 11 | 1 | 0 | 30 |
-| `Type::Array` | 32 | 4 | 42 | 7 | 2 | 5 | 92 |
+| `Type::Array` | 32 | 4 | 40 | 7 | 2 | 5 | 90 |
 | `Type::ArrayN` | 16 | 7 | 20 | 9 | 0 | 4 | 56 |
 | `Type::SmallArray` | 22 | 2 | 21 | 7 | 1 | 4 | 57 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 20 | 3 | 18 | 7 | 6 | 4 | 58 |
+| `Type::Map` | 20 | 3 | 21 | 7 | 6 | 4 | 61 |
 | `Type::Stream` | 14 | 1 | 9 | 7 | 1 | 1 | 33 |
 | `Type::Logger` | 0 | 1 | 2 | 1 | 2 | 1 | 7 |
 | `Type::Fn` | 26 | 5 | 23 | 10 | 1 | 0 | 65 |

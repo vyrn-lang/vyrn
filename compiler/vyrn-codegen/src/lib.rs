@@ -455,18 +455,9 @@ pub const REFLECT_MODULE_INTERFACE: i64 = 0;
 pub const REFLECT_CONTRACT_OF: i64 = 1;
 pub const REFLECT_LEX: i64 = 2;
 
-/// The generator-host entry points the ENGINE synthesizes and this emitter calls
-/// (RFC-0076 M3b).
-///
-/// Each is an ordinary Vyrn function the engine appends to the wrapper program:
-/// it asks the host to compute the value, then decodes it by walking the static
-/// type. Codegen only redirects the builtin's call site to it, so the decode is
-/// compiled by the ordinary emitter rather than hand-written as IR — the arrays,
-/// the records and the Options are the ones every other Vyrn program gets.
-pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
-pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
-/// Suffixed with the contract's name: the argument is a declaration, not a value.
-pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
+pub use vyrn_frontend::checker::{
+    GEN_ENTRY_CONTRACT_OF, GEN_ENTRY_LEX, GEN_ENTRY_MODULE_INTERFACE,
+};
 
 /// The atom-stream primitives the synthesized decoders are written against.
 ///

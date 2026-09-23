@@ -4446,6 +4446,150 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
+    /// An RFC-0014 or RFC-0044 I/O builtin, a directory listing, or `parse`: one runtime function
+    /// that writes its whole result through a slot allocated here, the hidden
+    /// destination an aggregate-returning call gets (`wasm_sig`). The
+    /// destination leads, the operands follow, then what the function needs
+    /// after them. Under a generation
+    /// (`Cx::gen`) the two readers are their host twins, which take the host's
+    /// read mode after the path and read through the loader's resolver rather
+    /// than `path_open` (RFC-0076 M7).
+    ///
+    /// `operand` writes argument `i` at the type asked for. The arm over the
+    /// source and [`Fn_::core_call`] over the rows both call this.
+    fn slot_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some(ty) = slot_arity(name).and_then(|n| slot_ty(name, n)) else {
+            return unsupported(&format!("`{name}` as an I/O builtin"), line);
+        };
+        let l = self.layout_of(&ty, line)?;
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        let rt = self.cx.rt;
+        let gen = self.cx.gen.is_some();
+        let halves = |b: &mut Frame, (pre, post): (u32, u32)| {
+            b.ins(&Instruction::I32Const(pre as i32))
+                .ins(&Instruction::I32Const(post as i32));
+        };
+        let f = match name {
+            "args" => rt.args,
+            "readLine" => {
+                b.ins(&Instruction::I32Const(rt.utf8d as i32));
+                rt.read_line
+            }
+            "readFile" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                if gen {
+                    b.ins(&Instruction::I32Const(crate::GEN_MODE_READ));
+                }
+                b.ins(&Instruction::I32Const(rt.utf8d as i32));
+                halves(b, rt.readerr);
+                halves(b, rt.nulerr);
+                halves(b, rt.utf8err);
+                if gen {
+                    rt.read_file_gen
+                } else {
+                    rt.read_file
+                }
+            }
+            "readFileBytes" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                if gen {
+                    b.ins(&Instruction::I32Const(crate::GEN_MODE_READ_BYTES));
+                }
+                halves(b, rt.readerr);
+                if gen {
+                    halves(b, rt.nulerr);
+                    rt.read_file_bytes_gen
+                } else {
+                    rt.read_file_bytes
+                }
+            }
+            "parse" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                rt.parse_i64
+            }
+            // `listDir` (RFC-0021) and `listDirKinds` (RFC-0119). Where the
+            // listing comes from is the twin called: the generator host's
+            // resolver under a generation, told the host's list mode, and
+            // WASI's `fd_readdir` on an ordinary build (RFC-0125 §3 M5), told
+            // whether names carry kinds, so `vyrn run` lists the real
+            // filesystem.
+            "listDir" | "listDirKinds" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                let kinds = name == "listDirKinds";
+                let f = if gen {
+                    b.ins(&Instruction::I32Const(if kinds {
+                        crate::GEN_MODE_LIST_KINDS
+                    } else {
+                        crate::GEN_MODE_LIST
+                    }));
+                    rt.list_dir_gen
+                } else {
+                    b.ins(&Instruction::I32Const(kinds as i32));
+                    rt.list_dir
+                };
+                halves(b, rt.listerr);
+                f
+            }
+            "fsyncFile" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                halves(b, rt.writeerr);
+                rt.fsync_file
+            }
+            // RFC-0111: the array arrives as a POINTER to its `{ ptr, len, cap }`
+            // record, so the two words are loaded out of it and pushed
+            // separately. The buffer may hold NULs, which the String writer's
+            // `strlen` could not have measured.
+            "writeFileBytes" => {
+                operand(self, m, b, 0, &Type::Str)?;
+                let bytes = Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }));
+                operand(self, m, b, 1, &bytes)?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                halves(b, rt.writeerr);
+                rt.write_file_bytes
+            }
+            // `renameFile` differs from `writeFile` only in the cross-device
+            // message and the runtime function.
+            _ => {
+                operand(self, m, b, 0, &Type::Str)?;
+                operand(self, m, b, 1, &Type::Str)?;
+                halves(b, rt.writeerr);
+                if name == "renameFile" {
+                    halves(b, rt.xdeverr);
+                    rt.rename_file
+                } else {
+                    rt.write_file
+                }
+            }
+        };
+        b.ins(&Instruction::Call(f));
+        b.slot(off);
+        Ok(ty)
+    }
+
     /// `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
     /// A copy, because the array is growable and the string is not: a `push`
     /// on the result must not write into the string's storage.
@@ -5356,8 +5500,9 @@ impl<'p> Fn_<'_, 'p> {
                     let drop_old = !vyrn_frontend::ast::mentions_place(value, name)
                         && !vyrn_frontend::ast::mentions_place(index, name);
                     // The entry's release is `map_set`'s own two questions.
+                    let mut parts = Parts::Ast(vec![index, value]);
                     return self
-                        .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
+                        .map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, drop_old, *line);
                 }
                 let w = match cached {
                     Some(w) => w,
@@ -7917,38 +8062,6 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(t);
             }
         }
-        // `listDir` (RFC-0021) and `listDirKinds` (RFC-0119): one path in, a
-        // `Result<Array<String>, String>` out through a destination slot, the
-        // shape `readFile` has. Where the listing comes from is the twin the
-        // emitter calls: the generator host's resolver under a generation,
-        // told the host's list mode, and WASI's `fd_readdir` on an ordinary
-        // build (RFC-0125 §3 M5), told whether names carry kinds, so `vyrn
-        // run` lists the real filesystem.
-        if matches!(name, "listDir" | "listDirKinds") && args.len() == 1 {
-            let ty = gen_list_dir_ty();
-            let l = self.layout_of(&ty, line)?;
-            let off = b.alloc(l.size, l.align);
-            b.slot(off);
-            self.expr_as(m, b, &args[0], &Type::Str)?;
-            let rt = self.cx.rt;
-            let kinds = name == "listDirKinds";
-            let f = if self.cx.gen.is_some() {
-                b.ins(&Instruction::I32Const(if kinds {
-                    crate::GEN_MODE_LIST_KINDS
-                } else {
-                    crate::GEN_MODE_LIST
-                }));
-                rt.list_dir_gen
-            } else {
-                b.ins(&Instruction::I32Const(kinds as i32));
-                rt.list_dir
-            };
-            b.ins(&Instruction::I32Const(rt.listerr.0 as i32));
-            b.ins(&Instruction::I32Const(rt.listerr.1 as i32));
-            b.ins(&Instruction::Call(f));
-            b.slot(off);
-            return Ok(ty);
-        }
         // RFC-0125 M7, the builtin family: a builtin the core's row specifies
         // is its operands at the row's types and one instruction, and
         // [`Fn_::core_call`] reads the same pair off a call row. A name with
@@ -8323,119 +8436,14 @@ impl<'p> Fn_<'_, 'p> {
             // arm was cheap; the RUNTIME FUNCTION behind it was a third copy of the
             // range check, and RFC-0079 M3 deleted both — `slice` routes into
             // `std/strpred`'s `sliceV` at the top of this dispatch now.)
-            // RFC-0014's input I/O. Every one of these is a runtime function that
-            // writes its whole result through a slot allocated here — the same
-            // hidden destination an aggregate-returning Vyrn call gets, which is
-            // why none of them needed a case outside M2b's four ABI rules.
-            "args" if args.is_empty() => {
-                let ty = io_builtin_ty(name, 0).expect("`args` is an I/O builtin");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(self.cx.rt.args));
-                b.slot(off);
-                return Ok(ty);
-            }
-            "readLine" if args.is_empty() => {
-                let ty = io_builtin_ty(name, 0).expect("`readLine` is an I/O builtin");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::I32Const(self.cx.rt.utf8d as i32));
-                b.ins(&Instruction::Call(self.cx.rt.read_line));
-                b.slot(off);
-                return Ok(ty);
-            }
-            // One path in, a `Result<_, String>` out through a destination slot.
-            // RFC-0044's `fsyncFile` is the same shape as the two readers and
-            // differs only in the runtime function — which is exactly why it was
-            // missed: it reads as a writer, so the arm it belonged in was the one
-            // keyed on TWO arguments.
-            //
-            // The destination leads, as it does for every aggregate a
-            // `std/runtime` function answers; the path follows, then what the
-            // function needs after it. Under a generation (`Cx::gen`) the two
-            // readers are their host twins, which take the host's read mode
-            // after the path and read through the loader's resolver rather
-            // than `path_open` (RFC-0076 M7).
-            "readFile" | "readFileBytes" | "fsyncFile" if args.len() == 1 => {
-                let ty = io_builtin_ty(name, 1).expect("all three are I/O builtins");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let rt = self.cx.rt;
-                let gen = self.cx.gen.is_some();
-                let halves = |b: &mut Frame, (pre, post): (u32, u32)| {
-                    b.ins(&Instruction::I32Const(pre as i32))
-                        .ins(&Instruction::I32Const(post as i32));
-                };
-                let f = match name {
-                    "readFile" => {
-                        if gen {
-                            b.ins(&Instruction::I32Const(crate::GEN_MODE_READ));
-                        }
-                        b.ins(&Instruction::I32Const(rt.utf8d as i32));
-                        halves(b, rt.readerr);
-                        halves(b, rt.nulerr);
-                        halves(b, rt.utf8err);
-                        if gen {
-                            rt.read_file_gen
-                        } else {
-                            rt.read_file
-                        }
-                    }
-                    "readFileBytes" => {
-                        if gen {
-                            b.ins(&Instruction::I32Const(crate::GEN_MODE_READ_BYTES));
-                        }
-                        halves(b, rt.readerr);
-                        if gen {
-                            halves(b, rt.nulerr);
-                            rt.read_file_bytes_gen
-                        } else {
-                            rt.read_file_bytes
-                        }
-                    }
-                    _ => {
-                        halves(b, rt.writeerr);
-                        rt.fsync_file
-                    }
-                };
-                b.ins(&Instruction::Call(f));
-                b.slot(off);
-                return Ok(ty);
-            }
-            // RFC-0111: a path and an `Array<UInt8>`, into the same destination
-            // slot `writeFile` uses. The array arrives as a POINTER to its
-            // `{ ptr, len, cap }` record, so the two words are loaded out of it
-            // and pushed separately — the buffer may hold NULs, which is exactly
-            // what the String writer's `strlen` could not have measured.
-            "writeFileBytes" if args.len() == 2 => {
-                let ty = io_builtin_ty(name, 2).expect("writeFileBytes is an I/O builtin");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let bytes = Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }));
-                self.expr_as(m, b, &args[1], &bytes)?;
-                let src = self.scratch(b, ValType::I32, 0);
-                let al = self.layout_of(&bytes, line)?;
-                b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I64Load(at(al.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
-                let (pre, post) = self.cx.rt.writeerr;
-                b.ins(&Instruction::I32Const(pre as i32));
-                b.ins(&Instruction::I32Const(post as i32));
-                b.ins(&Instruction::Call(self.cx.rt.write_file_bytes));
-                b.slot(off);
-                return Ok(ty);
+            // RFC-0014 and RFC-0044's I/O and `parse`, one runtime function
+            // each ([`Fn_::slot_call`]).
+            n if slot_ty(n, args.len()).is_some() => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.expr_as(m, b, &args[i], t).map(|_| ())
+                    };
+                return self.slot_call(m, b, n, &mut operand, line);
             }
             // RFC-0111: `print` for bytes. `write_all` is already the gathered
             // stdout writer every printed line goes through, so this is that call
@@ -8461,50 +8469,10 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Drop);
                 return Ok(Type::Unit);
             }
-            // Two strings in, a `Result<Bool, String>` out, through a destination
-            // slot — the same shape, so one arm. RFC-0044's `renameFile` differs
-            // from `writeFile` only in which runtime function it calls.
-            "writeFile" | "renameFile" if args.len() == 2 => {
-                let ty = io_builtin_ty(name, 2).expect("both writers are I/O builtins");
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                let rt = self.cx.rt;
-                b.ins(&Instruction::I32Const(rt.writeerr.0 as i32));
-                b.ins(&Instruction::I32Const(rt.writeerr.1 as i32));
-                if name == "renameFile" {
-                    b.ins(&Instruction::I32Const(rt.xdeverr.0 as i32));
-                    b.ins(&Instruction::I32Const(rt.xdeverr.1 as i32));
-                }
-                b.ins(&Instruction::Call(if name == "writeFile" {
-                    rt.write_file
-                } else {
-                    rt.rename_file
-                }));
-                b.slot(off);
-                return Ok(ty);
-            }
             // The two builtins RFC-0078 refused to route, and therefore the two
             // this backend owes a loop. `text_runtime` is where those loops are and
-            // why they are not `std/num` and `std/text`.
-            //
-            // `parse` writes its `Option<Int64>` through a slot allocated here,
-            // which is the same hidden destination `readLine` gets — the M2b
-            // aggregate rule rather than a case of its own. `parseI64` is a
-            // `std/runtime` function returning the `Option`, so the destination
-            // leads, as it does for every aggregate result (`wasm_sig`).
-            "parse" if args.len() == 1 => {
-                let ty = Type::option(Type::Int);
-                let l = self.layout_of(&ty, line)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                b.ins(&Instruction::Call(self.cx.rt.parse_i64));
-                b.slot(off);
-                return Ok(ty);
-            }
+            // why they are not `std/num` and `std/text`. `parse` is the other,
+            // and [`Fn_::slot_call`] writes it.
             // `lineAt(bytes, off)` / `colAt(bytes, off)`. The buffer goes through
             // `walk`, so an `Array`, a fixed `ArrayN` and a `SmallArray` all arrive
             // as one base-and-count — the same three the checker accepts — and the
@@ -8538,198 +8506,17 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(f));
                 return Ok(Type::Int);
             }
-            // RFC-0083 M1. Construction starts from `v128.const 0` and replaces
-            // each lane in written order; a splat is the one opcode. No lane is
-            // read back before it is written, so the zero start costs nothing that
-            // an undefined one would have saved.
-            //
-            // M3's integer width is the same two shapes with the lane-typed
-            // opcodes swapped, which is what M1 meant by "one internal name per
-            // width": nothing here decodes a receiver.
-            "F32x4" | "I32x4" | "F64x2" if !args.is_empty() => {
-                let wide = name == "F64x2";
-                let int = name == "I32x4";
-                let (vec, lane) = if int {
-                    (Type::I32x4, INT32)
-                } else if wide {
-                    (Type::F64x2, Type::Float)
-                } else {
-                    (Type::F32x4, Type::Float32)
-                };
-                b.ins(&Instruction::V128Const(0));
-                for (i, a) in args.iter().enumerate() {
-                    self.expr_as(m, b, a, &lane)?;
-                    b.ins(&if int {
-                        Instruction::I32x4ReplaceLane(i as u8)
-                    } else if wide {
-                        Instruction::F64x2ReplaceLane(i as u8)
-                    } else {
-                        Instruction::F32x4ReplaceLane(i as u8)
-                    });
-                }
-                return Ok(vec);
-            }
-            // The lane index was proven constant and in range by the checker, so
-            // this is a plain immediate and there is no bounds check to emit.
-            "@lane" if args.len() == 2 => {
-                let vt = self.expr(m, b, &args[0])?;
-                let vt = self.cx.resolve(&vt);
-                let lanes = if matches!(vt, Type::F64x2 | Type::Mask64x2) {
-                    2
-                } else {
-                    4
-                };
-                let Some(k) = ftypes::const_lane(&args[1], lanes) else {
-                    return unsupported("a lane index that is not a constant", line);
-                };
-                // A mask lane is all-ones or all-zeros; `Bool` rides an `i32` that
-                // must be 0 or 1, so the extract is followed by a test against
-                // zero rather than being handed over raw — `-1` where `1` is
-                // expected would print `true` and compare unequal to `true`. The
-                // wide mask extracts an `i64`, so its `eqz` is the 64-bit one and
-                // the second `eqz` — the one that puts the sense back — is the
-                // 32-bit one, because the first already left an `i32` behind.
-                if vt == Type::Mask64x2 {
-                    b.ins(&Instruction::I64x2ExtractLane(k));
-                    b.ins(&Instruction::I64Eqz);
-                    b.ins(&Instruction::I32Eqz);
-                    return Ok(Type::Bool);
-                }
-                if vt == Type::Mask32x4 {
-                    b.ins(&Instruction::I32x4ExtractLane(k));
-                    b.ins(&Instruction::I32Eqz);
-                    b.ins(&Instruction::I32Eqz);
-                    return Ok(Type::Bool);
-                }
-                // An `Int32` lane needs no normalising: `i32x4.extract_lane` is
-                // already the whole 32-bit value, and `Int32` rides an `i32`.
-                if vt == Type::I32x4 {
-                    b.ins(&Instruction::I32x4ExtractLane(k));
-                    return Ok(INT32);
-                }
-                if vt == Type::F64x2 {
-                    b.ins(&Instruction::F64x2ExtractLane(k));
-                    return Ok(Type::Float);
-                }
-                b.ins(&Instruction::F32x4ExtractLane(k));
-                return Ok(Type::Float32);
-            }
-            // `v.replaceLane(k, x)` — the same immediate as the read, and the same
-            // opcode the four-argument constructor above already uses one lane at a
-            // time. Vectors only: the checker refuses a mask receiver.
-            "@replaceLane" if args.len() == 3 => {
-                let vt = self.cx.resolve(&self.peek(&args[0], line)?);
-                let int = vt == Type::I32x4;
-                let wide = vt == Type::F64x2;
-                self.expr_as(m, b, &args[0], &vt)?;
-                let Some(k) = ftypes::const_lane(&args[1], if wide { 2 } else { 4 }) else {
-                    return unsupported("a lane index that is not a constant", line);
-                };
-                let lane = if int {
-                    &INT32
-                } else if wide {
-                    &Type::Float
-                } else {
-                    &Type::Float32
-                };
-                self.expr_as(m, b, &args[2], lane)?;
-                b.ins(&if int {
-                    Instruction::I32x4ReplaceLane(k)
-                } else if wide {
-                    Instruction::F64x2ReplaceLane(k)
-                } else {
-                    Instruction::F32x4ReplaceLane(k)
-                });
-                return Ok(vt);
-            }
-            // Mask reductions (RFC-0083 M2). Both push an `i32` that is already 0
-            // or 1, so unlike the mask lane read there is no normalising `i32.eqz`
-            // pair to add.
-            //
-            // `v128.any_true` is whole-vector — any bit set anywhere — where
-            // `i32x4.all_true` is per lane. They coincide here because a
-            // `Mask32x4` lane is all-ones or all-zeros and nothing else can build
-            // one; that is the same closed-inhabitants argument that let the mask
-            // be its own type. There is no `i32x4.any_true` to reach for instead:
-            // the encoder carries exactly one any-true, at v128 width.
-            //
-            // `all_true` is the one that has to know the width — `i64x2.all_true`
-            // is a different opcode reading the same 128 bits as two lanes instead
-            // of four, and reading a `Mask64x2` with the 32-bit one would answer
-            // correctly for all-true and all-false and diverge only on a mixed
-            // mask. `any_true` is unchanged because it never had a lane width.
-            "@anyTrue" | "@allTrue" => {
-                let mt = self.cx.resolve(&self.peek(&args[0], line)?);
-                let wide = mt == Type::Mask64x2;
-                self.expr_as(m, b, &args[0], &mt)?;
-                b.ins(&if name == "@anyTrue" {
-                    Instruction::V128AnyTrue
-                } else if wide {
-                    Instruction::I64x2AllTrue
-                } else {
-                    Instruction::I32x4AllTrue
-                });
-                return Ok(Type::Bool);
-            }
-            // (`@f32x4Abs` was here as `f32x4.abs`, deleted in M4 — and this is the
-            // column that kept it two milestones too long. Its census row claimed
-            // 3.5x HERE, which was four calls Cranelift declined to inline and not
-            // the instruction; written inline the walk is 54 ms against 58 ms over
-            // 102 M lanes — 1.07x, `select`'s bar. See RFC-0083's M4 note.)
-            //
-            // (`@i32x4Min`/`Max`/`Abs` were here, as `i32x4.min_s`/`max_s`/`abs`,
-            // and were deleted on their measurement. This is the column that came
-            // CLOSEST to keeping them and still did not: over 200 M lanes the
-            // builtin walk is 139 ms against the Vyrn one's 146 ms — 1.05x, and
-            // `select` was refused at 1.06x. The 273 ms the same walk shows with
-            // the Vyrn version behind a helper function is Cranelift not inlining
-            // a call, not the operation. See RFC-0083's M3 note.)
-            //
-            // Four consecutive elements of an `Array<Float32>` / `Array<Int32>` as
-            // one 16-byte access, behind ONE bounds check rather than four. Both
-            // widths are the same `v128.load`: the element stride is 4 either way,
-            // which is why `walk`/`elem_addr` need no lane knowledge.
-            "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
-            | "@f64x2Store" => {
-                let (vec, span) = if name.starts_with("@i32x4") {
-                    (Type::I32x4, 4)
-                } else if name.starts_with("@f64x2") {
-                    // Two lanes, an 8-byte stride — and `elem_addr` still needs no
-                    // lane knowledge, because it scales by the ELEMENT size the
-                    // array already carries. Only the check's span is ours.
-                    (Type::F64x2, 2)
-                } else {
-                    (Type::F32x4, 4)
-                };
-                let aty = self.expr(m, b, &args[0])?;
-                let w = self.walk(b, &aty, line)?;
-                self.expr_as(m, b, &args[1], &Type::Int)?;
-                let idx = b.local(ValType::I64);
-                b.ins(&Instruction::LocalSet(idx));
-                self.bounds_check_span(b, &w, idx, span);
-                if name.ends_with("Load") {
-                    self.elem_addr(b, &w, idx);
-                    // `align: 0` — a log2 exponent, so one byte. The buffer is an
-                    // array of elements, so nothing guarantees the 16 a
-                    // `v128.load` would like, and an overstated hint is a
-                    // validation-legal lie the engine may act on. The textual
-                    // backend understates for the same reason, in the other unit:
-                    // its `align 4` is a BYTE count, not this exponent.
-                    b.ins(&Instruction::V128Load(MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }));
-                    return Ok(vec);
-                }
-                self.elem_addr(b, &w, idx);
-                self.expr_as(m, b, &args[2], &vec)?;
-                b.ins(&Instruction::V128Store(MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }));
-                return Ok(Type::Unit);
+            n if matches!(vyrn_lower::core::builtin_row(n), Some(Spec::Lanes)) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
+                        match want {
+                            Some(t) => s.expr_as(m, b, &args[i], t).map(|_| t.clone()),
+                            None => s.expr(m, b, &args[i]),
+                        }
+                    };
+                let lane_at =
+                    |i: usize, lanes: i64| args.get(i).and_then(|a| ftypes::const_lane(a, lanes));
+                return self.lanes(m, b, n, args.len(), &mut operand, &lane_at, line);
             }
             // `Int64(x)` / `UInt16(x)` — a conversion, not a call. Which names are
             // conversions is the frontend's answer (`numeric_conv_target`), so the
@@ -12121,11 +11908,23 @@ impl<'p> Fn_<'_, 'p> {
             .addr(b, 0)
             .ok_or_else(|| gap("`pop` on a non-array binding", line))?;
         b.ins(&Instruction::LocalSet(slot));
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
+        self.pop_at(b, slot, &aty, line)
+    }
+
+    /// `pop` on the array whose address is in the local `slot`. The arm over
+    /// the source and [`Fn_::core_call`] over the rows both call this.
+    fn pop_at(
+        &mut self,
+        b: &mut Frame,
+        slot: u32,
+        aty: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`pop` on `{aty}`"), line);
         };
         let elem = *elem;
-        let al = self.layout_of(&aty, line)?;
+        let al = self.layout_of(aty, line)?;
         let opt = Type::option(elem.clone());
         let ol = self.layout_of(&opt, line)?;
         let out = b.alloc(ol.size, ol.align);
@@ -12141,7 +11940,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Store(word8()));
         }
         b.ins(&Instruction::LocalGet(slot));
-        let w = self.walk(b, &aty, line)?;
+        let w = self.walk(b, aty, line)?;
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::I32Eqz);
@@ -12185,14 +11984,32 @@ impl<'p> Fn_<'_, 'p> {
             .addr(b, 0)
             .ok_or_else(|| gap("`swapRemove` on a non-array binding", line))?;
         b.ins(&Instruction::LocalSet(slot));
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
+        let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+            s.expr_as(m, b, &args[1], &Type::Int).map(|_| ())
+        };
+        self.swap_remove_at(m, b, slot, &aty, &mut index, line)
+    }
+
+    /// `swapRemove` on the array whose address is in the local `slot`, with
+    /// `index` writing the index. The arm over the source and
+    /// [`Fn_::core_call`] over the rows both call this.
+    fn swap_remove_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        slot: u32,
+        aty: &Type,
+        index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`swapRemove` on `{aty}`"), line);
         };
         let elem = *elem;
-        let al = self.layout_of(&aty, line)?;
+        let al = self.layout_of(aty, line)?;
         b.ins(&Instruction::LocalGet(slot));
-        let w = self.walk(b, &aty, line)?;
-        self.expr_as(m, b, &args[1], &Type::Int)?;
+        let w = self.walk(b, aty, line)?;
+        index(self, m, b)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
         self.bounds_check(b, &w, idx, false);
@@ -14101,26 +13918,46 @@ impl<'p> Fn_<'_, 'p> {
             (None, Some((ke, _))) => self.peek(ke, line)?,
             (None, None) => Type::Str,
         };
-        let mty = Type::Map(Box::new(key_t.clone()), Box::new(val.clone()));
+        let mty = Type::Map(Box::new(key_t), Box::new(val));
         let l = self.layout_of(&mty, line)?;
         let off = b.alloc(l.size, l.align);
+        let mut parts = Parts::Ast(entries.iter().flat_map(|(k, v)| [k, v]).collect());
+        self.map_into(m, b, Dest::Slot(off), &mty, &mut parts, line)?;
         b.slot(off);
+        Ok(mty)
+    }
+
+    /// A map literal of type `mty` built at `dest`: the header zeroed, then
+    /// each key and value of `parts`, in pairs, inserted in written order, so
+    /// a duplicate key updates in place and keeps its slot —
+    /// `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first. The
+    /// value a repeated key shadows has no owner left, so the insert releases
+    /// it; inside a `region` the arena owns it. The AST arm and
+    /// [`Fn_::core_make`] both call this.
+    fn map_into(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        mty: &Type,
+        parts: &mut Parts,
+        line: usize,
+    ) -> Result<(), String> {
+        let Type::Map(key_t, val) = self.cx.resolve(mty) else {
+            return unsupported(&format!("a map literal of `{mty}`"), line);
+        };
+        let l = self.layout_of(mty, line)?;
+        dest.addr(b, 0);
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32Const(l.size as i32));
         b.ins(&Instruction::MemoryFill(0));
         let hdr = b.local(ValType::I32);
-        b.slot(off);
+        dest.addr(b, 0);
         b.ins(&Instruction::LocalSet(hdr));
-        // Written order, so a duplicate key updates in place and keeps its slot —
-        // `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first.
-        // A repeated key updates in place, so the value it shadows has no owner
-        // left — `["usd": 1, "usd": 3]`. Inside a `region` the arena owns it.
-        let drop_old = true;
-        for (ke, ve) in entries {
-            self.map_set(m, b, hdr, &l, ke, ve, &key_t, &val, drop_old, line)?;
+        for i in (0..parts.len()).step_by(2) {
+            self.map_set(m, b, hdr, &l, parts, i, &key_t, &val, true, line)?;
         }
-        b.slot(off);
-        Ok(mty)
+        Ok(())
     }
 
     /// `m[k] = v` — update in place on a hit, append on a miss.
@@ -14370,8 +14207,8 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         hdr: u32,
         l: &Layout,
-        key: &Expr,
-        value: &Expr,
+        parts: &mut Parts,
+        key: usize,
         key_t: &Type,
         val: &Type,
         drop_old: bool,
@@ -14389,19 +14226,19 @@ impl<'p> Fn_<'_, 'p> {
         let k = match mk {
             MapKey::I64 => {
                 let k = b.local(ValType::I64);
-                self.expr_as(m, b, key, &Type::Int)?;
+                self.part(m, b, parts, key, &Type::Int, line)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
             MapKey::Pack(_) => {
                 let raw = b.local(ValType::I32);
-                self.expr_as(m, b, key, key_t)?;
+                self.part(m, b, parts, key, key_t, line)?;
                 b.ins(&Instruction::LocalSet(raw));
                 self.pack_key(b, raw, key_t, line)?
             }
             MapKey::Str => {
                 let k = b.local(ValType::I32);
-                self.expr_as(m, b, key, &Type::Str)?;
+                self.part(m, b, parts, key, &Type::Str, line)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
@@ -14411,7 +14248,7 @@ impl<'p> Fn_<'_, 'p> {
             Repr::Agg(_) => ValType::I32,
             Repr::Unit => return unsupported("a Map of Unit", line),
         });
-        self.expr_as(m, b, value, val)?;
+        self.part(m, b, parts, key + 1, val, line)?;
         b.ins(&Instruction::LocalSet(v));
 
         let idx = b.local(ValType::I32);
@@ -14756,6 +14593,281 @@ impl<'p> Fn_<'_, 'p> {
         Ok(oty)
     }
 
+    /// A SIMD builtin (RFC-0083): a lane constructor, a lane read or write at
+    /// a constant index, a mask reduction, or a load or store of consecutive
+    /// array elements. The vector operand's own type chooses the opcode.
+    ///
+    /// `operand` writes argument `i`, at the type asked for or else at its own,
+    /// and answers the type it wrote. `lane_at` answers argument `i` as a lane
+    /// index below the count given, or `None` where it is no such constant.
+    /// The arm over the source and [`Fn_::core_call`] over the rows both call
+    /// this.
+    fn lanes(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        argc: usize,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            Option<&Type>,
+        ) -> Result<Type, String>,
+        lane_at: &dyn Fn(usize, i64) -> Option<u8>,
+        line: usize,
+    ) -> Result<Type, String> {
+        match name {
+            // RFC-0083 M1. Construction starts from `v128.const 0` and replaces
+            // each lane in written order; a splat is the one opcode. No lane is
+            // read back before it is written, so the zero start costs nothing that
+            // an undefined one would have saved.
+            //
+            // M3's integer width is the same two shapes with the lane-typed
+            // opcodes swapped, which is what M1 meant by "one internal name per
+            // width": nothing here decodes a receiver.
+            "F32x4" | "I32x4" | "F64x2" if argc > 0 => {
+                let wide = name == "F64x2";
+                let int = name == "I32x4";
+                let (vec, lane) = if int {
+                    (Type::I32x4, INT32)
+                } else if wide {
+                    (Type::F64x2, Type::Float)
+                } else {
+                    (Type::F32x4, Type::Float32)
+                };
+                b.ins(&Instruction::V128Const(0));
+                for i in 0..argc {
+                    operand(self, m, b, i, Some(&lane))?;
+                    b.ins(&if int {
+                        Instruction::I32x4ReplaceLane(i as u8)
+                    } else if wide {
+                        Instruction::F64x2ReplaceLane(i as u8)
+                    } else {
+                        Instruction::F32x4ReplaceLane(i as u8)
+                    });
+                }
+                return Ok(vec);
+            }
+            // The lane index was proven constant and in range by the checker, so
+            // this is a plain immediate and there is no bounds check to emit.
+            "@lane" if argc == 2 => {
+                let vt = operand(self, m, b, 0, None)?;
+                let vt = self.cx.resolve(&vt);
+                let lanes = if matches!(vt, Type::F64x2 | Type::Mask64x2) {
+                    2
+                } else {
+                    4
+                };
+                let Some(k) = lane_at(1, lanes) else {
+                    return unsupported("a lane index that is not a constant", line);
+                };
+                // A mask lane is all-ones or all-zeros; `Bool` rides an `i32` that
+                // must be 0 or 1, so the extract is followed by a test against
+                // zero rather than being handed over raw — `-1` where `1` is
+                // expected would print `true` and compare unequal to `true`. The
+                // wide mask extracts an `i64`, so its `eqz` is the 64-bit one and
+                // the second `eqz` — the one that puts the sense back — is the
+                // 32-bit one, because the first already left an `i32` behind.
+                if vt == Type::Mask64x2 {
+                    b.ins(&Instruction::I64x2ExtractLane(k));
+                    b.ins(&Instruction::I64Eqz);
+                    b.ins(&Instruction::I32Eqz);
+                    return Ok(Type::Bool);
+                }
+                if vt == Type::Mask32x4 {
+                    b.ins(&Instruction::I32x4ExtractLane(k));
+                    b.ins(&Instruction::I32Eqz);
+                    b.ins(&Instruction::I32Eqz);
+                    return Ok(Type::Bool);
+                }
+                // An `Int32` lane needs no normalising: `i32x4.extract_lane` is
+                // already the whole 32-bit value, and `Int32` rides an `i32`.
+                if vt == Type::I32x4 {
+                    b.ins(&Instruction::I32x4ExtractLane(k));
+                    return Ok(INT32);
+                }
+                if vt == Type::F64x2 {
+                    b.ins(&Instruction::F64x2ExtractLane(k));
+                    return Ok(Type::Float);
+                }
+                b.ins(&Instruction::F32x4ExtractLane(k));
+                return Ok(Type::Float32);
+            }
+            // `v.replaceLane(k, x)` — the same immediate as the read, and the same
+            // opcode the four-argument constructor above already uses one lane at a
+            // time. Vectors only: the checker refuses a mask receiver.
+            "@replaceLane" if argc == 3 => {
+                let vt = operand(self, m, b, 0, None)?;
+                let vt = self.cx.resolve(&vt);
+                let int = vt == Type::I32x4;
+                let wide = vt == Type::F64x2;
+                let Some(k) = lane_at(1, if wide { 2 } else { 4 }) else {
+                    return unsupported("a lane index that is not a constant", line);
+                };
+                let lane = if int {
+                    &INT32
+                } else if wide {
+                    &Type::Float
+                } else {
+                    &Type::Float32
+                };
+                operand(self, m, b, 2, Some(lane))?;
+                b.ins(&if int {
+                    Instruction::I32x4ReplaceLane(k)
+                } else if wide {
+                    Instruction::F64x2ReplaceLane(k)
+                } else {
+                    Instruction::F32x4ReplaceLane(k)
+                });
+                return Ok(vt);
+            }
+            // Mask reductions (RFC-0083 M2). Both push an `i32` that is already 0
+            // or 1, so unlike the mask lane read there is no normalising `i32.eqz`
+            // pair to add.
+            //
+            // `v128.any_true` is whole-vector — any bit set anywhere — where
+            // `i32x4.all_true` is per lane. They coincide here because a
+            // `Mask32x4` lane is all-ones or all-zeros and nothing else can build
+            // one; that is the same closed-inhabitants argument that let the mask
+            // be its own type. There is no `i32x4.any_true` to reach for instead:
+            // the encoder carries exactly one any-true, at v128 width.
+            //
+            // `all_true` is the one that has to know the width — `i64x2.all_true`
+            // is a different opcode reading the same 128 bits as two lanes instead
+            // of four, and reading a `Mask64x2` with the 32-bit one would answer
+            // correctly for all-true and all-false and diverge only on a mixed
+            // mask. `any_true` is unchanged because it never had a lane width.
+            "@anyTrue" | "@allTrue" if argc == 1 => {
+                let mt = operand(self, m, b, 0, None)?;
+                let mt = self.cx.resolve(&mt);
+                let wide = mt == Type::Mask64x2;
+                b.ins(&if name == "@anyTrue" {
+                    Instruction::V128AnyTrue
+                } else if wide {
+                    Instruction::I64x2AllTrue
+                } else {
+                    Instruction::I32x4AllTrue
+                });
+                return Ok(Type::Bool);
+            }
+            // (`@f32x4Abs` was here as `f32x4.abs`, deleted in M4 — and this is the
+            // column that kept it two milestones too long. Its census row claimed
+            // 3.5x HERE, which was four calls Cranelift declined to inline and not
+            // the instruction; written inline the walk is 54 ms against 58 ms over
+            // 102 M lanes — 1.07x, `select`'s bar. See RFC-0083's M4 note.)
+            //
+            // (`@i32x4Min`/`Max`/`Abs` were here, as `i32x4.min_s`/`max_s`/`abs`,
+            // and were deleted on their measurement. This is the column that came
+            // CLOSEST to keeping them and still did not: over 200 M lanes the
+            // builtin walk is 139 ms against the Vyrn one's 146 ms — 1.05x, and
+            // `select` was refused at 1.06x. The 273 ms the same walk shows with
+            // the Vyrn version behind a helper function is Cranelift not inlining
+            // a call, not the operation. See RFC-0083's M3 note.)
+            //
+            // Four consecutive elements of an `Array<Float32>` / `Array<Int32>` as
+            // one 16-byte access, behind ONE bounds check rather than four. Both
+            // widths are the same `v128.load`: the element stride is 4 either way,
+            // which is why `walk`/`elem_addr` need no lane knowledge.
+            "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
+            | "@f64x2Store"
+                if argc == 2 + usize::from(name.ends_with("Store")) =>
+            {
+                let (vec, span) = if name.starts_with("@i32x4") {
+                    (Type::I32x4, 4)
+                } else if name.starts_with("@f64x2") {
+                    // Two lanes, an 8-byte stride — and `elem_addr` still needs no
+                    // lane knowledge, because it scales by the ELEMENT size the
+                    // array already carries. Only the check's span is ours.
+                    (Type::F64x2, 2)
+                } else {
+                    (Type::F32x4, 4)
+                };
+                let aty = operand(self, m, b, 0, None)?;
+                let w = self.walk(b, &aty, line)?;
+                operand(self, m, b, 1, Some(&Type::Int))?;
+                let idx = b.local(ValType::I64);
+                b.ins(&Instruction::LocalSet(idx));
+                self.bounds_check_span(b, &w, idx, span);
+                if name.ends_with("Load") {
+                    self.elem_addr(b, &w, idx);
+                    // `align: 0` — a log2 exponent, so one byte. The buffer is an
+                    // array of elements, so nothing guarantees the 16 a
+                    // `v128.load` would like, and an overstated hint is a
+                    // validation-legal lie the engine may act on. The textual
+                    // backend understates for the same reason, in the other unit:
+                    // its `align 4` is a BYTE count, not this exponent.
+                    b.ins(&Instruction::V128Load(MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                    return Ok(vec);
+                }
+                self.elem_addr(b, &w, idx);
+                operand(self, m, b, 2, Some(&vec))?;
+                b.ins(&Instruction::V128Store(MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                }));
+                return Ok(Type::Unit);
+            }
+            _ => unsupported(&format!("`{name}` at this arity"), line),
+        }
+    }
+
+    /// `m.keys()` with the map's address in the local `hdr`: a snapshot
+    /// `Array<K>`, the keys copied into a buffer of their own, so the map may
+    /// be mutated afterwards without disturbing it. String keys are then dup'd
+    /// per element (RFC-0092 M2 — an array owns its elements, so a snapshot of
+    /// the map's own pointers would be freed twice); Int64 keys copy with the
+    /// buffer (RFC-0117). The arm over the source and [`Fn_::core_call`] over
+    /// the rows both call this.
+    fn map_keys(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        hdr: u32,
+        mty: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Map(key_t, _) = self.cx.resolve(mty) else {
+            return unsupported(&format!("`keys` on `{mty}`"), line);
+        };
+        let mk = self.map_key(&key_t, line)?;
+        let l = self.layout_of(mty, line)?;
+        let aty = Type::Array(key_t);
+        let al = self.layout_of(&aty, line)?;
+        let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(len));
+        let (kind, klen) = mk.kind();
+        b.ins(&Instruction::I32Const(kind));
+        b.ins(&Instruction::I32Const(klen));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
+        b.ins(&Instruction::LocalSet(buf));
+        if mk == MapKey::Str {
+            self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
+        }
+        let off = b.alloc(al.size, al.align);
+        b.slot(off + al.fields[0]);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word()));
+        for f in [al.fields[1], al.fields[2]] {
+            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(len));
+            b.ins(&Instruction::I64ExtendI32U);
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(aty)
+    }
+
     /// `m.has(k)`, `m.remove(k)` and `m.keys()`.
     fn map_method(
         &mut self,
@@ -14786,48 +14898,15 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalSet(hdr));
             (hdr, ty, false)
         };
+        if name == "@keys" {
+            return self.map_keys(m, b, hdr, &mty, line);
+        }
         let (key_t, val) = match self.cx.resolve(&mty) {
             Type::Map(k, v) => (*k, v),
             _ => return unsupported(&format!("`{name}` on `{mty}`"), line),
         };
         let mk = self.map_key(&key_t, line)?;
         let l = self.layout_of(&mty, line)?;
-
-        if name == "@keys" {
-            // A snapshot `Array<K>`: the keys copied into a buffer of their
-            // own, so the map may be mutated afterwards without disturbing it.
-            // String keys are then dup'd per element (RFC-0092 M2 — an array
-            // owns its elements, so a snapshot of the map's own pointers would
-            // be freed twice); Int64 keys copy with the buffer (RFC-0117).
-            let aty = Type::Array(Box::new(key_t.clone()));
-            let al = self.layout_of(&aty, line)?;
-            let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I64Load(at(l.fields[2])));
-            b.ins(&Instruction::I32WrapI64);
-            b.ins(&Instruction::LocalSet(len));
-            let (kind, klen) = mk.kind();
-            b.ins(&Instruction::I32Const(kind));
-            b.ins(&Instruction::I32Const(klen));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
-            b.ins(&Instruction::LocalSet(buf));
-            if mk == MapKey::Str {
-                self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
-            }
-            let off = b.alloc(al.size, al.align);
-            b.slot(off + al.fields[0]);
-            b.ins(&Instruction::LocalGet(buf));
-            b.ins(&Instruction::I32Store(word()));
-            for f in [al.fields[1], al.fields[2]] {
-                b.slot(off + f);
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I64ExtendI32U);
-                b.ins(&Instruction::I64Store(word8()));
-            }
-            b.slot(off);
-            return Ok(aty);
-        }
 
         let k = match mk {
             MapKey::I64 => {
@@ -16337,22 +16416,6 @@ const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 // bought it: 330 ns hand-written here against 721 ns compiled, and no difference
 // a program could observe.)
 
-/// The result type of an RFC-0014/RFC-0044 I/O builtin, or `None` if the name is
-/// not one.
-///
-/// ONE spelling, read by the emitting path (which sizes a destination slot with
-/// it) and by [`Fn_::peek`] (which needs the same answer when the call is a
-/// branch's value). M2l's rule is that a builtin `call` lowers owes `peek` a row;
-/// this is that row and that lowering reading one function, because two
-/// spellings of `Result<Bool, String>` are two chances to size a slot one field
-/// differently from the value written into it.
-/// `listDir`'s type (RFC-0021), in one place so the lowering and [`Fn_::peek`]
-/// cannot size a destination slot differently from the value written into it —
-/// M2l's rule, and the shape `io_builtin_ty` exists for on the other builtins.
-fn gen_list_dir_ty() -> Type {
-    Type::result(Type::Array(Box::new(Type::Str)), Type::Str)
-}
-
 /// The receivers that have a `.length` or a `.byteLength`, in ONE list.
 ///
 /// Neither name is a field, so both paths that meet one have to know the list:
@@ -16362,7 +16425,7 @@ fn gen_list_dir_ty() -> Type {
 /// read as "a field of the non-record type `Map<String, Int64>`" while the
 /// same read outside a branch compiled. `base` is already resolved.
 ///
-/// This is `io_builtin_ty`'s rule on a second table: one spelling, two readers.
+/// This is `slot_ty`'s rule on a second table: one spelling, two readers.
 fn length_ty(field: &str, base: &Type) -> Option<Type> {
     matches!(
         (field, base),
@@ -16375,20 +16438,29 @@ fn length_ty(field: &str, base: &Type) -> Option<Type> {
     .then_some(Type::Int)
 }
 
-fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
-    let str_err = |ok| Type::result(ok, Type::Str);
-    Some(match (name, argc) {
-        ("args", 0) => Type::Array(Box::new(Type::Str)),
-        ("readLine", 0) => Type::option(Type::Str),
-        ("readFile", 1) => str_err(Type::Str),
-        ("readFileBytes", 1) => str_err(Type::Array(Box::new(Type::IntN {
-            bits: 8,
-            signed: false,
-        }))),
-        ("fsyncFile", 1) => str_err(Type::Bool),
-        ("writeFile", 2) | ("renameFile", 2) | ("writeFileBytes", 2) => str_err(Type::Bool),
-        _ => return None,
-    })
+/// The result type of a builtin [`Fn_::slot_call`] writes, at `argc` operands,
+/// or `None` where the name is not one or the arity is not its own.
+///
+/// The type is the core's `Spec::Builds` row, so the slot the call sizes and
+/// the value the row lands are one spelling.
+fn slot_ty(name: &str, argc: usize) -> Option<Type> {
+    match vyrn_lower::core::builtin_row(name) {
+        Some(Spec::Builds(t)) if slot_arity(name) == Some(argc) => Some(t.clone()),
+        _ => None,
+    }
+}
+
+/// How many operands a builtin [`Fn_::slot_call`] writes takes, or `None`
+/// where the name is not one.
+fn slot_arity(name: &str) -> Option<usize> {
+    match name {
+        "args" | "readLine" => Some(0),
+        "readFile" | "readFileBytes" | "fsyncFile" | "parse" | "listDir" | "listDirKinds" => {
+            Some(1)
+        }
+        "writeFile" | "renameFile" | "writeFileBytes" => Some(2),
+        _ => None,
+    }
 }
 
 fn expr_name(e: &Expr) -> String {
@@ -16626,6 +16698,15 @@ fn builtin_spec(
         _ => return None,
     };
     Some((params.as_slice(), ins, ret))
+}
+
+/// Argument `i` of a call row as a lane index below `lanes`: the literal the
+/// row carries, which the checker proved constant and in range.
+fn core_lane(args: &[(Val, vyrn_frontend::ast::Capability)], i: usize, lanes: i64) -> Option<u8> {
+    match args.get(i) {
+        Some((Val::Lit(Lit::Int(k)), _)) if (0..lanes).contains(k) => Some(*k as u8),
+        _ => None,
+    }
 }
 
 /// The specification row of the builtin a CALL ROW names, or `None` where the
@@ -17962,6 +18043,45 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
             }
+            // A SIMD builtin: each operand at the type asked for or its own, and
+            // a lane index as the literal the row carries.
+            Some(Spec::Lanes) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
+                        let Some((v, _)) = args.get(i) else {
+                            return unsupported(&format!("`{callee}` with too few operands"), line);
+                        };
+                        let t = match want {
+                            Some(t) => t.clone(),
+                            None => s.core_ty(body, v, &Type::Int),
+                        };
+                        s.core_val(m, b, body, w, v, &t, line)?;
+                        Ok(t)
+                    };
+                let lane_at = |i: usize, lanes: i64| core_lane(args, i, lanes);
+                return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, line);
+            }
+            // `xs.pop()` and `xs.swapRemove(i)`: the receiver's address, which
+            // the call shrinks in place, and the index the row names.
+            Some(Spec::Removes) => {
+                let [(Val::Name(x), _), rest @ ..] = args else {
+                    return unsupported("a removal from no named receiver", line);
+                };
+                let aty = body.names[*x as usize].ty.clone();
+                let slot = b.local(ValType::I32);
+                self.core_addr_of(b, w, body, *x, line)?;
+                b.ins(&Instruction::LocalSet(slot));
+                return match (callee, rest) {
+                    ("@pop", []) => self.pop_at(b, slot, &aty, line),
+                    ("@swapRemove", [(i, _)]) => {
+                        let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                            s.core_val(m, b, body, w, i, &Type::Int, line)
+                        };
+                        self.swap_remove_at(m, b, slot, &aty, &mut index, line)
+                    }
+                    _ => unsupported(&format!("`{callee}` at this arity"), line),
+                };
+            }
             // `bytes` and `stringFromBytes`: built in a slot of the call's
             // own, which [`agg_landed`] copies into the destination.
             Some(Spec::Builds(_)) => {
@@ -17972,13 +18092,22 @@ impl<'p> Fn_<'_, 'p> {
                         Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
                         None => unsupported(&format!("`{callee}` with too few operands"), line),
                     };
-                return match callee {
-                    "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
-                    "stringFromBytes" => self.string_from_bytes(m, b, &mut operand, line),
-                    _ => unsupported(&format!("`{callee}` builds nothing this walk emits"), line),
+                return match (callee, args) {
+                    ("bytes", _) => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    ("stringFromBytes", _) => self.string_from_bytes(m, b, &mut operand, line),
+                    ("@keys", [(v, _)]) => {
+                        let mty = self.core_ty(body, v, &Type::Int);
+                        self.core_val(m, b, body, w, v, &mty, line)?;
+                        let hdr = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(hdr));
+                        self.map_keys(m, b, hdr, &mty, line)
+                    }
+                    _ => self.slot_call(m, b, callee, &mut operand, line),
                 };
             }
-            None => {}
+            // A routed builtin is the declared call below, through the
+            // signature [`Fn_::core_sig`] answers for the function it names.
+            Some(Spec::Routes(_)) | None => {}
         }
         // `T(v)` of a validated type: the operand at the base, then the check
         // (RFC-0125 §2.2). A literal was proven by the checker, which refuses
@@ -18130,26 +18259,36 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The element's address is the walk's: the header read, the bounds
             // check the language states, and one stride multiply — the same
-            // three [`Fn_::at`] emits for `a[i]`. A String's element is a byte
-            // widened on load, which is no load of the element's own type.
+            // three [`Fn_::at`] emits for `a[i]`. A String is walked from its
+            // pointer, which is its value and not its address, and its element
+            // is a `UInt8` where the walk hands a `for` the byte widened.
             At::Elem(base, i) => {
                 let walk = match core_header(w, base) {
                     Some(walk) => walk,
                     None => {
-                        let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
-                        self.core_step(b, off);
+                        let bty = match self.core_place_ty(body, base) {
+                            Some(t) if self.cx.resolve(&t) == Type::Str => {
+                                self.core_read(m, b, body, w, base, line)?
+                            }
+                            _ => {
+                                let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
+                                self.core_step(b, off);
+                                bty
+                            }
+                        };
                         self.walk(b, &bty, line)?
                     }
                 };
-                if walk.byte {
-                    return unsupported("a read of a String's byte", line);
-                }
                 self.core_val(m, b, body, w, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
-                self.bounds_check(b, &walk, ix, false);
+                self.bounds_check(b, &walk, ix, walk.byte);
                 self.elem_addr(b, &walk, ix);
-                Ok((walk.elem, None))
+                let byte = Type::IntN {
+                    bits: 8,
+                    signed: false,
+                };
+                Ok((if walk.byte { byte } else { walk.elem }, None))
             }
             // A key has no address: its read is the runtime's lookup, which
             // the aggregate `let` arm of [`Fn_::core_stmts`] writes.
@@ -18192,6 +18331,10 @@ impl<'p> Fn_<'_, 'p> {
             }
             At::Elem(base, _) => match self.cx.resolve(&self.core_place_ty(body, base)?) {
                 Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => Some(*e),
+                Type::Str => Some(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }),
                 _ => None,
             },
             At::Key(..) => None,
@@ -18392,6 +18535,11 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 _ => return unsupported("an array literal the row does not place", line),
             },
+            Rhs::Make(Ctor::Map, vs) => {
+                let mut parts = Parts::Core(body, vs, w);
+                self.map_into(m, b, dest, ty, &mut parts, line)?;
+                dest.addr(b, 0);
+            }
             _ => return unsupported("a made layout this walk does not build", line),
         }
         // `dest_used` is the AST arm's answer to [`Fn_::agg_into`], and this
@@ -18545,7 +18693,12 @@ impl<'p> Fn_<'_, 'p> {
                 Type::ArrayN(inner, n) => n == vs.len() && n > 0 && part(&inner),
                 _ => false,
             },
-            Ctor::Map | Ctor::Try(_) => false,
+            // A key and a value per entry, each a part this walk writes.
+            Ctor::Map => match self.cx.resolve(ty) {
+                Type::Map(k, v) => vs.len() % 2 == 0 && part(&k) && part(&v),
+                _ => false,
+            },
+            Ctor::Try(_) => false,
         }
     }
 
@@ -18636,6 +18789,11 @@ impl<'p> Fn_<'_, 'p> {
     /// one name that hits and must not be called — an unaudited build drops
     /// its four hooks rather than emitting them.
     fn core_sig(&self, callee: &str, kind: Callee) -> Option<Sig> {
+        // A routed builtin is a call to the function its row names.
+        let (callee, kind) = match core_builtin(callee, kind) {
+            Some(Spec::Routes(f)) => (*f, Callee::Fn),
+            _ => (callee, kind),
+        };
         if kind != Callee::Fn || self.audit_dropped(callee) {
             return None;
         }
@@ -19144,25 +19302,27 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Call {
                 callee, args, kind, ..
             } => {
-                self.core_args_readable(body, args)
-                    && (match core_builtin(callee, *kind) {
-                        Some(Spec::Builds(_)) => true,
-                        // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
-                        // the copy in a slot of its own, as `Builds` does.
-                        // A type that declares `impl Copy` is copied by that
-                        // declaration's function, a call like any other.
-                        Some(Spec::OwnType) => match self.core_copy_impl(body, callee, *kind, args)
-                        {
-                            Some(f) => self
-                                .core_sig(&f, Callee::Fn)
-                                .is_some_and(|s| s.params.len() == 1 && s.ret.agg().is_some()),
-                            None => matches!(args.as_slice(), [(Val::Name(n), _)]
+                self.core_removes(body, callee, *kind, args) == Some(true)
+                    || self.core_args_readable(body, args)
+                        && (match core_builtin(callee, *kind) {
+                            Some(Spec::Builds(_)) => true,
+                            // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
+                            // the copy in a slot of its own, as `Builds` does.
+                            // A type that declares `impl Copy` is copied by that
+                            // declaration's function, a call like any other.
+                            Some(Spec::OwnType) => {
+                                match self.core_copy_impl(body, callee, *kind, args) {
+                                    Some(f) => self.core_sig(&f, Callee::Fn).is_some_and(|s| {
+                                        s.params.len() == 1 && s.ret.agg().is_some()
+                                    }),
+                                    None => matches!(args.as_slice(), [(Val::Name(n), _)]
                                 if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
-                        },
-                        _ => false,
-                    } || self
-                        .core_sig(callee, *kind)
-                        .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
+                                }
+                            }
+                            _ => false,
+                        } || self
+                            .core_sig(callee, *kind)
+                            .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                 self.core_val_readable(body, k)
@@ -19188,6 +19348,29 @@ impl<'p> Fn_<'_, 'p> {
                 if (body.names[*x as usize].grows
                     || matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_)))
                     && self.core_args_readable(body, rest))
+    }
+
+    /// Whether a row removes from a named `Array` receiver
+    /// ([`Spec::Removes`]) with operands this walk writes, and if so whether
+    /// what it hands back is an aggregate, which lands through a slot.
+    fn core_removes(
+        &self,
+        body: &vyrn_lower::core::Body,
+        callee: &str,
+        kind: Callee,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+    ) -> Option<bool> {
+        if !matches!(core_builtin(callee, kind), Some(Spec::Removes)) {
+            return None;
+        }
+        let [(Val::Name(x), _), rest @ ..] = args else {
+            return None;
+        };
+        let Type::Array(e) = self.cx.resolve(&body.names[*x as usize].ty) else {
+            return None;
+        };
+        (self.core_args_readable(body, args) && rest.len() == usize::from(callee == "@swapRemove"))
+            .then(|| callee == "@pop" || matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))))
     }
 
     /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
@@ -19257,7 +19440,9 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs)
                 if self.core_ctor(rhs)
                     || self.core_agg_call(body, rhs)
-                    || self.core_rebuild(body, rhs) =>
+                    || self.core_rebuild(body, rhs)
+                    || matches!(rhs, Rhs::Call { callee, kind, args, .. }
+                        if self.core_removes(body, callee, *kind, args).is_some()) =>
             {
                 None
             }
@@ -19293,10 +19478,18 @@ impl<'p> Fn_<'_, 'p> {
                 _ => false,
             },
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
+            // A lane index is an immediate, so the row carries it as a literal.
+            Some(Spec::Lanes) => {
+                !matches!(callee, "@lane" | "@replaceLane") || core_lane(args, 1, 4).is_some()
+            }
+            // A removal that hands back a scalar leaves it on the stack; one
+            // that hands back an aggregate is an aggregate call.
+            Some(Spec::Removes) => self.core_removes(body, callee, kind, args) == Some(false),
             // A rebuild is read together with the store after it
-            // ([`Fn_::core_rebuilt`]), and a built aggregate as an aggregate
-            // call ([`Fn_::core_agg_call`]); neither alone.
-            Some(Spec::Rebuilds | Spec::Builds(_)) | None => false,
+            // ([`Fn_::core_rebuilt`]), a built aggregate as an aggregate call
+            // ([`Fn_::core_agg_call`]), and a routed builtin as the declared
+            // call [`Fn_::core_sig`] answers for; none alone.
+            Some(Spec::Rebuilds | Spec::Builds(_) | Spec::Routes(_)) | None => false,
         }
     }
 

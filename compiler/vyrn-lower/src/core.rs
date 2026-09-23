@@ -1669,9 +1669,27 @@ pub enum Spec {
     /// it otherwise, and the store after the call puts the new address
     /// into the name.
     Rebuilds,
+    /// A SIMD operation (RFC-0083): the lane constructors, a lane read or
+    /// write, a mask reduction, and a load or store of consecutive array
+    /// elements. The vector operand's own type chooses the instruction, and a
+    /// lane index is a literal the row carries, which the checker proved
+    /// constant and in range.
+    Lanes,
+    /// The call is a call to the named function, which the program links:
+    /// an entry a generator host's engine synthesizes, or a `std` function a
+    /// builtin routes to (`loader::RT_MODULES`). The emitter reads it as a
+    /// declared callee, and where the program does not define the function it
+    /// reads no such call.
+    Routes(&'static str),
+    /// An array receiver, and for `@swapRemove` an index at `Int64`. The call
+    /// shrinks the receiver in its own storage and hands back what it
+    /// removed: `@pop` an `Option` of the last element, `@swapRemove` the
+    /// element at the index.
+    Removes,
     /// Operands at whatever type the row put on their names, and a result at
-    /// the stated type that the call builds in storage of its own. The caller
-    /// lands it as it lands any aggregate result.
+    /// the stated type, whose parameters the operands' types solve, that the
+    /// call builds in storage of its own. The caller lands it as it lands any
+    /// aggregate result.
     Builds(Type),
 }
 
@@ -1735,12 +1753,79 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@append", Spec::Rebuilds),
             ("@copyFrom", Spec::Rebuilds),
             ("@strAppend", Spec::Rebuilds),
-            ("bytes", Spec::Builds(Type::Array(Box::new(u8_)))),
+            ("F32x4", Spec::Lanes),
+            ("I32x4", Spec::Lanes),
+            ("F64x2", Spec::Lanes),
+            ("@lane", Spec::Lanes),
+            ("@replaceLane", Spec::Lanes),
+            ("@anyTrue", Spec::Lanes),
+            ("@allTrue", Spec::Lanes),
+            ("@f32x4Load", Spec::Lanes),
+            ("@f32x4Store", Spec::Lanes),
+            ("@i32x4Load", Spec::Lanes),
+            ("@i32x4Store", Spec::Lanes),
+            ("@f64x2Load", Spec::Lanes),
+            ("@f64x2Store", Spec::Lanes),
+            (
+                "moduleInterface",
+                Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_MODULE_INTERFACE),
+            ),
+            ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
+            ("@pop", Spec::Removes),
+            ("@swapRemove", Spec::Removes),
+            ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),
             (
                 "stringFromBytes",
                 Spec::Builds(Type::result(Type::Str, Type::Str)),
             ),
+            // RFC-0014 and RFC-0044's I/O: the runtime writes the whole result
+            // into the caller's slot, and a failure is its `Err` message.
+            ("args", Spec::Builds(Type::Array(Box::new(Type::Str)))),
+            ("readLine", Spec::Builds(Type::option(Type::Str))),
+            ("readFile", Spec::Builds(Type::result(Type::Str, Type::Str))),
+            (
+                "readFileBytes",
+                Spec::Builds(Type::result(Type::Array(Box::new(u8_)), Type::Str)),
+            ),
+            (
+                "fsyncFile",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
+            ),
+            (
+                "writeFile",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
+            ),
+            (
+                "renameFile",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
+            ),
+            (
+                "writeFileBytes",
+                Spec::Builds(Type::result(Type::Bool, Type::Str)),
+            ),
+            ("parse", Spec::Builds(Type::option(Type::Int))),
+            (
+                "listDir",
+                Spec::Builds(Type::result(Type::Array(Box::new(Type::Str)), Type::Str)),
+            ),
+            (
+                "listDirKinds",
+                Spec::Builds(Type::result(Type::Array(Box::new(Type::Str)), Type::Str)),
+            ),
+            // A snapshot of a map's keys, at the prelude's own parameter.
+            (
+                "@keys",
+                Spec::Builds(Type::Array(Box::new(Type::Param("K".into())))),
+            ),
         ]
+        .into_iter()
+        .chain(
+            vyrn_frontend::loader::RT_MODULES
+                .iter()
+                .flat_map(|rt| rt.routes)
+                .map(|(builtin, f)| (*builtin, Spec::Routes(*f))),
+        )
+        .collect()
     })
 }
 
@@ -1899,16 +1984,15 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             vals(vs, out);
         }
         Rhs::Prim(_, vs, _) => vals(vs, out),
-        // Since RFC-0125 M7 a record literal and an array literal are read off
-        // the row (`direct::Fn_::core_make`), so neither is a gap. What refuses
-        // a part the emitter cannot place is the emitter's own screen, the way
-        // a `Callee::Fn` whose parameter crosses by address is not a gap
-        // either. A map literal and a `where`-checked constructor have no
+        // Since RFC-0125 M7 a record literal, an array literal and a map
+        // literal are read off the row (`direct::Fn_::core_make`), so none is
+        // a gap. What refuses a part the emitter cannot place is the emitter's
+        // own screen, the way a `Callee::Fn` whose parameter crosses by
+        // address is not a gap either. A `where`-checked constructor has no
         // reader at all.
         Rhs::Make(c, vs) => {
             match c {
-                Ctor::Record(..) | Ctor::Array => {}
-                Ctor::Map => out.push("Make:Map".into()),
+                Ctor::Record(..) | Ctor::Array | Ctor::Map => {}
                 Ctor::Try(_) => out.push("Make:Try".into()),
             }
             vals(vs, out);
@@ -4265,10 +4349,9 @@ impl<'a> Builder<'a> {
             Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Stream(e) => {
                 Ok(*e)
             }
-            Type::Str => Ok(Type::IntN {
-                bits: 8,
-                signed: false,
-            }),
+            // A `for` over a String yields each byte as an `Int64`, the
+            // checker's type; `s[i]` is a `UInt8` and never reaches here.
+            Type::Str => Ok(Type::Int),
             Type::Map(_, v) => Ok(*v),
             t => gap_d("an element of a non-container", &t.to_string(), line),
         }
@@ -5449,8 +5532,9 @@ impl<'a> Builder<'a> {
     /// the binding that follows; the ones queued by an enclosing expression
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
-    /// Whether `name(args)` at `e` is an element read of a builtin array
-    /// whose element owns no heap, off a receiver that is a place.
+    /// Whether `name(args)` at `e` is a read that owns no heap off a receiver
+    /// that is a place: an element of a builtin array, a String's byte, or a
+    /// map's entry, whose `Option` the runtime's lookup builds.
     fn reads_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
         name == vyrn_frontend::project::AT
             && args.len() == 2
@@ -5459,7 +5543,11 @@ impl<'a> Builder<'a> {
             && self.ty_of(&args[0]).is_ok_and(|t| {
                 matches!(
                     vyrn_frontend::types::resolve(&t, self.proto.types()),
-                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
+                    Type::Array(_)
+                        | Type::ArrayN(..)
+                        | Type::SmallArray(..)
+                        | Type::Str
+                        | Type::Map(..)
                 )
             })
     }
@@ -5612,10 +5700,11 @@ impl<'a> Builder<'a> {
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
             }
-            // `xs[i]` of a heapless element is section 2.1's element read, one load at
-            // an address, and not a call: the seeded `place at` row yields
-            // `@slot(self, i)` and nothing else. A String's byte, a map's
-            // entry and a user container's projection are other reads.
+            // `xs[i]` of a heapless element and a String's byte are section
+            // 2.1's element read, one load at an address, and a map's entry is
+            // a key read through the runtime's lookup; none is a call. The
+            // seeded `place at` row yields `@slot(self, i)` and nothing else.
+            // A user container's projection is another read.
             Expr::Call {
                 name,
                 args,
@@ -6246,6 +6335,15 @@ impl<'a> Builder<'a> {
         // the argument keying and the drains do not move.
         if let (1, Some(to)) = (vs.len(), vyrn_frontend::types::numeric_conv_target(name)) {
             return Ok(Rhs::Prim(Op::Conv(to), vec![vs[0].0.clone()], ret));
+        }
+        // `@concat(a, b)` is the String `+` the interpolation spine spells as
+        // a call, so the row is the operator's, over the same arguments.
+        if let ("@concat", [(a, _), (b, _)]) = (name, vs.as_slice()) {
+            return Ok(Rhs::Prim(
+                Op::Bin(BinOp::Add),
+                vec![a.clone(), b.clone()],
+                ret,
+            ));
         }
         Ok(Rhs::Call {
             callee: name.to_string(),
