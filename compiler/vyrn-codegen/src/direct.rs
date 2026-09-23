@@ -7261,15 +7261,21 @@ impl<'p> Fn_<'_, 'p> {
         // (RFC-0054). Both sides are handles, so the concatenation happens in the
         // HOST's arena and this is one import call (RFC-0076 M3a). Equality needs no
         // import: the checker permits only `+`.
-        if let (Some(g), Type::Named(n)) = (self.cx.gen, &lt) {
-            if n == "Code" {
-                if op != BinOp::Add {
-                    return unsupported(&format!("`{op:?}` on a code quote"), line);
-                }
-                self.expr_as(m, b, rhs, &lt)?;
-                b.ins(&Instruction::Call(g.concat));
-                return Ok(l);
+        if self.cx.gen.is_some() && matches!(&lt, Type::Named(n) if n == "Code") {
+            if op != BinOp::Add {
+                return unsupported(&format!("`{op:?}` on a code quote"), line);
             }
+            // The left operand is on the stack already.
+            let mut ty = |_: &mut Self, _: usize| unsupported("a concatenation's type", line);
+            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                if i == 0 {
+                    return Ok(());
+                }
+                s.expr_as(m, b, rhs, t).map(|_| ())
+            };
+            return self
+                .host(m, b, "+", 2, &mut ty, &mut operand, line)
+                .map(|_| l);
         }
         // The width the operator RUNS at, which may be the right operand's
         // (`op_width`), and the left operand already on the stack moving to it
@@ -7837,6 +7843,14 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(g.render));
                 self.fetch_str(b, g);
                 Ok(Type::Str)
+            }
+            // `Code + Code` concatenates fragments with their origins carried
+            // (RFC-0054), in the HOST's arena (RFC-0076 M3a).
+            ("+", 2) => {
+                operand(self, m, b, 0, &code)?;
+                operand(self, m, b, 1, &code)?;
+                b.ins(&Instruction::Call(g.concat));
+                Ok(code)
             }
             // The spliced value crosses as a TAG plus one 64-bit word (plus a
             // pointer when it is a String), because the host needs the value itself
@@ -19464,6 +19478,14 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, r, &Type::Str, line)?;
                 self.str_bin(b, *o, line)
             }
+            (Op::Bin(o), [l, r]) if self.core_code_concat(body, *o, l, r) => {
+                let mut ty = |_: &mut Self, _: usize| unsupported("a concatenation's type", line);
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.core_val(m, b, body, w, [l, r][i], t, line)
+                    };
+                self.host(m, b, "+", 2, &mut ty, &mut operand, line)
+            }
             (Op::Bin(o), [l, r]) => {
                 // A float literal has the type the checker gave it, which is
                 // its sibling's: `0.0 - o` with `o: Float32` runs at
@@ -20146,6 +20168,13 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Whether `l o r` is `Code + Code`, the host's concatenation
+    /// ([`Fn_::host`]), which exists only while a generator runs.
+    fn core_code_concat(&self, body: &vyrn_lower::core::Body, o: BinOp, l: &Val, r: &Val) -> bool {
+        let is_code = |v: &Val| matches!(self.cx.resolve(&self.core_ty(body, v, &Type::Int)), Type::Named(n) if n == "Code");
+        self.cx.gen.is_some() && o == BinOp::Add && is_code(l) && is_code(r)
+    }
+
     /// Whether `l o r` is a String operator [`Fn_::str_bin`] or
     /// [`Fn_::str_match`] writes: a String on the left, and a String or, for
     /// `=~`, the pattern literal on the right.
@@ -20170,6 +20199,9 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Val(v) => self.core_val_readable(body, v),
             Rhs::Prim(Op::Closure, ..) => false,
             Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op(body, *o, l, r)) => {
+                vs.iter().all(|v| self.core_val_readable(body, v))
+            }
+            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_code_concat(body, *o, l, r)) => {
                 vs.iter().all(|v| self.core_val_readable(body, v))
             }
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| self.core_operand(body, v)),
