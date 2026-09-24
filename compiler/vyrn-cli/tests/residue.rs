@@ -192,79 +192,35 @@ fn the_residue_ratchet_only_turns_one_way() {
         eprintln!("SKIP the route's leg: clang, wabt or simde is missing");
     }
 
+    // Each program is its own compile and run, so the corpus runs on every
+    // core, and the verdicts are folded in corpus order.
+    let corpus = corpus();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::Mutex::new(Vec::new());
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(path) = corpus.get(i) else { break };
+                let v = verdict(path, &base, &dir, &out_dir, route);
+                done.lock().unwrap().push((i, v));
+            });
+        }
+    });
+    let mut done = done.into_inner().unwrap();
+    done.sort_by_key(|(i, _)| *i);
     let mut failures: Vec<String> = Vec::new();
     let mut nudges = 0usize;
     let (mut engine_clean, mut engine_leaks) = (0usize, 0usize);
     let (mut route_clean, mut route_leaks) = (0usize, 0usize);
-    for path in &corpus() {
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        let expect = base.get(&name).unwrap_or(&Expect::Clean).clone();
-        let stdin_fixture = path.with_extension("stdin");
-        let prog_args = read_args(&path.with_extension("args"));
-
-        // The embedded engine: `vyrn run` compiles and runs in one process, so
-        // `VYRN_LEAK_CHECK` selects the accounting allocator and arms the run
-        // at once.
-        let mut cmd = vyrn();
-        cmd.env("VYRN_LEAK_CHECK", "1");
-        cmd.arg("run").arg(path).args(&prog_args);
-        let r = run_io(cmd, &dir, &stdin_fixture);
-        let err = norm(&r.stderr);
-        let before = failures.len();
-        judge(
-            "engine",
-            &name,
-            &expect,
-            r.status.code(),
-            &err,
-            &mut failures,
-            &mut nudges,
-        );
-        if r.status.code() == Some(135) {
-            engine_leaks += 1;
-        } else if failures.len() == before {
-            engine_clean += 1;
-        }
-
-        if !route {
-            continue;
-        }
-        let exe = out_dir.join(format!("{name}.exe"));
-        let build = vyrn()
-            .env("VYRN_LEAK_CHECK", "1")
-            .arg("build")
-            .arg(path)
-            .arg("-o")
-            .arg(&exe)
-            .output()
-            .expect("build");
-        if !build.status.success() {
-            failures.push(format!(
-                "{name} (route): an audited build failed:\n{}{}",
-                norm(&build.stdout),
-                norm(&build.stderr)
-            ));
-            continue;
-        }
-        let mut cmd = Command::new(&exe);
-        cmd.args(&prog_args);
-        let r = run_io(cmd, &dir, &stdin_fixture);
-        let err = norm(&r.stderr);
-        let before = failures.len();
-        judge(
-            "route",
-            &name,
-            &expect,
-            r.status.code(),
-            &err,
-            &mut failures,
-            &mut nudges,
-        );
-        if r.status.code() == Some(135) {
-            route_leaks += 1;
-        } else if failures.len() == before {
-            route_clean += 1;
-        }
+    for (_, v) in done {
+        failures.extend(v.failures);
+        nudges += v.nudges;
+        engine_clean += v.engine_clean;
+        engine_leaks += v.engine_leaks;
+        route_clean += v.route_clean;
+        route_leaks += v.route_leaks;
     }
     if nudges > 0 {
         eprintln!("ratchet: {nudges} row(s) can tighten");
@@ -279,4 +235,95 @@ fn the_residue_ratchet_only_turns_one_way() {
         "the residue ratchet slipped:\n{}",
         failures.join("\n")
     );
+}
+
+/// One program's verdict on both legs: what failed, how many rows can
+/// tighten, and whether each leg came out clean or leaking.
+#[derive(Default)]
+struct Verdict {
+    failures: Vec<String>,
+    nudges: usize,
+    engine_clean: usize,
+    engine_leaks: usize,
+    route_clean: usize,
+    route_leaks: usize,
+}
+
+fn verdict(
+    path: &Path,
+    base: &HashMap<String, Expect>,
+    dir: &Path,
+    out_dir: &Path,
+    route: bool,
+) -> Verdict {
+    let mut v = Verdict::default();
+    let name = path.file_stem().unwrap().to_string_lossy().to_string();
+    let expect = base.get(&name).unwrap_or(&Expect::Clean).clone();
+    let stdin_fixture = path.with_extension("stdin");
+    let prog_args = read_args(&path.with_extension("args"));
+
+    // The embedded engine: `vyrn run` compiles and runs in one process, so
+    // `VYRN_LEAK_CHECK` selects the accounting allocator and arms the run
+    // at once.
+    let mut cmd = vyrn();
+    cmd.env("VYRN_LEAK_CHECK", "1");
+    cmd.arg("run").arg(path).args(&prog_args);
+    let r = run_io(cmd, dir, &stdin_fixture);
+    let err = norm(&r.stderr);
+    let before = v.failures.len();
+    judge(
+        "engine",
+        &name,
+        &expect,
+        r.status.code(),
+        &err,
+        &mut v.failures,
+        &mut v.nudges,
+    );
+    if r.status.code() == Some(135) {
+        v.engine_leaks += 1;
+    } else if v.failures.len() == before {
+        v.engine_clean += 1;
+    }
+
+    if !route {
+        return v;
+    }
+    let exe = out_dir.join(format!("{name}.exe"));
+    let build = vyrn()
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("build")
+        .arg(path)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("build");
+    if !build.status.success() {
+        v.failures.push(format!(
+            "{name} (route): an audited build failed:\n{}{}",
+            norm(&build.stdout),
+            norm(&build.stderr)
+        ));
+        return v;
+    }
+    let mut cmd = Command::new(&exe);
+    cmd.args(&prog_args);
+    let r = run_io(cmd, dir, &stdin_fixture);
+    let err = norm(&r.stderr);
+    let before = v.failures.len();
+    judge(
+        "route",
+        &name,
+        &expect,
+        r.status.code(),
+        &err,
+        &mut v.failures,
+        &mut v.nudges,
+    );
+    if r.status.code() == Some(135) {
+        v.route_leaks += 1;
+    } else if v.failures.len() == before {
+        v.route_clean += 1;
+    }
+    v
 }
