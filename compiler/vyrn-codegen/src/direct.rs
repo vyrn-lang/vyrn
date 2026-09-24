@@ -17576,10 +17576,13 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     w.at[*n as usize] = self.core_place(w, body, *x);
                     // With no store to put it back, the result holds the
-                    // receiver's slot for its own extent.
+                    // receiver's slot for its own extent, unless the receiver
+                    // lives on to be stored again: a join after the rebuild
+                    // puts the result back into it.
                     if self
                         .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
                         .is_none()
+                        && !self.core_restored(body, *x)
                     {
                         w.slot[*n as usize] = w.slot[*x as usize].take();
                     }
@@ -20349,6 +20352,19 @@ impl<'p> Fn_<'_, 'p> {
         (t == v && back && self.core_rebuild(body, rhs)).then_some((*r, *t))
     }
 
+    /// Whether some store writes `x` whole other than the one that puts a
+    /// rebuilt `x` back ([`Fn_::core_rebuilt`]).
+    fn core_restored(&self, body: &vyrn_lower::core::Body, x: vyrn_lower::core::Name) -> bool {
+        let mut found = false;
+        each_list(&body.stmts, &mut |ss| {
+            found |= (0..ss.len()).any(|i| {
+                matches!(ss[i], St::Store { place: vyrn_lower::core::Place::Name(m), .. } if m == x)
+                    && self.core_rebuilt(body, ss, i).is_none()
+            });
+        });
+        found
+    }
+
     /// Whether a rebuild in `ss` hands `n` back to the place it was taken
     /// from ([`Fn_::core_rebuilt`]).
     fn core_hands_back(
@@ -20648,6 +20664,22 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
             }
         }
         _ => {}
+    }
+}
+
+/// `ss` and every list of rows inside it, each before the lists inside it.
+fn each_list(ss: &[St], f: &mut dyn FnMut(&[St])) {
+    f(ss);
+    for s in ss {
+        match s {
+            St::If { then, els, .. } => {
+                each_list(then, f);
+                each_list(els, f);
+            }
+            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => each_list(inner, f),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| each_list(&a.body, f)),
+            _ => {}
+        }
     }
 }
 
