@@ -17483,7 +17483,9 @@ impl<'p> Fn_<'_, 'p> {
                     if body.names[*x as usize].grows {
                         // `@strAppend`: the store after it states whether the
                         // buffer the accumulator held is this path's to free.
-                        let Some(St::Store { releases, .. }) = ss.get(i + 1) else {
+                        let Some(St::Store { releases, .. }) =
+                            ss.get(i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        else {
                             return unsupported("an append with no store", line);
                         };
                         // Module state grows at its fixed address, with the
@@ -17528,6 +17530,14 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::Drop);
                     }
                     w.at[*n as usize] = self.core_place(w, body, *x);
+                    // With no store to put it back, the result holds the
+                    // receiver's slot for its own extent.
+                    if self
+                        .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        .is_none()
+                    {
+                        w.slot[*n as usize] = w.slot[*x as usize].take();
+                    }
                 }
                 // The store that puts the rebuilt receiver back, which the
                 // rebuild already wrote.
@@ -17780,7 +17790,7 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     releases,
                     ..
-                } => {
+                } if self.core_framed(&body.names[*n as usize].ty) => {
                     // The temporary an `if` expression joins through is stored
                     // by each branch and bound by the `let` after them
                     // (RFC-0030), so the first store it meets takes its slot.
@@ -17816,11 +17826,34 @@ impl<'p> Fn_<'_, 'p> {
                         disown(b, Place::Slot(at));
                     }
                 }
-                // A field or module state: its address with the field's offset
-                // added, the value, and the store, which is the `SetField`
-                // arm's order for a scalar field. A String in module state is
-                // released where the row says so, and its word cleared, as a
-                // String name's.
+                // A map entry: the insert or update the arm and a map literal
+                // make ([`Fn_::map_set`]), which releases the value it
+                // displaces where the row says so.
+                St::Store {
+                    place: vyrn_lower::core::Place::Key(base, k),
+                    value,
+                    line,
+                    releases,
+                    ..
+                } => {
+                    let (mty, off) = self.core_addr(m, b, body, w, base, *line)?;
+                    self.core_step(b, off);
+                    let Type::Map(key_t, val) = self.cx.resolve(&mty) else {
+                        return unsupported("a key store into no map", *line);
+                    };
+                    let hdr = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalSet(hdr));
+                    let l = self.layout_of(&mty, *line)?;
+                    let kv = [k.clone(), value.clone()];
+                    let mut parts = Parts::Core(body, &kv, w);
+                    self.map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, *releases, *line)?;
+                }
+                // A place with an address: the address, what the place held
+                // kept aside where the row releases it, the value landed, and
+                // the kept value freed, the arm's order at `x = v`, `r.f = v`
+                // and `a[i] = v`. A layout lands as a copy of its bytes. A
+                // String in module state has its word cleared, as a String
+                // name's.
                 St::Store {
                     place,
                     value,
@@ -17838,7 +17871,12 @@ impl<'p> Fn_<'_, 'p> {
                         None
                     };
                     self.core_val(m, b, body, w, value, &ty, *line)?;
-                    b.ins(&store_of(&self.cx.ll(&ty)));
+                    match self.cx.repr(&ty, *line)? {
+                        Repr::Agg(l) => agg_landed(b, l.size, false),
+                        _ => {
+                            b.ins(&store_of(&self.cx.ll(&ty)));
+                        }
+                    }
                     self.free_snap(m, b, snap, *line)?;
                     if let vyrn_lower::core::Place::Global(g) = place {
                         if let Some(&word) = self.cx.gappend.get(g) {
@@ -19834,8 +19872,12 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(_, rhs) if self.core_take_part(body, rhs) => {
                 self.core_part_at(body, ss, i, &self.core_w).is_some()
             }
-            St::Let(_, rhs) if self.core_rebuild(body, rhs) => {
-                self.core_rebuilt(body, ss, i + 1).is_some()
+            // An accumulator's append is read with the store after it.
+            St::Let(_, rhs @ Rhs::Call { args, .. }) if self.core_rebuild(body, rhs) => {
+                !matches!(args.first(), Some((Val::Name(x), _)) if body.names[*x as usize].grows)
+                    || self
+                        .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        .is_some()
             }
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
@@ -19849,28 +19891,45 @@ impl<'p> Fn_<'_, 'p> {
             }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
-            // A store into a field or into module state owns no heap when its
-            // type is a scalar, so the displaced value needs no release.
+            // A store into a place with an address ([`Fn_::core_stmts`]). A
+            // layout's value is a name of its type, whose bytes are copied.
+            // Module state takes a scalar, and a String stored into the
+            // global itself, released by the row's `releases` with its
+            // accumulator's word cleared.
             St::Store { place, value, .. } => {
+                use vyrn_lower::core::Place as At;
+                let scalar_only = vyrn_lower::kernel::root_of(place).is_none();
                 let ty = match place {
-                    vyrn_lower::core::Place::Name(n) => Some(body.names[*n as usize].ty.clone()),
+                    At::Name(n) => Some(body.names[*n as usize].ty.clone()),
+                    At::Key(_, k) if scalar_only || !self.core_val_readable(body, k) => None,
+                    At::Key(m, _) => {
+                        match self.core_place_ty(body, m).map(|t| self.cx.resolve(&t)) {
+                            Some(Type::Map(_, v)) => Some(*v),
+                            _ => None,
+                        }
+                    }
                     p => self.core_place_ty(body, p),
                 };
+                let global = matches!(place, At::Global(_));
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
-                // A String name or module state takes the store too: the
-                // release is the row's `releases`, and an accumulator's word is
-                // cleared after it.
-                let whole = matches!(
-                    place,
-                    vyrn_lower::core::Place::Name(_) | vyrn_lower::core::Place::Global(_)
-                );
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
-                    (core_scalar(&r) || (whole && r == Type::Str))
-                        && (!self.checks(&t)
-                            || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
-                }) && self.core_val_readable(body, value)
+                    let fits = match self.cx.repr(&t, 0) {
+                        _ if scalar_only => {
+                            (core_scalar(&r) || (global && r == Type::Str))
+                                && self.core_val_readable(body, value)
+                        }
+                        Ok(Repr::Scalar(_)) => self.core_val_readable(body, value),
+                        Ok(Repr::Agg(_)) => {
+                            matches!(value, Val::Name(v)
+                                    if self.cx.resolve(&body.names[*v as usize].ty) == r)
+                        }
+                        _ => false,
+                    };
+                    fits && (!self.checks(&t)
+                        || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
+                })
             }
             St::If {
                 cond, then, els, ..
@@ -20097,16 +20156,18 @@ impl<'p> Fn_<'_, 'p> {
             .then(|| callee == "@pop" || matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))))
     }
 
-    /// The receiver and the result of the rebuild at `ss[i - 1]` when `ss[i]`
+    /// The receiver and the result of the rebuild before `ss[i]` when `ss[i]`
     /// is the store that puts the result back into that receiver, or into the
     /// place the receiver was taken from: one address, which
     /// [`Fn_::arr_rebuild`] has already written ([`Fn_::core_alias`]).
+    /// Between the two stand the releases of the call's argument temporaries.
     fn core_rebuilt(
         &self,
         body: &vyrn_lower::core::Body,
         ss: &[St],
         i: usize,
     ) -> Option<(vyrn_lower::core::Name, vyrn_lower::core::Name)> {
+        let k = drops_ahead(ss[..i].iter().rev());
         let (
             St::Let(t, rhs @ Rhs::Call { args, .. }),
             St::Store {
@@ -20114,7 +20175,7 @@ impl<'p> Fn_<'_, 'p> {
                 value: Val::Name(v),
                 ..
             },
-        ) = (ss.get(i.checked_sub(1)?)?, ss.get(i)?)
+        ) = (ss.get(i.checked_sub(k + 1)?)?, ss.get(i)?)
         else {
             return None;
         };
@@ -20201,7 +20262,12 @@ impl<'p> Fn_<'_, 'p> {
             {
                 None
             }
-            St::Store { place, .. } if !matches!(place, vyrn_lower::core::Place::Name(_)) => None,
+            St::Store { place, .. }
+                if !matches!(place, vyrn_lower::core::Place::Name(n)
+                    if self.core_framed(&body.names[*n as usize].ty)) =>
+            {
+                None
+            }
             s => first_read(s),
         }
     }
@@ -20342,14 +20408,24 @@ impl<'p> Fn_<'_, 'p> {
 }
 
 /// Give back the slots the row `s` took for its own work once it is written:
-/// every slot above the one its name holds, or above `mark`, the frame before
-/// the row. A row that holds rows of its own gives back through each of them.
+/// every slot above `mark`, the frame before the row, and above each slot the
+/// row took for a name. A name's slot need not be the row's own name's: a part
+/// written at its parent's offset takes the parent's slot in the part's row
+/// ([`Fn_::core_part_dest`]). A row that holds rows of its own gives back
+/// through each of them.
 fn core_row_done(b: &mut Frame, w: &Walked, s: &St, mark: u32) {
-    let from = match s {
-        St::If { .. } | St::Loop { .. } | St::Block { .. } | St::Switch { .. } => return,
-        St::Let(n, _) => w.slot[*n as usize].map_or(mark, |(_, end)| end.max(mark)),
-        _ => mark,
-    };
+    if matches!(
+        s,
+        St::If { .. } | St::Loop { .. } | St::Block { .. } | St::Switch { .. }
+    ) {
+        return;
+    }
+    let from = w
+        .slot
+        .iter()
+        .flatten()
+        .filter(|&&(at, _)| at >= mark)
+        .fold(mark, |top, &(_, end)| top.max(end));
     if from < b.mark() {
         b.give_back(from, b.mark());
     }
@@ -20594,6 +20670,12 @@ fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
         b.ins(&Instruction::I64Load(at(off)));
         b.ins(&Instruction::I32WrapI64);
     }
+}
+
+/// How many releases lead `ss`: the argument temporaries the builder releases
+/// between a rebuild and its store ([`Fn_::core_rebuilt`]).
+fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
+    ss.take_while(|s| matches!(s, St::Drop(..))).count()
 }
 
 fn core_scalar(t: &Type) -> bool {
