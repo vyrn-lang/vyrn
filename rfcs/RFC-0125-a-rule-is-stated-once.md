@@ -25531,6 +25531,8 @@ decide. The decisions:
   by `core_operand`'s rule, after `m7-store` lands: a vector is one `v128`
   local with no heap.
 
+**A render is a call to the impl that renders, decided on `m7-names`'s count (2026-09-24).** After `m7-names`, a record name is the largest refusal of the screen: 4,456 statements over the examples are refused for that alone, and 165 more for an enum name. The one reader such a name lacks is `@str`, which `print`, `toString` and every interpolation hole lower to. `str_value` renders the scalars and refuses the rest, on both walks. A type the language does not render renders through its `impl Show` (RFC-0094 M3), and the checker already names that impl for each site, in `show_dispatch`. So the decision: a render of a type the language does not render is a call to the function `show_dispatch` names, and the row states it as `Callee::Fn`, the way `routed_callee` states `toJson`. The checker's choice stays its one home. The emitter gains no record reader and the screen gains no clause. A `<T: Show>` parameter renders through the impl of the instance the row solved (`Row::solved`). After that, a record or enum name is asked the same place-and-type question as a `String` name. A record whose only use is a render needs nothing else; a read by value of a whole record is a separate reader, counted when the render leaves the table.
+
 **Two deletions, after the measure reads all.** First, the AST walk in
 `direct.rs` goes with `VYRN_NO_CORE_WALK` and `FORMS`, because nothing reaches
 it; `emitter_census` re-pins to what the core's reader costs. Second, the
