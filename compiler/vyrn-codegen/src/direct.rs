@@ -6615,7 +6615,17 @@ impl<'p> Fn_<'_, 'p> {
                 line,
             } => self.try_(m, b, operand, *line, e as *const Expr as usize)?,
             Expr::TryConstruct { name, args, line } => {
-                self.try_construct(m, b, name, args, *line)?
+                let [arg] = args.as_slice() else {
+                    return unsupported(&format!("`{name}?` at this arity"), *line);
+                };
+                self.try_construct(
+                    m,
+                    b,
+                    name,
+                    *line,
+                    |s, m, b, base| s.expr_as(m, b, arg, base).map(|_| ()),
+                    |b, l| Dest::Slot(b.alloc(l.size, l.align)),
+                )?
             }
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
             Expr::Call {
@@ -8429,15 +8439,17 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Unreachable);
                 return Ok(Type::Never);
             }
-            // RFC-0074 M3a. The same runtime trap the LLVM emitter writes, from
-            // the same constant: a compiled wasm module is not `vyrn serve`, and
+            // RFC-0074 M3a: a compiled wasm module is not `vyrn serve`, and
             // `std/http`'s `mount` reaches this arm whether or not the program
-            // mounts a live route. The argument is not emitted — the producer it
-            // names has nobody to pull it here.
+            // mounts a live route. The line is the one the core's `Spec::Traps`
+            // row writes. The argument is not emitted: the producer it names has
+            // nobody to pull it here.
             "serveStream" => {
-                let msg = self.cx.rt.intern(m, &crate::serve_stream_trap());
-                b.ins(&Instruction::I32Const(msg as i32))
-                    .ins(&Instruction::Call(self.cx.rt.trap));
+                self.panic_line(m, b, None, |s, m, b| {
+                    let at = s.cx.rt.intern(m, vyrn_frontend::trap::SERVE_STREAM);
+                    b.ins(&Instruction::I32Const(at as i32));
+                    Ok(())
+                })?;
                 b.ins(&Instruction::Unreachable);
                 return Ok(Type::Never);
             }
@@ -13491,7 +13503,10 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `Age?(n)` — a validated construction whose refinement answers with a tag
-    /// instead of a trap, yielding `Option<Age>` (RFC-0003).
+    /// instead of a trap, yielding `Option<Age>` (RFC-0003). Both walks call it:
+    /// `operand` pushes the value at the base type it is handed, and `dest`
+    /// names the storage the `Option` is written into, whose address is left
+    /// on the stack.
     ///
     /// This is the one flow that deliberately steps AROUND the M2d coercion seam,
     /// and the reason is the whole point of the form: `expr_as(n, Age)` would emit
@@ -13506,8 +13521,9 @@ impl<'p> Fn_<'_, 'p> {
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        args: &[Expr],
         line: usize,
+        operand: impl FnOnce(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        dest: impl FnOnce(&mut Frame, &Layout) -> Dest,
     ) -> Result<Type, String> {
         let decl = self
             .cx
@@ -13515,15 +13531,12 @@ impl<'p> Fn_<'_, 'p> {
             .get(name)
             .cloned()
             .ok_or_else(|| gap(&format!("a fallible construction of `{name}`"), line))?;
-        if args.len() != 1 {
-            return unsupported(&format!("`{name}?` at this arity"), line);
-        }
         let ty = Type::option(Type::Named(name.to_string()));
         let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
             return unsupported("a fallible construction of a non-aggregate Option", line);
         };
         let base = decl.base.clone();
-        self.expr_as(m, b, &args[0], &base)?;
+        operand(self, m, b, &base)?;
         // `predicate_holds` parks the value where the `where` clause binds it, so
         // both halves of the answer are in locals before either store.
         let (held, base_v) = match self.cx.repr(&base, line)? {
@@ -13551,21 +13564,21 @@ impl<'p> Fn_<'_, 'p> {
         };
         let tag = self.scratch(b, ValType::I32, 0);
         b.ins(&Instruction::LocalSet(tag));
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
+        let at = dest(b, &l);
+        at.addr(b, l.fields[0]);
         b.ins(&Instruction::LocalGet(tag));
         b.ins(&Instruction::I64ExtendI32U);
         b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[1]);
+        at.addr(b, l.fields[1]);
         b.ins(&Instruction::LocalGet(held));
         self.encode_word2(b, &base, line)?;
         b.ins(&Instruction::I64Store(word8()));
         for f in &l.fields[2..] {
-            b.slot(off + f);
+            at.addr(b, *f);
             b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
         }
-        b.slot(off);
+        at.addr(b, 0);
         Ok(ty)
     }
 
@@ -18148,6 +18161,11 @@ impl<'p> Fn_<'_, 'p> {
                 (None, Some(Spec::Lanes)) => at
                     .clone()
                     .ok_or_else(|| gap("a lane builtin the checker did not type", line)),
+                // What a removal hands back is the element, or an `Option` of
+                // it, at the type the row states.
+                (None, Some(Spec::Removes)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a removal the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(callee, *kind, solved) {
@@ -18878,6 +18896,15 @@ impl<'p> Fn_<'_, 'p> {
                 self.map_into(m, b, dest, ty, &mut parts, line)?;
                 dest.addr(b, 0);
             }
+            Rhs::Make(Ctor::Try(name), vs) => {
+                let [v] = vs.as_slice() else {
+                    return unsupported(&format!("`{name}?` at this arity"), line);
+                };
+                let operand = |s: &mut Self, m: &mut Module, b: &mut Frame, base: &Type| {
+                    s.core_val(m, b, body, w, v, base, line)
+                };
+                self.try_construct(m, b, name, line, operand, |_, _| dest)?;
+            }
             _ => return unsupported("a made layout this walk does not build", line),
         }
         // `dest_used` is the AST arm's answer to [`Fn_::agg_into`], and this
@@ -19025,8 +19052,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The type of each part of a record, an array or a map literal of `ty`,
-    /// in the order the row lists the `n` parts. `None` when the row does not
-    /// fill the layout exactly, or makes a checked constructor.
+    /// in the order the row lists the `n` parts, and the one operand of `T?(v)`
+    /// at `T`'s base where the base is one wasm local ([`Fn_::try_construct`]).
+    /// `None` when the row does not fill the layout exactly.
     fn core_part_tys(&self, ty: &Type, ctor: &Ctor, n: usize) -> Option<Vec<Type>> {
         match (ctor, self.cx.resolve(ty)) {
             (Ctor::Record(_, names), _) => {
@@ -19053,6 +19081,10 @@ impl<'p> Fn_<'_, 'p> {
                     })
                     .collect(),
             ),
+            (Ctor::Try(name), _) if n == 1 => {
+                let base = &self.cx.types.get(name)?.base;
+                self.core_framed(base).then(|| vec![base.clone()])
+            }
             _ => None,
         }
     }
@@ -19915,8 +19947,12 @@ impl<'p> Fn_<'_, 'p> {
             // A discarded value is dropped at the type the ROW produces, and
             // only a call row states one — a `St::Do` of anything else would
             // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
+            // A discarded layout is the storage its call wrote, a slot of the
+            // row's own that the row's end gives back, as an unbound
+            // temporary's is.
             St::Do { rhs, line, .. } => {
-                self.core_rhs_readable(body, rhs) && self.core_rhs_ty(rhs, *line).is_ok()
+                (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))
+                    && self.core_rhs_ty(rhs, *line).is_ok()
             }
             // A release stated as a statement ([`Fn_::core_drop`]) needs the
             // name's place: one wasm local, or a layout the walk bound, which

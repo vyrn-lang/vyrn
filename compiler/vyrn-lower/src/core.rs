@@ -1363,6 +1363,16 @@ fn is_place_read(e: &Expr) -> bool {
     }
 }
 
+/// A field read or an element read, whatever its receiver: the reads whose
+/// receiver [`Builder::place`] binds to a temporary when it names no place.
+fn reads_a_part(e: &Expr) -> bool {
+    match e {
+        Expr::Field { .. } => true,
+        Expr::Call { name, args, .. } => name == "@at" && args.len() == 2,
+        _ => false,
+    }
+}
+
 /// The two refusals a `consume` gets when what follows it names no place.
 /// `by_loop` picks the form's wording: `for x in consume xs` says the loop
 /// already owns a container, and a prefix `consume` says the value is already
@@ -1720,6 +1730,8 @@ pub enum Spec {
     /// A message at `String`, and for `@panicAt` the site as a string
     /// literal. The call writes the line and returns to nobody; the
     /// [`St::Trap`] the builder states after it is what ends the path.
+    /// `serveStream`'s message is the frontend's sentence, stated as a
+    /// literal in place of the stream, which a compiled build never pulls.
     Traps,
     /// A receiver first, rebuilt in place by the runtime. An array's
     /// receiver takes at most one operand at whatever type the row put on
@@ -1816,6 +1828,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@str", Spec::Renders(Type::Str)),
             ("panic", Spec::Traps),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
+            ("serveStream", Spec::Traps),
             ("@push", Spec::Rebuilds),
             ("@reserve", Spec::Rebuilds),
             ("@clear", Spec::Rebuilds),
@@ -1917,8 +1930,8 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 ///
 /// An empty answer means the rows carry the body end to end. A tag names the
 /// family one form track closes: `Call:<who>:<name>` for a callee the
-/// emitter's function table does not answer, `Make:<what>` for a layout,
-/// `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>` for a row
+/// emitter's function table does not answer, `Read:<kind>` and
+/// `Take:<kind>` for a place, `Opaque:<what>` for a row
 /// that names no value, and `Lambda`.
 /// `tests/coredrive.rs` ranks the tags into its classes, and
 /// `VYRN_GAP_TALLY` tables them over the gate list.
@@ -2070,15 +2083,9 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
         // literal are read off the row (`direct::Fn_::core_make`), so none is
         // a gap. What refuses a part the emitter cannot place is the emitter's
         // own screen, the way a `Callee::Fn` whose parameter crosses by
-        // address is not a gap either. A `where`-checked constructor has no
-        // reader at all.
-        Rhs::Make(c, vs) => {
-            match c {
-                Ctor::Record(..) | Ctor::Array | Ctor::Map => {}
-                Ctor::Try(_) => out.push("Make:Try".into()),
-            }
-            vals(vs, out);
-        }
+        // address is not a gap either. A checked construction `T?(v)` is read
+        // there too.
+        Rhs::Make(_, vs) => vals(vs, out),
     }
 }
 
@@ -3554,11 +3561,14 @@ impl<'a> Builder<'a> {
                 // A literal, or a nullary constructor, which is static in
                 // the same sense: [`Builder::val`] makes the variant and
                 // nothing allocated it.
-                let static_value = matches!(
-                    value,
-                    Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
-                ) || matches!(&rhs, Rhs::Val(Val::Name(m))
-                    if matches!(self.body.names[*m as usize].not_owned, Some(NotOwned::Static)));
+                let static_value = match &rhs {
+                    Rhs::Val(Val::Lit(l)) => !matches!(l, Lit::Opaque(_)),
+                    Rhs::Val(Val::Name(m)) => matches!(
+                        self.body.names[*m as usize].not_owned,
+                        Some(NotOwned::Static)
+                    ),
+                    _ => false,
+                };
                 // A call whose result points into an argument — a lending
                 // prelude row, a projection — binds a borrow whatever its
                 // type says, and that screen is the one thing about the
@@ -3597,11 +3607,11 @@ impl<'a> Builder<'a> {
                     }
                 }
                 self.bind(n, rhs, out);
-                // The unnamed receiver of the field the binding took or read
+                // The unnamed receiver of the part the binding took or read
                 // (RFC-0114 R1′): released after the read where the plan says
                 // this frame owns it, held — and seen by the kernel — where
                 // it does not.
-                if let Expr::Field { .. } = value {
+                if reads_a_part(value) {
                     self.release_receiver(value, out, false);
                 }
                 self.grows(n, name);
@@ -4201,7 +4211,8 @@ impl<'a> Builder<'a> {
     /// inside its argument, a variant constructor builds a value that
     /// outlives the call in what it built, a `panic` returns to nobody, and
     /// an `@`-spelled desugar is freed by the site that reads it (RFC-0096
-    /// M3). `own.rs` decided the same rule over a declared-types reading of
+    /// M3). A removal (`@pop`, `@swapRemove`) hands back what it took out,
+    /// and a statement that discards it is no site that reads it. `own.rs` decided the same rule over a declared-types reading of
     /// the program; the core asks the checker's own type, which is why this
     /// is a second opinion and not a filter.
     fn discards(&self, e: &Expr) -> bool {
@@ -4209,7 +4220,7 @@ impl<'a> Builder<'a> {
             return false;
         };
         !vyrn_frontend::ast::is_panic(name)
-            && !name.starts_with('@')
+            && (!name.starts_with('@') || matches!(builtin_row(name), Some(Spec::Removes)))
             && !self.lends(e)
             && !self.constructs(name)
     }
@@ -4631,10 +4642,14 @@ impl<'a> Builder<'a> {
             }
             _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
                 Some((size, _)) => Rhs::Call {
+                    kind: if self.concrete_fn(&size) {
+                        Callee::Fn
+                    } else {
+                        Callee::Method
+                    },
                     callee: size,
                     args: vec![(Val::Name(it), Capability::Read)],
                     write_back: false,
-                    kind: Callee::Method,
                     ret: Some(Type::Int),
                     solved: Vec::new(),
                 },
@@ -5405,7 +5420,7 @@ impl<'a> Builder<'a> {
     /// consumer's binding, the same point. The placer writes the row only
     /// where such a drain encloses the read; elsewhere the receiver stays
     /// held and the judgment refuses it.
-    fn release_receiver(&mut self, e: &Expr, out: &mut Vec<St>, borrowed: bool) {
+    fn release_receiver(&mut self, e: &'a Expr, out: &mut Vec<St>, borrowed: bool) {
         let Some((r, producer, malloc)) = self.pending_receiver.take() else {
             return;
         };
@@ -5423,6 +5438,13 @@ impl<'a> Builder<'a> {
             return;
         }
         let _ = node;
+        // An element's receiver is `@at`'s argument, and the AST walk frees
+        // it by the key an argument temporary has.
+        if let (false, Expr::Call { name, args, .. }) = (took, e) {
+            if self.arg_released(&args[0], r, name, 0) {
+                self.body.names[r as usize].arg_drop = Some(producer);
+            }
+        }
         // The read that took a heap value out of the receiver leaves a hole
         // where it was, and the release walks around it. A take the walk
         // cannot be told to skip — an ELEMENT, which the plan spells `[]` —
@@ -5467,7 +5489,7 @@ impl<'a> Builder<'a> {
         // inside it: `n = n + size(if c { names } else { .. })` stores an
         // Int64 and the join still binds an owning temporary.
         let rebinding = std::mem::take(&mut self.rebinding);
-        if let Some(l) = lit_of(e) {
+        if let Some(l) = lit_of(e).or_else(|| self.schema(e)) {
             return Ok(Val::Lit(l));
         }
         match e {
@@ -5549,7 +5571,7 @@ impl<'a> Builder<'a> {
                 };
                 self.record_fields(t, e);
                 self.bind(t, rhs, out);
-                if let Expr::Field { .. } = e {
+                if reads_a_part(e) {
                     self.release_receiver(e, out, false);
                 }
                 Ok(Val::Name(t))
@@ -5946,13 +5968,33 @@ impl<'a> Builder<'a> {
     /// the binding that follows; the ones queued by an enclosing expression
     /// are kept aside meanwhile, so a nested read cannot drop what an outer
     /// expression is still about to read.
-    /// Whether `name(args)` at `e` is a read that owns no heap off a receiver
-    /// that is a place: an element of a builtin array, a String's byte, or a
-    /// map's entry, whose `Option` the runtime's lookup builds.
+    /// The String `jsonSchema<T>()` renders from `T`'s declaration at compile
+    /// time, and `None` for every other expression. The arm's rewrite
+    /// (`direct::Fn_::reflected`) renders the same declaration.
+    fn schema(&self, e: &Expr) -> Option<Lit> {
+        let Expr::Call {
+            name, type_args, ..
+        } = e
+        else {
+            return None;
+        };
+        let [Type::Named(t) | Type::App(t, _)] = type_args.as_slice() else {
+            return None;
+        };
+        let types = self.proto.types();
+        let decl = types.get(t).filter(|_| name == "jsonSchema")?;
+        Some(Lit::Str(vyrn_frontend::types::json_schema_string(
+            decl, types,
+        )))
+    }
+
+    /// Whether `name(args)` at `e` is a read that owns no heap: an element of
+    /// a builtin array, a String's byte, or a map's entry, whose `Option` the
+    /// runtime's lookup builds. A receiver that is no place is bound to a
+    /// temporary and released after the read, as a field's is.
     fn reads_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
         name == vyrn_frontend::project::AT
             && args.len() == 2
-            && is_place_read(&args[0])
             && self.ty_of(e).is_ok_and(|t| !self.owns(&t))
             && self.ty_of(&args[0]).is_ok_and(|t| {
                 matches!(
@@ -6104,8 +6146,21 @@ impl<'a> Builder<'a> {
                 args,
                 line,
                 type_args: _,
-            } if name == "panic" || name == "@panicAt" => {
-                let r = self.call(name, args, *line, self.produced(e), out)?;
+            } if name == "panic" || name == "@panicAt" || name == "serveStream" => {
+                let r = if name == "serveStream" {
+                    // RFC-0074 M3a: a compiled build has no accept loop.
+                    let msg = Lit::Str(vyrn_frontend::trap::SERVE_STREAM.into());
+                    Rhs::Call {
+                        callee: name.clone(),
+                        args: vec![(Val::Lit(msg), Capability::Read)],
+                        write_back: false,
+                        kind: Callee::Builtin,
+                        ret: self.produced(e),
+                        solved: Vec::new(),
+                    }
+                } else {
+                    self.call(name, args, *line, self.produced(e), out)?
+                };
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
@@ -6138,6 +6193,9 @@ impl<'a> Builder<'a> {
                     .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
                 {
                     return self.call(&f, fwd, *line, self.produced(e), out);
+                }
+                if let Some(l) = self.schema(e) {
+                    return Ok(Rhs::Val(Val::Lit(l)));
                 }
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {
@@ -6582,7 +6640,11 @@ impl<'a> Builder<'a> {
             Expr::Call { name, args, .. } if name == "@at" && args.len() == 2 => {
                 let bty = self.ty_of(&args[0])?;
                 let base = self.place(&args[0], out)?;
+                // The receiver is this read's, and a field read in the index
+                // would release it as its own.
+                let receiver = self.pending_receiver.take();
                 let i = self.read_val(&args[1], out)?;
+                self.pending_receiver = receiver;
                 if self.is_map(&bty) {
                     Ok(Place::Key(Box::new(base), i))
                 } else {
@@ -6829,14 +6891,49 @@ impl<'a> Builder<'a> {
                 ret,
             ));
         }
+        // A method is a call after dispatch (section 2.1), as the `Fallible`
+        // switch states it.
+        let (callee, kind) = match args.first().and_then(|r| self.dispatched(name, r)) {
+            Some(f) if kind == Callee::Method => (f, Callee::Fn),
+            _ => (name.to_string(), kind),
+        };
         Ok(Rhs::Call {
-            callee: name.to_string(),
+            callee,
             args: vs,
             write_back,
             kind,
             ret,
             solved: Vec::new(),
         })
+    }
+
+    /// The impl function the method `name` dispatches to on `recv`'s type:
+    /// the one function the program declares under a name some protocol with
+    /// that method mangles, and no generic function. A generic impl waits on
+    /// `Cx::sigs`, which holds no instance of one.
+    fn dispatched(&self, name: &str, recv: &Expr) -> Option<String> {
+        let key = vyrn_frontend::types::type_key(&self.ty_of(recv).ok()?)?;
+        let fs: std::collections::BTreeSet<String> = self
+            .program
+            .impls
+            .iter()
+            .filter(|i| i.methods.iter().any(|m| m.name == name))
+            .map(|i| vyrn_frontend::types::impl_method_name(&i.protocol, &key, name))
+            .filter(|f| self.concrete_fn(f))
+            .collect();
+        let mut fs = fs.into_iter();
+        match (fs.next(), fs.next()) {
+            (Some(f), None) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Whether the program declares `f` as a function that is no generic one.
+    fn concrete_fn(&self, f: &str) -> bool {
+        self.program
+            .functions
+            .iter()
+            .any(|g| g.name == f && g.type_params.is_empty())
     }
 
     fn is_variant(&self, name: &str) -> bool {

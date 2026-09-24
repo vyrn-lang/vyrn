@@ -2395,3 +2395,25 @@ fn main() -> Int64 {
         assert_eq!(got, (Some(0), "r0\n1\n2\n".to_string()));
     }
 }
+
+// A removal hands back what it took out, and a statement that discards it is
+// no site that reads it. A popped record's box leaked under both walks.
+#[test]
+fn a_discarded_removal_releases_what_it_took_out() {
+    let body = r#"type Q = { k: Int64 }
+
+fn main() -> Int64 {
+    let mut qs: Array<Q> = [Q { k: 1 }, Q { k: 2 }, Q { k: 3 }]
+    let mut i = 0
+    while i < 2 {
+        qs.pop()
+        i = i + 1
+    }
+    print(qs.length)
+    return 0
+}
+"#;
+    for got in payload_run("discardpop", body) {
+        assert_eq!(got, (Some(0), "1\n".to_string()));
+    }
+}
