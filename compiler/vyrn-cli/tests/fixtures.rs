@@ -180,8 +180,15 @@ fn every_example_prints_what_was_recorded() {
         let (w_out, w_err) = (want(&f_out), want(&f_err));
         let w_code = want(&f_exit).trim().to_string();
         if stdout != w_out || stderr != w_err || code != w_code {
+            // The whole stderr, because a trap's message or a validator's
+            // error can sit past the first line that differs (#444).
+            let whole = if stderr != w_err {
+                format!("  the run's whole stderr:\n{stderr}")
+            } else {
+                String::new()
+            };
             failures.push(format!(
-                "{name}: DIVERGED from the recorded output\n  exit: recorded {w_code} vs run {code}\n{}{}",
+                "{name}: DIVERGED from the recorded output\n  exit: recorded {w_code} vs run {code}\n{}{}{whole}",
                 first_diff("stdout", "recorded", &w_out, "run", &stdout).unwrap_or_default(),
                 first_diff("stderr", "recorded", &w_err, "run", &stderr).unwrap_or_default(),
             ));
