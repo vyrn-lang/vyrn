@@ -6745,22 +6745,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The `impl Show for T` a value of type `t` renders through (RFC-0094 M3),
-    /// or `None` where the language renders `t` itself or nothing declared one.
-    ///
-    /// `t` is the type as WRITTEN, not the resolved base: the impl is keyed by
-    /// the declared name, and `renders` asks the base. So `type Email = String`
-    /// renders as a String — the seed — and a record asks its declaration.
+    /// The `impl Show for T` a value of the written type `t` renders through.
     fn show_dispatch(&self, t: &Type) -> Option<String> {
-        if crate::types::renders(&self.base(t)) {
-            return None;
-        }
-        let key = crate::types::type_key(t)?;
-        self.impls
-            .contains(&(crate::types::SHOW.to_string(), key.clone()))
-            .then(|| {
-                crate::types::impl_method_name(crate::types::SHOW, &key, crate::types::SHOW_SHOW)
-            })
+        crate::types::show_dispatch(self.impl_blocks, t, &self.base(t))
     }
 
     /// What to add to a refusal from `print`, `toString` or `value` when the

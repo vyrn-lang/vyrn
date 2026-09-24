@@ -9357,10 +9357,7 @@ impl<'p> Fn_<'_, 'p> {
     /// which is what the checker deferred to this point.
     fn show_dispatch(&self, ty: &Type) -> Option<String> {
         let t = self.cx.sub(ty);
-        match ftypes::renders(&self.cx.resolve(&t)) {
-            true => None,
-            false => ftypes::show_impl(&self.cx.impls, &t),
-        }
+        ftypes::show_dispatch(&self.cx.impls, &t, &self.cx.resolve(&t))
     }
 
     /// The concrete type of each argument, WITHOUT emitting it.

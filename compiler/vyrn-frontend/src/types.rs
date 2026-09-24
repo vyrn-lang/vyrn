@@ -283,7 +283,7 @@ pub const SHOW_SHOW: &str = "show";
 ///
 /// These are exactly the scalars `print`, `@str` and the three backends already
 /// lower, and they are the union RFC-0094 calls "the union parameter". A type
-/// here never reaches [`show_impl`]; everything else may.
+/// here never reaches an impl in [`show_dispatch`]; everything else may.
 pub fn renders(t: &Type) -> bool {
     matches!(
         t,
@@ -291,14 +291,21 @@ pub fn renders(t: &Type) -> bool {
     )
 }
 
-/// The `impl Show for T` method a value of type `ty` renders through, or `None`
-/// where nothing declared one. The caller has already established that
-/// [`renders`] is false for the resolved type.
-pub fn show_impl(impls: &[ImplBlock], ty: &Type) -> Option<String> {
-    show_impl_by_key(impls, &type_key(ty)?)
+/// The `impl Show for T` method a value renders through (RFC-0094 M3), or
+/// `None` where the language renders it itself or nothing declared one.
+///
+/// `written` is the type as written and `base` the same type resolved: the
+/// impl is keyed by the declared name, and [`renders`] asks the base. So
+/// `type Email = String` renders as a String, and a record asks its
+/// declaration. The checker, the core and the emitter's arm each ask here.
+pub fn show_dispatch(impls: &[ImplBlock], written: &Type, base: &Type) -> Option<String> {
+    if renders(base) {
+        return None;
+    }
+    show_impl_by_key(impls, &type_key(written)?)
 }
 
-/// [`show_impl`], by type key. The interpreter reaches this one, for the reason
+/// [`show_dispatch`]'s impl, by type key. The interpreter reaches this one, for the reason
 /// [`copy_impl_by_key`] exists: it dispatches on a runtime value, whose key is
 /// the name stamped on it.
 pub fn show_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
