@@ -1,0 +1,6 @@
+// a map key read of a layout value
+// pin: 0 break, 0 continue
+// A key read of a layout value is the same lookup as a scalar one: both
+// walks copy the payload into the Option's slot through `map_at`, two words
+// inline or a boxed copy, and a `match` releases it (RFC-0125 M7, `m7-mapkey`).
+type P = { a: Int64, b: Int64 }          fn nested(m: Map<String, Option<Int64>>, k: String) -> Int64 { let mut r = 0 - 2 match m[k] { Some(inner) => { match inner { Some(v) => { r = v } None => { r = 0 - 1 } } } None => { r = 0 - 2 } } return r }          fn pair(m: Map<String, P>, k: String) -> Int64 { let mut r = 0 match m[k] { Some(p) => { r = p.a * 10 + p.b } None => { r = 0 } } return r }          fn items(m: Map<String, Array<Int64>>, k: String) -> Int64 { let mut r = 0 match m[k] { Some(xs) => { r = xs.length } None => { r = 0 } } return r }          fn vyrnTestMain() -> Int64 { let mut n: Map<String, Option<Int64>> = [:] n["a"] = Some(4) n["b"] = None let ps: Map<String, P> = ["p": P { a: 3, b: 5 }] let ls: Map<String, Array<Int64>> = ["l": [1, 2, 3]]          return nested(n, "a") * 1000 + nested(n, "b") * 100 + nested(n, "c") + pair(ps, "p") * 10000 + pair(ps, "q") + items(ls, "l") * 1000000 + items(ls, "m") }
