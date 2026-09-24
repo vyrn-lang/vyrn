@@ -1177,6 +1177,12 @@ impl Body {
             | St::Loop { site, .. }
             | St::Do { site, .. }
             | St::Switch { site, .. } => (*site != 0).then_some(*site),
+            // A `region` names its block, which is the node its statement's
+            // reader asks by: the site is the block's scope, and no other
+            // statement's run is keyed there.
+            St::Block {
+                site, region: true, ..
+            } => Some(*site),
             _ => None,
         }
     }

@@ -17181,7 +17181,13 @@ impl<'p> Fn_<'_, 'p> {
         // body gives a statement a second one. `key_of` is the mapping back,
         // and ten other readers of the plan in this file ask through it.
         let at = self.cx.plan.key_of(s as *const Stmt as usize);
-        let run = self.core_at.get(&at)?;
+        // A `region`'s row names its block, which is not the statement.
+        let run = match s {
+            Stmt::Region { body, .. } => self
+                .core_at
+                .get(&self.cx.plan.key_of(body as *const Block as usize))?,
+            _ => self.core_at.get(&at)?,
+        };
         // THE FRAME CLAUSE, per statement. It was per BODY until the release
         // half of it moved here, and then it refused any statement the
         // placement keyed a release AT — 8,362 of them per body, and the `if`s
@@ -17315,6 +17321,7 @@ impl<'p> Fn_<'_, 'p> {
             (Stmt::Continue { .. }, St::Continue { .. }) => {}
             (Stmt::While { .. } | Stmt::ForIn { .. }, St::Loop { .. }) => {}
             (Stmt::IfLet { .. }, St::Switch { .. }) => {}
+            (Stmt::Region { .. }, St::Block { region: true, .. }) => {}
             _ => return None,
         }
         // Every OTHER binding of the run: the row types it by its destination
