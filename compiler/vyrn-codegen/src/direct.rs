@@ -17181,7 +17181,13 @@ impl<'p> Fn_<'_, 'p> {
         // body gives a statement a second one. `key_of` is the mapping back,
         // and ten other readers of the plan in this file ask through it.
         let at = self.cx.plan.key_of(s as *const Stmt as usize);
-        let run = self.core_at.get(&at)?;
+        // A `region`'s row names its block, which is not the statement.
+        let run = match s {
+            Stmt::Region { body, .. } => self
+                .core_at
+                .get(&self.cx.plan.key_of(body as *const Block as usize))?,
+            _ => self.core_at.get(&at)?,
+        };
         // THE FRAME CLAUSE, per statement. It was per BODY until the release
         // half of it moved here, and then it refused any statement the
         // placement keyed a release AT — 8,362 of them per body, and the `if`s
@@ -17315,6 +17321,7 @@ impl<'p> Fn_<'_, 'p> {
             (Stmt::Continue { .. }, St::Continue { .. }) => {}
             (Stmt::While { .. } | Stmt::ForIn { .. }, St::Loop { .. }) => {}
             (Stmt::IfLet { .. }, St::Switch { .. }) => {}
+            (Stmt::Region { .. }, St::Block { region: true, .. }) => {}
             _ => return None,
         }
         // Every OTHER binding of the run: the row types it by its destination
@@ -19773,7 +19780,9 @@ impl<'p> Fn_<'_, 'p> {
     /// It is not the operator table stated twice: what it asks is which VALUE
     /// the arm evaluates, whose type is the arm's answer for the binding. An
     /// operator's is its first operand's, because that is the one the width
-    /// rule ([`Fn_::op_width`]) adopts from.
+    /// rule ([`Fn_::op_width`]) adopts from. A call and a closure bind what
+    /// the checker typed at the site, which the row carries as its producer
+    /// type, so the clause reads it there and asks no callee.
     fn core_arm_ty(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> Option<Type> {
         Some(match rhs {
             Rhs::Val(Val::Lit(l)) => match l {
@@ -19784,17 +19793,7 @@ impl<'p> Fn_<'_, 'p> {
                 Lit::Opaque(_) => return None,
             },
             Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
-            Rhs::Call {
-                callee,
-                kind,
-                args,
-                solved,
-                targets,
-                ..
-            } => match self.core_mem_ty(callee, args.len()) {
-                Some(t) => t,
-                None => self.core_sig(callee, *kind, solved, targets)?.ret_ty,
-            },
+            Rhs::Call { ret, .. } | Rhs::Prim(Op::Closure, _, ret) => ret.clone()?,
             Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
             Rhs::Read(p) | Rhs::Take(p) => self.core_place_ty(body, p)?,
