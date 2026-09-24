@@ -1178,10 +1178,10 @@ fn gate() {
     // falls as the core walk takes bodies from it: 21,154 before the driver,
     // 9,911 when a temporary took a slot, 4,831 when the rows took a `while`
     // that hoists its header, 350 when a field taken into a literal moved
-    // `num$scan` to the rows, 138 when a store into a layout's name did
-    // (RFC-0125 M7).
+    // `num$scan` to the rows, 138 when a store into a layout's name did, 48
+    // when the screen stopped asking a name's type (RFC-0125 M7).
     assert!(
-        t.answered_has > 50,
+        t.answered_has > 20,
         "only {} backend answers matched the pair's has-type — the form stopped          carrying it",
         t.answered_has
     );

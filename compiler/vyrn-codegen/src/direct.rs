@@ -17195,8 +17195,9 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// Three clauses, and each one is a line of the record. The FRAME clause: a
     /// placed release and an aggregate destination are emissions the rows do
-    /// not carry. The SCALAR clause, per statement rather than per body: every
-    /// name the run names is one this walk reads. The STATEMENT screen:
+    /// not carry. The PLACE clause, per statement rather than per body: a name
+    /// the run reads, or a `let` binds, has a place whose type is its type on
+    /// both walks, whatever that type is. The STATEMENT screen:
     /// [`Fn_::core_readable`], unchanged.
     fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
         // A node is an ADDRESS, and `project::iterate_loop`'s copy of a loop
@@ -17257,20 +17258,14 @@ impl<'p> Fn_<'_, 'p> {
                 return None;
             }
         }
-        // The aggregates a `return` of the run copies into the caller's
-        // storage, through `dest`, under a branch or at the run's end
-        // ([`Fn_::core_lands`]). A result checked where it is returned is a
-        // check the row does not state (RFC-0079).
-        let (mut returned, mut released) = (Vec::new(), Vec::new());
+        // A result checked where a `return` of the run hands it back, under a
+        // branch or at the run's end, is a check the row does not state
+        // (RFC-0079).
+        let mut released = Vec::new();
         let mut returns = false;
         for r in run {
             core_leaf_rows(r, &mut |x| match x {
-                St::Return { value, .. } => {
-                    returns = true;
-                    if let (Some(Val::Name(n)), Repr::Agg(_)) = (value, &self.ret) {
-                        returned.push(*n);
-                    }
-                }
+                St::Return { .. } => returns = true,
                 St::Row { name, .. } => released.push(*name),
                 _ => {}
             });
@@ -17319,8 +17314,7 @@ impl<'p> Fn_<'_, 'p> {
                         // flow that does not check (M2d). The row states the
                         // check where it types the name at the annotation.
                         let named = &body.names[*n as usize].ty;
-                        if !core_name_ty(&self.cx.resolve(t))
-                            || self.cx.resolve(t) != self.cx.resolve(named)
+                        if self.cx.resolve(t) != self.cx.resolve(named)
                             || (self.checks(t) && self.cx.sub(t) != *named)
                         {
                             return None;
@@ -17372,11 +17366,10 @@ impl<'p> Fn_<'_, 'p> {
         for st in run {
             core_lets(st, &mut lets);
         }
-        // A name the run binds by a made layout or an aggregate call: its type
-        // is the layout's and not a scalar, and the two clauses below are about
-        // a value the arm leaves on the operand stack (RFC-0125 M7). A
-        // temporary the run's `return` hands back is built in the caller's
-        // storage.
+        // A name the run binds by a made layout or an aggregate call is built
+        // at the layout's type, so the type clause below does not ask it
+        // (RFC-0125 M7). A temporary the run's `return` hands back is built in
+        // the caller's storage.
         let lands: Vec<_> = (0..run.len())
             .filter(|&i| self.core_lands(body, run, i, &self.core_w.reads))
             .filter_map(|i| match &run[i] {
@@ -17431,9 +17424,6 @@ impl<'p> Fn_<'_, 'p> {
             }
             let info = &body.names[*n as usize];
             let want = self.core_arm_ty(body, rhs)?;
-            if !core_name_ty(&want) {
-                return None;
-            }
             let got = self.cx.resolve(&info.ty);
             // A truth value is the one result an operator states and its
             // operands do not.
@@ -17450,23 +17440,10 @@ impl<'p> Fn_<'_, 'p> {
         // A release row names a binding the PLACEMENT holds, and the emitter
         // reads its place off `rel_slots` rather than off this walk's own
         // table, at any depth of the run. So the name is not one this walk has
-        // to read, and the scalar clause below is not asked about it — a
-        // released name is a String or an array by definition, and asking
-        // would refuse every run that carries one.
+        // to read, and the place clause below is not asked about it.
         for r in &released {
             if let Some(i) = names.iter().position(|n| n == r) {
                 names.swap_remove(i);
-            }
-        }
-        for n in &names {
-            let info = &body.names[*n as usize];
-            if !core_name_ty(&info.ty)
-                && !made.contains(n)
-                && !switched.contains(n)
-                && !rebuilt.contains(n)
-                && !returned.contains(n)
-            {
-                return None;
             }
         }
         // Every name the run READS has to have a place before the first
@@ -17487,8 +17464,7 @@ impl<'p> Fn_<'_, 'p> {
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
             let named = &body.names[*n as usize].ty;
-            if !(core_name_ty(&self.cx.resolve(&ty)) || returned.contains(n) || rebuilt.contains(n))
-                || self.cx.resolve(&ty) != self.cx.resolve(named)
+            if self.cx.resolve(&ty) != self.cx.resolve(named)
                 || ((self.checks(&ty) || self.checks(named)) && self.cx.sub(&ty) != *named)
             {
                 return None;
@@ -20827,8 +20803,7 @@ fn ho_shell(
 ///
 /// A payload binder is a place [`Fn_::core_switch`] binds when it enters the
 /// arm, and a scrutinee is read as an ADDRESS rather than as a value. So the
-/// screen's scalar clause is asked about neither: a sum is not a scalar, and
-/// asking would refuse every run that switches at all.
+/// screen's place clause is asked about neither.
 fn core_switched(s: &St, ons: bool, out: &mut Vec<vyrn_lower::core::Name>) {
     match s {
         St::Switch { on, arms, .. } => {
@@ -20942,13 +20917,6 @@ fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
 /// between a rebuild and its store ([`Fn_::core_rebuilt`]).
 fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
     ss.take_while(|s| matches!(s, St::Drop(..))).count()
-}
-
-/// A type whose name both walks hold at one place: a scalar or a String's
-/// address in a wasm local, an array's or a map's header in a slot. Its
-/// release is the rows' own (`St::Drop`, `St::Row`).
-fn core_name_ty(t: &Type) -> bool {
-    core_scalar(t) || matches!(t, Type::Str | Type::Array(_) | Type::Map(..))
 }
 
 fn core_scalar(t: &Type) -> bool {
