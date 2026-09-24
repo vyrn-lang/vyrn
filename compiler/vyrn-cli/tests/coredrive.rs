@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 53] = [
+const SHAPES: [(&str, &str); 54] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -500,6 +500,14 @@ const SHAPES: [(&str, &str); 53] = [
         "a function's name stored as a value",
         "fn inc(x: Int64) -> Int64 { return x + 1 }          fn dbl(x: Int64) -> Int64 { return x * 2 }          type Op = { f: fn(Int64) -> Int64, n: Int64 }          fn pick(b: Bool) -> fn(Int64) -> Int64 { if b { return inc } return dbl }          fn vyrnTestMain() -> Int64 { let o = Op { f: dbl, n: 3 } let g = pick(true) let h = o.f return g(10) * 100 + h(o.n) }",
     ),
+    // A call's binding is typed by the producer type its row carries, and an
+    // extern has no declared signature for the screen to ask (RFC-0125 M7).
+    // The store into module state beside it keeps the body off the whole-body
+    // walk, so the `let` is the interleave's.
+    (
+        "a `let` of an extern call beside a statement the arm emits",
+        "extern fn hostNowMillis() -> Int64          let mut pending: Map<String, fn(Int64) -> Int64> = [:]          fn stash(cb: fn(Int64) -> Int64) { let t = hostNowMillis() pending[t.toString()] = cb.copy() }          fn vyrnTestMain() -> Int64 { stash(n -> n + 1) return pending.length }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -509,7 +517,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 53] = [
+const SHAPE_PIN: [(&str, usize, usize); 54] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -603,6 +611,11 @@ const SHAPE_PIN: [(&str, usize, usize); 53] = [
         0,
     ),
     ("a function's name stored as a value", 0, 0),
+    (
+        "a `let` of an extern call beside a statement the arm emits",
+        0,
+        0,
+    ),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

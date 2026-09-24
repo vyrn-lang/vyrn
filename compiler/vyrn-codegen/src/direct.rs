@@ -19773,7 +19773,9 @@ impl<'p> Fn_<'_, 'p> {
     /// It is not the operator table stated twice: what it asks is which VALUE
     /// the arm evaluates, whose type is the arm's answer for the binding. An
     /// operator's is its first operand's, because that is the one the width
-    /// rule ([`Fn_::op_width`]) adopts from.
+    /// rule ([`Fn_::op_width`]) adopts from. A call and a closure bind what
+    /// the checker typed at the site, which the row carries as its producer
+    /// type, so the clause reads it there and asks no callee.
     fn core_arm_ty(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> Option<Type> {
         Some(match rhs {
             Rhs::Val(Val::Lit(l)) => match l {
@@ -19784,17 +19786,7 @@ impl<'p> Fn_<'_, 'p> {
                 Lit::Opaque(_) => return None,
             },
             Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
-            Rhs::Call {
-                callee,
-                kind,
-                args,
-                solved,
-                targets,
-                ..
-            } => match self.core_mem_ty(callee, args.len()) {
-                Some(t) => t,
-                None => self.core_sig(callee, *kind, solved, targets)?.ret_ty,
-            },
+            Rhs::Call { ret, .. } | Rhs::Prim(Op::Closure, _, ret) => ret.clone()?,
             Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
             Rhs::Read(p) | Rhs::Take(p) => self.core_place_ty(body, p)?,
