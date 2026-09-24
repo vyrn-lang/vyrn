@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 57] = [
+const SHAPES: [(&str, &str); 60] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -531,6 +531,24 @@ const SHAPES: [(&str, &str); 57] = [
         "an aggregate return under a branch",
         "type P = { xs: Array<Int64>, n: Int64 }          fn find(n: Int64) -> Option<Int64> { if n > 2 { return Some(n) } return None }          fn pick(n: Int64) -> P { let f: fn(Int64) -> Int64 = x -> x + 1          if n > 3 { return P { xs: [n, n + 1], n: n } }          if let Some(k) = find(n + 2) { return P { xs: [k], n: k } } return P { xs: [], n: 0 } }          fn vyrnTestMain() -> Int64 { let a = pick(5) let b = pick(1) let c = pick(-9)          return a.xs[1] * 1000 + a.n * 100 + b.n * 10 + c.xs.length }",
     ),
+    // A String name is its address in one wasm local on both walks, and its
+    // release is a row, so the screen asks its place and type as it asks a
+    // scalar's. The lambda keeps the body off the per-body walk (RFC-0125 M7,
+    // `m7-names`).
+    (
+        "a String name bound, concatenated and printed",
+        "fn tag(n: Int64) -> String { return \"n\" + n.toString() }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let s = tag(4) print(tag(twice(3))) let t = s + \"!\" print(t)          return t.byteLength * 10 + twice(1) }",
+    ),
+    // An array name is its header's slot on both walks, read at its address.
+    (
+        "an Array name indexed, stored into, passed and moved",
+        "fn total(xs: Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let mut xs: Array<Int64> = [1, 2, 3] let mut i = 0          while i < xs.length { if xs[i] > 2 { xs[0] = xs[0] % 10 + twice(i) } i = i + 1 }          let n = total(xs) let ys = xs return n * 10 + ys.length }",
+    ),
+    // A map name is its header's slot on both walks, as an array's is.
+    (
+        "a Map name stored into, looked up, passed and moved",
+        "fn count(m: Map<String, Int64>) -> Int64 { return m.length }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let mut m: Map<String, Int64> = [:] m[\"a\"] = twice(1) m[\"b\"] = 3          let mut t = 0 if let Some(v) = m[\"a\"] { t = v } let n = count(m) let c = m          return n * 100 + t * 10 + c.length }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -540,7 +558,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 57] = [
+const SHAPE_PIN: [(&str, usize, usize); 60] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -642,6 +660,9 @@ const SHAPE_PIN: [(&str, usize, usize); 57] = [
     ("a `region` beside a statement the arm emits", 0, 0),
     ("a made layout the statement does not bind", 0, 0),
     ("an aggregate return under a branch", 0, 0),
+    ("a String name bound, concatenated and printed", 0, 0),
+    ("an Array name indexed, stored into, passed and moved", 0, 0),
+    ("a Map name stored into, looked up, passed and moved", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
@@ -898,7 +919,7 @@ fn run() {
         }
     }
     // The forms whose arm the rows have started to relieve. An arm goes when
-    // its first number reaches zero, and this pin says which eight are on that
+    // its first number reaches zero, and this pin says which ten are on that
     // road: a form that drops off the list has lost a reader the record has to
     // explain, and one that joins it is a slice's own count. The count is per
     // statement, so a form whose whole body the core walk takes leaves it:
@@ -918,8 +939,10 @@ fn run() {
             "Stmt::If",
             "Stmt::Expr",
             "Stmt::While",
+            "Stmt::ForIn",
             "Stmt::Break",
-            "Stmt::Continue"
+            "Stmt::Continue",
+            "Stmt::IfLet"
         ],
         "the forms the core's rows carry are not the ones the record names"
     );

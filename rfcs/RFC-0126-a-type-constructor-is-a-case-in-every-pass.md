@@ -92,7 +92,7 @@ order.
 
 ## 3. The census: what each constructor costs
 
-1,431 mentions in six files for 32 constructors — it was 2,517 in seven, and
+1,434 mentions in six files for 32 constructors — it was 2,517 in seven, and
 the seventh was `interp.rs` (RFC-0125 §3 M5); the sixth column was the text-IR
 emitter and is now the shared lowering alone, which is where the other 499 went
 (RFC-0125 §3 M4). It was 1,612 until RFC-0125 §3 M6's size slices, and 1,405 until M7's
@@ -122,7 +122,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Mask32x4` | 5 | 1 | 6 | 1 | 0 | 0 | 13 |
 | `Type::Mask64x2` | 6 | 1 | 7 | 1 | 0 | 0 | 15 |
 | `Type::Bool` | 32 | 2 | 33 | 6 | 0 | 2 | 75 |
-| `Type::Str` | 46 | 2 | 81 | 8 | 0 | 4 | 141 |
+| `Type::Str` | 46 | 2 | 82 | 8 | 0 | 4 | 142 |
 | `Type::Unit` | 25 | 4 | 32 | 9 | 2 | 0 | 72 |
 | `Type::Named` | 36 | 3 | 12 | 9 | 3 | 6 | 69 |
 | `Type::Record` | 12 | 3 | 5 | 18 | 0 | 5 | 43 |
@@ -133,11 +133,11 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Enum` | 12 | 5 | 9 | 12 | 0 | 3 | 41 |
 | `Type::Param` | 19 | 2 | 9 | 4 | 8 | 1 | 43 |
 | `Type::App` | 13 | 3 | 2 | 11 | 1 | 0 | 30 |
-| `Type::Array` | 32 | 4 | 40 | 7 | 2 | 5 | 90 |
+| `Type::Array` | 32 | 4 | 41 | 7 | 2 | 5 | 91 |
 | `Type::ArrayN` | 16 | 7 | 21 | 9 | 0 | 4 | 57 |
 | `Type::SmallArray` | 22 | 2 | 20 | 7 | 1 | 4 | 56 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 20 | 3 | 22 | 7 | 6 | 4 | 62 |
+| `Type::Map` | 20 | 3 | 23 | 7 | 6 | 4 | 63 |
 | `Type::Stream` | 14 | 1 | 10 | 7 | 1 | 1 | 34 |
 | `Type::Logger` | 0 | 1 | 2 | 1 | 2 | 1 | 7 |
 | `Type::Fn` | 26 | 5 | 26 | 10 | 1 | 0 | 68 |
