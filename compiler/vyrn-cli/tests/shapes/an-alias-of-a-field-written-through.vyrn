@@ -1,0 +1,7 @@
+// an alias of a field written through
+// pin: 0 break, 0 continue
+// A name read out of a field of an Array type is that field's place, and a
+// store into one of its elements lands in the buffer the name and the field
+// share (RFC-0125 M7, `m7-falias`): `std/num`'s `toFloat` doubles its
+// digits so, and an element that holds heap takes a String the same way.
+type D = { d: Array<Int64>, n: Int64 } type Q = { name: String, y: Int64 } type H = { qs: Array<Q> }          fn doubled() -> Int64 { let mut x = D { d: [5, 7, 9], n: 2 } let mut f = x.d let mut c = 0 let mut j = f.length - 1 while j >= 0 { let t = f[j] * 2 + c f[j] = t % 10 c = t / 10 j = j - 1 } return c * 1000 + f[0] * 100 + f[2] * 10 + x.n }          fn named() -> Int64 { let mut h = H { qs: [Q { name: "a" + "b", y: 1 }, Q { name: "c", y: 2 }] } let mut g = h.qs g[0].y = 9 g[1].name = "z" + g[0].name return g[0].y * 10 + g[1].name.byteLength }          fn vyrnTestMain() -> Int64 { return doubled() * 1000 + named() }

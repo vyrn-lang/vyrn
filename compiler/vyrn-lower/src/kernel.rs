@@ -258,7 +258,7 @@ enum Write<'s> {
 
 /// Whether a store at `rel`, a path under a container's header, lands in an
 /// element. An element store moves no header (RFC-0125 M1, `fieldstore.rs`).
-fn in_element(rel: &str) -> bool {
+pub fn in_element(rel: &str) -> bool {
     rel.starts_with(".[]")
 }
 
