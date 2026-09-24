@@ -20372,8 +20372,10 @@ impl<'p> Fn_<'_, 'p> {
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
                 self.core_val_readable(body, k)
-                    && matches!(self.core_place_ty(body, base).map(|t| self.cx.resolve(&t)),
-                        Some(Type::Map(_, v)) if !matches!(self.cx.repr(&v, 0), Ok(Repr::Agg(_))))
+                    && matches!(
+                        self.core_place_ty(body, base).map(|t| self.cx.resolve(&t)),
+                        Some(Type::Map(..))
+                    )
             }
             _ => false,
         }
