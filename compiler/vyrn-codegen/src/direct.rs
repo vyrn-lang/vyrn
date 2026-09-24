@@ -20925,10 +20925,10 @@ fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
 }
 
 /// A type whose name both walks hold at one place: a scalar or a String's
-/// address in a wasm local, an array's header in a slot. Its release is the
-/// rows' own (`St::Drop`, `St::Row`).
+/// address in a wasm local, an array's or a map's header in a slot. Its
+/// release is the rows' own (`St::Drop`, `St::Row`).
 fn core_name_ty(t: &Type) -> bool {
-    core_scalar(t) || matches!(t, Type::Str | Type::Array(_))
+    core_scalar(t) || matches!(t, Type::Str | Type::Array(_) | Type::Map(..))
 }
 
 fn core_scalar(t: &Type) -> bool {

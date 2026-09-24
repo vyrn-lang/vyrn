@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 59] = [
+const SHAPES: [(&str, &str); 60] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -544,6 +544,11 @@ const SHAPES: [(&str, &str); 59] = [
         "an Array name indexed, stored into, passed and moved",
         "fn total(xs: Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let mut xs: Array<Int64> = [1, 2, 3] let mut i = 0          while i < xs.length { if xs[i] > 2 { xs[0] = xs[0] % 10 + twice(i) } i = i + 1 }          let n = total(xs) let ys = xs return n * 10 + ys.length }",
     ),
+    // A map name is its header's slot on both walks, as an array's is.
+    (
+        "a Map name stored into, looked up, passed and moved",
+        "fn count(m: Map<String, Int64>) -> Int64 { return m.length }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let mut m: Map<String, Int64> = [:] m[\"a\"] = twice(1) m[\"b\"] = 3          let mut t = 0 if let Some(v) = m[\"a\"] { t = v } let n = count(m) let c = m          return n * 100 + t * 10 + c.length }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -553,7 +558,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 59] = [
+const SHAPE_PIN: [(&str, usize, usize); 60] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -657,6 +662,7 @@ const SHAPE_PIN: [(&str, usize, usize); 59] = [
     ("an aggregate return under a branch", 0, 0),
     ("a String name bound, concatenated and printed", 0, 0),
     ("an Array name indexed, stored into, passed and moved", 0, 0),
+    ("a Map name stored into, looked up, passed and moved", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
