@@ -1,0 +1,6 @@
+// a call through a `fn` parameter bound to a named function
+// pin: 0 break, 0 continue
+// A specialization is one instance per target (RFC-0023): a call through
+// a parameter bound to a named function is a call to it, a pass-through
+// names the same instance, and a generic callee is solved by the checker.
+fn inc(x: Int64) -> Int64 { return x + 1 }          fn twice(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(f(x)) }          fn four(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return twice(twice(x, f), f) }          fn mapAll<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> { let mut out: Array<U> = [] for x in xs { out.push(f(x)) } return out }          fn vyrnTestMain() -> Int64 { let xs: Array<Int64> = [1, 2, 3] let ys = mapAll(xs, inc) return four(10, inc) * 100 + ys[2] }

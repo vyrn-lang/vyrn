@@ -1,0 +1,6 @@
+// a payload binder that is a layout
+// pin: 0 break, 0 continue
+// A payload binder of a layout the construct does not own holds the
+// payload's address in the scrutinee's storage: a box for the array, the
+// sum itself for a two-word record (RFC-0125 M7).
+type P = { x: Int64, y: Int64 } fn f(o: Option<Array<Int64>>) -> Int64 { let mut t = 0          if let Some(xs) = o { t = xs[0] + xs.length } return t }          fn g(o: Option<P>) -> Int64 { return match o { Some(p) => p.x + p.y * 10, None => 0 } }          fn vyrnTestMain() -> Int64 { return f(Some([7, 8, 9])) + f(None) + g(Some(P { x: 1, y: 2 })) * 100 }

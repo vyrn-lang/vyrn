@@ -1,0 +1,5 @@
+// a field taken into a part
+// pin: 0 break, 0 continue
+// A field taken into a literal moves its header to the part's offset,
+// and the root's release carries the hole.
+type In = { d: Array<Int64>, k: Int64 } type Out = { d: Array<Int64>, n: Int64 }          fn mk(k: Int64) -> In { let mut a: Array<Int64> = [] a.push(k) a.push(k + 1) return In { d: a, k: k } }          fn moved(k: Int64) -> Out { let t = mk(k) return Out { d: consume t.d, n: t.k } }          fn kept(k: Int64) -> Int64 { let t = mk(k) let o = Out { d: consume t.d, n: t.k } return o.d.length + o.n }          fn vyrnTestMain() -> Int64 { let o = moved(3) return o.d.length * 100 + o.d[1] + kept(5) * 1000 }

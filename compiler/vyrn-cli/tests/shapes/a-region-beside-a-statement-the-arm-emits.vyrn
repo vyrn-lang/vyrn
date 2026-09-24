@@ -1,0 +1,6 @@
+// a `region` beside a statement the arm emits
+// pin: 0 break, 0 continue
+// A `region` statement is its block row, keyed by the block the row names
+// (RFC-0004, RFC-0125 M7). The store into module state keeps the body off
+// the whole-body walk, so each region is the interleave's.
+let mut pending: Map<String, fn(Int64) -> Int64> = [:]          fn keep(cb: fn(Int64) -> Int64) -> Int64 { let mut n = 0          region { let k = 3 let mut i = 0 while i < k { n = n + i i = i + 1 } }          pending[n.toString()] = cb.copy() region { n = n * 10 } return n }          fn vyrnTestMain() -> Int64 { return keep(x -> x + 1) + pending.length }

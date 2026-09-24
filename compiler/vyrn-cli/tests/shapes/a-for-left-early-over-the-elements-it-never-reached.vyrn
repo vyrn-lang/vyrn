@@ -1,0 +1,7 @@
+// a `for` left early over the elements it never reached
+// pin: 0 break, 0 continue
+// A `return` and a `break` out of a `for` whose every element leaves
+// through the loop variable release the elements no turn reached
+// (RFC-0125 M7). `examples/` writes only the `return`, in the generated
+// decoders.
+type Rec = { name: String, k: Int64 }          fn mk(n: Int64) -> Array<Rec> { let mut out: Array<Rec> = [] let mut i = 0          while i < n { out.push(Rec { name: "r" + i.toString(), k: i }) i = i + 1 } return out }          fn sink(r: consume Rec) -> Int64 { return r.k }          fn first(n: Int64) -> Int64 { for x in mk(n) { return sink(x) + 10 } return 0 }          fn until(n: Int64, stop: Int64) -> Int64 { let xs = mk(n) let mut t = 0          for x in consume xs { if x.k == stop { break } t = t + sink(x) } return t }          fn vyrnTestMain() -> Int64 { return first(3) + until(5, 3) * 100 }

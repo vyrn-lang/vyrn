@@ -1,0 +1,6 @@
+// a move of a layout, and a take out of a field
+// pin: 0 break, 0 continue
+// A move is a rename: `zs` and `b` hold the place the moved name held. A
+// layout taken out of a field is a copy into a slot, and so is `let q = p`
+// of a layout that owns no heap (RFC-0125 M7, `m7-move`).
+type R = { xs: Array<Int64>, s: String, n: Int64 } type P = { x: Int64, y: Int64 }          fn grab(r: consume R) -> Int64 { let t = consume r.s let ys = consume r.xs let mut zs = ys          zs.push(t.byteLength) return zs.length * 100 + zs[3] * 10 + r.n }          fn two(p: P) -> Int64 { let q = p return q.x + q.y * 10 }          fn pair(n: Int64) -> Int64 { let a = [1, n] let b = a return b[1] }          fn vyrnTestMain() -> Int64 { let r = R { xs: [4, 5, 6], s: "abc", n: 1 }          return grab(r) * 1000 + pair(2) * 100 + two(P { x: 1, y: 2 }) }

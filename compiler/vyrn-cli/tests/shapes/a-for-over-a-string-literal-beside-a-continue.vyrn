@@ -1,0 +1,6 @@
+// a `for` over a String literal beside a `continue`
+// pin: 0 break, 0 continue
+// A `for` over a String literal gave the whole body up, so the
+// `continue` in the other loop had no row, and the retired arm failed the
+// build (RFC-0125 M7, `m7-forhead`).
+fn vyrnTestMain() -> Int64 { let xs: Array<Int64> = [1, 2, 3, 4, 5] let mut s = 0          for x in xs { if x % 2 == 0 { continue } s = s + x }          for c in "abc" { s = s + Int64(c) } return s }

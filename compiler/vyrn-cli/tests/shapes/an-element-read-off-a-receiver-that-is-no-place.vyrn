@@ -1,0 +1,5 @@
+// an element read off a receiver that is no place
+// pin: 0 break, 0 continue
+// An element that owns no heap, read off a receiver that is no place, binds
+// the receiver to a temporary and releases it after the read (RFC-0125 M7).
+import { chars } from "std/text"          type P = { at: Int64, n: Int64 }          fn nm(k: Int64) -> String { return "Ab" + k.toString() }          fn m(k: Int64) -> Map<String, Int64> { let mut o: Map<String, Int64> = [:] o["a"] = k return o }          fn same(a: UInt8, b: Int64) -> Int64 { if Int64(a) == b { return 1 } return 0 }          fn lead(s: String) -> Bool { return s.byteLength > 0 && bytes(s)[0] >= 'A' && bytes(s)[0] <= 'Z' }          fn vyrnTestMain() -> Int64 { let p = P { at: 2, n: 0 } let b = bytes(nm(7))[p.at]          let mut c = bytes("xyz")[1] c = bytes(nm(3))[1] let d = chars(nm(5))[0]          let e = match m(9)["a"] { Some(v) => v, None => 0 }          let mut t = Int64(b) + Int64(c) * 1000 + Int64(d) * 1000000 + e * 1000000000 + same(bytes(nm(1))[p.at], 49) * 10000000000          if lead(nm(2)) { t = t + 100000000000 } return t }

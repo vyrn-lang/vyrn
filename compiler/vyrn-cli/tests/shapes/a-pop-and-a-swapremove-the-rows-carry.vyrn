@@ -1,0 +1,5 @@
+// a pop and a swapRemove the rows carry
+// pin: 0 break, 0 continue
+// (RFC-0125 M7, `m7-rows`). Every `pop` of `examples/` sits in a body
+// the rows do not take for another reason.
+type P = { x: Int64, s: String }          fn vyrnTestMain() -> Int64 { let mut ps: Array<P> = [P { x: 1, s: "a" }, P { x: 2, s: "bb" }]          let q = ps.swapRemove(0) let o = ps.pop() let mut xs: Array<Int64> = [5, 6, 7]          let a = xs.swapRemove(0) let mut t = q.x * 10 + q.s.byteLength + a * 1000          if let Some(p) = o { t = t + p.x * 100 } return t + xs.length * 10000 }

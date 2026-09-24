@@ -1,0 +1,6 @@
+// `@str` of a String temporary
+// pin: 0 break, 0 continue
+// `@str` copies each String hole, and the release row the driver placed
+// frees the temporary it copied: a field read, a `+`, a call result and a
+// rendered number (RFC-0125 M7).
+type U = { name: String } fn id(a: String) -> String { return a + "!" }          fn show(u: U, n: Int64) -> String { return "<\{u.name}|\{u.name + u.name}|\{id(u.name)}|\{n.toString()}>" }          fn vyrnTestMain() -> Int64 { let u = U { name: "ab" } return show(u, 7).byteLength }

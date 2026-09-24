@@ -1,0 +1,6 @@
+// a payload handed on from a scrutinee the frame keeps
+// pin: 0 break, 0 continue
+// A payload read out of a scrutinee the frame owns and handed to
+// `consume` leaves a hole the scrutinee's release walks around
+// (RFC-0125 M7, `m7-hole`); `std/vyx.vyrn`'s `vyxProcessElem` is one.
+type N = | E(String, Array<Int64>) | T(String) type One = { n: N, k: Int64 }          fn sum(xs: consume Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn f(n: consume N) -> One { return match n { E(s, xs) => One { n: T("x"), k: sum(xs) }, T(s) => One { n: n, k: 0 } } }          fn vyrnTestMain() -> Int64 { return f(E("a", [1, 2, 3])).k + f(T("b")).k * 10 }

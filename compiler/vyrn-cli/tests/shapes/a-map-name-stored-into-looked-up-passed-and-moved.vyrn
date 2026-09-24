@@ -1,0 +1,4 @@
+// a Map name stored into, looked up, passed and moved
+// pin: 0 break, 0 continue
+// A map name is its header's slot on both walks, as an array's is.
+fn count(m: Map<String, Int64>) -> Int64 { return m.length }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let mut m: Map<String, Int64> = [:] m["a"] = twice(1) m["b"] = 3          let mut t = 0 if let Some(v) = m["a"] { t = v } let n = count(m) let c = m          return n * 100 + t * 10 + c.length }

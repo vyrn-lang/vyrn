@@ -1,0 +1,3 @@
+// a `let` annotated with a `where` type
+// pin: 0 break, 0 continue
+type Age = Int64 where value >= 18 fn vyrnTestMain() -> Int64 { let mut x = 30 x = x - 25 let a: Age = x return a }

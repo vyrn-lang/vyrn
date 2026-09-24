@@ -1,0 +1,5 @@
+// a method call on a concrete receiver
+// pin: 0 break, 0 continue
+// A method is a call after dispatch: `Callee::Fn` to the impl function the
+// receiver's type names (section 2.1, RFC-0125 M7).
+type Tally = { counts: Array<Int64>, running: Int64 }          protocol Counting { fn record(modify self, n: Int64) fn sum(read self) -> Int64 }          impl Counting for Tally { fn record(modify self, n: Int64) { self.counts.push(n) self.running = self.running + n } fn sum(read self) -> Int64 { return self.running + self.counts.length } }          protocol Label { fn label(self) -> String }          impl Label for Int64 { fn label(self) -> String { return "i" + self.toString() } }          impl Label for Bool { fn label(self) -> String { if self { return "yes" } return "no" } }          fn both(x: Int64, flag: Bool) -> String { return label(x) + "/" + flag.label() }          fn vyrnTestMain() -> Int64 { let mut t = Tally { counts: [], running: 0 } t.record(5) record(t, 7) return t.sum() * 1000 + both(42, true).byteLength }

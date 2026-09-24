@@ -1,0 +1,6 @@
+// a stream handed to a function that returns it
+// pin: 0 break, 0 continue
+// A stream is linear (RFC-0081), so the callee disposes a stream it is
+// handed: `keep` hands it back, and a close after the call ended the
+// stream `two` returned.
+fn feed(n: Int64) -> Stream<Int64> { let mut xs: Array<Int64> = [] let mut i = 0 while i < n { xs.push(i + 1) i = i + 1 } return fromArray(xs) }          fn keep(s: Stream<Int64>) -> Stream<Int64> { return s }          fn two(n: Int64) -> Stream<Int64> { return keep(feed(n)) }          fn vyrnTestMain() -> Int64 { let mut t = 0 for v in two(3) { t = t * 10 + v } return t }

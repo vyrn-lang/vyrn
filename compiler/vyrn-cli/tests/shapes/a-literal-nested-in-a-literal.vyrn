@@ -1,0 +1,6 @@
+// a literal nested in a literal
+// pin: 0 break, 0 continue
+// A literal nested in a literal is built at its offset in the parent's
+// storage, a named array part is copied there, and an empty array of
+// records has no element to place (RFC-0125 M7).
+type In = { a: Int64, b: Int64 } type Out = { i: In, xs: Array<Int64>, k: Int64 }          fn mk(k: Int64) -> Out { return Out { i: In { a: k, b: 2 }, xs: [k, 3], k: k } }          fn bind(k: Int64) -> Int64 { let ys: Array<Int64> = [k] let e: Array<In> = []          let o = Out { i: In { a: 1, b: k }, xs: ys, k: 5 } return o.i.b + o.xs[0] + e.length }          fn vyrnTestMain() -> Int64 { let o = mk(4) return o.i.a + o.xs[1] * 10 + bind(7) * 100 }

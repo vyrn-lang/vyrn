@@ -1,0 +1,7 @@
+// an `if let` the rows carry
+// pin: 0 break, 0 continue
+// The tag family's own witness (RFC-0125 M7). Every `if let` of
+// `examples/` waits on another family as well — a builtin call in the
+// arm, a layout, a release — so the corpus cannot say whether the two
+// walks agree on the switch itself.
+fn vyrnTestMain() -> Int64 { let o = Some(7) let mut t = 0          if let Some(n) = o { t = t + n } else { t = 1 } return t }
