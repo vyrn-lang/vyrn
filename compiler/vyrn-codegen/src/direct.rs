@@ -654,7 +654,15 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
                 Body::Shell => "lambda",
                 _ => "",
             });
-            let body = lower_body(&mut m, &p.f, p.body, &p.sig, &cx, p.binds.clone());
+            let body = lower_body(
+                &mut m,
+                &p.f,
+                &p.core_key,
+                p.body,
+                &p.sig,
+                &cx,
+                p.binds.clone(),
+            );
             crate::observe::set_ctx(was);
             cx.subst = HashMap::new();
             cx.mono.borrow_mut().done += 1;
@@ -1153,6 +1161,8 @@ struct Pending<'a> {
     subst: HashMap<String, Type>,
     /// RFC-0023: the target each `fn`-typed parameter is bound to, by name.
     binds: HashMap<String, FnBinding>,
+    /// The name the core built this body under ([`vyrn_lower::core::body_of`]).
+    core_key: String,
 }
 
 /// The specialization worklist (RFC-0077 M2e, widened by M2m).
@@ -1644,6 +1654,7 @@ impl<'a> Cx<'a> {
         body: Body<'a>,
         subst: HashMap<String, Type>,
         binds: HashMap<String, FnBinding>,
+        core_key: String,
     ) -> Result<Sig, String> {
         if let Some(p) = self.mono.borrow().insts.iter().find(|p| p.key == key) {
             return Ok(p.sig.clone());
@@ -1662,6 +1673,7 @@ impl<'a> Cx<'a> {
             sig: sig.clone(),
             subst,
             binds,
+            core_key,
         });
         Ok(sig)
     }
@@ -1685,6 +1697,7 @@ impl<'a> Cx<'a> {
         targets: Vec<FnTarget>,
     ) -> Result<Sig, String> {
         let (sf, binds) = ho_shell(f, &subst, &targets);
+        let core_key = vyrn_lower::spell(&f.name, &type_args);
         self.enqueue(
             m,
             Key::Ho(f.name.clone(), type_args, targets),
@@ -1692,6 +1705,7 @@ impl<'a> Cx<'a> {
             Body::Block(&f.body),
             subst,
             binds,
+            core_key,
         )
     }
 
@@ -1703,6 +1717,7 @@ impl<'a> Cx<'a> {
         type_args: Vec<Type>,
         subst: HashMap<String, Type>,
     ) -> Result<Sig, String> {
+        let core_key = vyrn_lower::spell(&f.name, &type_args);
         self.enqueue(
             m,
             Key::Generic(f.name.clone(), type_args),
@@ -1710,6 +1725,7 @@ impl<'a> Cx<'a> {
             Body::Block(&f.body),
             subst,
             HashMap::new(),
+            core_key,
         )
     }
 
@@ -2323,6 +2339,9 @@ struct Fn_<'a, 'p> {
     /// itself, or for a lifted lambda the function that holds the literal
     /// (RFC-0125 M3, third slice).
     owner: String,
+    /// The name the core built this body under, which a lambda it lifts is
+    /// keyed under too ([`vyrn_lower::core::lambda_spelling`]).
+    core_key: String,
     /// This frame's own core body, and where each of its names lives — RFC-0125
     /// §3 M3, the interleave slice.
     ///
@@ -2388,6 +2407,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         dest_used: false,
         call_dest: None,
         owner: String::new(),
+        core_key: String::new(),
         core: None,
         core_at: HashMap::new(),
         core_rows: Vec::new(),
@@ -2469,7 +2489,7 @@ fn lower_fn(
     cx: &Cx<'_>,
     binds: HashMap<String, FnBinding>,
 ) -> Result<(), String> {
-    let frame = lower_body(m, f, Body::Block(&f.body), sig, cx, binds)?;
+    let frame = lower_body(m, f, &f.name, Body::Block(&f.body), sig, cx, binds)?;
     m.fill(sig.index, frame)?;
     if std::env::var_os("VYRN_WASM_NAMES").is_some() {
         m.name(sig.index, &f.name);
@@ -2479,13 +2499,15 @@ fn lower_fn(
 
 /// The body itself, before it is installed at the index reserved for it.
 ///
-/// `f` is the DECLARATION — the name, the line and the signature — and `body` is
-/// the statements. They are two arguments because a specialization's signature is
+/// `f` is the DECLARATION — the name, the line and the signature — `key` the
+/// name the core built the body under, and `body` the statements. `f` and
+/// `body` are two arguments because a specialization's signature is
 /// synthesized and its statements are the callee's own, borrowed rather than
 /// cloned (see [`Pending::body`]).
 fn lower_body(
     m: &mut Module,
     f: &Function,
+    key: &str,
     body: Body<'_>,
     sig: &Sig,
     cx: &Cx<'_>,
@@ -2510,7 +2532,7 @@ fn lower_body(
         .unwrap_or_else(|| f.name.clone());
 
     let mut b = Frame::new(&params, &results, &[], 0);
-    let core = core_body(&f.name, &binds, cx).map(std::rc::Rc::new);
+    let core = core_body(key, f, &binds, cx).map(std::rc::Rc::new);
     let mut cx_fn = Fn_ {
         cx,
         scope: Vec::new(),
@@ -2554,6 +2576,7 @@ fn lower_body(
         dest_used: false,
         call_dest: None,
         owner,
+        core_key: key.to_string(),
         core,
         core_at: HashMap::new(),
         core_rows: Vec::new(),
@@ -2791,22 +2814,31 @@ fn lower_body(
 /// its targets. A specialization with a target the core does not name reads
 /// the declaration's body, whose calls through the parameter the screen
 /// stands down at.
+///
+/// The body is the frame's only where its parameters are the frame's, by name
+/// and in order. A body with another parameter list was built for another
+/// signature: a specialization [`vyrn_lower::core::specialize`] could not
+/// state, or a lambda whose captures the two sides listed apart.
 fn core_body(
-    name: &str,
+    key: &str,
+    f: &Function,
     binds: &HashMap<String, FnBinding>,
     cx: &Cx<'_>,
 ) -> Option<vyrn_lower::core::Body> {
-    let body = vyrn_lower::core::body_of(name)?;
+    let body = vyrn_lower::core::body_of(key)?;
     let bound: Option<Vec<(vyrn_lower::core::Name, Target)>> = (body.params.iter())
         .filter_map(|&n| Some((n, binds.get(&body.names[n as usize].source)?)))
         .map(|(n, b)| Some((n, Target::Fn(cx.named(&b.target)?))))
         .collect();
-    match bound {
+    let body = match bound {
         Some(bound) if !binds.is_empty() && bound.len() == binds.len() => {
-            Some(vyrn_lower::core::specialize(&body, &bound).unwrap_or(body))
+            vyrn_lower::core::specialize(&body, &bound).unwrap_or(body)
         }
-        _ => Some(body),
-    }
+        _ => body,
+    };
+    let sources = body.params.iter().map(|&n| &body.names[n as usize].source);
+    (body.params.len() == f.params.len() && sources.eq(f.params.iter().map(|p| &p.name)))
+        .then_some(body)
 }
 
 /// Refuse a frame this backend's stack cannot hold at every depth the call
@@ -9883,7 +9915,12 @@ impl<'p> Fn_<'_, 'p> {
             .is_none()
             .then(|| self.cx.keep(at.clone()));
         let at = kept.as_deref().unwrap_or(at);
-        let Expr::Lambda { params, body, .. } = at else {
+        let Expr::Lambda {
+            params,
+            body,
+            line: at_line,
+        } = at
+        else {
             return unsupported("a lambda lifted from another expression", line);
         };
         if params.len() != ptys.len() {
@@ -10026,6 +10063,7 @@ impl<'p> Fn_<'_, 'p> {
             queued,
             self.cx.subst.clone(),
             HashMap::new(),
+            vyrn_lower::core::lambda_spelling(&self.core_key, *at_line),
         )?;
         let srcs = cap_names
             .iter()
@@ -17124,9 +17162,6 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         body: &vyrn_lower::core::Body,
     ) -> Result<(), String> {
-        if body.params.len() > self.scope.len() {
-            return unsupported("a core body whose parameters are not the frame's", 0);
-        }
         let mut w = std::mem::take(&mut self.core_w);
         let r = self.core_stmts(m, b, body, &mut w, &body.stmts);
         self.core_w = w;

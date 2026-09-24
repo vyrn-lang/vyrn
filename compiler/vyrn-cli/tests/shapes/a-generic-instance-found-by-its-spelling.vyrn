@@ -1,0 +1,6 @@
+// a generic instance found by its spelling
+// pin: 0 break, 0 continue
+// The core keys an instance by `vyrn_lower::spell`, `outside<String>`, and
+// the emitter asks by the same key, so the body is the core walk's (the
+// m7-keys record).
+type Box<T> = { v: T, n: Int64 }          fn outside<T>(b: Box<T>, lo: Int64, hi: Int64) -> Bool { if b.n < lo || b.n >= hi { return true } return false }          fn vyrnTestMain() -> Int64 { let b = Box { v: "x", n: 5 } let mut r = 0 if outside(b, 0, 3) { r = r + 1 } if outside(b, 0, 9) { r = r + 10 } return r }
