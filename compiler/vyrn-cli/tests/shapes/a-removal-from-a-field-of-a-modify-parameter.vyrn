@@ -1,0 +1,5 @@
+// a removal from a field of a `modify` parameter
+// pin: 0 break, 0 continue
+// The call shrinks the field where it lies, and the move-out window's
+// temp and put-back are no rows (`Builder::nested_store`).
+type Bag = { xs: Array<Int64>, n: Int64 } type Two = { b: Bag, k: Int64 }          fn take(b: modify Bag) -> Int64 { b.n = b.n + 1 let o = b.xs.pop() if let Some(v) = o { return v } return 0 }          fn drop2(t: modify Two) -> Int64 { t.b.xs.pop() let y = t.b.xs.swapRemove(t.b.xs.length - 2) return y }          fn vyrnTestMain() -> Int64 { let mut b = Bag { xs: [1, 2, 3, 4, 5], n: 0 } let a = take(b) let mut t = Two { b: b, k: 0 } let d = drop2(t) return a * 1000 + d * 100 + t.b.xs.length * 10 + t.b.n }

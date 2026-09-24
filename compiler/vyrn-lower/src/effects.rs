@@ -374,9 +374,22 @@ impl Walk<'_> {
     /// Whether the right-hand side was a call that is not a user body — the
     /// caller's own allocation when the result is owned.
     fn rhs(&mut self, r: &Rhs, line: usize) -> bool {
-        let Rhs::Call { callee, kind, .. } = r else {
+        let Rhs::Call {
+            callee, kind, args, ..
+        } = r
+        else {
             return false;
         };
+        // A place argument is the move-out window's place, and the call
+        // writes it as the window's store did.
+        for (a, _) in args {
+            if let crate::core::Arg::Place(p) = a {
+                if let Some(g) = global_root(p) {
+                    self.writes.insert(g.clone());
+                }
+                self.place(p);
+            }
+        }
         let c = self.callee(callee, kind.value());
         self.calls.push((callee.clone(), c.clone()));
         let atom = match c {

@@ -48,7 +48,7 @@ use vyrn_frontend::types::INT32;
 /// RFC-0125 §2.3's own vocabulary: the statements the emitter walks, what each
 /// one computes, and the values it computes it from. `Body` is spelled out at
 /// each use, because this file's own `Body` is the AST's.
-use vyrn_lower::core::{Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
+use vyrn_lower::core::{Arg, Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
@@ -16916,6 +16916,15 @@ fn builtin_spec(
 
 /// Argument `i` of a call row as a lane index below `lanes`: the literal the
 /// row carries, which the checker proved constant and in range.
+/// The arguments, where every one is a value.
+fn arg_vals(
+    args: &[(Arg, vyrn_frontend::ast::Capability)],
+) -> Option<Vec<(Val, vyrn_frontend::ast::Capability)>> {
+    args.iter()
+        .map(|(a, c)| Some((a.val()?.clone(), *c)))
+        .collect()
+}
+
 fn core_lane(args: &[(Val, vyrn_frontend::ast::Capability)], i: usize, lanes: i64) -> Option<u8> {
     match args.get(i) {
         Some((Val::Lit(Lit::Int(k)), _)) if (0..lanes).contains(k) => Some(*k as u8),
@@ -17368,16 +17377,25 @@ impl<'p> Fn_<'_, 'p> {
         // A result checked where a `return` of the run hands it back, under a
         // branch or at the run's end, is a check the row does not state
         // (RFC-0079).
+        //
+        // A place argument is a move-out window's call ([`Arg`]), whose `let`
+        // and put-back are source statements with no rows: the arm would emit
+        // them around the call, and the put-back would undo it.
         let mut released = Vec::new();
-        let mut returns = false;
+        let (mut returns, mut windowed) = (false, false);
         for r in run {
             core_leaf_rows(r, &mut |x| match x {
                 St::Return { .. } => returns = true,
                 St::Row { name, .. } => released.push(*name),
+                St::Let(_, Rhs::Call { args, .. })
+                | St::Do {
+                    rhs: Rhs::Call { args, .. },
+                    ..
+                } => windowed |= args.iter().any(|(a, _)| matches!(a, Arg::Place(_))),
                 _ => {}
             });
         }
-        if self.dest.is_some() && self.checks(&self.ret_ty) && returns {
+        if windowed || self.dest.is_some() && self.checks(&self.ret_ty) && returns {
             return None;
         }
         // A node is an ADDRESS. The row's FORM and the name it binds are
@@ -17642,8 +17660,11 @@ impl<'p> Fn_<'_, 'p> {
                     },
                 ) if self.core_rebuild(body, rhs) => {
                     let line = body.names[*n as usize].line;
-                    let Some(((Val::Name(x), _), rest)) = args.split_first() else {
+                    let Some(((Arg::Val(Val::Name(x)), _), rest)) = args.split_first() else {
                         return unsupported("a rebuild of no named receiver", line);
+                    };
+                    let Some(rest) = arg_vals(rest) else {
+                        return unsupported("a rebuild with a place argument", line);
                     };
                     if body.names[*x as usize].grows {
                         // `@strAppend`: the store after it states whether the
@@ -18434,6 +18455,43 @@ impl<'p> Fn_<'_, 'p> {
         kind: Callee,
         solved: &[(String, Type)],
         targets: &[Target],
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
+        hint: Option<(Dest, Type)>,
+        line: usize,
+    ) -> Result<Type, String> {
+        if let Some(vs) = arg_vals(args) {
+            return self.core_call_vals(
+                m, b, body, w, callee, kind, solved, targets, &vs, hint, line,
+            );
+        }
+        // A place receiver is shrunk where it lies, which is the move-out
+        // window's whole extent ([`Fn_::core_removes`]).
+        let ([(Arg::Place(p), _), rest @ ..], Some(Spec::Removes)) =
+            (args, core_builtin(callee, kind))
+        else {
+            return unsupported("a place argument to other than a removal", line);
+        };
+        let Some(rest) = arg_vals(rest) else {
+            return unsupported("a removal with two places", line);
+        };
+        let (aty, off) = self.core_addr(m, b, body, w, p, line)?;
+        self.core_step(b, off);
+        let slot = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(slot));
+        self.core_remove(m, b, body, w, callee, slot, &aty, &rest, line)
+    }
+
+    /// [`Fn_::core_call`] with every argument a value.
+    fn core_call_vals(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        callee: &str,
+        kind: Callee,
+        solved: &[(String, Type)],
+        targets: &[Target],
         args: &[(Val, vyrn_frontend::ast::Capability)],
         hint: Option<(Dest, Type)>,
         line: usize,
@@ -18467,8 +18525,8 @@ impl<'p> Fn_<'_, 'p> {
                 let [(v, _)] = args else {
                     return unsupported("`copy` of other than one value", line);
                 };
-                if let Some(f) = self.core_copy_impl(body, callee, kind, args) {
-                    return self.core_call(
+                if let Some(f) = self.core_copy_impl(body, callee, kind, v) {
+                    return self.core_call_vals(
                         m,
                         b,
                         body,
@@ -18577,16 +18635,7 @@ impl<'p> Fn_<'_, 'p> {
                 let slot = b.local(ValType::I32);
                 self.core_addr_of(b, w, body, *x, line)?;
                 b.ins(&Instruction::LocalSet(slot));
-                return match (callee, rest) {
-                    ("@pop", []) => self.pop_at(b, slot, &aty, line),
-                    ("@swapRemove", [(i, _)]) => {
-                        let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-                            s.core_val(m, b, body, w, i, &Type::Int, line)
-                        };
-                        self.swap_remove_at(m, b, slot, &aty, &mut index, line)
-                    }
-                    _ => unsupported(&format!("`{callee}` at this arity"), line),
-                };
+                return self.core_remove(m, b, body, w, callee, slot, &aty, rest, line);
             }
             // `bytes` and `stringFromBytes`: built in a slot of the call's
             // own, which [`agg_landed`] copies into the destination.
@@ -18771,6 +18820,31 @@ impl<'p> Fn_<'_, 'p> {
     /// own access and an aggregate step adds. `None` is an address that is
     /// already the place's. The distinction is what keeps the bytes the
     /// `Expr::Field` arm's: it loads at the offset rather than adding it.
+    /// A removal from the `Array` of type `aty` whose address is in `slot`.
+    fn core_remove(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        callee: &str,
+        slot: u32,
+        aty: &Type,
+        rest: &[(Val, vyrn_frontend::ast::Capability)],
+        line: usize,
+    ) -> Result<Type, String> {
+        match (callee, rest) {
+            ("@pop", []) => self.pop_at(b, slot, aty, line),
+            ("@swapRemove", [(i, _)]) => {
+                let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                    s.core_val(m, b, body, w, i, &Type::Int, line)
+                };
+                self.swap_remove_at(m, b, slot, aty, &mut index, line)
+            }
+            _ => unsupported(&format!("`{callee}` at this arity"), line),
+        }
+    }
+
     fn core_addr(
         &mut self,
         m: &mut Module,
@@ -19220,7 +19294,10 @@ impl<'p> Fn_<'_, 'p> {
                 let Some((tag, payload)) = self.core_variant(ty, callee) else {
                     return unsupported("a variant the row states of no sum", line);
                 };
-                let vs: Vec<Val> = args.iter().map(|(v, _)| v.clone()).collect();
+                let Some(vs) = arg_vals(args) else {
+                    return unsupported("a variant built from a place", line);
+                };
+                let vs: Vec<Val> = vs.into_iter().map(|(v, _)| v).collect();
                 let mut parts = Parts::Core(body, &vs, w);
                 let hint = Some((dest, ty.clone()));
                 self.build_variant(m, b, ty, tag, &mut parts, &payload, line, hint)?;
@@ -19378,7 +19455,10 @@ impl<'p> Fn_<'_, 'p> {
                 matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
                     && self.core_variant(ty, callee).is_some_and(|(_, p)| {
                         p.len() == args.len()
-                            && args.iter().zip(&p).all(|((v, _), t)| {
+                            && args.iter().zip(&p).all(|((a, _), t)| {
+                                let Arg::Val(v) = a else {
+                                    return false;
+                                };
                                 (self.core_val_readable(body, v) && self.core_part_ty(t))
                                     || self.core_payload_layout(body, v, t)
                             })
@@ -19576,7 +19656,7 @@ impl<'p> Fn_<'_, 'p> {
                     kind: Callee::Ctor,
                     ..
                 },
-            ) => args.iter().any(|(v, _)| *v == Val::Name(*t)),
+            ) => args.iter().any(|(v, _)| *v == Arg::Val(Val::Name(*t))),
             _ => false,
         })?;
         if ss[i + 1..j].iter().any(core_leaves) {
@@ -19594,7 +19674,9 @@ impl<'p> Fn_<'_, 'p> {
             Rhs::Make(c, ps) => (c, ps),
             Rhs::Call { callee, args, .. } => {
                 let (_, payload) = self.core_variant(ty, callee)?;
-                let at = args.iter().position(|(v, _)| *v == Val::Name(*t))?;
+                let at = args
+                    .iter()
+                    .position(|(v, _)| *v == Arg::Val(Val::Name(*t)))?;
                 let part = payload.get(at)?.clone();
                 let Ok(Repr::Agg(l)) = self.cx.repr(&part, 0) else {
                     return None;
@@ -19991,10 +20073,10 @@ impl<'p> Fn_<'_, 'p> {
         body: &vyrn_lower::core::Body,
         callee: &str,
         kind: Callee,
-        args: &[(Val, vyrn_frontend::ast::Capability)],
+        v: &Val,
     ) -> Option<String> {
-        match (core_builtin(callee, kind), args) {
-            (Some(Spec::OwnType), [(v, _)]) => {
+        match core_builtin(callee, kind) {
+            Some(Spec::OwnType) => {
                 ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int))
             }
             _ => None,
@@ -20396,7 +20478,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             // An accumulator's append is read with the store after it.
             St::Let(_, rhs @ Rhs::Call { args, .. }) if self.core_rebuild(body, rhs) => {
-                !matches!(args.first(), Some((Val::Name(x), _)) if body.names[*x as usize].grows)
+                !matches!(args.first(), Some((Arg::Val(Val::Name(x)), _)) if body.names[*x as usize].grows)
                     || self
                         .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
                         .is_some()
@@ -20545,14 +20627,18 @@ impl<'p> Fn_<'_, 'p> {
     /// copies its result back into it. A scalar `modify` argument lives in a
     /// local, which [`Fn_::spill`] gives an address for the call's extent. A
     /// name that holds another place's address ([`Fn_::core_alias`]) may not
-    /// be written through.
+    /// be written through. A place argument is a removal's receiver, which
+    /// [`Fn_::core_removes`] reads.
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
-        args: &[(Val, vyrn_frontend::ast::Capability)],
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> bool {
         use vyrn_frontend::ast::Capability as Cap;
-        args.iter().all(|(v, c)| {
+        args.iter().all(|(a, c)| {
+            let Arg::Val(v) = a else {
+                return false;
+            };
             let layout = matches!(v, Val::Name(n) if {
                 let t = &body.names[*n as usize].ty;
                 matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
@@ -20601,17 +20687,20 @@ impl<'p> Fn_<'_, 'p> {
                             // the copy in a slot of its own, as `Builds` does.
                             // A type that declares `impl Copy` is copied by that
                             // declaration's function, a call like any other.
-                            Some(Spec::OwnType) => {
-                                match self.core_copy_impl(body, callee, *kind, args) {
-                                    Some(f) => {
-                                        self.core_sig(body, &f, Callee::Fn, &[], &[]).is_some_and(
-                                            |s| s.params.len() == 1 && s.ret.agg().is_some(),
-                                        )
-                                    }
-                                    None => matches!(args.as_slice(), [(Val::Name(n), _)]
+                            Some(Spec::OwnType) => match args.as_slice() {
+                                [(Arg::Val(v), _)] => {
+                                    match self.core_copy_impl(body, callee, *kind, v) {
+                                        Some(f) => self
+                                            .core_sig(body, &f, Callee::Fn, &[], &[])
+                                            .is_some_and(|s| {
+                                                s.params.len() == 1 && s.ret.agg().is_some()
+                                            }),
+                                        None => matches!(v, Val::Name(n)
                                 if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
+                                    }
                                 }
-                            }
+                                _ => false,
+                            },
                             _ => false,
                         } || self
                             .core_sig(body, callee, *kind, solved, targets)
@@ -20639,34 +20728,44 @@ impl<'p> Fn_<'_, 'p> {
             return false;
         };
         matches!(core_builtin(callee, *kind), Some(Spec::Rebuilds))
-            && matches!(args.split_first(), Some(((Val::Name(x), _), rest))
+            && matches!(args.split_first(), Some(((Arg::Val(Val::Name(x)), _), rest))
                 if (body.names[*x as usize].grows
                     || matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_)))
                     && core_global(body, *x).is_none_or(|g| self.cx.gappend.contains_key(g))
                     && self.core_args_readable(body, rest))
     }
 
-    /// Whether a row removes from a named `Array` receiver
-    /// ([`Spec::Removes`]) with operands this walk writes, and if so whether
+    /// Whether a row removes from an `Array` receiver, a name or a place
+    /// ([`Spec::Removes`]), with operands this walk writes, and if so whether
     /// what it hands back is an aggregate, which lands through a slot.
     fn core_removes(
         &self,
         body: &vyrn_lower::core::Body,
         callee: &str,
         kind: Callee,
-        args: &[(Val, vyrn_frontend::ast::Capability)],
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> Option<bool> {
         if !matches!(core_builtin(callee, kind), Some(Spec::Removes)) {
             return None;
         }
-        let [(Val::Name(x), _), rest @ ..] = args else {
+        let [recv, rest @ ..] = args else {
             return None;
         };
-        let Type::Array(e) = self.cx.resolve(&body.names[*x as usize].ty) else {
+        let (ty, readable) = match &recv.0 {
+            Arg::Val(Val::Name(x)) => (
+                body.names[*x as usize].ty.clone(),
+                self.core_args_readable(body, std::slice::from_ref(recv)),
+            ),
+            Arg::Place(p) => (self.core_place_ty(body, p)?, true),
+            Arg::Val(Val::Lit(_)) => return None,
+        };
+        let Type::Array(e) = self.cx.resolve(&ty) else {
             return None;
         };
-        (self.core_args_readable(body, args) && rest.len() == usize::from(callee == "@swapRemove"))
-            .then(|| callee == "@pop" || matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))))
+        (readable
+            && self.core_args_readable(body, rest)
+            && rest.len() == usize::from(callee == "@swapRemove"))
+        .then(|| callee == "@pop" || matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))))
     }
 
     /// The receiver and the result of the rebuild before `ss[i]` when `ss[i]`
@@ -20692,7 +20791,7 @@ impl<'p> Fn_<'_, 'p> {
         else {
             return None;
         };
-        let Some((Val::Name(r), _)) = args.first() else {
+        let Some((Arg::Val(Val::Name(r)), _)) = args.first() else {
             return None;
         };
         let back = match place {
@@ -20812,18 +20911,19 @@ impl<'p> Fn_<'_, 'p> {
         body: &vyrn_lower::core::Body,
         callee: &str,
         kind: Callee,
-        args: &[(Val, vyrn_frontend::ast::Capability)],
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> bool {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
             Some(Spec::OwnType) => {
-                matches!(args, [_]) && self.core_copy_impl(body, callee, kind, args).is_none()
+                matches!(args, [(Arg::Val(v), _)] if self.core_copy_impl(body, callee, kind, v).is_none())
             }
             Some(Spec::Renders(_) | Spec::Effect) => matches!(args, [_]),
-            Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
+            Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
             // A lane index is an immediate, so the row carries it as a literal.
             Some(Spec::Lanes) => {
-                !matches!(callee, "@lane" | "@replaceLane") || core_lane(args, 1, 4).is_some()
+                !matches!(callee, "@lane" | "@replaceLane")
+                    || arg_vals(args).is_some_and(|vs| core_lane(&vs, 1, 4).is_some())
             }
             Some(Spec::Host) => self.cx.gen.is_some(),
             // A removal that hands back a scalar leaves it on the stack; one
@@ -20885,24 +20985,25 @@ impl<'p> Fn_<'_, 'p> {
                 targets,
                 ..
             } => {
-                self.core_args_readable(body, args)
-                    && (self.core_builtin_readable(body, callee, *kind, args)
-                        || (*kind == Callee::Fn && self.is_extern(callee))
-                        || self.core_named(callee, *kind).is_some()
-                        || self.core_mem_ty(callee, args.len()).is_some()
-                        || self
-                            .core_sig(body, callee, *kind, solved, targets)
-                            .is_some_and(|s| {
-                                // An aggregate result crosses through an out-pointer
-                                // the caller allocates, and this walk writes a plain
-                                // `call`: the frame it would need is the callee's
-                                // destination and not a name of this body.
-                                s.params.len() == args.len()
-                                    && matches!(
-                                        self.cx.repr(&s.ret_ty, 0),
-                                        Ok(Repr::Scalar(_) | Repr::Unit)
-                                    )
-                            }))
+                self.core_removes(body, callee, *kind, args) == Some(false)
+                    || self.core_args_readable(body, args)
+                        && (self.core_builtin_readable(body, callee, *kind, args)
+                            || (*kind == Callee::Fn && self.is_extern(callee))
+                            || self.core_named(callee, *kind).is_some()
+                            || self.core_mem_ty(callee, args.len()).is_some()
+                            || self
+                                .core_sig(body, callee, *kind, solved, targets)
+                                .is_some_and(|s| {
+                                    // An aggregate result crosses through an out-pointer
+                                    // the caller allocates, and this walk writes a plain
+                                    // `call`: the frame it would need is the callee's
+                                    // destination and not a name of this body.
+                                    s.params.len() == args.len()
+                                        && matches!(
+                                            self.cx.repr(&s.ret_ty, 0),
+                                            Ok(Repr::Scalar(_) | Repr::Unit)
+                                        )
+                                }))
             }
             // A place this walk addresses, whose value is one it loads: any
             // value in one wasm local, which a String's pointer is as much as
@@ -20982,7 +21083,7 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
         | St::Do {
             rhs: Rhs::Call { args, .. },
             ..
-        } => args.first().and_then(|(v, _)| name(v)),
+        } => args.first().and_then(|(a, _)| a.val()).and_then(name),
         St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
         _ => None,
     }
@@ -21042,9 +21143,12 @@ fn core_moves_on(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bo
             }) => *v == n && !rooted(place),
             Some(St::Let(_, Rhs::Call { args, .. })) => {
                 args.iter()
-                    .any(|a| *a == (Val::Name(n), Capability::Consume))
-                    && args.iter().all(|(v, _)| {
-                        *v == Val::Name(n) || !matches!(v, Val::Name(m) if *m == root)
+                    .any(|a| *a == (Arg::Val(Val::Name(n)), Capability::Consume))
+                    && args.iter().all(|(a, _)| match a {
+                        Arg::Val(v) => {
+                            *v == Val::Name(n) || !matches!(v, Val::Name(m) if *m == root)
+                        }
+                        Arg::Place(p) => !rooted(p),
                     })
             }
             _ => false,
@@ -21113,9 +21217,15 @@ fn core_written(
 ) {
     let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>| {
         if let Rhs::Call { args, .. } = r {
-            for (v, c) in args {
-                if let (Val::Name(n), Capability::Modify | Capability::Consume) = (v, c) {
-                    out.push((*n, Some(*c)));
+            for (a, c) in args {
+                match (a, c) {
+                    (Arg::Val(Val::Name(n)), Capability::Modify | Capability::Consume) => {
+                        out.push((*n, Some(*c)))
+                    }
+                    (Arg::Place(p), _) => out.extend(
+                        vyrn_lower::kernel::root_of(p).map(|(n, _)| (n, Some(Capability::Modify))),
+                    ),
+                    _ => {}
                 }
             }
         }
