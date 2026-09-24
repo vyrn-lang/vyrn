@@ -596,14 +596,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // the program has no module state, because a reservation nobody fills is not a
     // module — and an empty body is two bytes.
     let init = lower_globals_init(&mut m, program, &cx)?;
-    m.fill(init_index, init);
+    m.fill(init_index, init)?;
     // Before the drain, like every other body: a global of a DECLARED generic
     // release reaches the teardown and nowhere else, and its instance has to
     // be on a worklist the drain below still reads. That instance is what
     // `vyrn-lower`'s `<teardown>` root queues.
     if let Some(ti) = teardown_index {
         let t = lower_globals_teardown(&mut m, program, &cx)?;
-        m.fill(ti, t);
+        m.fill(ti, t)?;
     }
 
     // Drain what the bodies discovered, and then the dispatchers the drain
@@ -659,7 +659,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             cx.mono.borrow_mut().done += 1;
             match body {
                 Ok(body) => {
-                    m.fill(p.sig.index, body);
+                    m.fill(p.sig.index, body)?;
                     if std::env::var_os("VYRN_WASM_NAMES").is_some() {
                         m.name(p.sig.index, &p.f.name);
                     }
@@ -686,7 +686,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         if let Some((index, (rel, ty, holes), line)) = sh {
             cx.subst = HashMap::new();
             let body = lower_shape(&mut m, &cx, rel, &ty, &holes, line)?;
-            m.fill(index, body);
+            m.fill(index, body)?;
             cx.shapes.borrow_mut().done += 1;
             continue;
         }
@@ -700,7 +700,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         };
         if let Some((sig_ty, dsig)) = d {
             let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
-            m.fill(dsig.index, body);
+            m.fill(dsig.index, body)?;
             cx.dispatch.borrow_mut().done += 1;
             continue;
         }
@@ -713,9 +713,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         }
         derived = true;
         let fncopy = lower_fnval_copy(&mut m, &cx)?;
-        m.fill(cx.fnval_copy, fncopy);
+        m.fill(cx.fnval_copy, fncopy)?;
         let fnfree = lower_fnval_free(&mut m, &cx)?;
-        m.fill(cx.fnval_free, fnfree);
+        m.fill(cx.fnval_free, fnfree)?;
     }
     if let Some(e) = deferred {
         return Err(e);
@@ -2401,7 +2401,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
 /// No wrapping `block`, because there is no `return` to route: an initializer is
 /// an expression.
 fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(0, &[], 0);
+    let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
     for g in &program.globals {
         let (place, ty) = cx.globals[&g.name].clone();
@@ -2434,7 +2434,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
 /// rule instead of a defect. A binding whose value is a data-segment literal
 /// releases nothing: `free` refuses an address below `HEAP_BASE`.
 fn lower_globals_teardown(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(0, &[], 0);
+    let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
     for g in program.globals.iter().rev() {
         let (place, ty) = cx.globals[&g.name].clone();
@@ -2462,7 +2462,7 @@ fn lower_fn(
     binds: HashMap<String, FnBinding>,
 ) -> Result<(), String> {
     let frame = lower_body(m, f, Body::Block(&f.body), sig, cx, binds)?;
-    m.fill(sig.index, frame);
+    m.fill(sig.index, frame)?;
     if std::env::var_os("VYRN_WASM_NAMES").is_some() {
         m.name(sig.index, &f.name);
     }
@@ -2490,7 +2490,7 @@ fn lower_body(
         Body::Value(_) => None,
     };
     let sig = sig.clone();
-    let (params, _results) = cx.wasm_sig(&sig, f.line)?;
+    let (params, results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
     let shift = dest.map_or(0, |_| 1);
     // A lifted lambda's rows are the enclosing function's (see `f_shell`).
@@ -2501,7 +2501,7 @@ fn lower_body(
         .filter(|o| !o.is_empty())
         .unwrap_or_else(|| f.name.clone());
 
-    let mut b = Frame::new(params.len(), &[], 0);
+    let mut b = Frame::new(&params, &results, &[], 0);
     let core = core_body(&f.name, &binds, cx).map(std::rc::Rc::new);
     let mut cx_fn = Fn_ {
         cx,
@@ -2907,7 +2907,7 @@ fn call_depth_bump(b: &mut Frame, cx: &Cx<'_>, by: i32) {
 /// copy of that. The release twin below walks the same captures, so the two
 /// stay mirrors.
 fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(2, &[], 0);
+    let mut b = Frame::new(&[ValType::I64, ValType::I32], &[ValType::I32], &[], 0);
     let mut f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
     let vals = cx.fnvals.borrow().clone();
@@ -2952,7 +2952,7 @@ fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
 /// — the one place the registry is readable — rather than at the release site,
 /// which sees a `Fn(..)` type and no tag.
 fn lower_fnval_free(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(2, &[], 0);
+    let mut b = Frame::new(&[ValType::I64, ValType::I32], &[], &[], 0);
     let mut f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
     let vals = cx.fnvals.borrow().clone();
@@ -3026,7 +3026,7 @@ fn lower_shape(
     holes: &[String],
     line: usize,
 ) -> Result<Frame, String> {
-    let mut b = Frame::new(1, &[], 0);
+    let mut b = Frame::new(&[ValType::I32], &[], &[], 0);
     let mut f = top_level(cx);
     if rel {
         f.rel_body(m, &mut b, 0, ty, holes, line)?;
@@ -3045,8 +3045,8 @@ fn lower_dispatcher(
     let Type::Fn(ptys, ret) = sig_ty else {
         return unsupported("a dispatcher for a non-function type", 0);
     };
-    let (params, _) = cx.wasm_sig(dsig, 0)?;
-    let mut b = Frame::new(params.len(), &[], 0);
+    let (params, results) = cx.wasm_sig(dsig, 0)?;
+    let mut b = Frame::new(&params, &results, &[], 0);
     let mut f = top_level(cx);
 
     // param 0 is the aggregate-return destination when there is one, then the fn
