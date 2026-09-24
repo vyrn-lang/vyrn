@@ -28404,3 +28404,49 @@ Findings:
 - `match m(k)["a"]` leaks the temporary map, 112 bytes, on main under both walks; the head's core walk frees it and the AST walk still leaks it. `pop` of a two-word record has no lowering on either walk.
 - a discarded scalar removal stood down too: the screen typed no `Removes` row.
 Left: the three stayed items above, each blocked as named; the key-read receiver leak on the AST walk, blocked by the arm freeing no receiver of a key read.
+
+#### The emitter's unit tests compile with the core, and no arm of the AST walk reads zero (2026-09-24, `m7-retire`)
+Decision: the lead's, that an arm goes only when `VYRN_FORM_TALLY` reads zero for it over the whole gate list, and, on this track's first count, that vyrn-codegen's unit tests install the core, because a test that compiles with no core measures a walk nothing ships. Mine: nothing else goes, because no arm reads zero.
+Went: the no-core compile of vyrn-codegen's unit tests; `linked` in `direct.rs`'s test module calls `vyrn_lower::install`. Stayed: every arm, each with its count and the clause of `Fn_::core_run` that sends it statements, in the tables under this record. `Stmt::Continue`'s arm stays as the exhaustive match's refusal; it emits nothing, and its flag in `FORMS` is false already.
+Lines: `direct.rs` 20,944 to 20,945 on main `41ef02a0`. `emitter_census` re-pinned: `tests` 331 to 332 lines, `neither` 6,625 to 6,626. `FORMS` and RFC-0127's table: unmoved, because no flag turns false. Refusals: 0 lost / 0 gained. Manifest: untouched.
+Licence, measured on main `7cbd2e29` and rebased onto `41ef02a0`:
+- `VYRN_FORM_TALLY` over the whole gate list, before on `86aecc9e` and after on `7cbd2e29`: 607,806 and 882,482 lines. `Stmt::Break` 187 to 5: the unit-test binary's 182 went, and the 5 are `jchain.vyrn`'s `main`. The unit-test binary went from 9,893 tally lines to 18 occurrences, of `Expr::Var`, `Stmt::Let`, `Stmt::Return`, `Expr::Int`, a field, an array, a `match` and the `try` constructor, counted in the table below as any other reader's. No codegen unit test read a different byte, so none was re-pinned. The other columns moved with the generator cache state and with `m7-genhost`, not with this change.
+- The gate list: `vyrn check` over the 415 roots (339 accepted, 76 refused) and `emit-gen` over them with `VYRN_NO_GEN_CACHE=1` (412 exits 0); the site export (82 routes, 14 assets, 241 files); `VYRN_LEAK_CHECK=1 vyrn bench <f> --check` over 17 programs (78 ok); `cargo test -p vyrn-lower -p vyrn-codegen` (47 passed); `cargo test --release -p vyrn-cli` as `--lib --bins` and four `--test` groups (664 passed, 0 failed, 47 ignored on the committed tree; the manifest check green over 174 examples); `coredrive`, `kernel`, `effects`, `typed`, `coretables` and `residue`, each `--ignored`.
+- `coredrive --ignored`: 168 programs, 21,146 bodies; taken 20,179 of 21,176; carried end to end 1,626; 1 byte-identical, 167 run the same, 0 run apart. `kernel` 27,066 accepted, 0 refused, 0 unlowered; `effects` 29,624 judged, 0 unattributed; `typed` 236,919 judged, 0 unjudged; `coretables` green; `residue` 173 clean / 0 leaking on both engines.
+- Two temporary instruments, not committed and emitting no byte, split "a statement of another form" and the expression kinds `FORMS` does not key, and named the first refusing clause of `Fn_::core_run` for every statement the arm emitted. An expression arm is charged to the clause of the statement that holds it.
+Findings:
+- `Stmt::SetField`, `Stmt::IndexSet`, `Stmt::Region` and `Stmt::Drop` have no pairing in `Fn_::core_run`'s form match. Their arms go only through bodies the whole-body walk takes.
+- A name in the run that is not a scalar is the first refusal of the most statements of `Stmt::Let`, `Stmt::If`, `Stmt::Return` and `Stmt::Expr`. A made layout that is not the statement's own binding is the first of `Stmt::Assign`, `Stmt::While`, `Stmt::ForIn` and `Stmt::IfLet`.
+Left: the six arms nearest zero, each blocked by the clauses the second table names.
+
+##### Every arm, its count, and the clause that sends it statements (2026-09-24, `m7-retire`)
+
+Over the gate list on `7cbd2e29`, with the core in every binary. Columns: the arm's occurrences in compiles with a core; the occurrences under `VYRN_NO_CORE_WALK`, which is `coredrive`'s second walk; and the first refusing clause, by occurrences.
+
+| arm | with a core | core-off walk | first clause, largest first |
+|---|---|---|---|
+| `Stmt::Let` | 37,824 | 181,192 | a name not a scalar 14,443; a binding not a scalar 12,688; a made layout not the statement's binding 3,421; no core for the body 2,866 |
+| `Stmt::If` | 42,177 | 104,976 | a name not a scalar 13,462; an aggregate `return` under a branch 8,716; a binding not a scalar 7,252; a made layout 6,633 |
+| `Stmt::Assign` | 30,152 | 128,746 | a made layout 13,309; a name not a scalar 9,627; a binding not a scalar 4,356 |
+| `Stmt::Return` | 26,709 | 85,897 | a name not a scalar 11,825; the form's type condition 4,367; a made layout 3,270 |
+| `Stmt::While` | 17,721 | 35,145 | a made layout 8,161; a binding not a scalar 4,267; a hoisted binding 1,864; a name not a scalar 1,832 |
+| `Stmt::Expr` | 16,676 | 84,049 | a name not a scalar 10,672; no run at the statement 2,080; a binding not a scalar 1,754 |
+| `Stmt::Drop` | 7,590 | 886 | no run at the statement 7,205; no core for the body 385 |
+| `Stmt::SetField`, `Stmt::IndexSet`, `Stmt::Region` | 4,382, 3,912, 56 | 978, 3,316, 44 | together: no pairing in the form match 4,089; no core for the body 2,138; a hoisted binding 1,650; no run at the statement 473 |
+| `Stmt::ForIn` | 3,477 | 2,217 | a made layout 1,898; a binding not a scalar 704; an aggregate `return` under a branch 591 |
+| `Stmt::Continue` | 0 | 0 | retired in `track-ek` |
+| `Expr::Var`, `Expr::Binary`, `Expr::Int`, `Expr::Str` | 302,657, 129,220, 94,186, 61,414 | 830,195, 485,662, 415,099, 19,920 | their statements' |
+| `Expr::Bool`, `Expr::Byte`, `Expr::Unary` | 6,114, 5,705, 2,420 | 28,804, 27,118, 9,100 | their statements' |
+| a field, a call, a builtin call, a record, an array | 108,005, 105,519, 81,120, 8,421, 6,571 | 46,052, 418,073, 63,873, 4,629, 9,686 | their statements' |
+| `match`, `consume`, an `if` expression, `?`, a map | 4,753, 3,645, 2,992, 665, 525 | 3,829, 814, 1,036, 130, 165 | their statements' |
+
+The six arms nearest zero, and what still sends each body to them:
+
+| arm | occurrences | the clause, its occurrences, and the bodies |
+|---|---|---|
+| `Stmt::Break` | 5 | no run at the statement, 5: `jchain.vyrn`'s `main`, whose `break` is inside `@at` on a user container, which the emitter inlines and the core does not |
+| `Stmt::Region` | 56 | no pairing in the form match: `regionescape`'s and `matchown`'s `main` and `coredrive`'s `regionRebind`. It leaves only when the whole-body walk takes the body |
+| the `try` constructor | 55 | a made layout not the statement's binding 22, `parseServe` in `clidemo` and `clifail`; the statement screen (`Fn_::core_readable`) 15, `validatestr`'s `main`; an annotation that checks 12, `branchtypes`' `main` and a codegen unit test's; no run at the statement 6, `make` in `validate` and `admit` in the site export |
+| `Expr::Float` | 321 | a binding `Fn_::core_arm_ty` cannot type 219, 44 bodies in `simdbench`, `simdmem2`, `numbytes` and `repro`; the form's type condition 35, `simdmem2`'s `main`; a binding not a scalar 18, in `std/num`; the statement screen 16 and a name with no place 14, in `std/math`; three more clauses at 5 to 7 |
+| a lambda | 349 | no core for the body 132, `map`, `take`, `unfold` and `filter` in the stream library; a binding `Fn_::core_arm_ty` cannot type 73, 7 bodies in `lazyfield`, `closures2`, `fnvalarg`, `fnvalstore`, `encode`, `contextual` and `langbench`; an annotation that checks 66, 7 bodies in `capturefn`, `closures2`, `fnvalarg`, `shadowing`, `streammove` and the site export; a name not a scalar 26, `routes`; the two walks typing a binding apart 22, `makeAdder`, `capturedAtConstruction` and `wrapSink`; three more clauses at 7 to 12 |
+| `Stmt::IfLet` | 1,047 | a made layout not the statement's binding 523, 20 bodies (`checkContract`, `localeFromObj` and the site export's page readers); an aggregate `return` under a branch 213, `mount`, `gqlArgList`, `gqlSelSet` and `layer`; a binding not a scalar 99, `vyrnServeNext`; a hoisted binding 56, `httpMatch`; no core for the body 41, the stream library's `map` and `filter`; five more clauses at 5 to 38 |
