@@ -7223,8 +7223,9 @@ thread_local! {
     /// about a node it already holds. This is the other channel, and §2.3 is
     /// about this one — "the emitter reads the core and writes wasm". A body
     /// here is the STATEMENT an emitter walks in place of the source, so what
-    /// it carries is the whole of [`Body`] and not an answer per node.
-    static BODIES: std::cell::RefCell<HashMap<String, Body>> =
+    /// it carries is the whole of [`Body`] and not an answer per node. `None`
+    /// under a name two different bodies share: two lambdas on one line.
+    static BODIES: std::cell::RefCell<HashMap<String, Option<Body>>> =
         std::cell::RefCell::new(HashMap::new());
     static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
     /// What the checker decided about a program, under `(its address, whether
@@ -7530,11 +7531,11 @@ pub fn facts() -> Option<Facts> {
 /// The key is [`Instance::spelling`], which is the name the emitters lower a
 /// function under: `max<Int64>` for a specialization, `main@lambda:26` for a
 /// lifted lambda, `test@1` for a `test` block, and the empty name for module
-/// state. A body this pass could not build (a [`Gap`]) is absent, and a reader
-/// walks the source instead — the same standing down every reader of
-/// [`facts`] makes.
+/// state. A body this pass could not build (a [`Gap`]) is absent, and so is
+/// one whose name another body shares; a reader walks the source instead —
+/// the same standing down every reader of [`facts`] makes.
 pub fn body_of(name: &str) -> Option<Body> {
-    BODIES.with(|b| b.borrow().get(name).cloned())
+    BODIES.with(|b| b.borrow().get(name).cloned().flatten())
 }
 
 /// The instance of `body` whose `fn`-typed parameters are bound (RFC-0023):
@@ -7933,7 +7934,12 @@ fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
     // questions by node (RFC-0125 §3 M3, the driver slice). The fold and the
     // walk are the same set of frames, so they are filled at one site: a body
     // the fold does not see is one no emitter may read either.
-    BODIES.with(|b| b.borrow_mut().insert(body.name.clone(), body.clone()));
+    BODIES.with(|b| {
+        b.borrow_mut()
+            .entry(body.name.clone())
+            .and_modify(|had| *had = None)
+            .or_insert_with(|| Some(body.clone()));
+    });
     fold_facts(body, proto, &body.stmts, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
