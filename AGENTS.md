@@ -152,7 +152,7 @@ Add what the change touches:
 
 Per commit, run only the build and the census that commit moves; re-pin with `git commit --fixup` and `GIT_SEQUENCE_EDITOR=true git rebase --autosquash <base>`.
 
-A rebase conflict in a pin (a census `want` table, `SHAPES` and `SHAPE_PIN`, RFC-0126's counts, `wasm-sha256.tsv`) is not merged by hand. Take main's side plus the branch's own rows, run the gate, and copy the numbers the failing assert prints; the manifest rewrites with `VYRN_WASM_MANIFEST=write`. A rebase with no code conflict runs the short list once, at the tip.
+A pin is data a gate writes: a census file in `compiler/vyrn-cli/tests/pins/`, the `// pin:` line of a shape in `tests/shapes/`, and `rfcs/census/wasm-sha256.tsv`. Never merge one by hand. `.gitattributes` marks the pin files `merge=pin`, so with `git config merge.pin.driver true` a rebase keeps the current side and does not stop. Then run the gates with `VYRN_PIN=write` and `VYRN_WASM_MANIFEST=write`, read every line the diff moves, and commit it. A new shape is a new file, and conflicts with nothing. A rebase with no code conflict runs the short list once, at the tip.
 
 The full list is CI's: every job in `.github/workflows/ci.yml` and `site.yml`. The lead pushes the branch, opens a pull request against main, and merges it with a merge commit when CI is green. A branch built on another opens against that branch and is retargeted when it merges.
 

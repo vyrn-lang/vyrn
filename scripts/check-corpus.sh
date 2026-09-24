@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs `vyrn check` over the 415 corpus roots of TREE with TREE's release
+# Runs `vyrn check` over the corpus roots of TREE with TREE's release
 # binary, from TREE's root, and writes each root's stdout, stderr and exit code
 # under OUT. Two trees' OUT directories compare with `diff -r`.
 # Usage: scripts/check-corpus.sh TREE OUT
