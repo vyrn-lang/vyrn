@@ -18162,7 +18162,7 @@ impl<'p> Fn_<'_, 'p> {
                 // the same sentence the AST walk's statement arm writes, on
                 // the row rather than on the node.
                 St::Do { rhs, line, .. } => {
-                    let got = self.core_rhs_ty(rhs, *line)?;
+                    let got = self.core_rhs_ty(body, rhs, *line)?;
                     self.core_rhs(m, b, body, w, rhs, &got, *line)?;
                     if self.cx.repr(&got, *line)? != Repr::Unit {
                         b.ins(&Instruction::Drop);
@@ -18278,7 +18278,12 @@ impl<'p> Fn_<'_, 'p> {
     /// What a right-hand side the driver reads PRODUCES, without emitting it —
     /// which a `St::Do` needs and a `St::Let` does not, because a `let` has a
     /// name and a name has the checker's type on it.
-    fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
+    fn core_rhs_ty(
+        &self,
+        body: &vyrn_lower::core::Body,
+        rhs: &Rhs,
+        line: usize,
+    ) -> Result<Type, String> {
         match rhs {
             Rhs::Call {
                 callee,
@@ -18306,7 +18311,7 @@ impl<'p> Fn_<'_, 'p> {
                     .ok_or_else(|| gap("a removal the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
-                    None => match self.core_sig(callee, *kind, solved, targets) {
+                    None => match self.core_sig(body, callee, *kind, solved, targets) {
                         Some(s) => Ok(s.ret_ty),
                         None if *kind == Callee::Fn && self.is_extern(callee) => Ok(self
                             .cx
@@ -18540,17 +18545,34 @@ impl<'p> Fn_<'_, 'p> {
             };
             return self.extern_call(m, b, callee, args.len(), &mut operand, line);
         }
-        let ho = match targets {
-            [] => None,
-            _ => self.core_ho(callee, kind, solved, targets),
-        };
-        let sig = match (ho, self.core_instance(callee, kind, solved)) {
-            (Some((f, targs, subst, bound)), _) => self.cx.specialize(m, f, targs, subst, bound)?,
-            (None, Some((f, targs, subst))) => self.cx.instantiate(m, f, targs, subst)?,
-            (None, None) => match self.core_sig(callee, kind, solved, targets) {
-                Some(sig) => sig,
-                None => return unsupported("a core call this walk does not read", line),
-            },
+        // A call through a stored value (RFC-0037) is one call to the
+        // signature's dispatcher, with the value as its leading argument, as
+        // [`Fn_::fnval_call`] makes it.
+        let through: Vec<(Val, vyrn_frontend::ast::Capability)>;
+        let (sig, args) = match self.core_through(body, callee, kind) {
+            Some((n, sig_ty)) => {
+                through = std::iter::once((Val::Name(n), vyrn_frontend::ast::Capability::Read))
+                    .chain(args.iter().cloned())
+                    .collect();
+                (self.dispatcher(m, &sig_ty, line)?, &through[..])
+            }
+            None => {
+                let ho = match targets {
+                    [] => None,
+                    _ => self.core_ho(callee, kind, solved, targets),
+                };
+                let sig = match (ho, self.core_instance(callee, kind, solved)) {
+                    (Some((f, targs, subst, bound)), _) => {
+                        self.cx.specialize(m, f, targs, subst, bound)?
+                    }
+                    (None, Some((f, targs, subst))) => self.cx.instantiate(m, f, targs, subst)?,
+                    (None, None) => match self.core_sig(body, callee, kind, solved, targets) {
+                        Some(sig) => sig,
+                        None => return unsupported("a core call this walk does not read", line),
+                    },
+                };
+                (sig, args)
+            }
         };
         let dest = self.out_ptr(b, &sig, hint);
         let mut spilled = Vec::new();
@@ -19626,11 +19648,15 @@ impl<'p> Fn_<'_, 'p> {
     /// its four hooks rather than emitting them.
     fn core_sig(
         &self,
+        body: &vyrn_lower::core::Body,
         callee: &str,
         kind: Callee,
         solved: &[(String, Type)],
         targets: &[Target],
     ) -> Option<Sig> {
+        if let Some((_, t)) = self.core_through(body, callee, kind) {
+            return self.value_sig(&t);
+        }
         if !targets.is_empty() {
             let (f, _, subst, bound) = self.core_ho(callee, kind, solved, targets)?;
             return self.cx.signature(&ho_shell(f, &subst, &bound).0).ok();
@@ -19707,6 +19733,38 @@ impl<'p> Fn_<'_, 'p> {
         Some(FnTarget {
             sig: sig.clone(),
             ncaps: 0,
+        })
+    }
+
+    /// The stored value a call row calls through, and its signature. `None`
+    /// also for a parameter a specialization bound (RFC-0023).
+    fn core_through(
+        &self,
+        body: &vyrn_lower::core::Body,
+        callee: &str,
+        kind: Callee,
+    ) -> Option<(vyrn_lower::core::Name, Type)> {
+        let n = kind
+            .value()
+            .filter(|_| !self.fn_binds.contains_key(callee))?;
+        let info = &body.names[n as usize];
+        let sig_ty = crate::normalize_fn_sig(&self.cx.sub(&info.ty), &self.cx.types);
+        matches!(sig_ty, Type::Fn(..)).then_some((n, sig_ty))
+    }
+
+    /// The signature a call through a value of `sig_ty` sees: its own
+    /// parameters and result. Its index names no function; the call is the
+    /// dispatcher's ([`Fn_::core_call`]).
+    fn value_sig(&self, sig_ty: &Type) -> Option<Sig> {
+        let Type::Fn(ps, r) = sig_ty else {
+            return None;
+        };
+        Some(Sig {
+            index: 0,
+            modify: vec![false; ps.len()],
+            params: ps.clone(),
+            ret: self.cx.repr(r, 0).ok()?,
+            ret_ty: (**r).clone(),
         })
     }
 
@@ -20266,7 +20324,7 @@ impl<'p> Fn_<'_, 'p> {
             // temporary's is.
             St::Do { rhs, line, .. } => {
                 (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))
-                    && self.core_rhs_ty(rhs, *line).is_ok()
+                    && self.core_rhs_ty(body, rhs, *line).is_ok()
             }
             // A release stated as a statement ([`Fn_::core_drop`]) needs the
             // name's place: one wasm local, or a layout the walk bound, which
@@ -20349,9 +20407,9 @@ impl<'p> Fn_<'_, 'p> {
                             Some(Spec::OwnType) => {
                                 match self.core_copy_impl(body, callee, *kind, args) {
                                     Some(f) => {
-                                        self.core_sig(&f, Callee::Fn, &[], &[]).is_some_and(|s| {
-                                            s.params.len() == 1 && s.ret.agg().is_some()
-                                        })
+                                        self.core_sig(body, &f, Callee::Fn, &[], &[]).is_some_and(
+                                            |s| s.params.len() == 1 && s.ret.agg().is_some(),
+                                        )
                                     }
                                     None => matches!(args.as_slice(), [(Val::Name(n), _)]
                                 if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
@@ -20359,7 +20417,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => false,
                         } || self
-                            .core_sig(callee, *kind, solved, targets)
+                            .core_sig(body, callee, *kind, solved, targets)
                             .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
@@ -20515,14 +20573,20 @@ impl<'p> Fn_<'_, 'p> {
     /// The first name the statement `s` reads, which is the only one the
     /// operand stack can be carrying for it. None for an aggregate call, a
     /// variant and a store into a place, whose destination goes on the stack
-    /// before their parts, and for `@codeSplice`, whose tag goes before its
-    /// value.
+    /// before their parts, for `@codeSplice`, whose tag goes before its
+    /// value, and for a call through a stored value, whose value goes there
+    /// first.
     fn core_first_read(
         &self,
         body: &vyrn_lower::core::Body,
         s: Option<&St>,
     ) -> Option<vyrn_lower::core::Name> {
         match s? {
+            St::Let(_, Rhs::Call { callee, kind, .. })
+            | St::Do {
+                rhs: Rhs::Call { callee, kind, .. },
+                ..
+            } if self.core_through(body, callee, *kind).is_some() => None,
             St::Let(_, rhs)
                 if self.core_ctor(rhs)
                     || self.core_agg_call(body, rhs)
@@ -20630,7 +20694,7 @@ impl<'p> Fn_<'_, 'p> {
                         || self.core_named(callee, *kind).is_some()
                         || self.core_mem_ty(callee, args.len()).is_some()
                         || self
-                            .core_sig(callee, *kind, solved, targets)
+                            .core_sig(body, callee, *kind, solved, targets)
                             .is_some_and(|s| {
                                 // An aggregate result crosses through an out-pointer
                                 // the caller allocates, and this walk writes a plain

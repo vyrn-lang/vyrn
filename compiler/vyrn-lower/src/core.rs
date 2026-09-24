@@ -1997,7 +1997,7 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
-    gaps_of(&body.stmts, &mut out);
+    gaps_of(body, &body.stmts, &mut out);
     let mut seen = std::collections::HashSet::new();
     out.retain(|t| seen.insert(t.clone()));
     out
@@ -2046,10 +2046,10 @@ fn traps(s: &St) -> bool {
     }
 }
 
-fn gaps_of(ss: &[St], out: &mut Vec<String>) {
+fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
     for s in ss {
         match s {
-            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(r, out),
+            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(body, r, out),
             St::Store { place, value, .. } => {
                 gaps_place(place, out);
                 gaps_val(value, out);
@@ -2062,13 +2062,13 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
                 cond, then, els, ..
             } => {
                 gaps_val(cond, out);
-                gaps_of(then, out);
-                gaps_of(els, out);
+                gaps_of(body, then, out);
+                gaps_of(body, els, out);
             }
             // Since the loop slice the exit is the row's: the pass makes up the
             // two-way branch and the `break` at the head of the loop it
             // desugared, and a walk emits wasm's conditional branch for it.
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(b, out),
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(body, b, out),
             St::Break { .. } | St::Continue { .. } | St::Trap => {}
             St::Return { value, .. } => {
                 if let Some(v) = value {
@@ -2080,14 +2080,14 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
             St::Switch { on, arms, .. } => {
                 gaps_val(on, out);
                 for a in arms {
-                    gaps_of(&a.body, out);
+                    gaps_of(body, &a.body, out);
                 }
             }
         }
     }
 }
 
-fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
+fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
     let vals = |vs: &[Val], out: &mut Vec<String>| {
         for v in vs {
             gaps_val(v, out);
@@ -2125,10 +2125,18 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             // the result back, two rows an emitter reads, for a name, a field,
             // an element and a global alike. What such a body waits on is its
             // CALLEE, which is `@push` and its siblings, and the tag says so.
+            // A call through a stored value is one call to its signature's
+            // dispatcher (`direct::Fn_::core_call`); through a `fn`-typed
+            // parameter it waits on the specialization.
             if !matches!(kind, Callee::Fn | Callee::Ctor | Callee::Named)
                 && builtin_row(callee).is_none()
+                && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
-                out.push(format!("Call:{kind:?}:{callee}"));
+                let tag = match kind {
+                    Callee::Value(_) => "Value".to_string(),
+                    k => format!("{k:?}"),
+                };
+                out.push(format!("Call:{tag}:{callee}"));
             }
             for (v, _) in args {
                 gaps_val(v, out);
