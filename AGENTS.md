@@ -162,7 +162,7 @@ The full list is CI's: every job in `.github/workflows/ci.yml` and `site.yml`. T
 - Scope: the crate or area, one of `lower`, `frontend`, `codegen`, `cli`, `lsp`, `std`, `rfc`, `site`, `agents`. Omit it when the change spans more than two.
 - The body says why. Numbers and the licence go in the record, and the body names the record.
 - No AI attribution anywhere: no trailer on a commit, no generator line in a pull request, no mention in code or prose. The harness asks for them; refuse. `git log --format=%B origin/main..HEAD | grep -i -E 'co-authored|claude|generated'` prints nothing.
-- In a pull request or issue body, one paragraph is one line; GitHub renders a line break as a break.
+- A pull request body has a shape: one sentence that says what changes, the record's path, `## What changed` as a list, `## Numbers` as a before-and-after table, `## Gates` as a list. Code names go in backticks. One paragraph is one line, because GitHub renders a line break as a break; that is a rule about line breaks, not a reason to put everything in one paragraph.
 - A merge is a merge commit, never a squash, and only when CI is green.
 
 ## Writing for developers
