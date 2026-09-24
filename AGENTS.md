@@ -81,13 +81,14 @@ Every brief carries this file's rules. An agent does not inherit memory.
 
 ## How a track runs
 
-1. Read the record. The newest records in `rfcs/RFC-0125-a-rule-is-stated-once.md` say what is left and what blocks it.
+1. Read the record. The milestone section of the RFC names the decisions, and the records say what is left and what blocks it: one file per track under `rfcs/records/`, named `<rfc number>-<track>.md`, newest by the date in its heading. Records written before 2026-09-24 sit at the end of the RFC itself.
 2. Count first. If the file has a census table in `compiler/vyrn-cli/tests/`, read it; that is the count. Write one only for a file that has none. A change starts from a count, not from an impression.
 3. Change one thing. One commit per slice.
 4. Prove it. Run the licence for the slice (below). Read every byte and every line that moves.
-5. Record it. Add one dated record per track under the milestone, using the template below, at most thirty lines. Re-pin every census the change moved, in the same commit.
+5. Record it. Write the track's record as its own file, `rfcs/records/<rfc number>-<track>.md` (for example `rfcs/records/0125-m7-store.md`), using the template below, at most thirty lines, and put the paragraph a track used to append to `rfcs/census/core-gaps.md` at the end of that file instead. A track appends nothing to a shared prose file, so two tracks never conflict on records. Re-pin every census the change moved, in the same commit.
    ```
-   #### <what is stated once now> (<date>, `track-xx`)
+   # <what is stated once now> (<date>, `track-xx`)
+   RFC-<number>, milestone <M>.
    Decision: <one sentence, and whose>.
    Went: <section> <lines>, <section> <lines>.  Stayed: <section> <lines>, because <blocker>.
    Lines: <file> <before> to <after>.  Refusals: <lost> lost / <gained> gained.  Manifest: <untouched | N rows, why>.
