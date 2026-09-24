@@ -18767,7 +18767,8 @@ impl<'p> Fn_<'_, 'p> {
     /// `consume` of it hands the element on.
     ///
     /// `None` where the program can observe the copy. A binding the body
-    /// stores into, or hands to `modify`, writes a value of its own. A root on
+    /// stores into, or hands to `modify`, writes a value of its own; a store
+    /// into an element of an Array writes the buffer ([`core_written`]). A root on
     /// the chain handed to `consume` anywhere in the body may be freed under
     /// the name. A row of the name's extent that hands a root on the chain to
     /// `modify` ([`vyrn_lower::kernel::modifies`]) may replace what the name
@@ -18798,7 +18799,7 @@ impl<'p> Fn_<'_, 'p> {
         let mut written = Vec::new();
         for s in &body.stmts {
             core_lets(s, &mut lets);
-            core_written(s, &mut written);
+            core_written(&body.names, s, &mut written);
         }
         let read = |m: vyrn_lower::core::Name| {
             let mut at = lets.iter().filter(|(b, _)| *b == m);
@@ -18910,7 +18911,7 @@ impl<'p> Fn_<'_, 'p> {
         let mut written = Vec::new();
         for s in &body.stmts {
             core_lets(s, &mut lets);
-            core_written(s, &mut written);
+            core_written(&body.names, s, &mut written);
         }
         let mut at = lets.iter().filter(|(b, _)| *b == n);
         let (Some((_, Rhs::Val(Val::Name(x)))), None) = (at.next(), at.next()) else {
@@ -20663,7 +20664,15 @@ fn core_header(w: &Walked, base: &vyrn_lower::core::Place) -> Option<Walk> {
 
 /// The names a statement writes: the root of a store, `None`, and a `modify`
 /// or `consume` argument, with its capability. [`Fn_::core_alias`] reads it.
-fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>) {
+///
+/// A store into an element of an Array writes none: it lands in the buffer,
+/// which a name and a copy of its header share, and it moves no header
+/// ([`vyrn_lower::kernel::in_element`]).
+fn core_written(
+    names: &[vyrn_lower::core::NameInfo],
+    s: &St,
+    out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>,
+) {
     let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>| {
         if let Rhs::Call { args, .. } = r {
             for (v, c) in args {
@@ -20675,19 +20684,24 @@ fn core_written(s: &St, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability
     };
     match s {
         St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
-        St::Store { place, .. } => {
-            out.extend(vyrn_lower::kernel::root_of(place).map(|(n, _)| (n, None)))
-        }
+        St::Store { place, .. } => out.extend(
+            vyrn_lower::kernel::root_of(place)
+                .filter(|(n, path)| {
+                    !(vyrn_lower::kernel::in_element(path)
+                        && matches!(names[*n as usize].ty, Type::Array(_)))
+                })
+                .map(|(n, _)| (n, None)),
+        ),
         St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_written(s, out));
-            els.iter().for_each(|s| core_written(s, out));
+            then.iter().for_each(|s| core_written(names, s, out));
+            els.iter().for_each(|s| core_written(names, s, out));
         }
         St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_written(s, out));
+            inner.iter().for_each(|s| core_written(names, s, out));
         }
         St::Switch { arms, .. } => {
             for a in arms {
-                a.body.iter().for_each(|s| core_written(s, out));
+                a.body.iter().for_each(|s| core_written(names, s, out));
             }
         }
         _ => {}
