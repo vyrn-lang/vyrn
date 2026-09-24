@@ -17237,21 +17237,27 @@ impl<'p> Fn_<'_, 'p> {
                 return None;
             }
         }
-        // An aggregate result travels through `dest`, which the run's own
-        // `return` writes ([`Fn_::core_lands`]); one under a branch of the run
-        // is the arm's.
-        let tail = usize::from(matches!(core_head(run), Some(St::Return { .. })));
-        if self.dest.is_some() && run[..run.len() - tail].iter().any(core_returns) {
+        // The aggregates a `return` of the run copies into the caller's
+        // storage, through `dest`, under a branch or at the run's end
+        // ([`Fn_::core_lands`]). A result checked where it is returned is a
+        // check the row does not state (RFC-0079).
+        let (mut returned, mut released) = (Vec::new(), Vec::new());
+        let mut returns = false;
+        for r in run {
+            core_leaf_rows(r, &mut |x| match x {
+                St::Return { value, .. } => {
+                    returns = true;
+                    if let (Some(Val::Name(n)), Repr::Agg(_)) = (value, &self.ret) {
+                        returned.push(*n);
+                    }
+                }
+                St::Row { name, .. } => released.push(*name),
+                _ => {}
+            });
+        }
+        if self.dest.is_some() && self.checks(&self.ret_ty) && returns {
             return None;
         }
-        // The aggregate that `return` copies into the caller's storage.
-        let returned = match core_head(run) {
-            Some(St::Return {
-                value: Some(Val::Name(n)),
-                ..
-            }) if matches!(self.ret, Repr::Agg(_)) => Some(*n),
-            _ => None,
-        };
         // A node is an ADDRESS. The row's FORM and the name it binds are
         // checked against the statement's, so a row is never read as a
         // statement it did not come from.
@@ -17418,17 +17424,19 @@ impl<'p> Fn_<'_, 'p> {
         let mut names = Vec::new();
         let mut switched = Vec::new();
         for st in run {
-            // A release row names a binding the PLACEMENT holds, and the
-            // emitter reads its place off `rel_slots` rather than off this
-            // walk's own table. So the name is not one this walk has to read,
-            // and the scalar clause below is not asked about it — a released
-            // name is a String or an array by definition, and asking would
-            // refuse every run that carries one.
-            if matches!(st, St::Row { .. }) {
-                continue;
-            }
             core_switched(st, true, &mut switched);
             vyrn_lower::core::names_in(st, &mut names);
+        }
+        // A release row names a binding the PLACEMENT holds, and the emitter
+        // reads its place off `rel_slots` rather than off this walk's own
+        // table, at any depth of the run. So the name is not one this walk has
+        // to read, and the scalar clause below is not asked about it — a
+        // released name is a String or an array by definition, and asking
+        // would refuse every run that carries one.
+        for r in &released {
+            if let Some(i) = names.iter().position(|n| n == r) {
+                names.swap_remove(i);
+            }
         }
         for n in &names {
             let info = &body.names[*n as usize];
@@ -17436,7 +17444,7 @@ impl<'p> Fn_<'_, 'p> {
                 && !made.contains(n)
                 && !switched.contains(n)
                 && !rebuilt.contains(n)
-                && returned != Some(*n)
+                && !returned.contains(n)
             {
                 return None;
             }
@@ -17459,7 +17467,7 @@ impl<'p> Fn_<'_, 'p> {
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
             let named = &body.names[*n as usize].ty;
-            if !(core_scalar(&self.cx.resolve(&ty)) || returned == Some(*n) || rebuilt.contains(n))
+            if !(core_scalar(&self.cx.resolve(&ty)) || returned.contains(n) || rebuilt.contains(n))
                 || self.cx.resolve(&ty) != self.cx.resolve(named)
                 || ((self.checks(&ty) || self.checks(named)) && self.cx.sub(&ty) != *named)
             {
@@ -20862,14 +20870,24 @@ fn core_head(run: &[St]) -> Option<&St> {
 /// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
 /// [`Fn_::core_run`]'s screen, which a subtree carries for every branch.
 fn core_returns(s: &St) -> bool {
+    let mut out = false;
+    core_leaf_rows(s, &mut |r| out |= matches!(r, St::Return { .. }));
+    out
+}
+
+/// Every row under `s` that holds no rows of its own, `s` itself included,
+/// in row order.
+fn core_leaf_rows<'r>(s: &'r St, f: &mut dyn FnMut(&'r St)) {
     match s {
-        St::Return { .. } => true,
-        St::If { then, els, .. } => then.iter().any(core_returns) || els.iter().any(core_returns),
+        St::If { then, els, .. } => then.iter().chain(els).for_each(|s| core_leaf_rows(s, f)),
         St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().any(core_returns)
+            inner.iter().for_each(|s| core_leaf_rows(s, f))
         }
-        St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_returns)),
-        _ => false,
+        St::Switch { arms, .. } => arms
+            .iter()
+            .flat_map(|a| &a.body)
+            .for_each(|s| core_leaf_rows(s, f)),
+        _ => f(s),
     }
 }
 
