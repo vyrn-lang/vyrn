@@ -17828,6 +17828,9 @@ impl<'p> Fn_<'_, 'p> {
                     let info = &body.names[*n as usize];
                     let line = info.line;
                     self.core_rhs(m, b, body, w, rhs, &info.ty, line)?;
+                    if self.core_unit(&info.ty) {
+                        continue;
+                    }
                     // The slot rule (RFC-0125 M7). A temporary the next
                     // statement reads once, first, and nothing else reads
                     // stays on wasm's operand stack. Every other name takes a
@@ -17850,6 +17853,14 @@ impl<'p> Fn_<'_, 'p> {
                         let literal = matches!(rhs, Rhs::Val(Val::Lit(Lit::Str(_))));
                         self.core_word(b, w, *n, l, site, literal);
                     }
+                }
+                St::Store {
+                    place: vyrn_lower::core::Place::Name(n),
+                    value,
+                    line,
+                    ..
+                } if self.core_unit(&body.names[*n as usize].ty) => {
+                    self.core_val(m, b, body, w, value, &Type::Unit, *line)?;
                 }
                 St::Store {
                     place: vyrn_lower::core::Place::Name(n),
@@ -19110,6 +19121,13 @@ impl<'p> Fn_<'_, 'p> {
         matches!(self.cx.repr(t, 0), Ok(Repr::Scalar(_)))
     }
 
+    /// Whether `t` is Unit, which is no value (RFC-0125 M7): a name of it
+    /// needs no place, a read of it writes nothing, and its `let` or store
+    /// emits only the right-hand side's effects, as the arm's statement does.
+    fn core_unit(&self, t: &Type) -> bool {
+        self.cx.repr(t, 0) == Ok(Repr::Unit)
+    }
+
     /// Whether this walk can put the value `v` on the operand stack: a name it
     /// frames, or a literal it writes ([`Fn_::core_val`]).
     ///
@@ -19118,7 +19136,10 @@ impl<'p> Fn_<'_, 'p> {
     /// walk writes and no operation it applies.
     fn core_val_readable(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
         match v {
-            Val::Name(n) => self.core_framed(&body.names[*n as usize].ty),
+            Val::Name(n) => {
+                let ty = &body.names[*n as usize].ty;
+                self.core_framed(ty) || self.core_unit(ty)
+            }
             Val::Lit(l) => !matches!(l, Lit::Opaque(_)),
         }
     }
@@ -19798,6 +19819,9 @@ impl<'p> Fn_<'_, 'p> {
                     let ty = body.names[*n as usize].ty.clone();
                     return self.coerce(m, b, None, &ty, want, line);
                 }
+                if self.core_unit(&body.names[*n as usize].ty) {
+                    return Ok(());
+                }
                 // The place is this walk's, or — since the interleave slice —
                 // the one the AST arm bound the name at, which is the scope's.
                 let Some((place, ty)) = self.core_place(w, body, *n) else {
@@ -19963,10 +19987,11 @@ impl<'p> Fn_<'_, 'p> {
             // Or the temporary a layout `if` or `match` expression joins
             // through, which its first store slots ([`Fn_::core_joins`]).
             //
-            // Or a name no row names, such as the Unit join of a `match`
-            // statement, which needs no place.
+            // Or a Unit name, which is no value ([`Fn_::core_unit`]), or a
+            // name no row names. Neither needs a place.
             if occurs[n] != 0
                 && !(self.core_framed(&info.ty)
+                    || self.core_unit(&info.ty)
                     || (n < body.params.len()
                         && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
                 && !(!self.annotated_apart(&annotated, info)
@@ -20131,6 +20156,7 @@ impl<'p> Fn_<'_, 'p> {
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
                     let fits = match self.cx.repr(&t, 0) {
+                        Ok(Repr::Unit) => self.core_val_readable(body, value),
                         _ if scalar_only => {
                             (core_scalar(&r) || (global && r == Type::Str))
                                 && self.core_val_readable(body, value)

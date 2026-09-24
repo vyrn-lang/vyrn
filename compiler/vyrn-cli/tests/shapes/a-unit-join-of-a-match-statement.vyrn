@@ -1,0 +1,6 @@
+// a Unit join of a match statement
+// pin: 0 break, 0 continue
+// A `match` statement whose arms are calls that return Unit joins through a
+// Unit temporary. A Unit value is no value, so its `let` and its store emit
+// only the call (RFC-0125 M7, `m7-unit`).
+type Load = | Empty | One(Int64) | Pair(Int64, Int64)          fn note(s: String) { print(s) }          fn show(l: Load) { match l { Empty => print("empty"), One(n) => note("one " + n.toString()), Pair(a, b) => print((a + b).toString()) } }          fn vyrnTestMain() -> Int64 { show(Empty) show(One(4)) show(Pair(2, 5)) let o: Option<Int64> = Some(3) match o { Some(v) => note("got " + v.toString()), None => print("none") } return 9 }
