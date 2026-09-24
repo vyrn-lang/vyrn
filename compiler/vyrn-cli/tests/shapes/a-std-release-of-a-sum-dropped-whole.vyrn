@@ -1,0 +1,7 @@
+// a std release of a sum dropped whole
+// pin: 0 break, 0 continue
+// A declared release takes its receiver apart with `match consume self`, and
+// the caller frees the payload boxes after it returns (RFC-0125 M7,
+// `m7-release`). No program of `examples/` drops a `Von` or a `VyxNode`
+// whole, so none runs those two releases.
+import { Von } from "std/von"          import { VyxNode } from "std/vyx"          fn von(k: Int64) -> Int64 { let v = VArray([VStr("a" + k.toString()), VRecord("r", [])]) let w = VStr("b") return k }          fn vyx(k: Int64) -> Int64 { let n = VNElem("div", false, [], [VNText("t" + k.toString())], k) return k }          fn vyrnTestMain() -> Int64 { return von(1) * 10 + vyx(2) }

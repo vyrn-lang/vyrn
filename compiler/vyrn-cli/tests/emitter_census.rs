@@ -538,7 +538,7 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn tag_test(",
-            Mapping, Both,
+            Mapping, Core,
             "a tag test and the binders a pattern's payload opens",
         ),
         sec(

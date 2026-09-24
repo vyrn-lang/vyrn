@@ -2304,10 +2304,6 @@ struct Fn_<'a, 'p> {
     /// builder asks, not a second one. Two copies of that rule would be two answers to
     /// "may this buffer move", and one of them a use-after-free.
     append_ok: std::collections::HashSet<String>,
-    /// Whether this body is a declared `release` (RFC-0086): the CALLER walks
-    /// the receiver's payload boxes after the call, so a `match consume self`
-    /// inside one must not free them — see [`Fn_::frees_boxes`].
-    is_release: bool,
     /// wasm local holding the accumulator's pointer → the frame slot holding its
     /// ownership flag. Keyed by local index rather than by name because the
     /// local IS the binding: two `let out`s in one body are two accumulators, and
@@ -2387,7 +2383,6 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         expect: Vec::new(),
         fn_binds: HashMap::new(),
         append_ok: std::collections::HashSet::new(),
-        is_release: false,
         str_append: HashMap::new(),
         dest_hint: None,
         dest_used: false,
@@ -2554,7 +2549,6 @@ fn lower_body(
         append_ok: stmts
             .map(vyrn_lower::append::append_candidates)
             .unwrap_or_default(),
-        is_release: cx.owned.is_release_fn(&f.name),
         str_append: HashMap::new(),
         dest_hint: None,
         dest_used: false,
@@ -13193,7 +13187,7 @@ impl<'p> Fn_<'_, 'p> {
 
         // RFC-0114 Rule N at a match join, keyed by this expression's address.
         let ers = self.cx.edge_rows(key);
-        let free_box = self.frees_boxes(scrutinee, key);
+        let free_box = self.frees_boxes(key);
         for (slot, arm_ix) in Self::chain_order(&chain, arms.len())
             .into_iter()
             .enumerate()
@@ -13407,7 +13401,7 @@ impl<'p> Fn_<'_, 'p> {
         // the payload out of the box exactly as an arm binder does. Passing
         // `false` here was the whole of the `?` residue — every successful
         // `parseJson` left the box its `Ok` payload came in.
-        let free_box = self.frees_boxes(e, at);
+        let free_box = self.frees_boxes(at);
         let place = self.bind_payload(
             b,
             addr,
@@ -13938,10 +13932,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether a `match`, an `if let` or a `?` at `key` frees the boxes its
-    /// binders were read out of: the construct owns the value it switches on,
-    /// no drop row walks that value whole after it, the memory is not an
-    /// arena's, and this is not a declared `release` destructuring its own
-    /// receiver, whose caller walks the boxes.
+    /// binders were read out of: the construct owns the boxes, and no drop row
+    /// walks the value whole after it.
     ///
     /// The first clause is the CORE's, whole ([`Cx::owns_scrutinee`]). It was
     /// four clauses here — a `consume`, a scrutinee naming no place, a `Map`
@@ -13949,17 +13941,8 @@ impl<'p> Fn_<'_, 'p> {
     /// beside a core row that answered the fourth. The core states all four
     /// as one row now (`St::Switch`'s `owns`), which is why this backend has
     /// no `Expr` left to look at (RFC-0125 §3 M3, the box slice).
-    fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
-        use vyrn_frontend::ast::place_path;
-        let consumed = self.cx.owns_scrutinee(key);
-        let own_receiver = self.is_release
-            && match scrutinee {
-                Expr::Consume { place, .. } => {
-                    place_path(place).is_none_or(|(root, _)| root == "self")
-                }
-                _ => true,
-            };
-        consumed && !self.releases_whole(key) && !own_receiver
+    fn frees_boxes(&self, key: usize) -> bool {
+        self.cx.owns_scrutinee(key) && !self.releases_whole(key)
     }
 
     /// Whether a placed row releases the value at `key` WHOLE — the question
@@ -18943,13 +18926,21 @@ impl<'p> Fn_<'_, 'p> {
         let (Some((_, Rhs::Val(Val::Name(x)))), None) = (at.next(), at.next()) else {
             return None;
         };
-        // A join's stores are its branches', which run before the rename.
-        let joins = self.core_joins(body, *x);
         let from = &body.names[*x as usize];
-        ((joins || self.owns_heap(&info.ty))
-            && !from.borrow
+        let unwritten = |m: vyrn_lower::core::Name| !written.iter().any(|(w, _)| *w == m);
+        // A join's stores are its branches', which run before the rename.
+        // A borrowed layout parameter holds the caller's address for the
+        // whole body, so the temporary a scrutinee binds to it is that
+        // address while neither name is written: a declared release's
+        // `match consume self` ([`vyrn_lower::core`]'s `owns_boxes`).
+        let joins = self.core_joins(body, *x);
+        let param = from.borrow
+            && (*x as usize) < body.params.len()
+            && info.source.starts_with('@')
+            && unwritten(n);
+        ((joins || param || (self.owns_heap(&info.ty) && !from.borrow))
             && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
-            && (joins || !written.iter().any(|(m, _)| m == x)))
+            && (joins || unwritten(*x)))
         .then_some(*x)
     }
 
@@ -20207,10 +20198,6 @@ impl<'p> Fn_<'_, 'p> {
                     });
                 placed
                     && self.sum_of(&body.names[*n as usize].ty).is_some()
-                    // A declared `release` taking its own receiver apart keeps
-                    // the boxes for its caller, and the row does not say which
-                    // place a `consume` named ([`Fn_::frees_boxes`]).
-                    && !self.is_release
                     // A construct the plan releases WHOLE is one the arm gives
                     // a slot and a copy of its own, because an arm may build
                     // over the scratch the scrutinee was left in. The row
