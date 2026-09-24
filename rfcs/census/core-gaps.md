@@ -466,6 +466,39 @@ The walls came from a loaded machine, and the rounds of one arm ranged over up t
 
 **The decision this count supports.** A gen body is judged in the program that holds it, on every cache state, because that is the only judgment a command reports with the right file. The host build keeps building gen bodies for the kernel. `core::gaps` and `coredrive` count only bodies an emitter reads, so a gen body in a host build is judged and not counted, and the 80 `contractOf` lines leave the tally as lines no emitter reads. The generator compile's refusals are drained and dropped when it ends, since the host build states each of them. The licence is `vyrn check` over the 415 roots, byte-identical, and the three witnesses in `refusals.rs`: the run generator refused once at its own line, cold and warm; `unran` refused; the plain body unchanged. Skipping gen bodies in the host would save 43 to 78 ms per root. It would need two changes first: a generator compile's refusals reach the command, and the output cache key names the compiler. Even then a gen fn that no program runs would not be judged.
 
+## Judged, not emitted (2026-09-24)
+
+A gen body in the program that holds it is built by the core and judged by the kernel, and no emitter reads it: `direct.rs` skips every `gen fn` when it collects the functions to compile. The generator's own compile clears `is_gen` and emits the same body there (RFC-0076). `Instance::judged_only` states which bodies these are. `VYRN_GAP_TALLY` writes one more field before the command, `judged` or `emitted`, and `coredrive --ignored` counts the judged bodies on a line of their own and leaves them out of its classes. M7's measure is the bodies an emitter reads, so the judged column is not part of the target.
+
+**Decided on this count and the one above (2026-09-24, the lead's).** The host build keeps judging its gen bodies, and nothing skips them. On a warm cache the host build is the only build that judges a gen body, and for a gen fn no root runs it is the only build at all. A generator compile's refusals are not reported, because the host build states each one at its own file and line. `m7-genhost` drains the kernel's list before the analysis `movecheck::refusals` runs. M7's target is the bodies an emitter reads. A gen body in its host is counted in the judged column and not in the target, because the generator's own compile emits the same body and is counted there.
+
+The third and fourth counts above have no judged column to split. Their instrument sat in the emitter's screen, and the screen sees only the functions the emitter compiles.
+
+Measured at `m7-genhost`, on main `86aecc9e`, after `m7-route`, plus this track's commits. `VYRN_GAP_TALLY` ran over `emit-wat` of the 415 roots of `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`, one process per root from the root's directory, with `VYRN_NO_GEN_CACHE=1` and an empty `VYRN_GEN_CACHE_DIR` per root, so every generator compile ran. One pass, not the second pass of the earlier counts, so the denominator is this table's own.
+
+| column | lines | whole | with a gap |
+|---|---|---|---|
+| emitted | 72,673 | 71,678 | 995 |
+| judged, not emitted | 4,437 | 4,347 | 90 |
+| all | 77,110 | 76,025 | 1,085 |
+
+The 90 judged lines with a gap are 80 lines of `contractOf` in `vyxFinish`, `validateContract`, `uiContractErrs` and `uiInspectPage`, and 10 lines of `@at` in `std/i18n`'s `compilePlural`. The same bodies in the generator compiles are emitted lines. Their 41 lines of `contractOf` are whole, because `m7-route` states the call to the entry the generator compile declares. So the 80 host lines leave the target, and the bodies they copy are whole where they are emitted. `compilePlural` keeps `@at` in its 9 emitted lines as well, and waits on the element of a temporary.
+
+`coredrive --ignored` over its 168 programs:
+
+| | main `86aecc9e` | this track |
+|---|---|---|
+| bodies counted | 21,220 | 21,146 |
+| whole | 21,034 | 20,962 |
+| judged, not emitted | counted with the rest | 74 |
+| carried end to end, distinct | 1,669 | 1,626 |
+| the row names no value | 46 | 44 |
+| taken by the emitter | 20,179 of 21,176 | 20,179 of 21,176 |
+
+The 74 judged bodies are 72 whole and 2 that name no value. The carried column loses 43 distinct names, the gen bodies the rows carried whole.
+
+The emitter skips one more kind: a function that is no entry point and calls a `gen fn` (`direct::gen_reach`). Over the 415 roots it is 2 functions, `checkOf` and `fires`, and only when `std/vyx-hints` is itself the root. `judged_only` does not count them, because `gen_reach` is `vyrn-codegen`'s and the tally is written in `vyrn-lower`, below it.
+
 ## What the tracks since have changed
 
 Each track below retired tags, so every table above is the state before them

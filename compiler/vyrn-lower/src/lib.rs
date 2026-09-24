@@ -236,6 +236,13 @@ impl Instance<'_> {
         format!("{}<{}>", self.func.name, args.join(", "))
     }
 
+    /// Whether the kernel judges this body and no emitter reads it: a `gen fn`
+    /// in the program that holds it. The generator's own compile clears
+    /// `is_gen` and emits the body there (RFC-0076).
+    pub fn judged_only(&self) -> bool {
+        self.func.is_gen
+    }
+
     /// The module this instance's function was declared in; `""` for the root.
     pub fn module(&self) -> &str {
         self.func.module.as_deref().unwrap_or("")

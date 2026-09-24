@@ -2115,10 +2115,16 @@ thread_local! {
 }
 
 /// Appends one line per body of `out`: the module, the function, the first gap,
-/// every gap, and the command that ran. A body the rows carry whole reads `-`
-/// in both gap fields.
+/// every gap, `judged` for a body no emitter reads ([`Instance::judged_only`])
+/// or `emitted`, and the command that ran. A body the rows carry whole reads
+/// `-` in both gap fields.
 fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
     let file = inst.func.module.as_deref().unwrap_or("(the root)");
+    let reach = if inst.judged_only() {
+        "judged"
+    } else {
+        "emitted"
+    };
     let mut lines: Vec<String> = Vec::new();
     match out {
         Err(g) => {
@@ -2157,7 +2163,7 @@ fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
     static ARGV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let argv = ARGV.get_or_init(|| std::env::args().collect::<Vec<_>>().join(" "));
     for line in lines {
-        let line = format!("{line}\t{argv}\n");
+        let line = format!("{line}\t{reach}\t{argv}\n");
         if !SAID.with(|s| s.borrow_mut().insert(line.clone())) {
             continue;
         }
