@@ -20,3 +20,10 @@
 # alone. Nothing in this repo needs CRLF: there are no `.bat`/`.cmd` files, and
 # PowerShell reads LF.
 * text=auto eol=lf
+
+# A pin is data a gate writes, so a merge never stops on one. `merge=pin` keeps
+# the current side; the gate then fails on the stale number, and `VYRN_PIN=write`
+# or `VYRN_WASM_MANIFEST=write` writes the right one. The driver is set once per
+# clone: `git config merge.pin.driver true`.
+compiler/vyrn-cli/tests/pins/** merge=pin
+rfcs/census/wasm-sha256.tsv merge=pin
