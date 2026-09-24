@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="312" height="112" viewBox="0 0 312 112" role="img" aria-label="Vyrn">
+  <g transform="translate(-12 -2) scale(4.2)">
+    <path d="M 4.80 6.00 L 16.00 18.60 L 27.20 6.00" fill="none" stroke="#dbe7f5" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 10.65 7.64 L 16.00 18.60 L 26.11 11.78" fill="none" stroke="#1c7f9c" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 15.02 10.92 L 16.00 18.60 L 23.33 16.11" fill="none" stroke="#22b8d4" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="16.00" cy="18.60" r="1.7" fill="#4fe3f2"/>
+  </g>
+  <text x="124" y="78" fill="#f0f6fc" font-family="'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="-2">vyrn</text>
+</svg>

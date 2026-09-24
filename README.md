@@ -1,13 +1,28 @@
-# Vyrn
+<div align="center">
+
+<a href="https://vyrn-lang.github.io/vyrn/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/vyrn-logo-dark.svg">
+    <img alt="Vyrn" src=".github/assets/vyrn-logo-light.svg" width="312">
+  </picture>
+</a>
+
+### A systems language with the expressiveness of TypeScript
 
 [![CI](https://github.com/vyrn-lang/vyrn/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrn-lang/vyrn/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vyrn-lang/vyrn?include_prereleases&label=release&color=1c7f9c)](https://github.com/vyrn-lang/vyrn/releases)
+[![Docs](https://img.shields.io/badge/docs-vyrn--lang.github.io-22b8d4)](https://vyrn-lang.github.io/vyrn/)
+[![License](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-123258)](#license)
 
-**Vyrn is a systems language with the expressiveness of TypeScript.** Types
-carry the rules that make a value valid, not only its shape. Ownership is a
-capability you declare on a parameter — `read`, `modify`, or `consume` — so
-there is no garbage collector and no lifetime syntax. One program compiles to
-one WebAssembly module, and that module becomes the native binary. Both print
-the same bytes.
+[Website](https://vyrn-lang.github.io/vyrn/) &middot;
+[Install](#install) &middot;
+[Examples](examples/) &middot;
+[Standard library](docs/api/) &middot;
+[Design record](rfcs/)
+
+</div>
+
+Vyrn is a compiled language with no garbage collector and no lifetime syntax. A type carries the rules that make a value valid, not only its shape. Ownership is a capability you declare on a parameter: `read`, `modify` or `consume`. One program compiles to one WebAssembly module, and that module becomes the native binary. Both print the same bytes.
 
 ```vyrn
 type Age = Int64 where value >= 18
@@ -34,17 +49,17 @@ fn main() -> Int64 {
     addSeat(t)
     print(seatCount(t)) // 2
 
-    let a = Age(30) // proven valid at compile time - no runtime check
+    let a = Age(30) // proven valid at compile time, no runtime check
     print(a) // 30
     print(admit(25)) // 25
-    print(admit(5)) // -1 - 5 is not an Age, and nothing aborts
+    print(admit(5)) // -1: 5 is not an Age, and nothing aborts
 
     // let bad = Age(5)  // compile error: 5 does not satisfy `Age`
     return redeem(t) // t is consumed here; using it again is a compile error
 }
 ```
 
-Both commented-out lines are real compiler errors:
+The two commented-out lines are real compiler errors:
 
 ```
 bad.vyrn:4:0: 5 does not satisfy `Age` (predicate `where value >= 18` is false)
@@ -52,133 +67,7 @@ uac.vyrn:8:0: `a` is used here but was already consumed by `redeem(..)` on line 
   (a `consume` parameter takes ownership; the value can't be used afterward)
 ```
 
-## Status
-
-**Vyrn is an alpha.** Every release is a pre-release: the language changes
-without a deprecation period, and the design record in [`rfcs/`](rfcs/) moves
-ahead of the implementation. Do not build anything on it that you are not
-willing to fix next month.
-
-What is stable is the verification. Every example in [`examples/`](examples/)
-that is meant to run runs under all three backends and must agree byte for byte,
-including trap messages and exit codes. CI enforces that on every push. The
-exceptions are listed, not implied: the examples that exist to be REFUSED are
-pinned with the diagnostic they must produce (`EXPECTED_CHECK_FAILURE` in
-`compiler/vyrn-cli/tests/common/mod.rs`), and one example is wasm-only
-(`WASM_ONLY`). Both lists are part of the same harness — an example cannot leave
-the comparison without appearing in one of them.
-
-## Why Vyrn
-
-**Validated types.** A `where` clause is part of the type. The compiler rejects
-a provably-invalid constant, erases the check where it can prove validity, and
-emits the check where it cannot. You cannot forget a check you never wrote.
-See [`examples/validate.vyrn`](examples/validate.vyrn) and
-[`examples/autovalidate.vyrn`](examples/autovalidate.vyrn).
-
-**Ownership by declaration.** You write `read`, `modify`, `consume` or `share`
-on a parameter. The compiler enforces moves and aliasing from that. There is no
-lifetime syntax and no borrow annotations. Memory is reclaimed at a site the
-compiler names — `vyrn why --memory <file>` reports, per binding, whether it is
-reclaimed, how, and the reason when it is not. See
-[`examples/consume.vyrn`](examples/consume.vyrn),
-[`examples/modify.vyrn`](examples/modify.vyrn) and
-[`examples/ownership.vyrn`](examples/ownership.vyrn).
-
-**One module, two ways to run it.** `vyrn build --target wasm` emits the
-WebAssembly module directly — no LLVM, no clang, no WASI sysroot. `vyrn run`
-compiles the same module and runs it in an embedded wasmtime. `vyrn build` puts
-the same bytes through `wasm2c` and `clang` into a native executable. The route
-harness scans `examples/`, runs each program both ways, and compares stdout,
-stderr and exit code.
-
-**No async.** Function suspension is not in the language. The host owns the
-loop: the browser page, the HTTP server, or the runtime you write. See
-[`examples/eventloop.vyrn`](examples/eventloop.vyrn) and
-[`examples/server.vyrn`](examples/server.vyrn).
-
-**Compile-time generators, not compiler features.** A `gen fn` is ordinary Vyrn
-that runs at compile time and returns Vyrn source. An import target can be a
-call to one. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way, in
-[`std/`](std/) — none of them is a keyword. See
-[`examples/gendemo.vyrn`](examples/gendemo.vyrn) and
-`vyrn emit-gen <file>` to read the synthesized module.
-
-**Failure is a value.** No null. `Option<T>`, `Result<T, E>`, exhaustive
-`match`, and `?` propagation. See [`examples/option.vyrn`](examples/option.vyrn)
-and [`examples/fallible.vyrn`](examples/fallible.vyrn).
-
-## Feature tour
-
-| Area | Where to look |
-|------|---------------|
-| Structural records, width subtyping, `Omit`/`Pick`/`Merge` | [`record.vyrn`](examples/record.vyrn), [`utility.vyrn`](examples/utility.vyrn) |
-| Enums, exhaustive `match`, control flow | [`enum.vyrn`](examples/enum.vyrn), [`controlflow.vyrn`](examples/controlflow.vyrn) |
-| Generics, monomorphization, protocols and bounds | [`generics.vyrn`](examples/generics.vyrn), [`protocol.vyrn`](examples/protocol.vyrn) |
-| Function values and closures | [`lambdas.vyrn`](examples/lambdas.vyrn), [`closures2.vyrn`](examples/closures2.vyrn) |
-| Arrays, maps, places, in-place element stores | [`arrays.vyrn`](examples/arrays.vyrn), [`mapdemo.vyrn`](examples/mapdemo.vyrn), [`placeorder.vyrn`](examples/placeorder.vyrn) |
-| Strings, templates, regex, UTF-8 bytes | [`strings.vyrn`](examples/strings.vyrn), [`templates.vyrn`](examples/templates.vyrn), [`regex.vyrn`](examples/regex.vyrn) |
-| Pull streams, linear and lazy | [`stream.vyrn`](examples/stream.vyrn), [`streamops.vyrn`](examples/streamops.vyrn) |
-| Portable SIMD | [`simd.vyrn`](examples/simd.vyrn), [`simdint.vyrn`](examples/simdint.vyrn) |
-| Modules, namespaces, remote imports | [`modules.vyrn`](examples/modules.vyrn), [`namespace.vyrn`](examples/namespace.vyrn) |
-| Reflection, JSON Schema in and out | [`reflection.vyrn`](examples/reflection.vyrn), [`jsonschema.vyrn`](examples/jsonschema.vyrn), [`schemaimport.vyrn`](examples/schemaimport.vyrn) |
-| I/O, arguments, files, time, storage | [`input.vyrn`](examples/input.vyrn), [`args.vyrn`](examples/args.vyrn), [`files.vyrn`](examples/files.vyrn), [`clock.vyrn`](examples/clock.vyrn) |
-| Compile-time i18n over finite string types | [`finitekeys.vyrn`](examples/finitekeys.vyrn), [`i18ndemo.vyrn`](examples/i18ndemo.vyrn) |
-| Tests and benchmarks in the source file | [`testing.vyrn`](examples/testing.vyrn), [`benching.vyrn`](examples/benching.vyrn) |
-
-The standard library is 32 modules in [`std/`](std/), written in Vyrn. Generated
-API docs are committed under [`docs/api/`](docs/api/), and CI fails if they drift
-from the source.
-
-## The web and full-stack story
-
-`.vyx` single-file components compile to Vyrn through the `std/vyx` generator —
-a `<script>` block of ordinary Vyrn and a `<template>` block of markup. See
-[`examples/vyxcomp/`](examples/vyxcomp/).
-
-`vyrn dev` builds the client to wasm and serves the server root, the static
-files and the runtimes in one process. `vyrn serve` runs a plain
-`fn handle(req: Request) -> Response` over an HTTP/1.1 host, with
-`--workers N` for parallel handling. `vyrn routes` prints the resolved wire
-table and where each route came from.
-
-Three full applications are in the tree:
-[`examples/fullstack/`](examples/fullstack/) (the smallest one),
-[`examples/shelf/`](examples/shelf/) and [`examples/bin/`](examples/bin/) (a
-pastebin that survives restarts).
-
-[`web/`](web/) holds the browser demos and the host-side runtimes: `wasi-min.js`
-is a dependency-free WASI preview1 shim, and `vyrn-dom.js`, `vyrn-nav.js`,
-`vyrn-rpc.js` and `vyrn-query.js` are the client halves of the UI and RPC
-libraries.
-
-## Tooling
-
-```
-vyrn run | check | fix | build | test | bench | serve | dev | fmt | doc
-vyrn why <file> | why --contract <file> | why --memory <file>
-vyrn routes | emit-wat | emit-gen
-vyrn new <name> | add <specifier> | update | vendor | deps
-```
-
-- `vyrn fmt` is a canonical formatter. `--check` is the CI gate.
-- `vyrn test` runs `test` blocks written in the source file next to the code.
-- `vyrn bench` runs `bench` blocks, with `--json`, `--compare` and a
-  deterministic `--check` mode.
-- `vyrn doc` generates Markdown API docs from `///` comments.
-- Modules resolve from `vyrn.json`. Remote imports (`github:`, `gist:`,
-  `https:`) are pinned in `vyrn.lock` and cached by sha256 under `~/.vyrn`.
-  `--offline` refuses to fetch.
-- `vyrn-lsp` is a synchronous language server: diagnostics, hover,
-  go-to-definition and completion, across linked files. It ships beside `vyrn`
-  in every release archive. The VS Code extension is in
-  [`editor/vscode/`](editor/vscode/) and every release publishes it as one
-  platform-neutral `vyrn-vscode-<version>.vsix`:
-  `code --install-extension vyrn-vscode-<version>.vsix`.
-
 ## Getting started
-
-### Install
 
 Linux and macOS:
 
@@ -192,32 +81,90 @@ Windows, in PowerShell:
 irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex
 ```
 
-Either script picks the archive for your machine from the newest release,
-verifies it against that release's `SHA256SUMS`, and unpacks it under `~/.vyrn`
-(`%USERPROFILE%\.vyrn`) with the binary at `~/.vyrn/bin/vyrn`. A checksum it
-cannot match is a hard failure: nothing is installed. Then:
+Then run a program:
 
 ```bash
 vyrn run examples/fib.vyrn
 ```
 
-Published builds are **Linux x86_64, Linux arm64, macOS arm64 and Windows
-x86_64**. On any other platform, build from source. To install a specific tag rather than the
-newest, set `VYRN_VERSION=v0.1.0-alpha.1`; to install elsewhere, set
-`VYRN_INSTALL_DIR`. You can also download the archive and `SHA256SUMS` from the
-[releases page](https://github.com/vyrn-lang/vyrn/releases) and check it by
-hand.
+[Install](#install) lists the platforms, how to pick a version, and how to build from source.
 
-**What needs what.** `vyrn run`, `check`, `test`, `fmt`, `doc` and
-`build --target wasm` need nothing beyond the archive. **`vyrn build` — a native
-binary — needs `clang` on `PATH`** (or `$CLANG`), plus wabt's `wasm2c` and
-simde: in a clone of this repository `vyrn update --locked` fetches the pinned
-ones, and `$VYRN_WASM2C` and `$VYRN_SIMDE` override them anywhere.
+## Features
+
+- **Validated types.** A `where` clause is part of the type. The compiler rejects an invalid constant, removes the check where it proves the value valid, and emits it where it cannot. ([validate](examples/validate.vyrn), [autovalidate](examples/autovalidate.vyrn))
+- **Ownership by declaration.** `read`, `modify`, `consume` and `share` on a parameter drive moves and aliasing. `vyrn why --memory <file>` says where each binding is freed and why. ([consume](examples/consume.vyrn), [ownership](examples/ownership.vyrn))
+- **One module, two ways to run it.** `vyrn build --target wasm` emits WebAssembly directly, with no LLVM and no clang. `vyrn build` turns the same module into a native executable, and CI checks that both print the same output.
+- **Generators, not compiler features.** A `gen fn` is ordinary Vyrn that runs at compile time and returns source. RPC, UI, i18n, OpenAPI and GraphQL are libraries in [`std/`](std/), not keywords. ([gendemo](examples/gendemo.vyrn))
+- **Failure is a value.** No null: `Option<T>`, `Result<T, E>`, exhaustive `match` and `?`. ([option](examples/option.vyrn), [fallible](examples/fallible.vyrn))
+- **No async.** The host owns the event loop: the browser page, the HTTP server, or a runtime you write. ([eventloop](examples/eventloop.vyrn), [server](examples/server.vyrn))
+- **Tools in the box.** A formatter, a test runner and a benchmark runner for blocks in the source file, a doc generator, a package manager with a lock file, and a language server with a VS Code extension.
+
+## Examples
+
+Run a program, or check it without running it:
+
+```bash
+vyrn run examples/templates.vyrn
+vyrn check examples/ownership.vyrn
+```
+
+Build a WebAssembly module or a native binary:
+
+```bash
+vyrn build examples/fib.vyrn --target wasm -o fib.wasm
+vyrn build examples/fib.vyrn -o fib
+```
+
+Run the tests and benchmarks written next to the code:
+
+```bash
+vyrn test examples/testing.vyrn
+vyrn bench examples/benching.vyrn
+```
+
+Serve an HTTP handler, or a full-stack app with a wasm client:
+
+```bash
+vyrn serve examples/server.vyrn
+cd examples/fullstack && vyrn dev
+```
+
+Read what a generator wrote, or why memory is freed where it is:
+
+```bash
+vyrn emit-gen examples/gendemo.vyrn
+vyrn why --memory examples/ownership.vyrn
+```
+
+### A tour by topic
+
+| Area | Examples |
+|------|----------|
+| Records, width subtyping, `Omit` / `Pick` / `Merge` | [record](examples/record.vyrn), [utility](examples/utility.vyrn) |
+| Enums, exhaustive `match`, control flow | [enum](examples/enum.vyrn), [controlflow](examples/controlflow.vyrn) |
+| Generics, protocols and bounds | [generics](examples/generics.vyrn), [protocol](examples/protocol.vyrn) |
+| Function values and closures | [lambdas](examples/lambdas.vyrn), [closures2](examples/closures2.vyrn) |
+| Arrays, maps, in-place element stores | [arrays](examples/arrays.vyrn), [mapdemo](examples/mapdemo.vyrn), [placeorder](examples/placeorder.vyrn) |
+| Strings, templates, regex, UTF-8 | [strings](examples/strings.vyrn), [templates](examples/templates.vyrn), [regex](examples/regex.vyrn) |
+| Linear pull streams | [stream](examples/stream.vyrn), [streamops](examples/streamops.vyrn) |
+| Portable SIMD | [simd](examples/simd.vyrn), [simdint](examples/simdint.vyrn) |
+| Modules, namespaces, remote imports | [modules](examples/modules.vyrn), [namespace](examples/namespace.vyrn) |
+| Reflection, JSON Schema in and out | [reflection](examples/reflection.vyrn), [jsonschema](examples/jsonschema.vyrn), [schemaimport](examples/schemaimport.vyrn) |
+| I/O, arguments, files, time | [input](examples/input.vyrn), [args](examples/args.vyrn), [files](examples/files.vyrn), [clock](examples/clock.vyrn) |
+| Compile-time i18n | [finitekeys](examples/finitekeys.vyrn), [i18ndemo](examples/i18ndemo.vyrn) |
+| Web components and full-stack apps | [vyxcomp](examples/vyxcomp/), [fullstack](examples/fullstack/), [shelf](examples/shelf/), [bin](examples/bin/) |
+
+## Install
+
+The install scripts above pick the archive for your machine from the newest release, verify it against the release's `SHA256SUMS`, and unpack it under `~/.vyrn`. A checksum that does not match installs nothing.
+
+- **Platforms:** Linux x86_64, Linux arm64, macOS arm64 and Windows x86_64. On any other platform, build from source.
+- **Versions:** set `VYRN_VERSION=v0.1.0-alpha.1` for a specific tag, and `VYRN_INSTALL_DIR` for another location. The [releases page](https://github.com/vyrn-lang/vyrn/releases) has every archive and its checksums.
+- **What needs what:** `run`, `check`, `test`, `fmt`, `doc` and `build --target wasm` need only the archive. A native `vyrn build` also needs `clang` on `PATH`, plus wabt's `wasm2c` and simde, which `vyrn update --locked` fetches in a clone of this repository.
 
 ### Build from source
 
-You need a recent Rust toolchain. No LLVM, no clang and no wasi sysroot are
-needed to build or test the compiler.
+You need a recent Rust toolchain. Building and testing the compiler needs no LLVM, no clang and no WASI sysroot.
 
 ```bash
 git clone https://github.com/vyrn-lang/vyrn.git
@@ -226,118 +173,24 @@ cargo build --release -p vyrn-cli
 cargo run --release -p vyrn-cli -- run ../examples/fib.vyrn
 ```
 
-A native binary needs `clang` on `PATH` (or `$CLANG`):
+The binary finds `std/` and `web/` by walking up from its own path, so it works in place inside a clone. [`compiler/README.md`](compiler/README.md) has the crate map and the build notes for `vyrn-lsp` and `vyrn-genwasm`. The pinned toolchain versions are in [`vyrn.json`](vyrn.json), with every artifact's sha256 in [`vyrn.lock`](vyrn.lock). [`docs/releasing.md`](docs/releasing.md) says how a release is cut.
 
-```bash
-cargo run -p vyrn-cli -- build ../examples/fib.vyrn -o fib.exe
-```
+## Status
 
-A wasm module needs nothing extra:
+**Vyrn is an alpha.** Every release is a pre-release, and the language changes without a deprecation period. Do not build anything on it that you are not willing to fix next month.
 
-```bash
-cargo run -p vyrn-cli -- build ../examples/fib.vyrn --target wasm -o fib.wasm
-```
+The verification is stable. Every example that is meant to run runs as wasm and as a native binary, and both must agree byte for byte, including trap messages and exit codes. The examples that exist to be refused are pinned with the error they must produce. CI runs the tests on the four release platforms, the judgments over every program in the repository, and a check that each program compiles to the same wasm bytes on every platform. [`ci.yml`](.github/workflows/ci.yml) lists every job.
 
-The built binary finds `std/` and `web/` by walking up from its own path, so it
-works in place inside a clone.
+## Learn more
 
-The wasmtime and wasi-sdk versions this repository builds and tests against are
-in [`vyrn.json`](vyrn.json)'s `toolchain` key, and the bytes of every one of them
-are pinned by sha256 in [`vyrn.lock`](vyrn.lock) (RFC-0102). `vyrn update
---locked` fetches what the lock names, verifies it, and unpacks it under
-`~/.vyrn/tools/` — CI runs exactly that line, so there is one answer to "which
-version" rather than one per file that mentions it.
-
-[`compiler/README.md`](compiler/README.md) has the detailed build notes, the
-crate map, and how to build the excluded crates (`vyrn-lsp`, `vyrn-genwasm`).
-[`docs/releasing.md`](docs/releasing.md) is how a release is cut.
-
-## Repository layout
-
-```
-lang/
-├── rfcs/         the design record, numbered from RFC-0001; rfcs/README.md indexes them
-├── compiler/     the Rust workspace
-│   ├── vyrn-frontend/  lexer, parser, checker, move check, diagnostics
-│   ├── vyrn-codegen/   the one emitter: a lowered program to a wasm module
-│   ├── vyrn-cli/       the `vyrn` driver
-│   ├── vyrn-lsp/       language server (excluded from the workspace)
-│   └── vyrn-genwasm/   runs `gen fn` generators as compiled wasm (excluded)
-├── std/          the standard library, written in Vyrn
-├── examples/     single-file programs, plus multi-file apps in subdirectories
-├── web/          browser demos and the JavaScript host runtimes
-├── docs/api/     generated std API docs, checked for drift by CI
-├── editor/       the VS Code extension
-├── bench/        the benchmark baseline
-├── vyrn.json     this repository's own manifest: the pinned toolchain versions
-├── vyrn.lock     the url and sha256 of every pinned tool artifact
-├── tools/        hand-unpacked toolchain downloads, if any (not tracked)
-└── ROADMAP.md    what ships today and what is next
-```
-
-## What CI proves
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs eight jobs. Three
-are a matrix over the four platforms releases ship — Linux x86_64, Linux arm64,
-macOS arm64, Windows x86_64 — so every published binary is built by a machine
-whose tests ran. The rest are Linux, where the toolchain lives.
-
-1. **tests (workspace + LSP)**, on all four platforms — `cargo fmt --check` over
-   all three manifests, the workspace test suite, the LSP suite, the browser
-   runtime tests, the `docs/api/` drift gate, the install scripts (they install,
-   and they refuse an archive whose checksum does not match), and
-   `vyrn bench --check` over every benchmark.
-2. **the judgments over the corpus** — the linear judgment, the plan's tables
-   against the core's, the effect judgment beside the audience and the floor,
-   and typed-by-construction, each over every program in the repository.
-3. **the native route** — the wasm module and the native executable `wasm2c`
-   and `clang` build from it must agree on every example. The
-   known-divergent list is empty and must stay empty. This job also runs the
-   codegen integration tests that need clang, including the one that checks the
-   layout engine against clang's own answers on wasm32.
-4. **wasm bytes identical across the matrix** — the same program compiles to
-   the same bytes on all four platforms.
-5. **the compiled run prints the recorded output** — the fixtures.
-6. **generation is deterministic over the corpus** — every `gen fn` produces
-   the same source twice.
-7. **benchmarks**, on pushes to `main` only — every bench still builds and runs.
-   The regression half is not live: `bench/baseline.json` is a placeholder, so
-   `--compare` reports every bench as new. `ci.yml` says exactly what that gate
-   does and does not prove.
-
-[`.github/workflows/site.yml`](.github/workflows/site.yml) builds the website and
-runs its tests on pull requests too, and
-[`.github/workflows/release.yml`](.github/workflows/release.yml) refuses to
-publish a tag whose commit has no successful CI run.
-
-## The design record
-
-[`rfcs/`](rfcs/) is where decisions are made and argued. When the implementation
-and an RFC disagree, one of them is a bug. Start with
-[RFC-0001 Vision](rfcs/RFC-0001-vision.md),
-[RFC-0003 Validated Types](rfcs/RFC-0003-validated-types.md) and
-[RFC-0004 Capabilities & Memory](rfcs/RFC-0004-capabilities-and-memory.md).
-[`rfcs/README.md`](rfcs/README.md) indexes them, with the status each one
-carries.
-
-## Not in v1
-
-Higher-kinded types, dependent types, macros, class inheritance, metaclasses,
-and `async`/`await`. See
-[RFC-0001 §Non-goals](rfcs/RFC-0001-vision.md).
+- [`rfcs/`](rfcs/) is the design record, where decisions are made and argued. Start with [RFC-0001 Vision](rfcs/RFC-0001-vision.md), [RFC-0003 Validated Types](rfcs/RFC-0003-validated-types.md) and [RFC-0004 Capabilities and Memory](rfcs/RFC-0004-capabilities-and-memory.md).
+- [`docs/api/`](docs/api/) is the generated reference for the standard library, and CI fails if it drifts from [`std/`](std/).
+- [`ROADMAP.md`](ROADMAP.md) says what ships today and what is next.
+- [`editor/vscode/`](editor/vscode/) is the VS Code extension. Every release publishes it as a `.vsix`.
+- Not in v1: higher-kinded types, dependent types, macros, class inheritance and `async`/`await` ([RFC-0001, Non-goals](rfcs/RFC-0001-vision.md)).
 
 ## License
 
-Vyrn is licensed under either of [MIT](LICENSE-MIT) or
-[Apache License 2.0](LICENSE-APACHE), at your option. That is the pair Rust
-uses, and it is chosen for the same reason.
+Vyrn is licensed under either [MIT](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE), at your option. The licence covers the C runtime shim and the `std/` modules compiled into your programs, so shipping a Vyrn program costs attribution and nothing else.
 
-The choice reaches your programs, not just the compiler's source. `vyrn build`
-compiles a small C runtime shim into every native binary, and every `std/`
-module a program imports is compiled in too. Both are under the licence above,
-so shipping a Vyrn program costs you attribution and nothing else. A copyleft
-licence here would have reached the same code and cost far more.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you shall be dual licensed as above, without any
-additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you shall be dual licensed as above, without any additional terms or conditions.
