@@ -5785,7 +5785,7 @@ impl<'a> Builder<'a> {
                 unreached: Vec::new(),
             },
         );
-        self.body.name = format!("{}@lambda:{line}", outer.name);
+        self.body.name = lambda_spelling(&outer.name, *line);
         let saved = (
             std::mem::take(&mut self.scope),
             std::mem::take(&mut self.by_binding),
@@ -7525,11 +7525,17 @@ pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
+/// The name a lambda literal on `line` inside the body named `outer` is built
+/// and emitted under, and so its key in [`body_of`].
+pub fn lambda_spelling(outer: &str, line: usize) -> String {
+    format!("{outer}@lambda:{line}")
+}
+
 /// The core's own body for the function emitted under `name`, or `None` where
 /// this pass built none — RFC-0125 §3 M3, the driver slice.
 ///
-/// The key is [`Instance::spelling`], which is the name the emitters lower a
-/// function under: `max<Int64>` for a specialization, `main@lambda:26` for a
+/// The key is [`crate::spell`] of the instance, which is the name the emitters
+/// lower a function under: `max<Int64>` for a specialization, `main@lambda:26` for a
 /// lifted lambda, `test@1` for a `test` block, and the empty name for module
 /// state. A body this pass could not build (a [`Gap`]) is absent, and so is
 /// one whose name another body shares; a reader walks the source instead —

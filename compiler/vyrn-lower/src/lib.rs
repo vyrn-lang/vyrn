@@ -226,14 +226,21 @@ pub struct Instance<'a> {
     pub releases: Vec<Release>,
 }
 
+/// The name an instance of `name` at `type_args` is built and emitted under:
+/// `name` alone, or `map<Int64, String>`. It is the key of
+/// [`core::body_of`], so an emitter that knows an instance asks by it.
+pub fn spell(name: &str, type_args: &[Type]) -> String {
+    if type_args.is_empty() {
+        return name.to_string();
+    }
+    let args: Vec<String> = type_args.iter().map(|t| t.to_string()).collect();
+    format!("{name}<{}>", args.join(", "))
+}
+
 impl Instance<'_> {
     /// `map<Int64, String>` — the instantiation spelled, never mangled.
     pub fn spelling(&self) -> String {
-        if self.type_args.is_empty() {
-            return self.func.name.clone();
-        }
-        let args: Vec<String> = self.type_args.iter().map(|t| t.to_string()).collect();
-        format!("{}<{}>", self.func.name, args.join(", "))
+        spell(&self.func.name, &self.type_args)
     }
 
     /// Whether the kernel judges this body and no emitter reads it: a `gen fn`

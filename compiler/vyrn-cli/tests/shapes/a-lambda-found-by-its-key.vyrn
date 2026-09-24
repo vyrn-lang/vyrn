@@ -1,0 +1,6 @@
+// a lambda found by its key
+// pin: 0 break, 0 continue
+// The core keys a lifted lambda by its enclosing body and line
+// (`core::lambda_spelling`), and the emitter asks by the same key (the
+// m7-keys record).
+fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x) }          fn vyrnTestMain() -> Int64 { let k = 3 return apply(x -> { if x < k || x > 10 { return x * k } return x + k }, 5) }

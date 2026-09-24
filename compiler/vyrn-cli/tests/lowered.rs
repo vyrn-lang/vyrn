@@ -1164,11 +1164,13 @@ fn gate() {
         t.rungs_planned
     );
 
-    // A gate that compares nothing passes trivially. This is the floor the run
-    // above cleared by two orders of magnitude; it exists so a refactor that
-    // quietly stops recording fails here rather than passing.
+    // A gate that compares nothing passes trivially. This floor exists so a
+    // refactor that quietly stops recording fails here rather than passing.
+    // Only the AST walk answers, so the count falls as the core walk takes
+    // bodies from it: 9,414 when the emitter found generic instances and
+    // lambdas by their keys (RFC-0125 M7).
     assert!(
-        t.compared > 10_000,
+        t.compared > 5_000,
         "only {} backend answers were compared — the gate stopped seeing the corpus",
         t.compared
     );
