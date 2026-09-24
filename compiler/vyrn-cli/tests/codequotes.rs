@@ -275,3 +275,26 @@ fn std_scan_unit_tests_run_green() {
         "expected 7 green tests:\n{combined}"
     );
 }
+
+/// A splice's tag goes on the stack before its value, so the value a field read
+/// binds cannot ride the stack into it (RFC-0125 M7, `m7-str`).
+#[test]
+fn a_spliced_field_read_is_not_carried_under_the_tag() {
+    let gen = "type F = { box: String, n: Int64 }\n\
+               export gen fn mk(a: String) -> String {\n\
+               let found = F { box: a + \"x\", n: 1 }\n\
+               let r = render(vyrn\"\\{found.box}\")\n\
+               return \"export fn got() -> Int64 { return \\{r.byteLength} }\\n\"\n\
+               }\n";
+    let app = "import { mk } from \"./gen\"\n\
+               import { got } from mk(\"ab\")\n\
+               fn main() -> Int64 { print(got().toString()) return 0 }\n";
+    let app_path = gen_app("splicefield", gen, app);
+    let out = vyrn().arg("run").arg(&app_path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "run failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
+}

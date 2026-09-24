@@ -20183,7 +20183,8 @@ impl<'p> Fn_<'_, 'p> {
     /// The first name the statement `s` reads, which is the only one the
     /// operand stack can be carrying for it. None for an aggregate call, a
     /// variant and a store into a place, whose destination goes on the stack
-    /// before their parts.
+    /// before their parts, and for `@codeSplice`, whose tag goes before its
+    /// value.
     fn core_first_read(
         &self,
         body: &vyrn_lower::core::Body,
@@ -20195,7 +20196,8 @@ impl<'p> Fn_<'_, 'p> {
                     || self.core_agg_call(body, rhs)
                     || self.core_rebuild(body, rhs)
                     || matches!(rhs, Rhs::Call { callee, kind, args, .. }
-                        if self.core_removes(body, callee, *kind, args).is_some()) =>
+                        if self.core_removes(body, callee, *kind, args).is_some()
+                            || callee == "@codeSplice") =>
             {
                 None
             }
