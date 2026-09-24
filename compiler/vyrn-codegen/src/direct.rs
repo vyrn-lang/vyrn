@@ -20221,17 +20221,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::OwnType) => {
                 matches!(args, [_]) && self.core_copy_impl(body, callee, kind, args).is_none()
             }
-            // `@str` frees a String temporary once it has copied it
-            // (`str_temporary`), and the rows state that release as a row of
-            // their own. A name this pass minted is that temporary.
-            Some(Spec::Renders(ret)) => match args {
-                [(Val::Name(n), _)] if *ret == Type::Str => {
-                    let info = &body.names[*n as usize];
-                    !(info.source.starts_with('@') && self.cx.resolve(&info.ty) == Type::Str)
-                }
-                [_] => true,
-                _ => false,
-            },
+            Some(Spec::Renders(_)) => matches!(args, [_]),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
             // A lane index is an immediate, so the row carries it as a literal.
             Some(Spec::Lanes) => {
