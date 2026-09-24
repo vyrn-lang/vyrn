@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 55] = [
+const SHAPES: [(&str, &str); 56] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -515,6 +515,15 @@ const SHAPES: [(&str, &str); 55] = [
         "a `region` beside a statement the arm emits",
         "let mut pending: Map<String, fn(Int64) -> Int64> = [:]          fn keep(cb: fn(Int64) -> Int64) -> Int64 { let mut n = 0          region { let k = 3 let mut i = 0 while i < k { n = n + i i = i + 1 } }          pending[n.toString()] = cb.copy() region { n = n * 10 } return n }          fn vyrnTestMain() -> Int64 { return keep(x -> x + 1) + pending.length }",
     ),
+    // A layout a statement makes and does not bind, a call result read by
+    // the statement's call and an `if let`'s scrutinee, lands in a slot of its
+    // own, and the run carries its release. The lambda keeps the body off the
+    // per-body walk, so each statement is asked alone (RFC-0125 M7,
+    // `m7-iflet`).
+    (
+        "a made layout the statement does not bind",
+        "type P = { xs: Array<Int64>, n: Int64 } fn mk(n: Int64) -> P { return P { xs: [n, n + 1], n: n } }          fn total(p: P) -> Int64 { return p.xs[0] + p.xs[1] + p.n }          fn find(p: P) -> Option<Int64> { if p.n > 0 { return Some(p.n) } return None }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let a = total(mk(3)) let mut b = 0 if let Some(k) = find(mk(4)) { b = k }          return a * 100 + b * 10 + twice(1) }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -524,7 +533,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 55] = [
+const SHAPE_PIN: [(&str, usize, usize); 56] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -624,6 +633,7 @@ const SHAPE_PIN: [(&str, usize, usize); 55] = [
         0,
     ),
     ("a `region` beside a statement the arm emits", 0, 0),
+    ("a made layout the statement does not bind", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

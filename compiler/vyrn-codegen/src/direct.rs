@@ -2339,9 +2339,11 @@ struct Fn_<'a, 'p> {
     /// The row's type is the VALUE's (`core::Builder::stmt` asks `ty_of`) and
     /// the arm builds into the annotation's layout, so `let xs: Array<Int64> =
     /// [1, 2, 3]` writes a heap triple where the row alone says a fixed three.
-    /// `None` for an unannotated statement and for the per-body walk, which
-    /// refuses a body that annotates anything at all.
-    core_bound: Option<Type>,
+    /// Keyed by the statement's own binding, because the run makes other
+    /// layouts too, each at its own type. `None` for an unannotated statement
+    /// and for the per-body walk, which refuses a body that annotates anything
+    /// at all.
+    core_bound: Option<(vyrn_lower::core::Name, Type)>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -17156,8 +17158,8 @@ impl<'p> Fn_<'_, 'p> {
         let Some(run) = self.core_run(&body, s) else {
             return Ok(false);
         };
-        self.core_bound = match s {
-            Stmt::Let { ty: Some(t), .. } => Some(t.clone()),
+        self.core_bound = match (s, core_head(&run)) {
+            (Stmt::Let { ty: Some(t), .. }, Some(St::Let(n, _))) => Some((*n, t.clone())),
             _ => None,
         };
         let mut w = std::mem::take(&mut self.core_w);
@@ -17213,6 +17215,14 @@ impl<'p> Fn_<'_, 'p> {
         if !self.cursors.is_empty() && run.iter().any(core_returns) {
             return None;
         }
+        // A stream handed to a call is the callee's to close, where the arm
+        // hands it on, and the core states its release after the call. Streams
+        // wait for the runtime in Vyrn.
+        if run.iter().any(|r| {
+            matches!(r, St::Drop(n, ..) if matches!(body.names[*n as usize].ty, Type::Stream(_)))
+        }) {
+            return None;
+        }
         // A statement inside a `while` the arm emits that names a binding the
         // arm's hoist holds in locals, which the rows would walk again.
         if !self.walks.is_empty() {
@@ -17230,12 +17240,12 @@ impl<'p> Fn_<'_, 'p> {
         // An aggregate result travels through `dest`, which the run's own
         // `return` writes ([`Fn_::core_lands`]); one under a branch of the run
         // is the arm's.
-        let tail = usize::from(matches!(run.last(), Some(St::Return { .. })));
+        let tail = usize::from(matches!(core_head(run), Some(St::Return { .. })));
         if self.dest.is_some() && run[..run.len() - tail].iter().any(core_returns) {
             return None;
         }
         // The aggregate that `return` copies into the caller's storage.
-        let returned = match run.last() {
+        let returned = match core_head(run) {
             Some(St::Return {
                 value: Some(Val::Name(n)),
                 ..
@@ -17251,7 +17261,7 @@ impl<'p> Fn_<'_, 'p> {
         // The statement's own binding, and the type the reader annotated it
         // with: what a made layout is built into (RFC-0125 M7).
         let mut bound: (Option<vyrn_lower::core::Name>, Option<&Type>) = (None, None);
-        match (s, run.last()?) {
+        match (s, core_head(run)?) {
             (Stmt::Let { name, ty, .. }, St::Let(n, rhs)) if named(n, name) => {
                 bound = (Some(*n), ty.as_ref());
                 // The arm binds the ANNOTATION where the reader wrote one and
@@ -17368,16 +17378,25 @@ impl<'p> Fn_<'_, 'p> {
             .filter_map(|i| self.core_rebuilt(body, run, i))
             .flat_map(|(x, t)| [x, t])
             .collect();
-        // A made layout is the STATEMENT's own binding and nothing deeper: this
-        // walk reads the annotation off the statement it was handed, and a row
-        // under an `if` of the run has a `Stmt::Let` of its own with an
-        // annotation this walk never sees.
-        let slotted: Vec<_> = made
-            .iter()
-            .filter(|n| !lands.contains(n))
-            .copied()
-            .collect();
-        if !slotted.is_empty() && bound.0.is_none_or(|top| slotted != [top]) {
+        // A made layout other than the statement's own binding lands in a slot
+        // of its own, which the row gives back at its extent's end, and is
+        // built at its name's type. A `let` under the statement that annotates
+        // another type is the arm's, as it is for the per-body walk.
+        let under = self.annotations(|fs| {
+            hoist_stmt(
+                s,
+                &mut std::collections::HashSet::new(),
+                &mut Hoist {
+                    fe: &mut |_| {},
+                    fs,
+                },
+            )
+        });
+        if made.iter().any(|n| {
+            Some(*n) != bound.0
+                && !lands.contains(n)
+                && self.annotated_apart(&under, &body.names[*n as usize])
+        }) {
             return None;
         }
         for (n, rhs) in &lets {
@@ -17577,7 +17596,7 @@ impl<'p> Fn_<'_, 'p> {
                         || self
                             .core_bound
                             .as_ref()
-                            .is_some_and(|t| self.core_makes(body, t, rhs)) =>
+                            .is_some_and(|(top, t)| top == n && self.core_makes(body, t, rhs)) =>
                 {
                     let info = &body.names[*n as usize];
                     let line = info.line;
@@ -17603,7 +17622,10 @@ impl<'p> Fn_<'_, 'p> {
                     // The DESTINATION's type, which is the annotation where the
                     // reader wrote one: the arm takes the slot and writes the
                     // hint from it, and the row states the value's type instead.
-                    let ty = self.core_bound.take().unwrap_or_else(|| info.ty.clone());
+                    let ty = match self.core_bound.take_if(|(top, _)| top == n) {
+                        Some((_, t)) => t,
+                        None => info.ty.clone(),
+                    };
                     let r = self.cx.repr(&ty, line)?;
                     if !matches!(r, Repr::Agg(_)) {
                         return unsupported("a made layout with no layout", line);
@@ -17705,10 +17727,10 @@ impl<'p> Fn_<'_, 'p> {
                 ) if self.core_agg_call(body, rhs) => {
                     let line = body.names[*n as usize].line;
                     let lands = self.core_lands(body, ss, i, &w.reads);
-                    let bound = self.core_bound.take();
+                    let bound = self.core_bound.take_if(|(top, _)| top == n);
                     let ty = match bound {
                         _ if lands => self.ret_ty.clone(),
-                        Some(t) => t,
+                        Some((_, t)) => t,
                         None => body.names[*n as usize].ty.clone(),
                     };
                     let r = self.cx.repr(&ty, line)?;
@@ -19843,14 +19865,10 @@ impl<'p> Fn_<'_, 'p> {
         // VALUE. The two are one layout where they resolve alike, and a made
         // layout whose `let` annotates another type stays in the arm. The key
         // is the node the plan keys the binding by, which is that `Stmt::Let`.
-        let mut annotated = Vec::new();
-        if let Some(blk) = stmts {
-            each_block(blk, &mut |_| {}, &mut |s| {
-                if let Stmt::Let { ty: Some(t), .. } = s {
-                    annotated.push((s as *const Stmt as usize, self.cx.resolve(t)));
-                }
-            });
-        }
+        let annotated = match stmts {
+            Some(blk) => self.annotations(|fs| each_block(blk, &mut |_| {}, fs)),
+            None => Vec::new(),
+        };
         let occurs = body.occurrences();
         for (n, info) in body.names.iter().enumerate() {
             // A value with a place of its own: one wasm local, whatever the
@@ -19890,17 +19908,14 @@ impl<'p> Fn_<'_, 'p> {
                 && !(self.core_framed(&info.ty)
                     || (n < body.params.len()
                         && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
-                && !(info.binding.is_none_or(|at| {
-                    annotated
-                        .iter()
-                        .all(|(a, t)| *a != at || *t == self.cx.resolve(&info.ty))
-                }) && lets.iter().any(|(b, rhs)| {
-                    *b as usize == n
-                        && (self.core_makes(body, &info.ty, rhs)
-                            || self.core_agg_call(body, rhs)
-                            || self.core_take_part(body, rhs)
-                            || self.core_rebuild(body, rhs))
-                }))
+                && !(!self.annotated_apart(&annotated, info)
+                    && lets.iter().any(|(b, rhs)| {
+                        *b as usize == n
+                            && (self.core_makes(body, &info.ty, rhs)
+                                || self.core_agg_call(body, rhs)
+                                || self.core_take_part(body, rhs)
+                                || self.core_rebuild(body, rhs))
+                    }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
                 && self
                     .core_copies(body, n as vyrn_lower::core::Name)
@@ -19924,6 +19939,34 @@ impl<'p> Fn_<'_, 'p> {
         }
         let reads = body.reads();
         self.core_readable(body, &body.stmts, &reads, &[])
+    }
+
+    /// The type each annotated `let` a walk reaches names, resolved, keyed by
+    /// the node the core keys a binding by.
+    fn annotations(&self, walk: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<(usize, Type)> {
+        let mut out = Vec::new();
+        walk(&mut |s| {
+            if let Stmt::Let { ty: Some(t), .. } = s {
+                let at = self.cx.plan.key_of(s as *const Stmt as usize);
+                out.push((at, self.cx.resolve(t)));
+            }
+        });
+        out
+    }
+
+    /// Whether a name is bound by a `let` of `annotated` whose annotation is
+    /// another type than the name's. The core names a `let` by the type of its
+    /// value, so the row does not state the annotation's layout.
+    fn annotated_apart(
+        &self,
+        annotated: &[(usize, Type)],
+        info: &vyrn_lower::core::NameInfo,
+    ) -> bool {
+        info.binding.is_some_and(|at| {
+            annotated
+                .iter()
+                .any(|(a, t)| *a == at && *t != self.cx.resolve(&info.ty))
+        })
     }
 
     /// Whether any `let` of `blk` is annotated with a type that carries a
@@ -20809,6 +20852,12 @@ const CORE_EXITS: [ExitKind; 4] = [
     ExitKind::Return,
     ExitKind::Scrutinee,
 ];
+
+/// The row a run states its statement with: the last one, but for the
+/// releases of its temporaries after it ([`vyrn_lower::core::Body::rows_by_statement`]).
+fn core_head(run: &[St]) -> Option<&St> {
+    run.iter().rev().find(|r| !matches!(r, St::Drop(..)))
+}
 
 /// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
 /// [`Fn_::core_run`]'s screen, which a subtree carries for every branch.
