@@ -35,6 +35,8 @@
 //! tally beside the per-kind line tally. A rule that leaves the checker moves
 //! both numbers.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// What a section of `checker.rs` is.
@@ -692,10 +694,9 @@ fn the_structural_census_covers_the_file() {
     );
 }
 
-/// The line count and the refusal count per kind, as RFC-0125 §3 M6 records
-/// them. The prose quotes these numbers, so they are asserted rather than
-/// described: a change to `checker.rs` moves one, and the RFC's table moves
-/// with it.
+/// The line count and the refusal count per kind, pinned in
+/// `tests/pins/checker-census.tsv` for RFC-0125 §3 M6: a change to `checker.rs`
+/// moves one, and `VYRN_PIN=write` rewrites the file.
 #[test]
 fn the_structural_census_is_what_the_rfc_records() {
     let lines = checker();
@@ -723,15 +724,11 @@ fn the_structural_census_is_what_the_rfc_records() {
         )
     })
     .collect();
-    let want = vec![
-        ("the typing judgment", 3388, 132),
-        ("a rule the checker states", 1466, 53),
-        ("the checker's part in a rewrite stated elsewhere", 455, 14),
-        ("one arm per form, type constructor or builtin", 2760, 139),
-        ("shared machinery", 2371, 30),
-        ("tests", 4535, 0),
-    ];
-    assert_eq!(got, want, "the structural census has moved");
+    common::pin(
+        "checker-census",
+        "kind\tlines\trefusals",
+        got.iter().map(|(k, n, r)| format!("{k}\t{n}\t{r}")),
+    );
     assert_eq!(
         got.iter().map(|(_, n, _)| n).sum::<usize>(),
         lines.len(),

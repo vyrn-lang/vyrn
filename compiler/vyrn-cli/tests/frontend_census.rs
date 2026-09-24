@@ -43,6 +43,8 @@
 //! moves both numbers, and a file whose rules are all somewhere else states no
 //! diagnostic of its own.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// What a section is.
@@ -987,10 +989,9 @@ fn the_frontend_census_covers_every_file() {
     }
 }
 
-/// The line count and the diagnostic count per kind, per file, as RFC-0125 §3
-/// M6 records them. The prose quotes these numbers, so they are asserted rather
-/// than described: a change to one of the three files moves one, and the RFC's
-/// table moves with it.
+/// The line count and the diagnostic count per kind, per file, pinned in
+/// `tests/pins/frontend-census.tsv` for RFC-0125 §3 M6: a change to one of the
+/// files moves one, and `VYRN_PIN=write` rewrites the file.
 #[test]
 fn the_frontend_census_is_what_the_rfc_records() {
     let order = [
@@ -1035,53 +1036,11 @@ fn the_frontend_census_is_what_the_rfc_records() {
             "the diagnostic counts do not add up to {file}"
         );
     }
-    let want = vec![
-        ("loader.rs", "the file's own job", 4087, 9),
-        ("loader.rs", "a rule stated a second time", 0, 0),
-        ("loader.rs", "a path only a deleted route reached", 0, 0),
-        (
-            "loader.rs",
-            "a copy of a table another module carries",
-            0,
-            0,
-        ),
-        ("loader.rs", "shared machinery", 664, 1),
-        ("loader.rs", "tests", 143, 0),
-        ("symbols.rs", "the file's own job", 2942, 0),
-        ("symbols.rs", "a rule stated a second time", 0, 0),
-        ("symbols.rs", "a path only a deleted route reached", 0, 0),
-        (
-            "symbols.rs",
-            "a copy of a table another module carries",
-            197,
-            0,
-        ),
-        ("symbols.rs", "shared machinery", 410, 0),
-        ("symbols.rs", "tests", 829, 0),
-        ("project.rs", "the file's own job", 1074, 0),
-        ("project.rs", "a rule stated a second time", 0, 0),
-        ("project.rs", "a path only a deleted route reached", 0, 0),
-        (
-            "project.rs",
-            "a copy of a table another module carries",
-            0,
-            0,
-        ),
-        ("project.rs", "shared machinery", 298, 0),
-        ("project.rs", "tests", 310, 0),
-        ("movecheck.rs", "the file's own job", 891, 0),
-        ("movecheck.rs", "a rule stated a second time", 0, 0),
-        ("movecheck.rs", "a path only a deleted route reached", 0, 0),
-        (
-            "movecheck.rs",
-            "a copy of a table another module carries",
-            0,
-            0,
-        ),
-        ("movecheck.rs", "shared machinery", 1190, 0),
-        ("movecheck.rs", "tests", 46, 0),
-    ];
-    assert_eq!(got, want, "the frontend census has moved");
+    common::pin(
+        "frontend-census",
+        "file\tkind\tlines\tdiagnostics",
+        got.iter().map(|(f, k, n, d)| format!("{f}\t{k}\t{n}\t{d}")),
+    );
 }
 
 /// The table for RFC-0125 §3 M6, printed from the sections above:

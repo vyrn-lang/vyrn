@@ -33,6 +33,8 @@
 //! instruction count where it is, which is the reading that catches a deletion
 //! that deleted prose rather than emission.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// What a section of `direct.rs` is.
@@ -781,10 +783,9 @@ fn the_structural_census_covers_the_file() {
     );
 }
 
-/// The line count and the hand-emitted instruction count per kind, as RFC-0125
-/// §3 M3 records them. The prose quotes these numbers, so they are asserted
-/// rather than described: a change to `direct.rs` moves one, and the RFC's table
-/// moves with it.
+/// The line count and the hand-emitted instruction count per kind, pinned in
+/// `tests/pins/emitter-census.tsv` for RFC-0125 §3 M3: a change to `direct.rs`
+/// moves one, and `VYRN_PIN=write` rewrites the file.
 #[test]
 fn the_emitter_census_is_what_the_rfc_records() {
     let lines = emitter();
@@ -813,16 +814,11 @@ fn the_emitter_census_is_what_the_rfc_records() {
         )
     })
     .collect();
-    let want = vec![
-        ("the mapping §2.3 names", 11706, 838),
-        ("a decision §2.3 says it must not make", 1151, 214),
-        ("the runtime it emits by hand", 601, 7),
-        ("one block per builtin name", 4424, 823),
-        ("the wasm format", 343, 0),
-        ("shared machinery", 2715, 88),
-        ("tests", 332, 0),
-    ];
-    assert_eq!(got, want, "the emitter census has moved");
+    common::pin(
+        "emitter-census",
+        "kind\tlines\twasm",
+        got.iter().map(|(k, n, w)| format!("{k}\t{n}\t{w}")),
+    );
     assert_eq!(
         got.iter().map(|(_, n, _)| n).sum::<usize>(),
         lines.len(),
@@ -835,8 +831,9 @@ fn the_emitter_census_is_what_the_rfc_records() {
     );
 }
 
-/// What each section READS, per class, as RFC-0125 §3 M3 records it — and the
-/// mechanical half of the classification, which is what stops it rotting.
+/// What each section READS, per class, pinned in `tests/pins/emitter-reads.tsv`
+/// for RFC-0125 §3 M3 — and the mechanical half of the classification, which
+/// is what stops it rotting.
 ///
 /// A reader puts a section in a class; the file says whether it can be there.
 /// A section that names a source form cannot be `Core` or `Neither`, and one
@@ -893,14 +890,12 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
         (c.label(), n, l, f, r)
     })
     .collect();
-    let want = vec![
-        ("neither", 48, 6657, 0, 0),
-        ("the core's rows", 6, 2675, 0, 22),
-        ("the source, and the core says it too", 1, 81, 1, 0),
-        ("the source, and the core has no row", 10, 1995, 81, 0),
-        ("both, for two questions", 14, 9864, 106, 294),
-    ];
-    assert_eq!(got, want, "what the emitter reads has moved");
+    common::pin(
+        "emitter-reads",
+        "class\tsections\tlines\tforms\trows",
+        got.iter()
+            .map(|(c, n, l, f, r)| format!("{c}\t{n}\t{l}\t{f}\t{r}")),
+    );
     assert_eq!(
         got.iter().map(|(_, n, ..)| n).sum::<usize>(),
         secs.len(),

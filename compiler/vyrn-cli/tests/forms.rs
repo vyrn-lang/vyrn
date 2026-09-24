@@ -15,21 +15,22 @@
 //! Seven facts are checked:
 //!
 //! 1. [`the_census_covers_every_form`] reads `Stmt`, `Expr` and `Pattern` out of
-//!    `ast.rs` and asserts RFC-0127's two tables list exactly those, in the
+//!    `ast.rs` and asserts RFC-0127's verdict table lists exactly those, in the
 //!    declaration order. A form added to the surface therefore fails this test
-//!    until it has a cost row and a verdict.
-//! 2. [`the_form_census_is_what_the_rfc_records`] recomputes every count in the
-//!    form table by the method RFC-0127 §2 states.
+//!    until it has a verdict.
+//! 2. [`the_form_census_is_what_the_rfc_records`] recomputes every count of the
+//!    form table by the method RFC-0127 §2 states, and pins the table in
+//!    `tests/pins/forms.tsv`.
 //! 3. [`the_declaration_census_is_what_the_rfc_records`] does the same for the
-//!    declaration table, whose rows are read out of `Program`'s `Vec` fields —
-//!    so a tenth declaration form fails here too.
-//! 4. [`the_keyword_census_is_what_the_rfc_records`] reads the lexer's
-//!    `keywords!` table and asserts the RFC's keyword table lists the same
-//!    spellings against the same tokens, with the same counts. This is the third
-//!    reader of that map: `editor/vscode/test/grammar.test.mjs` is the second.
+//!    declarations, whose rows are read out of `Program`'s `Vec` fields, in
+//!    `tests/pins/declarations.tsv`.
+//! 4. [`the_keyword_census_is_what_the_rfc_records`] does the same for the
+//!    lexer's `keywords!` table, spellings against tokens, in
+//!    `tests/pins/keywords.tsv`. This is the third reader of that map:
+//!    `editor/vscode/test/grammar.test.mjs` is the second.
 //! 5. [`the_contextual_words_are_what_the_rfc_records`] does the same for the
-//!    words the lexer hands back as identifiers, and asserts the playground's
-//!    `CONTEXTUAL` list is a subset of the RFC's rows.
+//!    words the lexer hands back as identifiers, in `tests/pins/contextual.tsv`,
+//!    and asserts the playground's `CONTEXTUAL` list is a subset of its rows.
 //! 6. [`the_formatter_and_the_lsp_do_not_name_a_form`] pins the two zero
 //!    measurements §3.3 reports, because a zero in prose is a claim and a zero
 //!    in a test is a fact.
@@ -42,6 +43,8 @@
 //! not code; an item annotated `#[cfg(test)]` is skipped whole; in what is left,
 //! the needle counts where the next character is not a letter, digit or
 //! underscore. Only the needle differs per table, and each table says which.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 
@@ -221,19 +224,6 @@ fn columns(spec: &[(&str, &[&str])]) -> Vec<String> {
     spec.iter().map(|(_, files)| column(files)).collect()
 }
 
-/// A count as the RFC's prose writes one: thousands separated by a comma.
-fn grouped(n: usize) -> String {
-    let d = n.to_string();
-    let mut out = String::new();
-    for (i, c) in d.chars().enumerate() {
-        if i > 0 && (d.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// The variants of `pub enum <name>` in `ast.rs`, in declaration order.
 ///
 /// The names are the four-space-indented capitalised identifiers of the enum
@@ -367,83 +357,40 @@ fn table(text: &str, header: &str) -> Vec<Vec<String>> {
     rows
 }
 
-const FORM_HEADER: &str =
-    "| form | parser | checker | movecheck | own | lower | shared | wasm | editor | all eight |";
-const DECL_HEADER: &str =
-    "| declaration | parser | loader | checker | project | shared | editor | cli | all seven |";
-const KEYWORD_HEADER: &str = "| keyword | token | lexer | parser | fmt | all three |";
-const CONTEXTUAL_HEADER: &str = "| word | lexer | parser | checker | fmt | all four |";
 const VERDICT_HEADER: &str = "| form | what it is | RFC | verdict | the desugar, or the reason |";
 
-/// One table's counts against the code, by the method of §2.
+/// One table of §3 by the method of §2, pinned in `tests/pins/<name>.tsv`: a
+/// row per label with a count per column and their sum, then a total row.
 ///
-/// Returns the grand total so the caller can check the prose sentence.
-fn check_counts(
-    rows: &[Vec<String>],
-    spec: &[(&str, &[&str])],
-    needle_of: &dyn Fn(&str) -> String,
-    label_cells: usize,
-) -> usize {
+/// Each label is the row's leading cells and the needle its counts search for.
+fn pin_counts(name: &str, head: &str, labels: &[(String, String)], spec: &[(&str, &[&str])]) {
     let code = columns(spec);
-    let mut total = 0usize;
-    let mut wrong: Vec<String> = Vec::new();
-    for row in rows {
-        assert_eq!(
-            row.len(),
-            label_cells + spec.len() + 1,
-            "a row has {} cells: {row:?}",
-            row.len()
-        );
-        let label = row[0].trim_matches('`');
-        let needle = needle_of(label);
-        let mut sum = 0usize;
-        for (k, (col, _)) in spec.iter().enumerate() {
-            let got = mentions(&code[k], &needle);
-            let want: usize = row[label_cells + k].parse().expect("a count");
-            if got != want {
-                wrong.push(format!(
-                    "{needle} in {col}: code says {got}, RFC says {want}"
-                ));
-            }
-            sum += got;
+    let mut totals = vec![0usize; spec.len() + 1];
+    let mut rows: Vec<String> = Vec::new();
+    for (cells, needle) in labels {
+        let mut counts: Vec<usize> = code.iter().map(|c| mentions(c, needle)).collect();
+        counts.push(counts.iter().sum());
+        for (t, n) in totals.iter_mut().zip(&counts) {
+            *t += n;
         }
-        let want_sum: usize = row[label_cells + spec.len()]
-            .parse()
-            .expect("the row total");
-        if sum != want_sum {
-            wrong.push(format!(
-                "{needle}: the row sums to {sum}, RFC says {want_sum}"
-            ));
-        }
-        total += sum;
+        rows.push(common::pin_row(cells, &counts));
     }
-    assert!(
-        wrong.is_empty(),
-        "the census has moved:\n  {}",
-        wrong.join("\n  ")
-    );
-    total
+    let mut all = "all".to_string();
+    all.push_str(&"\t".repeat(head.matches('\t').count()));
+    rows.push(common::pin_row(&all, &totals));
+    let cols: Vec<&str> = spec.iter().map(|(c, _)| *c).collect();
+    common::pin(name, &format!("{head}\t{}\tall", cols.join("\t")), rows);
 }
 
-/// Both tables list every form `ast.rs` declares, in that order.
+/// The verdict table lists every form `ast.rs` declares, in that order, then
+/// every declaration.
 ///
-/// The anti-drift half: a form added to the surface has no cost row and no
-/// verdict until somebody writes one, and this test says so by name.
+/// The anti-drift half: a form added to the surface has no verdict until
+/// somebody writes one, and this test says so by name.
 #[test]
 fn the_census_covers_every_form() {
     let text = rfc_text();
     let want: Vec<String> = forms().iter().map(|f| format!("`{f}`")).collect();
-    let got: Vec<String> = table(&text, FORM_HEADER)
-        .iter()
-        .map(|r| r[0].clone())
-        .collect();
-    assert_eq!(
-        got, want,
-        "RFC-0127's cost table and `ast.rs` list different forms"
-    );
-
-    // The verdict table carries the forms and then the declarations, which is
-    // the order §4 states them in.
     let mut want_verdicts = want.clone();
     want_verdicts.extend(declarations().iter().map(|d| format!("`{d}`")));
     let got_verdicts: Vec<String> = table(&text, VERDICT_HEADER)
@@ -462,100 +409,37 @@ fn the_census_covers_every_form() {
     );
 }
 
-/// Every number in the form table is what the code says today.
+/// The form table, one row per form `ast.rs` declares.
 #[test]
 fn the_form_census_is_what_the_rfc_records() {
-    let text = rfc_text();
-    let rows = table(&text, FORM_HEADER);
-    let total = check_counts(&rows, FORM_COLUMNS, &|l| l.to_string(), 1);
-    let sentence = format!("{} mentions in eight files", grouped(total));
-    assert!(
-        text.contains(&sentence),
-        "the prose should say {sentence:?}"
-    );
+    let labels: Vec<(String, String)> = forms().into_iter().map(|f| (f.clone(), f)).collect();
+    pin_counts("forms", "form", &labels, FORM_COLUMNS);
 }
 
-/// Every number in the declaration table is what the code says today, and the
-/// rows are `Program`'s own `Vec` fields.
+/// The declaration table, one row per `Program` `Vec` field.
 #[test]
 fn the_declaration_census_is_what_the_rfc_records() {
-    let text = rfc_text();
-    let rows = table(&text, DECL_HEADER);
-    let got: Vec<String> = rows
-        .iter()
-        .map(|r| r[0].trim_matches('`').to_string())
+    let labels: Vec<(String, String)> = declarations()
+        .into_iter()
+        .map(|d| (d.clone(), format!(".{d}")))
         .collect();
-    assert_eq!(
-        got,
-        declarations(),
-        "RFC-0127's declaration table and `Program` list different fields"
-    );
-    let total = check_counts(&rows, DECL_COLUMNS, &|l| format!(".{l}"), 1);
-    let sentence = format!("{total} mentions in seven files");
-    assert!(
-        text.contains(&sentence),
-        "the prose should say {sentence:?}"
-    );
+    pin_counts("declarations", "declaration", &labels, DECL_COLUMNS);
 }
 
-/// The keyword table's spellings and tokens are the lexer's own map, and its
-/// counts are what the code says today.
+/// The keyword table: the lexer's own spellings against their tokens.
 #[test]
 fn the_keyword_census_is_what_the_rfc_records() {
-    let text = rfc_text();
-    let rows = table(&text, KEYWORD_HEADER);
-    let got: Vec<(String, String)> = rows
-        .iter()
-        .map(|r| {
-            (
-                r[0].trim_matches('`').to_string(),
-                r[1].trim_matches('`')
-                    .trim_start_matches("Tok::")
-                    .to_string(),
-            )
-        })
+    let labels: Vec<(String, String)> = keywords()
+        .into_iter()
+        .map(|(w, t)| (format!("{w}\tTok::{t}"), format!("Tok::{t}")))
         .collect();
-    assert_eq!(
-        got,
-        keywords(),
-        "RFC-0127's keyword table and `keyword_or_ident` disagree"
-    );
-    let kw = keywords();
-    let total = check_counts(
-        &rows,
-        KEYWORD_COLUMNS,
-        &|l| {
-            let tok = &kw.iter().find(|(w, _)| w == l).expect("a keyword row").1;
-            format!("Tok::{tok}")
-        },
-        2,
-    );
-    let sentence = format!("{total} mentions in three files");
-    assert!(
-        text.contains(&sentence),
-        "the prose should say {sentence:?}"
-    );
+    pin_counts("keywords", "keyword\ttoken", &labels, KEYWORD_COLUMNS);
 }
 
 /// The contextual table lists every word the parser reads by position, and the
 /// playground's list is inside it.
 #[test]
 fn the_contextual_words_are_what_the_rfc_records() {
-    let text = rfc_text();
-    let rows = table(&text, CONTEXTUAL_HEADER);
-    let got: Vec<String> = rows
-        .iter()
-        .map(|r| r[0].trim_matches('`').to_string())
-        .collect();
-    assert_eq!(
-        got,
-        CONTEXTUAL_WORDS
-            .iter()
-            .map(|w| w.to_string())
-            .collect::<Vec<_>>(),
-        "RFC-0127's contextual table and this test's list disagree"
-    );
-
     // The playground colours a subset of these, and `tests/contextual_words.rs`
     // holds it equal to the site's. A word added to both without a row here is
     // a word the census cannot see.
@@ -574,12 +458,11 @@ fn the_contextual_words_are_what_the_rfc_records() {
         );
     }
 
-    let total = check_counts(&rows, CONTEXTUAL_COLUMNS, &|l| format!("\"{l}\""), 1);
-    let sentence = format!("{total} mentions in four files");
-    assert!(
-        text.contains(&sentence),
-        "the prose should say {sentence:?}"
-    );
+    let labels: Vec<(String, String)> = CONTEXTUAL_WORDS
+        .iter()
+        .map(|w| (w.to_string(), format!("\"{w}\"")))
+        .collect();
+    pin_counts("contextual", "word", &labels, CONTEXTUAL_COLUMNS);
 }
 
 /// §3.3's two zeros, as facts rather than as claims.
@@ -664,71 +547,6 @@ fn the_verdicts_are_from_the_closed_set() {
     assert!(
         text.contains(&sentence),
         "the prose should say {sentence:?}"
-    );
-}
-
-/// The four tables for RFC-0127 §3, printed from the code:
-/// `cargo test -p vyrn-cli --test forms -- --ignored --nocapture
-/// the_form_census_as_a_table`.
-#[test]
-#[ignore]
-fn the_form_census_as_a_table() {
-    let print = |header: &str,
-                 labels: &[String],
-                 spec: &[(&str, &[&str])],
-                 needle_of: &dyn Fn(&str) -> String,
-                 extra: &dyn Fn(&str) -> String| {
-        let code = columns(spec);
-        println!("\n{header}");
-        println!("|---{}|", "|---".repeat(spec.len() + 1));
-        let mut total = 0usize;
-        for l in labels {
-            let counts: Vec<usize> = (0..spec.len())
-                .map(|k| mentions(&code[k], &needle_of(l)))
-                .collect();
-            let sum: usize = counts.iter().sum();
-            total += sum;
-            let cells: Vec<String> = counts.iter().map(|c| c.to_string()).collect();
-            println!("| `{l}` |{} {} | {sum} |", extra(l), cells.join(" | "));
-        }
-        println!("\n{total} mentions in {} files", spec.len());
-    };
-    let none = |_: &str| String::new();
-    print(
-        FORM_HEADER,
-        &forms(),
-        FORM_COLUMNS,
-        &|l| l.to_string(),
-        &none,
-    );
-    print(
-        DECL_HEADER,
-        &declarations(),
-        DECL_COLUMNS,
-        &|l| format!(".{l}"),
-        &none,
-    );
-    let kw = keywords();
-    let words: Vec<String> = kw.iter().map(|(w, _)| w.clone()).collect();
-    let tok_of = |l: &str| {
-        let t = kw
-            .iter()
-            .find(|(w, _)| w == l)
-            .expect("a keyword")
-            .1
-            .clone();
-        format!("Tok::{t}")
-    };
-    print(KEYWORD_HEADER, &words, KEYWORD_COLUMNS, &tok_of, &|l| {
-        format!(" `{}` |", tok_of(l))
-    });
-    let ctx: Vec<String> = CONTEXTUAL_WORDS.iter().map(|w| w.to_string()).collect();
-    print(
-        CONTEXTUAL_HEADER,
-        &ctx,
-        CONTEXTUAL_COLUMNS,
-        &|l| format!("\"{l}\""),
-        &none,
     );
 }
 
