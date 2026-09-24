@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 50] = [
+const SHAPES: [(&str, &str); 53] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -480,6 +480,26 @@ const SHAPES: [(&str, &str); 50] = [
         "a push whose result is returned, not stored back",
         "fn one(j: Int64) -> Array<String> { let mut out: Array<String> = []          return out.push(j.toString() + \"x\") }          fn two(j: Int64) -> Array<String> { let mut out: Array<String> = []          if j > 0 { return out.push(j.toString()) } return out.push(\"none\") }          fn vyrnTestMain() -> Int64 { let a = one(7) let b = two(0) let c = two(55)          return a[0].byteLength * 100 + b[0].byteLength * 10 + c[0].byteLength }",
     ),
+    // A stream is linear (RFC-0081), so the callee disposes a stream it is
+    // handed: `keep` hands it back, and a close after the call ended the
+    // stream `two` returned.
+    (
+        "a stream handed to a function that returns it",
+        "fn feed(n: Int64) -> Stream<Int64> { let mut xs: Array<Int64> = [] let mut i = 0 while i < n { xs.push(i + 1) i = i + 1 } return fromArray(xs) }          fn keep(s: Stream<Int64>) -> Stream<Int64> { return s }          fn two(n: Int64) -> Stream<Int64> { return keep(feed(n)) }          fn vyrnTestMain() -> Int64 { let mut t = 0 for v in two(3) { t = t * 10 + v } return t }",
+    ),
+    // A specialization is one instance per target (RFC-0023): a call through
+    // a parameter bound to a named function is a call to it, a pass-through
+    // names the same instance, and a generic callee is solved by the checker.
+    (
+        "a call through a `fn` parameter bound to a named function",
+        "fn inc(x: Int64) -> Int64 { return x + 1 }          fn twice(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(f(x)) }          fn four(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return twice(twice(x, f), f) }          fn mapAll<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> { let mut out: Array<U> = [] for x in xs { out.push(f(x)) } return out }          fn vyrnTestMain() -> Int64 { let xs: Array<Int64> = [1, 2, 3] let ys = mapAll(xs, inc) return four(10, inc) * 100 + ys[2] }",
+    ),
+    // A stored value is the closure enum's variant for its target (RFC-0037):
+    // a function's name returned or stored in a field is a make of it.
+    (
+        "a function's name stored as a value",
+        "fn inc(x: Int64) -> Int64 { return x + 1 }          fn dbl(x: Int64) -> Int64 { return x * 2 }          type Op = { f: fn(Int64) -> Int64, n: Int64 }          fn pick(b: Bool) -> fn(Int64) -> Int64 { if b { return inc } return dbl }          fn vyrnTestMain() -> Int64 { let o = Op { f: dbl, n: 3 } let g = pick(true) let h = o.f return g(10) * 100 + h(o.n) }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -489,7 +509,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 50] = [
+const SHAPE_PIN: [(&str, usize, usize); 53] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -576,6 +596,13 @@ const SHAPE_PIN: [(&str, usize, usize); 50] = [
         0,
     ),
     ("a push whose result is returned, not stored back", 0, 0),
+    ("a stream handed to a function that returns it", 0, 0),
+    (
+        "a call through a `fn` parameter bound to a named function",
+        0,
+        0,
+    ),
+    ("a function's name stored as a value", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

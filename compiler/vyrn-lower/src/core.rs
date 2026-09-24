@@ -527,6 +527,11 @@ pub enum Rhs {
         /// callee with no type parameters and for a call the checker did not
         /// solve.
         solved: Vec<(String, Type)>,
+        /// At a call to a function with `fn`-typed parameters (RFC-0023), the
+        /// target each such parameter is bound to, in the callee's order. The
+        /// argument states no value of its own. Empty elsewhere, and where an
+        /// argument is a value no [`Target`] names, which stays in `args`.
+        targets: Vec<Target>,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
     /// The first field is WHAT it computes; the last is the producer type —
@@ -536,6 +541,18 @@ pub enum Rhs {
     /// A record, array, map or variant literal: takes its parts. The first
     /// field is WHAT it constructs.
     Make(Ctor, Vec<Val>),
+}
+
+/// What a `fn`-typed parameter of a specialization calls (RFC-0023): the
+/// instance of a higher-order function is one per target, and a call through
+/// the parameter is a direct call to it ([`specialize`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// A function the program declares, called with no captures.
+    Fn(String),
+    /// The target this body's own `fn`-typed parameter is bound to: a
+    /// pass-through, which [`specialize`] replaces by the instance's target.
+    Param(Name),
 }
 
 /// WHO a [`Rhs::Call`]'s name resolves to (RFC-0125 §3 M3, the callee slice).
@@ -682,6 +699,9 @@ pub enum Ctor {
     /// `T?(v)` (RFC-0079): the constructor of a `where`-checked type, which
     /// answers an `Option<T>` rather than a `T`.
     Try(String),
+    /// A function value made for storage (RFC-0037): the variant of the
+    /// signature's closure enum its target names, with the captures as parts.
+    Closure(Target),
 }
 
 /// What a store displaces.
@@ -1247,6 +1267,7 @@ impl Body {
                     Ctor::Array => "array".into(),
                     Ctor::Map => "map".into(),
                     Ctor::Try(t) => format!("{t}?"),
+                    Ctor::Closure(t) => format!("closure {t:?}"),
                 },
                 vs.iter()
                     .map(|v| self.val(v))
@@ -4279,6 +4300,7 @@ impl<'a> Builder<'a> {
                 kind: Callee::Reserved,
                 ret: Some(Type::Str),
                 solved: Vec::new(),
+                targets: Vec::new(),
             },
         ));
         Ok(Val::Name(t))
@@ -4652,6 +4674,7 @@ impl<'a> Builder<'a> {
                     write_back: false,
                     ret: Some(Type::Int),
                     solved: Vec::new(),
+                    targets: Vec::new(),
                 },
                 None => return gap("a `for` over a container with no length", line),
             },
@@ -5506,6 +5529,33 @@ impl<'a> Builder<'a> {
                     let ty = self.ty_of(e)?;
                     self.nullary(name, ty, *line, out)
                 }
+                // A function's name stored as a value: the closure enum's
+                // variant for it, which captures nothing and so owns nothing.
+                // The type is the one the value ends up as, where the row has
+                // it.
+                None if self
+                    .program
+                    .functions
+                    .iter()
+                    .any(|f| &f.name == name && f.type_params.is_empty())
+                    && self
+                        .types
+                        .get(&(e as *const Expr as usize))
+                        .is_some_and(|t| {
+                            matches!(
+                                vyrn_frontend::types::resolve(t, self.proto.types()),
+                                Type::Fn(..)
+                            )
+                        }) =>
+                {
+                    let ty = self.types[&(e as *const Expr as usize)].clone();
+                    let t = self.name("@closure", ty, false, *line);
+                    self.body.names[t as usize].borrow = false;
+                    self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+                    let made = Ctor::Closure(Target::Fn(name.clone()));
+                    out.push(St::Let(t, Rhs::Make(made, Vec::new())));
+                    Ok(Val::Name(t))
+                }
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
                 // the checker types neither as an expression.
@@ -6157,6 +6207,7 @@ impl<'a> Builder<'a> {
                         kind: Callee::Builtin,
                         ret: self.produced(e),
                         solved: Vec::new(),
+                        targets: Vec::new(),
                     }
                 } else {
                     self.call(name, args, *line, self.produced(e), out)?
@@ -6430,6 +6481,7 @@ impl<'a> Builder<'a> {
                                 kind: Callee::Ctor,
                                 ret: Some(rt),
                                 solved: Vec::new(),
+                                targets: Vec::new(),
                             },
                         ));
                         Some(Val::Name(t))
@@ -6546,6 +6598,7 @@ impl<'a> Builder<'a> {
                 kind: Callee::Fn,
                 ret: Some(Type::Bool),
                 solved: Vec::new(),
+                targets: Vec::new(),
             },
         ));
         let failed = self.temp(Type::Bool, line);
@@ -6575,6 +6628,7 @@ impl<'a> Builder<'a> {
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
                 solved: Vec::new(),
+                targets: Vec::new(),
             },
         ));
         if let Val::Name(n) = sv {
@@ -6811,11 +6865,31 @@ impl<'a> Builder<'a> {
             // result.
             caps[0] = Capability::Consume;
         }
+        // A stream is linear (RFC-0081): the callee disposes what it is
+        // handed, so a position a stream fills takes it, whatever the
+        // position's word says. Every builtin that takes one says `consume`.
+        for (c, a) in caps.iter_mut().zip(args) {
+            if self
+                .ty_of(a)
+                .is_ok_and(|t| matches!(vyrn_frontend::types::resolve(&t, decls), Type::Stream(_)))
+            {
+                *c = Capability::Consume;
+            }
+        }
         let drains = !lends_here;
         if drains {
             self.drain += 1;
         }
+        let bound = match kind {
+            Callee::Fn => self.targets_of(name, args),
+            _ => Vec::new(),
+        };
+        let mut targets = Vec::new();
         for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
+            if let Some(Some(t)) = bound.get(k) {
+                targets.push(t.clone());
+                continue;
+            }
             // Whether THIS position may keep what it is handed, for a lambda
             // literal written AT it ([`NameInfo::closure_reads`]). The
             // capability is read where the rule about a position is stated
@@ -6904,6 +6978,7 @@ impl<'a> Builder<'a> {
             kind,
             ret,
             solved: Vec::new(),
+            targets,
         })
     }
 
@@ -6934,6 +7009,47 @@ impl<'a> Builder<'a> {
             .functions
             .iter()
             .any(|g| g.name == f && g.type_params.is_empty())
+    }
+
+    /// Per argument of a call to `name`, the [`Target`] a `fn`-typed
+    /// parameter is bound to: a function the program declares, or a
+    /// parameter of this body that is itself bound. Empty where the callee
+    /// takes no function, and where any function argument is a value no
+    /// target names (a lambda, a stored value), so the call keeps every
+    /// argument as a value.
+    ///
+    /// A parameter is `fn`-typed as written: one of an alias type takes the
+    /// stored value (RFC-0037), which is a value like any other.
+    fn targets_of(&self, name: &str, args: &[Expr]) -> Vec<Option<Target>> {
+        let Some(f) = self.program.functions.iter().find(|f| f.name == name) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (p, a) in f.params.iter().zip(args) {
+            if !matches!(p.ty, Type::Fn(..)) {
+                out.push(None);
+                continue;
+            }
+            let Expr::Var { name: v, .. } = a else {
+                return Vec::new();
+            };
+            let t = match self.lookup(v) {
+                Some(n)
+                    if self.body.params.contains(&n)
+                        && matches!(self.body.names[n as usize].ty, Type::Fn(..)) =>
+                {
+                    Target::Param(n)
+                }
+                Some(_) => return Vec::new(),
+                None if self.concrete_fn(v) => Target::Fn(v.clone()),
+                None => return Vec::new(),
+            };
+            out.push(Some(t));
+        }
+        if out.iter().all(Option::is_none) {
+            return Vec::new();
+        }
+        out
     }
 
     fn is_variant(&self, name: &str) -> bool {
@@ -7328,6 +7444,80 @@ pub fn facts() -> Option<Facts> {
 /// [`facts`] makes.
 pub fn body_of(name: &str) -> Option<Body> {
     BODIES.with(|b| b.borrow().get(name).cloned())
+}
+
+/// The instance of `body` whose `fn`-typed parameters are bound (RFC-0023):
+/// each parameter in `bound` leaves the parameter list, a call through it is
+/// [`Callee::Fn`] to its target, and a call that passes it on names that
+/// target. `None` where a bound parameter is read any other way (stored,
+/// captured, handed to a position no target names), or where another name
+/// shares its spelling, because a call through a value names its callee by
+/// spelling.
+pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
+    let spelled = |n: Name| &body.names[n as usize].source;
+    let shared = bound.iter().any(|(n, _)| {
+        (body.names.iter().enumerate()).any(|(m, i)| m != *n as usize && i.source == *spelled(*n))
+    });
+    if shared || bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
+        return None;
+    }
+    let by_spelling: Vec<(&str, &Target)> = (bound.iter())
+        .map(|(n, t)| (spelled(*n).as_str(), t))
+        .collect();
+    let mut out = body.clone();
+    bind_targets(&mut out.stmts, &by_spelling, bound);
+    let mut reads = vec![0; out.names.len()];
+    count_reads(&out.stmts, &mut reads);
+    if bound.iter().any(|(n, _)| reads[*n as usize] > 0) {
+        return None;
+    }
+    out.params.retain(|p| bound.iter().all(|(n, _)| n != p));
+    Some(out)
+}
+
+fn bind_targets(ss: &mut [St], by_spelling: &[(&str, &Target)], bound: &[(Name, Target)]) {
+    for s in ss {
+        match s {
+            St::Let(_, rhs) | St::Do { rhs, .. } => {
+                let Rhs::Call {
+                    callee,
+                    kind,
+                    targets,
+                    ..
+                } = rhs
+                else {
+                    continue;
+                };
+                if *kind == Callee::Value {
+                    if let Some((_, Target::Fn(f))) = by_spelling.iter().find(|(c, _)| c == callee)
+                    {
+                        *kind = Callee::Fn;
+                        *callee = f.clone();
+                    }
+                }
+                for t in targets.iter_mut() {
+                    if let Target::Param(p) = t {
+                        if let Some((_, to)) = bound.iter().find(|(n, _)| n == p) {
+                            *t = to.clone();
+                        }
+                    }
+                }
+            }
+            St::If { then, els, .. } => {
+                bind_targets(then, by_spelling, bound);
+                bind_targets(els, by_spelling, bound);
+            }
+            St::Loop { body, .. } | St::Block { body, .. } => {
+                bind_targets(body, by_spelling, bound)
+            }
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    bind_targets(&mut a.body, by_spelling, bound);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn count_reads(ss: &[St], out: &mut [u32]) {
