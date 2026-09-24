@@ -107,8 +107,8 @@ parameter and result types, and a seeded row spells each once. `Str` fell 35,
 and four of those moved INTO `prelude` rather than vanishing — the bit views
 now say `UInt64` there, and `logger`, `lineAt`, `colAt` and `@charCount` say
 their types there for the first time. No rule changed in any of the three.
-`the_surface_census_is_what_the_rfc_records` checks the file against the code,
-and `VYRN_PIN=write` rewrites it.
+`VYRN_PIN=write cargo test -p vyrn-cli --test surface` writes the file from the
+code, and the same test without the variable checks it.
 
 The counts are this branch's tip. §8.7 took them 16 below the
 census's first reading — `has_nested_wrap` and its two callers, one function

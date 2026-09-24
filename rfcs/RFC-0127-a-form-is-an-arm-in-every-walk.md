@@ -120,8 +120,9 @@ excluded generation crate that no gate could see — so §8's gate list names
 ### 3.1 The 37 forms
 
 `compiler/vyrn-cli/tests/pins/forms.tsv` counts 37 forms in eight files, with
-the total on its `all` row. `the_form_census_is_what_the_rfc_records` checks
-the file against the code, and `VYRN_PIN=write` rewrites it.
+the total on its `all` row. `VYRN_PIN=write cargo test -p vyrn-cli --test forms`
+writes it and the three files below from the code, and the same test without
+the variable checks them.
 
 **The shape of this table is not RFC-0126's, and that is the finding.** The type
 census ran from 7 mentions to 244, a factor of 35. This one runs from 10 to 120,
