@@ -17680,7 +17680,7 @@ impl<'p> Fn_<'_, 'p> {
                 // moves to the part's offset, as the arm's `consume t.d` in a
                 // literal moves it, and the field is the hole the root's
                 // release carries.
-                St::Let(n, rhs @ Rhs::Take(p)) if self.core_take_part(body, rhs) => {
+                St::Let(n, Rhs::Take(p)) if self.core_part_at(body, ss, i, w).is_some() => {
                     let line = body.names[*n as usize].line;
                     let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? else {
                         return unsupported("a taken layout with no parent", line);
@@ -20135,8 +20135,8 @@ impl<'p> Fn_<'_, 'p> {
             // reader's `let` takes before the call, the storage the call
             // wrote, or the caller's storage.
             St::Let(_, rhs) if self.core_agg_call(body, rhs) => true,
-            St::Let(_, rhs) if self.core_take_part(body, rhs) => {
-                self.core_part_at(body, ss, i, &self.core_w).is_some()
+            St::Let(_, Rhs::Take(_)) if self.core_part_at(body, ss, i, &self.core_w).is_some() => {
+                true
             }
             // An accumulator's append is read with the store after it.
             St::Let(_, rhs @ Rhs::Call { args, .. }) if self.core_rebuild(body, rhs) => {
