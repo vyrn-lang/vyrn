@@ -147,7 +147,8 @@ diff -r <out-base> <out-head>
 Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates.
 - The lexer's reserved words: `node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"`; the editor grammar's keywords must equal the lexer's.
-- The slice's licence: residue, the lowering pin, the bench table, whichever it names.
+- A manifest row that moves: `cargo test --release -p vyrn-cli --test residue -- --ignored`, about six minutes. A moved row can move a release, and a moved release is an ownership change.
+- The slice's licence: the lowering pin, the bench table, whichever it names.
 
 Per commit, run only the build and the census that commit moves; re-pin with `git commit --fixup` and `GIT_SEQUENCE_EDITOR=true git rebase --autosquash <base>`.
 
