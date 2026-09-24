@@ -1,0 +1,7 @@
+// a user release of a sum dropped whole
+// pin: 0 break, 0 continue
+// `matchown.vyrn`'s `Wrap`, verbatim: its release takes the receiver apart
+// with `match consume self`, and the caller frees the payload boxes after it
+// returns (RFC-0125 M7, `m7-release`). `matchown.vyrn` takes every `Wrap`
+// apart itself, so it never runs the release.
+type Wrap = | Empty | Words(Array<String>)          impl Owned for Wrap { fn release(consume self) { match consume self { Empty => {} Words(ws) => { drop ws } } } }          fn wrap(k: Int64) -> Int64 { let w = Words(["x" + k.toString(), "y"]) let e = Empty return k }          fn vyrnTestMain() -> Int64 { return wrap(3) + wrap(4) }

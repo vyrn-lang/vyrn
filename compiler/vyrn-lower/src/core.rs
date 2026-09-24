@@ -863,12 +863,11 @@ pub enum St {
         /// A different question from `consuming`, and both are needed.
         /// `consuming` is about a NAME: the construct is the last owner of a
         /// binding the reader wrote, so nothing releases it afterwards. This
-        /// one is about the VALUE: nobody else holds it, whether or not a
-        /// name ever did. Neither contains the other over the corpus, which
-        /// is why an emitter frees the boxes where EITHER is true: of 12,572
-        /// switches, 12,113 own their scrutinee and 9,587 took a name, and
-        /// the 161 and 19 sites of `examples/` that separate the two answers
-        /// are what the box slice measured before it moved the reading.
+        /// one is about the BOXES: nobody else frees them. It holds where the
+        /// construct took a name or switches on a value nobody else holds,
+        /// and never on a declared release's receiver, whose caller frees
+        /// the boxes ([`Builder::owns_boxes`]). An emitter frees the boxes
+        /// where this is true, and reads nothing else for it.
         ///
         /// Stated here rather than read off the source, which is where each
         /// compiled backend read it until RFC-0125 §3 M3's box slice.
@@ -2344,6 +2343,7 @@ fn build_seeded(
         appends: std::collections::HashSet::new(),
         region: 0,
         ret: None,
+        released: None,
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -2356,11 +2356,14 @@ fn build_seeded(
     // A declared release (`impl Owned for T { fn release(consume self) }`) IS
     // the release of `self`: its body frees the parts, and nothing releases
     // `self` again — so `self` is not a name the kernel owns there.
-    let is_release = f.name.starts_with("Owned__") && f.name.ends_with("__release");
+    let is_release = b.proto.is_release_fn(&f.name);
     for p in &f.params {
         let pty = vyrn_frontend::types::substitute(&p.ty, &subst);
         let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
         let n = b.name(&p.name, pty, owned, f.line);
+        if is_release {
+            b.released = Some(n);
+        }
         // RFC-0089 rule 2: a `read` or `modify` parameter may be observed and
         // passed on, never taken. The kernel refuses the take and needs the
         // capability to word it (RFC-0125 §3 M3, the census, rows 11 to 34).
@@ -2447,6 +2450,7 @@ pub fn build_module_state<'a>(
         appends: std::collections::HashSet::new(),
         region: 0,
         ret: None,
+        released: None,
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -2549,6 +2553,7 @@ fn build_outside_seeded<'a>(
         appends: std::collections::HashSet::new(),
         region: 0,
         ret: None,
+        released: None,
     };
     b.appends = crate::append::append_candidates(block);
     let mut out = Vec::new();
@@ -2655,6 +2660,9 @@ struct Builder<'a> {
     /// `None` of. `None` for module state, an outside block and a lambda the
     /// checker did not type.
     ret: Option<Type>,
+    /// The receiver of a declared release, which the frame does not own
+    /// ([`Builder::owns_boxes`]). `None` in every other body.
+    released: Option<Name>,
 }
 
 impl<'a> Builder<'a> {
@@ -3349,7 +3357,7 @@ impl<'a> Builder<'a> {
                 let mid = e as *const Expr as usize;
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
-                let owns = consuming || self.made_scrutinee(scrutinee);
+                let owns = self.owns_boxes(scrutinee, consuming);
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
                     let mut body = Vec::new();
@@ -3876,7 +3884,7 @@ impl<'a> Builder<'a> {
                 }
                 let sty = self.ty_of(scrutinee)?;
                 let (sv, consuming) = self.scrutinee(scrutinee, sid, None, out)?;
-                let owns = consuming || self.made_scrutinee(scrutinee);
+                let owns = self.owns_boxes(scrutinee, consuming);
                 let mut t = Vec::new();
                 let mark = self.scope.len();
                 let from = borrow_root(&sv, owns);
@@ -4819,6 +4827,28 @@ impl<'a> Builder<'a> {
     /// the construct's like any temporary's. The lowering still reads it as a
     /// place, and that is a different question — what the arms may hold, not
     /// what the frame owns.
+    /// Whether a construct owns the boxes its binders come out of
+    /// ([`St::Switch`]'s `owns`): it took a named scrutinee, or it switches
+    /// on a value the frame made.
+    ///
+    /// A declared release's receiver is the exception, taken or not: the
+    /// caller of a declared release frees the payload boxes after the call
+    /// (RFC-0096), so a switch on the receiver, or on the temporary bound to
+    /// it, hands the parts to its binders and owns no box.
+    fn owns_boxes(&self, e: &'a Expr, consuming: bool) -> bool {
+        let receiver = match e {
+            Expr::Consume { place, .. } => match &**place {
+                Expr::Var { name, .. } => Some(name),
+                _ => None,
+            },
+            Expr::Var { name, .. } => Some(name),
+            _ => None,
+        };
+        let released =
+            receiver.is_some_and(|r| self.released.is_some() && self.lookup(r) == self.released);
+        !released && (consuming || self.made_scrutinee(e))
+    }
+
     fn made_scrutinee(&self, e: &'a Expr) -> bool {
         use vyrn_frontend::ast::place_path;
         use vyrn_frontend::project::element_path;
@@ -6433,7 +6463,7 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
-                let owns = consuming || self.made_scrutinee(scrutinee);
+                let owns = self.owns_boxes(scrutinee, consuming);
                 let outer = self.body.names.len();
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
@@ -6500,7 +6530,7 @@ impl<'a> Builder<'a> {
                 let tid = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
-                let owns = consuming || self.made_scrutinee(expr);
+                let owns = self.owns_boxes(expr, consuming);
                 let decls = self.proto.types();
                 // A DECLARED `Fallible` enum (RFC-0080 M3) asks its impl; the two
                 // built-in sums have tags, and since RFC-0126 §8.11's M4b they
@@ -7420,11 +7450,12 @@ pub struct Facts {
     /// give back ([`St::Switch`]'s `owns`).
     ///
     /// The union of two questions and not one of them: the construct took a
-    /// named scrutinee, OR the scrutinee names no place the frame keeps. Each
-    /// compiled backend asked the second half of the SOURCE — a `consume`, an
-    /// expression with no place path, a `Map` lookup — beside the first half
-    /// off the table above. This row is the one statement of both
-    /// (RFC-0125 §3 M3, the box slice).
+    /// named scrutinee, OR the scrutinee names no place the frame keeps,
+    /// except on a declared release's receiver ([`Builder::owns_boxes`]).
+    /// Each compiled backend asked the second half of the SOURCE — a
+    /// `consume`, an expression with no place path, a `Map` lookup — beside
+    /// the first half off the table above. This row is the one statement of
+    /// both (RFC-0125 §3 M3, the box slice).
     pub owns_scrutinee: std::collections::HashSet<usize>,
 }
 
