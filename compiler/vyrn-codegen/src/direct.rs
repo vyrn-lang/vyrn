@@ -18689,12 +18689,7 @@ impl<'p> Fn_<'_, 'p> {
                 let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
                 self.core_step(b, off);
                 let (at, fty) = self.field_of(&bty, f, line)?;
-                // A `lazy T` field is FORCED by a read (RFC-0085 M4a), which is
-                // a call through the thunk's signature and not a load.
-                if vyrn_frontend::types::deferred(&fty).is_some() {
-                    return unsupported("a read of a deferred field", line);
-                }
-                Ok((fty, Some(at)))
+                Ok((thunk_of(fty), Some(at)))
             }
             // The element's address is the walk's: the header read, the bounds
             // check the language states, and one stride multiply — the same
@@ -18763,10 +18758,7 @@ impl<'p> Fn_<'_, 'p> {
                 if let Some(t) = length_ty(f, &self.cx.resolve(&bty)) {
                     return Some(t);
                 }
-                let fty = self.field_of(&bty, f, 0).ok()?.1;
-                vyrn_frontend::types::deferred(&fty)
-                    .is_none()
-                    .then_some(fty)
+                Some(thunk_of(self.field_of(&bty, f, 0).ok()?.1))
             }
             At::Elem(base, _) => match self.cx.resolve(&self.core_place_ty(body, base)?) {
                 Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => Some(*e),
@@ -20732,6 +20724,15 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
         } => args.first().and_then(|(v, _)| name(v)),
         St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
         _ => None,
+    }
+}
+
+/// What a field of type `ty` holds: a `lazy T` field holds its stored nullary
+/// closure, `fn() -> T` (RFC-0085 M4a), which the core reads and calls.
+fn thunk_of(ty: Type) -> Type {
+    match ty {
+        Type::Lazy(inner) => Type::Fn(Vec::new(), inner),
+        ty => ty,
     }
 }
 

@@ -3593,7 +3593,11 @@ impl<'a> Builder<'a> {
             } => {
                 let ty = self.ty_of(value)?;
                 let check = annotation.as_ref().and_then(|t| self.checked(&ty, t));
-                if check.is_none() && !matches!(value, Expr::Var { .. }) && is_place_read(value) {
+                if check.is_none()
+                    && !matches!(value, Expr::Var { .. })
+                    && is_place_read(value)
+                    && self.deferred_of(value).is_none()
+                {
                     let place = self.place(value, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -5421,9 +5425,15 @@ impl<'a> Builder<'a> {
             .contains(&mc::fn_sig_key(&ps, &r, &decls))
     }
 
-    /// The type a forced `lazy` field read yields, or `None` where the read is
-    /// an ordinary field of a record — see [`Builder::arg_released`].
+    /// The type a forced `lazy` field read yields where it owns heap, or
+    /// `None` — see [`Builder::arg_released`].
     fn forced_ty(&self, e: &Expr) -> Option<Type> {
+        self.deferred_of(e).filter(|t| self.proto.owns_heap(t))
+    }
+
+    /// The `T` of a read of a `lazy T` field, or `None` where `e` reads no
+    /// deferred field.
+    fn deferred_of(&self, e: &Expr) -> Option<Type> {
         let Expr::Field {
             expr: base, field, ..
         } = e
@@ -5436,8 +5446,31 @@ impl<'a> Builder<'a> {
             return None;
         };
         let f = fields.iter().find(|f| &f.name == field)?;
-        let inner = vyrn_frontend::types::deferred(&f.ty)?;
-        self.proto.owns_heap(inner).then(|| inner.clone())
+        vyrn_frontend::types::deferred(&f.ty).cloned()
+    }
+
+    /// A read of a `lazy T` field FORCES it (RFC-0085 M4a): the stored
+    /// nullary closure is read out of the field, which is a borrow of it,
+    /// and called through (RFC-0037). The call's result is a fresh value
+    /// every read, and its release is keyed by the read (`arg_released`).
+    fn force(&mut self, e: &'a Expr, inner: Type, out: &mut Vec<St>) -> Result<Rhs, Gap> {
+        let place = self.place(e, out)?;
+        let thunk = Type::Fn(Vec::new(), Box::new(inner.clone()));
+        let n = self.name("@thunk", thunk, false, e.line());
+        let callee = format!("@thunk{n}");
+        self.body.names[n as usize].source = callee.clone();
+        self.body.names[n as usize].path = reader_path(e);
+        out.push(St::Let(n, Rhs::Read(place)));
+        self.release_receiver(e, out, true);
+        Ok(Rhs::Call {
+            callee,
+            args: Vec::new(),
+            write_back: false,
+            kind: Callee::Value,
+            ret: Some(inner),
+            solved: Vec::new(),
+            targets: Vec::new(),
+        })
     }
 
     fn forces_a_thunk(&self, e: &Expr) -> bool {
@@ -5448,7 +5481,7 @@ impl<'a> Builder<'a> {
         let ty = self.ty_of(e).ok();
         let owns = ty.as_ref().is_some_and(|t| self.owns(t));
         match e {
-            Expr::Field { .. } if owns => {
+            Expr::Field { .. } if owns && self.deferred_of(e).is_none() => {
                 let place = self.place(e, out)?;
                 let t = self.borrow_name(e, ty.unwrap(), e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
@@ -5643,7 +5676,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
                 let ty = self.ty_of(e)?;
-                if is_place_read(e) && self.owns(&ty) {
+                if is_place_read(e) && self.owns(&ty) && self.deferred_of(e).is_none() {
                     // `best = m.name`, `if c { parts[0] } else { "" }`: the
                     // name this reaches is a borrow (`movecheck::names_a_place`
                     // says so at the `let` and at the store), and every take
@@ -6245,6 +6278,9 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Prim(Op::Bin(*op), vec![a, b], self.produced(e)))
             }
             Expr::Field { expr, field, .. } => {
+                if let Some(inner) = self.deferred_of(e) {
+                    return Ok(self.force(e, inner, out)?);
+                }
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
