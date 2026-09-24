@@ -17299,7 +17299,7 @@ impl<'p> Fn_<'_, 'p> {
                         // flow that does not check (M2d). The row states the
                         // check where it types the name at the annotation.
                         let named = &body.names[*n as usize].ty;
-                        if !core_scalar(&self.cx.resolve(t))
+                        if !core_local_ty(&self.cx.resolve(t))
                             || self.cx.resolve(t) != self.cx.resolve(named)
                             || (self.checks(t) && self.cx.sub(t) != *named)
                         {
@@ -17411,7 +17411,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             let info = &body.names[*n as usize];
             let want = self.core_arm_ty(body, rhs)?;
-            if !core_scalar(&want) {
+            if !core_local_ty(&want) {
                 return None;
             }
             let got = self.cx.resolve(&info.ty);
@@ -17440,7 +17440,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         for n in &names {
             let info = &body.names[*n as usize];
-            if !core_scalar(&info.ty)
+            if !core_local_ty(&info.ty)
                 && !made.contains(n)
                 && !switched.contains(n)
                 && !rebuilt.contains(n)
@@ -17467,7 +17467,7 @@ impl<'p> Fn_<'_, 'p> {
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
             let named = &body.names[*n as usize].ty;
-            if !(core_scalar(&self.cx.resolve(&ty)) || returned.contains(n) || rebuilt.contains(n))
+            if !(core_local_ty(&self.cx.resolve(&ty)) || returned.contains(n) || rebuilt.contains(n))
                 || self.cx.resolve(&ty) != self.cx.resolve(named)
                 || ((self.checks(&ty) || self.checks(named)) && self.cx.sub(&ty) != *named)
             {
@@ -20922,6 +20922,12 @@ fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
 /// between a rebuild and its store ([`Fn_::core_rebuilt`]).
 fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
     ss.take_while(|s| matches!(s, St::Drop(..))).count()
+}
+
+/// A value one wasm local holds on both walks: a scalar, or a String's
+/// address, whose release is the rows' own (`St::Drop`, `St::Row`).
+fn core_local_ty(t: &Type) -> bool {
+    core_scalar(t) || *t == Type::Str
 }
 
 fn core_scalar(t: &Type) -> bool {
