@@ -564,6 +564,7 @@ fn run() {
     let mut scalars = [0usize; CLASSES.len()];
     let mut carried: std::collections::BTreeSet<String> = Default::default();
     let mut bodies = 0usize;
+    let mut judged_only = 0usize;
     let mut programs = 0usize;
     let mut from_core = 0usize;
     let mut emitted = 0usize;
@@ -585,6 +586,12 @@ fn run() {
                 let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
                     continue;
                 };
+                // M7's measure counts the bodies an emitter reads. A gen body
+                // here is judged and emitted by the generator's own compile.
+                if inst.judged_only() {
+                    judged_only += top.frames().len();
+                    continue;
+                }
                 for body in top.frames() {
                     bodies += 1;
                     let c = class_of(body);
@@ -661,6 +668,7 @@ fn run() {
     }
 
     eprintln!("{programs} programs, {bodies} bodies");
+    eprintln!("{judged_only} more bodies the kernel judges and no emitter reads");
     eprintln!("what a body waits on before the core's rows could carry it:");
     for (i, what) in CLASSES.iter().enumerate() {
         eprintln!("  {:6}  {:6} scalar-only  {what}", classes[i], scalars[i]);

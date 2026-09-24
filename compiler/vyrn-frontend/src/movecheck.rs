@@ -587,6 +587,12 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
     // THIS analysis is the one a judgment may be reused for, and no other: a
     // generator load's and an engine's both run outside this call, and neither
     // reads the refusals ([`reuse_judgments`]).
+    //
+    // So the kernel's list is emptied first. An engine's compile leaves its
+    // refusals there with no file, and a generator compile runs only on a cold
+    // cache, so a refusal it left would print at the root's file and only
+    // cold. Every gen body a generator compile judges, this analysis judges.
+    let _ = crate::own::kernel_refusals();
     JUDGING.with(|j| j.set(true));
     crate::own::hand_on(program, &crate::own::analyze(program));
     JUDGING.with(|j| j.set(false));

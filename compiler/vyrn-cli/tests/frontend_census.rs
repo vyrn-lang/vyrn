@@ -1036,7 +1036,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4078, 9),
+        ("loader.rs", "the file's own job", 4087, 9),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1046,7 +1046,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
         ),
         ("loader.rs", "shared machinery", 664, 1),
-        ("loader.rs", "tests", 137, 0),
+        ("loader.rs", "tests", 143, 0),
         ("symbols.rs", "the file's own job", 2942, 0),
         ("symbols.rs", "a rule stated a second time", 0, 0),
         ("symbols.rs", "a path only a deleted route reached", 0, 0),
@@ -1069,7 +1069,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("project.rs", "shared machinery", 298, 0),
         ("project.rs", "tests", 310, 0),
-        ("movecheck.rs", "the file's own job", 885, 0),
+        ("movecheck.rs", "the file's own job", 891, 0),
         ("movecheck.rs", "a rule stated a second time", 0, 0),
         ("movecheck.rs", "a path only a deleted route reached", 0, 0),
         (

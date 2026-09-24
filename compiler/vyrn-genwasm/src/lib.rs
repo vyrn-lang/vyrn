@@ -46,7 +46,7 @@ use std::sync::mpsc;
 
 use vyrn_frontend::ast::{Block, Expr, Function, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
-use vyrn_frontend::gen::{CodePiece, GenInputs, GenOutput, GenRead, Spliced};
+use vyrn_frontend::gen::{compiler_identity, CodePiece, GenInputs, GenOutput, GenRead, Spliced};
 
 /// What this path cannot serve. A generator reaching any of these is handed back
 /// to the interpreter — see [`engine`].
@@ -1463,31 +1463,6 @@ fn artifact_key(program: &Program, fingerprint: Option<&str>) -> String {
     let mut sink = Sink(0xcbf2_9ce4_8422_2325);
     let _ = write!(sink, "gen1\u{0}{program:?}");
     format!("{:016x}", sink.0)
-}
-
-/// Which build of the compiler produced an artifact. Every crate here is version
-/// `0.0.0`, so the only honest answer is the executable itself — its size and
-/// mtime change on every rebuild, which is exactly when a persisted artifact
-/// stops being this codegen's output.
-fn compiler_identity() -> String {
-    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ID.get_or_init(|| {
-        let m = std::env::current_exe().and_then(|p| std::fs::metadata(p));
-        match m {
-            Ok(m) => format!(
-                "{}:{:?}",
-                m.len(),
-                m.modified().ok().and_then(|t| t
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| d.as_nanos()))
-            ),
-            // No answer is not "any answer": an artifact that cannot be tied to a
-            // build must not be reused across processes at all.
-            Err(_) => format!("unknown-{}", std::process::id()),
-        }
-    })
-    .clone()
 }
 
 /// Where compiled artifacts persist, beside the generation cache they belong to
