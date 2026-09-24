@@ -1,0 +1,6 @@
+// a `while` over module state, and one whose call replaces it
+// pin: 0 break, 0 continue
+// A `while` hoists the header of module state no call of the loop stores
+// into, and not one a call replaces: the second is built again once the
+// effect judgment is held (RFC-0125 M7, `m7-statehoist`).
+let mut xs: Array<Int64> = [1, 2, 3]          fn bump() { xs = [4, 5, 6, 7] }          fn sum() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut t = 0 let mut i = 0 while i < xs.length { t = t + xs[i] if i == 0 { bump() } i = i + 1 } return sum() * 100 + t }

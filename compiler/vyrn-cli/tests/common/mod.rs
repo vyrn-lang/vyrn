@@ -551,3 +551,45 @@ pub fn wasmtime() -> Option<PathBuf> {
 /// same rule: `vyrn-codegen/tests/` is a second harness, and a rule with two
 /// copies is a rule with two answers.
 pub use vyrn_codegen::toolchain::require_tools;
+
+/// Whether `VYRN_PIN=write` asks every pin to rewrite its file instead of
+/// asserting it. Panics on any other value, so a typo cannot pass as a check.
+pub fn pin_write() -> bool {
+    let mode = std::env::var("VYRN_PIN").unwrap_or_default();
+    assert!(
+        matches!(mode.as_str(), "" | "write"),
+        "VYRN_PIN must be unset or `write`, not {mode:?}"
+    );
+    mode == "write"
+}
+
+/// Holds a census table equal to `tests/pins/<name>.tsv`: `header`, then one
+/// tab-separated line per row. Under `VYRN_PIN=write` it writes the file.
+///
+/// A pin is data a gate writes, so a rebase never merges one by hand:
+/// `.gitattributes` keeps either side, this names the stale line, and the
+/// write mode fixes it.
+pub fn pin(name: &str, header: &str, rows: impl IntoIterator<Item = String>) {
+    let mut got = format!("{header}\n");
+    for row in rows {
+        got.push_str(&row);
+        got.push('\n');
+    }
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/pins")
+        .join(format!("{name}.tsv"));
+    if pin_write() {
+        std::fs::write(&file, &got).expect("write the pin");
+        return;
+    }
+    let want = std::fs::read_to_string(&file).unwrap_or_default();
+    if let Some(diff) = first_diff(name, "pinned", &want, "counted", &got) {
+        panic!("tests/pins/{name}.tsv has moved; rewrite it with VYRN_PIN=write\n{diff}");
+    }
+}
+
+/// A pin row: `label`, then each count, tab-separated.
+pub fn pin_row(label: &str, counts: &[usize]) -> String {
+    let cells: Vec<String> = counts.iter().map(|n| n.to_string()).collect();
+    format!("{label}\t{}", cells.join("\t"))
+}

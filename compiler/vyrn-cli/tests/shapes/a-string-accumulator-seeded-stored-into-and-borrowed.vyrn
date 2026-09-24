@@ -1,0 +1,7 @@
+// a String accumulator seeded, stored into and borrowed
+// pin: 0 break, 0 continue
+// An accumulator's append is one `@strAppend` row, and its ownership word
+// is the `let`'s (RFC-0125 M7). `examples/` seeds every accumulator it
+// grows from a literal or a call and never stores into one between
+// appends, so a borrowed seed and a store that clears the word are here.
+type R = { name: String, n: Int64 }          fn grow(n: Int64) -> String { let mut s = "[" let mut i = 0          while i < n { s = s + i.toString() + "," i = i + 1 } return s }          fn tail(r: R) -> String { let mut s = r.name s = s + "!" + r.name return s }          fn vyrnTestMain() -> Int64 { let mut s = grow(3) s = s + "x" s = "y" s = s + grow(2)          let r = R { name: "ab", n: 1 } let t = tail(r) return s.byteLength * 100 + t.byteLength }

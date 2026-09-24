@@ -1,0 +1,7 @@
+// a `let` of an extern call beside a statement the arm emits
+// pin: 0 break, 0 continue
+// A call's binding is typed by the producer type its row carries, and an
+// extern has no declared signature for the screen to ask (RFC-0125 M7).
+// The store into module state beside it keeps the body off the whole-body
+// walk, so the `let` is the interleave's.
+extern fn hostNowMillis() -> Int64          let mut pending: Map<String, fn(Int64) -> Int64> = [:]          fn stash(cb: fn(Int64) -> Int64) { let t = hostNowMillis() pending[t.toString()] = cb.copy() }          fn vyrnTestMain() -> Int64 { stash(n -> n + 1) return pending.length }

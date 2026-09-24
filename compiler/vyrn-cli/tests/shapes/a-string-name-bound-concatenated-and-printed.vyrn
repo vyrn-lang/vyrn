@@ -1,0 +1,7 @@
+// a String name bound, concatenated and printed
+// pin: 0 break, 0 continue
+// A String name is its address in one wasm local on both walks, and its
+// release is a row, so the screen asks its place and type as it asks a
+// scalar's. The lambda keeps the body off the per-body walk (RFC-0125 M7,
+// `m7-names`).
+fn tag(n: Int64) -> String { return "n" + n.toString() }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let s = tag(4) print(tag(twice(3))) let t = s + "!" print(t)          return t.byteLength * 10 + twice(1) }

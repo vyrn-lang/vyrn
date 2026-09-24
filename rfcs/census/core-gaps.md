@@ -544,8 +544,8 @@ TAKES stand at 953.
 
 The corpus cannot witness this family. Each of the 156 `if let`s in `examples/`
 waits on another family too, so the AST arm's count does not move. The witness
-is `coredrive`'s `SHAPES`: one `if let` the rows carry, compiled both ways and
-asserted byte for byte.
+is `coredrive`'s shape `tests/shapes/an-if-let-the-rows-carry.vyrn`, compiled
+both ways and asserted byte for byte.
 
 The `for` head track (`m7-forhead`) retired `Opaque:Exit`, `Opaque:Index` and
 `Read:Elem`. The builder states the length, the counter, the exit test and the

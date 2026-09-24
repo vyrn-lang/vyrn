@@ -1,0 +1,4 @@
+// a `match` statement with block arms
+// pin: 0 break, 0 continue
+// A `match` statement's Unit join is a name no row names.
+fn vyrnTestMain() -> Int64 { let o = Some(3) let mut t = 0          match o { Some(n) => { t = t + n } None => { t = 1 } } return t }

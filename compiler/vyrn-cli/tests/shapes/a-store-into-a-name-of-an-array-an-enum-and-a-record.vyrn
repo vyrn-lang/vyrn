@@ -1,0 +1,6 @@
+// a store into a name of an array, an enum and a record
+// pin: 0 break, 0 continue
+// A store into a name of a layout copies the value's bytes into the name's
+// place and releases what the place held where the row says so, in a loop
+// and out of one (RFC-0125 M7, `m7-store`).
+type R = { s: String, n: Int64 }          fn mk(n: Int64) -> R { return R { s: n.toString() + "r", n: n } }          fn fill(n: Int64) -> Array<String> { let mut xs: Array<String> = [] let mut i = 0          while i < n { xs.push(i.toString()) i = i + 1 } return xs }          fn opt(n: Int64) -> Option<String> { if n > 0 { return Some(n.toString()) } return None }          fn vyrnTestMain() -> Int64 { let mut xs = fill(2) let mut i = 0          while i < 3 { xs = fill(i + 3) i = i + 1 } let mut o = opt(1) o = opt(22)          let mut r = mk(1) r = mk(333) let t = match o { Some(s) => s.byteLength, None => 7 }          o = opt(0) return xs.length * 1000 + xs[4].byteLength * 100 + r.s.byteLength * 10 + t }

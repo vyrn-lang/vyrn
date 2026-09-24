@@ -1,0 +1,5 @@
+// a function's name stored as a value
+// pin: 0 break, 0 continue
+// A stored value is the closure enum's variant for its target (RFC-0037):
+// a function's name returned or stored in a field is a make of it.
+fn inc(x: Int64) -> Int64 { return x + 1 }          fn dbl(x: Int64) -> Int64 { return x * 2 }          type Op = { f: fn(Int64) -> Int64, n: Int64 }          fn pick(b: Bool) -> fn(Int64) -> Int64 { if b { return inc } return dbl }          fn vyrnTestMain() -> Int64 { let o = Op { f: dbl, n: 3 } let g = pick(true) let h = o.f return g(10) * 100 + h(o.n) }

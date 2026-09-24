@@ -1,0 +1,6 @@
+// a field read beside a `modify` of its root
+// pin: 0 break, 0 continue
+// A field read out of a root handed to `modify` holds the field's address
+// where no `modify` of the root falls in the read's extent: after the call,
+// or before it in the same turn.
+type P = { src: Array<Int64>, at: Int64 }          fn step(p: modify P) { p.at = p.at + 1 }          fn grow(p: modify P) { p.src.push(p.at) }          fn total(xs: Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn after(p: modify P) -> Int64 { step(p) let n = total(p.src) return n + p.at * 100 }          fn turns(p: modify P) -> Int64 { let mut t = 0 let mut i = 0 while i < 3 { t = t + total(p.src) grow(p) i = i + 1 } return t }          fn vyrnTestMain() -> Int64 { let mut p = P { src: [1, 2], at: 5 } let a = after(p) let b = turns(p) return a + b * 1000 + p.src.length * 1000000 }

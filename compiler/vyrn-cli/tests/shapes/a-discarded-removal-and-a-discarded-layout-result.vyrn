@@ -1,0 +1,5 @@
+// a discarded removal and a discarded layout result
+// pin: 0 break, 0 continue
+// A discarded call whose result is a layout lands in a slot of the row's own,
+// given back when the row ends, and a popped record is released (RFC-0125 M7).
+type P = { x: Int64, y: Int64 }          type Q = { k: Int64 }          fn mk(k: Int64) -> P { return P { x: k, y: k * 2 } }          fn vyrnTestMain() -> Int64 { let mut xs: Array<Int64> = [1, 2, 3, 4] let mut qs: Array<Q> = [Q { k: 1 }, Q { k: 2 }, Q { k: 3 }] let mut ps: Array<P> = [mk(1), mk(2), mk(3), mk(4), mk(5)] let mut i = 0          while i < 2 { xs.pop() qs.pop() ps.swapRemove(0) mk(i) i = i + 1 }          return xs.length * 1000 + qs.length * 100 + ps.length * 10 + ps[0].x }

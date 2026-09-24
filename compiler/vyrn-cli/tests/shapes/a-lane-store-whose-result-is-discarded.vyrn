@@ -1,0 +1,5 @@
+// a lane store whose result is discarded
+// pin: 0 break, 0 continue
+// A lane store's type is the row's, which the emitter decides only as it
+// writes the store.
+fn vyrnTestMain() -> Int64 { let mut xs: Array<Float32> = [0.0, 0.0, 0.0, 0.0, 0.0]          F32x4.store(xs, 1, F32x4.splat(2.5)) if xs[4] > 2.0 { return 1 } return 0 }

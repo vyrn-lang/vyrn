@@ -1,0 +1,3 @@
+// a `let` of an `if` expression
+// pin: 0 break, 0 continue
+fn vyrnTestMain() -> Int64 { let x = if 2 > 1 { 10 } else { 20 } return x }

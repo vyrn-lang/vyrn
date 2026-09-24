@@ -1,0 +1,8 @@
+// a made layout the statement does not bind
+// pin: 0 break, 0 continue
+// A layout a statement makes and does not bind, a call result read by
+// the statement's call and an `if let`'s scrutinee, lands in a slot of its
+// own, and the run carries its release. The lambda keeps the body off the
+// per-body walk, so each statement is asked alone (RFC-0125 M7,
+// `m7-iflet`).
+type P = { xs: Array<Int64>, n: Int64 } fn mk(n: Int64) -> P { return P { xs: [n, n + 1], n: n } }          fn total(p: P) -> Int64 { return p.xs[0] + p.xs[1] + p.n }          fn find(p: P) -> Option<Int64> { if p.n > 0 { return Some(p.n) } return None }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let a = total(mk(3)) let mut b = 0 if let Some(k) = find(mk(4)) { b = k }          return a * 100 + b * 10 + twice(1) }

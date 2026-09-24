@@ -1,0 +1,5 @@
+// a call to a host-boundary extern
+// pin: 0 break, 0 continue
+// A host-boundary name is an import the runtime serves, and the core walk
+// calls it through the arm's own emission.
+extern fn hostNowMillis() -> Int64          fn vyrnTestMain() -> Int64 { let t = hostNowMillis() if t > 0 { return 1 } return 0 }

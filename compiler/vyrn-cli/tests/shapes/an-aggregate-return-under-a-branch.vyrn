@@ -1,0 +1,6 @@
+// an aggregate return under a branch
+// pin: 0 break, 0 continue
+// A layout returned under an `if` and an `if let` is written through the
+// out-pointer where the `return` stands, and the exit's release rows
+// under the branch are the placement's (RFC-0125 M7, `m7-iflet`).
+type P = { xs: Array<Int64>, n: Int64 }          fn find(n: Int64) -> Option<Int64> { if n > 2 { return Some(n) } return None }          fn pick(n: Int64) -> P { let f: fn(Int64) -> Int64 = x -> x + 1          if n > 3 { return P { xs: [n, n + 1], n: n } }          if let Some(k) = find(n + 2) { return P { xs: [k], n: k } } return P { xs: [], n: 0 } }          fn vyrnTestMain() -> Int64 { let a = pick(5) let b = pick(1) let c = pick(-9)          return a.xs[1] * 1000 + a.n * 100 + b.n * 10 + c.xs.length }

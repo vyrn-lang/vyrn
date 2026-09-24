@@ -1,0 +1,5 @@
+// a heapless record copied by `let`
+// pin: 0 break, 0 continue
+// A `let` of a layout that owns no heap copies it, so a store into the
+// copy leaves the original.
+type P = { x: Int64, y: Int64 }          fn bump(a: P) -> P { let mut b = a b.x = b.x + 10 return b }          fn vyrnTestMain() -> Int64 { let a = P { x: 1, y: 2 } let b = bump(a) return a.x * 100 + b.x }

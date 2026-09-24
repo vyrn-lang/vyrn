@@ -1,0 +1,6 @@
+// an element a `for` hands on out of a container it alone owns
+// pin: 0 break, 0 continue
+// A `for` over a container it alone owns binds each element at its
+// address in the buffer, and the element leaves by a push or a `consume`
+// or is released there (RFC-0125 M7).
+type F = { key: String, n: Int64 }          fn mk(k: Int64) -> Array<F> { return [F { key: k.toString(), n: k }, F { key: "b".copy(), n: 2 }, F { key: "cc".copy(), n: 3 }] }          fn pick(k: Int64) -> Int64 { let mut out: Array<F> = [] for f in mk(k) { if f.n != 2 { out.push(f) } }          return out.length * 10 + out[0].key.byteLength + out[1].key.byteLength * 100 }          fn eat(f: consume F) -> Int64 { return f.key.byteLength + f.n }          fn sum(k: Int64) -> Int64 { let mut t = 0 for x in mk(k) { if x.n > 2 { t = t + eat(x) } } return t }          fn vyrnTestMain() -> Int64 { return pick(40) + sum(123) * 1000 }

@@ -15,12 +15,12 @@
 //! Three facts are checked:
 //!
 //! 1. [`the_census_covers_every_constructor`] reads `ast::Type`'s variants out
-//!    of `ast.rs` and asserts the RFC's two tables list exactly those, in the
-//!    declaration order. A new constructor therefore fails this test until it
-//!    has a cost row and a verdict.
+//!    of `ast.rs` and asserts the RFC's verdict table lists exactly those, in
+//!    the declaration order. A new constructor therefore fails this test until
+//!    it has a verdict.
 //! 2. [`the_surface_census_is_what_the_rfc_records`] recomputes every count by
-//!    the method RFC-0126 §2 states and asserts the table's numbers, its `all
-//!    seven` column and the total in the prose.
+//!    the method RFC-0126 §2 states and pins the cost table, one row per
+//!    constructor and a total, in `tests/pins/surface.tsv`.
 //! 3. [`the_verdicts_are_from_the_closed_set`] holds §4's vocabulary to three
 //!    words and asserts the sentence that tallies them.
 //!
@@ -30,6 +30,8 @@
 //! `#[cfg(test)]` is skipped whole. In what is left, `Type::<Name>` counts where
 //! the next character is not a letter, digit or underscore — which is what keeps
 //! `Type::Int` from counting `Type::IntN`.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 
@@ -140,19 +142,6 @@ fn mentions(code: &str, name: &str) -> usize {
     n
 }
 
-/// A count as the RFC's prose writes one: thousands separated by a comma.
-fn grouped(n: usize) -> String {
-    let d = n.to_string();
-    let mut out = String::new();
-    for (i, c) in d.chars().enumerate() {
-        if i > 0 && (d.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// `ast::Type`'s variants, in declaration order, read out of `ast.rs`.
 ///
 /// The names are the four-space-indented capitalised identifiers of the enum
@@ -205,15 +194,13 @@ fn table(text: &str, header: &str) -> Vec<Vec<String>> {
     rows
 }
 
-const COST_HEADER: &str =
-    "| constructor | checker | shared | wasm | types | prelude | editor | all six |";
 const VERDICT_HEADER: &str =
     "| constructor | what it is | RFC | verdict | the desugar, or the reason |";
 
-/// Both tables list every constructor `ast.rs` declares, in that order.
+/// The verdict table lists every constructor `ast.rs` declares, in that order.
 ///
-/// This is the anti-drift half: a constructor added to the surface has no cost
-/// row and no verdict until somebody writes one, and this test says so by name.
+/// This is the anti-drift half: a constructor added to the surface has no
+/// verdict until somebody writes one, and this test says so by name.
 #[test]
 fn the_census_covers_every_constructor() {
     let text = rfc_text();
@@ -221,16 +208,14 @@ fn the_census_covers_every_constructor() {
         .iter()
         .map(|c| format!("`Type::{c}`"))
         .collect();
-    for (header, which) in [
-        (COST_HEADER, "the cost table"),
-        (VERDICT_HEADER, "the verdicts"),
-    ] {
-        let got: Vec<String> = table(&text, header).iter().map(|r| r[0].clone()).collect();
-        assert_eq!(
-            got, want,
-            "RFC-0126 {which} and `ast::Type` list different constructors"
-        );
-    }
+    let got: Vec<String> = table(&text, VERDICT_HEADER)
+        .iter()
+        .map(|r| r[0].clone())
+        .collect();
+    assert_eq!(
+        got, want,
+        "RFC-0126's verdicts and `ast::Type` list different constructors"
+    );
     assert!(
         text.contains(&format!("{} constructors", want.len())),
         "the prose should say {} constructors",
@@ -238,48 +223,30 @@ fn the_census_covers_every_constructor() {
     );
 }
 
-/// Every number in the cost table is what the code says today.
+/// RFC-0126 §3's cost table, one row per constructor and a total, pinned in
+/// `tests/pins/surface.tsv`.
 #[test]
 fn the_surface_census_is_what_the_rfc_records() {
-    let text = rfc_text();
     let code: Vec<String> = COLUMNS
         .iter()
         .map(|(_, f)| code_only(&compiler_file(f)))
         .collect();
-    let rows = table(&text, COST_HEADER);
-    let mut total = 0usize;
-    let mut wrong: Vec<String> = Vec::new();
-    for row in &rows {
-        assert_eq!(row.len(), 8, "a cost row has {} cells: {row:?}", row.len());
-        let name = row[0].trim_matches('`').trim_start_matches("Type::");
-        let mut sum = 0usize;
-        for (k, (col, _)) in COLUMNS.iter().enumerate() {
-            let got = mentions(&code[k], name);
-            let want: usize = row[k + 1].parse().expect("a count");
-            if got != want {
-                wrong.push(format!(
-                    "Type::{name} in {col}: code says {got}, RFC says {want}"
-                ));
-            }
-            sum += got;
+    let mut totals = vec![0usize; COLUMNS.len() + 1];
+    let mut rows: Vec<String> = Vec::new();
+    for name in constructors() {
+        let mut counts: Vec<usize> = code.iter().map(|c| mentions(c, &name)).collect();
+        counts.push(counts.iter().sum());
+        for (t, n) in totals.iter_mut().zip(&counts) {
+            *t += n;
         }
-        let want_sum: usize = row[7].parse().expect("the row total");
-        if sum != want_sum {
-            wrong.push(format!(
-                "Type::{name}: the row sums to {sum}, RFC says {want_sum}"
-            ));
-        }
-        total += sum;
+        rows.push(common::pin_row(&format!("Type::{name}"), &counts));
     }
-    assert!(
-        wrong.is_empty(),
-        "the surface census has moved:\n  {}",
-        wrong.join("\n  ")
-    );
-    let sentence = format!("{} mentions in six files", grouped(total));
-    assert!(
-        text.contains(&sentence),
-        "the prose should say {sentence:?}"
+    rows.push(common::pin_row("all", &totals));
+    let header: Vec<&str> = COLUMNS.iter().map(|(c, _)| *c).collect();
+    common::pin(
+        "surface",
+        &format!("constructor\t{}\tall", header.join("\t")),
+        rows,
     );
 }
 
@@ -323,29 +290,4 @@ fn the_verdicts_are_from_the_closed_set() {
         text.contains(&sentence),
         "the prose should say {sentence:?}"
     );
-}
-
-/// The cost table for RFC-0126 §3, printed from the code:
-/// `cargo test -p vyrn-cli --test surface -- --ignored --nocapture
-/// the_surface_census_as_a_table`.
-#[test]
-#[ignore]
-fn the_surface_census_as_a_table() {
-    let code: Vec<String> = COLUMNS
-        .iter()
-        .map(|(_, f)| code_only(&compiler_file(f)))
-        .collect();
-    println!("{COST_HEADER}");
-    println!("|---|---|---|---|---|---|---|---|");
-    let mut total = 0usize;
-    for name in constructors() {
-        let counts: Vec<usize> = (0..COLUMNS.len())
-            .map(|k| mentions(&code[k], &name))
-            .collect();
-        let sum: usize = counts.iter().sum();
-        total += sum;
-        let cells: Vec<String> = counts.iter().map(|c| c.to_string()).collect();
-        println!("| `Type::{name}` | {} | {sum} |", cells.join(" | "));
-    }
-    println!("\n{total} mentions in six files");
 }

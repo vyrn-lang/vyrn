@@ -1,0 +1,3 @@
+// an order on two string literals
+// pin: 0 break, 0 continue
+fn vyrnTestMain() -> Int64 { if "abc" < "abd" { return 1 } return 0 }

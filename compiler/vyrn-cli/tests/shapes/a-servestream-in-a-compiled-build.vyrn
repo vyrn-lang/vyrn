@@ -1,0 +1,5 @@
+// a `serveStream` in a compiled build
+// pin: 0 break, 0 continue
+// A compiled build has no accept loop, so `serveStream` traps with the
+// frontend's sentence and never pulls the stream (RFC-0074 M3a, RFC-0125 M7).
+fn feed(k: Int64) -> Stream<String> { let xs: Array<String> = [k.toString(), "b".copy()] return fromArray(xs) }          fn open(k: Int64) -> Int64 { if k > 1 { serveStream(feed(k)) } return k }          fn vyrnTestMain() -> Int64 { return open(1) + open(2) }

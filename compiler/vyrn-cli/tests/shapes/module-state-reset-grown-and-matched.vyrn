@@ -1,0 +1,6 @@
+// module state reset, grown and matched
+// pin: 0 break, 0 continue
+// Module state (RFC-0013): a String accumulator reset and grown at its
+// address, and a `match` on a global read by address. `examples/` writes
+// both only in programs the emitter census does not load.
+type Lang = | En | Uk          let mut lang: Lang = En          let mut acc = ""          fn grow(n: Int64) -> Int64 { acc = "" let mut i = 0          while i < n { acc = acc + "ab" + i.toString() i = i + 1 } return acc.byteLength }          fn pick() -> Int64 { return match lang { En => 1, Uk => 2 } }          fn vyrnTestMain() -> Int64 { let a = pick() lang = Uk return grow(3) * 100 + a * 10 + pick() }

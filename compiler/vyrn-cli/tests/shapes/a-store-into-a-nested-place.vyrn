@@ -1,0 +1,7 @@
+// a store into a nested place
+// pin: 0 break, 0 continue
+// A store into a nested place is one store into its path: a field of an
+// element that holds heap, an element of a field, and a field of an
+// element of a field (RFC-0125 M7, `m7-move`), and a String stored into
+// a field of an element (`m7-store`).
+type Q = { name: String, y: Int64 } type R = { qs: Array<Q>, ns: Array<Int64>, n: Int64 }          fn bump(qs: consume Array<Q>, i: Int64) -> Array<Q> { let mut a = qs a[i].y = 7 return a }          fn deep(r: consume R) -> R { let mut s = r s.ns[1] = s.n * 2 s.qs[0].y = 3 return s }          fn name(qs: consume Array<Q>) -> Array<Q> { let mut a = qs a[0].name = "r" + a[0].y.toString() return a }          fn vyrnTestMain() -> Int64 { let qs: Array<Q> = [Q { name: "n" + "0", y: 2 }, Q { name: "m", y: 1 }]          let out = name(bump(qs, 1)) let d = deep(R { qs: [Q { name: "a" + "b", y: 0 }], ns: [5, 6], n: 4 })          return out[1].y * 1000 + out[0].name.byteLength * 100 + d.ns[1] * 10 + d.qs[0].y }

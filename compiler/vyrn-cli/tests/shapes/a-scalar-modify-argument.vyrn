@@ -1,0 +1,6 @@
+// a scalar `modify` argument
+// pin: 0 break, 0 continue
+// A scalar handed to `modify` lives in a local, which has no address, so
+// the call spills it to a slot and reloads it after (RFC-0125 M7).
+// `examples/` hands `modify` only layouts.
+fn bump(n: modify Int64, by: Int64) { n = n + by }          fn flip(b: modify Bool) { b = !b }          fn thrice(n: modify Int64) { bump(n, 3) }          fn vyrnTestMain() -> Int64 { let mut x = 1 bump(x, 2) thrice(x)          let mut f = false flip(f) if f { x = x + 100 } return x }
