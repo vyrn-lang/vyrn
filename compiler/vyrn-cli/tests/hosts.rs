@@ -61,6 +61,7 @@ const HOSTS: &[(&str, Core)] = &[
     ("compiler/vyrn-cli/tests/letswalk.rs", Installed),
     ("compiler/vyrn-cli/tests/lowered.rs", Installed),
     ("compiler/vyrn-cli/tests/projections.rs", Installed),
+    ("compiler/vyrn-cli/tests/reproducible.rs", Installed),
     ("compiler/vyrn-cli/tests/typed.rs", Installed),
     ("compiler/vyrn-frontend/tests/common/mod.rs", Installed),
     ("compiler/vyrn-frontend/tests/loader_run.rs", Installed),

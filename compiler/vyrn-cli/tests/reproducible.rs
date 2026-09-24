@@ -199,3 +199,43 @@ fn the_same_source_emits_the_same_ir_in_every_process() {
         .collect();
     all_equal(&outs, "llvm ir");
 }
+
+/// The in-process half: `vyrn run` lowers a program and then compiles it, and a
+/// key built from a node's address is sound only while the node lives (#444). A
+/// program compiled, a second one compiled and dropped, and the first compiled
+/// again reuses the freed addresses, so a key that outlived its node shows as
+/// different bytes for one source.
+#[test]
+fn a_program_compiled_after_another_in_one_process_is_the_same_bytes() {
+    struct Disk;
+    impl vyrn_frontend::loader::ModuleResolver for Disk {
+        fn read(&self, resolved: &str) -> Result<String, String> {
+            std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+        }
+    }
+    vyrn_lower::install();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let opts = vyrn_frontend::loader::LoadOptions {
+        std_root: Some(root.join("std").to_string_lossy().replace('\\', "/")),
+        ..Default::default()
+    };
+    // The `vyrn run` sequence: the load's memo, the ownership memo, the
+    // lowering `check_instantiations` makes, then the compile.
+    let build = |name: &str| -> Vec<u8> {
+        let path = root.join("examples").join(name);
+        let src = std::fs::read_to_string(&path).expect("the example reads");
+        let key = path.to_string_lossy().replace('\\', "/");
+        let _memo = vyrn_frontend::project::Memo::open();
+        let program = vyrn_frontend::load(&src, &key, &opts, &Disk).expect("the example loads");
+        let _own = vyrn_frontend::own::Memo::open(&program);
+        vyrn_codegen::check_instantiations(&program).expect("the example instantiates");
+        vyrn_codegen::direct::compile(&program).expect("the example compiles")
+    };
+    let first = build("fnvalarg.vyrn");
+    let _other = build("closures2.vyrn");
+    let again = build("fnvalarg.vyrn");
+    all_equal(
+        &[first, again],
+        "fnvalarg.vyrn compiled before and after closures2.vyrn",
+    );
+}

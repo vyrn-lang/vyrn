@@ -30,10 +30,10 @@ Expr::Field	7	2	4	0	13	0	2	0	28
 Expr::TryConstruct	1	3	1	0	4	0	3	0	12
 Expr::ArrayLit	5	2	1	0	7	1	3	1	20
 Expr::MapLit	3	2	1	0	5	1	2	0	14
-Expr::Lambda	1	7	3	0	11	1	8	0	31
+Expr::Lambda	1	7	3	0	11	1	9	0	32
 Expr::Consume	1	2	2	0	10	0	4	0	19
 Pattern::Variant	11	4	1	0	3	0	5	0	24
 Pattern::Success	1	4	2	0	4	0	6	0	17
 Pattern::Failure	1	3	1	0	2	0	3	0	10
 Pattern::Other	1	2	0	0	2	0	4	0	9
-all	150	135	58	2	314	5	188	9	861
+all	150	135	58	2	314	5	189	9	862

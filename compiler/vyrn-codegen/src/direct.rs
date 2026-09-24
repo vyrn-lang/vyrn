@@ -465,6 +465,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
+        kept: RefCell::new(Vec::new()),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -596,14 +597,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // the program has no module state, because a reservation nobody fills is not a
     // module — and an empty body is two bytes.
     let init = lower_globals_init(&mut m, program, &cx)?;
-    m.fill(init_index, init);
+    m.fill(init_index, init)?;
     // Before the drain, like every other body: a global of a DECLARED generic
     // release reaches the teardown and nowhere else, and its instance has to
     // be on a worklist the drain below still reads. That instance is what
     // `vyrn-lower`'s `<teardown>` root queues.
     if let Some(ti) = teardown_index {
         let t = lower_globals_teardown(&mut m, program, &cx)?;
-        m.fill(ti, t);
+        m.fill(ti, t)?;
     }
 
     // Drain what the bodies discovered, and then the dispatchers the drain
@@ -659,7 +660,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             cx.mono.borrow_mut().done += 1;
             match body {
                 Ok(body) => {
-                    m.fill(p.sig.index, body);
+                    m.fill(p.sig.index, body)?;
                     if std::env::var_os("VYRN_WASM_NAMES").is_some() {
                         m.name(p.sig.index, &p.f.name);
                     }
@@ -686,7 +687,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         if let Some((index, (rel, ty, holes), line)) = sh {
             cx.subst = HashMap::new();
             let body = lower_shape(&mut m, &cx, rel, &ty, &holes, line)?;
-            m.fill(index, body);
+            m.fill(index, body)?;
             cx.shapes.borrow_mut().done += 1;
             continue;
         }
@@ -700,7 +701,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         };
         if let Some((sig_ty, dsig)) = d {
             let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
-            m.fill(dsig.index, body);
+            m.fill(dsig.index, body)?;
             cx.dispatch.borrow_mut().done += 1;
             continue;
         }
@@ -713,9 +714,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         }
         derived = true;
         let fncopy = lower_fnval_copy(&mut m, &cx)?;
-        m.fill(cx.fnval_copy, fncopy);
+        m.fill(cx.fnval_copy, fncopy)?;
         let fnfree = lower_fnval_free(&mut m, &cx)?;
-        m.fill(cx.fnval_free, fnfree);
+        m.fill(cx.fnval_free, fnfree)?;
     }
     if let Some(e) = deferred {
         return Err(e);
@@ -1292,6 +1293,10 @@ struct Cx<'a> {
     /// A miss is a literal inside a tree the program does not hold — a leaked
     /// desugar — and the caller keeps its clone for that.
     lambdas: HashMap<usize, &'a LambdaBody>,
+    /// The nodes this backend makes or copies and then hands to a walk that
+    /// keys on their addresses, kept alive for the compile: a key built from a
+    /// node's address is sound only while the node lives (#444).
+    kept: RefCell<Vec<Rc<dyn std::any::Any>>>,
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -1606,6 +1611,14 @@ impl<'a> Cx<'a> {
     /// for a literal the program does not hold — see [`Cx::lambdas`].
     fn lambda(&self, at: &Expr) -> Option<&'a LambdaBody> {
         self.lambdas.get(&(at as *const Expr as usize)).copied()
+    }
+
+    /// `node`, moved where it lives as long as this `Cx`, so its address keys
+    /// nothing else for the whole compile.
+    fn keep<T: 'static>(&self, node: T) -> Rc<T> {
+        let kept = Rc::new(node);
+        self.kept.borrow_mut().push(kept.clone());
+        kept
     }
 
     /// Whether a narrow scalar load of `ty` has to sign-extend — [`load_of`]'s
@@ -2401,7 +2414,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
 /// No wrapping `block`, because there is no `return` to route: an initializer is
 /// an expression.
 fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(0, &[], 0);
+    let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
     for g in &program.globals {
         let (place, ty) = cx.globals[&g.name].clone();
@@ -2434,7 +2447,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
 /// rule instead of a defect. A binding whose value is a data-segment literal
 /// releases nothing: `free` refuses an address below `HEAP_BASE`.
 fn lower_globals_teardown(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(0, &[], 0);
+    let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
     for g in program.globals.iter().rev() {
         let (place, ty) = cx.globals[&g.name].clone();
@@ -2462,7 +2475,7 @@ fn lower_fn(
     binds: HashMap<String, FnBinding>,
 ) -> Result<(), String> {
     let frame = lower_body(m, f, Body::Block(&f.body), sig, cx, binds)?;
-    m.fill(sig.index, frame);
+    m.fill(sig.index, frame)?;
     if std::env::var_os("VYRN_WASM_NAMES").is_some() {
         m.name(sig.index, &f.name);
     }
@@ -2490,7 +2503,7 @@ fn lower_body(
         Body::Value(_) => None,
     };
     let sig = sig.clone();
-    let (params, _results) = cx.wasm_sig(&sig, f.line)?;
+    let (params, results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
     let shift = dest.map_or(0, |_| 1);
     // A lifted lambda's rows are the enclosing function's (see `f_shell`).
@@ -2501,7 +2514,7 @@ fn lower_body(
         .filter(|o| !o.is_empty())
         .unwrap_or_else(|| f.name.clone());
 
-    let mut b = Frame::new(params.len(), &[], 0);
+    let mut b = Frame::new(&params, &results, &[], 0);
     let core = core_body(&f.name, &binds, cx).map(std::rc::Rc::new);
     let mut cx_fn = Fn_ {
         cx,
@@ -2907,7 +2920,7 @@ fn call_depth_bump(b: &mut Frame, cx: &Cx<'_>, by: i32) {
 /// copy of that. The release twin below walks the same captures, so the two
 /// stay mirrors.
 fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(2, &[], 0);
+    let mut b = Frame::new(&[ValType::I64, ValType::I32], &[ValType::I32], &[], 0);
     let mut f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
     let vals = cx.fnvals.borrow().clone();
@@ -2952,7 +2965,7 @@ fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
 /// — the one place the registry is readable — rather than at the release site,
 /// which sees a `Fn(..)` type and no tag.
 fn lower_fnval_free(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
-    let mut b = Frame::new(2, &[], 0);
+    let mut b = Frame::new(&[ValType::I64, ValType::I32], &[], &[], 0);
     let mut f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
     let vals = cx.fnvals.borrow().clone();
@@ -3026,7 +3039,7 @@ fn lower_shape(
     holes: &[String],
     line: usize,
 ) -> Result<Frame, String> {
-    let mut b = Frame::new(1, &[], 0);
+    let mut b = Frame::new(&[ValType::I32], &[], &[], 0);
     let mut f = top_level(cx);
     if rel {
         f.rel_body(m, &mut b, 0, ty, holes, line)?;
@@ -3045,8 +3058,8 @@ fn lower_dispatcher(
     let Type::Fn(ptys, ret) = sig_ty else {
         return unsupported("a dispatcher for a non-function type", 0);
     };
-    let (params, _) = cx.wasm_sig(dsig, 0)?;
-    let mut b = Frame::new(params.len(), &[], 0);
+    let (params, results) = cx.wasm_sig(dsig, 0)?;
+    let mut b = Frame::new(&params, &results, &[], 0);
     let mut f = top_level(cx);
 
     // param 0 is the aggregate-return destination when there is one, then the fn
@@ -9691,9 +9704,7 @@ impl<'p> Fn_<'_, 'p> {
             line,
         };
         match arg {
-            Expr::Lambda { params, body, line } => {
-                self.lift_lambda(m, arg, params, body, ptys, expected_ret, *line)
-            }
+            Expr::Lambda { line, .. } => self.lift_lambda(m, arg, ptys, expected_ret, *line),
             Expr::Var { name, .. } => {
                 // A pass-through `fn`-typed parameter: forward the target AND the
                 // captures, which are this instance's own capture parameters. The
@@ -9865,12 +9876,22 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         at: &Expr,
-        params: &[Binder],
-        body: &LambdaBody,
         ptys: &[Type],
         expected_ret: &Type,
         line: usize,
     ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
+        // The key below is the literal's address. A literal the program does
+        // not hold dies with its tree, and a later one could land where it was,
+        // so the key names a copy this `Cx` keeps.
+        let kept = self
+            .cx
+            .lambda(at)
+            .is_none()
+            .then(|| self.cx.keep(at.clone()));
+        let at = kept.as_deref().unwrap_or(at);
+        let Expr::Lambda { params, body, .. } = at else {
+            return unsupported("a lambda lifted from another expression", line);
+        };
         if params.len() != ptys.len() {
             return unsupported("a lambda with the wrong number of parameters", line);
         }
@@ -10208,7 +10229,7 @@ impl<'p> Fn_<'_, 'p> {
         e: &Expr,
         sig_ty: &Type,
     ) -> Result<Type, String> {
-        let Expr::Lambda { params, body, line } = e else {
+        let Expr::Lambda { line, .. } = e else {
             return unsupported("a function value from a non-lambda", Expr::line(e));
         };
         let Type::Fn(ptys, ret) = sig_ty else {
@@ -10217,7 +10238,7 @@ impl<'p> Fn_<'_, 'p> {
         // The expected-type stack must not leak into the lifted body: its own
         // storage boundaries push their own types.
         let saved = std::mem::take(&mut self.expect);
-        let r = self.lift_lambda(m, e, params, body, ptys, ret, *line);
+        let r = self.lift_lambda(m, e, ptys, ret, *line);
         self.expect = saved;
         let (target, srcs, _) = r?;
         self.build_fnval(m, b, sig_ty, target, &srcs, *line)
@@ -13656,14 +13677,16 @@ impl<'p> Fn_<'_, 'p> {
         }
         if let Pattern::Variant(_, binds) = pattern {
             let bind = &binds[0];
-            let synth = Stmt::Let {
+            // Kept, because `stmt` keys a release and an accumulator on the
+            // statement's address.
+            let synth = self.cx.keep(Stmt::Let {
                 name: bind.name.clone(),
                 mutable: false,
                 ty: None,
                 value: p.place.clone(),
                 line,
                 col: bind.col,
-            };
+            });
             self.stmt(m, b, &synth)?;
         }
         self.block(m, b, then_block)?;
@@ -21020,6 +21043,7 @@ mod tests {
             facts: None,
             types: HashMap::new(),
             lambdas: HashMap::new(),
+            kept: RefCell::new(Vec::new()),
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,

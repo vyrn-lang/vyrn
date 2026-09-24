@@ -656,6 +656,21 @@ jobs:
         # engine leg still measures the same module, so the ratchet is not
         # hostage to a platform nobody has pinned wabt for.
         run: cargo test --quiet --release -p vyrn-cli --test residue -- --ignored --nocapture
+      - name: Keep fnvalarg's route build and any refused module when the job fails (#444)
+        # fnvalarg flakes on Linux only; the residue scratch survives a failure.
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/i444" && cp /tmp/vyrn-residue-*/fnvalarg* "$RUNNER_TEMP/i444/" || true
+          cd examples && "$RUNNER_TEMP/i444/fnvalarg.exe" > /dev/null 2> "$RUNNER_TEMP/i444/fnvalarg.stderr" || true
+          cp /tmp/vyrn-invalid-*.wasm "$RUNNER_TEMP/i444/" 2> /dev/null || true
+      - name: Upload fnvalarg's route build (#444)
+        if: failure()
+        # actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fnvalarg-route
+          path: ${{ runner.temp }}/i444
+          if-no-files-found: ignore
       - name: The codegen integration tests that need a toolchain (RFC-0077)
         working-directory: compiler
         # THE JOB THAT MAKES `layout_vs_clang` A GATE. These six tests —
@@ -794,6 +809,22 @@ jobs:
       - name: Every example prints what was recorded, as compiled wasm
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test fixtures -- --ignored --nocapture
+      - name: Keep fnvalarg's audited wasm, its stderr and any refused module when the job fails (#444)
+        # fnvalarg flakes on Linux only; this leg has no wasm2c, so no C output.
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/i444" && cd examples
+          VYRN_LEAK_CHECK=1 ../compiler/target/debug/vyrn build fnvalarg.vyrn --target wasm -o "$RUNNER_TEMP/i444/fnvalarg.wasm" || true
+          ../compiler/target/debug/vyrn run fnvalarg.vyrn > /dev/null 2> "$RUNNER_TEMP/i444/fnvalarg.stderr" || true
+          cp /tmp/vyrn-invalid-*.wasm "$TEMP"/vyrn-invalid-*.wasm "$RUNNER_TEMP/i444/" 2> /dev/null || true
+      - name: Upload fnvalarg's wasm (#444)
+        if: failure()
+        # actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fnvalarg-${{ matrix.os }}
+          path: ${{ runner.temp }}/i444
+          if-no-files-found: ignore
 
   gen-engine:
     name: generation is deterministic over the corpus

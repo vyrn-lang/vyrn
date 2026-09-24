@@ -774,9 +774,9 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule another pass also states", 165, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
-        ("the WASI host and the wasmtime embedding", 1133, 0),
+        ("the WASI host and the wasmtime embedding", 1144, 0),
         ("shared machinery", 1547, 19),
-        ("tests", 857, 2),
+        ("tests", 872, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

@@ -343,7 +343,18 @@ pub struct Compiled {
 /// Translate `bytes` for the engine `meter` selects.
 pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
     let clock = std::time::Instant::now();
-    let module = Module::new(engine(meter), bytes).map_err(|e| format!("wasm: {e:?}"))?;
+    let module = Module::new(engine(meter), bytes).map_err(|e| {
+        // A module the engine refuses is a compiler defect, and the bytes are
+        // its only evidence (#444).
+        let kept = std::env::temp_dir().join(format!("vyrn-invalid-{}.wasm", std::process::id()));
+        match std::fs::write(&kept, bytes) {
+            Ok(()) => format!(
+                "wasm: {e:?}\n  note: the module is kept at {}",
+                kept.display()
+            ),
+            Err(_) => format!("wasm: {e:?}"),
+        }
+    })?;
     Ok(Compiled {
         module,
         meter,
@@ -1117,6 +1128,21 @@ fn fill(data: &mut [u8], strings: &[Vec<u8>], ptrs: i32, buf: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A module the engine refuses is kept, and the error names where (#444).
+    #[test]
+    fn a_refused_module_is_kept_and_named() {
+        let bad = b"\0asm\x01\0\0\0\x01";
+        let Err(e) = compile(bad, false) else {
+            panic!("a truncated section compiled");
+        };
+        let kept = e
+            .split("kept at ")
+            .nth(1)
+            .expect("the error names the file");
+        assert_eq!(std::fs::read(kept).expect("the file is there"), bad);
+        let _ = std::fs::remove_file(kept);
+    }
 
     /// One program with module state and a door the host can knock on.
     const PROBE: &str = r#"let mut hits = 0

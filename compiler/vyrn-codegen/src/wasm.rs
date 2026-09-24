@@ -379,9 +379,9 @@ impl Module {
         frame: u32,
         build: impl FnOnce(&mut Frame),
     ) -> u32 {
-        let mut f = Frame::new(params.len(), locals, frame);
+        let mut f = Frame::new(params, results, locals, frame);
         build(&mut f);
-        self.add(params, results, f)
+        self.add(f)
     }
 
     /// Install an already-built body as a function, giving its index.
@@ -389,15 +389,10 @@ impl Module {
     /// The half of [`Module::func`] that a lowering wants when it needs the
     /// module WHILE it emits — interning a string literal mid-expression, say,
     /// which a `build` closure borrowing `&mut Module` could not do.
-    pub fn add(&mut self, params: &[ValType], results: &[ValType], f: Frame) -> u32 {
-        debug_assert_eq!(
-            f.base,
-            params.len() as u32,
-            "frame built for a different signature"
-        );
+    pub fn add(&mut self, f: Frame) -> u32 {
         self.bodies.push(Defined {
-            params: params.to_vec(),
-            results: results.to_vec(),
+            params: f.params.clone(),
+            results: f.results.clone(),
             body: Some(f),
         });
         self.next_func() - 1
@@ -422,16 +417,21 @@ impl Module {
     }
 
     /// Supply the body of a function [`Module::reserve_func`] handed out.
-    pub fn fill(&mut self, index: u32, f: Frame) {
+    pub fn fill(&mut self, index: u32, f: Frame) -> Result<(), String> {
         let i = (index - self.n_imports()) as usize;
         let d = &mut self.bodies[i];
-        debug_assert_eq!(
-            f.base,
-            d.params.len() as u32,
-            "frame built for a different signature"
-        );
+        // A body built for another signature validates nowhere, and a module
+        // with one is refused by the engine that loads it, far from here (#444).
+        if (&d.params, &d.results) != (&f.params, &f.results) {
+            return Err(format!(
+                "internal error: function {index} was reserved as {:?} -> {:?} and filled \
+                 with a body built for {:?} -> {:?}",
+                d.params, d.results, f.params, f.results
+            ));
+        }
         assert!(d.body.is_none(), "function {index} filled twice");
         d.body = Some(f);
+        Ok(())
     }
 
     /// How many functions this module imports — the offset a defined
@@ -803,11 +803,10 @@ impl Module {
 
         let mut code = CodeSection::new();
         for (i, d) in self.bodies.into_iter().enumerate() {
-            let n = d.params.len();
             let body = d
                 .body
                 .unwrap_or_else(|| panic!("function {i} was reserved and never filled"));
-            code.function(&encode(body, n));
+            code.function(&encode(body));
         }
 
         let mut m = wasm_encoder::Module::new();
@@ -846,11 +845,7 @@ impl Module {
 }
 
 /// One finished body, with the shadow-stack prologue and epilogue around it.
-fn encode(f: Frame, n_params: usize) -> Function {
-    debug_assert_eq!(
-        f.base, n_params as u32,
-        "frame built for a different signature"
-    );
+fn encode(f: Frame) -> Function {
     let mut decl = vec![ValType::I32]; // the frame base
     decl.extend(f.locals.iter().copied());
     let mut out = Function::new_with_locals_types(decl);
@@ -924,14 +919,18 @@ pub struct Frame {
     freed: Vec<(u32, u32)>,
     /// Local holding the frame's base address, valid for the whole body.
     base: u32,
+    /// The signature the body is built for, which [`Module::fill`] holds
+    /// against the reservation.
+    params: Vec<ValType>,
+    results: Vec<ValType>,
 }
 
 impl Frame {
-    /// An empty body for a function with `n_params` parameters, `locals`
-    /// pre-declared after the frame base, and `frame` bytes of stack reserved
-    /// before anything [`Frame::alloc`] adds.
-    pub fn new(n_params: usize, locals: &[ValType], frame: u32) -> Self {
-        let base = n_params as u32;
+    /// An empty body for a function of this signature, `locals` pre-declared
+    /// after the frame base, and `frame` bytes of stack reserved before anything
+    /// [`Frame::alloc`] adds.
+    pub fn new(params: &[ValType], results: &[ValType], locals: &[ValType], frame: u32) -> Self {
+        let base = params.len() as u32;
         Frame {
             body: Vec::new(),
             locals: locals.to_vec(),
@@ -940,6 +939,8 @@ impl Frame {
             high: frame,
             freed: Vec::new(),
             base,
+            params: params.to_vec(),
+            results: results.to_vec(),
         }
     }
 
@@ -1212,12 +1213,26 @@ mod tests {
         });
         assert_eq!(later, 0, "the reservation took the first index");
         assert_eq!(caller, 1);
-        let mut f = Frame::new(0, &[], 0);
+        let mut f = Frame::new(&[], &[ValType::I32], &[], 0);
         f.ins(&Instruction::I32Const(7));
-        m.fill(later, f);
+        m.fill(later, f).expect("the body matches its reservation");
         m.export("vyrn_entry", caller);
         // Two bodies out, in index order rather than in the order they arrived.
         assert_eq!(section_ids(&m.finish().unwrap()), vec![1, 3, 5, 6, 7, 10]);
+    }
+
+    /// A body built for another signature is refused where it is filled, and
+    /// never reaches the bytes (#444).
+    #[test]
+    fn a_body_for_another_signature_is_refused() {
+        let mut m = Module::new();
+        let later = m.reserve_func(&[ValType::I64, ValType::I64], &[ValType::I64]);
+        let f = Frame::new(&[ValType::I32, ValType::I64], &[ValType::I64], &[], 0);
+        let e = m.fill(later, f).expect_err("the signatures differ");
+        assert!(
+            e.contains("function 0 was reserved as [I64, I64] -> [I64]"),
+            "{e}"
+        );
     }
 
     /// The sweep, at the section level: an import nothing reaches leaves the
