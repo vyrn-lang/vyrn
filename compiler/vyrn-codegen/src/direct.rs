@@ -17512,6 +17512,19 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_give_back(b, w, &mut due, &ends[j]);
             }
             (last, mark) = (Some(i), b.mark());
+            if let St::Store {
+                place: vyrn_lower::core::Place::Name(n),
+                line,
+                ..
+            } = s
+            {
+                if w.at[*n as usize].is_none() && self.core_joins(body, *n) {
+                    let ty = body.names[*n as usize].ty.clone();
+                    let r = self.cx.repr(&ty, *line)?;
+                    let off = self.core_slot(b, w, *n, &r, *line)?;
+                    self.core_bind(b, body, w, *n, Place::Slot(off), ty)?;
+                }
+            }
             match s {
                 // A receiver rebuilt in place: the result is the receiver's
                 // own storage, so the name takes the receiver's place.
@@ -18904,7 +18917,6 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Option<vyrn_lower::core::Name> {
         let info = &body.names[n as usize];
         if info.borrow
-            || !self.owns_heap(&info.ty)
             || self.checks(&info.ty)
             || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
         {
@@ -18920,11 +18932,49 @@ impl<'p> Fn_<'_, 'p> {
         let (Some((_, Rhs::Val(Val::Name(x)))), None) = (at.next(), at.next()) else {
             return None;
         };
+        // A join's stores are its branches', which run before the rename.
+        let joins = self.core_joins(body, *x);
         let from = &body.names[*x as usize];
-        (!from.borrow
+        ((joins || self.owns_heap(&info.ty))
+            && !from.borrow
             && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
-            && !written.iter().any(|(m, _)| m == x))
+            && (joins || !written.iter().any(|(m, _)| m == x)))
         .then_some(*x)
+    }
+
+    /// Whether `n` is the temporary a layout `if` or `match` expression joins
+    /// through (RFC-0030): a name the naming pass minted, that no `let` binds
+    /// and each branch stores whole. Its place is a slot the first store takes
+    /// ([`Fn_::core_slot`]), and the `let` that renames it holds the slot to
+    /// the end of its own extent ([`Fn_::core_renames`]).
+    fn core_joins(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
+        let info = &body.names[n as usize];
+        if !info.source.starts_with('@')
+            || (n as usize) < body.params.len()
+            || self.checks(&info.ty)
+            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
+        {
+            return false;
+        }
+        let (mut lets, mut binders, mut written) = (Vec::new(), Vec::new(), Vec::new());
+        for s in &body.stmts {
+            core_lets(s, &mut lets);
+            core_switched(s, true, &mut binders);
+            core_written(&body.names, s, &mut written);
+        }
+        let mut whole = 0;
+        each_list(&body.stmts, &mut |ss| {
+            whole += ss
+                .iter()
+                .filter(|r| {
+                    matches!(r, St::Store { place: vyrn_lower::core::Place::Name(m), .. } if *m == n)
+                })
+                .count();
+        });
+        whole > 0
+            && !lets.iter().any(|(b, _)| *b == n)
+            && !binders.contains(&n)
+            && written.iter().filter(|(m, _)| *m == n).count() == whole
     }
 
     /// Whether [`Fn_::core_switch`] gives a payload binder of `ty` a place —
@@ -19910,6 +19960,9 @@ impl<'p> Fn_<'_, 'p> {
             // one [`Fn_::core_readable`] asks about where it stands, because
             // what places it is the `return` after it.
             //
+            // Or the temporary a layout `if` or `match` expression joins
+            // through, which its first store slots ([`Fn_::core_joins`]).
+            //
             // Or a name no row names, such as the Unit join of a `match`
             // statement, which needs no place.
             if occurs[n] != 0
@@ -19933,6 +19986,7 @@ impl<'p> Fn_<'_, 'p> {
                     .is_none()
                 && !binders.contains(&(n as vyrn_lower::core::Name))
                 && !self.core_walked(body, n as vyrn_lower::core::Name)
+                && !self.core_joins(body, n as vyrn_lower::core::Name)
             {
                 return false;
             }

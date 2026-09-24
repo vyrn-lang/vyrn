@@ -1,0 +1,9 @@
+// a layout joined by an `if` and a `match`, and renamed
+// pin: 0 break, 0 continue
+// A layout `if` or `match` expression stores each branch into a join
+// temporary its first store slots, and the `let` after it renames the slot
+// (RFC-0125 M7, `m7-join`): an array, a record and an enum. In `grow` the
+// arm's rebuilt array is the join, and the receiver keeps its slot until the
+// join puts it back; the encoder `toJson` writes for an `Option` field is
+// this `grow`.
+type P = { x: Int64, y: Int64 }          type Box = | Empty | Full(Int64)          fn two(n: Int64) -> Array<Int64> { let mut a: Array<Int64> = [] a.push(n) a.push(n + 1) return a }          fn arr(b: Bool, n: Int64) -> Int64 { let xs = if b { two(n) } else { [] } return xs.length }          fn rec(b: Bool) -> Int64 { let p = if b { P { x: 1, y: 2 } } else { P { x: 3, y: 4 } } return p.x * 10 + p.y }          fn sum(o: Option<Int64>) -> Int64 { let s = match o { Some(k) => Full(k), None => Empty } return match s { Empty => 0, Full(k) => k } }          fn total(xs: consume Array<Int64>) -> Int64 { return xs.length * 10 + xs[1] }          fn grow(o: Option<Int64>) -> Int64 { let mut xs: Array<Int64> = [1] xs = match o { Some(k) => xs.push(k), None => xs } xs.push(9) return total(xs) }          fn vyrnTestMain() -> Int64 { return arr(true, 3) * 1000000 + rec(false) * 10000 + sum(Some(5)) * 1000 + grow(Some(4)) * 10 + grow(None) }
