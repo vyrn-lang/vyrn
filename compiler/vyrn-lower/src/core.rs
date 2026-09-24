@@ -1100,6 +1100,15 @@ impl Body {
             };
             let mut need: Vec<Name> = Vec::new();
             names_in(s, &mut need);
+            // A temporary's release names no node, so it is the run's that
+            // binds the temporary: before the statement, where the builder
+            // frees an argument before the row that reads the result, and
+            // after it. Without it a temporary that owns heap is never freed
+            // where the rows emit the statement.
+            let temp = |n: &Name, run: &[St]| {
+                !self.names[*n as usize].bound_by_let
+                    && run.iter().any(|r| matches!(r, St::Let(m, _) if m == n))
+            };
             let mut start = i;
             while start > 0 {
                 match &ss[start - 1] {
@@ -1111,15 +1120,26 @@ impl Body {
                     // exit leaves unreached ([`Builder::release_unreached`]).
                     St::Loop { site: 0, .. } => {}
                     St::Let(n, rhs)
-                        if self.names[*n as usize].binding.is_none() && need.contains(n) =>
+                        if !self.names[*n as usize].bound_by_let && need.contains(n) =>
                     {
                         names_in_rhs(rhs, &mut need);
                     }
+                    St::Drop(n, ..) if !self.names[*n as usize].bound_by_let => {}
                     _ => break,
                 }
                 start -= 1;
             }
-            if out.insert(node, ss[start..=i].to_vec()).is_some() {
+            while let Some(d) = (start..i)
+                .rev()
+                .find(|&d| matches!(&ss[d], St::Drop(n, ..) if !temp(n, &ss[start..=i])))
+            {
+                start = d + 1;
+            }
+            let mut end = i;
+            while matches!(ss.get(end + 1), Some(St::Drop(n, ..)) if temp(n, &ss[start..=i])) {
+                end += 1;
+            }
+            if out.insert(node, ss[start..=end].to_vec()).is_some() {
                 twice.push(node);
             }
         }
