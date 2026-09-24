@@ -6064,6 +6064,19 @@ impl<'a> Builder<'a> {
         )))
     }
 
+    /// The `impl Show` function a `print` or `@str` of one argument calls,
+    /// where the program declares it.
+    fn render_callee(&self, name: &str, args: &[Expr]) -> Option<String> {
+        let [a] = args else { return None };
+        if !matches!(name, "print" | "@str") {
+            return None;
+        }
+        let t = self.ty_of(a).ok()?;
+        let base = vyrn_frontend::types::resolve(&t, self.proto.types());
+        vyrn_frontend::types::show_dispatch(&self.program.impls, &t, &base)
+            .filter(|f| self.program.functions.iter().any(|d| &d.name == f))
+    }
+
     /// Whether `name(args)` at `e` is a read that owns no heap: an element of
     /// a builtin array, a String's byte, or a map's entry, whose `Option` the
     /// runtime's lookup builds. A receiver that is no place is bound to a
@@ -6270,6 +6283,27 @@ impl<'a> Builder<'a> {
                     .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
                 {
                     return self.call(&f, fwd, *line, self.produced(e), out);
+                }
+                // A render of a type the language does not render is a call
+                // to its `impl Show` (RFC-0125 M7). `print` prints the String
+                // the call hands back, and releases it after.
+                if let Some(f) = self.render_callee(name, args) {
+                    let r = self.call(&f, args, *line, Some(Type::Str), out)?;
+                    if name == "@str" {
+                        return Ok(r);
+                    }
+                    let t = self.temp(Type::Str, *line);
+                    out.push(St::Let(t, r));
+                    self.after.push(t);
+                    return Ok(Rhs::Call {
+                        callee: name.clone(),
+                        args: vec![(Val::Name(t), Capability::Read)],
+                        write_back: false,
+                        kind: Callee::Reserved,
+                        ret: self.produced(e),
+                        solved: Vec::new(),
+                        targets: Vec::new(),
+                    });
                 }
                 if let Some(l) = self.schema(e) {
                     return Ok(Rhs::Val(Val::Lit(l)));

@@ -1,0 +1,6 @@
+// a record printed, interpolated and rendered through its impl
+// pin: 0 break, 0 continue
+// A render of a type the language does not render is a call to its
+// `impl Show`, at a concrete type and at a `<T: Show>` instance
+// (RFC-0125 M7, `m7-render`).
+protocol Show { fn show(self) -> String }          type P = { x: Int64, y: Int64 }          impl Show for P { fn show(self) -> String { return "(\{self.x}, \{self.y})" } }          fn label<T: Show>(v: T) -> String { let f: fn(Int64) -> Int64 = x -> x return "[\{v}]" }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let p = P { x: 3, y: twice(2) } print(p) let s = "at \{p}" let t = p.toString() let u = label(p) print(u)          return s.byteLength * 100 + t.byteLength * 10 + u.byteLength }
