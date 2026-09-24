@@ -17512,6 +17512,19 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_give_back(b, w, &mut due, &ends[j]);
             }
             (last, mark) = (Some(i), b.mark());
+            if let St::Store {
+                place: vyrn_lower::core::Place::Name(n),
+                line,
+                ..
+            } = s
+            {
+                if w.at[*n as usize].is_none() && self.core_joins(body, *n) {
+                    let ty = body.names[*n as usize].ty.clone();
+                    let r = self.cx.repr(&ty, *line)?;
+                    let off = self.core_slot(b, w, *n, &r, *line)?;
+                    self.core_bind(b, body, w, *n, Place::Slot(off), ty)?;
+                }
+            }
             match s {
                 // A receiver rebuilt in place: the result is the receiver's
                 // own storage, so the name takes the receiver's place.
@@ -17576,10 +17589,13 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     w.at[*n as usize] = self.core_place(w, body, *x);
                     // With no store to put it back, the result holds the
-                    // receiver's slot for its own extent.
+                    // receiver's slot for its own extent, unless the receiver
+                    // lives on to be stored again: a join after the rebuild
+                    // puts the result back into it.
                     if self
                         .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
                         .is_none()
+                        && !self.core_restored(body, *x)
                     {
                         w.slot[*n as usize] = w.slot[*x as usize].take();
                     }
@@ -18901,7 +18917,6 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Option<vyrn_lower::core::Name> {
         let info = &body.names[n as usize];
         if info.borrow
-            || !self.owns_heap(&info.ty)
             || self.checks(&info.ty)
             || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
         {
@@ -18917,11 +18932,49 @@ impl<'p> Fn_<'_, 'p> {
         let (Some((_, Rhs::Val(Val::Name(x)))), None) = (at.next(), at.next()) else {
             return None;
         };
+        // A join's stores are its branches', which run before the rename.
+        let joins = self.core_joins(body, *x);
         let from = &body.names[*x as usize];
-        (!from.borrow
+        ((joins || self.owns_heap(&info.ty))
+            && !from.borrow
             && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
-            && !written.iter().any(|(m, _)| m == x))
+            && (joins || !written.iter().any(|(m, _)| m == x)))
         .then_some(*x)
+    }
+
+    /// Whether `n` is the temporary a layout `if` or `match` expression joins
+    /// through (RFC-0030): a name the naming pass minted, that no `let` binds
+    /// and each branch stores whole. Its place is a slot the first store takes
+    /// ([`Fn_::core_slot`]), and the `let` that renames it holds the slot to
+    /// the end of its own extent ([`Fn_::core_renames`]).
+    fn core_joins(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
+        let info = &body.names[n as usize];
+        if !info.source.starts_with('@')
+            || (n as usize) < body.params.len()
+            || self.checks(&info.ty)
+            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
+        {
+            return false;
+        }
+        let (mut lets, mut binders, mut written) = (Vec::new(), Vec::new(), Vec::new());
+        for s in &body.stmts {
+            core_lets(s, &mut lets);
+            core_switched(s, true, &mut binders);
+            core_written(&body.names, s, &mut written);
+        }
+        let mut whole = 0;
+        each_list(&body.stmts, &mut |ss| {
+            whole += ss
+                .iter()
+                .filter(|r| {
+                    matches!(r, St::Store { place: vyrn_lower::core::Place::Name(m), .. } if *m == n)
+                })
+                .count();
+        });
+        whole > 0
+            && !lets.iter().any(|(b, _)| *b == n)
+            && !binders.contains(&n)
+            && written.iter().filter(|(m, _)| *m == n).count() == whole
     }
 
     /// Whether [`Fn_::core_switch`] gives a payload binder of `ty` a place —
@@ -19907,6 +19960,9 @@ impl<'p> Fn_<'_, 'p> {
             // one [`Fn_::core_readable`] asks about where it stands, because
             // what places it is the `return` after it.
             //
+            // Or the temporary a layout `if` or `match` expression joins
+            // through, which its first store slots ([`Fn_::core_joins`]).
+            //
             // Or a name no row names, such as the Unit join of a `match`
             // statement, which needs no place.
             if occurs[n] != 0
@@ -19930,6 +19986,7 @@ impl<'p> Fn_<'_, 'p> {
                     .is_none()
                 && !binders.contains(&(n as vyrn_lower::core::Name))
                 && !self.core_walked(body, n as vyrn_lower::core::Name)
+                && !self.core_joins(body, n as vyrn_lower::core::Name)
             {
                 return false;
             }
@@ -20349,6 +20406,19 @@ impl<'p> Fn_<'_, 'p> {
         (t == v && back && self.core_rebuild(body, rhs)).then_some((*r, *t))
     }
 
+    /// Whether some store writes `x` whole other than the one that puts a
+    /// rebuilt `x` back ([`Fn_::core_rebuilt`]).
+    fn core_restored(&self, body: &vyrn_lower::core::Body, x: vyrn_lower::core::Name) -> bool {
+        let mut found = false;
+        each_list(&body.stmts, &mut |ss| {
+            found |= (0..ss.len()).any(|i| {
+                matches!(ss[i], St::Store { place: vyrn_lower::core::Place::Name(m), .. } if m == x)
+                    && self.core_rebuilt(body, ss, i).is_none()
+            });
+        });
+        found
+    }
+
     /// Whether a rebuild in `ss` hands `n` back to the place it was taken
     /// from ([`Fn_::core_rebuilt`]).
     fn core_hands_back(
@@ -20648,6 +20718,22 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
             }
         }
         _ => {}
+    }
+}
+
+/// `ss` and every list of rows inside it, each before the lists inside it.
+fn each_list(ss: &[St], f: &mut dyn FnMut(&[St])) {
+    f(ss);
+    for s in ss {
+        match s {
+            St::If { then, els, .. } => {
+                each_list(then, f);
+                each_list(els, f);
+            }
+            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => each_list(inner, f),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| each_list(&a.body, f)),
+            _ => {}
+        }
     }
 }
 
