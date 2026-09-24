@@ -106,11 +106,12 @@ Safe:
 - Never order a placement by a hash map. Order is the source's: line, column, then key. The lowering pin runs each root ten times to catch this.
 
 Fast: before you claim speed or spend lines on it, write down which layer the change touches and its number before and after. A micro-optimization the numbers do not license is deleted; a slower path they do license stays, and the record says why.
-- Memory: locality, peak, allocation frequency, footprint, false sharing, page faults.
-- Computation: complexity (best, worst, average), SIMD and SWAR, instruction-level parallelism, dependency chains, stalls, branch predictability, numerical stability, precision loss.
-- Concurrency: task independence, lock-free structures, contention, thread safety, Amdahl's limit.
-- The system boundary: I/O, system calls, initialization, teardown.
-- Behaviour: no side effects, determinism, behaviour under load.
+- Memory: cache locality, peak memory, allocation frequency, footprint size, false sharing, page fault rate, bytes copied, access pattern, alignment, aliasing, data layout.
+- Computation: algorithm complexity with best, worst, average and amortized case, vectorization, SIMD, SWAR, instruction-level parallelism, data dependency chains, pipeline stalls, branch predictability, control flow predictability, call and inlining cost, code size, bounds and overflow checks, numerical stability, precision loss, float associativity.
+- Concurrency: task independence, microparallel algorithms, lock-free structures, lock contention, memory ordering, thread safety, Amdahl's law limit.
+- The system boundary: disk and network I/O, system call frequency, initialization overhead, teardown cost.
+- Behaviour: zero side effects, determinism, adaptive behaviour under load.
+- Measurement: the layer that runs, not the IR; representative input; no dead-code elimination of the measured work; warm-up, interleaving, best of N, noise band.
 
 ## Environment
 
