@@ -20618,8 +20618,9 @@ mod tests {
     /// A single-source program with the runtime linked. Since PLAN-0125-runtime
     /// §6 step 1 the string family is `std/runtime`, which the loader injects
     /// into every program, so a test that compiles anything loads the way the
-    /// CLI does rather than through the bare `vyrn_frontend::check`.
+    /// CLI does, with the core installed, and not through `vyrn_frontend::check`.
     fn linked(src: &str) -> Result<Program, String> {
+        vyrn_lower::install();
         let files = vyrn_frontend::loader::MapResolver(
             [
                 ("main.vyrn", src),
