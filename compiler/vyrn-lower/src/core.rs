@@ -595,8 +595,10 @@ pub enum Callee {
     /// a generation-time surface builtin, a `@`-spelled operation, `print`.
     Reserved,
     /// A call through a function VALUE in scope (RFC-0023): a lambda takes
-    /// its parameters by read.
-    Value,
+    /// its parameters by read. The name holds the value, and the call READS
+    /// it: every walker that counts a row's names counts it
+    /// ([`Callee::value`]). The row's `callee` spells it for a message.
+    Value(Name),
 }
 
 impl Callee {
@@ -611,6 +613,15 @@ impl Callee {
     /// caller keeps its own (`movecheck::sinks` asks `owns_heap` there and
     /// asks nothing at a declared parameter). RFC-0125 §3 M3, the
     /// two-questions slice.
+    /// The name a call through a value reads, or `None` for every other
+    /// callee.
+    pub fn value(self) -> Option<Name> {
+        match self {
+            Callee::Value(n) => Some(n),
+            _ => None,
+        }
+    }
+
     pub fn declared(self) -> bool {
         matches!(self, Callee::Fn | Callee::Method | Callee::Projection)
     }
@@ -1623,7 +1634,10 @@ impl Reads {
                     self.handed[n as usize] = true;
                 }
             }
-            Rhs::Call { args, .. } => {
+            Rhs::Call { args, kind, .. } => {
+                if let Some(f) = kind.value() {
+                    self.val(&Val::Name(f));
+                }
                 for (v, c) in args {
                     if *c == vyrn_frontend::ast::Capability::Consume {
                         self.hand(v);
@@ -5466,7 +5480,7 @@ impl<'a> Builder<'a> {
             callee,
             args: Vec::new(),
             write_back: false,
-            kind: Callee::Value,
+            kind: Callee::Value(n),
             ret: Some(inner),
             solved: Vec::new(),
             targets: Vec::new(),
@@ -6891,15 +6905,15 @@ impl<'a> Builder<'a> {
         // A binding of function type is asked first, as `Checker::call` asks
         // it: a `fn`-typed parameter `h` shadows a function `h` the program
         // declares, and `h(req)` is a call through the value.
-        let bound = self.lookup(name).is_some_and(|n| {
+        let bound = self.lookup(name).filter(|n| {
             matches!(
-                vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, decls),
+                vyrn_frontend::types::resolve(&self.body.names[*n as usize].ty, decls),
                 Type::Fn(..)
             )
         });
-        let mut caps: Vec<Capability> = if bound {
+        let mut caps: Vec<Capability> = if let Some(n) = bound {
             // A lambda captures by read and takes by read (RFC-0023).
-            kind = Callee::Value;
+            kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
         } else if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
             kind = Callee::Fn;
@@ -7584,22 +7598,13 @@ pub fn body_of(name: &str) -> Option<Body> {
 /// each parameter in `bound` leaves the parameter list, a call through it is
 /// [`Callee::Fn`] to its target, and a call that passes it on names that
 /// target. `None` where a bound parameter is read any other way (stored,
-/// captured, handed to a position no target names), or where another name
-/// shares its spelling, because a call through a value names its callee by
-/// spelling.
+/// captured, handed to a position no target names).
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
-    let spelled = |n: Name| &body.names[n as usize].source;
-    let shared = bound.iter().any(|(n, _)| {
-        (body.names.iter().enumerate()).any(|(m, i)| m != *n as usize && i.source == *spelled(*n))
-    });
-    if shared || bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
+    if bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
         return None;
     }
-    let by_spelling: Vec<(&str, &Target)> = (bound.iter())
-        .map(|(n, t)| (spelled(*n).as_str(), t))
-        .collect();
     let mut out = body.clone();
-    bind_targets(&mut out.stmts, &by_spelling, bound);
+    bind_targets(&mut out.stmts, bound);
     let mut reads = vec![0; out.names.len()];
     count_reads(&out.stmts, &mut reads);
     if bound.iter().any(|(n, _)| reads[*n as usize] > 0) {
@@ -7609,7 +7614,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     Some(out)
 }
 
-fn bind_targets(ss: &mut [St], by_spelling: &[(&str, &Target)], bound: &[(Name, Target)]) {
+fn bind_targets(ss: &mut [St], bound: &[(Name, Target)]) {
     for s in ss {
         match s {
             St::Let(_, rhs) | St::Do { rhs, .. } => {
@@ -7622,9 +7627,8 @@ fn bind_targets(ss: &mut [St], by_spelling: &[(&str, &Target)], bound: &[(Name, 
                 else {
                     continue;
                 };
-                if *kind == Callee::Value {
-                    if let Some((_, Target::Fn(f))) = by_spelling.iter().find(|(c, _)| c == callee)
-                    {
+                if let Some(v) = kind.value() {
+                    if let Some((_, Target::Fn(f))) = bound.iter().find(|(n, _)| *n == v) {
                         *kind = Callee::Fn;
                         *callee = f.clone();
                     }
@@ -7638,15 +7642,13 @@ fn bind_targets(ss: &mut [St], by_spelling: &[(&str, &Target)], bound: &[(Name, 
                 }
             }
             St::If { then, els, .. } => {
-                bind_targets(then, by_spelling, bound);
-                bind_targets(els, by_spelling, bound);
+                bind_targets(then, bound);
+                bind_targets(els, bound);
             }
-            St::Loop { body, .. } | St::Block { body, .. } => {
-                bind_targets(body, by_spelling, bound)
-            }
+            St::Loop { body, .. } | St::Block { body, .. } => bind_targets(body, bound),
             St::Switch { arms, .. } => {
                 for a in arms {
-                    bind_targets(&mut a.body, by_spelling, bound);
+                    bind_targets(&mut a.body, bound);
                 }
             }
             _ => {}
@@ -7667,7 +7669,10 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
                 Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
                     vs.iter().for_each(|v| hit(v, out));
                 }
-                Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| hit(v, out)),
+                Rhs::Call { args, kind, .. } => {
+                    kind.value().iter().for_each(|f| hit(&Val::Name(*f), out));
+                    args.iter().for_each(|(v, _)| hit(v, out))
+                }
                 Rhs::Read(_) | Rhs::Take(_) => {}
             },
             St::Store { value, .. } => hit(value, out),
@@ -7859,7 +7864,10 @@ fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
     match r {
         Rhs::Val(v) => names_in_val(v, out),
         Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().for_each(|v| names_in_val(v, out)),
-        Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| names_in_val(v, out)),
+        Rhs::Call { args, kind, .. } => {
+            out.extend(kind.value());
+            args.iter().for_each(|(v, _)| names_in_val(v, out))
+        }
         Rhs::Read(p) | Rhs::Take(p) => names_in_place(p, out),
     }
 }

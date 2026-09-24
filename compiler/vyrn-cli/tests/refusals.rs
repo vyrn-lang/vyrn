@@ -2752,6 +2752,71 @@ fn a_modify_of_the_place_a_read_binding_reads_is_refused() {
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
 
+/// A call through a `fn` value READS the value (RFC-0125 M7, `m7-fnval-b`):
+/// a `modify` of the root the value was read out of ends that borrow, and the
+/// call after it is refused. Before the call counted as a read the program was
+/// accepted and the two walks ran apart: the core's rows call through the
+/// field's address and printed 10, the arm called its copy and printed 6.
+#[test]
+fn a_call_through_a_fn_value_after_a_modify_of_its_root_is_refused() {
+    let src = "type H = { f: fn(Int64) -> Int64, n: Int64 }
+               fn inc(x: Int64) -> Int64 { return x + 1 }
+               fn dbl(x: Int64) -> Int64 { return x * 2 }
+               fn swap(h: modify H) { h.f = dbl }
+               fn main() -> Int64 {
+  let mut h = H { f: inc, n: 1 }
+                 let g = h.f
+  swap(h)
+  print(g(5))
+  return 0
+}
+";
+    let dir = common::scratch("fnval-modify");
+    let want = "`h` is written here while `g` still reads out of it";
+    let mut bad: Vec<String> = Vec::new();
+    std::fs::write(dir.join("modify.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "modify.vyrn", false);
+    if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+        bad.push(format!("`check` said {text}"));
+    }
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "modify.vyrn"])
+        .output()
+        .expect("vyrn run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || !out.stdout.is_empty() || !err.contains(want) {
+        bad.push(format!("`run` ran or said {err}"));
+    }
+    // The way out the menu names: `g` is a value of its own, the one `inc`.
+    let fixed = src.replace(
+        "let g = h.f
+",
+        "let g = h.f.copy()
+",
+    );
+    std::fs::write(dir.join("copy.vyrn"), fixed).expect("write the program");
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["run", "copy.vyrn"])
+        .output()
+        .expect("vyrn run");
+    if String::from_utf8_lossy(&out.stdout).trim() != "6" {
+        bad.push(format!(
+            "the copy printed {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        ));
+    }
+    assert!(
+        bad.is_empty(),
+        "{}",
+        bad.join(
+            "
+  "
+        )
+    );
+}
+
 /// A payload binder of a layout reads out of the scrutinee for the arm's
 /// extent, whoever owns the scrutinee (RFC-0125 M7, `m7-binder`): a store, or
 /// a `modify` argument, that writes the scrutinee while the binder lives is
