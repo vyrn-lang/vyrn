@@ -189,14 +189,15 @@ fn lazy_is_still_an_ordinary_identifier_everywhere_else() {
 ///
 /// Which is also the answer to what a lazy field costs a record that has none.
 /// Nothing: no shape changed, so nothing that is not deferred can pay for
-/// something that is. Inside the reader the deferred spelling is *shorter* — it
-/// skips the intermediate binding's spill, which is the only thing the explicit
-/// form needs and the implicit one does not.
+/// something that is. Inside the reader the explicit spelling is shorter: the
+/// core gives the named closure a place, and the implicit force is the arm's,
+/// which copies the closure into a temporary (the m7-names2 record).
 #[test]
 fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
     let wat_of = |name: &str, src: &str| -> String {
         let path = write(name, src);
         let out = vyrn()
+            .env("VYRN_WASM_NAMES", "1")
             .arg("emit-wat")
             .arg(&path)
             .output()
@@ -231,19 +232,22 @@ fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
          \x20   return 0\n\
          }\n",
     );
-    // Byte for byte, and that is the claim in its strongest form: the two
-    // programs differ in one token — whether the field is declared `lazy` or
-    // `fn() -> String` — and in whether the reader names the closure before
-    // calling it. Neither difference reaches the module. A deferral that built
-    // anything of its own, or a read that forced through a second path, would
-    // show here as one function that differs.
-    //
-    // It used to be a diff of `vyrn emit-ir` with the user's `main` cut out,
-    // because the textual route's `main` DID differ by the binding the implicit
-    // read does not need. The route went (RFC-0125 §2.5), the binding costs
-    // nothing in the one emitter, and the assertion got shorter.
+    // Byte for byte outside the reader. The two programs differ in one token,
+    // whether the field is declared `lazy` or `fn() -> String`, and in whether
+    // `main` names the closure before calling it. The first difference
+    // does not reach the module. A deferral that built anything of its own, or
+    // a read that forced through a second path, would show here as one more
+    // function that differs.
+    let outside_main = |wat: &str| -> String {
+        let at = wat.find("\n  (func $main ").expect("a named `main`");
+        let end = wat[at + 1..]
+            .find("\n  (")
+            .map_or(wat.len(), |e| at + 1 + e);
+        format!("{}{}", &wat[..at], &wat[end..])
+    };
     assert_eq!(
-        deferred, explicit,
+        outside_main(&deferred),
+        outside_main(&explicit),
         "a lazy field must lower as the stored closure it is, and nothing else"
     );
 }
