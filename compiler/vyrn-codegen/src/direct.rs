@@ -20183,7 +20183,8 @@ impl<'p> Fn_<'_, 'p> {
     /// The first name the statement `s` reads, which is the only one the
     /// operand stack can be carrying for it. None for an aggregate call, a
     /// variant and a store into a place, whose destination goes on the stack
-    /// before their parts.
+    /// before their parts, and for `@codeSplice`, whose tag goes before its
+    /// value.
     fn core_first_read(
         &self,
         body: &vyrn_lower::core::Body,
@@ -20195,7 +20196,8 @@ impl<'p> Fn_<'_, 'p> {
                     || self.core_agg_call(body, rhs)
                     || self.core_rebuild(body, rhs)
                     || matches!(rhs, Rhs::Call { callee, kind, args, .. }
-                        if self.core_removes(body, callee, *kind, args).is_some()) =>
+                        if self.core_removes(body, callee, *kind, args).is_some()
+                            || callee == "@codeSplice") =>
             {
                 None
             }
@@ -20219,17 +20221,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::OwnType) => {
                 matches!(args, [_]) && self.core_copy_impl(body, callee, kind, args).is_none()
             }
-            // `@str` frees a String temporary once it has copied it
-            // (`str_temporary`), and the rows state that release as a row of
-            // their own. A name this pass minted is that temporary.
-            Some(Spec::Renders(ret)) => match args {
-                [(Val::Name(n), _)] if *ret == Type::Str => {
-                    let info = &body.names[*n as usize];
-                    !(info.source.starts_with('@') && self.cx.resolve(&info.ty) == Type::Str)
-                }
-                [_] => true,
-                _ => false,
-            },
+            Some(Spec::Renders(_)) => matches!(args, [_]),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
             // A lane index is an immediate, so the row carries it as a literal.
             Some(Spec::Lanes) => {

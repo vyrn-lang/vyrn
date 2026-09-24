@@ -143,7 +143,7 @@ const CALLS: [(&str, &str, usize); 0] = [];
 /// arm to, and neither is one. The other five are shapes the driver got wrong
 /// and nothing asked: `examples/` writes none of them, and the file that does
 /// compiles with no core at all.
-const SHAPES: [(&str, &str); 43] = [
+const SHAPES: [(&str, &str); 44] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -443,6 +443,13 @@ const SHAPES: [(&str, &str); 43] = [
         "a discarded removal and a discarded layout result",
         "type P = { x: Int64, y: Int64 }          type Q = { k: Int64 }          fn mk(k: Int64) -> P { return P { x: k, y: k * 2 } }          fn vyrnTestMain() -> Int64 { let mut xs: Array<Int64> = [1, 2, 3, 4] let mut qs: Array<Q> = [Q { k: 1 }, Q { k: 2 }, Q { k: 3 }] let mut ps: Array<P> = [mk(1), mk(2), mk(3), mk(4), mk(5)] let mut i = 0          while i < 2 { xs.pop() qs.pop() ps.swapRemove(0) mk(i) i = i + 1 }          return xs.length * 1000 + qs.length * 100 + ps.length * 10 + ps[0].x }",
     ),
+    // `@str` copies each String hole, and the release row the driver placed
+    // frees the temporary it copied: a field read, a `+`, a call result and a
+    // rendered number (RFC-0125 M7).
+    (
+        "`@str` of a String temporary",
+        "type U = { name: String } fn id(a: String) -> String { return a + \"!\" }          fn show(u: U, n: Int64) -> String { return \"<\\{u.name}|\\{u.name + u.name}|\\{id(u.name)}|\\{n.toString()}>\" }          fn vyrnTestMain() -> Int64 { let u = U { name: \"ab\" } return show(u, 7).byteLength }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -452,7 +459,7 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 43] = [
+const SHAPE_PIN: [(&str, usize, usize); 44] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
@@ -520,6 +527,7 @@ const SHAPE_PIN: [(&str, usize, usize); 43] = [
     ("a checked construction the rows carry", 0, 0),
     ("a method call on a concrete receiver", 0, 0),
     ("a discarded removal and a discarded layout result", 0, 0),
+    ("`@str` of a String temporary", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
