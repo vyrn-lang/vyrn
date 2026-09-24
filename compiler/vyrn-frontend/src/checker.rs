@@ -210,8 +210,12 @@ pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
 /// name one function (RFC-0125 M7).
 pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
 pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
-/// Suffixed with the contract's name: the argument is a declaration, not a value.
-pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
+
+/// The entry `contractOf(contract)` calls, one per contract: the argument is a
+/// declaration, not a value, so the entry is nullary.
+pub fn gen_entry_contract_of(contract: &str) -> String {
+    format!("__vyrnGenContractOf_{contract}")
+}
 
 /// What one of those three answers, at that arity.
 fn gen_host_primitive(name: &str, argc: usize) -> Option<Type> {

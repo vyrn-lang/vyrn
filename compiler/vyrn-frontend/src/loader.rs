@@ -915,10 +915,8 @@ pub const RT_MODULES: &[RtModule] = &[
     //
     // `chars` was the other route here and RFC-0094 M2 took it: it has a free
     // spelling, so `import { chars } from "std/text"` is the whole of what routing
-    // was doing for it. `lineAt`/`colAt` never routed at all, and M2 left them
-    // alone — see the M4c note in RFC-0078 and the doc on `lineAtV`: the
-    // interpreter memoizes a line-start table that a Vyrn library cannot, worth
-    // 122 ms of a 291 ms `std/vyx` page compile.
+    // was doing for it. `lineAt` and `colAt` route to `lineAtV` and `colAtV`,
+    // which carry the prelude row's signature (RFC-0125 M7).
     //
     // RFC-0125 §3 M6 (the third judgment's fifth slice) added `stringFromBytes`
     // as a DESUGAR rather than a route: only the CHECK half moved here
@@ -940,7 +938,11 @@ pub const RT_MODULES: &[RtModule] = &[
         spec: "std/text",
         prefix: "text$",
         desugared: &["stringFromBytes"],
-        routes: &[("@charCount", "text$charCountV")],
+        routes: &[
+            ("@charCount", "text$charCountV"),
+            ("lineAt", "text$lineAtV"),
+            ("colAt", "text$colAtV"),
+        ],
         always: true,
     },
     // RFC-0081 M2: the six decimal places. Listed as DESUGARED rather than routed
@@ -1023,6 +1025,31 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
         .flat_map(|rt| rt.routes)
         .find(|(builtin, _)| *builtin == name)
         .map(|(_, reserved)| *reserved)
+}
+
+/// The function a builtin call is a call to where its argument's type or name
+/// names the callee (RFC-0125 M7), and the arguments the call hands on; `None`
+/// for any other call. `ty_of` answers the static type of an argument.
+///
+/// `contractOf(C)` calls the entry `vyrn-genwasm` appends for `C` and hands on
+/// nothing, since `C` is a declaration. `toJson(x)` calls the encoder wrapper of
+/// `x`'s type, and `fromJson<T>(s)` the decoder of `T`, which
+/// [`crate::check_and_synthesize`] appends. The builder and the emitter's arm
+/// read the call as a call to the function only where the program declares it.
+pub fn routed_callee<'e>(
+    name: &str,
+    type_args: &[Type],
+    args: &'e [Expr],
+    ty_of: impl FnOnce(&Expr) -> Option<Type>,
+) -> Option<(String, &'e [Expr])> {
+    match (name, type_args, args) {
+        ("contractOf", _, [Expr::Var { name: c, .. }]) => {
+            Some((crate::checker::gen_entry_contract_of(c), &[]))
+        }
+        ("toJson", _, [a]) => Some((crate::jsonenc::wrap_name(&ty_of(a)?), args)),
+        ("fromJson", [t], [_]) => Some((crate::jsondec::top_name(t), args)),
+        _ => None,
+    }
 }
 
 /// The synthesized source of every generator-produced module reachable from the

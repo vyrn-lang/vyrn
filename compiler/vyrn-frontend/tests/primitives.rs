@@ -99,12 +99,6 @@ enum Why {
     /// row: "a builtin becomes, at most, a type-directed compiler part plus a
     /// call into Vyrn."
     Compiler,
-    /// **A cache, with a stated reason.** M5's own row, and the only one. The
-    /// interpreter memoizes a line-start table per buffer that a Vyrn library
-    /// **cannot** hold, because a generator may not touch module state (comptime
-    /// purity). Worth 122 ms of a 291 ms `std/vyx` page compile; the native shim
-    /// holds no such cache and counts exactly as the Vyrn version does.
-    Cache,
     /// **The semantics differ observably.** Moving it is a language change, not a
     /// mechanical move.
     Semantics,
@@ -270,9 +264,6 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("Some", Compiler, "a constructor of the compiler's own Option"),
     ("Ok", Compiler, "a constructor of the compiler's own Result"),
     ("Err", Compiler, "as `Ok`"),
-    // ---- A cache, with a stated reason (M5's row) ----------------------------
-    ("lineAt", Cache, "memoized line-start table; a generator may not hold state"),
-    ("colAt", Cache, "as `lineAt`, sharing the same table"),
     // ---- The semantics differ observably -------------------------------------
     ("parse", Semantics, "WRAPS on overflow where std/num's parseInt64 refuses"),
     // RFC-0083 M2: the one vector operation that is not movable AT ALL. Every
@@ -399,11 +390,13 @@ fn the_direct_backend_carries_the_census_too() {
         // and `examples/storage.vyrn` calls it — so the invisibility is fixed at
         // both ends and this row is gone.
     ];
-    // The names a backend spells with a Rust constant rather than a literal.
+    // The names a backend spells with a Rust constant, or reaches through the
+    // frontend function that names their callee, rather than a literal.
     let alias = |n: &str| match n {
         "@panicAt" => Some("PANIC_AT"),
         "@at" => Some("project::AT"),
         "@slot" => Some("ELEM"),
+        "contractOf" | "toJson" | "fromJson" => Some("routed_callee"),
         _ => None,
     };
     let direct = include_str!("../../vyrn-codegen/src/direct.rs");
@@ -560,8 +553,9 @@ fn nothing_is_both_censused_and_routed() {
 /// bytes there is, which is why M4b(2)'s "wants a primitive the way
 /// `floatFromBits` did" resolves to "it already is one".
 ///
-/// The other three are M4c's, restated where the reason can be found:
-/// `lineAt`/`colAt` are the cache, and `parse` wraps where `std/num` refuses.
+/// The other is M4c's, restated where the reason can be found: `parse` wraps
+/// where `std/num` refuses. M4c's `lineAt`/`colAt` were a cache the interpreter
+/// held; RFC-0125 M7 routed both into `std/text` once the interpreter was gone.
 /// M4c's fourth refusal was `slice`, "blocked on the abort primitive" — RFC-0079
 /// M3 unblocked it by removing the need to abort rather than by supplying one, so
 /// its row is gone and `nothing_is_both_censused_and_routed` is what now enforces
@@ -593,8 +587,6 @@ fn the_refusals_keep_their_reasons() {
     for (name, why) in [
         ("logger", Syscall),
         ("stringFromBytes", View),
-        ("lineAt", Cache),
-        ("colAt", Cache),
         ("parse", Semantics),
     ] {
         assert_eq!(

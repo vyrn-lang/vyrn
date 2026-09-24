@@ -6117,10 +6117,21 @@ impl<'a> Builder<'a> {
                 name,
                 args,
                 line,
-                type_args: _,
+                type_args,
             } => {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
+                }
+                // A builtin whose argument names its callee is a call to that
+                // function where the program declares it (RFC-0125 M7).
+                // Elsewhere the builtin stays, with the effect its row states.
+                if let Some((f, fwd)) =
+                    vyrn_frontend::loader::routed_callee(name, type_args, args, |a| {
+                        self.ty_of(a).ok()
+                    })
+                    .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
+                {
+                    return self.call(&f, fwd, *line, self.produced(e), out);
                 }
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {

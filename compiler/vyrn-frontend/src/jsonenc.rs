@@ -89,8 +89,13 @@ fn spell(ty: &Type) -> String {
     ty.to_string().replace(crate::loader::RT_PREFIX, PH)
 }
 
-/// The `toJson` wrapper for `ty`, by its reserved name — the function
-/// [`encode_expr`] calls. See the wrapper note in [`encoders`].
+/// The `toJson` wrapper for `ty`, by its reserved name: `toJson(x)` at static
+/// type `ty` is one call of it ([`crate::loader::routed_callee`]).
+///
+/// One call, not `json$emit(json$e<key>(arg))`: the inner form made the whole
+/// encoded tree an ARGUMENT TEMPORARY, whose declared `impl Owned` release the
+/// drains refuse, and every `toJson` leaked its tree (exit-residue round four).
+/// The wrapper makes the tree an ordinary binding, which block exit releases.
 pub fn wrap_name(ty: &Type) -> String {
     format!(
         "{}w{}",
@@ -102,27 +107,6 @@ pub fn wrap_name(ty: &Type) -> String {
 /// The placeholder spelling of a wrapper, for use inside generated source.
 fn wrap_ph(ty: &Type) -> String {
     format!("{PH}w{}", crate::types::struct_key(ty))
-}
-
-/// What `toJson(arg)` becomes when the argument's static type is `ty`:
-/// `json$w<key>(arg)`. Every engine calls this at the point where it already
-/// knows `ty`, so the walk has one definition and no engine has a JSON encoder
-/// of its own.
-///
-/// One call, not `json$emit(json$e<key>(arg))` as it used to be: the inner
-/// form made the whole encoded tree an ARGUMENT TEMPORARY, and a temporary
-/// whose release is a declared `impl Owned` call is exactly what the drains
-/// refuse — its body is user code whose timing all three engines must agree
-/// on. Every `toJson` leaked its tree (exit-residue round four: fourteen
-/// blocks for one small record). The wrapper makes the tree an ordinary
-/// BINDING, and block exit already releases those identically everywhere.
-pub fn encode_expr(arg: crate::ast::Expr, ty: &Type, line: usize) -> crate::ast::Expr {
-    crate::ast::Expr::Call {
-        type_args: Vec::new(),
-        name: wrap_name(ty),
-        args: vec![arg],
-        line,
-    }
 }
 
 /// Generate the encoder functions for `tys` and everything reachable from them.
@@ -145,7 +129,7 @@ pub fn encoders(tys: &[Type], types: &HashMap<String, TypeDecl>) -> Result<Vec<F
         // Best-effort per root: an unencodable type in the set is the call site's
         // problem, not this pass's.
         let Ok(e) = w.encoder(ty) else { continue };
-        // The `toJson` wrapper (see `encode_expr`): the tree lives in a
+        // The `toJson` wrapper (see `wrap_name`): the tree lives in a
         // binding, so block exit runs `Json`'s declared release — the one
         // point all three engines already agree on.
         let wph = wrap_ph(ty);

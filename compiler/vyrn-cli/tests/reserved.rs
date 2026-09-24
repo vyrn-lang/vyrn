@@ -37,7 +37,9 @@ fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
     // A user owns those four names now, which is the deletion visible from the
     // surface: `fn get(..)` compiles. RFC-0094 M2 did the same for eleven more,
     // `slice` among them — see `a_name_returned_by_m2_may_be_declared` below.
-    for name in ["at", "push", "len", "pop", "toString"] {
+    // `lineAt` witnesses the sentence for a routed builtin: `std/runtime`'s own
+    // `lineAt` was its corpus witness until RFC-0125 M7 deleted it.
+    for name in ["at", "push", "len", "pop", "toString", "lineAt"] {
         // The `print` is load-bearing: it is what links `std/num`, and linking a
         // std module that uses the builtin is what used to trigger the flood.
         let src = format!(

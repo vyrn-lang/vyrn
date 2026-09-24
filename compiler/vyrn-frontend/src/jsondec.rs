@@ -67,7 +67,8 @@ fn type_key(ty: &Type) -> String {
 }
 
 /// The top-level `String -> Validation<T>` entry point for a decode target, by
-/// its reserved (unspellable) name.
+/// its reserved (unspellable) name: `fromJson<T>(s)` is one call of it
+/// ([`crate::loader::routed_callee`]).
 pub fn top_name(ty: &Type) -> String {
     format!("{}t{}", crate::loader::RT_PREFIX, type_key(ty))
 }
@@ -90,18 +91,6 @@ fn spell(ty: &Type) -> String {
     ty.to_string()
         .replace(crate::loader::RT_PREFIX, PH)
         .replace(rd_prefix(), PD)
-}
-
-/// What `fromJson(T, s)` becomes: a call to `T`'s synthesized entry point. Every
-/// engine calls this at its own `fromJson` arm, so the walk has one definition and
-/// no engine holds a JSON decoder.
-pub fn decode_expr(target: &Type, src: crate::ast::Expr, line: usize) -> crate::ast::Expr {
-    crate::ast::Expr::Call {
-        type_args: Vec::new(),
-        name: top_name(target),
-        args: vec![src],
-        line,
-    }
 }
 
 /// Generate the decoders for `tys` (each a `fromJson` target) and everything

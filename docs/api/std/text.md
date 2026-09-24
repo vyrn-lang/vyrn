@@ -15,17 +15,14 @@ spelling, so it is an ordinary export named `chars` and a caller imports it.
 `charCount` cannot follow — `s.charCount()` is method-only, so the name the
 engines look up is `@charCount`, which no import can bring into scope.
 
-`lineAt` and `colAt` moved neither time: the interpreter memoizes a line-start
-table per buffer and a Vyrn library cannot (a generator may not touch module
-state — comptime purity), and the loop below is O(off) where the memo is O(1).
-That is worth 122 ms of a 291 ms `std/vyx` page compile, measured, so retiring
-them is a decision about that cache rather than about capability. They stay
-builtins and `lineAtV`/`colAtV` stay the thing they are proved against.
+`lineAt` and `colAt` route into `lineAtV` and `colAtV` (RFC-0125 M7). The
+line-start memo that kept them builtins lived in the interpreter, which is
+gone; the runtime's own pair counted exactly as the loops below do.
 
-`tests/text.rs` is what proves it: the `chars` half is now a pinned digest over
+`tests/text.rs` is what proves it: the `chars` half is a pinned digest over
 ~2,000 codepoints (a comparison against the builtin would compare `chars` with
-itself), while the malformed table and the line/column table are still live
-oracles against `stringFromBytes` and `lineAt`/`colAt`, neither of which moved.
+itself), the malformed table is a live oracle against `stringFromBytes`, and
+the line/column table is checked against a count the test makes in Rust.
 `charCount` needed no new digest and that is the interesting part: `charCountV`
 is a byte scan and `chars` is a full decode, so the two are independent
 implementations of one fact, and `chars`'s side of that comparison is already
@@ -161,16 +158,9 @@ function, a line of emitted IR and ~30 lines of hand-written `wasm-encoder`.
 fn lineAtV(b: Array<UInt8>, off: Int64) -> Int64
 ```
 
-The 1-based line number of byte offset `off` in `b` — the `lineAt` builtin, in
-Vyrn. One more than the number of LF bytes before `off`; an offset past the
-end reads as the end, and a negative one as 0.
-
-This is the shape the builtin exists to avoid: `lineAt` is a builtin BECAUSE
-the obvious loop is O(off) and a scanner asks once per node, which cost
-`std/vyx` 122 ms of a 291 ms page compile. The interpreter memoizes a
-line-start table per buffer; the native shim counts directly, exactly like
-this. So the Vyrn version is not slower than every engine — it is slower than
-one of them, and identical to the other.
+The 1-based line number of byte offset `off` in `b`, which `lineAt` calls.
+One more than the number of LF bytes before `off`; an offset past the end
+reads as the end, and a negative one as 0. O(off) per call.
 
 ## colAtV
 
@@ -178,7 +168,7 @@ one of them, and identical to the other.
 fn colAtV(b: Array<UInt8>, off: Int64) -> Int64
 ```
 
-The 1-based column of byte offset `off` in `b` — the `colAt` builtin, in Vyrn.
+The 1-based column of byte offset `off` in `b`, which `colAt` calls.
 
 **The column counts BYTES, not codepoints**, and that was measured off the
 builtin rather than assumed: both the interpreter (`off - lineStart + 1`) and

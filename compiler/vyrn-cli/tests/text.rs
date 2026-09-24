@@ -23,12 +23,9 @@
 //!    implementations of one fact; and the chain is not closed, because `chars`'s
 //!    answers over these buffers are what item 2's digest pins to the C and Rust
 //!    that existed before anything moved;
-//! 5. `lineAtV`/`colAtV` against `lineAt`/`colAt` at every offset — **also still a
-//!    live oracle**, because those two builtins did not move either (the
-//!    interpreter's memoized line-start table is why, and retiring it is M5's
-//!    question). Every offset rather than a chosen few precisely because the two
-//!    engine implementations compute the answer differently: a binary search over
-//!    the memoized table against a backward walk to the previous LF.
+//! 5. `lineAt`/`colAt` at every offset against a count this file makes in Rust.
+//!    RFC-0125 M7 routed both into `lineAtV`/`colAtV`, so a comparison of the
+//!    builtin with the Vyrn function would compare one function with itself.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -345,16 +342,13 @@ fn decodeutf8_and_stringfrombytes_refuse_exactly_what_rust_refuses() {
     );
 }
 
-/// `lineAtV`/`colAtV` against `lineAt`/`colAt`, at every offset of every buffer
-/// (RFC-0078 M4b).
+/// `lineAt`/`colAt` at every offset of every buffer, against the line and the
+/// byte column counted here (RFC-0078 M4b).
 ///
-/// Every offset rather than a chosen few, because the two engine implementations
-/// compute the answer differently — the interpreter binary-searches a memoized
-/// table of line starts, the native shim walks backwards to the previous LF — and
-/// a third implementation agreeing with both at offset 0 and disagreeing at the
-/// byte after the last newline is exactly the failure mode. Offsets run from -3
-/// to `len + 3`, since both builtins clamp and the clamping is unwritten
-/// behaviour nothing else pins.
+/// Every offset rather than a chosen few, because a walk that agrees at offset 0
+/// and disagrees at the byte after the last newline is exactly the failure mode.
+/// Offsets run from -3 to `len + 3`, since both builtins clamp and the clamping
+/// is unwritten behaviour nothing else pins.
 #[test]
 fn line_and_column_match_the_builtins_at_every_offset() {
     let texts: [&str; 12] = [
@@ -372,18 +366,8 @@ fn line_and_column_match_the_builtins_at_every_offset() {
         "é\né\né",              // a multi-byte codepoint spanning a column boundary
     ];
 
-    let harness = r#"import { colAtV, lineAtV } from "std/text"
-
-fn row(b: Array<UInt8>, off: Int64) -> String {
-    let ml = lineAtV(b, off)
-    let mc = colAtV(b, off)
-    let tl = lineAt(b, off)
-    let tc = colAt(b, off)
-    if ml == tl && mc == tc {
-        return "ok " + tl.toString() + ":" + tc.toString()
-    }
-    return "MISMATCH mine " + ml.toString() + ":" + mc.toString() + " builtin " +
-        tl.toString() + ":" + tc.toString()
+    let harness = r#"fn row(b: Array<UInt8>, off: Int64) -> String {
+    return lineAt(b, off).toString() + ":" + colAt(b, off).toString()
 }
 "#;
     let mut rows: Vec<(usize, i64)> = Vec::new();
@@ -401,8 +385,18 @@ fn row(b: Array<UInt8>, off: Int64) -> String {
     let bad: Vec<String> = lines
         .iter()
         .zip(&rows)
-        .filter(|(l, _)| !l.starts_with("ok"))
-        .map(|(l, (i, off))| format!("{:?} @ {off}: {l}", texts[*i]))
+        .filter_map(|(l, (i, off))| {
+            let b = texts[*i].as_bytes();
+            let o = (*off).clamp(0, b.len() as i64) as usize;
+            let line = 1 + b[..o].iter().filter(|&&c| c == b'\n').count();
+            let col = o - b[..o]
+                .iter()
+                .rposition(|&c| c == b'\n')
+                .map_or(0, |p| p + 1)
+                + 1;
+            let want = format!("{line}:{col}");
+            (*l != want).then(|| format!("{:?} @ {off}: {l}, counted {want}", texts[*i]))
+        })
         .collect();
     assert!(
         bad.is_empty(),
@@ -423,7 +417,7 @@ fn row(b: Array<UInt8>, off: Int64) -> String {
         .map(|(l, _)| l.clone())
         .expect("the offset after the first é");
     assert_eq!(
-        three, "ok 1:3",
+        three, "1:3",
         "a column is a byte offset, not a character index"
     );
 }
