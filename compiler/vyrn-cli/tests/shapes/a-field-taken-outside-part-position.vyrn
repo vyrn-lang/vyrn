@@ -1,0 +1,7 @@
+// a field taken outside part position
+// pin: 0 break, 0 continue
+// A take out of a field is a part only where a literal's row builds it into
+// its parent; any other take is m7-move's alias or copy (RFC-0125 M7,
+// `m7-take`): a parameter's and a module-state field pushed and handed
+// back, a local's field taken, and a field taken into a `consume` argument.
+type S = { keys: Array<String>, n: Int64 }          type R = { value: Array<Int64>, err: String }          let mut g: S = S { keys: [], n: 0 }          fn add(s: modify S, k: String) -> Unit { s.keys.push(k.copy()) s.n = s.n + 1 }          fn keep(xs: consume Array<Int64>) -> Int64 { return xs.length }          fn local(k: Int64) -> Int64 { let r = R { value: [k, k], err: "ab" } let t = consume r.value return keep(t) + r.err.byteLength }          fn arg(k: Int64) -> Int64 { let r = R { value: [k], err: "e" } return keep(consume r.value) }          fn global(k: Int64) -> Int64 { g.keys.push("x" + k.toString()) return g.keys.length }          fn vyrnTestMain() -> Int64 { let mut s = S { keys: [], n: 0 } add(s, "a") add(s, "b") return s.n * 1000 + local(3) * 100 + arg(4) * 10 + global(0) }
