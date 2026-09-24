@@ -465,6 +465,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
+        kept: RefCell::new(Vec::new()),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -1292,6 +1293,10 @@ struct Cx<'a> {
     /// A miss is a literal inside a tree the program does not hold — a leaked
     /// desugar — and the caller keeps its clone for that.
     lambdas: HashMap<usize, &'a LambdaBody>,
+    /// The nodes this backend makes or copies and then hands to a walk that
+    /// keys on their addresses, kept alive for the compile: a key built from a
+    /// node's address is sound only while the node lives (#444).
+    kept: RefCell<Vec<Rc<dyn std::any::Any>>>,
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -1606,6 +1611,14 @@ impl<'a> Cx<'a> {
     /// for a literal the program does not hold — see [`Cx::lambdas`].
     fn lambda(&self, at: &Expr) -> Option<&'a LambdaBody> {
         self.lambdas.get(&(at as *const Expr as usize)).copied()
+    }
+
+    /// `node`, moved where it lives as long as this `Cx`, so its address keys
+    /// nothing else for the whole compile.
+    fn keep<T: 'static>(&self, node: T) -> Rc<T> {
+        let kept = Rc::new(node);
+        self.kept.borrow_mut().push(kept.clone());
+        kept
     }
 
     /// Whether a narrow scalar load of `ty` has to sign-extend — [`load_of`]'s
@@ -9691,9 +9704,7 @@ impl<'p> Fn_<'_, 'p> {
             line,
         };
         match arg {
-            Expr::Lambda { params, body, line } => {
-                self.lift_lambda(m, arg, params, body, ptys, expected_ret, *line)
-            }
+            Expr::Lambda { line, .. } => self.lift_lambda(m, arg, ptys, expected_ret, *line),
             Expr::Var { name, .. } => {
                 // A pass-through `fn`-typed parameter: forward the target AND the
                 // captures, which are this instance's own capture parameters. The
@@ -9865,12 +9876,22 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         at: &Expr,
-        params: &[Binder],
-        body: &LambdaBody,
         ptys: &[Type],
         expected_ret: &Type,
         line: usize,
     ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
+        // The key below is the literal's address. A literal the program does
+        // not hold dies with its tree, and a later one could land where it was,
+        // so the key names a copy this `Cx` keeps.
+        let kept = self
+            .cx
+            .lambda(at)
+            .is_none()
+            .then(|| self.cx.keep(at.clone()));
+        let at = kept.as_deref().unwrap_or(at);
+        let Expr::Lambda { params, body, .. } = at else {
+            return unsupported("a lambda lifted from another expression", line);
+        };
         if params.len() != ptys.len() {
             return unsupported("a lambda with the wrong number of parameters", line);
         }
@@ -10208,7 +10229,7 @@ impl<'p> Fn_<'_, 'p> {
         e: &Expr,
         sig_ty: &Type,
     ) -> Result<Type, String> {
-        let Expr::Lambda { params, body, line } = e else {
+        let Expr::Lambda { line, .. } = e else {
             return unsupported("a function value from a non-lambda", Expr::line(e));
         };
         let Type::Fn(ptys, ret) = sig_ty else {
@@ -10217,7 +10238,7 @@ impl<'p> Fn_<'_, 'p> {
         // The expected-type stack must not leak into the lifted body: its own
         // storage boundaries push their own types.
         let saved = std::mem::take(&mut self.expect);
-        let r = self.lift_lambda(m, e, params, body, ptys, ret, *line);
+        let r = self.lift_lambda(m, e, ptys, ret, *line);
         self.expect = saved;
         let (target, srcs, _) = r?;
         self.build_fnval(m, b, sig_ty, target, &srcs, *line)
@@ -13656,14 +13677,16 @@ impl<'p> Fn_<'_, 'p> {
         }
         if let Pattern::Variant(_, binds) = pattern {
             let bind = &binds[0];
-            let synth = Stmt::Let {
+            // Kept, because `stmt` keys a release and an accumulator on the
+            // statement's address.
+            let synth = self.cx.keep(Stmt::Let {
                 name: bind.name.clone(),
                 mutable: false,
                 ty: None,
                 value: p.place.clone(),
                 line,
                 col: bind.col,
-            };
+            });
             self.stmt(m, b, &synth)?;
         }
         self.block(m, b, then_block)?;
@@ -21020,6 +21043,7 @@ mod tests {
             facts: None,
             types: HashMap::new(),
             lambdas: HashMap::new(),
+            kept: RefCell::new(Vec::new()),
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,
