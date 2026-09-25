@@ -2512,50 +2512,15 @@ pub fn build_module_state<'a>(
     rows: &[crate::Row<'a>],
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
-    let seed = &seed;
-    let (types, produced, solved) = row_facts(rows);
-    let mut b = Builder {
+    let mut b = Builder::bare(
         program,
         own,
-        proto: &own.proto,
-        types,
-        produced,
-        solved,
-        placed: HashMap::new(),
-        body: Body {
-            name: String::new(),
-            file: None,
-            export: false,
-            names: Vec::new(),
-            params: Vec::new(),
-            stmts: Vec::new(),
-            lambdas: Vec::new(),
-            cands: Vec::new(),
-            loop_buffers: Vec::new(),
-            unreached: Vec::new(),
-            unbound_drops: Vec::new(),
-        },
-        scope: Vec::new(),
-        by_binding: HashMap::new(),
-        temps: 0,
-        pending_receiver: None,
-        drain: 0,
-        after: Vec::new(),
-        after_of_rhs: Vec::new(),
-        stream_loops: Vec::new(),
-        walks: Vec::new(),
-        reading: Vec::new(),
-        seed,
-        loop_marks: Vec::new(),
-        loop_aliased: HashMap::new(),
-        rebinding: false,
-        call_keeps: None,
-        pending_closure: None,
-        appends: std::collections::HashSet::new(),
-        region: 0,
-        ret: None,
-        released: None,
-    };
+        rows,
+        &seed,
+        String::new(),
+        None,
+        HashMap::new(),
+    );
     let mut out = Vec::new();
     for g in &program.globals {
         let v = b.val(&g.init, &mut out)?;
@@ -2609,7 +2574,6 @@ fn build_outside_seeded<'a>(
     rows: &[crate::Row<'a>],
     seed: &std::collections::HashSet<usize>,
 ) -> Result<Body, Gap> {
-    let (types, produced, solved) = row_facts(rows);
     // The plan's rows for this body. No substitution: the body has no type
     // parameters, so `own`'s answer is already the concrete one.
     let no_steps: Vec<Release> = Vec::new();
@@ -2618,48 +2582,7 @@ fn build_outside_seeded<'a>(
     for r in steps {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    let mut b = Builder {
-        program,
-        own,
-        proto: &own.proto,
-        types,
-        produced,
-        solved,
-        placed,
-        body: Body {
-            name: name.to_string(),
-            file,
-            export: false,
-            names: Vec::new(),
-            params: Vec::new(),
-            stmts: Vec::new(),
-            lambdas: Vec::new(),
-            cands: Vec::new(),
-            loop_buffers: Vec::new(),
-            unreached: Vec::new(),
-            unbound_drops: Vec::new(),
-        },
-        scope: Vec::new(),
-        by_binding: HashMap::new(),
-        temps: 0,
-        pending_receiver: None,
-        drain: 0,
-        after: Vec::new(),
-        after_of_rhs: Vec::new(),
-        stream_loops: Vec::new(),
-        walks: Vec::new(),
-        reading: Vec::new(),
-        seed,
-        loop_marks: Vec::new(),
-        loop_aliased: HashMap::new(),
-        rebinding: false,
-        call_keeps: None,
-        pending_closure: None,
-        appends: std::collections::HashSet::new(),
-        region: 0,
-        ret: None,
-        released: None,
-    };
+    let mut b = Builder::bare(program, own, rows, seed, name.to_string(), file, placed);
     b.appends = crate::append::append_candidates(block);
     let mut out = Vec::new();
     b.block(block, &mut out)?;
@@ -2679,6 +2602,41 @@ struct Unreached {
     elem: Type,
     line: usize,
     site: usize,
+}
+
+/// A module-state initializer or a `where` predicate as a body of its own,
+/// for the typed judgment alone (RFC-0125 M7, the judgment's reach): the
+/// checker types both, and neither is a function. `binds` are the names the
+/// checker put in scope, a predicate's `value` or its record's fields. The
+/// body holds the expression's value and nothing else: it places no row and
+/// is never emitted.
+pub fn build_root<'a>(
+    program: &'a Program,
+    own: &'a Ownership,
+    rows: &[crate::Row<'a>],
+    file: Option<String>,
+    binds: &[(String, Type)],
+    e: &'a Expr,
+) -> Result<Body, Gap> {
+    let seed = std::collections::HashSet::new();
+    let mut b = Builder::bare(
+        program,
+        own,
+        rows,
+        &seed,
+        String::new(),
+        file,
+        HashMap::new(),
+    );
+    for (name, ty) in binds {
+        let n = b.name(name, ty.clone(), false, e.line());
+        b.scope.push((name.clone(), n));
+        b.body.params.push(n);
+    }
+    let mut out = Vec::new();
+    b.val(e, &mut out)?;
+    b.body.stmts = out;
+    Ok(b.body)
 }
 
 struct Builder<'a> {
@@ -2771,6 +2729,62 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
+    /// A builder for a body that is no instance: no substitution, and the
+    /// rows' facts as the checker recorded them.
+    fn bare(
+        program: &'a Program,
+        own: &'a Ownership,
+        rows: &[crate::Row<'a>],
+        seed: &'a std::collections::HashSet<usize>,
+        name: String,
+        file: Option<String>,
+        placed: HashMap<(Exit, usize), Vec<&'a Release>>,
+    ) -> Self {
+        let (types, produced, solved) = row_facts(rows);
+        Builder {
+            program,
+            own,
+            proto: &own.proto,
+            types,
+            produced,
+            solved,
+            placed,
+            body: Body {
+                name,
+                file,
+                export: false,
+                names: Vec::new(),
+                params: Vec::new(),
+                stmts: Vec::new(),
+                lambdas: Vec::new(),
+                cands: Vec::new(),
+                loop_buffers: Vec::new(),
+                unreached: Vec::new(),
+                unbound_drops: Vec::new(),
+            },
+            scope: Vec::new(),
+            by_binding: HashMap::new(),
+            temps: 0,
+            pending_receiver: None,
+            drain: 0,
+            after: Vec::new(),
+            after_of_rhs: Vec::new(),
+            stream_loops: Vec::new(),
+            walks: Vec::new(),
+            reading: Vec::new(),
+            seed,
+            loop_marks: Vec::new(),
+            loop_aliased: HashMap::new(),
+            rebinding: false,
+            call_keeps: None,
+            pending_closure: None,
+            appends: std::collections::HashSet::new(),
+            region: 0,
+            ret: None,
+            released: None,
+        }
+    }
+
     fn owns(&self, ty: &Type) -> bool {
         self.proto.owns_heap(ty) || self.proto.must_use(ty) || self.proto.release_kind(ty).is_some()
     }
@@ -8887,6 +8901,50 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 typed(program, &top, &inst.func.module, true);
             }
             Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name),
+        }
+    }
+    // Each module-state initializer and each `where` predicate, for the
+    // judgment alone, as a generic function with no instance is.
+    for g in &program.globals {
+        match build_root(
+            program,
+            own,
+            &lowered.globals,
+            g.module.clone(),
+            &[],
+            &g.init,
+        ) {
+            Ok(top) => {
+                typed(program, &top, &g.module, true);
+            }
+            Err(e) => {
+                refuse_gap(e, &g.module, &g.name);
+            }
+        }
+    }
+    for d in &program.type_decls {
+        let Some(p) = &d.predicate else { continue };
+        let binds: Vec<(String, Type)> = match &d.base {
+            Type::Record(fields) => fields
+                .iter()
+                .map(|f| (f.name.clone(), f.ty.clone()))
+                .collect(),
+            base => vec![("value".to_string(), base.clone())],
+        };
+        match build_root(
+            program,
+            own,
+            &lowered.predicates,
+            d.module.clone(),
+            &binds,
+            p,
+        ) {
+            Ok(top) => {
+                typed(program, &top, &d.module, true);
+            }
+            Err(e) => {
+                refuse_gap(e, &d.module, &d.name);
+            }
         }
     }
     // A placed release of a generic declared release is a call the lowering's
