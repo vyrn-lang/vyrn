@@ -2424,22 +2424,14 @@ fn main() -> Int64 {
 // free the field.
 #[test]
 fn a_generic_release_placed_inside_a_generic_release_is_freed_on_both_walks() {
-    shape_runs_clean(
-        "a-generic-release-placed-inside-a-generic-release",
-        "6
-",
-    );
+    shape_runs_clean("a-generic-release-placed-inside-a-generic-release", "6\n");
 }
 
 // A map literal whose values are layouts: a repeated key, a record with a
 // String field, and a nested array (record `m7-fieldmap`).
 #[test]
 fn a_map_literal_of_layout_values_is_freed_on_both_walks() {
-    shape_runs_clean(
-        "a-map-literal-of-layout-values-the-rows-carry",
-        "720323
-",
-    );
+    shape_runs_clean("a-map-literal-of-layout-values-the-rows-carry", "720323\n");
 }
 
 // A record and an enum as a map's key, stored over and looked up
