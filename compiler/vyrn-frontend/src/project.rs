@@ -32,7 +32,9 @@
 //! whose `place at` yields `self.data[i]` inlines to the same `@slot` through
 //! one more level of the same machinery.
 
-use crate::ast::{BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type};
+use crate::ast::{
+    BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type, TypeDecl,
+};
 use std::collections::HashMap;
 
 /// The element-place primitive: `@slot(container, index)`. Unspellable (no
@@ -319,6 +321,10 @@ thread_local! {
     static STORES: std::cell::RefCell<
         Option<HashMap<usize, (String, Expr, Expr, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
+    /// The `Schema` literal each `schemaOf<T>()` node stands for, keyed by
+    /// the call node, with the target's name. See [`schema`].
+    static SCHEMAS: std::cell::RefCell<Option<HashMap<usize, (String, &'static Expr)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Share every desugar built while this value is alive.
@@ -343,6 +349,7 @@ impl Memo {
         OPT_MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         LOOPS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         STORES.with(|m| *m.borrow_mut() = Some(HashMap::new()));
+        SCHEMAS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         Memo(())
     }
 }
@@ -353,7 +360,33 @@ impl Drop for Memo {
         OPT_MEMO.with(|m| *m.borrow_mut() = None);
         LOOPS.with(|m| *m.borrow_mut() = None);
         STORES.with(|m| *m.borrow_mut() = None);
+        SCHEMAS.with(|m| *m.borrow_mut() = None);
     }
+}
+
+/// The `Schema` literal the call `schemaOf<T>()` at `call` stands for
+/// ([`crate::types::schema_struct_lit`] of `decl`), expanded once and shared
+/// while a [`Memo`] is open, so the checker types the nodes the lowering
+/// walks. `None` outside a memo.
+pub fn schema(call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
+    SCHEMAS.with(|m| {
+        let mut m = m.borrow_mut();
+        let m = m.as_mut()?;
+        let key = call as *const Expr as usize;
+        if let Some((_, e)) = m.get(&key).filter(|(n, _)| *n == decl.name) {
+            return Some(*e);
+        }
+        let e: &'static Expr = Box::leak(Box::new(crate::types::schema_struct_lit(decl)));
+        m.insert(key, (decl.name.clone(), e));
+        Some(e)
+    })
+}
+
+/// The `Schema` literal the checker expanded for the call at `call`
+/// ([`schema`]), which the lowering walks in its place.
+pub fn schema_at(call: &Expr) -> Option<&'static Expr> {
+    let key = call as *const Expr as usize;
+    SCHEMAS.with(|m| m.borrow().as_ref()?.get(&key).map(|(_, e)| *e))
 }
 
 /// Whether a compile-scope [`Memo`] is open. A projection store is expanded

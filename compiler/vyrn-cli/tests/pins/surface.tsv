@@ -11,7 +11,7 @@ Type::Mask64x2	6	1	7	1	0	0	15
 Type::Bool	32	2	37	6	0	2	79
 Type::Str	45	2	78	8	0	4	137
 Type::Unit	25	4	32	9	2	0	72
-Type::Named	36	3	17	9	3	6	74
+Type::Named	37	3	17	9	3	6	75
 Type::Record	11	3	5	18	0	5	42
 Type::Omit	3	1	0	9	0	0	13
 Type::Pick	3	1	0	9	0	0	13
@@ -19,7 +19,7 @@ Type::Merge	3	1	0	9	0	0	13
 Type::Partial	3	1	0	9	0	0	13
 Type::Enum	12	5	9	12	0	3	41
 Type::Param	18	2	9	4	11	1	45
-Type::App	13	3	2	11	1	0	30
+Type::App	14	3	2	11	1	0	31
 Type::Array	31	4	43	7	2	5	92
 Type::ArrayN	16	7	21	9	0	4	57
 Type::SmallArray	21	2	26	7	1	4	61
@@ -31,4 +31,4 @@ Type::Fn	26	5	31	10	1	0	73
 Type::Lazy	7	1	2	9	0	0	19
 Type::Never	4	2	6	2	0	0	14
 Type::Err	81	1	0	1	0	0	83
-all	575	74	512	220	34	47	1462
+all	577	74	512	220	34	47	1464

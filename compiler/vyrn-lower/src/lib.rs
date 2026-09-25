@@ -1137,6 +1137,13 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
             };
             desugar(e, method, args, d, chain, w);
         }
+        // `schemaOf<T>()` lowers through the literal the checker expanded
+        // for it ([`vyrn_frontend::project::schema_at`]).
+        Expr::Call { name, .. } if name == "schemaOf" => {
+            if let Some(lit) = vyrn_frontend::project::schema_at(e) {
+                expr(lit, d, chain, w);
+            }
+        }
         Expr::Call { args, .. } | Expr::TryConstruct { args, .. } => {
             for a in args {
                 kids.push(expr(a, d, chain, w));
