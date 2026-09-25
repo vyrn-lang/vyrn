@@ -79,3 +79,16 @@ Licence:
 - `site/export.vyrn`, best of 8 interleaved: 3,835 ms on main, 3,485 ms at the tip, inside the noise.
 Time: about 110 minutes: 50 work, 45 gates, 15 builds.
 Left: group 4, blocked by a decision. A literal row names no width and no node (`Lit`, "the WIDTH is not here"). So the judgment cannot tell `let x: UInt8 = 300` from `let x: Int64 = 300`, and cannot say which statement's line it is on. The checker states the fit rule twice (`Checker::expr` and `adapt_int_literal`).
+
+#### The integer literal fit rule is stated once, in the checker (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, decision A, group 4.
+Decision: the literal checks stay in the checker, because the fit is part of producing the literal's type from its slot; the literal row gains no width. The lead's.
+Went: two statements of the fit rule (`int_literal_fits` beside `int_value_fits`), two renderings of the value (`render_int_literal`, the closure in `int_literal_value`), and three copies of the sentence. `fits` states it for a slot's integer literal, a slot's byte literal and a literal adapted to a sized sibling.
+Stayed: the other literal checks (`[]`, `[:]`, the element limit, the `SmallArray` length), for the same reason.
+Lines: `checker.rs` 14,765 to 14,735. Refusals: 0 lost / 0 gained. Manifest: untouched.
+Licence:
+- `vyrn check` over 507 roots against main 6ad6dfc2: byte-identical. `checker-rules` pin unchanged.
+- two witness programs with 17 literals: sized slots, a byte into `Int8`, `UInt64`'s maximum, a negated minimum, and siblings on both sides of `+`, `==`, `<` and `>`. Byte-identical under both binaries.
+- `nextest -p vyrn-cli` 674 passed. `-p vyrn-frontend -p vyrn-lower` 1,079 passed. `lowered_dump` and `refusals` `--ignored` passed. `vyrn-lsp` passed.
+- pins: `checker-census` typing judgment 123 to 121 refusals; the literal section's anchor is `literal_value`.
+Time: about 25 minutes.
