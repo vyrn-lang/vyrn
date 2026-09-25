@@ -18845,9 +18845,11 @@ impl<'p> Fn_<'_, 'p> {
         }
         // A take a rebuild hands back is the place it was taken from: the
         // arm rebuilds a field in place (`s.keys.push(k)`), and the hole the
-        // take leaves is the rebuild's own until the store fills it.
+        // take leaves is the rebuild's own until the store fills it. So is a
+        // take the next row moves on ([`core_moves_on`]).
         if let Some(p) = core_taken(body, n) {
-            return self.core_hands_back(body, &body.stmts, n).then_some(p);
+            return (self.core_hands_back(body, &body.stmts, n) || core_moves_on(body, n))
+                .then_some(p);
         }
         let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
         let owned = info.releases && !info.borrow;
@@ -20814,6 +20816,46 @@ fn core_taken(
         (Some((_, Rhs::Take(p))), None) => Some(p),
         _ => None,
     }
+}
+
+/// Whether the take `n` moves on at the next row and nowhere else: the value
+/// a store writes, or a `consume` argument no other argument's root shares.
+/// The part moves from its field to its destination, as the arm's
+/// `x = consume r.f` does, so the name needs no slot of its own. The take's
+/// root is a local that the store does not write, so no row between the take
+/// and the move writes the field.
+fn core_moves_on(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
+    let Some((root, _)) = core_taken(body, n).and_then(vyrn_lower::kernel::root_of) else {
+        return false;
+    };
+    let rooted = |p: &vyrn_lower::core::Place| {
+        vyrn_lower::kernel::root_of(p).is_some_and(|(r, _)| r == root)
+    };
+    let mut found = false;
+    each_list(&body.stmts, &mut |ss| {
+        let Some(i) = ss
+            .iter()
+            .position(|s| matches!(s, St::Let(t, _) if *t == n))
+        else {
+            return;
+        };
+        found = match ss.get(i + 1) {
+            Some(St::Store {
+                place,
+                value: Val::Name(v),
+                ..
+            }) => *v == n && !rooted(place),
+            Some(St::Let(_, Rhs::Call { args, .. })) => {
+                args.iter()
+                    .any(|a| *a == (Val::Name(n), Capability::Consume))
+                    && args.iter().all(|(v, _)| {
+                        *v == Val::Name(n) || !matches!(v, Val::Name(m) if *m == root)
+                    })
+            }
+            _ => false,
+        };
+    });
+    found && body.occurrences()[n as usize] == 2
 }
 
 /// Every `let` a statement's rows bind, itself and everything under it.

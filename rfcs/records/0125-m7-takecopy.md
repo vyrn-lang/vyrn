@@ -1,0 +1,21 @@
+#### A take the next row moves on holds its field's place (2026-09-25, `m7-takecopy`)
+RFC-0125, milestone M7.
+Decision: a take whose one use is the next row, as the value a store writes or as a `consume` argument, needs no slot: the part moves from its field to its destination, as the arm's `work = consume folded.buf` does. `core_alias` already held a take a rebuild hands back as its place; `core_moves_on` adds the second case to that one reader. The lead's rule (brief `m7-takecopy`).
+Went: m7-move's let-copy slot for these takes (`core_copies`). Stayed: a take read by a later row, and a take whose store writes its own root, because the store releases the old value before it copies.
+Lines: `direct.rs` 21,411 to 21,453 (+42: `core_moves_on` and its doc 40, the clause in `core_alias` 2). Refusals: 0 lost / 0 gained. Manifest: 2 rows, below.
+Trace: `fannkuch`'s rows are `let @t6 = take folded.buf` then `work = @t6`, with no row between. 370022c9's arm copies 24 bytes from `folded.buf` into `work` once. 069c4a49 copies them into a slot at 104 and then from the slot into `work`, and the frame grows from 112 to 128 bytes. The tip copies once, from `folded.buf` into `work`, and the frame is 112 bytes again. No row between the take and the store reads or writes `folded`, so the slot carried no soundness.
+Licence:
+- `vyrn run --profile examples/fannkuch.vyrn`, operations executed: 370022c9 8,911,713; 069c4a49 9,335,581; tip 9,184,381. The fix removes 151,200, 30 per permutation of 7! = 5,040. The prediction was 8,911,713 or below; it is not met, see Findings.
+- `fannkuch` `memory.copy` 1 / 2 / 1 on the three binaries.
+- the 2 moved rows, `VYRN_WASM_NAMES=1`, `wasm2wat` against 069c4a49's binary: `fannkuch` `fannkuch` (above); `graphql` `gqlListValue` (frame 144 to 128, its 16-byte copy gone, `memory.copy` 6 to 5), `gqlSelSet` (256 to 240, 15 to 13), `gqlProjectEach` and its instance (11 to 10). `graphql` operations: 6,108,163 / 6,095,701 / 6,094,231.
+- the shape `a-field-taken-outside-part-position` (`a0501ab7`): `arg`'s `keep(consume r.value)` loses its 24-byte copy and its frame falls from 64 to 32 bytes. Both binaries print 2411 with the core walk on and off, under `VYRN_LEAK_CHECK=1`.
+- `fannkuch` and `graphql` under `VYRN_LEAK_CHECK=1` with 069c4a49's binary and the tip's: the same output, exit 0, no leak line.
+- `coredrive --ignored`: taken 20,906 of 21,177, unchanged; 1 byte-identical, 167 run the same, 0 run apart. `kernel` 27,066 / 0 / 0. `residue --ignored`: engine 173 clean / 0 leaking, route 173 clean / 0 leaking.
+- `vyrn check` over 492 roots, 069c4a49's binary against the tip's: equal but for one generator-cache warning in `shelf/server/view`, which names the other binary's cache entry.
+- pins by `VYRN_PIN=write`, after the rebase onto 513bae71: `emitter-census` the mapping 11,882 to 11,924; `emitter-reads` both, for two questions 9,740 to 9,782 lines and 305 to 309 rows. The manifest delta against 513bae71 is still the 2 rows.
+- wall time, not a licence: `vyrn bench examples/fannkuch.vyrn`, six interleaved rounds, best 25.41 ms (370022c9), 24.45 ms (069c4a49), 22.43 ms (tip). Round medians ran 24.7 to 42.9 ms on every binary, so the band holds all three.
+Tried: hoisting an element store's header (`header_reads`, the m7-hoist prototype, `C:/wtboxtmp/hoist-proto.patch`). 18 manifest rows, taken unchanged. `fannkuch` 9,335,581 to 9,349,799 (+0.15%); fewer operations in 8 programs (`contractquery` -0.60%, `sha1` -0.35%, `threeengines` -0.24%, `spectralnorm` -0.10%, 4 under -0.1%), the same in 9. Bench, 12 rounds, paired medians inside the band. Dropped by the lead: the numbers do not license it. On top of this change it gives 9,198,599, again more.
+Findings:
+- the other 272,668 operations of the gap to 370022c9 (54 per permutation) are not the take. The core walk reads `count`'s header at each `count[r - 1] = r` and `count[r] = count[r] - 1`, where the arm read it once before the outer loop, and it binds `r - 1` to a second local. The hoist prototype does not recover them, and why it adds operations is not explained.
+- `local`'s `let t = consume r.value` in the shape keeps its slot. Why was not traced.
+Left: `count`'s per-store header read in `fannkuch`, blocked by a hoist the numbers license, which none yet does.
