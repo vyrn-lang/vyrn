@@ -19894,7 +19894,10 @@ impl<'p> Fn_<'_, 'p> {
     /// RFC-0125 M7, [`Fn_::core_make`]'s screen. The row's
     /// captures are names this walk reads, and they are exactly the captures
     /// the lifted signature takes ([`crate::lambda_captures`]), so every part
-    /// has a slot in the capture block.
+    /// has a slot in the capture block. [`Fn_::core_make`] finds each part by
+    /// its source name, and the equal count is what makes those names
+    /// distinct: a row that captures a name and the name it shadows gives no
+    /// body rather than a guess.
     fn core_lambda(
         &self,
         body: &vyrn_lower::core::Body,
