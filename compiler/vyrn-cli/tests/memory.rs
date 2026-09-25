@@ -2453,3 +2453,31 @@ fn a_generic_release_placed_inside_a_generic_release_is_freed_on_both_walks() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// A removal from a map held in a record field is a move-out window, and the
+// core states the removal into the field's place. With a `read` receiver the
+// core could not, and `main` was not judged (record `0125-m7-mapleak`).
+#[test]
+fn a_removal_from_a_map_field_releases_the_entry() {
+    let body = r#"type H = { n: Int64, m: Map<String, String> }
+
+fn names() -> Map<String, String> {
+    let mut m: Map<String, String> = [:]
+    m["a"] = "x"
+    m["b"] = "y"
+    return m
+}
+
+fn main() -> Int64 {
+    let mut h = H { n: 1, m: names() }
+    let gone = h.m.remove("a")
+    h.m.remove("c")
+    print(gone)
+    print(h.m.length)
+    return 0
+}
+"#;
+    for got in payload_run("mapfield", body) {
+        assert_eq!(got, (Some(0), "true\n1\n".to_string()));
+    }
+}
