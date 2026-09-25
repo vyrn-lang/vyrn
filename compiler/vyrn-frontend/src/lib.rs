@@ -163,7 +163,8 @@ pub fn load(
 /// backend as source it cannot tell apart from the user's.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     let check_span = prof::phase("check");
-    let (mut diags, json_types, json_dec_types) = checker::check_accum_with_json_types(program);
+    let (mut diags, json_types, json_dec_types, refused) =
+        checker::check_accum_with_json_types(program);
     drop(check_span);
     let synth_span = prof::phase("synthesize");
     if diags.is_empty() {
@@ -206,6 +207,9 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
         diags.extend(movecheck::refusals(program));
+    } else if let Some(refused) = refused {
+        let _p = prof::phase("lower typed");
+        lower_typed(program, refused);
     }
     // RFC-0125 M6, fourth slice: the floor row a judgment answers. The load
     // held the decision because the judgment reads the named core, which is
@@ -222,6 +226,90 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
         floor::forget();
     }
     diags
+}
+
+/// Builds the core of every body the checker typed in a program it refused
+/// (RFC-0125 M7, decision A). A refused function leaves the program for the
+/// build, and so does every function that names one, until none does; a
+/// program whose tests, benches, module state or impl methods name one is not
+/// built. The kernel's refusals are dropped, because a program the checker
+/// refused gets the checker's refusals alone.
+fn lower_typed(program: &mut ast::Program, mut out: std::collections::HashSet<String>) {
+    use ast::stmt_mentions;
+    // A generator's own program is judged by the checker alone, as in
+    // `movecheck::refusals`.
+    if !own::placer_installed() || movecheck::in_comptime() {
+        return;
+    }
+    let names = |b: &ast::Block, out: &std::collections::HashSet<String>| {
+        !checker::fn_calls(b).is_disjoint(out)
+            || out
+                .iter()
+                .any(|n| b.stmts.iter().any(|s| stmt_mentions(s, n)))
+    };
+    // Each round moves at least one function out, so the loop ends within
+    // `program.functions.len()` rounds.
+    loop {
+        let more: Vec<String> = program
+            .functions
+            .iter()
+            .filter(|f| !out.contains(&f.name) && names(&f.body, &out))
+            .map(|f| f.name.clone())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        out.extend(more);
+    }
+    // Module state is read as a block of one statement for the question.
+    let inits: Vec<ast::Block> = program
+        .globals
+        .iter()
+        .map(|g| ast::Block {
+            stmts: vec![ast::Stmt::Expr(g.init.clone())],
+        })
+        .collect();
+    let blocks = program
+        .tests
+        .iter()
+        .chain(&program.benches)
+        .map(|t| &t.body);
+    let methods = program.impls.iter().flat_map(|i| &i.methods);
+    if blocks
+        .chain(methods.map(|m| &m.body))
+        .chain(&inits)
+        .any(|b| names(b, &out))
+        || program.impls.iter().any(|i| {
+            types::type_key(&i.ty).is_none_or(|k| {
+                i.methods
+                    .iter()
+                    .any(|m| out.contains(&types::impl_method_name(&i.protocol, &k, &m.name)))
+            })
+        })
+    {
+        return;
+    }
+    // The functions move out and back by value, in the source's order.
+    let mut gone = Vec::new();
+    let mut at = Vec::new();
+    for (i, f) in std::mem::take(&mut program.functions)
+        .into_iter()
+        .enumerate()
+    {
+        if out.contains(&f.name) {
+            gone.push((i, f));
+        } else {
+            at.push(i);
+            program.functions.push(f);
+        }
+    }
+    let _ = own::kernel_refusals();
+    let _ = own::analyze(program);
+    let _ = own::kernel_refusals();
+    let kept = std::mem::take(&mut program.functions);
+    let mut back: Vec<(usize, ast::Function)> = at.into_iter().zip(kept).chain(gone).collect();
+    back.sort_by_key(|(i, _)| *i);
+    program.functions = back.into_iter().map(|(_, f)| f).collect();
 }
 
 pub fn load_warned(

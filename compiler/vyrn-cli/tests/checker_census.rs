@@ -134,7 +134,7 @@ fn sections() -> Vec<Section> {
              blocks of `Checker::call` until then",
         ),
         sec(
-            "pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {",
+            "pub fn check_accum_with_json_types(program: &Program) -> CheckedJson {",
             Shared,
             "the full-check entry point and the two renderers a conformance \
              refusal quotes an impl head with",
@@ -769,4 +769,24 @@ fn the_structural_census_as_a_table() {
             secs[i].what
         );
     }
+}
+
+/// Every refusal `Checker::stmt` and `Checker::expr` state, as `vyrn check`
+/// prints it over `tests/checker-rules.vyrn`, one body per rule — pinned in
+/// `tests/pins/checker-rules.tsv` for RFC-0125 M7. A rule that leaves the
+/// checker leaves this pin as it is; the pin moves only with a sentence.
+#[test]
+fn every_rule_of_the_two_walks_says_what_the_pin_records() {
+    let out = common::vyrn()
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))
+        .args(["check", "checker-rules.vyrn"])
+        .output()
+        .expect("run vyrn check");
+    assert_eq!(out.status.code(), Some(1), "the program is refused");
+    let stderr = String::from_utf8(out.stderr).expect("stderr is UTF-8");
+    common::pin(
+        "checker-rules",
+        "what vyrn check prints",
+        stderr.lines().map(str::to_string),
+    );
 }
