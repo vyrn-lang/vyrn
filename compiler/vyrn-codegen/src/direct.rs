@@ -17904,9 +17904,7 @@ impl<'p> Fn_<'_, 'p> {
                     let Some(elem) = self.core_stream_elem(body, *s) else {
                         return unsupported("a pull of no stream", line);
                     };
-                    self.core_addr_of(b, w, body, *s, line)?;
-                    let src = b.local(ValType::I32);
-                    b.ins(&Instruction::LocalSet(src));
+                    let src = self.core_addr_local(b, w, body, *s, line)?;
                     let r = self.cx.repr(&elem, line)?;
                     let place = self.place_for(b, &r, line)?;
                     let has = self.stream_next(m, b, src, place, &elem, line)?;
@@ -20198,6 +20196,25 @@ impl<'p> Fn_<'_, 'p> {
     /// a stream is pulled and never indexed.
     fn core_pulls(&self, body: &vyrn_lower::core::Body, base: &vyrn_lower::core::Place) -> bool {
         matches!(base, vyrn_lower::core::Place::Name(s) if self.core_stream_elem(body, *s).is_some())
+    }
+
+    /// A local holding the address of the layout `n`: its own, where its
+    /// place is one, or a fresh one set from [`Fn_::core_addr_of`].
+    fn core_addr_local(
+        &self,
+        b: &mut Frame,
+        w: &Walked,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+        line: usize,
+    ) -> Result<u32, String> {
+        if let Some((Place::Local(l), _)) = self.core_place(w, body, n) {
+            return Ok(l);
+        }
+        self.core_addr_of(b, w, body, n, line)?;
+        let l = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(l));
+        Ok(l)
     }
 
     /// Push the address of the aggregate the name `n` holds: a slot's, or the
