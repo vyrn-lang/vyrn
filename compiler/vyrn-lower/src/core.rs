@@ -6815,11 +6815,11 @@ impl<'a> Builder<'a> {
         )))
     }
 
-    /// The `impl Show` function a `print` or `@str` of one argument calls,
-    /// where the program declares it.
+    /// The `impl Show` function a `print`, `@str` or `value` of one argument
+    /// calls, where the program declares it.
     fn render_callee(&self, name: &str, args: &[Expr]) -> Option<String> {
         let [a] = args else { return None };
-        if !matches!(name, "print" | "@str") {
+        if !matches!(name, "print" | "@str" | "value") {
             return None;
         }
         let t = self.ty_of(a).ok()?;
@@ -7040,7 +7040,8 @@ impl<'a> Builder<'a> {
                 }
                 // A render of a type the language does not render is a call
                 // to its `impl Show` (RFC-0125 M7). `print` prints the String
-                // the call hands back, and releases it after.
+                // the call hands back, and releases it after; the `value`
+                // box takes it.
                 if let Some(f) = self.render_callee(name, args) {
                     let r = self.call(&f, args, *line, Some(Type::Str), out)?;
                     if name == "@str" {
@@ -7048,10 +7049,15 @@ impl<'a> Builder<'a> {
                     }
                     let t = self.temp(Type::Str, *line);
                     out.push(St::Let(t, r));
-                    self.after.push(t);
+                    let cap = if name == "value" {
+                        Capability::Consume
+                    } else {
+                        self.after.push(t);
+                        Capability::Read
+                    };
                     return Ok(Rhs::Call {
                         callee: name.clone(),
-                        args: vec![(Arg::Val(Val::Name(t)), Capability::Read)],
+                        args: vec![(Arg::Val(Val::Name(t)), cap)],
                         write_back: false,
                         kind: Callee::Reserved,
                         ret: self.produced(e),
@@ -7777,6 +7783,12 @@ impl<'a> Builder<'a> {
             {
                 *c = Capability::Consume;
             }
+        }
+        // `@list([..])` moves the literal's elements into the growable array
+        // it builds, so it takes the literal: a read would leave the literal
+        // to release the same elements again.
+        if name == "@list" {
+            caps.iter_mut().for_each(|c| *c = Capability::Consume);
         }
         let drains = !lends_here;
         if drains {

@@ -9453,20 +9453,15 @@ impl<'p> Fn_<'_, 'p> {
     /// textual emitter box, and nothing else.
     fn value_variant(&mut self, arg: &Expr, line: usize) -> Result<&'static str, String> {
         let t = self.peek(arg, line)?;
-        Ok(match self.cx.resolve(&t) {
-            Type::Int
-            | Type::IntN {
-                bits: 64,
-                signed: true,
-            } => "IntVal",
-            Type::Bool => "BoolVal",
-            Type::Str => "StrVal",
+        let r = self.cx.resolve(&t);
+        match value_scalar(&r) {
+            Some(v) => Ok(v),
             // RFC-0094 M3: a type that says how it renders boxes as the String
             // it renders to. The emitting path rewrites the argument into that
             // `show` call, so both halves name one variant.
-            _ if self.show_dispatch(&t).is_some() => "StrVal",
-            other => return unsupported(&format!("`value` of `{other}`"), line),
-        })
+            None if self.show_dispatch(&t).is_some() => Ok("StrVal"),
+            None => unsupported(&format!("`value` of `{r}`"), line),
+        }
     }
 
     /// The `impl Show for T` a value of type `ty` renders through (RFC-0094 M3),
@@ -17632,7 +17627,7 @@ impl<'p> Fn_<'_, 'p> {
                     // and the arm converts its result to the annotation after
                     // the call, which the row does not state.
                     let call = self.core_agg_call(body, rhs);
-                    if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) || call {
+                    if matches!(rhs, Rhs::Make(..)) || self.core_ctor(body, rhs) || call {
                         if self.checks(t)
                             || (call
                                 && self.cx.resolve(t)
@@ -17711,11 +17706,12 @@ impl<'p> Fn_<'_, 'p> {
             .collect();
         let mut made = Vec::new();
         for (n, rhs) in &lets {
-            if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) {
+            if matches!(rhs, Rhs::Make(..)) || self.core_ctor(body, rhs) {
+                let made_ty = self.core_made_ty(body, *n);
                 let at = match bound {
                     _ if lands.contains(n) => &self.ret_ty,
                     (Some(top), Some(t)) if top == *n => t,
-                    _ => &body.names[*n as usize].ty,
+                    _ => &made_ty,
                 };
                 if !self.core_makes(body, at, rhs) {
                     return None;
@@ -17995,7 +17991,7 @@ impl<'p> Fn_<'_, 'p> {
                 // and then binds, and a record or an array is never on the
                 // operand stack to be bound.
                 St::Let(n, rhs)
-                    if self.core_makes(body, &body.names[*n as usize].ty, rhs)
+                    if self.core_makes(body, &self.core_made_ty(body, *n), rhs)
                         || self
                             .core_bound
                             .as_ref()
@@ -18027,7 +18023,7 @@ impl<'p> Fn_<'_, 'p> {
                     // hint from it, and the row states the value's type instead.
                     let ty = match self.core_bound.take_if(|(top, _)| top == n) {
                         Some((_, t)) => t,
-                        None => info.ty.clone(),
+                        None => self.core_made_ty(body, *n),
                     };
                     let r = self.cx.repr(&ty, line)?;
                     if !matches!(r, Repr::Agg(_)) {
@@ -18090,6 +18086,25 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A MOVE of a layout: the name takes the place the moved name
                 // held, and its slot's extent with it.
+                // A literal's growable array: `@list` takes the literal, which
+                // was made in its heap buffer, so the name takes its place.
+                St::Let(n, _) if self.core_lists(body).iter().any(|(_, a)| a == n) => {
+                    let info = &body.names[*n as usize];
+                    let Some(&(x, _)) = self.core_lists(body).iter().find(|(_, a)| a == n) else {
+                        return unsupported("a list of no literal", info.line);
+                    };
+                    // A literal made as its parent's part has no place of its
+                    // own: the part the parent reads is this name.
+                    if let Some(d) = w.built[x as usize].take() {
+                        w.built[*n as usize] = Some(d);
+                        continue;
+                    }
+                    let Some((place, _)) = self.core_place(w, body, x) else {
+                        return unsupported("a list of a literal with no place", info.line);
+                    };
+                    w.slot[*n as usize] = w.slot[x as usize].take();
+                    self.core_bind(b, body, w, *n, place, info.ty.clone())?;
+                }
                 St::Let(n, Rhs::Val(Val::Name(x))) if self.core_renames(body, *n).is_some() => {
                     let info = &body.names[*n as usize];
                     let Some((place, _)) = self.core_place(w, body, *x) else {
@@ -19721,8 +19736,11 @@ impl<'p> Fn_<'_, 'p> {
             // A variant: its tag, then its payload in the slots the sum gives
             // it. The hint is this walk's destination, which the builder takes
             // because the type it is building is the one the slot holds.
-            Rhs::Call { callee, args, .. } => {
-                let Some((tag, payload)) = self.core_variant(ty, callee) else {
+            Rhs::Call { args, .. } => {
+                let Some((tag, payload)) = self
+                    .core_ctor_name(body, rhs)
+                    .and_then(|v| self.core_variant(ty, v))
+                else {
                     return unsupported("a variant the row states of no sum", line);
                 };
                 let Some(vs) = arg_vals(args) else {
@@ -19853,14 +19871,82 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether a row is a call to a variant constructor, which is a made layout
     /// (RFC-0125 M7) rather than the `call` [`Fn_::core_call`] writes.
-    fn core_ctor(&self, rhs: &Rhs) -> bool {
-        matches!(
-            rhs,
+    fn core_ctor(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
+        self.core_ctor_name(body, rhs).is_some()
+    }
+
+    /// The variant a constructor row builds: the callee of a [`Callee::Ctor`]
+    /// row, and for the `value(x)` box the variant of the built-in `Value` enum
+    /// its operand's type picks ([`value_scalar`]). A type that boxes through
+    /// its `show` is no row here, because the row does not state the call.
+    fn core_ctor_name<'r>(&self, body: &vyrn_lower::core::Body, rhs: &'r Rhs) -> Option<&'r str> {
+        match rhs {
             Rhs::Call {
                 kind: Callee::Ctor,
+                callee,
                 ..
-            }
-        )
+            } => Some(callee),
+            Rhs::Call {
+                kind: Callee::Reserved,
+                callee,
+                args,
+                ..
+            } if callee == "value" => match args.as_slice() {
+                [(Arg::Val(v), _)] => {
+                    value_scalar(&self.cx.resolve(&self.core_ty(body, v, &Type::Int)))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Each fixed literal a `@list` row takes, with the name the row binds:
+    /// `let l = [..]` at `[T; n]`, then `let a = @list(l)` at `Array<T>`,
+    /// which takes `l` (RFC-0125 M7). The literal is made at the growable
+    /// type, its parts in the heap buffer, and `a` takes its place, so no
+    /// fixed copy exists.
+    fn core_lists(
+        &self,
+        body: &vyrn_lower::core::Body,
+    ) -> Vec<(vyrn_lower::core::Name, vyrn_lower::core::Name)> {
+        let mut lets = Vec::new();
+        for s in &body.stmts {
+            core_lets(s, &mut lets);
+        }
+        lets.iter()
+            .filter_map(|(a, rhs)| match rhs {
+                Rhs::Call {
+                    kind: Callee::Reserved,
+                    callee,
+                    args,
+                    ..
+                } if callee == "@list" => match args.as_slice() {
+                    [(Arg::Val(Val::Name(l)), vyrn_frontend::ast::Capability::Consume)] => {
+                        Some((*l, *a))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .filter(|(l, a)| {
+                lets.iter()
+                    .any(|(m, r)| m == l && matches!(r, Rhs::Make(Ctor::Array, _)))
+                    && matches!(
+                        (self.cx.resolve(&body.names[*l as usize].ty), self.cx.resolve(&body.names[*a as usize].ty)),
+                        (Type::ArrayN(e, _), Type::Array(g)) if e == g
+                    )
+            })
+            .collect()
+    }
+
+    /// The type a made name is built at: the growable array a `@list` row
+    /// takes it into ([`Fn_::core_lists`]), and its own type otherwise.
+    fn core_made_ty(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> Type {
+        match self.core_lists(body).iter().find(|(l, _)| *l == n) {
+            Some((_, a)) => body.names[*a as usize].ty.clone(),
+            None => body.names[n as usize].ty.clone(),
+        }
     }
 
     /// The tag and the payload types of the variant `name` of the sum `ty` —
@@ -19887,12 +19973,10 @@ impl<'p> Fn_<'_, 'p> {
         match rhs {
             Rhs::Make(c, vs) => self.core_made(body, ty, c, vs),
             Rhs::Prim(Op::Closure(key), vs, _) => self.core_lambda(body, key, ty, vs),
-            Rhs::Call {
-                callee,
-                args,
-                kind: Callee::Ctor,
-                ..
-            } => {
+            Rhs::Call { args, .. } => {
+                let Some(callee) = self.core_ctor_name(body, rhs) else {
+                    return false;
+                };
                 matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
                     && self.core_variant(ty, callee).is_some_and(|(_, p)| {
                         p.len() == args.len()
@@ -20039,6 +20123,8 @@ impl<'p> Fn_<'_, 'p> {
         let Val::Name(n) = v else {
             return false;
         };
+        let lists = self.core_lists(body);
+        let n = &lists.iter().find(|(_, a)| a == n).map_or(*n, |(l, _)| *l);
         ss[..i]
             .iter()
             .rposition(|s| matches!(s, St::Let(l, _) if l == n))
@@ -20068,8 +20154,8 @@ impl<'p> Fn_<'_, 'p> {
         let St::Let(t, rhs) = &ss[i] else {
             return None;
         };
-        let made =
-            matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..)) || self.core_ctor(rhs);
+        let made = matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..))
+            || self.core_ctor(body, rhs);
         let taken = self.core_take_part(body, rhs);
         if body.names[*t as usize].binding.is_some()
             || w.occurs.get(*t as usize) != Some(&2)
@@ -20087,16 +20173,18 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_payload_layout(body, &Val::Name(*t), part)
                 }
         };
+        // A literal a `@list` row takes is a part under the name that row
+        // binds ([`Fn_::core_lists`]).
+        let named = self
+            .core_lists(body)
+            .iter()
+            .find(|(l, _)| l == t)
+            .map_or(*t, |(_, a)| *a);
         let j = (i + 1..ss.len()).find(|&j| match &ss[j] {
-            St::Let(_, Rhs::Make(_, ps)) => ps.contains(&Val::Name(*t)),
-            St::Let(
-                _,
-                Rhs::Call {
-                    args,
-                    kind: Callee::Ctor,
-                    ..
-                },
-            ) => args.iter().any(|(v, _)| *v == Arg::Val(Val::Name(*t))),
+            St::Let(_, Rhs::Make(_, ps)) => ps.contains(&Val::Name(named)),
+            St::Let(_, r @ Rhs::Call { args, .. }) if self.core_ctor(body, r) => {
+                args.iter().any(|(v, _)| *v == Arg::Val(Val::Name(named)))
+            }
             _ => false,
         })?;
         if ss[i + 1..j].iter().any(core_leaves) {
@@ -20105,18 +20193,19 @@ impl<'p> Fn_<'_, 'p> {
         let St::Let(parent, prhs) = &ss[j] else {
             return None;
         };
+        let made = self.core_made_ty(body, *parent);
         let ty = if self.core_lands(body, ss, j, &w.reads) {
             &self.ret_ty
         } else {
-            &body.names[*parent as usize].ty
+            &made
         };
         let (ctor, ps) = match prhs {
             Rhs::Make(c, ps) => (c, ps),
-            Rhs::Call { callee, args, .. } => {
-                let (_, payload) = self.core_variant(ty, callee)?;
+            Rhs::Call { args, .. } => {
+                let (_, payload) = self.core_variant(ty, self.core_ctor_name(body, prhs)?)?;
                 let at = args
                     .iter()
-                    .position(|(v, _)| *v == Arg::Val(Val::Name(*t)))?;
+                    .position(|(v, _)| *v == Arg::Val(Val::Name(named)))?;
                 let part = payload.get(at)?.clone();
                 let Ok(Repr::Agg(l)) = self.cx.repr(&part, 0) else {
                     return None;
@@ -20131,7 +20220,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => return None,
         };
-        let at = ps.iter().position(|v| *v == Val::Name(*t))?;
+        let at = ps.iter().position(|v| *v == Val::Name(named))?;
         let (part, off, into) = match (ctor, self.cx.resolve(ty)) {
             (Ctor::Record(_, names), _) => {
                 let Ok(Repr::Agg(l)) = self.cx.repr(ty, 0) else {
@@ -20836,7 +20925,7 @@ impl<'p> Fn_<'_, 'p> {
                 && !(!self.annotated_apart(&annotated, info)
                     && lets.iter().any(|(b, rhs)| {
                         *b as usize == n
-                            && (self.core_makes(body, &info.ty, rhs)
+                            && (self.core_makes(body, &self.core_made_ty(body, *b), rhs)
                                 || self.core_agg_call(body, rhs)
                                 || self.core_take_part(body, rhs)
                                 || self.core_rebuild(body, rhs))
@@ -20848,6 +20937,7 @@ impl<'p> Fn_<'_, 'p> {
                 && self
                     .core_renames(body, n as vyrn_lower::core::Name)
                     .is_none()
+                && !self.core_lists(body).iter().any(|(_, a)| *a as usize == n)
                 && !binders.contains(&(n as vyrn_lower::core::Name))
                 && !self.core_walked(body, n as vyrn_lower::core::Name)
                 && !self.core_joins(body, n as vyrn_lower::core::Name)
@@ -20936,7 +21026,7 @@ impl<'p> Fn_<'_, 'p> {
             let made = ss[..i].iter().filter_map(|p| match p {
                 St::Let(l, rhs)
                     if matches!(rhs, Rhs::Make(..))
-                        || self.core_ctor(rhs)
+                        || self.core_ctor(body, rhs)
                         || self.core_agg_call(body, rhs) =>
                 {
                     Some(*l)
@@ -20952,13 +21042,14 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_lands`]) (RFC-0125 M7).
             St::Let(n, rhs)
                 if matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..))
-                    || self.core_ctor(rhs) =>
+                    || self.core_ctor(body, rhs) =>
             {
                 let part = self.core_part_at(body, ss, i, &self.core_w);
+                let made = self.core_made_ty(body, *n);
                 let ty = match &part {
                     Some(at) => &at.ty,
                     None if self.core_lands(body, ss, i, reads) => &self.ret_ty,
-                    None => &body.names[*n as usize].ty,
+                    None => &made,
                 };
                 self.core_built(body, ss, i, ty, rhs)
             }
@@ -20998,7 +21089,8 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(n, _)
                 if self.core_alias(body, *n).is_some()
                     || self.core_copies(body, *n).is_some()
-                    || self.core_renames(body, *n).is_some() =>
+                    || self.core_renames(body, *n).is_some()
+                    || self.core_lists(body).iter().any(|(_, a)| a == n) =>
             {
                 true
             }
@@ -21411,7 +21503,7 @@ impl<'p> Fn_<'_, 'p> {
                 ..
             } if self.core_through(body, callee, *kind).is_some() => None,
             St::Let(_, rhs)
-                if self.core_ctor(rhs)
+                if self.core_ctor(body, rhs)
                     || self.core_agg_call(body, rhs)
                     || self.core_rebuild(body, rhs)
                     || matches!(rhs, Rhs::Call { callee, kind, args, .. }
@@ -21683,6 +21775,20 @@ fn core_moves_on(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bo
         };
     });
     found && body.occurrences()[n as usize] == 2
+}
+
+/// The `Value` variant `value(x)` boxes a resolved scalar type into.
+fn value_scalar(t: &Type) -> Option<&'static str> {
+    match t {
+        Type::Int
+        | Type::IntN {
+            bits: 64,
+            signed: true,
+        } => Some("IntVal"),
+        Type::Bool => Some("BoolVal"),
+        Type::Str => Some("StrVal"),
+        _ => None,
+    }
 }
 
 /// Every `let` a statement's rows bind, itself and everything under it.
