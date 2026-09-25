@@ -19104,8 +19104,11 @@ impl<'p> Fn_<'_, 'p> {
             return None;
         }
         // A name this pass minted, a `for` head's borrow or a scrutinee, is
-        // read by address in the arm.
-        let value = !info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
+        // read by address in the arm. A `let` of the source copies, and that
+        // includes one a projection's prologue writes (`let @p0.h = h`).
+        let value = (info.bound_by_let || !info.source.starts_with('@'))
+            && !info.heap
+            && !self.owns_heap(&info.ty);
         let mut lets = Vec::new();
         for s in &body.stmts {
             core_lets(s, &mut lets);
