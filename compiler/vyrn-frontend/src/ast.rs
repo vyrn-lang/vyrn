@@ -2083,26 +2083,34 @@ crate::body_scope_descent!(AstVisit, ast_block, ast_stmt, ast_expr);
 /// Function bodies and module-state initializers — what the backends lower. A
 /// literal inside a leaked desugar is not here, and a caller that misses keeps
 /// whatever it did before.
-pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<usize, &'a LambdaBody> {
-    struct Lambdas<'a>(std::collections::HashMap<usize, &'a LambdaBody>);
+///
+/// Each literal comes with the name of the function that holds it, the empty
+/// name for module state.
+pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<usize, (&'a str, &'a Expr)> {
+    struct Lambdas<'a>(
+        &'a str,
+        std::collections::HashMap<usize, (&'a str, &'a Expr)>,
+    );
     impl<'a> AstVisit<'a> for Lambdas<'a> {
         const SCOPED: bool = false;
         fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
-            if let Expr::Lambda { body, .. } = e {
-                self.0.insert(e as *const Expr as usize, body);
+            if let Expr::Lambda { .. } = e {
+                self.1.insert(e as *const Expr as usize, (self.0, e));
             }
             true
         }
     }
-    let mut v = Lambdas(std::collections::HashMap::new());
+    let mut v = Lambdas("", std::collections::HashMap::new());
     let mut locals = std::collections::HashSet::new();
     for f in &p.functions {
+        v.0 = &f.name;
         ast_block(&f.body, &mut locals, &mut v);
     }
+    v.0 = "";
     for g in &p.globals {
         ast_expr(&g.init, &locals, &mut v);
     }
-    v.0
+    v.1
 }
 
 /// A reader that records the address of every node it is handed, in walk order.
