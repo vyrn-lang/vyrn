@@ -18511,12 +18511,17 @@ impl<'p> Fn_<'_, 'p> {
                 m, b, body, w, callee, kind, solved, targets, &vs, hint, line,
             );
         }
+        if self.core_user_callee(callee, kind) {
+            return self.core_user_call(
+                m, b, body, w, callee, kind, solved, targets, args, hint, line,
+            );
+        }
         // A place receiver is shrunk where it lies, which is the move-out
         // window's whole extent ([`Fn_::core_removes`]).
         let ([(Arg::Place(p), _), rest @ ..], Some(Spec::Removes)) =
             (args, core_builtin(callee, kind))
         else {
-            return unsupported("a place argument to other than a removal", line);
+            return unsupported("a place argument to a builtin other than a removal", line);
         };
         let Some(rest) = arg_vals(rest) else {
             return unsupported("a removal with two places", line);
@@ -18774,15 +18779,43 @@ impl<'p> Fn_<'_, 'p> {
             };
             return self.extern_call(m, b, callee, args.len(), &mut operand, line);
         }
+        let args: Vec<_> = args
+            .iter()
+            .map(|(v, c)| (Arg::Val(v.clone()), *c))
+            .collect();
+        self.core_user_call(
+            m, b, body, w, callee, kind, solved, targets, &args, hint, line,
+        )
+    }
+
+    /// A call to a declared function, whose arguments are values or the
+    /// places `modify` parameters write ([`Arg`]): a place crosses as its
+    /// address, as a layout name does.
+    #[allow(clippy::too_many_arguments)]
+    fn core_user_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        callee: &str,
+        kind: Callee,
+        solved: &[(String, Type)],
+        targets: &[Target],
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
+        hint: Option<(Dest, Type)>,
+        line: usize,
+    ) -> Result<Type, String> {
         // A call through a stored value (RFC-0037) is one call to the
         // signature's dispatcher, with the value as its leading argument, as
         // [`Fn_::fnval_call`] makes it.
-        let through: Vec<(Val, vyrn_frontend::ast::Capability)>;
+        let through: Vec<(Arg, vyrn_frontend::ast::Capability)>;
         let (sig, args) = match self.core_through(body, callee, kind) {
             Some((n, sig_ty)) => {
-                through = std::iter::once((Val::Name(n), vyrn_frontend::ast::Capability::Read))
-                    .chain(args.iter().cloned())
-                    .collect();
+                through =
+                    std::iter::once((Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Read))
+                        .chain(args.iter().cloned())
+                        .collect();
                 (self.dispatcher(m, &sig_ty, line)?, &through[..])
             }
             None => {
@@ -18805,9 +18838,9 @@ impl<'p> Fn_<'_, 'p> {
         };
         let dest = self.out_ptr(b, &sig, hint);
         let mut spilled = Vec::new();
-        for ((v, c), p) in args.iter().zip(&sig.params) {
-            match (v, c) {
-                (Val::Name(n), vyrn_frontend::ast::Capability::Modify)
+        for ((a, c), p) in args.iter().zip(&sig.params) {
+            match (a, c) {
+                (Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Modify)
                     if !matches!(self.cx.repr(p, line)?, Repr::Agg(_)) =>
                 {
                     let Some((Place::Local(l), ty)) = self.core_place(w, body, *n) else {
@@ -18815,7 +18848,11 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     spilled.push(self.spill(b, l, &ty, line)?);
                 }
-                _ => self.core_val(m, b, body, w, v, p, line)?,
+                (Arg::Val(v), _) => self.core_val(m, b, body, w, v, p, line)?,
+                (Arg::Place(pl), _) => {
+                    let (_, off) = self.core_addr(m, b, body, w, pl, line)?;
+                    self.core_step(b, off);
+                }
             }
         }
         b.ins(&Instruction::Call(sig.index));
@@ -19090,8 +19127,9 @@ impl<'p> Fn_<'_, 'p> {
     /// into an element of an Array writes the buffer ([`core_written`]). A root on
     /// the chain handed to `consume` anywhere in the body may be freed under
     /// the name. A row of the name's extent that hands a root on the chain to
-    /// `modify` ([`vyrn_lower::kernel::modifies`]) may replace what the name
-    /// points into. Outside the extent the kernel ends the alias at that call
+    /// `modify` ([`vyrn_lower::kernel::modifies`]), or rebuilds it as a
+    /// write-back receiver (`out.push(v)`), may replace what the name points
+    /// into. Outside the extent the kernel ends the alias at that call
     /// and refuses a read after it, as it does at a store into the root; for
     /// module state, a callee's store too.
     fn core_alias<'b>(
@@ -19131,6 +19169,10 @@ impl<'p> Fn_<'_, 'p> {
         };
         let place = read(n)?;
         let extent = core_extent(&body.stmts, n, &body.occurrences())?;
+        let mut rebuilt = Vec::new();
+        extent
+            .iter()
+            .for_each(|s| core_written(&body.names, s, &mut rebuilt));
         if written
             .iter()
             .any(|(m, c)| *m == n && !(owned && *c == Some(Capability::Consume)))
@@ -19152,6 +19194,9 @@ impl<'p> Fn_<'_, 'p> {
             if written
                 .iter()
                 .any(|(m, c)| *m == root && *c == Some(Capability::Consume))
+                || rebuilt
+                    .iter()
+                    .any(|(m, c)| *m == root && *c == Some(Capability::Modify))
                 || vyrn_lower::kernel::modifies(
                     extent,
                     vyrn_lower::kernel::Root::N(root),
@@ -20720,7 +20765,8 @@ impl<'p> Fn_<'_, 'p> {
     /// local, which [`Fn_::spill`] gives an address for the call's extent. A
     /// name that holds another place's address ([`Fn_::core_alias`]) may not
     /// be written through. A place argument is a removal's receiver, which
-    /// [`Fn_::core_removes`] reads.
+    /// [`Fn_::core_removes`] reads, or a layout a declared function modifies
+    /// ([`Fn_::core_user_callee`]).
     fn core_args_readable(
         &self,
         body: &vyrn_lower::core::Body,
@@ -20728,8 +20774,16 @@ impl<'p> Fn_<'_, 'p> {
     ) -> bool {
         use vyrn_frontend::ast::Capability as Cap;
         args.iter().all(|(a, c)| {
-            let Arg::Val(v) = a else {
-                return false;
+            let v = match a {
+                Arg::Val(v) => v,
+                // A place a `modify` parameter writes crosses as its address,
+                // as a layout name does; a scalar one has no local to reload.
+                Arg::Place(p) => {
+                    return *c == Cap::Modify
+                        && self.core_place_ty(body, p).is_some_and(|t| {
+                            matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_))) && !self.checks(&t)
+                        });
+                }
             };
             let layout = matches!(v, Val::Name(n) if {
                 let t = &body.names[*n as usize].ty;
@@ -20773,6 +20827,7 @@ impl<'p> Fn_<'_, 'p> {
             } => {
                 self.core_removes(body, callee, *kind, args) == Some(true)
                     || self.core_args_readable(body, args)
+                        && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (match core_builtin(callee, *kind) {
                             Some(Spec::Builds(_)) => true,
                             // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
@@ -20825,6 +20880,16 @@ impl<'p> Fn_<'_, 'p> {
                     || matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_)))
                     && core_global(body, *x).is_none_or(|g| self.cx.gappend.contains_key(g))
                     && self.core_args_readable(body, rest))
+    }
+
+    /// Whether `callee` is a declared function, whose arguments
+    /// [`Fn_::core_user_call`] writes, place arguments included, and not a
+    /// builtin, a validated type or a host import, whose readers take values.
+    fn core_user_callee(&self, callee: &str, kind: Callee) -> bool {
+        matches!(core_builtin(callee, kind), None | Some(Spec::Routes(_)))
+            && self.core_named(callee, kind).is_none()
+            && !(kind == Callee::Fn && self.is_extern(callee))
+            && !callee.starts_with(vyrn_frontend::loader::MEM_PREFIX)
     }
 
     /// Whether a row removes from a receiver, a name or a place
@@ -21085,6 +21150,7 @@ impl<'p> Fn_<'_, 'p> {
             } => {
                 self.core_removes(body, callee, *kind, args) == Some(false)
                     || self.core_args_readable(body, args)
+                        && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (self.core_builtin_readable(body, callee, *kind, args)
                             || (*kind == Callee::Fn && self.is_extern(callee))
                             || self.core_named(callee, *kind).is_some()
@@ -21314,9 +21380,17 @@ fn core_written(
     out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>,
 ) {
     let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>| {
-        if let Rhs::Call { args, .. } = r {
-            for (a, c) in args {
+        if let Rhs::Call {
+            args, write_back, ..
+        } = r
+        {
+            for (k, (a, c)) in args.iter().enumerate() {
                 match (a, c) {
+                    // A write-back receiver is taken and stored back by the
+                    // row after, so it changes no owner: a modify.
+                    (Arg::Val(Val::Name(n)), Capability::Consume) if k == 0 && *write_back => {
+                        out.push((*n, Some(Capability::Modify)))
+                    }
                     (Arg::Val(Val::Name(n)), Capability::Modify | Capability::Consume) => {
                         out.push((*n, Some(*c)))
                     }

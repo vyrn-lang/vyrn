@@ -7300,14 +7300,21 @@ impl<'a> Builder<'a> {
                 vyrn_frontend::declared::arg_cap(&self.own.arg_caps, name, k)
                     .is_none_or(|c| c == Capability::Consume)
             });
+            let global = matches!(a, Expr::Var { name, .. }
+                if self.lookup(name).is_none()
+                    && self.program.globals.iter().any(|g| &g.name == name));
+            // Module state handed to `modify` (`insert(cells, v)`) is that
+            // place, as a window's is: a borrow of it would be written
+            // through.
+            if let (Capability::Modify, Expr::Var { name, .. }, true) = (cap, a, global) {
+                vs.push((Arg::Place(Place::Global(name.clone())), *cap));
+                continue;
+            }
             let v = if *cap == Capability::Consume {
                 // Module state as the receiver (`books.push(b)`): a read of
                 // it is a borrow nothing may take, so the write-back form
                 // takes the place and the store after the call fills it, as
                 // for a field or an element.
-                let global = matches!(a, Expr::Var { name, .. }
-                    if self.lookup(name).is_none()
-                        && self.program.globals.iter().any(|g| &g.name == name));
                 if k == 0
                     && rebuilds
                     && (global || !matches!(a, Expr::Var { .. } | Expr::Consume { .. }))
