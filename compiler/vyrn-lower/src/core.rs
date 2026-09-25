@@ -1857,10 +1857,11 @@ pub enum Spec {
     /// declared callee, and where the program does not define the function it
     /// reads no such call.
     Routes(&'static str),
-    /// An array receiver, and for `@swapRemove` an index at `Int64`. The call
-    /// shrinks the receiver in its own storage and hands back what it
-    /// removed: `@pop` an `Option` of the last element, `@swapRemove` the
-    /// element at the index.
+    /// A receiver the call shrinks in its own storage. `@pop` takes an array
+    /// and hands back an `Option` of the last element, `@swapRemove` an
+    /// array and an index at `Int64` and hands back the element there.
+    /// `@remove` takes a map and a key at the map's key type, releases the
+    /// key and value the entry held, and answers whether it held one.
     Removes,
     /// A map and a key at the map's key type. The answer is a `Bool`: whether
     /// the map holds an entry for the key.
@@ -1963,6 +1964,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
             ("@pop", Spec::Removes),
             ("@swapRemove", Spec::Removes),
+            ("@remove", Spec::Removes),
             ("@has", Spec::Finds),
             ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),
             (
