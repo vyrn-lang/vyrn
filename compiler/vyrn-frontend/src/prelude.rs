@@ -112,7 +112,7 @@
 //!
 //! | name | it answers | why no row |
 //! |---|---|---|
-//! | `value` | `Value` | It boxes the caller's buffer rather than copying it (`box_payload` of the lowered argument), so it LENDS, and a row would double free. The LENDING is stated in [`lends`] since RFC-0125 §3 M3's type slice; the absence of a row no longer states it. |
+//! | `value` | `Value` | Its parameter is a union of three types and a type that renders by `show`, which no signature spells. It boxes a copy of a String operand, so it does not lend (#512). |
 //! | `@list` | `Array<E>` | `E` is the argument's element type, which one row cannot name any more than `at` can. |
 //! | `pullAt` | `Option<T>` | The element type comes from the expected type; the checker refuses the call without an annotation, so the binding is already named. |
 //! | `at`, `atSet`, `bytes` | the receiver's | They LEND, which is the older rule above. |
@@ -1005,6 +1005,15 @@ pub fn rebuilds(name: &str) -> bool {
         && matches!(f.ret, Type::Array(_) | Type::SmallArray(..) | Type::Map(..))
 }
 
+/// Whether `value(arg)` boxes a copy of `arg` rather than `arg` itself: a
+/// String read out of a place some other name owns (#512). A temporary is
+/// the box's to take. `string` is whether the box is `StrVal` of `arg`
+/// itself; a type that renders by `show` boxes the fresh String its render
+/// returns.
+pub fn boxes_a_copy(arg: &Expr, string: bool) -> bool {
+    string && crate::project::is_place_read(arg)
+}
+
 /// Whether the result of `name` points **into** one of its arguments.
 ///
 /// Read off the body, which is where a projection says so: a row that yields
@@ -1012,21 +1021,9 @@ pub fn rebuilds(name: &str) -> bool {
 /// say it for an element of a container and `bytes` says it for a String's
 /// buffer, and they are the only rows that say it.
 ///
-/// **`value` has no row and lends anyway** — the audit table in the module
-/// comment says so: it BOXES the caller's buffer instead of copying it, so a
-/// release row on its result is a double free. Its parameter is a union of
-/// three types no signature spells, which is why there is no row to read the
-/// fact off. Until RFC-0125 §3 M3's type slice the absence of the row WAS the
-/// statement: no return type meant the declared reading could not name
-/// `value(x)`, so nothing released it. The checker types the call, so the
-/// absence states nothing any more and the fact is written here, beside the
-/// rows that state it the ordinary way. `protocol Show` over a record, matched
-/// on `value(p)`, is the program: the kernel refused the release the plan had
-/// just minted (`vyrn-frontend/semantics` literal #344, found by `testsweep`).
+/// `value` does not lend: it boxes a copy of a String operand, so the box
+/// owns its payload (#512). [`boxes_a_copy`] says which operand.
 pub fn lends(name: &str) -> bool {
-    if name == "value" {
-        return true;
-    }
     let Some(f) = signature(name) else {
         return false;
     };

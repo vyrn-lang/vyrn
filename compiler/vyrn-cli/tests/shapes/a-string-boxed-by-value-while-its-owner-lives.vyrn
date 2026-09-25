@@ -1,0 +1,8 @@
+// a String boxed by value while its owner lives
+// pin: 0 break, 0 continue
+// `value(s)` boxes a copy of `s`, so the array's release frees the copy and
+// `s` is still whole when it is printed. Before #512 the box held `s`'s own
+// buffer and the release freed it under `s`. Both walks print abcd, then 14,
+// with no free-audit line (RFC-0125 M7, `m7-small`).
+fn count(values: Array<Value>) -> Int64 { return values.length }
+fn vyrnTestMain() -> Int64 { let s = "ab" + "cd" let n = count([value(s)]) print(s) return n * 10 + s.byteLength }

@@ -8168,12 +8168,11 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether a call by this name lends: `a[i]` and the seeded element row
-    /// it dispatches to, a lending prelude row, the `value` box, a projection.
+    /// it dispatches to, a lending prelude row, a projection.
     fn lends(&self, name: &str) -> bool {
         name == vyrn_frontend::project::AT
             || name == vyrn_frontend::project::ELEM
             || vyrn_frontend::prelude::lends(name)
-            || name == "value"
             || self
                 .cx
                 .impls
@@ -8373,6 +8372,14 @@ impl<'p> Fn_<'_, 'p> {
                     args: args.to_vec(),
                     line,
                 }];
+                // The render is a fresh String the box takes whole.
+                if name == "value" {
+                    let variant = self.value_variant(&args[0], line)?;
+                    return match self.sum_ctor(m, b, variant, &rendered, line, None)? {
+                        Some(t) => Ok(t),
+                        None => unsupported("the built-in `Value` enum", line),
+                    };
+                }
                 return self.call(m, b, name, &rendered, &[], line);
             }
         }
@@ -8673,10 +8680,23 @@ impl<'p> Fn_<'_, 'p> {
             // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
             // is picked by the argument's type and built by the ordinary enum path,
             // so the tag and the payload encoding are the same ones a user's
-            // `IntVal(3)` would get.
+            // `IntVal(3)` would get. A String read out of a place is boxed as a
+            // copy, because the box owns its payload (#512).
             "value" if args.len() == 1 => {
-                let name = self.value_variant(&args[0], line)?;
-                return match self.sum_ctor(m, b, name, args, line, hint)? {
+                let variant = self.value_variant(&args[0], line)?;
+                let copied = [Expr::Call {
+                    type_args: Vec::new(),
+                    name: "@copy".to_string(),
+                    args: args.to_vec(),
+                    line,
+                }];
+                let string = variant == "StrVal";
+                let args = if vyrn_frontend::prelude::boxes_a_copy(&args[0], string) {
+                    &copied[..]
+                } else {
+                    args
+                };
+                return match self.sum_ctor(m, b, variant, args, line, hint)? {
                     Some(t) => Ok(t),
                     None => unsupported("the built-in `Value` enum", line),
                 };
