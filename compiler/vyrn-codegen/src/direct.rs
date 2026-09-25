@@ -9977,7 +9977,7 @@ impl<'p> Fn_<'_, 'p> {
         // because a capture list is part of the lifted function's signature and two
         // backends disagreeing about its length would emit calls with the wrong
         // number of arguments.
-        let cap_names = crate::lambda_captures(
+        let cap_names = vyrn_lower::core::lambda_captures(
             body,
             params.iter().map(|p| p.name.clone()).collect(),
             &|n| self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n),
@@ -17875,9 +17875,10 @@ impl<'p> Fn_<'_, 'p> {
                 // operand stack to be bound.
                 St::Let(n, rhs)
                     if self.core_makes(body, &body.names[*n as usize].ty, rhs)
-                        || self.core_bound.as_ref().is_some_and(|(top, t)| {
-                            top == n && self.core_makes(body, t, rhs)
-                        }) =>
+                        || self
+                            .core_bound
+                            .as_ref()
+                            .is_some_and(|(top, t)| top == n && self.core_makes(body, t, rhs)) =>
                 {
                     let info = &body.names[*n as usize];
                     let line = info.line;
@@ -19506,34 +19507,20 @@ impl<'p> Fn_<'_, 'p> {
             );
         }
         // A lambda: the literal lifted as the arm lifts it, and its captures
-        // read off the row in the order the lifted signature takes them.
+        // read off the row, which lists them in the lifted signature's order.
         if let Rhs::Prim(Op::Closure(key), vs, _) = rhs {
             let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
             let Some(at) = self.literal(key) else {
                 return unsupported("a lambda this walk does not find", line);
             };
-            let (target, srcs) = self.lift_stored(m, at, &sig_ty)?;
-            let caps: Option<Vec<Val>> = srcs
-                .iter()
-                .map(|e| {
-                    vs.iter()
-                        .find(|v| {
-                            matches!((v, e), (Val::Name(c), Expr::Var { name, .. })
-                                if body.names[*c as usize].source == *name)
-                        })
-                        .cloned()
-                })
-                .collect();
-            let Some(caps) = caps else {
-                return unsupported("a lambda whose captures the row does not name", line);
-            };
+            let (target, _) = self.lift_stored(m, at, &sig_ty)?;
             return self.fnval_into(
                 m,
                 b,
                 dest,
                 &sig_ty,
                 target,
-                &mut Parts::Core(body, &caps, w),
+                &mut Parts::Core(body, vs, w),
                 line,
             );
         }
@@ -19693,12 +19680,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Two rows make one: [`Rhs::Make`] states a record, an array or a map
     /// literal, and a call to [`Callee::Ctor`] states a variant of a sum, which
     /// is the same build with a tag in front of it.
-    fn core_makes(
-        &self,
-        body: &vyrn_lower::core::Body,
-        ty: &Type,
-        rhs: &Rhs,
-    ) -> bool {
+    fn core_makes(&self, body: &vyrn_lower::core::Body, ty: &Type, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Make(c, vs) => self.core_made(body, ty, c, vs),
             Rhs::Prim(Op::Closure(key), vs, _) => self.core_lambda(body, key, ty, vs),
@@ -19883,7 +19865,8 @@ impl<'p> Fn_<'_, 'p> {
         let St::Let(t, rhs) = &ss[i] else {
             return None;
         };
-        let made = matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..)) || self.core_ctor(rhs);
+        let made =
+            matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..)) || self.core_ctor(rhs);
         let taken = self.core_take_part(body, rhs);
         if body.names[*t as usize].binding.is_some()
             || w.occurs.get(*t as usize) != Some(&2)
@@ -20277,55 +20260,23 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether this walk makes the lambda a closure row names by `key` at `ty`:
-    /// RFC-0125 M7, [`Fn_::core_make`]'s screen. The row's
-    /// captures are names this walk reads, and they are exactly the captures
-    /// the lifted signature takes ([`crate::lambda_captures`]), so every part
-    /// has a slot in the capture block. [`Fn_::core_make`] finds each part by
-    /// its source name, and the equal count is what makes those names
-    /// distinct: a row that captures a name and the name it shadows gives no
-    /// body rather than a guess.
-    fn core_lambda(
-        &self,
-        body: &vyrn_lower::core::Body,
-        key: &str,
-        ty: &Type,
-        vs: &[Val],
-    ) -> bool {
+    /// RFC-0125 M7, [`Fn_::core_make`]'s screen. The row lists its captures
+    /// in the order the lifted signature takes them
+    /// ([`vyrn_lower::core::lambda_captures`]), and each is a name this walk
+    /// reads.
+    fn core_lambda(&self, body: &vyrn_lower::core::Body, key: &str, ty: &Type, vs: &[Val]) -> bool {
         let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
-        let (
-            Type::Fn(ptys, _),
-            Some(Expr::Lambda {
-                params, body: lit, ..
-            }),
-        ) = (
-            &sig_ty,
-            self.literal(key),
-        )
+        let (Type::Fn(ptys, _), Some(Expr::Lambda { params, .. })) = (&sig_ty, self.literal(key))
         else {
             return false;
         };
-        let Some(srcs) = vs
-            .iter()
-            .map(|v| match v {
-                Val::Name(c)
-                    if self.core_val_readable(body, v)
-                        || self.core_payload_layout(body, v, &body.names[*c as usize].ty) =>
-                {
-                    Some(body.names[*c as usize].source.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Option<Vec<&str>>>()
-        else {
-            return false;
-        };
-        let caps =
-            crate::lambda_captures(lit, params.iter().map(|p| p.name.clone()).collect(), &|x| {
-                srcs.contains(&x)
-            });
         matches!(self.cx.repr(&sig_ty, 0), Ok(Repr::Agg(_)))
             && params.len() == ptys.len()
-            && caps.len() == srcs.len()
+            && vs.iter().all(|v| {
+                matches!(v, Val::Name(c)
+                    if self.core_val_readable(body, v)
+                        || self.core_payload_layout(body, v, &body.names[*c as usize].ty))
+            })
     }
 
     /// The declared function a `x.copy()` row calls when the receiver's type
