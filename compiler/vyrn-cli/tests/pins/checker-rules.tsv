@@ -1,0 +1,67 @@
+what vyrn check prints
+checker-rules.vyrn:26:0: `a` declared Int64 but initializer is String
+checker-rules.vyrn:30:0: cannot bind `u` to a Unit value
+checker-rules.vyrn:34:0: assignment to unknown variable `zz`
+checker-rules.vyrn:39:0: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:44:0: `x` is Int64 but assigned String
+checker-rules.vyrn:48:0: assignment to field of unknown variable `zz`
+checker-rules.vyrn:53:0: cannot mutate a field of `p` (declared without `mut`)
+checker-rules.vyrn:58:0: cannot mutate a field of `Span` in place (its `where` invariant could be broken mid-update); rebuild it: `s = Span { .. }`
+checker-rules.vyrn:63:0: `n` is not a record, so it has no field `f`
+checker-rules.vyrn:68:0: record `p` has no field `zz`
+checker-rules.vyrn:74:0: field `age` is Age (validated); assign an already-constructed `Age` value, e.g. `Age(..)`
+checker-rules.vyrn:79:0: field `a` is Int64 but assigned String
+checker-rules.vyrn:83:0: index-assignment to unknown variable `zz`
+checker-rules.vyrn:88:0: cannot store into `a` (declared without `mut`)
+checker-rules.vyrn:93:0: `m` is keyed by String, but the key here is Int64
+checker-rules.vyrn:98:0: `m` holds values of type Int64 but the stored value is String
+checker-rules.vyrn:103:0: `n[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` projection (`fn atSet(modify self, ..) -> modify T`), found Int64
+checker-rules.vyrn:108:0: array index must be an Int64, found String
+checker-rules.vyrn:113:0: `k[..] = ..` is keyed by String, found Int64
+checker-rules.vyrn:118:0: `a` holds Int64 but the stored value is String
+checker-rules.vyrn:122:0: return type mismatch: expected Int64, found String
+checker-rules.vyrn:125:0: `if` condition must be Bool, found Int64
+checker-rules.vyrn:131:0: `break` outside a loop
+checker-rules.vyrn:135:0: `continue` outside a loop
+checker-rules.vyrn:139:0: `while` condition must be Bool, found Int64
+checker-rules.vyrn:145:0: `for` needs an Array, a String, or a type that declares `impl Iterate` (a `size` method and an `nth` projection, `fn nth(read self, ..) -> read T`), found Int64
+checker-rules.vyrn:151:0: cannot `drop` module state `g` — it lives for the whole module and is reclaimed at process exit
+checker-rules.vyrn:155:0: `drop` of unbound variable `zz`
+checker-rules.vyrn:159:0: cannot `drop` `x`: its type `T` is a type parameter, so this body cannot know whether the rule below holds for the instance — a plain record would be released here where `drop` on it directly is refused. Release the value where its concrete type is known, or `consume` the heap field and `drop` that
+checker-rules.vyrn:164:0: `drop` needs a heap value (a String, an Array, a Map, a Ref, or an Option/Result carrying one, or a type declaring `impl Owned`), but `n` is Int64
+checker-rules.vyrn:168:0: integer literal 300 does not fit UInt8 (its range is 0..=255)
+checker-rules.vyrn:172:0: integer literal 9223372036854775808 exceeds Int64's maximum (9223372036854775807); only `UInt64` can hold it — annotate the binding (`let x: UInt64 = ...`)
+checker-rules.vyrn:176:0: byte literal 255 does not fit Int8 (its range is -128..=127)
+checker-rules.vyrn:180:0: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
+checker-rules.vyrn:184:0: variant `A` needs 1 argument(s)
+checker-rules.vyrn:188:0: cannot infer the type of `Nothing`; add an annotation
+checker-rules.vyrn:192:0: unknown variable `zz`
+checker-rules.vyrn:196:0: unary `-` needs a numeric type, found String
+checker-rules.vyrn:200:0: unary `!` needs Bool, found Int64
+checker-rules.vyrn:204:0: unary `~` needs an integer type, found String
+checker-rules.vyrn:209:0: invalid regex `(`: unclosed group `(`
+checker-rules.vyrn:215:0: the right side of `=~` must be a string-literal pattern
+checker-rules.vyrn:219:0: shift amount 64 is out of range for a 64-bit value (valid range is 0..64)
+checker-rules.vyrn:224:0: String has no `length`: use `byteLength` for bytes or `charCount()` for Unicode scalars
+checker-rules.vyrn:229:0: type P has no field `zz`
+checker-rules.vyrn:234:0: cannot access field `f` on non-record type Int64
+checker-rules.vyrn:238:0: `P?(..)` is only for validated/nominal scalar types
+checker-rules.vyrn:242:0: unknown type `Zz`
+checker-rules.vyrn:246:0: `Age?` takes 1 argument, got 2
+checker-rules.vyrn:250:0: `Age` is built from Int64, but the argument is String
+checker-rules.vyrn:254:0: `[]` is an array literal, but Map<String, Int64> is not an array type
+checker-rules.vyrn:258:0: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
+checker-rules.vyrn:262:0: this array literal has 513 elements, past the limit of 512
+  note: a literal is lowered element by element into one call frame, so its length is a compile-time cost on both backends
+  note: a table this long belongs in a file the program reads, not in the program
+checker-rules.vyrn:266:0: this literal has 3 elements but the slot is SmallArray<_, 2>
+checker-rules.vyrn:270:0: array elements must share a type: expected Int64, found String
+checker-rules.vyrn:274:0: `[:]` is a map literal, but Array<Int64> is not a map type
+checker-rules.vyrn:278:0: cannot infer the type of `[:]`; annotate it, e.g. `let m: Map<String, Int64> = [:];`
+checker-rules.vyrn:282:0: the map is keyed by String, but this key is Int64
+checker-rules.vyrn:286:0: map values must share a type: expected Int64, found String
+checker-rules.vyrn:290:0: a lambda `|..|` needs a function type from context: pass it to a `fn`-typed parameter, or give the binding a function type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`) (RFC-0037)
+checker-rules.vyrn:299:0: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:300:0: `if` condition must be Bool, found Int64
+checker-rules.vyrn:309:0: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
+checker-rules.vyrn:314:0: cannot assign to `x` (declared without `mut`)

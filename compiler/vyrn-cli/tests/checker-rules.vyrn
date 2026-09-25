@@ -1,0 +1,319 @@
+// Every refusal `Checker::stmt` and `Checker::expr` state, one body each.
+// The checker stops at a statement's first error and goes on to the next
+// statement, so `vyrn check` prints each sentence once (RFC-0125 M7,
+// `m7-typed`).
+// `checker_census.rs` pins what it prints; a rule that leaves the
+// checker leaves that pin as it is.
+type P = { a: Int64, age: Age }
+type Age = Int64 where value >= 18
+type Span = { lo: Int64, hi: Int64 } where lo < hi
+type E = | A(Int64) | B
+type M<T> = | Nothing | Just(T)
+type Keyed = { data: Array<Int64> }
+impl Index for Keyed {
+    fn at(read self, k: String) -> read Int64 {
+        return self.data[0]
+    }
+    fn atSet(modify self, k: String) -> modify Int64 {
+        return self.data[0]
+    }
+}
+let mut g: Array<Int64> = []
+fn unitFn() -> Unit {
+    return
+}
+fn declaredInit() -> Int64 {
+    let a: Int64 = "s"
+    return 0
+}
+fn bindUnit() -> Int64 {
+    let u = unitFn()
+    return 0
+}
+fn assignUnknown() -> Int64 {
+    zz = 1
+    return 0
+}
+fn assignImmutable() -> Int64 {
+    let x = 1
+    x = 2
+    return x
+}
+fn assignMismatch() -> Int64 {
+    let mut x = 1
+    x = "s"
+    return x
+}
+fn fieldUnknown() -> Int64 {
+    zz.a = 1
+    return 0
+}
+fn fieldImmutable() -> Int64 {
+    let p = P { a: 1, age: Age(20) }
+    p.a = 2
+    return 0
+}
+fn fieldWhere() -> Int64 {
+    let mut s = Span { lo: 1, hi: 2 }
+    s.lo = 0
+    return 0
+}
+fn fieldNotRecord() -> Int64 {
+    let mut n = 1
+    n.f = 2
+    return 0
+}
+fn fieldMissing() -> Int64 {
+    let mut p = P { a: 1, age: Age(20) }
+    p.zz = 2
+    return 0
+}
+fn fieldValidated() -> Int64 {
+    let mut p = P { a: 1, age: Age(20) }
+    let k = 30
+    p.age = k
+    return 0
+}
+fn fieldMismatch() -> Int64 {
+    let mut p = P { a: 1, age: Age(20) }
+    p.a = "s"
+    return 0
+}
+fn indexUnknown() -> Int64 {
+    zz[0] = 1
+    return 0
+}
+fn indexImmutable() -> Int64 {
+    let a = [1]
+    a[0] = 2
+    return 0
+}
+fn mapKey() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    m[1] = 2
+    return 0
+}
+fn mapValue() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    m["a"] = "s"
+    return 0
+}
+fn indexNotContainer() -> Int64 {
+    let mut n = 1
+    n[0] = 2
+    return 0
+}
+fn indexNotInt() -> Int64 {
+    let mut a = [1]
+    a["x"] = 2
+    return 0
+}
+fn indexKeyed() -> Int64 {
+    let mut k = Keyed { data: [1] }
+    k[1] = 2
+    return 0
+}
+fn indexValue() -> Int64 {
+    let mut a = [1]
+    a[0] = "s"
+    return 0
+}
+fn returnMismatch() -> Int64 {
+    return "s"
+}
+fn ifCond() -> Int64 {
+    if 1 {
+        return 0
+    }
+    return 1
+}
+fn breakOutside() -> Int64 {
+    break
+    return 0
+}
+fn continueOutside() -> Int64 {
+    continue
+    return 0
+}
+fn whileCond() -> Int64 {
+    while 1 {
+        return 0
+    }
+    return 1
+}
+fn forNotIterable() -> Int64 {
+    for x in 5 {
+        return x
+    }
+    return 0
+}
+fn dropState() -> Int64 {
+    drop g
+    return 0
+}
+fn dropUnbound() -> Int64 {
+    drop zz
+    return 0
+}
+fn dropParam<T>(x: consume T) -> Int64 {
+    drop x
+    return 0
+}
+fn dropScalar() -> Int64 {
+    let n = 1
+    drop n
+    return 0
+}
+fn intFits() -> Int64 {
+    let b: UInt8 = 300
+    return 0
+}
+fn intMax() -> Int64 {
+    let v = 9223372036854775808
+    return 0
+}
+fn byteFits() -> Int64 {
+    let b: Int8 = '\xff'
+    return 0
+}
+fn inferNone() -> Int64 {
+    let x = None
+    return 0
+}
+fn variantArgs() -> Int64 {
+    let e = A
+    return 0
+}
+fn inferVariant() -> Int64 {
+    let e = Nothing
+    return 0
+}
+fn unknownVariable() -> Int64 {
+    let v = zz
+    return 0
+}
+fn unaryNeg() -> Int64 {
+    let s = -"s"
+    return 0
+}
+fn unaryNot() -> Int64 {
+    let b = !1
+    return 0
+}
+fn unaryBits() -> Int64 {
+    let b = ~"s"
+    return 0
+}
+fn regexInvalid() -> Int64 {
+    let s = "a"
+    let b = s =~ "("
+    return 0
+}
+fn regexNotLiteral() -> Int64 {
+    let s = "a"
+    let p = "a"
+    let b = s =~ p
+    return 0
+}
+fn shiftRange() -> Int64 {
+    let v = 1 << 64
+    return 0
+}
+fn stringLength() -> Int64 {
+    let s = "a"
+    let v = s.length
+    return 0
+}
+fn readMissing() -> Int64 {
+    let p = P { a: 1, age: Age(20) }
+    let v = p.zz
+    return 0
+}
+fn readNotRecord() -> Int64 {
+    let n = 1
+    let v = n.f
+    return 0
+}
+fn tryNotScalar() -> Int64 {
+    let x = P?(1)
+    return 0
+}
+fn tryUnknown() -> Int64 {
+    let x = Zz?(1)
+    return 0
+}
+fn tryArity() -> Int64 {
+    let x = Age?(1, 2)
+    return 0
+}
+fn tryBase() -> Int64 {
+    let x = Age?("s")
+    return 0
+}
+fn arrayNotArray() -> Int64 {
+    let m: Map<String, Int64> = []
+    return 0
+}
+fn inferArray() -> Int64 {
+    let a = []
+    return 0
+}
+fn arrayLimit() -> Int64 {
+    let a = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    return 0
+}
+fn smallArray() -> Int64 {
+    let s: SmallArray<Int64, 2> = [1, 2, 3]
+    return 0
+}
+fn arrayShare() -> Int64 {
+    let a = [1, "s"]
+    return 0
+}
+fn mapNotMap() -> Int64 {
+    let a: Array<Int64> = [:]
+    return 0
+}
+fn inferMap() -> Int64 {
+    let m = [:]
+    return 0
+}
+fn mapKeyed() -> Int64 {
+    let m: Map<String, Int64> = [1: 2]
+    return 0
+}
+fn mapShare() -> Int64 {
+    let m = ["a": 1, "b": "s"]
+    return 0
+}
+fn lambdaContext() -> Int64 {
+    let f = x -> x
+    return 0
+}
+// Two refused statements in one body, from two groups. The checker states
+// both. Once the store rule is the judgment's, only the `if 1` prints: the
+// checker refuses the body, so no core is built for it, and a body reports
+// the refusals of the first pass that refuses it (RFC-0125 M7, decision A).
+fn twoPasses() -> Int64 {
+    let x = 1
+    x = 2
+    if 1 {
+        return 0
+    }
+    return x
+}
+// A typed body that calls a refused generic function is not lowered either:
+// the build moves out every function that names a refused one. So once the
+// store rule is the judgment's, `callsRefused`'s line goes with it.
+fn refusedGeneric<T>(x: T) -> Int64 {
+    let a = []
+    return 0
+}
+fn callsRefused() -> Int64 {
+    let x = 1
+    x = 2
+    return refusedGeneric(x)
+}
+fn main() -> Int64 {
+    return 0
+}
