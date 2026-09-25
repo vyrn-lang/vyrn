@@ -19127,8 +19127,9 @@ impl<'p> Fn_<'_, 'p> {
     /// into an element of an Array writes the buffer ([`core_written`]). A root on
     /// the chain handed to `consume` anywhere in the body may be freed under
     /// the name. A row of the name's extent that hands a root on the chain to
-    /// `modify` ([`vyrn_lower::kernel::modifies`]) may replace what the name
-    /// points into. Outside the extent the kernel ends the alias at that call
+    /// `modify` ([`vyrn_lower::kernel::modifies`]), or rebuilds it as a
+    /// write-back receiver (`out.push(v)`), may replace what the name points
+    /// into. Outside the extent the kernel ends the alias at that call
     /// and refuses a read after it, as it does at a store into the root; for
     /// module state, a callee's store too.
     fn core_alias<'b>(
@@ -19168,6 +19169,10 @@ impl<'p> Fn_<'_, 'p> {
         };
         let place = read(n)?;
         let extent = core_extent(&body.stmts, n, &body.occurrences())?;
+        let mut rebuilt = Vec::new();
+        extent
+            .iter()
+            .for_each(|s| core_written(&body.names, s, &mut rebuilt));
         if written
             .iter()
             .any(|(m, c)| *m == n && !(owned && *c == Some(Capability::Consume)))
@@ -19189,6 +19194,9 @@ impl<'p> Fn_<'_, 'p> {
             if written
                 .iter()
                 .any(|(m, c)| *m == root && *c == Some(Capability::Consume))
+                || rebuilt
+                    .iter()
+                    .any(|(m, c)| *m == root && *c == Some(Capability::Modify))
                 || vyrn_lower::kernel::modifies(
                     extent,
                     vyrn_lower::kernel::Root::N(root),
@@ -21372,9 +21380,17 @@ fn core_written(
     out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>,
 ) {
     let args = |r: &Rhs, out: &mut Vec<(vyrn_lower::core::Name, Option<Capability>)>| {
-        if let Rhs::Call { args, .. } = r {
-            for (a, c) in args {
+        if let Rhs::Call {
+            args, write_back, ..
+        } = r
+        {
+            for (k, (a, c)) in args.iter().enumerate() {
                 match (a, c) {
+                    // A write-back receiver is taken and stored back by the
+                    // row after, so it changes no owner: a modify.
+                    (Arg::Val(Val::Name(n)), Capability::Consume) if k == 0 && *write_back => {
+                        out.push((*n, Some(Capability::Modify)))
+                    }
                     (Arg::Val(Val::Name(n)), Capability::Modify | Capability::Consume) => {
                         out.push((*n, Some(*c)))
                     }

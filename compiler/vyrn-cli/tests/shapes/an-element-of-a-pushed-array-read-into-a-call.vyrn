@@ -1,0 +1,6 @@
+// an element of a pushed array read into a call
+// pin: 0 break, 0 continue
+// `out.push(x)` rebuilds `out` and hands it back, so it changes no owner.
+// A borrow of an element is that element for its extent, and a push inside
+// the extent still refuses it (the m7-reads record).
+type E = { a: Int64, tag: String }          fn diff(x: E, y: E) -> Int64 { return x.a - y.a + x.tag.byteLength }          fn sorted(xs: Array<E>) -> Int64 { let mut out: Array<E> = [] for x in xs { out.push(x.copy()) } let d = out[1] return diff(out[0], out[1]) * 10 + d.a }          fn vyrnTestMain() -> Int64 { let xs: Array<E> = [E { a: 1, tag: "p" }, E { a: 5, tag: "qq" }] return sorted(xs) }
