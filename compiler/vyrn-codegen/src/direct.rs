@@ -20896,7 +20896,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
-    /// `bound` holds the payload binders of the arms `ss` is inside.
+    /// `bound` holds the names with a place on the path to `ss`: the payload
+    /// binders of the arms it is inside, and the names an enclosing list made
+    /// before it, whose slots the walk holds to the end of their extent.
     fn core_readable(
         &self,
         body: &vyrn_lower::core::Body,
@@ -20904,6 +20906,19 @@ impl<'p> Fn_<'_, 'p> {
         reads: &[u32],
         bound: &[vyrn_lower::core::Name],
     ) -> bool {
+        let path = |i: usize| -> Vec<vyrn_lower::core::Name> {
+            let made = ss[..i].iter().filter_map(|p| match p {
+                St::Let(l, rhs)
+                    if matches!(rhs, Rhs::Make(..))
+                        || self.core_ctor(rhs)
+                        || self.core_agg_call(body, rhs) =>
+                {
+                    Some(*l)
+                }
+                _ => None,
+            });
+            bound.iter().copied().chain(made).collect()
+        };
         ss.iter().enumerate().all(|(i, s)| match s {
             // A made layout is built into the name's own slot, which the
             // name holds to the end of its extent, or into the caller's
@@ -21003,11 +21018,11 @@ impl<'p> Fn_<'_, 'p> {
                 cond, then, els, ..
             } => {
                 self.core_val_readable(body, cond)
-                    && self.core_readable(body, then, reads, bound)
-                    && self.core_readable(body, els, reads, bound)
+                    && self.core_readable(body, then, reads, &path(i))
+                    && self.core_readable(body, els, reads, &path(i))
             }
-            St::Block { body: inner, .. } => self.core_readable(body, inner, reads, bound),
-            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads, bound),
+            St::Block { body: inner, .. } => self.core_readable(body, inner, reads, &path(i)),
+            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads, &path(i)),
             St::Break { .. } | St::Continue { .. } => true,
             // A tag is read and an arm is chosen off the row
             // ([`Fn_::core_switch`]). What that needs is a scrutinee this walk
@@ -21021,17 +21036,12 @@ impl<'p> Fn_<'_, 'p> {
                 // which the `let` arm slots before the switch is reached, or a
                 // payload binder, which the enclosing switch binds when it
                 // enters the arm) or the one the AST arm bound.
-                let placed = bound.contains(n)
+                let path = path(i);
+                let placed = path.contains(n)
                     || self.core_place(&self.core_w, body, *n).is_some()
                     || self.core_alias(body, *n).is_some()
                     || self.core_copies(body, *n).is_some()
-                    || self.core_renames(body, *n).is_some()
-                    || ss[..i].iter().any(|p| {
-                        matches!(p, St::Let(l, rhs) if l == n
-                            && (matches!(rhs, Rhs::Make(..))
-                                || self.core_ctor(rhs)
-                                || self.core_agg_call(body, rhs)))
-                    });
+                    || self.core_renames(body, *n).is_some();
                 placed
                     && self.sum_of(&body.names[*n as usize].ty).is_some()
                     // A construct the plan releases WHOLE is one the arm gives
@@ -21050,7 +21060,7 @@ impl<'p> Fn_<'_, 'p> {
                                 body,
                                 &a.body[a.reads(on).len()..],
                                 reads,
-                                &[bound, &a.binds[..]].concat(),
+                                &[&path[..], &a.binds[..]].concat(),
                             )
                     })
             }
