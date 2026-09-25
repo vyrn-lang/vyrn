@@ -7778,6 +7778,12 @@ impl<'a> Builder<'a> {
                 *c = Capability::Consume;
             }
         }
+        // `@list([..])` moves the literal's elements into the growable array
+        // it builds, so it takes the literal: a read would leave the literal
+        // to release the same elements again.
+        if name == "@list" {
+            caps.iter_mut().for_each(|c| *c = Capability::Consume);
+        }
         let drains = !lends_here;
         if drains {
             self.drain += 1;
