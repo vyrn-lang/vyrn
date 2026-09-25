@@ -92,3 +92,34 @@ Licence:
 - `nextest -p vyrn-cli` 674 passed. `-p vyrn-frontend -p vyrn-lower` 1,079 passed. `lowered_dump` and `refusals` `--ignored` passed. `vyrn-lsp` passed.
 - pins: `checker-census` typing judgment 123 to 121 refusals; the literal section's anchor is `literal_value`.
 Time: about 25 minutes.
+
+#### Module state and predicates are roots of the judgment (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, decision A, group 5, first commit.
+Decision: each module-state initializer and each `where` predicate is built for the typed judgment alone, as a generic function with no instance is (#487). The lead's.
+Went: two copies of the `Builder` literal (`build_module_state`, `build_outside_seeded`); `Builder::bare` states it once. Stayed: every rule; this commit moves none.
+Lines: `core.rs` 9,327 to 9,385. Refusals: 0 lost / 0 gained. Manifest: untouched.
+Licence:
+- `vyrn check` over 507 roots, main's binary against this commit: byte-identical but `std/runtime.vyrn`, which main's binary refuses from any tree but its own. 0 internal errors.
+- the witness programs of group 5 (C:/wtboxtmp/w5), main against this commit: byte-identical.
+- `nextest -p vyrn-cli` 674 passed.
+
+#### An unknown name is stated once, over the core (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, decision A, group 5.
+Decision: the checker types an unknown name `Err` and goes on; the builder records it, binds `Err` and goes on; a statement that read a name typed `Err` drops the checker's later refusals and is not refused. The lead's.
+Went: the checker's five sites (assign, field and index store, a read, `T?(..)`), two checker unit tests of them, and the debug lint's claim that no row reaching the lowering is typed `Err`. The pin test of the unknown name's column moved to `columns.rs`, where the lowering is installed.
+Lines: `checker.rs` 14,735 to 14,750 (`Checker::unit` and its flag). `core.rs` 9,385 to 9,505 (47 of them the poison walk and `ast::exprs_one`). `typed.rs` 1,127 to 1,144. `loader.rs` +11, `lib.rs` -18. Refusals: 0 lost / 0 gained over the corpus. Manifest: untouched.
+Licence:
+- `vyrn check` over 507 roots against main: byte-identical but `std/runtime.vyrn` (above) and the census program. 0 internal errors.
+- `checker-rules` pin: 6 witnesses come. Two unknown names in one body both print (379, 381). `if v` after a failed `let v` adds nothing (387 alone). Module state and a predicate reading an unknown name (394, 395). A predicate sees no module state (397).
+- 56 witness programs (C:/wtboxtmp/w5), main against the tip, debug and release equal: 41 byte-identical. 8 lose a "must return on all paths" line that followed an unknown name. `pre_cascade` loses its four cascade lines, the decided change. 4 gain the moved `mut` line in a body that read an unknown name, because the checker no longer refuses it. 2 lose the unknown name beside a checker refusal in the same body (decision A).
+- a generator with an unknown name prints main's line; without the loader's change it printed "the installed generation engine declined it".
+- `nextest -p vyrn-cli` 676 passed at the rebased tip. `-p vyrn-frontend -p vyrn-lower` 1,077 passed. `kernel`, `effects`, `typed`, `coretables`, `coredrive`, `wasmhash` (check), `lowered_dump`, `columns`, `refusals`, `letswalk` and `checker_census` `--ignored` passed. `vyrn-lsp` 100 passed.
+- pins: `checker-census` typing judgment 121 to 116 refusals; `forms`, `surface` and `frontend-census` move by the builder's and loader's new lines.
+- coredrive: 21,053 of 21,172 bodies take the core's walk on 31a3e69a before and after, and 21,082 rebased on ab947e5f; 1 of 168 programs emit the same module, 167 run the same.
+- rebased on ab947e5f: the corpus's 507 old roots are byte-identical to the pre-rebase tip, and main's 10 new roots are accepted.
+- `site/export.vyrn`, best of 5 interleaved: 3,088 ms on main, 3,101 ms at the tip, inside the noise.
+Time: about 200 minutes: 110 work, 60 gates, 30 builds.
+Findings:
+- the checker's `Err` poison never silenced `if`, `while`, `for` and `match`: main prints four cascade lines after `let v: Int64 = "s"`. The flag removes them.
+- a body the builder gaps in after an unknown name is refused, not an internal error: the poison walk finds the name the gap came before.
+Left: group 6, the 31 type comparisons; its order goes to the lead first.
