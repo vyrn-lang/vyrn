@@ -1488,6 +1488,160 @@ pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
         .collect()
 }
 
+/// Whether a value of type `from` can be used where `to` is expected.
+/// Validated types decay to their base (an `Age` is an `Int`), but the
+/// reverse requires explicit construction.
+pub fn assignable(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    assignable_d(from, to, 0, types)
+}
+
+/// Depth cap for [`assignable_d`]: past it the comparison is a
+/// recursive type revisiting itself, not a width-subtyping question.
+const MAX_ASSIGNABLE_DEPTH: usize = 64;
+
+/// [`assignable`] with the descent depth in hand. Structural
+/// width subtyping walks field by field, and a legal recursive record
+/// (`type NodeA = { v: Int64, next: Option<NodeA> }`) compared against
+/// another (`NodeB`) descends `NodeA -> Option<NodeA> -> NodeA`
+/// forever — mutually recursive transparent aliases diverge the same
+/// way through their expansion arms. A cycle here has no finite
+/// witness, so past the cap the answer is simply "not assignable":
+/// the program gets a type error instead of a stack overflow, the
+/// same give-up `own::owns_heap` makes.
+fn assignable_d(from: &Type, to: &Type, depth: usize, types: &HashMap<String, TypeDecl>) -> bool {
+    if depth > MAX_ASSIGNABLE_DEPTH {
+        return false;
+    }
+    if from == to {
+        return true;
+    }
+    // An `Err` (a recovered type-check failure) is compatible with anything:
+    // it should flow through without manufacturing a second diagnostic. This
+    // is what keeps inside-body error recovery cascade-free.
+    if matches!(from, Type::Err) || matches!(to, Type::Err) {
+        return true;
+    }
+    // `Never` (RFC-0079) is the bottom type: a `panic` produces no value, so
+    // it fits wherever a value is wanted. One direction only — a `String` is
+    // not a `Never`, and making it one would let a panic-typed context
+    // swallow a real value.
+    if matches!(from, Type::Never) {
+        return true;
+    }
+    // RFC-0085 M4a: a `lazy T` field takes exactly what a `fn() -> T` field
+    // takes — a lambda, a named function, or another stored value of that
+    // signature. The construction site writes the thunk and is meant to see
+    // that it is one; only the READ hides it.
+    if let Type::Lazy(t) = to {
+        return assignable_d(from, &Type::Fn(Vec::new(), t.clone()), depth + 1, types);
+    }
+    if let Type::Lazy(t) = from {
+        return assignable_d(&Type::Fn(Vec::new(), t.clone()), to, depth + 1, types);
+    }
+    // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
+    // DeleteResult = Result<Bool, String>`) is interchangeable with its
+    // resolved form — it carries no `where` obligation of its own.
+    let transparent = |b: &Type| {
+        is_sum_alias(b)
+            || matches!(
+                b,
+                Type::Map(..)
+                | Type::Array(_)
+                | Type::ArrayN(..)
+                // A named function type (`type Middleware = fn(..) -> ..`,
+                // RFC-0037) is interchangeable with its structural form.
+                | Type::Fn(..)
+            )
+    };
+    if let Type::Named(n) = to {
+        if let Some(d) = types.get(n) {
+            if d.predicate.is_none() && transparent(&d.base) {
+                return assignable_d(from, &d.base, depth + 1, types);
+            }
+        }
+    }
+    if let Type::Named(n) = from {
+        if let Some(d) = types.get(n) {
+            if d.predicate.is_none() && transparent(&d.base) {
+                return assignable_d(&d.base, to, depth + 1, types);
+            }
+        }
+    }
+    // A nominal/validated `Named` type decays to its base scalar for reading
+    // (an `Age` is an `Int`, a `UserId` is a `String`).
+    if let Type::Named(_) = from {
+        if matches!(to, Type::Int | Type::Bool | Type::Str) {
+            return &resolve(from, types) == to;
+        }
+    }
+    // Option/Result are covariant in their payloads (values are immutable).
+    if let (Some(a), Some(b)) = (option_payload(from), option_payload(to)) {
+        return assignable_d(a, b, depth + 1, types);
+    }
+    if let (Some((a, e1)), Some((b, e2))) = (result_payloads(from), result_payloads(to)) {
+        return assignable_d(a, b, depth + 1, types) && assignable_d(e1, e2, depth + 1, types);
+    }
+    // A Map is covariant in its value type (keys recurse the same way;
+    // values are immutable at a read boundary) — RFC-0028.
+    if let (Type::Map(ka, va), Type::Map(kb, vb)) = (from, to) {
+        return assignable_d(ka, kb, depth + 1, types) && assignable_d(va, vb, depth + 1, types);
+    }
+    if let (Type::Array(a), Type::Array(b)) = (from, to) {
+        return assignable_d(a, b, depth + 1, types);
+    }
+    // A `SmallArray<T, N>` (RFC-0056) is covariant in `T` and invariant in
+    // `N` (the capacity is part of the type — no widening/narrowing).
+    if let (Type::SmallArray(a, na), Type::SmallArray(b, nb)) = (from, to) {
+        return na == nb && assignable_d(a, b, depth + 1, types);
+    }
+    // `assignable` is the STRICT relation: a predicated named type admits
+    // only itself here. Value boundaries use `coercible`, which adds the
+    // automatic-validation rule on top.
+    if let Type::Named(n) = to {
+        if let Some(d) = types.get(n) {
+            if d.predicate.is_some() {
+                return matches!(from, Type::Named(m) if m == n);
+            }
+        }
+    }
+    // Structural width subtyping: `from` is usable as `to` if it has every
+    // field `to` requires, with an assignable type. Extra fields are fine.
+    if let (Type::Record(ff), Type::Record(tf)) = (&resolve(from, types), &resolve(to, types)) {
+        return tf.iter().all(|need| {
+            ff.iter().any(|have| {
+                have.name == need.name && assignable_d(&have.ty, &need.ty, depth + 1, types)
+            })
+        });
+    }
+    false
+}
+
+/// Whether `from` may flow into `to` at a **value boundary** (a `let`
+/// annotation, an assignment, a call argument, a return, a record field, an
+/// array element): everything `assignable` allows, **plus automatic
+/// validation** — a value structurally compatible with a predicated named
+/// type's base may flow in, and the boundary itself runs the `where`
+/// predicate (a provably-false constant is rejected at compile time by
+/// `Checker::prove_coercion`; anything else is checked at runtime by both
+/// backends, trapping with `validation failed for \`T\``).
+///
+/// The rule applies at the top level only: a payload inside an
+/// `Option`/`Result`/`Array` *type* does not auto-coerce — each element is
+/// validated at its own literal/argument boundary instead.
+pub fn coercible(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    if assignable(from, to, types) {
+        return true;
+    }
+    if let Type::Named(n) = to {
+        if let Some(d) = types.get(n) {
+            if d.predicate.is_some() {
+                return assignable(from, &d.base, types);
+            }
+        }
+    }
+    false
+}
+
 pub fn resolve(ty: &Type, types: &HashMap<String, TypeDecl>) -> Type {
     resolve_d(ty, types, 0)
 }

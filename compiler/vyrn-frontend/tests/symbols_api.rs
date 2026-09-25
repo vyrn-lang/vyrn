@@ -711,7 +711,7 @@ fn import_collision_errors_but_root_index_survives() {
 #[test]
 fn analyze_linked_adopts_foreign_errors() {
     let root = "import { bad } from \"./lib\"\n\nfn main() -> Int64 {\n    return bad(1)\n}\n";
-    let lib = "export fn bad(x: Int64) -> Int64 {\n    return \"nope\"\n}\n";
+    let lib = "export fn bad(x: Int64) -> Int64 {\n    let a: UInt8 = 300\n    return x\n}\n";
     let resolver = vyrn_frontend::loader::MapResolver(
         [("lib.vyrn".to_string(), lib.to_string())]
             .into_iter()

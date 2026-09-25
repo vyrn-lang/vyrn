@@ -169,6 +169,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     let synth_span = prof::phase("synthesize");
     if diags.is_empty() {
         let types = types::decl_map(program);
+        let checked = program.functions.len();
         match jsonenc::encoders(&json_types, &types) {
             Ok(fns) => program.functions.extend(fns),
             Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
@@ -192,6 +193,9 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
             .filter(|f| !have.contains(f.name.as_str()))
             .collect();
         program.functions.extend(fresh);
+        for f in &mut program.functions[checked..] {
+            f.after_check = true;
+        }
     }
     // RFC-0125 §3 M3, the accumulation slice: the checker's ownership refusals
     // and the kernel's, as one list, in the order the source states them. The

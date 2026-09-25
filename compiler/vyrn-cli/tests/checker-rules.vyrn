@@ -293,7 +293,7 @@ fn lambdaContext() -> Int64 {
 // Two refused statements in one body, from two groups the typed judgment
 // states, so both print. Beside a rule the checker still states, a moved
 // rule does not print: the checker refuses the body, and it has no core
-// (RFC-0125 M7, decision A). `storeMismatch` witnesses that.
+// (RFC-0125 M7, decision A). `movedBesideChecker` witnesses that.
 fn twoPasses() -> Int64 {
     let x = 1
     x = 2
@@ -346,8 +346,7 @@ fn storeUncalled<T>(v: T) -> Int64 {
     x = 2
     return x
 }
-// A moved rule and a checker rule on one statement: the checker's sentence
-// prints, because the body it refuses has no core (#487).
+// Two rules the typed judgment states, on one statement: both print.
 fn storeMismatch() -> Int64 {
     let x = 1
     x = "s"
@@ -428,6 +427,37 @@ fn forSizeOnly() -> Int64 {
     for x in r {
     }
     return 0
+}
+fn movedBesideChecker() -> Int64 {
+    let a: Int64 = "s"
+    let n = -"x"
+    return 0
+}
+// A value its slot does not take is the typed judgment's. A name bound to
+// Unit is typed `Err`, so its uses add nothing; a `test` body returns Unit;
+// a generic function is judged as written.
+fn unitThenUse() -> Int64 {
+    let u = unitFn()
+    let v = u + 1
+    return 0
+}
+fn returnGeneric<T>(x: T) -> Int64 {
+    return x
+}
+fn callsReturnGeneric() -> Int64 {
+    return returnGeneric(1)
+}
+test "returns a value" {
+    return 3
+}
+// An `impl` projection's body is judged like a function's.
+type Ringed = { data: Array<Int64> }
+impl Index for Ringed {
+    fn at(read self, i: Int64) -> read String {
+        let x = 1
+        x = 2
+        return self.data[i]
+    }
 }
 fn main() -> Int64 {
     return 0

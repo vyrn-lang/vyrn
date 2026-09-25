@@ -723,6 +723,11 @@ pub struct Function {
     /// word (`let mut` already has it); `export mut fn` is the only combination,
     /// with `export` outermost like `export gen fn` / `export extern fn`.
     pub is_mut: bool,
+    /// Written by the compiler after the checker reported: a JSON codec or a
+    /// `where` constructor (`check_and_synthesize`). The recording types its
+    /// nodes and nothing reports on them, so the typed judgment's rules about
+    /// the types a body was given do not read it.
+    pub after_check: bool,
 }
 
 impl Function {
