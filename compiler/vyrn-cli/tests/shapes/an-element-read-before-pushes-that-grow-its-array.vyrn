@@ -1,0 +1,7 @@
+// an element read before pushes that grow its array
+// pin: 0 break, 0 continue
+// `let e = out[0]` binds a heapless record, then 64 pushes reallocate the
+// buffer. `e` is a copy, 16 bytes into its own slot, and never an alias of
+// the freed buffer. With a heap field the checker refuses the read of `e`
+// ("`out` is written here while `e` still reads out of it"). The m7-reads record.
+type P = { a: Int64, b: Int64 }          fn grow(xs: Array<P>) -> Int64 { let mut out: Array<P> = [] for x in xs { out.push(x) } let e = out[0] let mut i = 0 while i < 64 { out.push(P { a: i, b: i }) i = i + 1 } return e.a * 1000 + e.b * 10 + out.length }          fn vyrnTestMain() -> Int64 { let xs: Array<P> = [P { a: 7, b: 3 }] return grow(xs) % 100 }
