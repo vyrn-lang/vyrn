@@ -11,10 +11,10 @@ Licence, at the tip on main `d62c4f6e`:
 - #509, `an_index_store_takes_the_key_type_a_lookup_takes`: `s[h] = 1` with `h: Suit` and `s[Clubs] = 2` are accepted. `s[3] = 1` is refused with "`s` is keyed by Suit, but the key here is Int64". Main's binary refuses all three stores of the witness and names the Int64 one with that same sentence.
 - `vyrn check` over the corpus, with this tree's binary without and with both changes: 534 roots, 455 accepted, 79 refused, `diff -r` empty.
 - `kernel`, `effects`, `typed`, `coretables`, `wasmhash` `--ignored` with the manifest check: 6 passed. `kernel` 27,061 / 0 / 0.
-- `coredrive --ignored`: fails at `coredrive.rs:482`, the carried forms lacking `Stmt::IfLet`, with and without this track's code (taken 21,139 of 21,172 both ways). Main `d62c4f6e` fails it as well. The new shape is at 0 break, 0 continue.
+- `coredrive --ignored` with the manifest check, on a local merge of this branch with `origin/m7-shard` `6db4e9f5`, which carries #513's forms pin: passed. Taken 21,141 of 21,172, 1,676 carried end to end, 1 byte-identical, 167 run the same, 0 run apart. The new shape is at 0 break, 0 continue. On main `d62c4f6e` alone it fails at `coredrive.rs:482` (the carried forms lack `Stmt::IfLet`) with and without this track's code. The CLI suite (680/680) and the other ignored suites also passed on the merge.
 - `residue --ignored`: engine 173 clean / 0 leaking, route 173 / 0, 0 failed.
 - pins by `VYRN_PIN=write`: #508 moves `emitter-census` (the mapping 12,572 to 12,573, a decision 1,148 to 1,149), `emitter-reads` (neither 6,709 to 6,711) and `surface` (`Type::Int` 130 to 128). #509 moves `checker-census` (the typing judgment 3,223 to 3,230, tests 4,424 to 4,439).
-Time: about 110 minutes: 30 work, 60 gates, 20 on a rebase that dropped the pins and on main's `coredrive` failure.
+Time: about 130 minutes: 30 work, 75 gates, 25 on a rebase that dropped the pins and on main's `coredrive` failure.
 Findings:
-- Main `d62c4f6e` fails `coredrive`: no `if let` in the corpus is carried by the core's rows any more (11 on the arm, 0 on the rows).
-Left: main's `coredrive` failure, blocked by a bisect across #499, #502, #503, #505 and #506.
+- Main `d62c4f6e` fails `coredrive`: no `if let` in the corpus is carried by the core's rows any more. #513 moves the forms pin.
+Left: nothing on this track.
