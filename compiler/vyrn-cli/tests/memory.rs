@@ -2444,6 +2444,13 @@ fn a_map_keyed_by_a_record_or_an_enum_is_freed_on_both_walks() {
     );
 }
 
+// A record and an enum key with String values, released and copied. The
+// release freed the packed key bytes as String pointers and trapped (#508).
+#[test]
+fn a_map_of_a_packed_key_and_a_string_value_is_freed_on_both_walks() {
+    shape_runs_clean("a-map-of-a-packed-key-and-a-string-value", "22321\n");
+}
+
 /// Runs the shape `stem` of `tests/shapes/` under the free audit, on the
 /// core's rows and on the AST walk, and asserts each prints `want`, exits 0
 /// and prints nothing on stderr.

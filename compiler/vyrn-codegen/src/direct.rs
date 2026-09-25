@@ -4137,10 +4137,10 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             // Two parallel buffers. String keys are released per entry
-            // (RFC-0092 M3); Int64 keys go with their buffer (RFC-0117). The
-            // elements first, then the buffers they live in.
+            // (RFC-0092 M3); Int64 and packed keys go with their buffer
+            // (RFC-0117). The elements first, then the buffers they live in.
             Type::Map(kt, vt) if self.deep_row(ty) => {
-                let ik = self.cx.resolve(&kt) == Type::Int;
+                let mk = self.map_key(&kt, line)?;
                 let l = self.layout_of(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let n = b.local(ValType::I32);
@@ -4148,7 +4148,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Load(at(l.fields[2])));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(n));
-                for (i, (stride, elem)) in [(4u32, Type::Str), (vstride, (*vt).clone())]
+                let kstride = mk.stride() as u32;
+                for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
                     .into_iter()
                     .enumerate()
                 {
@@ -4156,7 +4157,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
-                    if !(ik && i == 0) {
+                    if i == 1 || mk == MapKey::Str {
                         self.each(m, b, true, buf, n, stride, &elem, line)?;
                     }
                     b.ins(&Instruction::LocalGet(buf))
@@ -12656,9 +12657,10 @@ impl<'p> Fn_<'_, 'p> {
                 self.each(m, b, false, base, n, stride, &inner, line)
             }
             Type::Map(kt, vt) => {
-                // String keys are dup'd per entry; Int64 keys copy with the
-                // buffer (RFC-0117) — 8-byte stride, no per-element walk.
-                let ik = self.cx.resolve(&kt) == Type::Int;
+                // String keys are dup'd per entry; Int64 and packed keys copy
+                // with the buffer (RFC-0117), at their stride, with no
+                // per-element walk.
+                let mk = self.map_key(&kt, line)?;
                 let l = self.layout_of(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let (n, cap) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -12670,7 +12672,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Load(at(l.fields[3])));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(cap));
-                let kstride = if ik { 8u32 } else { 4u32 };
+                let kstride = mk.stride() as u32;
                 for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
                     .into_iter()
                     .enumerate()
@@ -12695,7 +12697,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
-                    if !(ik && i == 0) {
+                    if i == 1 || mk == MapKey::Str {
                         self.each(m, b, false, nb, n, stride, &elem, line)?;
                     }
                 }
