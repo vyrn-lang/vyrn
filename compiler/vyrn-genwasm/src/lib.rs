@@ -337,16 +337,27 @@ fn wrapper_program(program: &Program) -> Option<Program> {
         return None;
     }
     let mut p = program.clone();
-    // `args()[i]` — the parser's own desugar for indexing.
-    let argv = |i: usize| call("@at", vec![call("args", vec![]), Expr::Int(i as i64)]);
-    let mut body = vec![Stmt::Let {
-        name: "g".into(),
-        mutable: false,
-        ty: Some(Type::Str),
-        value: argv(0),
-        line: 0,
-        col: 0,
-    }];
+    // `argv[i]` — the parser's own desugar for indexing, of `args()` bound
+    // once, so each read is an element of a place.
+    let argv = |i: usize| call("@at", vec![var("argv"), Expr::Int(i as i64)]);
+    let mut body = vec![
+        Stmt::Let {
+            name: "argv".into(),
+            mutable: false,
+            ty: None,
+            value: call("args", vec![]),
+            line: 0,
+            col: 0,
+        },
+        Stmt::Let {
+            name: "g".into(),
+            mutable: false,
+            ty: Some(Type::Str),
+            value: argv(0),
+            line: 0,
+            col: 0,
+        },
+    ];
     for f in p.functions.iter().filter(|f| dispatchable(f)) {
         body.push(Stmt::If {
             cond: Expr::Binary {
