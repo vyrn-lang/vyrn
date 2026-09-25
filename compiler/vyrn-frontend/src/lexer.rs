@@ -2,6 +2,16 @@
 
 use crate::diagnostics::Diagnostic;
 
+/// An interpolation hole: its raw, un-lexed source and where that source
+/// starts, so the nodes parsed from it name the lines and columns they sit on
+/// (#471).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hole {
+    pub src: String,
+    pub line: usize,
+    pub col: usize,
+}
+
 /// A lexical token kind.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
@@ -17,11 +27,11 @@ pub enum Tok {
     /// A string literal, already decoded (escapes resolved).
     Str(String),
     /// An interpolated string `"a\{e}b\{f}c"` (RFC-0007). `parts` are the decoded
-    /// literal fragments (always `exprs.len() + 1` of them); `exprs` are the raw,
-    /// un-lexed source of each `\{ .. }` hole, re-parsed by the parser.
+    /// literal fragments (always `exprs.len() + 1` of them); `exprs` are the
+    /// `\{ .. }` holes, re-parsed by the parser.
     TemplateStr {
         parts: Vec<String>,
-        exprs: Vec<String>,
+        exprs: Vec<Hole>,
     },
     /// A `///` documentation comment line (markdown). One leading space after the
     /// slashes is stripped. Attached to the following declaration by the parser.
@@ -481,7 +491,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                 )
             };
             let mut parts: Vec<String> = Vec::new();
-            let mut exprs: Vec<String> = Vec::new();
+            let mut exprs: Vec<Hole> = Vec::new();
             let mut cur = String::new();
             loop {
                 if i >= chars.len() {
@@ -546,6 +556,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                         parts.push(std::mem::take(&mut cur));
                         i += 2; // skip `\{`
                         let hole = i;
+                        let (hole_line, hole_col) = (line, i - line_start + 1);
                         let mut depth = 1usize;
                         while i < chars.len() && depth > 0 {
                             match chars[i] {
@@ -637,7 +648,11 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                 "empty `\\{ }` interpolation".to_string(),
                             ));
                         }
-                        exprs.push(hole_src);
+                        exprs.push(Hole {
+                            src: hole_src,
+                            line: hole_line,
+                            col: hole_col,
+                        });
                         i += 1; // skip closing `}`
                         continue;
                     }
@@ -1049,13 +1064,13 @@ mod tests {
         // A `}` inside a char literal or a `//` comment must not close the hole.
         let toks = lex("\"\\{'}'}\"").unwrap();
         assert!(
-            matches!(&toks[0].tok, Tok::TemplateStr { exprs, .. } if exprs[0] == "'}'"),
+            matches!(&toks[0].tok, Tok::TemplateStr { exprs, .. } if exprs[0].src == "'}'"),
             "{:?}",
             toks[0].tok
         );
         let toks = lex("\"\\{ 1 + // } not the end\n 2 }\"").unwrap();
         assert!(
-            matches!(&toks[0].tok, Tok::TemplateStr { exprs, .. } if exprs[0].contains("2")),
+            matches!(&toks[0].tok, Tok::TemplateStr { exprs, .. } if exprs[0].src.contains("2")),
             "{:?}",
             toks[0].tok
         );

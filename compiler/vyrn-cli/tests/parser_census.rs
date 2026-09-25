@@ -844,12 +844,12 @@ fn the_parser_census_is_what_the_rfc_records() {
     }
     let want = vec![
         ("parser.rs", "the grammar's own arm", 3485, 51),
-        ("parser.rs", "a desugar the parser states", 1043, 7),
+        ("parser.rs", "a desugar the parser states", 1058, 7),
         ("parser.rs", "a table stated a second time", 232, 1),
         ("parser.rs", "recovery and the diagnostic sentences", 174, 2),
         ("parser.rs", "shared machinery", 244, 1),
-        ("parser.rs", "tests", 1948, 0),
-        ("lexer.rs", "the grammar's own arm", 577, 11),
+        ("parser.rs", "tests", 1961, 0),
+        ("lexer.rs", "the grammar's own arm", 592, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
         ("lexer.rs", "a table stated a second time", 163, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),

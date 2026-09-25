@@ -37,39 +37,39 @@ fn main() -> Int64                                                       @59
               call @concat : String                                      @61
                 str "window: " : String                                  @61
                 call @str : String                                       @61
-                  call @at : Int64                                       @1
-                    var w : Window                                       @1
+                  call @at : Int64                                       @61
+                    var w : Window                                       @61
                     int 0 : Int64                                        @61
                     call @at : Int64                                     @21
                       field .data : Array<Int64>                         @21
-                        var w : Window                                   @1
+                        var w : Window                                   @61
                       binary Add : Int64                                 @21
                         field .start : Int64                             @21
-                          var w : Window                                 @1
+                          var w : Window                                 @61
                         int 0 : Int64                                    @61
               str " " : String                                           @61
             call @str : String                                           @61
-              call @at : Int64                                           @1
-                var w : Window                                           @1
+              call @at : Int64                                           @61
+                var w : Window                                           @61
                 int 1 : Int64                                            @61
                 call @at : Int64                                         @21
                   field .data : Array<Int64>                             @21
-                    var w : Window                                       @1
+                    var w : Window                                       @61
                   binary Add : Int64                                     @21
                     field .start : Int64                                 @21
-                      var w : Window                                     @1
+                      var w : Window                                     @61
                     int 1 : Int64                                        @61
           str " " : String                                               @61
         call @str : String                                               @61
-          call @at : Int64                                               @1
-            var w : Window                                               @1
+          call @at : Int64                                               @61
+            var w : Window                                               @61
             int 3 : Int64                                                @61
             call @at : Int64                                             @21
               field .data : Array<Int64>                                 @21
-                var w : Window                                           @1
+                var w : Window                                           @61
               binary Add : Int64                                         @21
                 field .start : Int64                                     @21
-                  var w : Window                                         @1
+                  var w : Window                                         @61
                 int 3 : Int64                                            @61
   let s : Strided                                                        @63
     record Strided : Strided                                             @63
@@ -85,46 +85,46 @@ fn main() -> Int64                                                       @59
               call @concat : String                                      @64
                 str "strided: " : String                                 @64
                 call @str : String                                       @64
-                  call @at : Int64                                       @1
-                    var s : Strided                                      @1
+                  call @at : Int64                                       @64
+                    var s : Strided                                      @64
                     int 0 : Int64                                        @64
                     let @b3.k : Int64                                    @32
                       binary Mul : Int64                                 @32
                         int 0 : Int64                                    @32
                         field .stride : Int64                            @32
-                          var s : Strided                                @1
+                          var s : Strided                                @64
                     call @at : Int64                                     @33
                       field .data : Array<Int64>                         @33
-                        var s : Strided                                  @1
-                      var @b3.k : Int64                                  @1
+                        var s : Strided                                  @64
+                      var @b3.k : Int64                                  @64
               str " " : String                                           @64
             call @str : String                                           @64
-              call @at : Int64                                           @1
-                var s : Strided                                          @1
+              call @at : Int64                                           @64
+                var s : Strided                                          @64
                 int 1 : Int64                                            @64
                 let @b4.k : Int64                                        @32
                   binary Mul : Int64                                     @32
                     int 1 : Int64                                        @32
                     field .stride : Int64                                @32
-                      var s : Strided                                    @1
+                      var s : Strided                                    @64
                 call @at : Int64                                         @33
                   field .data : Array<Int64>                             @33
-                    var s : Strided                                      @1
-                  var @b4.k : Int64                                      @1
+                    var s : Strided                                      @64
+                  var @b4.k : Int64                                      @64
           str " " : String                                               @64
         call @str : String                                               @64
-          call @at : Int64                                               @1
-            var s : Strided                                              @1
+          call @at : Int64                                               @64
+            var s : Strided                                              @64
             int 2 : Int64                                                @64
             let @b5.k : Int64                                            @32
               binary Mul : Int64                                         @32
                 int 2 : Int64                                            @32
                 field .stride : Int64                                    @32
-                  var s : Strided                                        @1
+                  var s : Strided                                        @64
             call @at : Int64                                             @33
               field .data : Array<Int64>                                 @33
-                var s : Strided                                          @1
-              var @b5.k : Int64                                          @1
+                var s : Strided                                          @64
+              var @b5.k : Int64                                          @64
   let c : Clamped                                                        @66
     record Clamped : Clamped                                             @66
       call build : Array<Int64>                                          @66
@@ -138,76 +138,76 @@ fn main() -> Int64                                                       @59
               call @concat : String                                      @67
                 str "clamped: " : String                                 @67
                 call @str : String                                       @67
-                  call @at : Int64                                       @1
-                    var c : Clamped                                      @1
+                  call @at : Int64                                       @67
+                    var c : Clamped                                      @67
                     int 0 : Int64                                        @67
-                    let @p6.i : Int64                                    @1
-                      int 0 : Int64                                      @1
+                    let @p6.i : Int64                                    @67
+                      int 0 : Int64                                      @67
                     let @b6.n : Int64                                    @43
                       field .length : Int64                              @43
                         field .data : Array<Int64>                       @43
-                          var c : Clamped                                @1
+                          var c : Clamped                                @67
                     let @b6.j : Int64                                    @44
                       ifexpr : Int64                                     @44
                         binary Lt : Bool                                 @44
-                          var @p6.i : Int64                              @1
-                          var @b6.n : Int64                              @1
-                        var @p6.i : Int64                                @1
+                          var @p6.i : Int64                              @67
+                          var @b6.n : Int64                              @67
+                        var @p6.i : Int64                                @67
                         binary Sub : Int64                               @44
-                          var @b6.n : Int64                              @1
+                          var @b6.n : Int64                              @67
                           int 1 : Int64                                  @44
                     call @at : Int64                                     @45
                       field .data : Array<Int64>                         @45
-                        var c : Clamped                                  @1
-                      var @b6.j : Int64                                  @1
+                        var c : Clamped                                  @67
+                      var @b6.j : Int64                                  @67
               str " " : String                                           @67
             call @str : String                                           @67
-              call @at : Int64                                           @1
-                var c : Clamped                                          @1
+              call @at : Int64                                           @67
+                var c : Clamped                                          @67
                 int 2 : Int64                                            @67
-                let @p7.i : Int64                                        @1
-                  int 2 : Int64                                          @1
+                let @p7.i : Int64                                        @67
+                  int 2 : Int64                                          @67
                 let @b7.n : Int64                                        @43
                   field .length : Int64                                  @43
                     field .data : Array<Int64>                           @43
-                      var c : Clamped                                    @1
+                      var c : Clamped                                    @67
                 let @b7.j : Int64                                        @44
                   ifexpr : Int64                                         @44
                     binary Lt : Bool                                     @44
-                      var @p7.i : Int64                                  @1
-                      var @b7.n : Int64                                  @1
-                    var @p7.i : Int64                                    @1
+                      var @p7.i : Int64                                  @67
+                      var @b7.n : Int64                                  @67
+                    var @p7.i : Int64                                    @67
                     binary Sub : Int64                                   @44
-                      var @b7.n : Int64                                  @1
+                      var @b7.n : Int64                                  @67
                       int 1 : Int64                                      @44
                 call @at : Int64                                         @45
                   field .data : Array<Int64>                             @45
-                    var c : Clamped                                      @1
-                  var @b7.j : Int64                                      @1
+                    var c : Clamped                                      @67
+                  var @b7.j : Int64                                      @67
           str " " : String                                               @67
         call @str : String                                               @67
-          call @at : Int64                                               @1
-            var c : Clamped                                              @1
+          call @at : Int64                                               @67
+            var c : Clamped                                              @67
             int 9 : Int64                                                @67
-            let @p8.i : Int64                                            @1
-              int 9 : Int64                                              @1
+            let @p8.i : Int64                                            @67
+              int 9 : Int64                                              @67
             let @b8.n : Int64                                            @43
               field .length : Int64                                      @43
                 field .data : Array<Int64>                               @43
-                  var c : Clamped                                        @1
+                  var c : Clamped                                        @67
             let @b8.j : Int64                                            @44
               ifexpr : Int64                                             @44
                 binary Lt : Bool                                         @44
-                  var @p8.i : Int64                                      @1
-                  var @b8.n : Int64                                      @1
-                var @p8.i : Int64                                        @1
+                  var @p8.i : Int64                                      @67
+                  var @b8.n : Int64                                      @67
+                var @p8.i : Int64                                        @67
                 binary Sub : Int64                                       @44
-                  var @b8.n : Int64                                      @1
+                  var @b8.n : Int64                                      @67
                   int 1 : Int64                                          @44
             call @at : Int64                                             @45
               field .data : Array<Int64>                                 @45
-                var c : Clamped                                          @1
-              var @b8.j : Int64                                          @1
+                var c : Clamped                                          @67
+              var @b8.j : Int64                                          @67
   let mut a : Array<Int64>                                               @71
     call build : Array<Int64>                                            @71
       int 4 : Int64                                                      @71
@@ -223,18 +223,18 @@ fn main() -> Int64                                                       @59
               call @concat : String                                      @73
                 str "array: " : String                                   @73
                 call @str : String                                       @73
-                  call @at : Int64                                       @1
-                    var a : Array<Int64>                                 @1
+                  call @at : Int64                                       @73
+                    var a : Array<Int64>                                 @73
                     int 0 : Int64                                        @73
               str " " : String                                           @73
             call @str : String                                           @73
-              call @at : Int64                                           @1
-                var a : Array<Int64>                                     @1
+              call @at : Int64                                           @73
+                var a : Array<Int64>                                     @73
                 int 1 : Int64                                            @73
           str " " : String                                               @73
         call @str : String                                               @73
-          call @at : Int64                                               @1
-            var a : Array<Int64>                                         @1
+          call @at : Int64                                               @73
+            var a : Array<Int64>                                         @73
             int 3 : Int64                                                @73
   return                                                                 @74
     int 0 : Int64                                                        @74
