@@ -1469,6 +1469,14 @@ impl<'a> Cx<'a> {
             .is_some_and(|f| f.discarded.contains(&self.plan.key_of(node)))
     }
 
+    /// Is the `let` at `node` a copy the source does not write? The core
+    /// states it ([`vyrn_lower::core::Facts::copies`]).
+    fn copies_at_let(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.copies.contains(&self.plan.key_of(node)))
+    }
+
     /// Does this `for` give its container back where it ends? The core states
     /// it at the loop ([`vyrn_lower::core::Facts::loop_gives_back`]); this
     /// emitter read the word `consume` off the source until RFC-0125 §3 M3's
@@ -5110,6 +5118,24 @@ impl<'p> Fn_<'_, 'p> {
                         (place, got)
                     }
                 };
+                // A copy the core states for a rebound borrow (#501): the
+                // binding holds the owner's bytes, duplicated in place.
+                if self.cx.copies_at_let(s as *const Stmt as usize) {
+                    match place {
+                        Place::Local(l) => {
+                            b.ins(&Instruction::LocalGet(l));
+                            self.copy_stack(m, b, &bound, *line)?;
+                            b.ins(&Instruction::LocalSet(l));
+                        }
+                        Place::Slot(off) => {
+                            let a = b.local(ValType::I32);
+                            b.slot(off);
+                            b.ins(&Instruction::LocalSet(a));
+                            self.copy_at(m, b, a, &bound, *line)?;
+                        }
+                        Place::Static(_) => return unsupported("a copy into module state", *line),
+                    }
+                }
                 // A String accumulator gets its ownership word at its one
                 // declaration site, under the whitelist the core's builder asks.
                 let owns = self.releases_whole(s as *const Stmt as usize);

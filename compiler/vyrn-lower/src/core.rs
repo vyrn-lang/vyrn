@@ -178,6 +178,10 @@ pub struct NameInfo {
     /// `modify` parameter. The typed judgment refuses a store into any other
     /// name the reader wrote ([`crate::typed::stores`]).
     pub mutable: bool,
+    /// Whether the `let` binding this name states a copy the source does not
+    /// write ([`Builder::copies`]), which the AST walk reads as
+    /// [`Facts::copies`].
+    pub copied: bool,
     /// For a name a LAMBDA literal binds: the captures the closure reads as
     /// VALUES, where the closure may outlive the call it is written at
     /// (RFC-0037, RFC-0125 §3 M3, row 24). `None` where it may not, and for
@@ -2476,6 +2480,7 @@ fn build_seeded(
         call_keeps: None,
         pending_closure: None,
         appends: std::collections::HashSet::new(),
+        rebound: std::collections::HashSet::new(),
         region: 0,
         ret: None,
         released: None,
@@ -2520,6 +2525,7 @@ fn build_seeded(
         b.body.params.push(n);
     }
     b.appends = crate::append::append_candidates(&f.body);
+    rebound(&f.body, &mut b.rebound);
     let mut out = Vec::new();
     b.block(&f.body, &mut out)?;
     cut(&mut out);
@@ -2618,6 +2624,7 @@ fn build_outside_seeded<'a>(
     }
     let mut b = Builder::bare(program, own, rows, seed, name.to_string(), file, placed);
     b.appends = crate::append::append_candidates(block);
+    rebound(block, &mut b.rebound);
     let mut out = Vec::new();
     b.block(block, &mut out)?;
     cut(&mut out);
@@ -2754,6 +2761,8 @@ struct Builder<'a> {
     reading: Vec<Name>,
     /// The body's String accumulators ([`crate::append::append_candidates`]).
     appends: std::collections::HashSet<String>,
+    /// The names the body stores into whole ([`rebound`]).
+    rebound: std::collections::HashSet<String>,
     /// How many `region`s enclose the statement being lowered. An arena
     /// buffer cannot grow, so an append inside one is the `concat` call.
     region: u32,
@@ -2821,6 +2830,7 @@ impl<'a> Builder<'a> {
             call_keeps: None,
             pending_closure: None,
             appends: std::collections::HashSet::new(),
+            rebound: std::collections::HashSet::new(),
             region: 0,
             ret: None,
             released: None,
@@ -2860,6 +2870,7 @@ impl<'a> Builder<'a> {
             linear,
             bound_by_let: false,
             mutable: false,
+            copied: false,
             closure_reads: None,
             not_owned: None,
         });
@@ -2942,6 +2953,37 @@ impl<'a> Builder<'a> {
             Rhs::Val(Val::Name(m)) => !self.body.names[*m as usize].borrow,
             _ => true,
         }
+    }
+
+    /// Whether the `let` `s` of a value of type `ty` is a copy (#501): a
+    /// `let mut` the body stores into whole, bound to a borrow of a type
+    /// that owns heap. The binding names a value of its own, so the stores
+    /// into it and its exit release what it holds on every path, the first
+    /// turn of a loop included, where a borrow would release the owner's
+    /// value or nothing. A write through the borrow is refused instead
+    /// ([`crate::kernel`]), because it changes what the owner sees. A type
+    /// that declares `impl Copy` keeps the borrow: the AST walk states no
+    /// call for it.
+    fn copies(&self, s: &Stmt, ty: &Type) -> bool {
+        let Stmt::Let {
+            name,
+            value,
+            mutable: true,
+            ..
+        } = s
+        else {
+            return false;
+        };
+        let borrow = match value {
+            Expr::Var { name: m, .. } => self
+                .lookup(m)
+                .is_some_and(|m| self.body.names[m as usize].borrow),
+            e => is_place_read(e) && self.deferred_of(e).is_none(),
+        };
+        borrow
+            && self.rebound.contains(name)
+            && self.owns(ty)
+            && vyrn_frontend::types::copy_impl(&self.program.impls, ty).is_none()
     }
 
     /// Why a `let` binds a value this frame does not own, in the order the
@@ -4123,7 +4165,9 @@ impl<'a> Builder<'a> {
                 let check = annotation
                     .as_ref()
                     .and_then(|t| self.checked(&ty, t, value));
+                let copied = check.is_none() && self.copies(s, &ty);
                 if check.is_none()
+                    && !copied
                     && !matches!(value, Expr::Var { .. })
                     && is_place_read(value)
                     && self.deferred_of(value).is_none()
@@ -4145,6 +4189,19 @@ impl<'a> Builder<'a> {
                 // and the name has the type the reader wrote.
                 let (rhs, ty) = match check {
                     Some(to) => (self.check(&to, value, *line, out)?, Type::Named(to)),
+                    None if copied => {
+                        let v = self.read_at(value, out, None)?;
+                        let rhs = Rhs::Call {
+                            callee: "@copy".to_string(),
+                            args: vec![(Arg::Val(v), Capability::Read)],
+                            write_back: false,
+                            kind: Callee::Reserved,
+                            ret: Some(ty.clone()),
+                            solved: Vec::new(),
+                            targets: Vec::new(),
+                        };
+                        (rhs, ty)
+                    }
                     None => (self.rhs(value, out)?, ty),
                 };
                 // A literal, or a nullary constructor, which is static in
@@ -4180,6 +4237,7 @@ impl<'a> Builder<'a> {
                 let borrow =
                     !owned && (self.lends(value) || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
                 let n = self.name(name, ty, owned, *line);
+                self.body.names[n as usize].copied = copied;
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
                 self.body.names[n as usize].not_owned = reason;
                 self.record_fields(n, value);
@@ -8243,6 +8301,9 @@ pub struct Facts {
     /// is one this pass states no answer for, and a reader falls back to the
     /// plan there.
     pub stores: std::collections::HashMap<usize, bool>,
+    /// The `let` nodes whose binding is a copy the source does not write
+    /// ([`NameInfo::copied`]): the AST walk copies the value it binds.
+    pub copies: std::collections::HashSet<usize>,
     /// The stores of that map the core STANDS DOWN at, whatever the judgment
     /// would say — the two reasons a store releases nothing that the
     /// statement itself carries (RFC-0125 §3 M3, the store slice):
@@ -8833,6 +8894,52 @@ fn names_in_place(p: &Place, out: &mut Vec<Name>) {
     }
 }
 
+/// Every name a statement of `b` stores into whole (`x = v`), in nested
+/// blocks and statement-position `match` arms too. A rebuild's write-back
+/// (`xs.push(v)`, `xs = push(xs, v)`) is no such store: it hands the receiver
+/// back, and the kernel refuses it on a borrow (census row 26).
+fn rebound(b: &Block, out: &mut std::collections::HashSet<String>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Assign {
+                value: Expr::Call { name: f, args, .. },
+                name,
+                ..
+            } if vyrn_frontend::prelude::rebuilds(f)
+                && matches!(args.first(), Some(Expr::Var { name: r, .. }) if r == name) => {}
+            Stmt::Assign { name, .. } => {
+                out.insert(name.clone());
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | Stmt::IfLet {
+                then_block,
+                else_block,
+                ..
+            } => {
+                rebound(then_block, out);
+                if let Some(e) = else_block {
+                    rebound(e, out);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
+                rebound(body, out)
+            }
+            Stmt::Expr(Expr::Match { arms, .. }) => {
+                for a in arms {
+                    if let ArmBody::Block(b) = &a.body {
+                        rebound(b, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
 /// the binding (RFC-0093 M2).
 fn plan_holes(holes: &[String]) -> Vec<String> {
@@ -8847,6 +8954,9 @@ fn plan_holes(holes: &[String]) -> Vec<String> {
 fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
     for s in stmts {
         match s {
+            St::Let(n, _) if body.names[*n as usize].copied => {
+                out.copies.extend(body.names[*n as usize].binding);
+            }
             St::If { then, els, .. } => {
                 fold_facts(body, proto, then, out);
                 fold_facts(body, proto, els, out);
