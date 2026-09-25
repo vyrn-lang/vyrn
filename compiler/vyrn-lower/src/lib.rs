@@ -728,13 +728,13 @@ fn build<'a>(
     }
 }
 
-/// Every generic function no instance of `lowered` reaches, as one instance
-/// whose type parameters stand for themselves (RFC-0125 M7, the judgment's
-/// reach). The checker typed each body once, so the judgment reads it once.
-/// The instances are built for the judgment and never emitted.
-pub fn uninstantiated<'a>(
+/// Every generic function as one instance whose type parameters stand for
+/// themselves (RFC-0125 M7, the judgment's reach). The checker typed each
+/// body once, with its parameters as written, so the judgment reads it once
+/// that way whatever instances the program has. The instances are built for
+/// the judgment and never emitted.
+pub fn as_written<'a>(
     program: &'a Program,
-    lowered: &Lowered<'a>,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Vec<Instance<'a>> {
     let recorded = checker::recorded(program);
@@ -745,7 +745,6 @@ pub fn uninstantiated<'a>(
             !f.type_params.is_empty()
                 && !f.is_extern
                 && !f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
-                && !lowered.instances.iter().any(|i| std::ptr::eq(i.func, *f))
         })
         .map(|func| {
             let type_args: Vec<Type> = func.type_params.iter().cloned().map(Type::Param).collect();

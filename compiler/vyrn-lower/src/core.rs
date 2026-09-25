@@ -1055,6 +1055,9 @@ pub struct Body {
     /// elements no turn of that `for` reached, innermost loop first
     /// ([`Facts::unreached`]).
     pub(crate) unreached: Vec<(usize, usize)>,
+    /// A `drop` whose name no binding in scope answers: the name and the
+    /// line. The core has no row for it; [`crate::typed::drops`] refuses it.
+    pub unbound_drops: Vec<(String, usize)>,
 }
 
 /// What a candidate construct is, which is what [`last_owner`] has to ask of
@@ -2397,6 +2400,7 @@ fn build_seeded(
             cands: Vec::new(),
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
+            unbound_drops: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2505,6 +2509,7 @@ pub fn build_module_state<'a>(
             cands: Vec::new(),
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
+            unbound_drops: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2608,6 +2613,7 @@ fn build_outside_seeded<'a>(
             cands: Vec::new(),
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
+            unbound_drops: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -4415,7 +4421,8 @@ impl<'a> Builder<'a> {
             }
             Stmt::Drop { name, line } => {
                 let Some(n) = self.lookup(name) else {
-                    return gap("a `drop` of module state", *line);
+                    self.body.unbound_drops.push((name.clone(), *line));
+                    return Ok(());
                 };
                 // `drop s` inside a `region` used to lower to nothing,
                 // because this pass read the binding as the arena's and the
@@ -6042,6 +6049,7 @@ impl<'a> Builder<'a> {
                 cands: Vec::new(),
                 loop_buffers: Vec::new(),
                 unreached: Vec::new(),
+                unbound_drops: Vec::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line);
@@ -8384,12 +8392,17 @@ thread_local! {
 /// Judge one built body with the typed judgment, and say whether it refused.
 /// A refused body is not remembered by the judgment memo: the memo serves
 /// the kernel's refusals alone, so the body is built and judged again.
-fn typed(program: &Program, top: &Body, file: &Option<String>) -> bool {
+/// `as_written` is false for an instance of a generic function, whose types
+/// are the instance's and not the ones the checker typed the body with.
+fn typed(program: &Program, top: &Body, file: &Option<String>, as_written: bool) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
     TYPED.with(|t| {
         let (out, seen) = &mut *t.borrow_mut();
         let mut found = crate::typed::stores(top, &global_mutable, seen);
         found.extend(crate::typed::loops(top, seen));
+        if as_written {
+            found.extend(crate::typed::drops(top, program));
+        }
         found.sort_by_key(|(line, _)| *line);
         let refused = !found.is_empty();
         out.extend(
@@ -8668,7 +8681,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         let refused = top
             .as_ref()
-            .is_some_and(|t| typed(program, t, &inst.func.module));
+            .is_some_and(|t| typed(program, t, &inst.func.module, inst.subst.is_empty()));
         let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, refused_before);
         built.push(top);
@@ -8692,7 +8705,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     eprintln!("{}", top.render());
                 }
                 place_frames(&top, &ob.name, own, &mut added, &mut touched, trace);
-                if typed(program, &top, &ob.module) {
+                if typed(program, &top, &ob.module, true) {
                     key = None;
                 }
                 outside.push(Some(top));
@@ -8704,13 +8717,14 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         remember(memo.as_ref(), key, refused_before);
     }
-    // A generic function no instance reaches is still a body the checker
-    // typed, so it is built once, for the judgment alone: it places no row
-    // and is never emitted (RFC-0125 M7, the judgment's reach).
-    for inst in crate::uninstantiated(program, &lowered, own) {
+    // Every generic function is built once more with its parameters as
+    // written, for the judgment alone: the checker typed the body that way
+    // whatever instances the program has. It places no row and is never
+    // emitted (RFC-0125 M7, the judgment's reach).
+    for inst in crate::as_written(program, own) {
         match build(program, &inst, own) {
             Ok(top) => {
-                typed(program, &top, &inst.func.module);
+                typed(program, &top, &inst.func.module, true);
             }
             Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name),
         }

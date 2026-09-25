@@ -363,6 +363,15 @@ fn breakInLambda() -> Int64 {
     }
     return 0
 }
+// The `drop` rules are the typed judgment's. A generic function with an
+// instance is read with its parameters as written, as the checker read it.
+fn dropGiven<T>(x: consume T) -> Int64 {
+    drop x
+    return 0
+}
+fn givesString() -> Int64 {
+    return dropGiven("a" + "b")
+}
 fn main() -> Int64 {
     return 0
 }

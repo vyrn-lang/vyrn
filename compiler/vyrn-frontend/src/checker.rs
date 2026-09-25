@@ -4658,83 +4658,7 @@ impl<'a> Checker<'a> {
                 // A `for` may run zero times, so it never guarantees a return.
                 Ok(false)
             }
-            Stmt::Drop { name, line } => {
-                // `drop name;` reclaims a heap value. The binding must exist and
-                // hold something that owns heap memory. (Use-after-drop is caught
-                // separately by move checking, which treats this as a consume.)
-                // Module state (RFC-0013) is never dropped — it has module
-                // lifetime and is reclaimed only at process exit.
-                if self.resolves_to_global(scope, name) {
-                    return Err(cerr!(
-                        line,
-                        "cannot `drop` module state `{name}` — it lives for the \
-                         whole module and is reclaimed at process exit"
-                    ));
-                }
-                let b = self
-                    .lookup(scope, name)
-                    .ok_or_else(|| cerr!(line, "`drop` of unbound variable `{name}`"))?;
-                // Phase 5 made `drop` deep, so an `Option`/`Result` carrying heap
-                // is droppable too — the two aggregates rule 4 now releases. A
-                // record and a user enum are NOT here, and `own::release_kind`
-                // carries the measurement that kept them off; this list follows it
-                // rather than deciding a second time.
-                let t = self.base(&b.ty);
-                // A type PARAMETER is REFUSED (RFC-0118 M2's finding). It used
-                // to pass "so the instance decides", which kept a generic
-                // container's per-element loop legal (census U4) — but that
-                // loop is gone (`Slots` releases its arrays, never a bare `T`),
-                // and what the pass actually did in the tree was launder this
-                // very rule: `vyxGive<T>(v: consume T) { drop v }` accepted a
-                // plain record as `T` and dropped it, where the direct spelling
-                // is refused below. No instance check runs on a generic body,
-                // so the only sound gate is here. A generic fn that needs to
-                // release a `T` again is the program that reopens this, with
-                // the per-instance check the old comment promised.
-                // A DECLARED row passes too, and the key is read off the written
-                // type rather than off `base` — `impl Owned for Ring` is what
-                // `Ring` means, so resolving it to its record shape first is
-                // exactly the lookup that loses the answer.
-                //
-                // RFC-0086 M3 is why this arm exists. `impl MustUse for T` says a
-                // value must be disposed of BY NAME, and `drop` is the only
-                // terminal way to say that — handing it to a call or returning it
-                // only moves the obligation on. Without this arm the milestone
-                // would have shipped an obligation with no way to discharge it,
-                // and the fix menu would have named a statement the checker
-                // refuses. Nothing else was needed: `release_kind` already
-                // answers `Release(..)` for the type and every engine's `drop`
-                // lowering already asks it, so the gate was the whole gap.
-                if crate::types::type_key(&b.ty)
-                    .is_some_and(|k| self.impls.contains(&(crate::types::OWNED.to_string(), k)))
-                {
-                    return Ok(false);
-                }
-                if matches!(
-                    t,
-                    Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
-                ) || (crate::types::is_sum_alias(&t)
-                    && crate::declared::owns_heap(&t, &self.types))
-                {
-                    return Ok(false);
-                }
-                if matches!(t, Type::Param(_)) {
-                    return Err(cerr!(
-                        line,
-                        "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this \
-                         body cannot know whether the rule below holds for the instance — a \
-                         plain record would be released here where `drop` on it directly is \
-                         refused. Release the value where its concrete type is known, or \
-                         `consume` the heap field and `drop` that"
-                    ));
-                }
-                Err(cerr!(
-                    line,
-                    "`drop` needs a heap value (a String, an Array, a Map, a Ref, \
-                     or an Option/Result carrying one, or a type declaring `impl Owned`), but \
-                     `{name}` is {t}"
-                ))
-            }
+            Stmt::Drop { .. } => Ok(false),
             Stmt::Expr(e) => {
                 // A `panic` statement is `Never`-typed, so it satisfies the
                 // return-path check the way a `return` does (RFC-0079): the
@@ -9449,16 +9373,6 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// Whether `name` resolves to a module-state binding rather than a local: no
-    /// frame carries it and module state does. A local of the same name shadows
-    /// it, so this returns `false` then.
-    fn resolves_to_global(&self, scope: &Scope, name: &str) -> bool {
-        if scope.iter().any(|f| f.contains_key(name)) {
-            return false;
-        }
-        scope.globals && self.globals.borrow().contains_key(name)
-    }
-
     /// The element type of the array a `pop`/`swapRemove` receiver names, after
     /// checking it is a plain `Array<T>` binding the operation may write through
     /// (RFC-0011). A fixed-size `Array<T, N>` cannot shrink, so it is rejected
@@ -13227,17 +13141,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("read itself"), "{e}");
-    }
-
-    #[test]
-    fn dropping_a_global_is_an_error() {
-        let e = check_src(
-            "let s = \"hi\"\n\
-             fn f() -> Int64 { drop s return 0 }\n\
-             fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("module state"), "{e}");
     }
 
     #[test]

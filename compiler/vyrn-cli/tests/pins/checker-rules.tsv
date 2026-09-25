@@ -70,3 +70,4 @@ checker-rules.vyrn:340:0: cannot store into `untyped` (declared without `mut`)
 checker-rules.vyrn:346:0: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:353:0: `x` is Int64 but assigned String
 checker-rules.vyrn:361:0: `break` outside a loop
+checker-rules.vyrn:369:0: cannot `drop` `x`: its type `T` is a type parameter, so this body cannot know whether the rule below holds for the instance — a plain record would be released here where `drop` on it directly is refused. Release the value where its concrete type is known, or `consume` the heap field and `drop` that
