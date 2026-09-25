@@ -53,6 +53,9 @@ pub fn install() {
     // rule about a TYPE and not about ownership, so it is the typed judgment's
     // and reaches the same list through the same kind of slot.
     vyrn_frontend::own::install_must_use(typed::obligation::judge);
+    // RFC-0125 M7, decision A: the typed judgment's refusals over the core,
+    // which `vyrn check` reads before the kernel's.
+    vyrn_frontend::own::install_typed(core::typed_diagnostics);
     // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);
@@ -723,6 +726,49 @@ fn build<'a>(
         bodies: outside,
         places,
     }
+}
+
+/// Every generic function no instance of `lowered` reaches, as one instance
+/// whose type parameters stand for themselves (RFC-0125 M7, the judgment's
+/// reach). The checker typed each body once, so the judgment reads it once.
+/// The instances are built for the judgment and never emitted.
+pub fn uninstantiated<'a>(
+    program: &'a Program,
+    lowered: &Lowered<'a>,
+    ownership: &vyrn_frontend::own::Ownership,
+) -> Vec<Instance<'a>> {
+    let recorded = checker::recorded(program);
+    program
+        .functions
+        .iter()
+        .filter(|f| {
+            !f.type_params.is_empty()
+                && !f.is_extern
+                && !f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
+                && !lowered.instances.iter().any(|i| std::ptr::eq(i.func, *f))
+        })
+        .map(|func| {
+            let type_args: Vec<Type> = func.type_params.iter().cloned().map(Type::Param).collect();
+            let mut w = Walk::new(&recorded, &program.impls);
+            block(&func.body, 0, &mut vec![HashMap::new()], &mut w);
+            Instance {
+                func,
+                subst: func
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(type_args.iter().cloned())
+                    .collect(),
+                type_args,
+                rows: w.rows,
+                releases: ownership
+                    .releases
+                    .get(&func.name)
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 /// The calls the LANGUAGE writes at this body's exits — RFC-0101 M5.

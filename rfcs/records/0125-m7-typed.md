@@ -31,3 +31,33 @@ Findings:
 - the editor pays the same: `load_warned` reaches `check_and_synthesize`, so a keystroke in a file with a checker refusal now builds the core.
 - a typed caller of a refused generic function is moved out with it, the lead's fallback, not an invented instance. `callsRefused` in the census program is the witness: once the store rule is the judgment's, its line goes.
 Left: the rules, groups 1 to 4 first.
+
+#### The judgment reaches every body the checker types (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, the reach decision (#487).
+Decision: a gap in a typed body is an internal error, and a generic function with no instance is built once for the judgment. The lead's, on the first move's witnesses.
+Went: `init_ty`, the builder's second statement of a global initializer's type; `named_place` reads the checker's recorded type instead. The silent `not lowered` trace line. Stayed: nothing.
+Lines: `core.rs` 9,223 to 9,230, `vyrn-lower` `lib.rs` 1,495 to 1,538 (`uninstantiated`). Refusals: 0 lost / 0 gained over the corpus. Manifest: untouched.
+Shape: `refuse_gap` reports every gap. A gap with a rule is a refusal, as before. A gap without one says "internal error: the core cannot state ..., so `f` is not judged". A generic body with no instance is walked with each parameter standing for itself, then built and judged. It places no row and is never emitted.
+Licence:
+- `vyrn check` over 503 roots, main b640e67d against each commit: byte-identical stderr and exit codes, 426 accepted, 77 refused, 0 internal errors.
+- one gap outside the corpus: `vyrn-frontend` `semantics::module_state_of_fn_type_with_init_order`, a call through module state of function type (`cur(10)`). Closed at its home: the value is read out of the global and called through, as a forced `lazy` field is. The body now takes the core's walk; its wasm differs from main's and prints 31 under both.
+- `c20` (untyped module state, `arr[0] = 4`) is refused by main and by this tree at 3:0.
+Findings:
+- the lead asked for each parameter as an opaque OWNED type. `declared::owns_heap` answers `false` for `Type::Param`, and making it `true` changes every generic analysis in `own.rs`. The store rule reads no ownership, so the parameter stands as written. The kernel does not judge these bodies.
+- `site/export.vyrn`, best of 8 interleaved: 4,431 ms on main, 4,373 ms at the tip. The runs spread from 4.4 s to 11.8 s, so the noise band is wider than the difference.
+
+#### A store needs `mut` is stated once, over the core (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, decision A, group 1.
+Decision: `NameInfo.mutable` holds the fact; the typed judgment reads the root of every store. The lead's representation.
+Went: the checker's three sites (assign, field, index) and its six unit tests of them. Stayed: the `remove` and `pop` refusals in `Checker::expr`, which are group 2's.
+Lines: `checker.rs` 14,988 to 14,911. `typed.rs` 906 to 998 (`stores`). `core.rs` 9,230 to 9,296 (the slot and `mutable`). `refusals.rs` 3,103 to 3,166. Refusals: 0 lost / 0 gained over the corpus. Manifest: untouched.
+Shape: a `let mut` or a `modify` parameter is mutable; binders, `for` variables and lambda parameters never are. A store is a `St::Store` or an `Arg::Place` passed to `modify` (a removal through a path). Module state answers through `GlobalDecl.mutable`. One refusal per statement site, across every instance of a generic. The refusals reach `vyrn check` through `own::typed_refusals`, and a typed refusal silences the kernel's list.
+Licence:
+- `vyrn check` over 503 roots against main b640e67d: byte-identical except the census program. 0 corpus bodies changed output.
+- `checker-rules` pin: 299 and 314 go (decision A), six witnesses come: `h.a[i] = 5`, `k["a"] = 2`, `h.a.pop()`, untyped module state, an uncalled generic, and at 353 the checker's "`x` is Int64 but assigned String" in place of the moved rule's sentence (#487).
+- 23 witness programs, main's binary against the tip: equal except that last one. They cover two stores on one line, a generic called twice, tests, benches, impl methods, lambdas, binders, parameters and an imported module.
+- `nextest -p vyrn-cli` 672 passed. `-p vyrn-frontend -p vyrn-lower` 1,081 passed. `kernel`, `effects`, `typed`, `coretables`, `coredrive`, `wasmhash` (check), `lowered_dump`, `refusals`, `letswalk` and `columns` all passed under `--ignored`. `vyrn-lsp` 100 passed.
+- pins: `checker-census` typing judgment 132 to 129 refusals; `forms` `Stmt::Let` in lower 15 to 16; `frontend-census` movecheck 891 to 901.
+- coredrive: the emitter took the core's walk for 21,033 of 21,172 bodies; 1 of 168 programs emit the same module, 167 run the same.
+Time: about 150 minutes: 70 work, 60 gates, 20 builds.
+Left: groups 2 to 4.

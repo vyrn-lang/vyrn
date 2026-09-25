@@ -652,6 +652,35 @@ pub fn must_use_refusals(program: &Program) -> Vec<crate::diagnostics::Diagnosti
     MUST_USE.get().map(|f| f(program)).unwrap_or_default()
 }
 
+/// The typed judgment's refusals — RFC-0125 M7, decision A. The fifth slot
+/// of the same shape: the judgment reads the core, which `vyrn-lower` builds,
+/// and this crate sits below it. Drained by each read, like [`Refusals`].
+pub type Typed = fn() -> Vec<crate::diagnostics::Diagnostic>;
+
+static TYPED: std::sync::OnceLock<Typed> = std::sync::OnceLock::new();
+
+/// Install the typed judgment's drain. The first installation wins.
+pub fn install_typed(f: Typed) {
+    let _ = TYPED.set(f);
+}
+
+/// What the typed judgment refused about the program just analysed.
+///
+/// # Panics
+///
+/// Where a placer is installed and this slot is not: the judgment states
+/// rules the checker no longer states, so an empty slot is a silent
+/// acceptance.
+pub fn typed_refusals() -> Vec<crate::diagnostics::Diagnostic> {
+    match TYPED.get() {
+        Some(f) => f(),
+        None if placer_installed() => {
+            panic!("the placer is installed and the typed judgment is not")
+        }
+        None => Vec::new(),
+    }
+}
+
 /// The placement as a consumer reads it: `(exit, the node the exit is AT)` maps
 /// to the bindings released there, in the order they run.
 ///

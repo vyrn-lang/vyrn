@@ -752,6 +752,69 @@ fn the_shapes_rule_ones_unit_tests_pinned_are_still_refused() {
     );
 }
 
+/// The checker's unit tests of "a store needs `mut`", asked of the whole
+/// compiler after the rule moved to the typed judgment (RFC-0125 M7, group 1).
+/// Each asked `vyrn_frontend::check` alone, which states the rule no longer.
+#[test]
+fn the_checkers_mut_unit_tests_are_still_refused() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "an assign",
+            "cannot assign to `x`",
+            "fn main() -> Int64 { let x = 1 x = 2 return x }",
+        ),
+        (
+            "a field store",
+            "cannot mutate a field of `p`",
+            "type P = { x: Int64 } fn main() -> Int64 { let p = P { x: 1 } p.x = 2 return p.x }",
+        ),
+        (
+            "an index store",
+            "cannot store into `a`",
+            "fn main() -> Int64 { let a: Array<Int64> = [1, 2] a[0] = 9 return 0 }",
+        ),
+        (
+            "module state",
+            "cannot assign to `banner`",
+            "let banner = \"hi\"
+             fn f() -> Int64 { banner = \"bye\" return 0 }
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a local shadowing module state",
+            "cannot assign to `hits`",
+            "let mut hits = 0
+             fn f() -> Int64 { let hits = 1 hits = 2 return hits }
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "an element field store",
+            "cannot store into `a`",
+            "type P = { x: Int64 }
+             fn main() -> Int64 { let a: Array<P> = [P { x: 1 }]  a[0].x = 9  return 0 }",
+        ),
+    ];
+    let dir = common::scratch("mut-rule");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains(&format!("{says} (declared without `mut`)")) {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a store needs `mut` no longer refuses:
+  {}",
+        bad.join(
+            "
+  "
+        )
+    );
+}
+
 /// The shapes row 07's own unit tests pinned, still refused after the rule
 /// left `movecheck.rs` (RFC-0125 §3 M3, row 07).
 ///

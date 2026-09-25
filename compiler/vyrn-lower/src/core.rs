@@ -173,6 +173,10 @@ pub struct NameInfo {
     /// pattern binder and a temporary are keyed by a node too, and none of
     /// them is a binding the memory report is about.
     pub bound_by_let: bool,
+    /// Whether the reader may store into the name: a `let mut`, or a
+    /// `modify` parameter. The typed judgment refuses a store into any other
+    /// name the reader wrote ([`crate::typed::stores`]).
+    pub mutable: bool,
     /// For a name a LAMBDA literal binds: the captures the closure reads as
     /// VALUES, where the closure may outlive the call it is written at
     /// (RFC-0037, RFC-0125 §3 M3, row 24). `None` where it may not, and for
@@ -2443,6 +2447,7 @@ fn build_seeded(
         b.body.names[n as usize].must_use_param =
             b.proto.must_use(&b.body.names[n as usize].ty.clone());
         b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
+        b.body.names[n as usize].mutable = p.capability == Capability::Modify;
         b.scope.push((p.name.clone(), n));
         b.keyed(n, p as *const _ as usize);
         b.body.params.push(n);
@@ -2762,6 +2767,7 @@ impl<'a> Builder<'a> {
             walked: None,
             linear,
             bound_by_let: false,
+            mutable: false,
             closure_reads: None,
             not_owned: None,
         });
@@ -2778,9 +2784,10 @@ impl<'a> Builder<'a> {
 
     /// The same, for a `let` a reader wrote — the bindings the memory report
     /// is about.
-    fn keyed_let(&mut self, n: Name, binding: usize) {
-        self.keyed(n, binding);
+    fn keyed_let(&mut self, n: Name, s: &Stmt) {
+        self.keyed(n, s as *const Stmt as usize);
         self.body.names[n as usize].bound_by_let = true;
+        self.body.names[n as usize].mutable = matches!(s, Stmt::Let { mutable: true, .. });
     }
 
     /// Record the plan's key for a name, and the name for the key.
@@ -3804,7 +3811,7 @@ impl<'a> Builder<'a> {
                     self.release_receiver(value, out, true);
                     self.grows(n, name);
                     self.scope.push((name.clone(), n));
-                    self.keyed_let(n, sid);
+                    self.keyed_let(n, s);
                     return Ok(());
                 }
                 // A value crossing into a validated type is that type's
@@ -3872,7 +3879,7 @@ impl<'a> Builder<'a> {
                 }
                 self.grows(n, name);
                 self.scope.push((name.clone(), n));
-                self.keyed_let(n, sid);
+                self.keyed_let(n, s);
             }
             Stmt::Assign { name, value, line } => {
                 let n = self.lookup(name);
@@ -4806,28 +4813,15 @@ impl<'a> Builder<'a> {
             return Ok((Place::Name(n), self.body.names[n as usize].ty.clone()));
         }
         match self.program.globals.iter().find(|g| &g.name == name) {
-            Some(g) => match g.ty.clone().or_else(|| self.init_ty(&g.init)) {
+            Some(g) => match g
+                .ty
+                .clone()
+                .or_else(|| node_ty(&g.init as *const Expr as usize))
+            {
                 Some(t) => Ok((Place::Global(name.to_string()), t)),
-                None => gap_d("a global without a declared type", name, line),
+                None => gap_d("a global the checker did not type", name, line),
             },
             None => gap("a place that is not a binding", line),
-        }
-    }
-
-    /// The type of a global's initializer, from its shape: the checker's rows
-    /// are per instance and a global is instantiated nowhere.
-    fn init_ty(&self, init: &Expr) -> Option<Type> {
-        match init {
-            Expr::StructLit { name, .. } => Some(Type::Named(name.clone())),
-            Expr::Str(_) => Some(Type::Str),
-            Expr::Bool(_) => Some(Type::Bool),
-            Expr::Call { name, .. } => self
-                .program
-                .functions
-                .iter()
-                .find(|f| &f.name == name)
-                .map(|f| f.ret.clone()),
-            _ => None,
         }
     }
 
@@ -7182,6 +7176,21 @@ impl<'a> Builder<'a> {
             // takes the String by address and stashes atoms of its own —
             // so the guest keeps every argument it owns.
             vec![Capability::Read; args.len()]
+        } else if let Some(g) = self.program.globals.iter().find(|g| {
+            g.name == name
+                && matches!(
+                    vyrn_frontend::types::resolve(&g.ty.clone().unwrap_or(Type::Unit), decls),
+                    Type::Fn(..)
+                )
+        }) {
+            // Module state of function type (RFC-0029): the value is read
+            // out of the global, which is a borrow of it, and called
+            // through, as a forced `lazy` field is.
+            let ty = g.ty.clone().unwrap_or(Type::Unit);
+            let n = self.name(name, ty, false, line);
+            out.push(St::Let(n, Rhs::Read(Place::Global(name.to_string()))));
+            kind = Callee::Value(n);
+            vec![Capability::Read; args.len()]
         } else {
             return gap_d("a call this slice cannot attribute", name, line);
         };
@@ -8346,6 +8355,51 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
+type Typed = (
+    Vec<vyrn_frontend::diagnostics::Diagnostic>,
+    std::collections::HashSet<usize>,
+);
+
+thread_local! {
+    /// What the typed judgment refused about the program last analysed on
+    /// this thread, as `vyrn check` words it, and the statements it refused.
+    static TYPED: std::cell::RefCell<Typed> = std::cell::RefCell::default();
+}
+
+/// Judge one built body with the typed judgment, and say whether it refused.
+/// A refused body is not remembered by the judgment memo: the memo serves
+/// the kernel's refusals alone, so the body is built and judged again.
+fn typed(program: &Program, top: &Body, file: &Option<String>) -> bool {
+    let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
+    TYPED.with(|t| {
+        let (out, seen) = &mut *t.borrow_mut();
+        let found = crate::typed::stores(top, &global_mutable, seen);
+        let refused = !found.is_empty();
+        out.extend(
+            found
+                .into_iter()
+                .map(|(line, message)| diagnostic(line, message, file)),
+        );
+        refused
+    })
+}
+
+fn diagnostic(
+    line: usize,
+    message: String,
+    file: &Option<String>,
+) -> vyrn_frontend::diagnostics::Diagnostic {
+    let mut d = vyrn_frontend::diagnostics::Diagnostic::error(line, 0, "check", message);
+    d.file = file.clone();
+    d
+}
+
+/// The typed judgment's refusals, drained. Installed into `own`'s slot by
+/// [`crate::install`].
+pub fn typed_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+    TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
+}
+
 /// The same refusals as `movecheck`-stage diagnostics, deduplicated, for the
 /// one list a file's refusals come out in
 /// (`vyrn_frontend::movecheck::refusals`, RFC-0125 §3 M3, the accumulation
@@ -8414,6 +8468,37 @@ pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
 /// the plan sees the same rows. A body the core cannot build, or the kernel
 /// refuses for a reason other than a missing release (a double free, a use
 /// after release), is left exactly as the plan had it.
+/// Reports a body the core did not build. A gap with a rule is the program's
+/// refusal, in the checker's own sentence (RFC-0125 §3 M3, the checker's
+/// deletion path). A gap without one is a defect in the builder: the checker
+/// typed the body, so every judgment over the core would pass over it in
+/// silence (RFC-0125 M7, the judgment's reach).
+fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
+    let Some(message) = g.rule else {
+        let detail = if g.detail.is_empty() {
+            String::new()
+        } else {
+            format!(" `{}`", g.detail)
+        };
+        let message = format!(
+            "internal error: the core cannot state {}{detail}, so `{body}` is not judged",
+            g.what
+        );
+        // With the typed judgment's refusals, which print whichever pass
+        // refused the program.
+        TYPED.with(|t| t.borrow_mut().0.push(diagnostic(g.line, message, file)));
+        return;
+    };
+    REFUSALS.with(|v| {
+        v.borrow_mut().push(crate::kernel::Refusal {
+            message,
+            line: g.line,
+            file: file.clone(),
+            body: body.to_string(),
+        })
+    });
+}
+
 pub fn augment(program: &Program, own: &mut Ownership) {
     let _p = vyrn_frontend::prof::phase("placer");
     // A node is an address, and the allocator hands the same one out again:
@@ -8549,26 +8634,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         let top = match made {
             Ok(b) => Some(b),
             Err(g) => {
-                // A rule the core states, rather than a construct it cannot
-                // lower: reported like the kernel's own refusals (RFC-0125
-                // §3 M3, the checker's deletion path).
-                if let Some(message) = g.rule {
-                    REFUSALS.with(|v| {
-                        v.borrow_mut().push(crate::kernel::Refusal {
-                            message,
-                            line: g.line,
-                            file: inst.func.module.clone(),
-                            body: inst.func.name.clone(),
-                        })
-                    });
-                } else if trace {
-                    eprintln!(
-                        "placer: {} not lowered: {} {}",
-                        inst.spelling(),
-                        g.what,
-                        g.detail
-                    );
-                }
+                refuse_gap(g, &inst.func.module, &inst.func.name);
                 None
             }
         };
@@ -8583,12 +8649,16 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             // third slice).
             place_frames(top, &inst.func.name, own, &mut added, &mut touched, trace);
         }
+        let refused = top
+            .as_ref()
+            .is_some_and(|t| typed(program, t, &inst.func.module));
+        let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, refused_before);
         built.push(top);
     }
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
     for (ob, m) in lowered.bodies.iter().zip(made_outside) {
-        let (key, made) = match m {
+        let (mut key, made) = match m {
             Made::Served(rs) => {
                 REFUSALS.with(|v| v.borrow_mut().extend(rs));
                 outside.push(None);
@@ -8605,25 +8675,28 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     eprintln!("{}", top.render());
                 }
                 place_frames(&top, &ob.name, own, &mut added, &mut touched, trace);
+                if typed(program, &top, &ob.module) {
+                    key = None;
+                }
                 outside.push(Some(top));
             }
             Err(g) => {
-                if let Some(message) = g.rule {
-                    REFUSALS.with(|v| {
-                        v.borrow_mut().push(crate::kernel::Refusal {
-                            message,
-                            line: g.line,
-                            file: ob.module.clone(),
-                            body: ob.name.clone(),
-                        })
-                    });
-                } else if trace {
-                    eprintln!("placer: {} not lowered: {} {}", ob.name, g.what, g.detail);
-                }
+                refuse_gap(g, &ob.module, &ob.name);
                 outside.push(None);
             }
         }
         remember(memo.as_ref(), key, refused_before);
+    }
+    // A generic function no instance reaches is still a body the checker
+    // typed, so it is built once, for the judgment alone: it places no row
+    // and is never emitted (RFC-0125 M7, the judgment's reach).
+    for inst in crate::uninstantiated(program, &lowered, own) {
+        match build(program, &inst, own) {
+            Ok(top) => {
+                typed(program, &top, &inst.func.module);
+            }
+            Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name),
+        }
     }
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]), and it reads the rows only

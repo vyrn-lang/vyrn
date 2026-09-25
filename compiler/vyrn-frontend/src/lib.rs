@@ -209,7 +209,16 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
         diags.extend(movecheck::refusals(program));
     } else if let Some(refused) = refused {
         let _p = prof::phase("lower typed");
-        lower_typed(program, refused);
+        // Each typed refusal stands before the first of the checker's in its
+        // file at a later line, so the list keeps the checker's own order.
+        for d in lower_typed(program, refused) {
+            let at = diags
+                .iter()
+                .position(|c| c.file == d.file && c.line > d.line)
+                .or_else(|| diags.iter().rposition(|c| c.file == d.file).map(|i| i + 1))
+                .unwrap_or(diags.len());
+            diags.insert(at, d);
+        }
     }
     // RFC-0125 M6, fourth slice: the floor row a judgment answers. The load
     // held the decision because the judgment reads the named core, which is
@@ -229,17 +238,20 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
 }
 
 /// Builds the core of every body the checker typed in a program it refused
-/// (RFC-0125 M7, decision A). A refused function leaves the program for the
-/// build, and so does every function that names one, until none does; a
-/// program whose tests, benches, module state or impl methods name one is not
-/// built. The kernel's refusals are dropped, because a program the checker
-/// refused gets the checker's refusals alone.
-fn lower_typed(program: &mut ast::Program, mut out: std::collections::HashSet<String>) {
+/// (RFC-0125 M7, decision A), and answers the typed judgment's refusals of
+/// those bodies. A refused function leaves the program for the build, and so
+/// does every function that names one, until none does; a program whose
+/// tests, benches, module state or impl methods name one is not built. The
+/// kernel's refusals are dropped, because typing comes before the judgments.
+fn lower_typed(
+    program: &mut ast::Program,
+    mut out: std::collections::HashSet<String>,
+) -> Vec<diagnostics::Diagnostic> {
     use ast::stmt_mentions;
     // A generator's own program is judged by the checker alone, as in
     // `movecheck::refusals`.
     if !own::placer_installed() || movecheck::in_comptime() {
-        return;
+        return Vec::new();
     }
     let names = |b: &ast::Block, out: &std::collections::HashSet<String>| {
         !checker::fn_calls(b).is_disjoint(out)
@@ -287,7 +299,7 @@ fn lower_typed(program: &mut ast::Program, mut out: std::collections::HashSet<St
             })
         })
     {
-        return;
+        return Vec::new();
     }
     // The functions move out and back by value, in the source's order.
     let mut gone = Vec::new();
@@ -304,12 +316,15 @@ fn lower_typed(program: &mut ast::Program, mut out: std::collections::HashSet<St
         }
     }
     let _ = own::kernel_refusals();
+    let _ = own::typed_refusals();
     let _ = own::analyze(program);
     let _ = own::kernel_refusals();
+    let typed = own::typed_refusals();
     let kept = std::mem::take(&mut program.functions);
     let mut back: Vec<(usize, ast::Function)> = at.into_iter().zip(kept).chain(gone).collect();
     back.sort_by_key(|(i, _)| *i);
     program.functions = back.into_iter().map(|(_, f)| f).collect();
+    typed
 }
 
 pub fn load_warned(
