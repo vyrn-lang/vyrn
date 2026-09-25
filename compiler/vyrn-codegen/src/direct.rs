@@ -1302,7 +1302,7 @@ struct Cx<'a> {
     ///
     /// A miss is a literal inside a tree the program does not hold — a leaked
     /// desugar — and the caller keeps its clone for that.
-    lambdas: HashMap<usize, &'a LambdaBody>,
+    lambdas: HashMap<usize, (&'a str, &'a Expr)>,
     /// The nodes this backend makes or copies and then hands to a walk that
     /// keys on their addresses, kept alive for the compile: a key built from a
     /// node's address is sound only while the node lives (#444).
@@ -1615,12 +1615,6 @@ impl<'a> Cx<'a> {
     /// one per SPELLING of a sum (RFC-0126 §8.11, M4a).
     fn sum_vs(&self, ty: &Type) -> Option<Vec<EnumVariant>> {
         crate::sum_variants_of(&self.sub(ty), &self.types)
-    }
-
-    /// The PROGRAM's own body for a lambda literal at this address, or `None`
-    /// for a literal the program does not hold — see [`Cx::lambdas`].
-    fn lambda(&self, at: &Expr) -> Option<&'a LambdaBody> {
-        self.lambdas.get(&(at as *const Expr as usize)).copied()
     }
 
     /// `node`, moved where it lives as long as this `Cx`, so its address keys
@@ -9922,6 +9916,30 @@ impl<'p> Fn_<'_, 'p> {
         Ok(crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types))
     }
 
+    /// The PROGRAM's own body for a lambda literal at this address, or `None`
+    /// for a literal the program does not hold — see [`Cx::lambdas`].
+    fn lambda(&self, at: &Expr) -> Option<&'p LambdaBody> {
+        match self.cx.lambdas.get(&(at as *const Expr as usize))?.1 {
+            Expr::Lambda { body, .. } => Some(body),
+            _ => None,
+        }
+    }
+
+    /// The one literal `owner` holds on `line`, which is where the core names
+    /// the lambda a row makes ([`vyrn_lower::core::lambda_spelling`]). `None`
+    /// for two literals on one line, whose core body is absent anyway (#459).
+    fn literal(&self, owner: &str, line: usize) -> Option<&'p Expr> {
+        let mut at = self
+            .cx
+            .lambdas
+            .values()
+            .filter(|(o, e)| *o == owner && e.line() == line);
+        match (at.next(), at.next()) {
+            (Some((_, e)), None) => Some(e),
+            _ => None,
+        }
+    }
+
     /// Lift a lambda literal to a top-level function: `(captures.., params..) ->
     /// ret`, discovered and indexed here, its body lowered when the queue reaches
     /// it.
@@ -9942,11 +9960,7 @@ impl<'p> Fn_<'_, 'p> {
         // The key below is the literal's address. A literal the program does
         // not hold dies with its tree, and a later one could land where it was,
         // so the key names a copy this `Cx` keeps.
-        let kept = self
-            .cx
-            .lambda(at)
-            .is_none()
-            .then(|| self.cx.keep(at.clone()));
+        let kept = self.lambda(at).is_none().then(|| self.cx.keep(at.clone()));
         let at = kept.as_deref().unwrap_or(at);
         let Expr::Lambda {
             params,
@@ -10002,7 +10016,7 @@ impl<'p> Fn_<'_, 'p> {
         //
         // A literal the program does not hold keeps the copy, and the shell
         // carries it exactly as before.
-        let queued = match self.cx.lambda(at) {
+        let queued = match self.lambda(at) {
             Some(LambdaBody::Block(b)) => Body::Block(b),
             Some(LambdaBody::Expr(e)) => Body::Value(e),
             None => Body::Shell,
@@ -10178,13 +10192,15 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("a function value that is not an aggregate", line);
         };
         let off = b.alloc(l.size, l.align);
-        self.fnval_into(m, b, Dest::Slot(off), sig_ty, target, cap_srcs, line)?;
+        let mut parts = Parts::of(cap_srcs);
+        self.fnval_into(m, b, Dest::Slot(off), sig_ty, target, &mut parts, line)?;
         b.slot(off);
         Ok(sig_ty.clone())
     }
 
     /// Write a stored function value into `dest`: its tag, and its payload,
-    /// which [`Fn_::build_fnval`] states.
+    /// which [`Fn_::build_fnval`] states. `caps` are the captures in the
+    /// target's order.
     #[allow(clippy::too_many_arguments)]
     fn fnval_into(
         &mut self,
@@ -10193,11 +10209,11 @@ impl<'p> Fn_<'_, 'p> {
         dest: Dest,
         sig_ty: &Type,
         target: FnTarget,
-        cap_srcs: &[Expr],
+        caps: &mut Parts,
         line: usize,
     ) -> Result<(), String> {
         let cap_tys = target.sig.params[..target.ncaps].to_vec();
-        if cap_tys.len() != cap_srcs.len() {
+        if cap_tys.len() != caps.len() {
             return unsupported(
                 "a function value whose captures do not match its target",
                 line,
@@ -10217,7 +10233,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Const(bl.size as i64));
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalSet(p));
-            for (i, (src, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
+            for (i, ty) in cap_tys.iter().enumerate() {
                 // The snapshot OWNS its heap (RFC-0114 §25 round three, the
                 // textual backend's rule, mirrored here in round fifty-seven):
                 // a heap capture READ OUT OF A PLACE is duplicated into the
@@ -10230,13 +10246,14 @@ impl<'p> Fn_<'_, 'p> {
                 // slot, so reading its name BUILDS the aggregate (RFC-0023 ×
                 // RFC-0037, [`Fn_::fnval_binding`]) rather than reading one.
                 let dup = self.owns_heap(ty)
-                    && !matches!(src, Expr::Var { name, .. } if self.fn_binds.contains_key(name));
+                    && !matches!(caps, Parts::Ast(es)
+                        if matches!(es[i], Expr::Var { name, .. } if self.fn_binds.contains_key(name)));
                 b.ins(&Instruction::LocalGet(p));
                 if bl.fields[i] != 0 {
                     b.ins(&Instruction::I32Const(bl.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                 }
-                self.expr_as(m, b, src, ty)?;
+                self.part(m, b, caps, i, ty, line)?;
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
                         if dup {
@@ -10294,6 +10311,19 @@ impl<'p> Fn_<'_, 'p> {
         e: &Expr,
         sig_ty: &Type,
     ) -> Result<Type, String> {
+        let (target, srcs) = self.lift_stored(m, e, sig_ty)?;
+        self.build_fnval(m, b, sig_ty, target, &srcs, Expr::line(e))
+    }
+
+    /// The target a stored lambda calls, and its captures in the target's
+    /// order: [`Fn_::fnval_lambda`]'s lift, which the core walk's
+    /// [`Fn_::core_make`] shares.
+    fn lift_stored(
+        &mut self,
+        m: &mut Module,
+        e: &Expr,
+        sig_ty: &Type,
+    ) -> Result<(FnTarget, Vec<Expr>), String> {
         let Expr::Lambda { line, .. } = e else {
             return unsupported("a function value from a non-lambda", Expr::line(e));
         };
@@ -10305,8 +10335,7 @@ impl<'p> Fn_<'_, 'p> {
         let saved = std::mem::take(&mut self.expect);
         let r = self.lift_lambda(m, e, ptys, ret, *line);
         self.expect = saved;
-        let (target, srcs, _) = r?;
-        self.build_fnval(m, b, sig_ty, target, &srcs, *line)
+        r.map(|(target, srcs, _)| (target, srcs))
     }
 
     /// A stored value from a bare function name: the empty-payload variant. The
@@ -17436,7 +17465,7 @@ impl<'p> Fn_<'_, 'p> {
                     (Some(top), Some(t)) if top == *n => t,
                     _ => &body.names[*n as usize].ty,
                 };
-                if !self.core_makes(body, at, rhs) {
+                if !self.core_makes(body, *n, at, rhs) {
                     return None;
                 }
                 made.push(*n);
@@ -17663,11 +17692,10 @@ impl<'p> Fn_<'_, 'p> {
                 // and then binds, and a record or an array is never on the
                 // operand stack to be bound.
                 St::Let(n, rhs)
-                    if self.core_makes(body, &body.names[*n as usize].ty, rhs)
-                        || self
-                            .core_bound
-                            .as_ref()
-                            .is_some_and(|(top, t)| top == n && self.core_makes(body, t, rhs)) =>
+                    if self.core_makes(body, *n, &body.names[*n as usize].ty, rhs)
+                        || self.core_bound.as_ref().is_some_and(|(top, t)| {
+                            top == n && self.core_makes(body, *n, t, rhs)
+                        }) =>
                 {
                     let info = &body.names[*n as usize];
                     let line = info.line;
@@ -19099,7 +19127,47 @@ impl<'p> Fn_<'_, 'p> {
             let Some((sig_ty, target)) = self.core_closure(ty, t, vs) else {
                 return unsupported("a function value this walk does not make", line);
             };
-            return self.fnval_into(m, b, dest, &sig_ty, target, &[], line);
+            return self.fnval_into(
+                m,
+                b,
+                dest,
+                &sig_ty,
+                target,
+                &mut Parts::Core(body, &[], w),
+                line,
+            );
+        }
+        // A lambda: the literal lifted as the arm lifts it, and its captures
+        // read off the row in the order the lifted signature takes them.
+        if let Rhs::Prim(Op::Closure, vs, _) = rhs {
+            let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
+            let Some(at) = self.literal(&self.owner, line) else {
+                return unsupported("a lambda this walk does not find", line);
+            };
+            let (target, srcs) = self.lift_stored(m, at, &sig_ty)?;
+            let caps: Option<Vec<Val>> = srcs
+                .iter()
+                .map(|e| {
+                    vs.iter()
+                        .find(|v| {
+                            matches!((v, e), (Val::Name(c), Expr::Var { name, .. })
+                                if body.names[*c as usize].source == *name)
+                        })
+                        .cloned()
+                })
+                .collect();
+            let Some(caps) = caps else {
+                return unsupported("a lambda whose captures the row does not name", line);
+            };
+            return self.fnval_into(
+                m,
+                b,
+                dest,
+                &sig_ty,
+                target,
+                &mut Parts::Core(body, &caps, w),
+                line,
+            );
         }
         dest.addr(b, 0);
         match rhs {
@@ -19249,9 +19317,16 @@ impl<'p> Fn_<'_, 'p> {
     /// Two rows make one: [`Rhs::Make`] states a record, an array or a map
     /// literal, and a call to [`Callee::Ctor`] states a variant of a sum, which
     /// is the same build with a tag in front of it.
-    fn core_makes(&self, body: &vyrn_lower::core::Body, ty: &Type, rhs: &Rhs) -> bool {
+    fn core_makes(
+        &self,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+        ty: &Type,
+        rhs: &Rhs,
+    ) -> bool {
         match rhs {
             Rhs::Make(c, vs) => self.core_made(body, ty, c, vs),
+            Rhs::Prim(Op::Closure, vs, _) => self.core_lambda(body, n, ty, vs),
             Rhs::Call {
                 callee,
                 args,
@@ -19375,7 +19450,10 @@ impl<'p> Fn_<'_, 'p> {
         ty: &Type,
         rhs: &Rhs,
     ) -> bool {
-        if !self.core_makes(body, ty, rhs) {
+        let St::Let(n, _) = &ss[i] else {
+            return false;
+        };
+        if !self.core_makes(body, *n, ty, rhs) {
             return false;
         }
         let Rhs::Make(ctor, vs) = rhs else {
@@ -19429,7 +19507,7 @@ impl<'p> Fn_<'_, 'p> {
         let St::Let(t, rhs) = &ss[i] else {
             return None;
         };
-        let made = matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs);
+        let made = matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure, ..)) || self.core_ctor(rhs);
         let taken = self.core_take_part(body, rhs);
         if body.names[*t as usize].binding.is_some()
             || w.occurs.get(*t as usize) != Some(&2)
@@ -19442,7 +19520,7 @@ impl<'p> Fn_<'_, 'p> {
         let fits = |part: &Type| {
             !self.checks(part)
                 && if made {
-                    self.core_makes(body, part, rhs)
+                    self.core_makes(body, *t, part, rhs)
                 } else {
                     self.core_payload_layout(body, &Val::Name(*t), part)
                 }
@@ -19812,6 +19890,55 @@ impl<'p> Fn_<'_, 'p> {
         Some((sig_ty, self.core_target(t)?))
     }
 
+    /// Whether this walk makes the lambda a closure row binds to `n` at `ty`:
+    /// RFC-0125 M7, [`Fn_::core_make`]'s screen. The row's
+    /// captures are names this walk reads, and they are exactly the captures
+    /// the lifted signature takes ([`crate::lambda_captures`]), so every part
+    /// has a slot in the capture block.
+    fn core_lambda(
+        &self,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+        ty: &Type,
+        vs: &[Val],
+    ) -> bool {
+        let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
+        let (
+            Type::Fn(ptys, _),
+            Some(Expr::Lambda {
+                params, body: lit, ..
+            }),
+        ) = (
+            &sig_ty,
+            self.literal(&self.owner, body.names[n as usize].line),
+        )
+        else {
+            return false;
+        };
+        let Some(srcs) = vs
+            .iter()
+            .map(|v| match v {
+                Val::Name(c)
+                    if self.core_val_readable(body, v)
+                        || self.core_payload_layout(body, v, &body.names[*c as usize].ty) =>
+                {
+                    Some(body.names[*c as usize].source.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<&str>>>()
+        else {
+            return false;
+        };
+        let caps =
+            crate::lambda_captures(lit, params.iter().map(|p| p.name.clone()).collect(), &|x| {
+                srcs.contains(&x)
+            });
+        matches!(self.cx.repr(&sig_ty, 0), Ok(Repr::Agg(_)))
+            && params.len() == ptys.len()
+            && caps.len() == srcs.len()
+    }
+
     /// The declared function a `x.copy()` row calls when the receiver's type
     /// declares `impl Copy for T` (RFC-0091 M1), as the arm's `@copy` does.
     fn core_copy_impl(
@@ -20040,9 +20167,7 @@ impl<'p> Fn_<'_, 'p> {
         // written at the `return` ([`Fn_::core_lands`]); what is refused is a
         // result checked where it is returned, because the row states no
         // check (RFC-0079).
-        if !body.lambdas.is_empty()
-            || (matches!(self.ret, Repr::Agg(_)) && self.checks(&self.ret_ty))
-        {
+        if matches!(self.ret, Repr::Agg(_)) && self.checks(&self.ret_ty) {
             return false;
         }
         let mut lets = Vec::new();
@@ -20106,7 +20231,7 @@ impl<'p> Fn_<'_, 'p> {
                 && !(!self.annotated_apart(&annotated, info)
                     && lets.iter().any(|(b, rhs)| {
                         *b as usize == n
-                            && (self.core_makes(body, &info.ty, rhs)
+                            && (self.core_makes(body, *b, &info.ty, rhs)
                                 || self.core_agg_call(body, rhs)
                                 || self.core_take_part(body, rhs)
                                 || self.core_rebuild(body, rhs))
@@ -20205,7 +20330,10 @@ impl<'p> Fn_<'_, 'p> {
             // name holds to the end of its extent, or into the caller's
             // storage where the `return` after it hands it back
             // ([`Fn_::core_lands`]) (RFC-0125 M7).
-            St::Let(n, rhs) if matches!(rhs, Rhs::Make(..)) || self.core_ctor(rhs) => {
+            St::Let(n, rhs)
+                if matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure, ..))
+                    || self.core_ctor(rhs) =>
+            {
                 let part = self.core_part_at(body, ss, i, &self.core_w);
                 let ty = match &part {
                     Some(at) => &at.ty,
