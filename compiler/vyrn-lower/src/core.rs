@@ -580,6 +580,10 @@ pub enum Target {
     /// captures first. Each capture is the instance's parameter that carries
     /// it, by name and type, in the order the caller forwards them.
     Lambda(String, Vec<(String, Type)>),
+    /// A stored value (RFC-0037), which the instance takes as the parameter
+    /// this names: the bound parameter stays, under that name, and a call
+    /// through it stays a call through the value.
+    Value(String),
 }
 
 /// WHO a [`Rhs::Call`]'s name resolves to (RFC-0125 §3 M3, the callee slice).
@@ -707,8 +711,9 @@ pub enum Op {
     /// RFC-0023: a lambda literal. Its operands are the captures the closure
     /// snapshots and its result is the closure value, which is why it is a
     /// prim and not a [`Ctor`] — the parts are READ, where a constructor's
-    /// are taken.
-    Closure,
+    /// are taken. The key is the one its lifted body is built and emitted
+    /// under ([`lambda_spelling`]).
+    Closure(String),
 }
 
 /// What a [`Rhs::Make`] row constructs (RFC-0125 §3 M3, the operation slice).
@@ -1328,7 +1333,7 @@ impl Body {
                     Op::Un(o) => format!("{o:?}").to_lowercase(),
                     Op::Bin(o) => format!("{o:?}").to_lowercase(),
                     Op::Conv(t) => format!("conv {t}"),
-                    Op::Closure => "closure".into(),
+                    Op::Closure(_) => "closure".into(),
                 },
                 vs.iter()
                     .map(|v| self.val(v))
@@ -2216,7 +2221,7 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
                 }
             }
         }
-        Rhs::Prim(Op::Closure, vs, _) => {
+        Rhs::Prim(Op::Closure(_), vs, _) => {
             out.push("Lambda".into());
             vals(vs, out);
         }
@@ -3241,7 +3246,7 @@ impl<'a> Builder<'a> {
     /// String temporaries the reading site frees (RFC-0096 M3). After, because
     /// the result is named first and the temporaries were its operands.
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
-        if matches!(rhs, Rhs::Prim(Op::Closure, ..)) {
+        if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
             self.body.names[n as usize].closure_reads = self.pending_closure.take();
         }
         out.push(St::Let(n, rhs));
@@ -6018,8 +6023,8 @@ impl<'a> Builder<'a> {
         // in a later argument of the same call — asks the position it is
         // written at rather than this one's.
         self.body.names[t as usize].closure_reads = self.closure_reads(e, &caps);
-        out.push(St::Let(t, Rhs::Prim(Op::Closure, caps.clone(), Some(ty))));
-        self.lambda_frame(e, &caps)?;
+        let key = self.lambda_frame(e, &caps)?;
+        out.push(St::Let(t, Rhs::Prim(Op::Closure(key), caps, Some(ty))));
         Ok(Val::Name(t))
     }
 
@@ -6033,9 +6038,16 @@ impl<'a> Builder<'a> {
     /// owner's name; `lib.rs` keeps `placed` across the lift). An expression
     /// body is a `return` of its value at no site: nothing an engine runs
     /// stands there, so a name still held at it is refused, not placed.
-    fn lambda_frame(&mut self, e: &'a Expr, caps: &[Val]) -> Result<(), Gap> {
-        let Expr::Lambda { params, body, line } = e else {
-            return Ok(());
+    /// Answers the key the frame is built under.
+    fn lambda_frame(&mut self, e: &'a Expr, caps: &[Val]) -> Result<String, Gap> {
+        let Expr::Lambda {
+            params,
+            body,
+            line,
+            col,
+        } = e
+        else {
+            return gap("a lambda frame of no lambda literal", e.line());
         };
         let decls = self.proto.types();
         let (ptys, ret): (Vec<Type>, Option<Type>) = match self.ty_of(e).ok() {
@@ -6051,8 +6063,7 @@ impl<'a> Builder<'a> {
             // the instance monomorphized away. Its body is typed, so each
             // parameter has the type of its first use there.
             None => {
-                let (mut vars, mut calls) = (Vec::new(), Vec::new());
-                mentions_in_lambda(body, &mut vars, &mut calls);
+                let vars = mentions_in_lambda(body);
                 let ptys = params
                     .iter()
                     .map(|p| {
@@ -6087,7 +6098,7 @@ impl<'a> Builder<'a> {
                 unbound_drops: Vec::new(),
             },
         );
-        self.body.name = lambda_spelling(&outer.name, *line);
+        self.body.name = lambda_spelling(&outer.name, *line, *col);
         let saved = (
             std::mem::take(&mut self.scope),
             std::mem::take(&mut self.by_binding),
@@ -6145,39 +6156,31 @@ impl<'a> Builder<'a> {
         ) = saved;
         self.ret = outer_ret;
         r?;
+        let key = frame.name.clone();
         self.body.lambdas.push(frame);
-        Ok(())
+        Ok(key)
     }
 
     /// The names of this body a lambda mentions, as a place or as a callee
-    /// (`n -> f(n) + 1` captures the function value `f`).
+    /// (`n -> f(n) + 1` captures the function value `f`), in the order
+    /// [`lambda_captures`] gives. Each is the binding [`Builder::lookup`]
+    /// resolves the name to, not a shadowed one (#483).
     ///
-    /// The mention set is [`mentions_in_lambda`]'s, which reads the body and
-    /// honours the body's own bindings. `ast::mentions_place` cannot answer
-    /// this question: it answers `true` for every name once the lambda has a
-    /// block body, so a frame captured every name in scope, and a capture is a
-    /// READ — every block-bodied lambda written after a `consume` was refused
-    /// as a use of the consumed name (round two's F2-051).
+    /// The walk reads the body and honours the body's own bindings.
+    /// `ast::mentions_place` cannot answer this question: it answers `true`
+    /// for every name once the lambda has a block body, so a frame captured
+    /// every name in scope, and a capture is a READ — every block-bodied
+    /// lambda written after a `consume` was refused as a use of the consumed
+    /// name (round two's F2-051).
     fn captures(&self, e: &Expr) -> Vec<Val> {
         let Expr::Lambda { params, body, .. } = e else {
             return Vec::new();
         };
-        let (mut vars, mut calls) = (Vec::new(), Vec::new());
-        mentions_in_lambda(body, &mut vars, &mut calls);
-        let mut caps = Vec::new();
-        for (name, n) in &self.scope {
-            // A shadowed entry is no binding the body can name (#483).
-            if params.iter().any(|p| p.name == *name)
-                || caps.contains(&Val::Name(*n))
-                || self.lookup(name) != Some(*n)
-            {
-                continue;
-            }
-            if reads_place(&vars, name) || calls.contains(&name.as_str()) {
-                caps.push(Val::Name(*n));
-            }
-        }
-        caps
+        let locals = params.iter().map(|p| p.name.clone()).collect();
+        lambda_captures(body, locals, &|n| self.lookup(n).is_some())
+            .iter()
+            .filter_map(|n| self.lookup(n).map(Val::Name))
+            .collect()
     }
 
     /// [`NameInfo::closure_reads`] for one lambda literal: the captures its
@@ -6193,8 +6196,7 @@ impl<'a> Builder<'a> {
         // The names the body MENTIONS, which is not the names it captures: a
         // callee is a name the core captures — the closure has to reach the
         // body — and no value the closure holds.
-        let (mut vars, mut calls) = (Vec::new(), Vec::new());
-        mentions_in_lambda(body, &mut vars, &mut calls);
+        let vars = mentions_in_lambda(body);
         Some(
             caps.iter()
                 .filter_map(|v| match v {
@@ -6951,8 +6953,8 @@ impl<'a> Builder<'a> {
                 // The name this closure binds is `bind`'s to give, so the
                 // fact waits for it ([`Builder::pending_closure`]).
                 self.pending_closure = self.closure_reads(e, &caps);
-                self.lambda_frame(e, &caps)?;
-                Ok(Rhs::Prim(Op::Closure, caps, self.produced(e)))
+                let key = self.lambda_frame(e, &caps)?;
+                Ok(Rhs::Prim(Op::Closure(key), caps, self.produced(e)))
             }
         }
     }
@@ -7519,43 +7521,109 @@ fn reads_place(vars: &[&Expr], base: &str) -> bool {
     })
 }
 
-/// Every `Var` node and every callee name in a lambda's body, nested
-/// lambdas included, minus the names the body itself binds: what the frame
-/// captures, and where an untyped parameter's type can be read.
+/// The captured (free) local variables of a lambda body (RFC-0023), in
+/// first-seen order: names read in the body that are neither the lambda's own
+/// parameters/locals nor module state nor functions — i.e. bindings that live in
+/// the enclosing local scope, which is what `is_local` answers.
 ///
-/// The descent is `ast::body_scope_descent!`'s; what is this reader's own is
-/// the two names it records. A name the body shadows is NOT recorded: a
-/// capture is a read, so counting a shadow refuses a program that reads
-/// nothing (round two's F2-051).
-fn mentions_in_lambda<'e>(
-    body: &'e LambdaBody,
-    vars: &mut Vec<&'e Expr>,
-    calls: &mut Vec<&'e str>,
-) {
-    struct Mentions<'e, 'o> {
-        vars: &'o mut Vec<&'e Expr>,
-        calls: &'o mut Vec<&'e str>,
+/// The descent and the scope stack are `ast::body_scope_descent!`'s since
+/// RFC-0125 §3 M6. The scope this pass kept was the walk's, arm for arm; what
+/// is its own is the entry — the lambda's own parameters are in `locals` before
+/// the body is walked — and one line at a site: a nested lambda literal is not
+/// descended, because RFC-0023's nesting lock means there is never one.
+///
+/// This is the one statement of the capture order: the core's closure row
+/// lists its captures in it, and the emitter lifts the signature in it.
+pub fn lambda_captures(
+    body: &LambdaBody,
+    locals: std::collections::HashSet<String>,
+    is_local: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    /// The collector's line at each site: a name read that no local shadows and
+    /// `is_local` answers for is a capture, recorded once, in first-seen order.
+    struct CapturesOf<'a> {
+        out: Vec<String>,
+        seen: std::collections::HashSet<String>,
+        is_local: &'a dyn Fn(&str) -> bool,
     }
 
-    impl<'e> BodyVisit<'e> for Mentions<'e, '_> {
-        fn expr(&mut self, e: &'e Expr, locals: &std::collections::HashSet<String>) -> bool {
+    impl CapturesOf<'_> {
+        fn take(&mut self, n: &str, locals: &std::collections::HashSet<String>) {
+            if locals.contains(n) || self.seen.contains(n) {
+                return;
+            }
+            // Only an enclosing LOCAL slot is a capture — module state and
+            // functions/variants are reached directly by the lifted function.
+            if (self.is_local)(n) {
+                self.seen.insert(n.to_string());
+                self.out.push(n.to_string());
+            }
+        }
+    }
+
+    impl BodyVisit<'_> for CapturesOf<'_> {
+        fn expr(&mut self, e: &Expr, locals: &std::collections::HashSet<String>) -> bool {
             match e {
-                Expr::Var { name, .. } if !locals.contains(place_base(name)) => self.vars.push(e),
-                Expr::Call { name, .. } if !locals.contains(name.as_str()) => {
-                    self.calls.push(name.as_str())
-                }
+                Expr::Var { name, .. } => self.take(place_base(name), locals),
+                // A CALL captures its callee when the callee names an enclosing
+                // local: `|req, ps| run(req)` over a `fn`-typed `run` calls a
+                // value, not a symbol, and leaving it out of the capture list
+                // lowered it as a direct call to `@vyrn_run` — a name no module
+                // defines (the interpreter, which resolves through the
+                // environment, ran the same program fine). Nothing else changes:
+                // `is_local` is false for a top-level function, so an ordinary
+                // call still reaches its symbol with no capture at all.
+                Expr::Call { name, .. } => self.take(name, locals),
+                // RFC-0023's nesting lock: a lambda body may not hold another
+                // lambda literal, so there is no inner body to walk.
+                Expr::Lambda { .. } => return false,
                 _ => {}
             }
             true
         }
     }
 
-    let mut v = Mentions { vars, calls };
+    let mut v = CapturesOf {
+        out: Vec::new(),
+        seen: std::collections::HashSet::new(),
+        is_local,
+    };
+    let mut locals = locals;
+    match body {
+        LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+        LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+    }
+    v.out
+}
+
+/// Every `Var` node in a lambda's body, nested lambdas included, minus the
+/// names the body itself binds: where an untyped parameter's type can be
+/// read, and which captures the closure reads as values.
+///
+/// The descent is `ast::body_scope_descent!`'s. A name the body shadows is
+/// NOT recorded: a capture is a read, so counting a shadow refuses a program
+/// that reads nothing (round two's F2-051).
+fn mentions_in_lambda(body: &LambdaBody) -> Vec<&Expr> {
+    struct Mentions<'e>(Vec<&'e Expr>);
+
+    impl<'e> BodyVisit<'e> for Mentions<'e> {
+        fn expr(&mut self, e: &'e Expr, locals: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Var { name, .. } = e {
+                if !locals.contains(place_base(name)) {
+                    self.0.push(e);
+                }
+            }
+            true
+        }
+    }
+
+    let mut v = Mentions(Vec::new());
     let mut locals = std::collections::HashSet::new();
     match body {
         LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
         LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
     }
+    v.0
 }
 
 thread_local! {
@@ -7871,21 +7939,29 @@ pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
-/// The name a lambda literal on `line` inside the body named `outer` is built
-/// and emitted under, and so its key in [`body_of`].
-pub fn lambda_spelling(outer: &str, line: usize) -> String {
-    format!("{outer}@lambda:{line}")
+/// The name a lambda literal at `line` and `col` inside the body named
+/// `outer` is built and emitted under, and so its key in [`body_of`].
+pub fn lambda_spelling(outer: &str, line: usize, col: usize) -> String {
+    format!("{outer}@lambda:{line}:{col}")
+}
+
+/// The line of a lambda key [`lambda_spelling`] spelled, which is how
+/// RFC-0037 names a lambda source. `None` for any other name.
+pub fn lambda_line(name: &str) -> Option<usize> {
+    let (_, at) = name.rsplit_once("@lambda:")?;
+    at.split(':').next()?.parse().ok()
 }
 
 /// The core's own body for the function emitted under `name`, or `None` where
 /// this pass built none — RFC-0125 §3 M3, the driver slice.
 ///
 /// The key is [`crate::spell`] of the instance, which is the name the emitters
-/// lower a function under: `max<Int64>` for a specialization, `main@lambda:26` for a
-/// lifted lambda, `test@1` for a `test` block, and the empty name for module
-/// state. A body this pass could not build (a [`Gap`]) is absent, and so is
-/// one whose name another body shares; a reader walks the source instead —
-/// the same standing down every reader of [`facts`] makes.
+/// lower a function under: `max<Int64>` for a specialization,
+/// `main@lambda:26:13` for a lifted lambda, `test@1` for a `test` block, and
+/// the empty name for module state. A body this pass could not build (a
+/// [`Gap`]) is absent, and so is one whose name another body shares; a
+/// reader walks the source instead — the same standing down every reader of
+/// [`facts`] makes.
 pub fn body_of(name: &str) -> Option<Body> {
     BODIES.with(|b| b.borrow().get(name).cloned().flatten())
 }
@@ -7894,7 +7970,9 @@ pub fn body_of(name: &str) -> Option<Body> {
 /// each parameter in `bound` leaves the parameter list, a call through it is
 /// [`Callee::Fn`] to its target, and a call that passes it on names that
 /// target. A parameter bound to a lambda is that lambda's captures: they take
-/// its place in the parameter list, and a call through it passes them first.
+/// its place in the parameter list, a call through it passes them first, and
+/// a call that passes it on takes them after its own arguments, which the
+/// emitter puts back where the `fn` parameter stands (`direct::ho_args`).
 /// `None` where a bound parameter is read any other way (stored, captured,
 /// handed to a position no target names).
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
@@ -7902,6 +7980,15 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
         return None;
     }
     let mut out = body.clone();
+    let values: Vec<Name> = (bound.iter())
+        .filter_map(|(n, t)| match t {
+            Target::Value(source) => {
+                out.names[*n as usize].source = source.clone();
+                Some(*n)
+            }
+            _ => None,
+        })
+        .collect();
     let mut caps: Vec<(Name, Vec<Name>)> = Vec::new();
     for (n, t) in bound {
         let Target::Lambda(_, cs) = t else { continue };
@@ -7919,13 +8006,14 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     bind_targets(&mut out.stmts, bound, &caps);
     let mut reads = vec![0; out.names.len()];
     count_reads(&out.stmts, &mut reads);
-    if bound.iter().any(|(n, _)| reads[*n as usize] > 0) {
+    let gone = |n: &Name| !values.contains(n);
+    if bound.iter().any(|(n, _)| gone(n) && reads[*n as usize] > 0) {
         return None;
     }
     out.params = (out.params.iter())
         .flat_map(|p| match caps.iter().find(|(n, _)| n == p) {
             Some((_, names)) => names.clone(),
-            None if bound.iter().any(|(n, _)| n == p) => Vec::new(),
+            None if gone(p) && bound.iter().any(|(n, _)| n == p) => Vec::new(),
             None => vec![*p],
         })
         .collect();
@@ -7960,15 +8048,20 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
                             let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
                             args.splice(0..0, lead.collect::<Vec<_>>());
                         }
+                        Some((_, Target::Value(source))) => *callee = source.clone(),
                         _ => {}
                     }
                 }
                 for t in targets.iter_mut() {
-                    if let Target::Param(p) = t {
-                        if let Some((_, to)) = bound.iter().find(|(n, _)| n == p) {
-                            *t = to.clone();
-                        }
-                    }
+                    let Target::Param(p) = t else { continue };
+                    let p = *p;
+                    let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
+                        continue;
+                    };
+                    *t = to.clone();
+                    let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
+                    let forwarded = forwarded.into_iter().flatten();
+                    args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
                 }
             }
             St::If { then, els, .. } => {

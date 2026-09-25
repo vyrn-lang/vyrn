@@ -4241,6 +4241,7 @@ impl Parser {
     }
 
     fn lambda(&mut self, line: usize) -> Result<Expr, Diagnostic> {
+        let col = self.col();
         let mut params = Vec::new();
         if *self.peek() == Tok::LParen {
             self.advance();
@@ -4269,7 +4270,12 @@ impl Parser {
             self.no_struct = saved;
             LambdaBody::Expr(Box::new(e?))
         };
-        Ok(Expr::Lambda { params, body, line })
+        Ok(Expr::Lambda {
+            params,
+            body,
+            line,
+            col,
+        })
     }
 
     fn primary(&mut self) -> Result<Expr, Diagnostic> {

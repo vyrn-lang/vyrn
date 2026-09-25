@@ -1,0 +1,5 @@
+// a parameter bound to a stored value
+// pin: 0 break, 0 continue
+// A parameter bound to a stored value is that value, under the name the
+// caller forwards, and a call through it goes through its dispatcher: 21.
+fn apply(g: fn(Int64) -> Int64, v: Int64) -> Int64 { return g(v) + g(1) }          fn vyrnTestMain() -> Int64 { let k = 5 let add: fn(Int64) -> Int64 = x -> x + k return apply(add, 10) }

@@ -444,7 +444,7 @@ impl Writes<'_> {
                         }
                     }
                 }
-                matches!(r, Rhs::Prim(crate::core::Op::Closure, vs, _)
+                matches!(r, Rhs::Prim(crate::core::Op::Closure(_), vs, _)
                     if vs.iter().any(|v| matches!(v, Val::Name(k) if self.alias.contains(k))))
             }
             St::If { then, els, .. } => {
@@ -2357,7 +2357,7 @@ impl<'b> Kernel<'b> {
                 // it is a value under RFC-0037's defunctionalization, and a
                 // borrow inside one has no lifetime to stand on (RFC-0125 §3
                 // M3, row 24).
-                if matches!(rhs, Rhs::Prim(crate::core::Op::Closure, ..)) {
+                if matches!(rhs, Rhs::Prim(crate::core::Op::Closure(_), ..)) {
                     let i = &self.body.names[*n as usize];
                     if let Some(reads) = i.closure_reads.clone() {
                         self.escaping_capture(st, &reads, i.line)?;

@@ -622,78 +622,6 @@ pub(crate) fn normalize_fn_sig(t: &Type, types: &HashMap<String, TypeDecl>) -> T
     }
 }
 
-/// The captured (free) local variables of a lambda body (RFC-0023), in
-/// first-seen order: names read in the body that are neither the lambda's own
-/// parameters/locals nor module state nor functions — i.e. bindings that live in
-/// the enclosing local scope, which is what `is_local` answers.
-///
-/// The descent and the scope stack are `ast::body_scope_descent!`'s since
-/// RFC-0125 §3 M6. The scope this pass kept was the walk's, arm for arm; what
-/// is its own is the entry — the lambda's own parameters are in `locals` before
-/// the body is walked — and one line at a site: a nested lambda literal is not
-/// descended, because RFC-0023's nesting lock means there is never one.
-pub(crate) fn lambda_captures(
-    body: &LambdaBody,
-    locals: std::collections::HashSet<String>,
-    is_local: &dyn Fn(&str) -> bool,
-) -> Vec<String> {
-    /// The collector's line at each site: a name read that no local shadows and
-    /// `is_local` answers for is a capture, recorded once, in first-seen order.
-    struct CapturesOf<'a> {
-        out: Vec<String>,
-        seen: std::collections::HashSet<String>,
-        is_local: &'a dyn Fn(&str) -> bool,
-    }
-
-    impl CapturesOf<'_> {
-        fn take(&mut self, n: &str, locals: &std::collections::HashSet<String>) {
-            if locals.contains(n) || self.seen.contains(n) {
-                return;
-            }
-            // Only an enclosing LOCAL slot is a capture — module state and
-            // functions/variants are reached directly by the lifted function.
-            if (self.is_local)(n) {
-                self.seen.insert(n.to_string());
-                self.out.push(n.to_string());
-            }
-        }
-    }
-
-    impl BodyVisit<'_> for CapturesOf<'_> {
-        fn expr(&mut self, e: &Expr, locals: &std::collections::HashSet<String>) -> bool {
-            match e {
-                Expr::Var { name, .. } => self.take(name, locals),
-                // A CALL captures its callee when the callee names an enclosing
-                // local: `|req, ps| run(req)` over a `fn`-typed `run` calls a
-                // value, not a symbol, and leaving it out of the capture list
-                // lowered it as a direct call to `@vyrn_run` — a name no module
-                // defines (the interpreter, which resolves through the
-                // environment, ran the same program fine). Nothing else changes:
-                // `is_local` is false for a top-level function, so an ordinary
-                // call still reaches its symbol with no capture at all.
-                Expr::Call { name, .. } => self.take(name, locals),
-                // RFC-0023's nesting lock: a lambda body may not hold another
-                // lambda literal, so there is no inner body to walk.
-                Expr::Lambda { .. } => return false,
-                _ => {}
-            }
-            true
-        }
-    }
-
-    let mut v = CapturesOf {
-        out: Vec::new(),
-        seen: std::collections::HashSet::new(),
-        is_local,
-    };
-    let mut locals = locals;
-    match body {
-        LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
-        LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
-    }
-    v.out
-}
-
 /// Björn Höhrmann's UTF-8 validation DFA table: 256 byte-class entries followed
 /// by a 108-entry (9 states × 12 classes) transition table. State 0 is ACCEPT,
 /// 12 is REJECT. Used by `@__vyrn_utf8valid` so the native decoders reject exactly
@@ -760,10 +688,6 @@ pub(crate) fn utf8d_table() -> Vec<u8> {
     t.extend_from_slice(&trans);
     t
 }
-
-// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
-// declared (RFC-0125 §3 M6). This module's collectors read it.
-vyrn_frontend::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 
 /// The type arguments a construction or call site instantiates a generic with:
 /// `declared` are the parametric types (a function's parameters, an enum

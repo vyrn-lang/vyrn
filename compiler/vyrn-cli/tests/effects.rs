@@ -528,12 +528,7 @@ fn run_corpus() {
             for f in b.frames() {
                 if std::ptr::eq(f, b) {
                     top.push(refs.len());
-                } else if let Some(line) = f
-                    .name
-                    .rsplit("@lambda:")
-                    .next()
-                    .and_then(|l| l.parse::<usize>().ok())
-                {
+                } else if let Some(line) = vyrn_lower::core::lambda_line(&f.name) {
                     lambda_frames
                         .entry((insts[i].func.name.as_str(), line))
                         .or_default()
@@ -548,12 +543,7 @@ fn run_corpus() {
         // initializer, `test@<i>` / `bench@<i>` for a test or a bench.
         for b in &outside {
             for f in b.frames() {
-                if let Some(line) = f
-                    .name
-                    .rsplit("@lambda:")
-                    .next()
-                    .and_then(|l| l.parse::<usize>().ok())
-                {
+                if let Some(line) = vyrn_lower::core::lambda_line(&f.name) {
                     lambda_frames
                         .entry((b.name.as_str(), line))
                         .or_default()
