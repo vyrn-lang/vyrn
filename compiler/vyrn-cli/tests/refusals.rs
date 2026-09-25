@@ -366,6 +366,34 @@ fn census() -> Vec<Row> {
              name for the `read` parameter `r`",
             Kernel::Its,
         ),
+        row(
+            "r37_join_of_a_borrow_then_an_owned_if_arm.vyrn",
+            "rule 2: a join an arm owns may not hold another arm's borrow (#518)",
+            "RFC-0089",
+            "`xs[0]` may not be stored into a store — it is a `read` parameter",
+            Kernel::Its,
+        ),
+        row(
+            "r38_join_of_an_owned_then_a_borrowed_if_arm.vyrn",
+            "rule 2: the same, with the owned arm first (#518)",
+            "RFC-0089",
+            "`xs[0]` may not be stored into a store — it is a `read` parameter",
+            Kernel::Its,
+        ),
+        row(
+            "r39_join_of_a_borrowed_then_an_owned_match_arm.vyrn",
+            "rule 2: a match join an arm owns may not hold a borrowed payload binder (#518)",
+            "RFC-0089",
+            "`s` may not be stored into a store — it is a second name for the `read` parameter `o`",
+            Kernel::Its,
+        ),
+        row(
+            "r40_join_of_an_owned_then_a_borrowed_match_arm.vyrn",
+            "rule 2: the same, with the owned arm first (#518)",
+            "RFC-0089",
+            "`s` may not be stored into a store — it is a second name for the `read` parameter `o`",
+            Kernel::Its,
+        ),
     ]
 }
 
