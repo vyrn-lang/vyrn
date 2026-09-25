@@ -408,8 +408,7 @@ pub enum Lit {
 /// What a row stands on where it names no value.
 ///
 /// Each kind is one producer in this pass, and each one blocks on something
-/// of its own: [`Opaque::Pull`] on a stream's pull, which is a call the row
-/// does not state, [`Opaque::Trapped`] on nothing, because the statement after
+/// of its own: [`Opaque::Trapped`] on nothing, because the statement after
 /// it never runs, and [`Opaque::Unbound`] on a store with nothing to store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opaque {
@@ -420,10 +419,6 @@ pub enum Opaque {
     /// sink: IntSink = double`) is the tag RFC-0037's defunctionalizer
     /// chose, which the emitter holds and this pass does not.
     Static,
-    /// A `for` head over a stream: its exit test and the index its element is
-    /// read at. A stream is pulled and not indexed, so both are the one call
-    /// that answers the next element or none, and the row states no such call.
-    Pull,
     /// The result of a call that traps (`panic`). Only a row after the
     /// `St::Trap` reads it, and no finished body holds one ([`cut`]).
     Trapped,
@@ -1903,15 +1898,21 @@ pub enum Spec {
     /// call builds in storage of its own. The caller lands it as it lands any
     /// aggregate result.
     Builds(Type),
-    /// One operand at the type the row put on its name, and no result. The
-    /// call writes the operand out (`writeStdout`) or releases it (`close`).
-    Effect,
+    /// One operand at the type the row put on its name, and a result at the
+    /// stated type. The call writes the operand out (`writeStdout`), releases
+    /// it (`close`), or moves it into a heap box and answers the box's
+    /// address (`boxStream`).
+    Effect(Type),
     /// RFC-0008's facade. `logger(name)` takes a String and hands it back
     /// as the `Logger`, which is its name. A level takes a `Logger` and a
     /// String message, and writes the line to the build's sink, or nothing
     /// when the level is below the build's threshold. Both operands are
     /// evaluated either way.
     Logs,
+    /// A stream receiver the call advances in its own storage: the head of a
+    /// `for` over a stream. The call answers whether an element came, and
+    /// the read of the stream at the call's own name is that element.
+    Pulls,
 }
 
 /// Every builtin the row specifies, by name.
@@ -1969,8 +1970,9 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("panic", Spec::Traps),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
             ("serveStream", Spec::Traps),
-            ("writeStdout", Spec::Effect),
-            ("close", Spec::Effect),
+            ("writeStdout", Spec::Effect(Type::Unit)),
+            ("close", Spec::Effect(Type::Unit)),
+            ("boxStream", Spec::Effect(Type::Int)),
             ("logger", Spec::Logs),
             ("@trace", Spec::Logs),
             ("@debug", Spec::Logs),
@@ -2008,6 +2010,11 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_MODULE_INTERFACE),
             ),
             ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
+            ("@pull", Spec::Pulls),
+            (
+                "pullAt",
+                Spec::Builds(Type::option(Type::Param("T".into()))),
+            ),
             ("@pop", Spec::Removes),
             ("@swapRemove", Spec::Removes),
             ("@remove", Spec::Removes),
@@ -2055,6 +2062,20 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             (
                 "@toArray",
                 Spec::Builds(Type::Array(Box::new(Type::Param("T".into())))),
+            ),
+            // A stream's producers (RFC-0075 M2b, RFC-0090 M3) build its
+            // six-word header in a slot of their own.
+            (
+                "fromArray",
+                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
+            ),
+            (
+                "fromStep",
+                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
+            ),
+            (
+                "unboxStream",
+                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
             ),
             // A snapshot of a map's keys, at the prelude's own parameter.
             (
@@ -4509,10 +4530,25 @@ impl<'a> Builder<'a> {
                         ));
                         (Val::Name(c), Val::Name(i))
                     }
-                    None => (
-                        Val::Lit(Lit::Opaque(Opaque::Pull)),
-                        Val::Lit(Lit::Opaque(Opaque::Pull)),
-                    ),
+                    // A stream is pulled and not indexed: one call answers
+                    // whether an element came, and its name stands for the
+                    // element in the read below.
+                    None => {
+                        let c = self.temp(Type::Bool, *line);
+                        l.push(St::Let(
+                            c,
+                            Rhs::Call {
+                                callee: "@pull".into(),
+                                args: vec![(Arg::Val(Val::Name(it)), Capability::Modify)],
+                                write_back: false,
+                                kind: Callee::Reserved,
+                                ret: Some(Type::Bool),
+                                solved: Vec::new(),
+                                targets: Vec::new(),
+                            },
+                        ));
+                        (Val::Name(c), Val::Name(c))
+                    }
                 };
                 l.push(St::If {
                     cond,
@@ -4605,7 +4641,7 @@ impl<'a> Builder<'a> {
                     // The loop pulled the stream to its end, or a `break`
                     // left early: either way the loop closes it here, where
                     // the loop is the stream's last owner.
-                    if self.body.names[it as usize].releases && self.taken_by_loop(it, sid) {
+                    if self.stream_owed(it) && self.taken_by_loop(it, sid) {
                         out.push(St::Drop(it, Site::None, 0, None));
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {
@@ -4838,6 +4874,14 @@ impl<'a> Builder<'a> {
         frees
     }
 
+    /// Whether the stream `it` a `for` walks is this frame's to close: one it
+    /// holds, or a parameter, which carries the obligation into the callee
+    /// ([`NameInfo::must_use_param`]).
+    fn stream_owed(&self, it: Name) -> bool {
+        let info = &self.body.names[it as usize];
+        info.releases || info.must_use_param
+    }
+
     /// The rows a `return` or a `?` runs for every enclosing `for`, innermost
     /// first: the elements no turn reached, then the stream it walks, closed.
     fn leave_loops(&mut self, exit: usize, out: &mut Vec<St>) {
@@ -4845,7 +4889,7 @@ impl<'a> Builder<'a> {
             self.release_unreached(u, exit, out);
         }
         for it in self.stream_loops.iter().rev() {
-            if self.body.names[*it as usize].releases {
+            if self.stream_owed(*it) {
                 out.push(St::Drop(*it, Site::None, 0, None));
             }
         }

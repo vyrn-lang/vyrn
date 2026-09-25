@@ -2607,6 +2607,7 @@ fn lower_body(
             built: vec![None; core.names.len()],
             bufs: vec![None; core.names.len()],
             over: Vec::new(),
+            pulled: vec![None; core.names.len()],
         };
     }
 
@@ -8799,10 +8800,40 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 return self.stream_from_array(b, &inner, line);
             }
-            "fromStep" if args.len() == 3 => return self.stream_from_step(m, b, args, line),
-            "boxStream" if args.len() == 1 => return self.stream_box(m, b, args, line),
-            "unboxStream" if args.len() == 1 => return self.stream_unbox(m, b, args, line),
-            "pullAt" if args.len() == 1 => return self.stream_pull_at(m, b, args, line),
+            "fromStep" if args.len() == 3 => {
+                let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize| match i {
+                    0 | 1 => s.expr_as(m, b, &args[i], &Type::Int).map(|_| Type::Int),
+                    _ => s.expr(m, b, &args[i]),
+                };
+                return self.stream_from_step(m, b, &mut operand, line);
+            }
+            "boxStream" if args.len() == 1 => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, _: Option<&Type>| {
+                        s.expr(m, b, &args[0])
+                    };
+                return self.stream_box(m, b, &mut operand, line);
+            }
+            "unboxStream" if args.len() == 1 => {
+                let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
+                    Some(Type::Stream(i)) => *i,
+                    _ => return unsupported("an `unboxStream` with no expected Stream type", line),
+                };
+                let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                    s.expr_as(m, b, &args[0], &Type::Int).map(|_| ())
+                };
+                return self.stream_unbox(m, b, &elem, &mut addr, line);
+            }
+            "pullAt" if args.len() == 1 => {
+                let want = self.expect.last().map(|t| self.cx.resolve(t));
+                let Some(elem) = want.as_ref().and_then(ftypes::option_payload).cloned() else {
+                    return unsupported("a `pullAt` with no expected Option type", line);
+                };
+                let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                    s.expr_as(m, b, &args[0], &Type::Int).map(|_| ())
+                };
+                return self.stream_pull_at(m, b, &elem, &mut addr, line);
+            }
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
             "@swapRemove" if args.len() == 2 => return self.swap_remove(m, b, args, line),
             // `list([..])` is the explicit spelling of the contextual literal;
@@ -10593,11 +10624,14 @@ impl<'p> Fn_<'_, 'p> {
     /// each written straight into the pair of header fields that IS that value.
     /// The cursor arrives from the caller since RFC-0090 M3 — `std/stream` minted
     /// it out of its own `Slots` — so nothing is allocated here.
+    ///
+    /// `operand` emits the `i`th argument: the two cursor words at `Int64`, and
+    /// the step at its own type, which it answers.
     fn stream_from_step(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, usize) -> Result<Type, String>,
         line: usize,
     ) -> Result<Type, String> {
         // Written argument order — the interpreter evaluates `slot`, `gen` and
@@ -10605,13 +10639,13 @@ impl<'p> Fn_<'_, 'p> {
         // that order here too. The step's SIGNATURE names the element type, but
         // its value is not needed until the header exists, so the two cursor
         // words wait in locals while the step is evaluated.
-        self.expr_as(m, b, &args[0], &Type::Int)?;
+        operand(self, m, b, 0)?;
         let c0 = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(c0));
-        self.expr_as(m, b, &args[1], &Type::Int)?;
+        operand(self, m, b, 1)?;
         let c1 = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(c1));
-        let fty = self.expr(m, b, &args[2])?;
+        let fty = operand(self, m, b, 2)?;
         let fv = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(fv));
         let sig = self.cx.resolve(&fty);
@@ -10669,15 +10703,15 @@ impl<'p> Fn_<'_, 'p> {
     const BOX_MAGIC: i64 = 3735928559;
 
     /// Leave the address of a checked box's `Stream` on the stack, or trap.
+    /// `addr` emits the box's address as an `Int64`.
     fn stream_box_at(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
-        _line: usize,
+        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
     ) -> Result<u32, String> {
         let a = b.local(ValType::I32);
-        self.expr_as(m, b, &args[0], &Type::Int)?;
+        addr(self, m, b)?;
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(a));
         b.ins(&Instruction::I32Eqz);
@@ -10717,7 +10751,12 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            Option<&Type>,
+        ) -> Result<Type, String>,
         line: usize,
     ) -> Result<Type, String> {
         let sl = self.stream_layout(line)?;
@@ -10730,7 +10769,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(p));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        let got = self.expr(m, b, &args[0])?;
+        let got = operand(self, m, b, None)?;
         if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
             return unsupported(&format!("`boxStream` of `{got}`"), line);
         }
@@ -10749,15 +10788,12 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        elem: &Type,
+        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
-            Some(Type::Stream(i)) => *i,
-            _ => return unsupported("an `unboxStream` with no expected Stream type", line),
-        };
         let sl = self.stream_layout(line)?;
-        let a = self.stream_box_at(m, b, args, line)?;
+        let a = self.stream_box_at(m, b, addr)?;
         let off = b.alloc(sl.size, sl.align);
         b.slot(off);
         b.ins(&Instruction::LocalGet(a));
@@ -10774,7 +10810,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::Call(self.cx.rt.free));
         b.slot(off);
-        Ok(Type::Stream(Box::new(elem)))
+        Ok(Type::Stream(Box::new(elem.clone())))
     }
 
     /// `pullAt(a)`: one element from the stream in that box (RFC-0075 M2c),
@@ -10785,19 +10821,15 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        elem: &Type,
+        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let want = self.expect.last().map(|t| self.cx.resolve(t));
-        let elem = match want.as_ref().and_then(ftypes::option_payload) {
-            Some(i) => i.clone(),
-            None => return unsupported("a `pullAt` with no expected Option type", line),
-        };
         let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        let a = self.stream_box_at(m, b, args, line)?;
+        let a = self.stream_box_at(m, b, addr)?;
         let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(8));
@@ -14800,9 +14832,9 @@ impl<'p> Fn_<'_, 'p> {
         Ok(oty)
     }
 
-    /// `writeStdout(bytes)` and `close(s)`, the builtins [`Spec::Effect`]
-    /// names. `operand` writes the argument at the type asked for, or at its
-    /// own where none is, and answers the type it wrote.
+    /// `writeStdout(bytes)`, `close(s)` and `boxStream(s)`, the builtins
+    /// [`Spec::Effect`] names. `operand` writes the argument at the type asked
+    /// for, or at its own where none is, and answers the type it wrote.
     fn effect(
         &mut self,
         m: &mut Module,
@@ -14840,6 +14872,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(self.cx.rt.write_all));
                 b.ins(&Instruction::Drop);
             }
+            "boxStream" => return self.stream_box(m, b, operand, line),
             // `close` reclaims what this backend CAN reclaim. Its `malloc` is a
             // bump pointer that never frees, so a buffer stream's teardown is
             // still nothing — but a stepped one owns a cell, and cells come from
@@ -17146,6 +17179,9 @@ struct Walked {
     /// own row writes it.
     bufs: Vec<Option<u32>>,
     over: Vec<(vyrn_lower::core::Name, vyrn_lower::core::Name)>,
+    /// The place a stream's pull wrote its element to, by the pull's name,
+    /// until the read at that name binds it ([`Spec::Pulls`]).
+    pulled: Vec<Option<(Place, Type)>>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17835,7 +17871,20 @@ impl<'p> Fn_<'_, 'p> {
                             line,
                         )?;
                     } else {
-                        self.core_call(m, b, body, w, callee, *kind, &[], &[], args, None, line)?;
+                        self.core_call(
+                            m,
+                            b,
+                            body,
+                            w,
+                            callee,
+                            *kind,
+                            &[],
+                            &[],
+                            args,
+                            None,
+                            None,
+                            line,
+                        )?;
                         b.ins(&Instruction::Drop);
                     }
                     w.at[*n as usize] = self.core_place(w, body, *x);
@@ -17850,6 +17899,41 @@ impl<'p> Fn_<'_, 'p> {
                     {
                         w.slot[*n as usize] = w.slot[*x as usize].take();
                     }
+                }
+                // The head of a `for` over a stream: the element goes into a
+                // place of its own, which the read at this row's name binds,
+                // and the name is whether one came, as the arm's `for` pulls.
+                St::Let(
+                    n,
+                    Rhs::Call {
+                        callee, kind, args, ..
+                    },
+                ) if matches!(core_builtin(callee, *kind), Some(Spec::Pulls)) => {
+                    let line = body.names[*n as usize].line;
+                    let [(Arg::Val(Val::Name(s)), _)] = args.as_slice() else {
+                        return unsupported("a pull of no named stream", line);
+                    };
+                    let Some(elem) = self.core_stream_elem(body, *s) else {
+                        return unsupported("a pull of no stream", line);
+                    };
+                    let src = self.core_addr_local(b, w, body, *s, line)?;
+                    let r = self.cx.repr(&elem, line)?;
+                    let place = self.place_for(b, &r, line)?;
+                    let has = self.stream_next(m, b, src, place, &elem, line)?;
+                    w.pulled[*n as usize] = Some((place, elem));
+                    self.core_bind(b, body, w, *n, Place::Local(has), Type::Bool)?;
+                }
+                St::Let(n, Rhs::Read(vyrn_lower::core::Place::Elem(s, c)))
+                    if self.core_pulls(body, s) =>
+                {
+                    let line = body.names[*n as usize].line;
+                    let Some((place, ty)) = (match c {
+                        Val::Name(c) => w.pulled[*c as usize].take(),
+                        Val::Lit(_) => None,
+                    }) else {
+                        return unsupported("an element read of a stream no pull wrote", line);
+                    };
+                    self.core_bind(b, body, w, *n, place, ty)?;
                 }
                 // The store that puts the rebuilt receiver back, which the
                 // rebuild already wrote.
@@ -18032,11 +18116,23 @@ impl<'p> Fn_<'_, 'p> {
                             args,
                             solved,
                             targets,
+                            ret,
                             ..
                         } => {
                             let hint = dest.map(|d| (d, ty.clone()));
                             self.core_call(
-                                m, b, body, w, callee, *kind, solved, targets, args, hint, line,
+                                m,
+                                b,
+                                body,
+                                w,
+                                callee,
+                                *kind,
+                                solved,
+                                targets,
+                                args,
+                                ret.as_ref(),
+                                hint,
+                                line,
                             )?;
                         }
                         Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
@@ -18504,10 +18600,22 @@ impl<'p> Fn_<'_, 'p> {
                 kind,
                 solved,
                 targets,
+                ret,
                 ..
             } => {
                 let got = self.core_call(
-                    m, b, body, w, callee, *kind, solved, targets, args, None, line,
+                    m,
+                    b,
+                    body,
+                    w,
+                    callee,
+                    *kind,
+                    solved,
+                    targets,
+                    args,
+                    ret.as_ref(),
+                    None,
+                    line,
                 )?;
                 self.coerce(m, b, None, &got, want, line)
             }
@@ -18544,9 +18652,10 @@ impl<'p> Fn_<'_, 'p> {
                 builtin_spec(callee, args.len()),
                 core_builtin(callee, *kind),
             ) {
-                (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
+                (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret) | Spec::Effect(ret))) => {
+                    Ok(ret.clone())
+                }
                 (None, Some(Spec::Traps)) => Ok(Type::Never),
-                (None, Some(Spec::Effect)) => Ok(Type::Unit),
                 (None, Some(Spec::Logs)) if callee == "logger" => Ok(Type::Logger),
                 (None, Some(Spec::Logs)) => Ok(Type::Unit),
                 // [`Fn_::lanes`] decides a lane builtin's type as it emits, and
@@ -18597,12 +18706,13 @@ impl<'p> Fn_<'_, 'p> {
         solved: &[(String, Type)],
         targets: &[Target],
         args: &[(Arg, vyrn_frontend::ast::Capability)],
+        ret: Option<&Type>,
         hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
         if let Some(vs) = arg_vals(args) {
             return self.core_call_vals(
-                m, b, body, w, callee, kind, solved, targets, &vs, hint, line,
+                m, b, body, w, callee, kind, solved, targets, &vs, ret, hint, line,
             );
         }
         if self.core_user_callee(callee, kind) {
@@ -18639,6 +18749,7 @@ impl<'p> Fn_<'_, 'p> {
         solved: &[(String, Type)],
         targets: &[Target],
         args: &[(Val, vyrn_frontend::ast::Capability)],
+        ret: Option<&Type>,
         hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
@@ -18821,6 +18932,44 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::LocalSet(hdr));
                         self.sa_to_array(m, b, hdr, &aty, line)
                     }
+                    ("fromArray", [(v, _)]) => {
+                        let aty = self.core_ty(body, v, &Type::Int);
+                        let Type::Array(inner) = self.cx.resolve(&aty) else {
+                            return unsupported(&format!("`fromArray` of `{aty}`"), line);
+                        };
+                        self.core_val(m, b, body, w, v, &aty, line)?;
+                        self.stream_from_array(b, &inner, line)
+                    }
+                    ("fromStep", [_, _, _]) => {
+                        let mut step = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize| {
+                            let v = &args[i].0;
+                            let t = match i {
+                                0 | 1 => Type::Int,
+                                _ => s.core_ty(body, v, &Type::Int),
+                            };
+                            s.core_val(m, b, body, w, v, &t, line)?;
+                            Ok(t)
+                        };
+                        self.stream_from_step(m, b, &mut step, line)
+                    }
+                    // The element type is the row's result: nothing in the
+                    // call carries it, because an address is an `Int64`.
+                    ("unboxStream" | "pullAt", [(v, _)]) => {
+                        let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                            s.core_val(m, b, body, w, v, &Type::Int, line)
+                        };
+                        let ret = ret.map(|t| self.cx.resolve(t));
+                        match (callee, ret) {
+                            ("unboxStream", Some(Type::Stream(elem))) => {
+                                self.stream_unbox(m, b, &elem, &mut addr, line)
+                            }
+                            ("pullAt", Some(opt)) => match ftypes::option_payload(&opt) {
+                                Some(elem) => self.stream_pull_at(m, b, elem, &mut addr, line),
+                                None => unsupported("a `pullAt` of no Option", line),
+                            },
+                            _ => unsupported(&format!("`{callee}` with no result type"), line),
+                        }
+                    }
                     ("@keys", [(v, _)]) => {
                         let mty = self.core_ty(body, v, &Type::Int);
                         self.core_val(m, b, body, w, v, &mty, line)?;
@@ -18831,7 +18980,7 @@ impl<'p> Fn_<'_, 'p> {
                     _ => self.slot_call(m, b, callee, &mut operand, line),
                 };
             }
-            Some(Spec::Effect) => {
+            Some(Spec::Effect(_)) => {
                 let [(v, _)] = args else {
                     return unsupported(&format!("`{callee}` of other than one value"), line);
                 };
@@ -18855,6 +19004,8 @@ impl<'p> Fn_<'_, 'p> {
                     };
                 return self.logs(m, b, callee, &mut operand, line);
             }
+            // A pull binds two names, and [`Fn_::core_stmts`] emits it.
+            Some(Spec::Pulls) => return unsupported("a pull apart from its loop head", line),
             // A routed builtin is the declared call below, through the
             // signature [`Fn_::core_sig`] answers for the function it names.
             Some(Spec::Routes(_)) | None => {}
@@ -20042,6 +20193,43 @@ impl<'p> Fn_<'_, 'p> {
             .ok_or_else(|| gap("an aggregate result with no out-pointer", line))
     }
 
+    /// The element type of `n` where it is a stream, and `None` elsewhere.
+    fn core_stream_elem(
+        &self,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<Type> {
+        match self.cx.resolve(&body.names[n as usize].ty) {
+            Type::Stream(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Whether an element read of `base` is the read a stream's pull answers:
+    /// a stream is pulled and never indexed.
+    fn core_pulls(&self, body: &vyrn_lower::core::Body, base: &vyrn_lower::core::Place) -> bool {
+        matches!(base, vyrn_lower::core::Place::Name(s) if self.core_stream_elem(body, *s).is_some())
+    }
+
+    /// A local holding the address of the layout `n`: its own, where its
+    /// place is one, or a fresh one set from [`Fn_::core_addr_of`].
+    fn core_addr_local(
+        &self,
+        b: &mut Frame,
+        w: &Walked,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+        line: usize,
+    ) -> Result<u32, String> {
+        if let Some((Place::Local(l), _)) = self.core_place(w, body, n) {
+            return Ok(l);
+        }
+        self.core_addr_of(b, w, body, n, line)?;
+        let l = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(l));
+        Ok(l)
+    }
+
     /// Push the address of the aggregate the name `n` holds: a slot's, or the
     /// one a parameter's local holds, which is what `Expr::Var` pushes for a
     /// layout.
@@ -20728,6 +20916,22 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
             }
+            // The head of a `for` over a stream, whose element is one wasm
+            // value ([`Spec::Pulls`]).
+            St::Let(
+                _,
+                Rhs::Call {
+                    callee, kind, args, ..
+                },
+            ) if matches!(core_builtin(callee, *kind), Some(Spec::Pulls)) => {
+                matches!(args.as_slice(), [(Arg::Val(Val::Name(s)), _)]
+                    if self.core_stream_elem(body, *s).is_some_and(|t| self.core_framed(&t)))
+            }
+            St::Let(_, Rhs::Read(vyrn_lower::core::Place::Elem(s, _)))
+                if self.core_pulls(body, s) =>
+            {
+                true
+            }
             St::Let(n, _)
                 if self.core_alias(body, *n).is_some()
                     || self.core_copies(body, *n).is_some()
@@ -20930,13 +21134,16 @@ impl<'p> Fn_<'_, 'p> {
                 kind,
                 solved,
                 targets,
+                ret,
                 ..
             } => {
                 self.core_removes(body, callee, *kind, args) == Some(true)
                     || self.core_args_readable(body, args)
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (match core_builtin(callee, *kind) {
-                            Some(Spec::Builds(_)) => true,
+                            // The result type is the row's, which a stream
+                            // reader's operands do not carry.
+                            Some(Spec::Builds(_)) => ret.is_some(),
                             // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
                             // the copy in a slot of its own, as `Builds` does.
                             Some(Spec::OwnType) => {
@@ -21177,7 +21384,7 @@ impl<'p> Fn_<'_, 'p> {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
             Some(Spec::OwnType) => matches!(args, [(Arg::Val(_), _)]),
-            Some(Spec::Renders(_) | Spec::Effect) => matches!(args, [_]),
+            Some(Spec::Renders(_) | Spec::Effect(_)) => matches!(args, [_]),
             Some(Spec::Logs) => args.len() == logs_arity(callee),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
             // A lane index is an immediate, so the row carries it as a literal.
@@ -21195,7 +21402,7 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_rebuilt`]), a built aggregate as an aggregate call
             // ([`Fn_::core_agg_call`]), and a routed builtin as the declared
             // call [`Fn_::core_sig`] answers for; none alone.
-            Some(Spec::Rebuilds | Spec::Builds(_) | Spec::Routes(_)) | None => false,
+            Some(Spec::Rebuilds | Spec::Builds(_) | Spec::Routes(_) | Spec::Pulls) | None => false,
         }
     }
 

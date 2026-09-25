@@ -1,0 +1,6 @@
+// a stream a producer builds in a slot of its own
+// pin: 0 break, 0 continue
+// `fromArray`, `fromStep` and `unboxStream` build a six-word header in
+// storage of their own, so a name bound by one holds that storage, as a
+// `Builds` row states (RFC-0125 M7). `map` reaches the last two.
+import { map } from "std/stream"          fn twice(n: Int64) -> Int64 { return n * 2 }          fn feed(n: Int64) -> Stream<Int64> { let mut xs: Array<Int64> = [] let mut i = 0 while i < n { xs.push(i + 1) i = i + 1 } return fromArray(xs) }          fn named() -> Int64 { let xs: Array<Int64> = [4, 5] let s = fromArray(xs) let mut t = 0 for v in s { t = t * 10 + v } return t }          fn vyrnTestMain() -> Int64 { let mut t = 0 for v in map(feed(3), twice) { t = t * 10 + v } return t * 100 + named() }

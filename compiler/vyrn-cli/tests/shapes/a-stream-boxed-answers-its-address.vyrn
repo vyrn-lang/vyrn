@@ -1,0 +1,6 @@
+// a stream boxed answers its address
+// pin: 0 break, 0 continue
+// `boxStream` moves a stream into a heap box and answers the box's address,
+// an `Effect` row with an `Int64` result (RFC-0125 M7). `take` boxes its
+// source.
+import { take } from "std/stream"          fn feed(n: Int64) -> Stream<Int64> { let mut xs: Array<Int64> = [] let mut i = 0 while i < n { xs.push(i + 1) i = i + 1 } return fromArray(xs) }          fn vyrnTestMain() -> Int64 { let mut t = 0 for v in take(feed(5), 3) { t = t * 10 + v } return t }
