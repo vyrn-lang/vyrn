@@ -8407,8 +8407,9 @@ pub fn body_of(name: &str) -> Option<Body> {
 /// its place in the parameter list, a call through it passes them first, and
 /// a call that passes it on takes them after its own arguments, which the
 /// emitter puts back where the `fn` parameter stands (`direct::ho_args`).
-/// `None` where a bound parameter is read any other way (stored, captured,
-/// handed to a position no target names).
+/// A bound parameter read once as a value, a lambda's capture, is made where
+/// it is read: the closure variant its target names. `None` where one is read
+/// twice, or a pass-through names no target.
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     if bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
         return None;
@@ -8441,8 +8442,17 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     let mut reads = vec![0; out.names.len()];
     count_reads(&out.stmts, &mut reads);
     let gone = |n: &Name| !values.contains(n);
-    if bound.iter().any(|(n, _)| gone(n) && reads[*n as usize] > 0) {
-        return None;
+    for (n, t) in bound
+        .iter()
+        .filter(|(n, _)| gone(n) && reads[*n as usize] > 0)
+    {
+        let parts = (caps.iter().find(|(c, _)| c == n))
+            .map(|(_, ns)| ns.iter().map(|c| Val::Name(*c)).collect())
+            .unwrap_or_default();
+        let made = St::Let(*n, Rhs::Make(Ctor::Closure(t.clone()), parts));
+        if reads[*n as usize] > 1 || !make_before_read(&mut out.stmts, reads.len(), *n, made) {
+            return None;
+        }
     }
     out.params = (out.params.iter())
         .flat_map(|p| match caps.iter().find(|(n, _)| n == p) {
@@ -8452,6 +8462,41 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
         })
         .collect();
     Some(out)
+}
+
+/// Put `made`, the row that binds `n`, before the one row that reads `n`, at
+/// that row's depth. `names` is the body's name count. `false` where no row
+/// reads it.
+fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St) -> bool {
+    let mut reads = vec![0; names];
+    for i in 0..ss.len() {
+        let nested = match &mut ss[i] {
+            St::If { then, els, .. } => vec![then, els],
+            St::Loop { body, .. } | St::Block { body, .. } => vec![body],
+            St::Switch { arms, .. } => arms.iter_mut().map(|a| &mut a.body).collect(),
+            _ => Vec::new(),
+        };
+        let mut inner = 0;
+        for b in &nested {
+            count_reads(b, &mut reads);
+            inner += std::mem::take(&mut reads[n as usize]);
+        }
+        if inner > 0 {
+            return nested
+                .into_iter()
+                .find(|b| {
+                    count_reads(b, &mut reads);
+                    std::mem::take(&mut reads[n as usize]) > 0
+                })
+                .is_some_and(|b| make_before_read(b, names, n, made));
+        }
+        count_reads(std::slice::from_ref(&ss[i]), &mut reads);
+        if reads[n as usize] > 0 {
+            ss.insert(i, made);
+            return true;
+        }
+    }
+    false
 }
 
 fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name>)]) {
