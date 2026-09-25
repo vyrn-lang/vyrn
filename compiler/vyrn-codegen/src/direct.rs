@@ -19373,10 +19373,7 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<vyrn_lower::core::Name> {
         let info = &body.names[n as usize];
-        if info.borrow
-            || self.checks(&info.ty)
-            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
-        {
+        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
         let mut lets = Vec::new();
@@ -19396,7 +19393,9 @@ impl<'p> Fn_<'_, 'p> {
         };
         let from = &body.names[*x as usize];
         let unwritten = |m: vyrn_lower::core::Name| !written.iter().any(|(w, _)| *w == m);
-        // A join's stores are its branches', which run before the rename.
+        // A join's stores are its branches', which run before the rename. A
+        // borrow takes over only a join's place: the join holds the bytes the
+        // borrow reads, and neither name releases them.
         // A borrowed layout parameter holds the caller's address for the
         // whole body, so the temporary a scrutinee binds to it is that
         // address while neither name is written: a declared release's
@@ -19404,7 +19403,7 @@ impl<'p> Fn_<'_, 'p> {
         let joins = self.core_joins(body, *x);
         let param =
             from.borrow && body.params.contains(x) && info.source.starts_with('@') && unwritten(n);
-        ((joins || param || (self.owns_heap(&info.ty) && !from.borrow))
+        ((joins || (!info.borrow && (param || (self.owns_heap(&info.ty) && !from.borrow))))
             && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
             && (joins || unwritten(*x)))
         .then_some(*x)
