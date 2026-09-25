@@ -530,7 +530,7 @@ fn sections() -> Vec<Section> {
             "whether a type names `Self`, one arm per constructor",
         ),
         sec(
-            "fn int_literal_fits(n: i64, bits: u8, signed: bool) -> bool {",
+            "fn literal_value(n: i64) -> i128 {",
             Judgment,
             "the sized-integer literal rules: the value a literal denotes, \
              whether it fits, and the name and range a refusal quotes",

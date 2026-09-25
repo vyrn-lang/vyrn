@@ -4851,17 +4851,8 @@ impl<'a> Checker<'a> {
             // be a literal above i64::MAX — valid solely as a `UInt64`.
             Expr::Int(n) => match expected.map(|t| self.base(t)) {
                 Some(t @ Type::IntN { bits, signed }) => {
-                    if int_literal_fits(*n, bits, signed) {
-                        Ok(t)
-                    } else {
-                        Err(cerr!(
-                            *self.stmt_line.borrow(),
-                            "integer literal {} does not fit {} (its range is {})",
-                            render_int_literal(*n),
-                            intn_name(bits, signed),
-                            intn_range(bits, signed),
-                        ))
-                    }
+                    let v = literal_value(*n);
+                    fits("integer", v, bits, signed, *self.stmt_line.borrow()).map(|()| t)
                 }
                 _ => {
                     // …unless nobody wrote it. The wrap named above is a fact
@@ -4887,29 +4878,21 @@ impl<'a> Checker<'a> {
             // single byte; it defaults to `UInt8` but coerces to an expected
             // integer type exactly as `Expr::Int` does (so `let x: Int64 = 'a'`
             // behaves as `97`). Its 0..255 value always fits `UInt8`.
-            Expr::Byte(b) => {
-                let v = *b as i64;
-                match expected.map(|t| self.base(t)) {
-                    Some(Type::Int) => Ok(Type::Int),
-                    Some(t @ Type::IntN { bits, signed }) => {
-                        if int_literal_fits(v, bits, signed) {
-                            Ok(t)
-                        } else {
-                            Err(cerr!(
-                                *self.stmt_line.borrow(),
-                                "byte literal {} does not fit {} (its range is {})",
-                                render_int_literal(v),
-                                intn_name(bits, signed),
-                                intn_range(bits, signed),
-                            ))
-                        }
-                    }
-                    _ => Ok(Type::IntN {
-                        bits: 8,
-                        signed: false,
-                    }),
-                }
-            }
+            Expr::Byte(b) => match expected.map(|t| self.base(t)) {
+                Some(Type::Int) => Ok(Type::Int),
+                Some(t @ Type::IntN { bits, signed }) => fits(
+                    "byte",
+                    i128::from(*b),
+                    bits,
+                    signed,
+                    *self.stmt_line.borrow(),
+                )
+                .map(|()| t),
+                _ => Ok(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }),
+            },
             // A float literal takes the expected float type (`let x: Float32 = 1.5`),
             // otherwise the default `Float` (f64).
             Expr::Float(_) => Ok(match expected.map(|t| self.base(t)) {
@@ -4989,7 +4972,7 @@ impl<'a> Checker<'a> {
                 }
                 // A sized annotation accepts its exact minimum written
                 // negated (`let x: Int32 = -2147483648`): the positive
-                // magnitude does not fit (`int_literal_fits` measures
+                // magnitude does not fit ([`fits`] measures
                 // 2147483648 against a max of 2147483647), but the
                 // NEGATION is exactly representable — refusing it made the
                 // minimum of every signed sized type unwritable.
@@ -9489,43 +9472,49 @@ fn type_mentions_self(ty: &Type) -> bool {
     found
 }
 
-/// Whether an integer literal `n` fits the sized type. The lexer wraps
-/// u64-range literals into the i64 bit pattern, so a *negative* `n` means "a
-/// literal above i64::MAX" — it fits only `UInt64`. (True negative literals
-/// never reach this: unary `-` does not adapt to sized types.)
-fn int_literal_fits(n: i64, bits: u8, signed: bool) -> bool {
-    if bits == 64 {
-        return !signed || n >= 0;
-    }
-    let max = if signed {
-        i64::MAX >> (64 - u32::from(bits))
+/// The value an integer literal `n` was written as. The lexer wraps u64-range
+/// literals into the i64 bit pattern, so a negative `n` is a literal above
+/// `i64::MAX`, and its unsigned reading is what was written.
+fn literal_value(n: i64) -> i128 {
+    if n < 0 {
+        i128::from(n as u64)
     } else {
-        (1i64 << bits) - 1
-    };
-    (0..=max).contains(&n)
+        i128::from(n)
+    }
+}
+
+/// Refuses a `kind` literal whose value `v` falls outside a sized integer
+/// type: the one statement of the fit rule, for a literal given its type by
+/// a slot and for one adapted to a sized sibling operand.
+///
+/// # Errors
+///
+/// `v` is outside the type's range.
+fn fits(kind: &str, v: i128, bits: u8, signed: bool, line: usize) -> Result<(), Diagnostic> {
+    if int_value_fits(v, bits, signed) {
+        return Ok(());
+    }
+    Err(cerr!(
+        line,
+        "{kind} literal {v} does not fit {} (its range is {})",
+        intn_name(bits, signed),
+        intn_range(bits, signed),
+    ))
 }
 
 /// The VALUE an integer-literal expression denotes, unwrapping one unary
 /// `-` (`-5` parses as `Neg(Int(5))`). A bare negative `n` is the lexer's
-/// wrap of a value above `i64::MAX`, so its unsigned reading is what was
-/// written (the same reading [`render_int_literal`] shows). `None` for
+/// wrap of a value above `i64::MAX`, read by [`literal_value`]. `None` for
 /// anything that is not a literal or its negation.
 fn int_literal_value(e: &Expr) -> Option<i128> {
-    let bare = |n: i64| {
-        if n < 0 {
-            n as u64 as i128
-        } else {
-            i128::from(n)
-        }
-    };
     match e {
-        Expr::Int(n) => Some(bare(*n)),
+        Expr::Int(n) => Some(literal_value(*n)),
         Expr::Unary {
             op: UnOp::Neg,
             expr,
             ..
         } => match &**expr {
-            Expr::Int(n) => Some(-bare(*n)),
+            Expr::Int(n) => Some(-literal_value(*n)),
             _ => None,
         },
         _ => None,
@@ -9533,9 +9522,8 @@ fn int_literal_value(e: &Expr) -> Option<i128> {
 }
 
 /// Whether a literal VALUE (already negated, so wider than any operand's
-/// `i64`) fits the sized type — covering the negative half down to the
-/// exact minimum, which [`int_literal_fits`] cannot see because it only
-/// ever measures a non-negative magnitude.
+/// `i64`) fits the sized type, the negative half down to the exact minimum
+/// included.
 fn int_value_fits(v: i128, bits: u8, signed: bool) -> bool {
     if signed {
         let shift = 128 - u32::from(bits);
@@ -9564,15 +9552,7 @@ fn adapt_int_literal(lit: &Expr, sibling: &Type, line: usize) -> Result<Option<T
     let Some(v) = int_literal_value(lit) else {
         return Ok(None);
     };
-    if !int_value_fits(v, *bits, *signed) {
-        return Err(cerr!(
-            line,
-            "integer literal {} does not fit {} (its range is {})",
-            v,
-            intn_name(*bits, *signed),
-            intn_range(*bits, *signed),
-        ));
-    }
+    fits("integer", v, *bits, *signed, line)?;
     Ok(Some(sibling.clone()))
 }
 
@@ -9588,7 +9568,7 @@ fn adapt_byte_literal(lit: &Expr, sibling: &Type) -> Option<Type> {
     };
     match sibling {
         Type::Int => Some(Type::Int),
-        Type::IntN { bits, signed } if int_literal_fits(i64::from(*b), *bits, *signed) => {
+        Type::IntN { bits, signed } if int_value_fits(i128::from(*b), *bits, *signed) => {
             Some(sibling.clone())
         }
         _ => None,
@@ -9612,16 +9592,6 @@ fn intn_range(bits: u8, signed: bool) -> String {
             (1u64 << bits) - 1
         };
         format!("0..={max}")
-    }
-}
-
-/// Render a literal as the user wrote it: a negative `n` is a wrapped
-/// u64-range literal, so show its unsigned value.
-fn render_int_literal(n: i64) -> String {
-    if n < 0 {
-        (n as u64).to_string()
-    } else {
-        n.to_string()
     }
 }
 
