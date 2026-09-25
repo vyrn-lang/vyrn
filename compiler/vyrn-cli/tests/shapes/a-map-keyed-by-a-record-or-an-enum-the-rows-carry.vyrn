@@ -1,0 +1,6 @@
+// a map keyed by a record or an enum the rows carry
+// pin: 0 break, 0 continue
+// A record or a fieldless enum key is a layout name, which the store and
+// the lookup read as a call reads a layout argument: by its address, packed
+// by `pack_key` (RFC-0117 M2, RFC-0125 M7, `m7-mapkey2`).
+import { Hashable } from "std/hash"          type Point = { x: Int64, y: Int64 }          impl Hashable for Point { fn hash(self) -> UInt64 { return UInt64(self.x) * 31 + UInt64(self.y) } }          type Suit = | Clubs | Hearts          impl Hashable for Suit { fn hash(self) -> UInt64 { return match self { Clubs => UInt64(1), Hearts => UInt64(2) } } }          fn points() -> Int64 { let mut m: Map<Point, Int64> = [:] m[Point { x: 1, y: 2 }] = 1 m[Point { x: 3, y: 4 }] = 2 m[Point { x: 1, y: 2 }] = 3 let p = Point { x: 3, y: 4 } let a = match m[Point { x: 1, y: 2 }] { Some(v) => v, None => 0 } let b = match m[p] { Some(v) => v, None => 0 } let c = match m[Point { x: 9, y: 9 }] { Some(v) => v, None => 7 } return a * 100 + b * 10 + c + m.length * 1000 }          fn suits() -> Int64 { let mut s: Map<Suit, Int64> = [:] s.tally(Hearts, 5) s.tally(Clubs, 1) s.tally(Hearts, 1) let v = match s[Hearts] { Some(v) => v, None => 0 } return v * 10 + s.length }          fn vyrnTestMain() -> Int64 { return points() + suits() * 10000 }

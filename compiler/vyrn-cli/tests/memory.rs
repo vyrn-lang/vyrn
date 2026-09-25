@@ -2442,6 +2442,16 @@ fn a_map_literal_of_layout_values_is_freed_on_both_walks() {
     );
 }
 
+// A record and an enum as a map's key, stored over and looked up
+// (record `m7-mapkey2`).
+#[test]
+fn a_map_keyed_by_a_record_or_an_enum_is_freed_on_both_walks() {
+    shape_runs_clean(
+        "a-map-keyed-by-a-record-or-an-enum-the-rows-carry",
+        "622327\n",
+    );
+}
+
 /// Runs the shape `stem` of `tests/shapes/` under the free audit, on the
 /// core's rows and on the AST walk, and asserts each prints `want`, exits 0
 /// and prints nothing on stderr.
