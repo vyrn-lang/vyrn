@@ -1,0 +1,6 @@
+// a map literal of layout values the rows carry
+// pin: 0 break, 0 continue
+// A map's layout value is a name with a slot of its own, and `map_set`
+// moves its bytes into the entry (RFC-0125 M7, `m7-fieldmap`). A repeated
+// key releases the value it replaces.
+type P = { x: Int64, s: String }          fn dup() -> Int64 { let m: Map<String, Array<Int64>> = ["k": [1], "k": [2, 3]] return match m["k"] { Some(v) => v.length * 10 + v[1], None => 0 } }          fn recs() -> Int64 { let m: Map<String, P> = ["a": P { x: 1, s: "one".copy() }, "b": P { x: 2, s: "two" }] return match m["b"] { Some(p) => p.x * 100 + p.s.byteLength, None => 0 } }          fn nested() -> Int64 { let m: Map<String, Array<Array<Int64>>> = ["k": [[5], [6, 7]]] return match m["k"] { Some(v) => v[1][1], None => 0 } }          fn vyrnTestMain() -> Int64 { return dup() + recs() * 100 + nested() * 100000 }
