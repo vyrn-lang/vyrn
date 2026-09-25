@@ -1168,9 +1168,9 @@ fn gate() {
     // refactor that quietly stops recording fails here rather than passing.
     // Only the AST walk answers, so the count falls as the core walk takes
     // bodies from it: 9,414 when the emitter found generic instances and
-    // lambdas by their keys, 4,902 when it took the `Slots` windows,
-    // 3,985 when it took the logging facade and 3,989 when it took module
-    // state handed to `modify` (RFC-0125 M7). The gate needs a witness of
+    // lambdas by their keys, 4,902 when it took the `Slots` windows, and
+    // about 4,000 each time it took the logging facade, module state handed
+    // to `modify` and map tallies (RFC-0125 M7). The gate needs a witness of
     // its own before the arm retires (#465).
     assert!(
         t.compared > 3_000,
