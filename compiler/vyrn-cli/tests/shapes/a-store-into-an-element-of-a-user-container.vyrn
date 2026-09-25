@@ -1,0 +1,6 @@
+// a store into an element of a user container
+// pin: 0 break, 0 continue
+// `s[i] = v` stores into the place `atSet` yields, after its prologue; a
+// value that reads the container is the temp the checker's expansion binds
+// before the container moves out (`0125-m7-atrhs`).
+type Slice = { data: Array<Int64>, start: Int64 } impl Index for Slice { fn at(read self, i: Int64) -> read Int64 { return self.data[self.start + i] } fn atSet(modify self, i: Int64) -> modify Int64 { return self.data[self.start + i] } }          type Names = { data: Array<String> } impl Index for Names { fn at(read self, i: Int64) -> read String { return self.data[i] } fn atSet(modify self, i: Int64) -> modify String { return self.data[i] } }          fn vyrnTestMain() -> Int64 { let mut s = Slice { data: [1, 2, 3, 4, 5], start: 1 } s[0] = 100 s[1] = s[1] + 7 let mut n = Names { data: ["a", "b"] } n[1] = n[1] + "c" n[0] = "z" print("\{n[0]}\{n[1]}") return s[0] * 100 + s[1] }

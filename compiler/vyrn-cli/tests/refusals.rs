@@ -793,6 +793,26 @@ fn the_checkers_mut_unit_tests_are_still_refused() {
             "type P = { x: Int64 }
              fn main() -> Int64 { let a: Array<P> = [P { x: 1 }]  a[0].x = 9  return 0 }",
         ),
+        (
+            "a projected element store",
+            "cannot store into `b`",
+            "type P = { x: Int64 } type Bag = { items: Array<P> }
+             impl Index for Bag {
+                 fn at(read self, i: Int64) -> read P { return self.items[i] }
+                 fn atSet(modify self, i: Int64) -> modify P { return self.items[i] }
+             }
+             fn main() -> Int64 { let b = Bag { items: [P { x: 1 }] }  b[0] = P { x: 2 }  return 0 }",
+        ),
+        (
+            "a projected element field store",
+            "cannot store into `b`",
+            "type P = { x: Int64 } type Bag = { items: Array<P> }
+             impl Index for Bag {
+                 fn at(read self, i: Int64) -> read P { return self.items[i] }
+                 fn atSet(modify self, i: Int64) -> modify P { return self.items[i] }
+             }
+             fn main() -> Int64 { let b = Bag { items: [P { x: 1 }] }  b[0].x = 9  return 0 }",
+        ),
     ];
     let dir = common::scratch("mut-rule");
     let mut bad: Vec<String> = Vec::new();

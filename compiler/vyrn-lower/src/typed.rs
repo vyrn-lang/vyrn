@@ -911,12 +911,16 @@ pub mod obligation {
 /// the rule the checker's `stmt` stated at three sites. A store is a
 /// `St::Store` or a place passed to a `modify` argument, which is how a
 /// removal through a path is stated. `global_mutable` answers for module
-/// state. A temporary this pass minted (`@t`) is no name the reader wrote.
+/// state. `projected` answers whether a projection answers for a type's
+/// element places: a store through such a name is a store into its element,
+/// whatever field its `atSet` yields. A temporary this pass minted (`@t`) is
+/// no name the reader wrote.
 /// `seen` holds the statements already refused, so the instances of one
 /// generic function refuse a statement once.
 pub fn stores(
     body: &Body,
     global_mutable: &dyn Fn(&str) -> bool,
+    projected: &dyn Fn(&Type) -> bool,
     seen: &mut std::collections::HashSet<usize>,
 ) -> Vec<(usize, String)> {
     let mut out: Vec<(usize, String)> = Vec::new();
@@ -929,15 +933,15 @@ pub fn stores(
                 step = Some(at);
                 at = b;
             }
-            let name = match at {
+            let (name, elem) = match at {
                 Place::Name(n) => {
                     let info = &f.names[*n as usize];
                     if info.mutable || info.source.starts_with('@') {
                         return;
                     }
-                    &info.source
+                    (&info.source, projected(&info.ty))
                 }
-                Place::Global(g) if !global_mutable(g) => g,
+                Place::Global(g) if !global_mutable(g) => (g, false),
                 _ => return,
             };
             if site.is_some_and(|k| !seen.insert(k)) {
@@ -945,7 +949,7 @@ pub fn stores(
             }
             let what = match step {
                 None => "cannot assign to",
-                Some(Place::Field(..)) => "cannot mutate a field of",
+                Some(Place::Field(..)) if !elem => "cannot mutate a field of",
                 Some(_) => "cannot store into",
             };
             out.push((line, format!("{what} `{name}` (declared without `mut`)")));
