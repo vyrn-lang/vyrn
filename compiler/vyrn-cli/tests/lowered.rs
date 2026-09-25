@@ -1302,7 +1302,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "whether a CONSTANT fails its target's predicate at compile time",
             false,
             false,
-            44,
+            25,
         ),
     ]
 }

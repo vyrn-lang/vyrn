@@ -6332,19 +6332,14 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// RFC-0020's containment escape: a string flow the checker proved lands
-    /// inside `to`'s language needs no runtime check.
-    ///
-    /// Both backends run the same frontend predicate over the same AST rather
-    /// than agreeing by construction — the consteval precedent, and the reason
-    /// `lib.rs::coerce_flow` exists at all. Skipping differently here would show
-    /// up as a trap on one target only.
+    /// Whether the checker proved `e` a value of `to` ([`vyrn_frontend::validate::proven`]),
+    /// with this walk's scope resolving a name.
     fn proven(&self, e: &Expr, to: &Type) -> bool {
         let resolve = |x: &Expr| match x {
             Expr::Var { name, .. } => self.lookup(name, 0).ok().map(|(_, t)| t),
             _ => None,
         };
-        vyrn_frontend::finite::string_flow_proven(e, to, &self.cx.types, &resolve)
+        vyrn_frontend::validate::proven(e, to, &self.cx.types, &resolve)
     }
 
     /// Emit the check that the value on the stack satisfies `decl`'s `where`
@@ -6712,10 +6707,8 @@ impl<'p> Fn_<'_, 'p> {
                 // A predicated record's cross-field `where` runs on the finished
                 // literal. There is no coercion to hang it on — the literal
                 // already IS the named type, so `from == to` and
-                // `validation_required` correctly says no — which is exactly why
-                // the LLVM emitter validates at its construction site too. A
-                // wholly constant literal was proven by the checker, so only a
-                // dynamic one pays.
+                // `validation_required` correctly says no. A literal the
+                // checker proved runs no check.
                 if let Some(d) = self
                     .cx
                     .types
@@ -6723,10 +6716,7 @@ impl<'p> Fn_<'_, 'p> {
                     .filter(|d| d.predicate.is_some())
                     .cloned()
                 {
-                    let dynamic = fields
-                        .iter()
-                        .any(|(_, e)| vyrn_frontend::consteval::eval(e, &HashMap::new()).is_none());
-                    if dynamic {
+                    if !self.proven(e, &Type::Named(name.clone())) {
                         self.emit_validation(b, &d, *line)?;
                     }
                 }
@@ -8870,8 +8860,7 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(t);
         }
         // `Age(n)` — the explicit spelling of what a boundary now does by itself
-        // (RFC-0003). Same rule as the record literal above: a constant was
-        // proven by the checker, so only a dynamic value pays for a check.
+        // (RFC-0003). A value the checker proved pays for no check.
         if let Some(d) = self
             .cx
             .types
@@ -8883,7 +8872,7 @@ impl<'p> Fn_<'_, 'p> {
                 return unsupported(&format!("`{name}` at this arity"), line);
             }
             self.expr_as(m, b, &args[0], &d.base)?;
-            if vyrn_frontend::consteval::eval(&args[0], &HashMap::new()).is_none() {
+            if !self.proven(&args[0], &Type::Named(name.to_string())) {
                 self.emit_validation(b, &d, line)?;
             }
             return Ok(Type::Named(name.to_string()));

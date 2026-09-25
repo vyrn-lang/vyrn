@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::ast::*;
-use crate::consteval::{self, ConstVal};
+use crate::consteval;
 use crate::diagnostics::Diagnostic;
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
@@ -3165,42 +3165,21 @@ impl<'a> Checker<'a> {
             _ => return Ok(()),
         };
         let pred = decl.predicate.as_ref().unwrap();
-        // Scalar constant: bind `value`.
-        if let Some(cv) = consteval::eval(expr, &HashMap::new()) {
-            let mut env = HashMap::new();
-            env.insert("value".to_string(), cv.clone());
-            if consteval::eval(pred, &env).and_then(ConstVal::as_bool) == Some(false) {
-                return Err(cerr!(
-                    line,
-                    "{cv} does not satisfy `{}` (predicate `where {}` is false)",
-                    decl.name,
-                    pred_summary(pred),
-                ));
-            }
-            return Ok(());
+        match crate::validate::constant_verdict(expr, decl) {
+            Some((false, Some(cv))) => Err(cerr!(
+                line,
+                "{cv} does not satisfy `{}` (predicate `where {}` is false)",
+                decl.name,
+                pred_summary(pred),
+            )),
+            Some((false, None)) => Err(cerr!(
+                line,
+                "this value does not satisfy `{}` (predicate `where {}` is false)",
+                decl.name,
+                pred_summary(pred),
+            )),
+            _ => Ok(()),
         }
-        // Record literal with all-constant fields: bind each field name.
-        if let (Expr::StructLit { fields, .. }, Type::Record(_)) = (expr, &decl.base) {
-            let mut env = HashMap::new();
-            for (fname, fexpr) in fields {
-                match consteval::eval(fexpr, &HashMap::new()) {
-                    Some(cv) => {
-                        env.insert(fname.clone(), cv);
-                    }
-                    None => return Ok(()), // not fully constant — runtime check
-                }
-            }
-            if consteval::eval(pred, &env).and_then(ConstVal::as_bool) == Some(false) {
-                return Err(cerr!(
-                    line,
-                    "this value does not satisfy `{}` (predicate `where {}` \
-                     is false)",
-                    decl.name,
-                    pred_summary(pred),
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// RFC-0020 M1: prove a string **interpolation** (or a finite-string
@@ -5170,7 +5149,7 @@ impl<'a> Checker<'a> {
             ),
             Expr::Try { expr, line } => self.check_try(expr, *line, scope, fn_ret),
             Expr::StructLit { name, fields, line } => {
-                self.check_struct_lit(name, fields, *line, scope, expected, fn_ret)
+                self.check_struct_lit(expr, name, fields, *line, scope, expected, fn_ret)
             }
             Expr::Field { expr, field, line } => {
                 let ety = self.expr(expr, scope, None, fn_ret)?;
@@ -5454,6 +5433,7 @@ impl<'a> Checker<'a> {
     /// field present exactly once, each value assignable to its field's type.
     fn check_struct_lit(
         &self,
+        lit: &Expr,
         name: &str,
         fields: &[(String, Expr)],
         line: usize,
@@ -5549,28 +5529,13 @@ impl<'a> Checker<'a> {
         }
         // Cross-field predicate: if every field is a compile-time constant, the
         // invariant is checked now and a provable violation is a compile error.
-        if let Some(pred) = decl.and_then(|d| d.predicate.as_ref()) {
-            let mut env = HashMap::new();
-            let mut all_const = true;
-            for (fname, value) in fields {
-                match consteval::eval(value, &HashMap::new()) {
-                    Some(cv) => {
-                        env.insert(fname.clone(), cv);
-                    }
-                    None => {
-                        all_const = false;
-                        break;
-                    }
-                }
-            }
-            if all_const {
-                if let Some(false) = consteval::eval(pred, &env).and_then(ConstVal::as_bool) {
-                    return Err(cerr!(
-                        line,
-                        "`{name} {{ .. }}` violates `where {}`",
-                        pred_summary(pred)
-                    ));
-                }
+        if let Some(d) = decl.filter(|d| d.predicate.is_some()) {
+            if let Some((false, _)) = crate::validate::constant_verdict(lit, d) {
+                return Err(cerr!(
+                    line,
+                    "`{name} {{ .. }}` violates `where {}`",
+                    pred_summary(d.predicate.as_ref().unwrap())
+                ));
             }
         }
         let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else {
@@ -9338,24 +9303,14 @@ impl<'a> Checker<'a> {
             ));
         }
         // Compile-time validation when the argument is a constant.
-        if let Some(cv) = consteval::eval(&args[0], &HashMap::new()) {
-            if let Some(pred) = &decl.predicate {
-                let mut env = HashMap::new();
-                env.insert("value".to_string(), cv.clone());
-                match consteval::eval(pred, &env).and_then(ConstVal::as_bool) {
-                    Some(true) => {}
-                    Some(false) => {
-                        return Err(cerr!(
-                            line,
-                            "{} does not satisfy `{}` (predicate `where {}` is false)",
-                            cv,
-                            decl.name,
-                            pred_summary(pred),
-                        ));
-                    }
-                    None => {} // couldn't fully fold; fall through to runtime
-                }
-            }
+        if let Some((false, Some(cv))) = crate::validate::constant_verdict(&args[0], decl) {
+            return Err(cerr!(
+                line,
+                "{} does not satisfy `{}` (predicate `where {}` is false)",
+                cv,
+                decl.name,
+                pred_summary(decl.predicate.as_ref().unwrap()),
+            ));
         }
         Ok(Type::Named(decl.name.clone()))
     }
