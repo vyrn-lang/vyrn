@@ -446,24 +446,6 @@ pub fn lower_with<'a>(
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });
-    // The lint re-derives the types with a fresh check, and a COMPTIME program
-    // is not the program that check admitted: a generator is re-loaded as its
-    // own root and keeps helpers that use `lex`, `render` and `Token`, which an
-    // ordinary check refuses as "only available during generation" and records
-    // as `<type error>`. Whether the lint sees one at all depends on which
-    // functions the instantiation reaches — the same generator reaches 448
-    // through `vyrn check` and 458 through the editor, which is what made this
-    // assertion fire in one host and not the other. It stays armed for every
-    // program a tool holds (RFC-0125 §3 M3, the accumulation slice).
-    debug_assert!(
-        vyrn_frontend::movecheck::in_comptime() || lint(&lowered).is_empty(),
-        "the lowered form failed its own lint:
-  {}",
-        lint(&lowered).join(
-            "
-  "
-        )
-    );
     lowered
 }
 
@@ -1359,7 +1341,7 @@ fn iterate<'a>(
 /// supposed to have (RFC-0101 §2.6).
 ///
 /// This is GHC's `-dcore-lint` in the small: it runs on the corpus gate and, via
-/// the `debug_assert` in [`lower`], on every debug build forever. What it checks
+/// the `debug_assert` in [`core::augment`], on every debug build forever. What it checks
 /// is structure — that the answers are there, that they are concrete, that the
 /// order is the order a dump can be diffed in. What it does NOT do is re-derive
 /// each type from its children: that check needs a second type derivation, which
@@ -1405,7 +1387,7 @@ pub fn lint(l: &Lowered) -> Vec<String> {
                 if matches!(t, Type::Err) {
                     bad.push(format!(
                         "{} @{}: the {} is typed `<type error>`, and a \
-                         program that reaches lowering has none",
+                         program the typed judgment accepts has none",
                         i.spelling(),
                         r.line,
                         r.node.kind()

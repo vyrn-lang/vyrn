@@ -417,32 +417,6 @@ fn main() -> Int64 {
     assert_eq!(d.end_col, 7);
 }
 
-/// An `unknown variable` diagnostic is pinned to the variable **identifier** on
-/// the error's line. Guards the generalized pinner's identifier path (a user
-/// name, the offending use being on the line).
-#[test]
-fn unknown_variable_pinned_to_ident() {
-    let src = "\
-fn main() -> Int64 {
-    return x;
-}
-";
-    let a = analyze(src);
-    let d = a
-        .diagnostics
-        .iter()
-        .find(|d| d.message.contains("unknown variable"))
-        .expect("an unknown-variable diagnostic");
-    // Line 2: `    return x;` — `x` at 1-based col 12 (4 spaces + "return" +
-    // space + x).
-    assert_eq!(d.line, 2);
-    assert_eq!(
-        d.col, 12,
-        "pinned to the `x` identifier, not col 0 (whole line)"
-    );
-    assert_eq!(d.end_col, 13);
-}
-
 /// A movecheck diagnostic is pinned to the borrowed **identifier** on the
 /// error's line (the movecheck message backtick-quotes the variable name).
 /// The pinner used to be guarded over `movecheck` as well as the checker.

@@ -1377,6 +1377,7 @@ fn check_accum_inner(
         in_test: RefCell::new(false),
         in_bench: RefCell::new(false),
         in_gen: RefCell::new(false),
+        unknown: std::cell::Cell::new(false),
         here: RefCell::new(None),
         shadows: program.surface_shadows.clone(),
         stmt_line: RefCell::new(0),
@@ -1398,8 +1399,8 @@ fn check_accum_inner(
 
     // 3. Validate each type decl (base kind, referenced-type existence, predicate).
     for t in &program.type_decls {
-        if let Err(s) = checker.check_type_decl(t) {
-            out.push(s);
+        if let Err(s) = checker.unit(|| checker.check_type_decl(t)) {
+            out.extend(s);
         }
     }
 
@@ -2311,6 +2312,10 @@ struct Checker<'a> {
     /// which is also what keeps them out of any backend (gen fn bodies are never
     /// emitted).
     in_gen: RefCell<bool>,
+    /// Whether the unit [`Checker::unit`] runs read a name nothing answers,
+    /// or a name typed [`Type::Err`]. An unknown name is typed `Err`, and the
+    /// typed judgment refuses it (RFC-0125 M7, group 5).
+    unknown: std::cell::Cell<bool>,
     /// The module whose body is being checked right now (RFC-0054, corrected).
     ///
     /// It exists for ONE question: is a call to `render`/`rawAt`/`raw`/`lex` the
@@ -3986,7 +3991,7 @@ impl<'a> Checker<'a> {
         for g in &program.globals {
             // A literal initializer's range error names the global's line.
             *self.stmt_line.borrow_mut() = g.line;
-            let bty = (|| -> Result<Type, Diagnostic> {
+            let bty = self.unit(|| -> Result<Type, Diagnostic> {
                 // Initializer restrictions (walked before typing so the messages
                 // are precise): no user/extern call, no later-global read.
                 init_restrictions(
@@ -4038,16 +4043,17 @@ impl<'a> Checker<'a> {
                     self.prove_coercion(&g.init, declared, g.line)?;
                 }
                 Ok(g.ty.clone().unwrap_or(vty))
-            })();
+            });
             let binding = match bty {
                 Ok(t) => Binding {
                     ty: t,
                     mutable: g.mutable,
                 },
                 Err(s) => {
-                    let mut d = s;
-                    d.file = g.module.clone();
-                    out.push(d);
+                    out.extend(s.map(|mut d| {
+                        d.file = g.module.clone();
+                        d
+                    }));
                     Binding {
                         ty: Type::Err,
                         mutable: g.mutable,
@@ -4181,7 +4187,7 @@ impl<'a> Checker<'a> {
         scope.push(HashMap::new());
         let mut always_returns = false;
         for stmt in &block.stmts {
-            match self.stmt(stmt, ret, scope) {
+            match self.unit(|| self.stmt(stmt, ret, scope)) {
                 Ok(r) => {
                     if r {
                         always_returns = true;
@@ -4189,7 +4195,11 @@ impl<'a> Checker<'a> {
                 }
                 Err(msg) => {
                     // Record and continue: the next statement is checked too.
-                    self.errors.borrow_mut().push(msg);
+                    // A statement whose refusal [`Checker::unit`] dropped may
+                    // have returned; its body is refused, so the block does
+                    // not claim to fall through.
+                    always_returns |= msg.is_none();
+                    self.errors.borrow_mut().extend(msg);
                     // Cascade-free recovery: a `let`/`for` that failed still
                     // binds its name to `Type::Err`, so later uses do not raise
                     // "unknown variable" diagnostics — they flow through
@@ -4200,6 +4210,18 @@ impl<'a> Checker<'a> {
         }
         scope.pop();
         always_returns
+    }
+
+    /// Runs one unit of checking: a statement, a type declaration or a
+    /// module-state initializer. A refusal in a unit that read a name typed
+    /// `Type::Err` is `Err(None)`: it follows from that type. An unknown name
+    /// is the typed judgment's refusal, and any other `Err` is the refusal of
+    /// the statement that bound it (RFC-0125 M7, group 5).
+    fn unit<T>(&self, f: impl FnOnce() -> Result<T, Diagnostic>) -> Result<T, Option<Diagnostic>> {
+        let outer = self.unknown.replace(false);
+        let r = f();
+        let read = self.unknown.replace(outer);
+        r.map_err(|d| Some(d).filter(|_| !read))
     }
 
     /// Bind the name of a failed `let`/`for`-in to `Type::Err` in the current
@@ -4289,9 +4311,10 @@ impl<'a> Checker<'a> {
                 Ok(false)
             }
             Stmt::Assign { name, value, line } => {
-                let b = self
-                    .lookup(scope, name)
-                    .ok_or_else(|| cerr!(line, "assignment to unknown variable `{name}`"))?;
+                let Some(b) = self.lookup(scope, name) else {
+                    self.unknown.set(true);
+                    return Ok(false);
+                };
                 let vty = self.expr(value, scope, Some(&b.ty), Some(ret))?;
                 if !self.coercible(&vty, &b.ty) {
                     return Err(cerr!(line, "`{name}` is {} but assigned {}", b.ty, vty));
@@ -4307,9 +4330,10 @@ impl<'a> Checker<'a> {
                 value,
                 line,
             } => {
-                let b = self.lookup(scope, name).ok_or_else(|| {
-                    cerr!(line, "assignment to field of unknown variable `{name}`")
-                })?;
+                let Some(b) = self.lookup(scope, name) else {
+                    self.unknown.set(true);
+                    return Ok(false);
+                };
                 // Validated data is rebuilt, not mutated: a field write on a
                 // record with a cross-field `where` could break the invariant
                 // mid-update, so it must go through whole-value reassignment
@@ -4367,9 +4391,10 @@ impl<'a> Checker<'a> {
                 value,
                 line,
             } => {
-                let b = self
-                    .lookup(scope, name)
-                    .ok_or_else(|| cerr!(line, "index-assignment to unknown variable `{name}`"))?;
+                let Some(b) = self.lookup(scope, name) else {
+                    self.unknown.set(true);
+                    return Ok(false);
+                };
                 // `m[k] = v` on a Map (RFC-0028) inserts or updates in place: the
                 // key coerces to the map's key type `K` (RFC-0117), the value to
                 // `V` (auto-validated when `V` is predicated, exactly like an
@@ -4945,6 +4970,11 @@ impl<'a> Checker<'a> {
                     };
                 }
                 if let Some(b) = self.lookup(scope, name) {
+                    // A name a failed statement bound: its refusals are that
+                    // statement's.
+                    if b.ty == Type::Err {
+                        self.unknown.set(true);
+                    }
                     return Ok(b.ty);
                 }
                 // RFC-0037: a bare (non-generic, non-extern, non-gen) function
@@ -4960,7 +4990,8 @@ impl<'a> Checker<'a> {
                     });
                     return Ok(sig);
                 }
-                Err(cerr!(line, "unknown variable `{name}`"))
+                self.unknown.set(true);
+                Ok(Type::Err)
             }
             Expr::Unary { op, expr, line } => {
                 // `-9223372036854775808` is the one literal whose magnitude only
@@ -5193,7 +5224,10 @@ impl<'a> Checker<'a> {
                             "`{name}?(..)` is only for validated/nominal scalar types"
                         ))
                     }
-                    None => return Err(cerr!(line, "unknown type `{name}`")),
+                    None => {
+                        self.unknown.set(true);
+                        return Ok(Type::Err);
+                    }
                 };
                 if args.len() != 1 {
                     return Err(cerr!(
@@ -11111,13 +11145,6 @@ mod tests {
              fn main() -> Int64 { if let Some(v) = f() { return v } return 0 }"
         )
         .is_ok());
-        // A binder is scoped to the then-block only — not visible after.
-        let scope = check_src(
-            "fn f() -> Option<Int64> { return Some(1) } \
-             fn main() -> Int64 { if let Some(v) = f() { } return v }",
-        )
-        .unwrap_err();
-        assert!(scope.contains("v"), "{scope}");
         // Wrong pattern for the scrutinee shape.
         let bad = check_src(
             "fn f() -> Option<Int64> { return Some(1) } \
@@ -13115,18 +13142,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("read itself"), "{e}");
-    }
-
-    #[test]
-    fn where_predicate_may_not_reference_a_global() {
-        // A global is not a constant; a refinement predicate can't see it.
-        let e = check_src(
-            "let lo = 3\n\
-             type T = Int64 where value >= lo\n\
-             fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("unknown variable") || e.contains("lo"), "{e}");
     }
 
     // ---- RFC-0011 addendum: `a[i].field = v` write-through --------------

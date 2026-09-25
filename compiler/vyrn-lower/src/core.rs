@@ -1063,6 +1063,11 @@ pub struct Body {
     /// A `drop` whose name no binding in scope answers: the name and the
     /// line. The core has no row for it; [`crate::typed::drops`] refuses it.
     pub unbound_drops: Vec<(String, usize)>,
+    /// A name no binding, module state or declaration answers, which the
+    /// checker typed as an error: the node, the line and the sentence. The
+    /// builder binds the checker's `Err` there and goes on;
+    /// [`crate::typed::unknowns`] refuses it.
+    pub unknown: Vec<(usize, usize, String)>,
 }
 
 /// What a candidate construct is, which is what [`last_owner`] has to ask of
@@ -2425,6 +2430,7 @@ fn build_seeded(
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
             unbound_drops: Vec::new(),
+            unknown: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2446,6 +2452,7 @@ fn build_seeded(
         region: 0,
         ret: None,
         released: None,
+        closed: false,
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -2606,8 +2613,8 @@ struct Unreached {
 
 /// A module-state initializer or a `where` predicate as a body of its own,
 /// for the typed judgment alone (RFC-0125 M7, the judgment's reach): the
-/// checker types both, and neither is a function. `binds` are the names the
-/// checker put in scope, a predicate's `value` or its record's fields. The
+/// checker types both, and neither is a function. A predicate has `binds`,
+/// its `value` or its record's fields, and sees no module state. The
 /// body holds the expression's value and nothing else: it places no row and
 /// is never emitted.
 pub fn build_root<'a>(
@@ -2615,7 +2622,7 @@ pub fn build_root<'a>(
     own: &'a Ownership,
     rows: &[crate::Row<'a>],
     file: Option<String>,
-    binds: &[(String, Type)],
+    binds: Option<&[(String, Type)]>,
     e: &'a Expr,
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
@@ -2628,7 +2635,8 @@ pub fn build_root<'a>(
         file,
         HashMap::new(),
     );
-    for (name, ty) in binds {
+    b.closed = binds.is_some();
+    for (name, ty) in binds.unwrap_or_default() {
         let n = b.name(name, ty.clone(), false, e.line());
         b.scope.push((name.clone(), n));
         b.body.params.push(n);
@@ -2726,6 +2734,8 @@ struct Builder<'a> {
     /// The receiver of a declared release, which the frame does not own
     /// ([`Builder::owns_boxes`]). `None` in every other body.
     released: Option<Name>,
+    /// A `where` predicate's body: it sees its binds and no module state.
+    closed: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -2761,6 +2771,7 @@ impl<'a> Builder<'a> {
                 loop_buffers: Vec::new(),
                 unreached: Vec::new(),
                 unbound_drops: Vec::new(),
+                unknown: Vec::new(),
             },
             scope: Vec::new(),
             by_binding: HashMap::new(),
@@ -2782,6 +2793,7 @@ impl<'a> Builder<'a> {
             region: 0,
             ret: None,
             released: None,
+            closed: false,
         }
     }
 
@@ -3583,7 +3595,39 @@ impl<'a> Builder<'a> {
             k += match self.nested_store(&ss[k..], out)? {
                 Some(n) => n,
                 None => {
-                    self.stmt(&ss[k], out)?;
+                    let (scope, at) = (self.scope.len(), out.len());
+                    if let Err(g) = self.stmt(&ss[k], out) {
+                        // The checker typed an unknown name `Err` and went
+                        // on, so a gap may come before the builder meets it.
+                        let mut named = Vec::new();
+                        vyrn_frontend::ast::exprs_one(&ss[k], &mut |e, locals| {
+                            let local =
+                                matches!(e, Expr::Var { name, .. } if locals.contains(name));
+                            let typed = self.types.get(&(e as *const Expr as usize));
+                            if !local && matches!(typed, None | Some(Type::Err)) {
+                                named.extend(self.unknown_of(e));
+                            }
+                        });
+                        self.body.unknown.extend(named);
+                        if self.body.unknown.is_empty() {
+                            return Err(g);
+                        }
+                        // The body is refused: the statement goes, and a
+                        // name it binds is poisoned in its turn.
+                        out.truncate(at);
+                        self.scope.truncate(scope);
+                        if let Stmt::Let {
+                            name,
+                            line,
+                            mutable,
+                            ..
+                        } = &ss[k]
+                        {
+                            let n = self.name(name, Type::Err, false, *line);
+                            self.body.names[n as usize].mutable = *mutable;
+                            self.scope.push((name.clone(), n));
+                        }
+                    }
                     1
                 }
             };
@@ -3936,6 +3980,9 @@ impl<'a> Builder<'a> {
                 self.keyed_let(n, s);
             }
             Stmt::Assign { name, value, line } => {
+                if !self.known(name, sid, *line, "assignment to unknown variable") {
+                    return Ok(());
+                }
                 let n = self.lookup(name);
                 let check = match n {
                     Some(n) => {
@@ -4069,6 +4116,9 @@ impl<'a> Builder<'a> {
                 value,
                 line,
             } => {
+                if !self.known(name, sid, *line, "assignment to field of unknown variable") {
+                    return Ok(());
+                }
                 let base = self.named_place(name, *line)?;
                 self.set_field(base, name, field, value, sid, *line, out)?;
             }
@@ -4078,6 +4128,9 @@ impl<'a> Builder<'a> {
                 value,
                 line,
             } => {
+                if !self.known(name, sid, *line, "index-assignment to unknown variable") {
+                    return Ok(());
+                }
                 let base = self.named_place(name, *line)?;
                 self.index_set(base, name, index, value, sid, *line, out)?;
             }
@@ -4878,6 +4931,41 @@ impl<'a> Builder<'a> {
             releases,
         });
         Ok(())
+    }
+
+    /// Whether a binding or module state answers `name`. Where none does,
+    /// records the refusal at `site`: `words` is the sentence before the name.
+    fn known(&mut self, name: &str, site: usize, line: usize, words: &str) -> bool {
+        if self.answers(name) {
+            return true;
+        }
+        let refusal = format!("{words} `{name}`");
+        self.body.unknown.push((site, line, refusal));
+        false
+    }
+
+    fn answers(&self, name: &str) -> bool {
+        self.lookup(name).is_some()
+            || !self.closed && self.program.globals.iter().any(|g| g.name == name)
+    }
+
+    /// The refusal of `e` where it names nothing: a variable no binding or
+    /// module state answers, or `T?(..)` of an undeclared type.
+    fn unknown_of(&self, e: &Expr) -> Option<(usize, usize, String)> {
+        let site = e as *const Expr as usize;
+        match e {
+            Expr::Var { name, line } if !self.answers(name) => {
+                Some((site, *line, format!("unknown variable `{name}`")))
+            }
+            Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
+                Some((site, *line, format!("unknown type `{name}`")))
+            }
+            _ => None,
+        }
+    }
+
+    fn unknown_at(&mut self, e: &Expr) {
+        self.body.unknown.extend(self.unknown_of(e));
     }
 
     fn named_place(&self, name: &str, line: usize) -> Result<(Place, Type), Gap> {
@@ -6110,6 +6198,7 @@ impl<'a> Builder<'a> {
                 loop_buffers: Vec::new(),
                 unreached: Vec::new(),
                 unbound_drops: Vec::new(),
+                unknown: Vec::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
@@ -6232,6 +6321,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
+        self.unknown_at(e);
         let ty = self.ty_of(e)?;
         let t = if self.owns(&ty) {
             self.borrow_name(e, ty, line)
@@ -6677,6 +6767,7 @@ impl<'a> Builder<'a> {
                 Ok(r)
             }
             Expr::TryConstruct { name, args, .. } => {
+                self.unknown_at(e);
                 let mut vs = Vec::new();
                 for a in args {
                     vs.push(self.val(a, out)?);
@@ -7092,14 +7183,11 @@ impl<'a> Builder<'a> {
     /// of one, or a temporary the expression produced (an unnamed receiver).
     fn place(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Place, Gap> {
         match e {
-            Expr::Var { name, line } => match self.lookup(name) {
+            Expr::Var { name, .. } => match self.lookup(name) {
                 Some(n) => Ok(Place::Name(n)),
                 None => {
-                    if self.program.globals.iter().any(|g| &g.name == name) {
-                        Ok(Place::Global(name.clone()))
-                    } else {
-                        gap("a place that is not a binding", *line)
-                    }
+                    self.unknown_at(e);
+                    Ok(Place::Global(name.clone()))
                 }
             },
             Expr::Field { expr, field, .. } => {
@@ -8574,6 +8662,16 @@ fn typed(program: &Program, top: &Body, file: &Option<String>, as_written: bool)
         let (out, seen) = &mut *t.borrow_mut();
         let mut found = crate::typed::stores(top, &global_mutable, &projected, seen);
         found.extend(crate::typed::loops(top, seen));
+        // One sentence per name and line: a declaration's predicate is also
+        // the body of its constructor.
+        for u in crate::typed::unknowns(top, seen) {
+            let said = |d: &vyrn_frontend::diagnostics::Diagnostic| {
+                (&d.file, d.line, &d.message) == (file, u.0, &u.1)
+            };
+            if !out.iter().any(said) && !found.contains(&u) {
+                found.push(u);
+            }
+        }
         if as_written {
             found.extend(crate::typed::drops(top, program));
         }
@@ -8911,7 +9009,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             own,
             &lowered.globals,
             g.module.clone(),
-            &[],
+            None,
             &g.init,
         ) {
             Ok(top) => {
@@ -8936,7 +9034,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             own,
             &lowered.predicates,
             d.module.clone(),
-            &binds,
+            Some(&binds),
             p,
         ) {
             Ok(top) => {
@@ -8947,6 +9045,28 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             }
         }
     }
+    // The lint re-derives the types with a fresh check, and a COMPTIME program
+    // is not the program that check admitted: a generator is re-loaded as its
+    // own root and keeps helpers that use `lex`, `render` and `Token`, which an
+    // ordinary check refuses as "only available during generation" and records
+    // as `<type error>`. Whether the lint sees one at all depends on which
+    // functions the instantiation reaches — the same generator reaches 448
+    // through `vyrn check` and 458 through the editor, which is what made this
+    // assertion fire in one host and not the other. A program the typed
+    // judgment refused holds an unknown name the checker typed `<type error>`
+    // (RFC-0125 M7, group 5), and is never emitted. It stays armed for every
+    // other program a tool holds (RFC-0125 §3 M3, the accumulation slice).
+    debug_assert!(
+        vyrn_frontend::movecheck::in_comptime()
+            || TYPED.with(|t| !t.borrow().0.is_empty())
+            || crate::lint(&lowered).is_empty(),
+        "the lowered form failed its own lint:
+  {}",
+        crate::lint(&lowered).join(
+            "
+  "
+        )
+    );
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]), and it reads the rows only
     // once they are in the plan. So a program where one is placed is lowered
