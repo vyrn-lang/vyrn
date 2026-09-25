@@ -8,7 +8,7 @@ Type::I32x4	11	1	8	1	0	0	21
 Type::F64x2	8	1	8	1	0	0	18
 Type::Mask32x4	5	1	6	1	0	0	13
 Type::Mask64x2	6	1	7	1	0	0	15
-Type::Bool	32	2	37	6	0	2	79
+Type::Bool	29	2	37	6	0	2	76
 Type::Str	45	2	78	8	0	4	137
 Type::Unit	25	4	32	9	2	0	72
 Type::Named	37	3	17	9	3	6	75
@@ -31,4 +31,4 @@ Type::Fn	26	5	32	10	1	0	74
 Type::Lazy	7	1	2	9	0	0	19
 Type::Never	4	2	6	2	0	0	14
 Type::Err	81	1	0	1	0	0	83
-all	577	74	517	220	34	47	1469
+all	574	74	517	220	34	47	1466

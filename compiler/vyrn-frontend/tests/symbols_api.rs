@@ -388,35 +388,6 @@ fn main() -> Int64 { return 0; }
     assert_eq!(d.end_col, 18);
 }
 
-/// A non-Bool `if` condition diagnostic is pinned to the `if` **keyword**, not
-/// left whole-line. The first backtick-quoted token in the message is `if`,
-/// which is a reserved word (never a `Tok::Ident`), so the keyword column map
-/// resolves it. Guards the generalized pinner's keyword path.
-#[test]
-fn if_condition_pinned_to_if_keyword() {
-    let src = "\
-fn main() -> Int64 {
-    if 5 {
-        print(1);
-    }
-    return 0;
-}
-";
-    let a = analyze(src);
-    let d = a
-        .diagnostics
-        .iter()
-        .find(|d| d.message.contains("`if` condition must be Bool"))
-        .expect("an if-condition diagnostic");
-    // Line 2: `    if 5 {` — 4 spaces, then `if` at 1-based cols 5-6.
-    assert_eq!(d.line, 2);
-    assert_eq!(
-        d.col, 5,
-        "pinned to the `if` keyword, not col 0 (whole line)"
-    );
-    assert_eq!(d.end_col, 7);
-}
-
 /// A movecheck diagnostic is pinned to the borrowed **identifier** on the
 /// error's line (the movecheck message backtick-quotes the variable name).
 /// The pinner used to be guarded over `movecheck` as well as the checker.

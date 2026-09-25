@@ -61,6 +61,7 @@ checker-rules.vyrn:278:0: cannot infer the type of `[:]`; annotate it, e.g. `let
 checker-rules.vyrn:282:0: the map is keyed by String, but this key is Int64
 checker-rules.vyrn:286:0: map values must share a type: expected Int64, found String
 checker-rules.vyrn:290:0: a lambda `|..|` needs a function type from context: pass it to a `fn`-typed parameter, or give the binding a function type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`) (RFC-0037)
+checker-rules.vyrn:299:0: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:300:0: `if` condition must be Bool, found Int64
 checker-rules.vyrn:309:0: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
 checker-rules.vyrn:326:0: cannot mutate a field of `h` (declared without `mut`)
@@ -77,3 +78,7 @@ checker-rules.vyrn:387:0: `v` declared Int64 but initializer is String
 checker-rules.vyrn:394:0: unknown variable `zz`
 checker-rules.vyrn:395:0: unknown variable `zz`
 checker-rules.vyrn:397:0: unknown variable `bound`
+checker-rules.vyrn:401:0: `if` condition must be Bool, found Int64
+checker-rules.vyrn:406:0: `for` needs an Array, a String, or a type that declares `impl Iterate` (a `size` method and an `nth` projection, `fn nth(read self, ..) -> read T`), found Map<String, Int64>
+checker-rules.vyrn:411:0: `if` condition must be Bool, found T
+checker-rules.vyrn:428:0: `for` needs an Array, a String, or a type that declares `impl Iterate` (a `size` method and an `nth` projection, `fn nth(read self, ..) -> read T`), found { data: Array<Int64> }

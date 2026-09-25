@@ -1069,11 +1069,15 @@ pub struct Body {
     /// A `drop` whose name no binding in scope answers: the name and the
     /// line. The core has no row for it; [`crate::typed::drops`] refuses it.
     pub unbound_drops: Vec<(String, usize)>,
-    /// A name no binding, module state or declaration answers, which the
-    /// checker typed as an error: the node, the line and the sentence. The
-    /// builder binds the checker's `Err` there and goes on;
-    /// [`crate::typed::unknowns`] refuses it.
-    pub unknown: Vec<(usize, usize, String)>,
+    /// A rule the builder met where it lowers the construct the rule is
+    /// about, and which the checker let through: the node, the line and the
+    /// sentence. An unknown name is one, and the builder binds the checker's
+    /// `Err` there and goes on. [`crate::typed::refused`] refuses each.
+    pub refused: Vec<(usize, usize, String)>,
+    /// The same for a rule about the types the checker gave the body, which
+    /// hold as written and not in an instance: a condition that is not
+    /// Bool, a `for` over what no loop walks.
+    pub mistyped: Vec<(usize, usize, String)>,
 }
 
 /// What a candidate construct is, which is what [`last_owner`] has to ask of
@@ -2475,7 +2479,8 @@ fn build_seeded(
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
             unbound_drops: Vec::new(),
-            unknown: Vec::new(),
+            refused: Vec::new(),
+            mistyped: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2825,7 +2830,8 @@ impl<'a> Builder<'a> {
                 loop_buffers: Vec::new(),
                 unreached: Vec::new(),
                 unbound_drops: Vec::new(),
-                unknown: Vec::new(),
+                refused: Vec::new(),
+                mistyped: Vec::new(),
             },
             scope: Vec::new(),
             by_binding: HashMap::new(),
@@ -3628,10 +3634,10 @@ impl<'a> Builder<'a> {
                 cond,
                 then_branch,
                 else_branch: Some(else_branch),
-                ..
+                line: at,
             } => {
                 let site = e as *const Expr as usize;
-                let c = self.read_val(cond, out)?;
+                let c = self.condition(cond, "if", *at, out)?;
                 let mut t = Vec::new();
                 self.arm_returns(then_branch, sid, line, &mut t)?;
                 let mut f = Vec::new();
@@ -3883,8 +3889,8 @@ impl<'a> Builder<'a> {
                                 named.extend(self.unknown_of(e));
                             }
                         });
-                        self.body.unknown.extend(named);
-                        if self.body.unknown.is_empty() {
+                        self.body.refused.extend(named);
+                        if self.body.refused.is_empty() && self.body.mistyped.is_empty() {
                             return Err(g);
                         }
                         // The body is refused: the statement goes, and a
@@ -4464,9 +4470,9 @@ impl<'a> Builder<'a> {
                 cond,
                 then_block,
                 else_block,
-                ..
+                line,
             } => {
-                let c = self.read_val(cond, out)?;
+                let c = self.condition(cond, "if", *line, out)?;
                 let mut t = Vec::new();
                 self.block(then_block, &mut t)?;
                 self.edge_drops(sid, 0, &mut t)?;
@@ -4546,7 +4552,7 @@ impl<'a> Builder<'a> {
             }
             Stmt::While { cond, body, line } => {
                 let mut l = Vec::new();
-                let c = self.read_val(cond, &mut l)?;
+                let c = self.condition(cond, "while", *line, &mut l)?;
                 l.push(St::If {
                     cond: c,
                     then: Vec::new(),
@@ -4571,12 +4577,24 @@ impl<'a> Builder<'a> {
                 col: _,
             } => {
                 let ity = self.ty_of(iter)?;
-                let ety = match self.elem_ty(&ity, *line) {
-                    Ok(t) => t,
-                    // A user container: the element is what its `nth`
-                    // projection yields (RFC-0091 M2), under this
-                    // instantiation's type arguments.
-                    Err(g) => self.projected_elem(&ity).ok_or(g)?,
+                // A user container: the element is what its `nth` projection
+                // yields (RFC-0091 M2), under this instantiation's type
+                // arguments. A map is no container a `for` walks.
+                let elem = self
+                    .elem_ty(&ity, *line)
+                    .ok()
+                    .filter(|_| !self.is_map(&ity));
+                let Some(ety) = elem.or_else(|| self.projected_elem(&ity)) else {
+                    let t = vyrn_frontend::types::resolve(&ity, self.proto.types());
+                    if t != Type::Err {
+                        let refusal = format!(
+                            "`for` needs an Array, a String, or a type that declares \
+                             `impl Iterate` (a `size` method and an `nth` projection, \
+                             `fn nth(read self, ..) -> read T`), found {t}"
+                        );
+                        self.body.mistyped.push((sid, *line, refusal));
+                    }
+                    return gap("a `for` over what no loop walks", *line);
                 };
                 // The LOOP form of the take (RFC-0125 §3 M3, row 09): the
                 // same rule as the prefix form, at the other spelling.
@@ -5264,8 +5282,28 @@ impl<'a> Builder<'a> {
             return true;
         }
         let refusal = format!("{words} `{name}`");
-        self.body.unknown.push((site, line, refusal));
+        self.body.refused.push((site, line, refusal));
         false
+    }
+
+    /// The condition of an `if` or a `while`, read. A condition that is not
+    /// Bool is refused; one typed `Err` is refused where its name is.
+    fn condition(
+        &mut self,
+        cond: &'a Expr,
+        word: &str,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        let t = self.ty_of(cond)?;
+        let bool = vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Bool;
+        if !bool && t != Type::Err {
+            let refusal = format!("`{word}` condition must be Bool, found {t}");
+            self.body
+                .mistyped
+                .push((cond as *const Expr as usize, line, refusal));
+        }
+        self.read_val(cond, out)
     }
 
     fn answers(&self, name: &str) -> bool {
@@ -5289,7 +5327,7 @@ impl<'a> Builder<'a> {
     }
 
     fn unknown_at(&mut self, e: &Expr) {
-        self.body.unknown.extend(self.unknown_of(e));
+        self.body.refused.extend(self.unknown_of(e));
     }
 
     fn named_place(&self, name: &str, line: usize) -> Result<(Place, Type), Gap> {
@@ -6522,7 +6560,8 @@ impl<'a> Builder<'a> {
                 loop_buffers: Vec::new(),
                 unreached: Vec::new(),
                 unbound_drops: Vec::new(),
-                unknown: Vec::new(),
+                refused: Vec::new(),
+                mistyped: Vec::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
@@ -7173,7 +7212,7 @@ impl<'a> Builder<'a> {
                 // runs them there.
                 let site = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
-                let c = self.read_val(cond, out)?;
+                let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
@@ -9207,9 +9246,9 @@ fn typed(program: &Program, top: &Body, file: &Option<String>, as_written: bool)
         let (out, seen) = &mut *t.borrow_mut();
         let mut found = crate::typed::stores(top, &global_mutable, &projected, seen);
         found.extend(crate::typed::loops(top, seen));
-        // One sentence per name and line: a declaration's predicate is also
-        // the body of its constructor.
-        for u in crate::typed::unknowns(top, seen) {
+        // One sentence per line: a declaration's predicate is also the body
+        // of its constructor.
+        for u in crate::typed::refused(top, as_written, seen) {
             let said = |d: &vyrn_frontend::diagnostics::Diagnostic| {
                 (&d.file, d.line, &d.message) == (file, u.0, &u.1)
             };

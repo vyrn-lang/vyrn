@@ -4511,12 +4511,9 @@ impl<'a> Checker<'a> {
                 cond,
                 then_block,
                 else_block,
-                line,
+                ..
             } => {
-                let cty = self.expr(cond, scope, None, Some(ret))?;
-                if self.base(&cty) != Type::Bool {
-                    return Err(cerr!(line, "`if` condition must be Bool, found {cty}"));
-                }
+                self.expr(cond, scope, None, Some(ret))?;
                 let then_ret = self.block(then_block, ret, scope);
                 match else_block {
                     Some(eb) => {
@@ -4572,11 +4569,8 @@ impl<'a> Checker<'a> {
                 Ok(false)
             }
             Stmt::Continue { .. } => Ok(false),
-            Stmt::While { cond, body, line } => {
-                let cty = self.expr(cond, scope, None, Some(ret))?;
-                if self.base(&cty) != Type::Bool {
-                    return Err(cerr!(line, "`while` condition must be Bool, found {cty}"));
-                }
+            Stmt::While { cond, body, .. } => {
+                self.expr(cond, scope, None, Some(ret))?;
                 self.block(body, ret, scope);
                 Ok(false)
             }
@@ -4600,7 +4594,7 @@ impl<'a> Checker<'a> {
                     Type::Stream(inner) => (*inner).clone(),
                     // Iterating a String yields each byte as an Int.
                     Type::Str => Type::Int,
-                    other => {
+                    _ => {
                         // RFC-0091 M3: a user container declares how it is
                         // iterated, and the element type is what its `place nth`
                         // yields. The resolved shape cannot answer, so the
@@ -4617,15 +4611,8 @@ impl<'a> Checker<'a> {
                                     None => nth.ret.clone(),
                                 }
                             }
-                            None => {
-                                return Err(cerr!(
-                                    line,
-                                    "`for` needs an Array, a String, or a type that \
-                                     declares `impl Iterate` (a `size` method and an `nth` \
-                                     projection, `fn nth(read self, ..) -> read T`), \
-                                     found {other}"
-                                ))
-                            }
+                            // The typed judgment refuses the loop (RFC-0125 M7).
+                            None => Type::Err,
                         }
                     }
                 };
@@ -5913,10 +5900,7 @@ impl<'a> Checker<'a> {
                  must yield a value)"
             ));
         };
-        let cty = self.expr(cond, scope, Some(&Type::Bool), fn_ret)?;
-        if self.base(&cty) != Type::Bool && !matches!(cty, Type::Err) {
-            return Err(cerr!(line, "`if` condition must be Bool, found {cty}"));
-        }
+        self.expr(cond, scope, Some(&Type::Bool), fn_ret)?;
         // Branches unify exactly like match arms: the first branch is checked
         // against the expected type, the second against the accumulated result.
         let mut result: Option<Type> = expected.cloned();
@@ -10521,16 +10505,6 @@ mod tests {
              for x in r {{ s = s + x }}\n return s }}"
         ))
         .is_ok());
-        // A `size` alone is not an iterable, and the refusal says which half is
-        // missing.
-        let e = check_src(
-            "type Ring = { data: Array<Int64> }\n\
-             impl Iterate for Ring { fn size(self) -> Int64 { return 0 } }\n\
-             fn main() -> Int64 { let r = Ring { data: [] }\n \
-             for x in r { print(x) }\n return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("`nth` projection"), "{e}");
     }
 
     #[test]
@@ -13671,15 +13645,6 @@ mod tests {
              return x }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("differing types"), "{e}");
-    }
-
-    #[test]
-    fn if_expression_condition_must_be_bool() {
-        let src = "fn main() -> Int64 {\n\
-             let x = if 3 { 1 } else { 2 }\n\
-             return x }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("condition must be Bool"), "{e}");
     }
 
     #[test]
