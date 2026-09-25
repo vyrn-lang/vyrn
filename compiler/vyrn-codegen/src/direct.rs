@@ -17488,6 +17488,7 @@ impl<'p> Fn_<'_, 'p> {
         if core_walk_off() && FORMS[form].1 {
             return Ok(false);
         }
+        self.core_lift_targets(m, s);
         let Some(run) = self.core_run(&body, s) else {
             return Ok(false);
         };
@@ -17501,6 +17502,62 @@ impl<'p> Fn_<'_, 'p> {
         self.core_bound = None;
         count(form, true);
         r.map(|()| true)
+    }
+
+    /// Lift each lambda literal a call row of `s` names as a target, at the
+    /// callee's `fn` parameter type, so the screen finds its signature
+    /// ([`Cx::lambda_sig`]). The arm lifts the same literal at the same type
+    /// to the same instance, so a statement the screen refuses loses nothing.
+    fn core_lift_targets(&mut self, m: &mut Module, s: &Stmt) {
+        let at = self.cx.plan.key_of(s as *const Stmt as usize);
+        let Some(run) = self.core_at.get(&at).cloned() else {
+            return;
+        };
+        let mut calls = Vec::new();
+        for r in &run {
+            core_leaf_rows(r, &mut |x| {
+                if let St::Let(_, rhs) | St::Do { rhs, .. } = x {
+                    if let Rhs::Call {
+                        callee,
+                        solved,
+                        targets,
+                        kind: Callee::Fn,
+                        ..
+                    } = rhs
+                    {
+                        calls.push((callee.clone(), solved.clone(), targets.clone()));
+                    }
+                }
+            });
+        }
+        for (callee, solved, targets) in calls {
+            let Some(f) = self.cx.higher_order.get(callee.as_str()).copied() else {
+                continue;
+            };
+            let Some((_, subst)) = solved_instance(f, &solved) else {
+                continue;
+            };
+            let fns = f.params.iter().filter_map(|p| match &p.ty {
+                Type::Fn(ptys, ret) => Some((ptys, ret)),
+                _ => None,
+            });
+            for ((ptys, ret), t) in fns.zip(&targets) {
+                let Target::Lambda(key, _) = t else { continue };
+                if self.cx.lambda_sig(key).is_some() {
+                    continue;
+                }
+                let Some(lit) = self.literal(key) else {
+                    continue;
+                };
+                let ptys: Vec<Type> = (ptys.iter())
+                    .map(|t| ftypes::substitute(t, &subst))
+                    .collect();
+                let ret = ftypes::substitute(ret, &subst);
+                let saved = std::mem::take(&mut self.expect);
+                let _ = self.lift_lambda(m, lit, &ptys, &ret, lit.line());
+                self.expect = saved;
+            }
+        }
     }
 
     /// The core's rows for one source statement, where this walk reads all of

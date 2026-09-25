@@ -7813,8 +7813,17 @@ impl<'a> Builder<'a> {
             _ => Vec::new(),
         };
         let mut targets = Vec::new();
+        let mut forwarded = Vec::new();
         for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
             if let Some(Some(t)) = bound.get(k) {
+                // A lambda target's frame is its own body, and its captures
+                // follow the call's own arguments, which is where
+                // [`specialize`] puts a forwarded target's.
+                if let Target::Lambda(..) = t {
+                    let vals = self.captures(a);
+                    self.lambda_frame(a, &vals)?;
+                    forwarded.extend(vals.into_iter().map(|v| (Arg::Val(v), Capability::Read)));
+                }
                 targets.push(t.clone());
                 continue;
             }
@@ -7887,6 +7896,7 @@ impl<'a> Builder<'a> {
             }
             vs.push((Arg::Val(v), *cap));
         }
+        vs.extend(forwarded);
         if drains {
             self.drain -= 1;
         }
@@ -7977,10 +7987,10 @@ impl<'a> Builder<'a> {
 
     /// Per argument of a call to `name`, the [`Target`] a `fn`-typed
     /// parameter is bound to: a function the program declares, or a
-    /// parameter of this body that is itself bound. Empty where the callee
-    /// takes no function, and where any function argument is a value no
-    /// target names (a lambda, a stored value), so the call keeps every
-    /// argument as a value.
+    /// parameter of this body that is itself bound, or a lambda literal
+    /// written there, with its captures. Empty where the callee takes no
+    /// function, and where any function argument is a value no target names
+    /// (a stored value), so the call keeps every argument as a value.
     ///
     /// A parameter is `fn`-typed as written: one of an alias type takes the
     /// stored value (RFC-0037), which is a value like any other.
@@ -7994,8 +8004,26 @@ impl<'a> Builder<'a> {
                 out.push(None);
                 continue;
             }
-            let Expr::Var { name: v, .. } = a else {
-                return Vec::new();
+            let v = match a {
+                Expr::Var { name, .. } => name,
+                // A `consume` position may keep the closure, so the literal
+                // is a value the kernel judges ([`NameInfo::closure_reads`]).
+                Expr::Lambda { line, col, .. } if p.capability != Capability::Consume => {
+                    let caps = (self.captures(a).into_iter())
+                        .filter_map(|c| match c {
+                            Val::Name(n) => Some(n),
+                            Val::Lit(_) => None,
+                        })
+                        .map(|n| {
+                            let info = &self.body.names[n as usize];
+                            (info.source.clone(), info.ty.clone())
+                        })
+                        .collect();
+                    let key = lambda_spelling(&self.body.name, *line, *col);
+                    out.push(Some(Target::Lambda(key, caps)));
+                    continue;
+                }
+                _ => return Vec::new(),
             };
             let t = match self.lookup(v) {
                 Some(n)
