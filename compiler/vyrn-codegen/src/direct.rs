@@ -18985,10 +18985,8 @@ impl<'p> Fn_<'_, 'p> {
         // address while neither name is written: a declared release's
         // `match consume self` ([`vyrn_lower::core`]'s `owns_boxes`).
         let joins = self.core_joins(body, *x);
-        let param = from.borrow
-            && (*x as usize) < body.params.len()
-            && info.source.starts_with('@')
-            && unwritten(n);
+        let param =
+            from.borrow && body.params.contains(x) && info.source.starts_with('@') && unwritten(n);
         ((joins || param || (self.owns_heap(&info.ty) && !from.borrow))
             && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
             && (joins || unwritten(*x)))
@@ -19003,7 +19001,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_joins(&self, body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
         let info = &body.names[n as usize];
         if !info.source.starts_with('@')
-            || (n as usize) < body.params.len()
+            || body.params.contains(&n)
             || self.checks(&info.ty)
             || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
         {
@@ -20070,7 +20068,7 @@ impl<'p> Fn_<'_, 'p> {
             if occurs[n] != 0
                 && !(self.core_framed(&info.ty)
                     || self.core_unit(&info.ty)
-                    || (n < body.params.len()
+                    || (body.params.contains(&(n as vyrn_lower::core::Name))
                         && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
                 && !(!self.annotated_apart(&annotated, info)
                     && lets.iter().any(|(b, rhs)| {
@@ -20371,7 +20369,7 @@ impl<'p> Fn_<'_, 'p> {
                     Val::Name(n) => {
                         self.core_val_readable(body, v)
                             && (body.names[*n as usize].binding.is_some()
-                                || (*n as usize) < body.params.len())
+                                || body.params.contains(n))
                     }
                     Val::Lit(_) => false,
                 },
