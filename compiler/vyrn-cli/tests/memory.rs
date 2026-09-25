@@ -2424,11 +2424,34 @@ fn main() -> Int64 {
 // free the field.
 #[test]
 fn a_generic_release_placed_inside_a_generic_release_is_freed_on_both_walks() {
-    let shape = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/shapes/a-generic-release-placed-inside-a-generic-release.vyrn");
+    shape_runs_clean(
+        "a-generic-release-placed-inside-a-generic-release",
+        "6
+",
+    );
+}
+
+// A map literal whose values are layouts: a repeated key, a record with a
+// String field, and a nested array (record `m7-fieldmap`).
+#[test]
+fn a_map_literal_of_layout_values_is_freed_on_both_walks() {
+    shape_runs_clean(
+        "a-map-literal-of-layout-values-the-rows-carry",
+        "720323
+",
+    );
+}
+
+/// Runs the shape `stem` of `tests/shapes/` under the free audit, on the
+/// core's rows and on the AST walk, and asserts each prints `want`, exits 0
+/// and prints nothing on stderr.
+fn shape_runs_clean(stem: &str, want: &str) {
+    let shape = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/shapes/{stem}.vyrn"));
     let src = std::fs::read_to_string(shape).unwrap()
-        + "\nfn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }\n";
-    let dir = std::env::temp_dir().join(format!("vyrn-slotrel-{}", std::process::id()));
+        + "
+fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }
+";
+    let dir = std::env::temp_dir().join(format!("vyrn-shape-{stem}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("m.vyrn");
@@ -2447,7 +2470,7 @@ fn a_generic_release_placed_inside_a_generic_release_is_freed_on_both_walks() {
         );
         assert_eq!(
             got,
-            (Some(0), "6\n".to_string(), String::new()),
+            (Some(0), want.to_string(), String::new()),
             "ast walk: {ast}"
         );
     }

@@ -19730,7 +19730,8 @@ impl<'p> Fn_<'_, 'p> {
     /// A layout part of a record or an array is a layout name here, and
     /// [`Fn_::core_built`] asks where its bytes come from, which needs the
     /// row's list. [`Fn_::map_into`] stores a map's parts through
-    /// [`Fn_::part`], so each is a value in one local.
+    /// [`Fn_::part`]: a layout value is a name with a slot of its own, and
+    /// [`Fn_::map_set`] moves its bytes into the entry.
     fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
         let layout = |t: &Type| matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t);
         // A cross-field `where` runs on the finished literal (RFC-0079) and
@@ -19748,7 +19749,6 @@ impl<'p> Fn_<'_, 'p> {
             vs.iter().zip(&tys).all(|(v, t)| {
                 (self.core_val_readable(body, v) && self.core_part_ty(t))
                     || (layout(t)
-                        && !matches!(ctor, Ctor::Map)
                         && matches!(v, Val::Name(n) if layout(&body.names[*n as usize].ty)))
             })
         })
@@ -19823,9 +19823,10 @@ impl<'p> Fn_<'_, 'p> {
         vs.iter().zip(&tys).all(|(v, t)| {
             self.core_framed(t)
                 || (self.core_payload_layout(body, v, t)
-                    && matches!(v, Val::Name(n)
-                        if body.names[*n as usize].binding.is_some()
-                            || self.core_alias(body, *n).is_some()))
+                    && (matches!(ctor, Ctor::Map)
+                        || matches!(v, Val::Name(n)
+                            if body.names[*n as usize].binding.is_some()
+                                || self.core_alias(body, *n).is_some())))
                 || self.core_part_of(body, ss, i, v)
         })
     }
