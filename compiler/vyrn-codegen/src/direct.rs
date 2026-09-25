@@ -15250,6 +15250,20 @@ impl<'p> Fn_<'_, 'p> {
 // `SmallArray<T, N>` (RFC-0056, RFC-0077 M2l)
 // ---------------------------------------------------------------------------
 
+/// Write the inline state of a `SmallArray<T, N>` header at `dest`: `len`,
+/// `cap == n` and a null `data` (RFC-0056). Both walks build one through it.
+fn sa_head(b: &mut Frame, dest: Dest, l: &Layout, len: usize, n: usize) {
+    dest.addr(b, l.fields[0]);
+    b.ins(&Instruction::I64Const(len as i64));
+    b.ins(&Instruction::I64Store(word8()));
+    dest.addr(b, l.fields[1]);
+    b.ins(&Instruction::I64Const(n as i64));
+    b.ins(&Instruction::I64Store(word8()));
+    dest.addr(b, l.fields[2]);
+    b.ins(&Instruction::I32Const(0));
+    b.ins(&Instruction::I32Store(word()));
+}
+
 /// A `SmallArray<T, N>` is `{ i64 len, i64 cap, ptr data, [N x T] inline }` with
 /// TWO live states: `cap == N` is inline (`data` is null and never read) and
 /// `cap > N` is spilled. M2c refused it, and the reason was exact — its first
@@ -15318,15 +15332,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         let l = self.layout_of(want, line)?;
         let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::I64Const(len as i64));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::I64Const(n as i64));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::I32Store(word()));
+        sa_head(b, Dest::Slot(off), &l, len, n);
         if len > 0 {
             b.slot(off + l.fields[3]);
             b.ins(&Instruction::LocalGet(src));
@@ -15338,6 +15344,26 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.slot(off);
         Ok(())
+    }
+
+    /// A `SmallArray<T, N>` literal the core's row makes (RFC-0125 M7): the
+    /// header of [`sa_head`] at `dest`, and the parts written straight into
+    /// the inline buffer. The checker proved `parts.len() <= N`.
+    #[allow(clippy::too_many_arguments)]
+    fn sa_into(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        ty: &Type,
+        inner: &Type,
+        n: usize,
+        parts: &mut Parts,
+        line: usize,
+    ) -> Result<(), String> {
+        let l = self.layout_of(ty, line)?;
+        sa_head(b, dest, &l, parts.len(), n);
+        self.fixed_elems(m, b, dest.at(l.fields[3]), inner, parts, line)
     }
 
     /// `xs.push(v)` on a `SmallArray<T, N>` — store into the live buffer, growing
@@ -19468,6 +19494,11 @@ impl<'p> Fn_<'_, 'p> {
                     self.fixed_elems(m, b, dest, &inner, &mut parts, line)?;
                     dest.addr(b, 0);
                 }
+                Type::SmallArray(inner, n) if vs.len() <= n => {
+                    let mut parts = Parts::Core(body, vs, w);
+                    self.sa_into(m, b, dest, ty, &inner, n, &mut parts, line)?;
+                    dest.addr(b, 0);
+                }
                 _ => return unsupported("an array literal the row does not place", line),
             },
             Rhs::Make(Ctor::Map, vs) => {
@@ -19671,6 +19702,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             (Ctor::Array, Type::Array(inner)) => Some(vec![*inner; n]),
             (Ctor::Array, Type::ArrayN(inner, k)) if k == n && n > 0 => Some(vec![*inner; n]),
+            (Ctor::Array, Type::SmallArray(inner, k)) if n <= k => Some(vec![*inner; n]),
             // A key and a value per entry.
             (Ctor::Map, Type::Map(k, v)) if n % 2 == 0 => Some(
                 (0..n)
