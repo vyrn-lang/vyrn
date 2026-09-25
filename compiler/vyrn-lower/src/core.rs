@@ -3275,6 +3275,24 @@ impl<'a> Builder<'a> {
         self.checked(&from, to, e).filter(|_| self.proven(e, to))
     }
 
+    /// The value `e` takes at a destination of `to`: the constructor row of
+    /// the validated type it crosses into where the checker proved the
+    /// crossing ([`Builder::proven_crossing`]), bound to a temporary, and
+    /// `e`'s own value otherwise, whose check the emitter's reader runs.
+    /// `None` is a destination of no type the builder knows.
+    fn proven_val(
+        &mut self,
+        e: &'a Expr,
+        to: Option<&Type>,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        match to.and_then(|to| self.proven_crossing(e, to)) {
+            Some(t) => Ok(Val::Name(self.checked_temp(&t, e, line, out)?)),
+            None => self.val(e, out),
+        }
+    }
+
     /// [`Builder::check`] bound to a temporary of the validated type `to`.
     /// A constructor hands its argument back, so over a literal the temporary
     /// is static data, as the literal is.
@@ -4185,12 +4203,8 @@ impl<'a> Builder<'a> {
                         return Ok(());
                     }
                 }
-                let proven = value
-                    .as_ref()
-                    .zip(self.ret.clone())
-                    .and_then(|(e, r)| self.proven_crossing(e, &r));
-                let v = match (value, proven) {
-                    (Some(e), Some(to)) => Some(Val::Name(self.checked_temp(&to, e, *line, out)?)),
+                let v = match (value, self.ret.clone()) {
+                    (Some(e), Some(r)) => Some(self.proven_val(e, Some(&r), *line, out)?),
                     (Some(e), None) => Some(self.val(e, out)?),
                     (None, _) => None,
                 };
@@ -4885,9 +4899,9 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
-        let v = self.val(value, out)?;
         let (base, bty) = base;
         let fty = self.field_ty(&bty, field, line)?;
+        let v = self.proven_val(value, Some(&fty), line, out)?;
         // `s.dense.push(i)` IS `s.dense = s.dense.push(i)`: the
         // receiver comes back through the result, so the store hands
         // the buffer back and releases nothing — the same rule a
@@ -4945,7 +4959,6 @@ impl<'a> Builder<'a> {
                 (Place::Elem(Box::new(base), i), value)
             }
         };
-        let v = self.val(stored, out)?;
         // A user container's `place at` yields the element's place
         // (RFC-0091 M2), and the element's type is the value's. Such
         // a store is REWRITTEN into a block of its own before the
@@ -4959,6 +4972,7 @@ impl<'a> Builder<'a> {
             Ok(t) => t,
             Err(_) => self.ty_of(value)?,
         };
+        let v = self.proven_val(stored, Some(&ety), line, out)?;
         let key = self.store_key(sid);
         let site = Site::Node(key);
         // The same hand-back, and the INDEX counts as well: `xs[i] =
@@ -6824,17 +6838,24 @@ impl<'a> Builder<'a> {
                 }
                 Ok(Rhs::Make(Ctor::Try(name.clone()), vs))
             }
-            Expr::ArrayLit { elems, .. } => {
+            // A part crosses into its slot's type as a stored value does.
+            Expr::ArrayLit { elems, line } => {
+                let ety = self
+                    .ty_of(e)
+                    .ok()
+                    .and_then(|t| self.elem_ty(&t, *line).ok());
                 let mut vs = Vec::new();
                 for a in elems {
-                    vs.push(self.val(a, out)?);
+                    vs.push(self.proven_val(a, ety.as_ref(), *line, out)?);
                 }
                 Ok(Rhs::Make(Ctor::Array, vs))
             }
-            Expr::StructLit { name, fields, .. } => {
+            Expr::StructLit { name, fields, line } => {
+                let ty = self.ty_of(e).ok();
                 let mut vs = Vec::new();
-                for (_, a) in fields {
-                    vs.push(self.val(a, out)?);
+                for (f, a) in fields {
+                    let fty = ty.as_ref().and_then(|t| self.field_ty(t, f, *line).ok());
+                    vs.push(self.proven_val(a, fty.as_ref(), *line, out)?);
                 }
                 Ok(Rhs::Make(
                     Ctor::Record(
@@ -6844,11 +6865,18 @@ impl<'a> Builder<'a> {
                     vs,
                 ))
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { entries, line } => {
+                let (kty, vty) = match self
+                    .ty_of(e)
+                    .map(|t| vyrn_frontend::types::resolve(&t, self.proto.types()))
+                {
+                    Ok(Type::Map(k, v)) => (Some(*k), Some(*v)),
+                    _ => (None, None),
+                };
                 let mut vs = Vec::new();
                 for (k, v) in entries {
-                    vs.push(self.val(k, out)?);
-                    vs.push(self.val(v, out)?);
+                    vs.push(self.proven_val(k, kty.as_ref(), *line, out)?);
+                    vs.push(self.proven_val(v, vty.as_ref(), *line, out)?);
                 }
                 Ok(Rhs::Make(Ctor::Map, vs))
             }
