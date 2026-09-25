@@ -7404,10 +7404,17 @@ impl<'a> Builder<'a> {
             ));
         }
         // A method is a call after dispatch (section 2.1), as the `Fallible`
-        // switch states it.
-        let (callee, kind, solved) = match args.first().and_then(|r| self.dispatched(name, r)) {
-            Some((f, solved)) if kind == Callee::Method => (f, Callee::Fn, solved),
-            _ => (name.to_string(), kind, Vec::new()),
+        // switch states it. So is `x.copy()` of a type that declares
+        // `impl Copy` (RFC-0091 M1): that declaration's function, with its
+        // type arguments, returns a value that owns its heap.
+        let dispatched = match (kind, args.first()) {
+            (Callee::Method, Some(r)) => self.dispatched(name, r),
+            (Callee::Reserved, Some(r)) if name == "@copy" => self.copied(r),
+            _ => None,
+        };
+        let (callee, kind, solved) = match dispatched {
+            Some((f, solved)) => (f, Callee::Fn, solved),
+            None => (name.to_string(), kind, Vec::new()),
         };
         Ok(Rhs::Call {
             callee,
@@ -7439,6 +7446,15 @@ impl<'a> Builder<'a> {
             (Some(f), None) => Some(f),
             _ => None,
         }
+    }
+
+    /// The `impl Copy` function `x.copy()` calls on `recv`'s type, and its
+    /// type arguments; `None` where the type declares no `copy`.
+    fn copied(&self, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
+        let rty = self.ty_of(recv).ok()?;
+        let f = vyrn_frontend::types::copy_impl(&self.program.impls, &rty)?;
+        let solved = self.impl_args(&f, &rty)?;
+        Some((f, solved))
     }
 
     /// Whether the program declares `f` as a function that is no generic one.

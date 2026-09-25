@@ -1,0 +1,7 @@
+// a record copied, the copy mutated, both released
+// pin: 0 break, 0 continue
+// `.copy()` of a record that owns a String and an Array, and of a generic
+// `impl<T> Copy` type. The core states the second as a call to the
+// declaration's function, and each copy is a fresh owner released at block
+// exit (the m7-copy record).
+type R = { name: String, xs: Array<Int64>, n: Int64 }          type Tagged<T> = { items: Array<T>, id: Int64 }          impl<T> Copy for Tagged<T> { fn copy(self) -> Tagged<T> { return Tagged { items: self.items.copy(), id: self.id + 1 } } }          fn vyrnTestMain() -> Int64 { let r = R { name: "ab" + "c", xs: [1, 2], n: 3 } let mut c = r.copy() c.name = c.name + "!" c.xs.push(9) c.n = 4 print("\{r.name} \{r.xs.length} \{r.n} \{c.name} \{c.xs.length} \{c.n}") let t = Tagged { items: ["x" + "y"], id: 1 } let mut u = t.copy() u.items.push("z") return t.items.length * 1000 + t.id * 100 + u.items.length * 10 + u.id }
