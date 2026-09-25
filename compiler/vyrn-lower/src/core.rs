@@ -360,7 +360,8 @@ impl BorrowKind {
 ///
 /// The statements that carry one: [`St::Store`] (its `Stmt::Assign`,
 /// `Stmt::SetField` or `Stmt::IndexSet` node), a [`St::Drop`] of a discarded
-/// result (its `Stmt::Expr` node), a [`St::Drop`] one edge of a join owes
+/// result (its `Stmt::Expr` node), a [`St::Drop`] a reader wrote (its
+/// `Stmt::Drop` node), a [`St::Drop`] one edge of a join owes
 /// ([`Site::Edge`]), [`St::Row`], [`St::If`], [`St::Block`], [`St::Break`],
 /// [`St::Continue`], [`St::Return`] and [`Arm`]. An argument temporary's key
 /// rides on the NAME instead ([`NameInfo::arg_drop`]), because the drop that
@@ -813,8 +814,9 @@ pub enum St {
     },
     /// A release. `site` is the node the plan keys the row by where the plan
     /// has one: the `Stmt::Expr` of a discarded result, or the join and edge
-    /// of a Rule N release. [`Site::None`] elsewhere — a `drop` statement, a
-    /// scope's own release, an argument temporary, a payload binder, which
+    /// of a Rule N release. A `drop` statement carries its own node, which is
+    /// how a reader finds its run. [`Site::None`] elsewhere — a scope's own
+    /// release, an argument temporary, a payload binder, which
     /// [`NameInfo::arg_drop`], [`NameInfo::receiver`] and [`Arm::frees`] name
     /// instead.
     ///
@@ -1254,6 +1256,8 @@ impl Body {
             | St::Loop { site, .. }
             | St::Do { site, .. }
             | St::Switch { site, .. } => (*site != 0).then_some(*site),
+            // A `drop` the reader wrote; a placed release has no line.
+            St::Drop(_, Site::Node(at), line, _) if *line != 0 => Some(*at),
             // A `region` names its block, which is the node its statement's
             // reader asks by: the site is the block's scope, and no other
             // statement's run is keyed there.
@@ -4826,7 +4830,7 @@ impl<'a> Builder<'a> {
                 // answers for its own blocks now — `free` refuses one by its
                 // class word — so a `drop` inside a region is an ordinary
                 // drop.
-                out.push(St::Drop(n, Site::None, *line, None));
+                out.push(St::Drop(n, Site::Node(sid), *line, None));
             }
             // RFC-0114 section 25: an unaudited build emits no audit hook, so the
             // row states neither the call nor its operand. A row for `p + 8`
@@ -8990,6 +8994,7 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
                     out.stood_down.insert(*at);
                 }
             }
+            St::Drop(_, _, line, _) if *line > 0 => {}
             St::Drop(n, at, _, holes) => match at {
                 Site::Node(at) => {
                     if body.names[*n as usize].for_consume {
