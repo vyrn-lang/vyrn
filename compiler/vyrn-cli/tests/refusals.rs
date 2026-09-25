@@ -815,6 +815,45 @@ fn the_checkers_mut_unit_tests_are_still_refused() {
     );
 }
 
+/// The checker's unit test of `break` and `continue` outside a loop, asked
+/// of the whole compiler after the rule moved to the typed judgment (RFC-0125
+/// M7, group 2).
+#[test]
+fn the_checkers_loop_unit_test_is_still_refused() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("a break", "`break` outside a loop", "fn main() -> Int64 { break return 0 }"),
+        (
+            "a continue",
+            "`continue` outside a loop",
+            "fn main() -> Int64 { continue return 0 }",
+        ),
+        (
+            "a break in a lambda in a loop",
+            "`break` outside a loop",
+            "fn main() -> Int64 { while true {              let f: fn(Int64) -> Unit = x -> { break } } return 0 }",
+        ),
+    ];
+    let dir = common::scratch("loop-rule");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains(says) {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a loop exit outside a loop no longer refuses:
+  {}",
+        bad.join(
+            "
+  "
+        )
+    );
+}
+
 /// The shapes row 07's own unit tests pinned, still refused after the rule
 /// left `movecheck.rs` (RFC-0125 §3 M3, row 07).
 ///

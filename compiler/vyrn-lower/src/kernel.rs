@@ -2693,27 +2693,31 @@ impl<'b> Kernel<'b> {
                     self.join(&ctx.breaks)?
                 };
             }
-            St::Break { site } => {
-                let Some(l) = self.loops.last_mut() else {
-                    return self.refuse("a `break` outside a loop".into());
-                };
-                // Names bound inside the loop go out of scope here.
-                let inside = l.bound_inside.clone();
+            // Outside a loop the path ends: the typed judgment refuses the
+            // statement (`typed::loops`), and its refusal silences this list.
+            St::Break { .. } | St::Continue { .. } if self.loops.is_empty() => st.ended = true,
+            St::Break { site, .. } => {
+                // Names bound inside the loop go out of scope here. The arm
+                // above took the break with no loop around it.
+                let inside = self.loops.last().expect("a loop").bound_inside.clone();
                 self.scope_end(st, &inside, Exit::Break, *site)?;
-                let l = self.loops.last_mut().unwrap();
-                l.breaks.push(st.clone());
+                self.loops
+                    .last_mut()
+                    .expect("a loop")
+                    .breaks
+                    .push(st.clone());
                 st.ended = true;
             }
-            St::Continue { site } => {
-                let Some(ctx) = self.loops.last() else {
-                    return self.refuse("a `continue` outside a loop".into());
-                };
-                let inside = ctx.bound_inside.clone();
+            St::Continue { site, .. } => {
+                let inside = self.loops.last().expect("a loop").bound_inside.clone();
                 self.scope_end(st, &inside, Exit::Continue, *site)?;
                 // Recorded, not judged here: the loop widens its entry from
                 // every back edge before any of them is compared to it.
-                let l = self.loops.last_mut().unwrap();
-                l.continues.push(st.clone());
+                self.loops
+                    .last_mut()
+                    .expect("a loop")
+                    .continues
+                    .push(st.clone());
                 st.ended = true;
             }
             St::Return {

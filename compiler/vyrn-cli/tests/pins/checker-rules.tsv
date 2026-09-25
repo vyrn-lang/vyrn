@@ -69,3 +69,4 @@ checker-rules.vyrn:336:0: cannot mutate a field of `h` (declared without `mut`)
 checker-rules.vyrn:340:0: cannot store into `untyped` (declared without `mut`)
 checker-rules.vyrn:346:0: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:353:0: `x` is Int64 but assigned String
+checker-rules.vyrn:361:0: `break` outside a loop

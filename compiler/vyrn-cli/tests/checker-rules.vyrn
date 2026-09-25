@@ -353,6 +353,16 @@ fn storeMismatch() -> Int64 {
     x = "s"
     return x
 }
+// `break` and `continue` outside a loop are the typed judgment's. A lambda
+// is a frame of its own, so the loop around it does not count.
+fn breakInLambda() -> Int64 {
+    while true {
+        let f: fn(Int64) -> Unit = x -> {
+            break
+        }
+    }
+    return 0
+}
 fn main() -> Int64 {
     return 0
 }

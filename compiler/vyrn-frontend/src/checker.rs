@@ -1370,7 +1370,6 @@ fn check_accum_inner(
         impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
-        in_loop: RefCell::new(false),
         binder_types: RefCell::new(HashMap::new()),
         in_root: std::cell::Cell::new(false),
         errors: RefCell::new(Vec::new()),
@@ -2333,12 +2332,6 @@ struct Checker<'a> {
     /// one (`let x: Int8 = 300`) would otherwise report line 0; this is the
     /// enclosing statement's answer, updated at every [`Self::stmt`] entry.
     stmt_line: RefCell<usize>,
-    /// True while checking the body of a `for`/`while`/`while let` loop
-    /// (RFC-0060). `break`/`continue` are legal only when this is set; elsewhere
-    /// they are a checker error. Saved/restored around each loop body and reset
-    /// to `false` when descending into a lambda body (a loop does not extend
-    /// across a function boundary).
-    in_loop: RefCell<bool>,
     /// Names of `extern` (host-provided) functions — not usable as function
     /// values (RFC-0037: closures do not cross the host boundary).
     extern_fns: &'a std::collections::HashSet<String>,
@@ -4562,28 +4555,18 @@ impl<'a> Checker<'a> {
                     None => Ok(false),
                 }
             }
-            Stmt::Break { line } => {
-                if !*self.in_loop.borrow() {
-                    return Err(cerr!(line, "`break` outside a loop"));
-                }
+            Stmt::Break { .. } => {
                 // `break` diverges but does not return — it never satisfies the
                 // "returns on all paths" obligation.
                 Ok(false)
             }
-            Stmt::Continue { line } => {
-                if !*self.in_loop.borrow() {
-                    return Err(cerr!(line, "`continue` outside a loop"));
-                }
-                Ok(false)
-            }
+            Stmt::Continue { .. } => Ok(false),
             Stmt::While { cond, body, line } => {
                 let cty = self.expr(cond, scope, None, Some(ret))?;
                 if self.base(&cty) != Type::Bool {
                     return Err(cerr!(line, "`while` condition must be Bool, found {cty}"));
                 }
-                let prev = self.in_loop.replace(true);
                 self.block(body, ret, scope);
-                self.in_loop.replace(prev);
                 Ok(false)
             }
             Stmt::ForIn {
@@ -4647,9 +4630,7 @@ impl<'a> Checker<'a> {
                         mutable: false,
                     },
                 );
-                let prev = self.in_loop.replace(true);
                 self.block(body, ret, scope);
-                self.in_loop.replace(prev);
                 scope.pop();
                 // A `for` over a user container is a desugar too, one level up:
                 // the loop three engines walk is `place nth` inlined per turn
@@ -8664,12 +8645,7 @@ impl<'a> Checker<'a> {
                                  use an expression body `|..| expr`"
                             ));
                         }
-                        // A lambda is a function boundary: an enclosing loop does
-                        // not extend into it (`break`/`continue` inside would be a
-                        // checker error), so reset the in-loop flag (RFC-0060).
-                        let prev_loop = self.in_loop.replace(false);
                         let returns = self.block(b, &ret, &mut inner);
-                        self.in_loop.replace(prev_loop);
                         if ret != Type::Unit && !returns {
                             return Err(cerr!(lline, "this lambda must return {ret} on all paths"));
                         }
@@ -8859,10 +8835,7 @@ impl<'a> Checker<'a> {
                 }
             }
             LambdaBody::Block(b) => {
-                // Function boundary — reset the in-loop flag (RFC-0060).
-                let prev_loop = self.in_loop.replace(false);
                 let returns = self.block(b, &ret, &mut inner);
-                self.in_loop.replace(prev_loop);
                 if ret != Type::Unit && !returns {
                     return Err(cerr!(line, "this lambda must return {ret} on all paths"));
                 }
@@ -11240,28 +11213,6 @@ mod tests {
         // With no annotation at all the advice to add one still stands.
         let none = check_src("fn main() -> Int64 { let a = [] return 0 }").unwrap_err();
         assert!(none.contains("annotate it"), "{none}");
-    }
-
-    #[test]
-    fn break_continue_only_inside_loops() {
-        // Legal inside `for`/`while` bodies.
-        assert!(check_src(
-            "fn main() -> Int64 { for x in [1, 2] { if x == 2 { break } continue } return 0 }"
-        )
-        .is_ok());
-        // `break` at a function's top level is an error.
-        let b = check_src("fn main() -> Int64 { break return 0 }").unwrap_err();
-        assert!(b.contains("`break` outside a loop"), "{b}");
-        // `continue` outside a loop is an error.
-        let c = check_src("fn main() -> Int64 { continue return 0 }").unwrap_err();
-        assert!(c.contains("`continue` outside a loop"), "{c}");
-        // A loop does not extend into a lambda — a `break` inside is an error.
-        let l = check_src(
-            "fn ap(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
-             fn main() -> Int64 { while true { let r = ap(x -> { break }) } return 0 }",
-        )
-        .unwrap_err();
-        assert!(l.contains("`break` outside a loop"), "{l}");
     }
 
     #[test]

@@ -866,11 +866,14 @@ pub enum St {
         region: bool,
     },
     /// `site` is the statement's node, or 0 for a break this pass made up.
+    /// `line` is the statement's, and 0 where `site` is.
     Break {
         site: usize,
+        line: usize,
     },
     Continue {
         site: usize,
+        line: usize,
     },
     Return {
         value: Option<Val>,
@@ -1229,8 +1232,8 @@ impl Body {
                 ..
             } => (*site != 0).then_some(*site),
             St::If { site, .. }
-            | St::Break { site }
-            | St::Continue { site }
+            | St::Break { site, .. }
+            | St::Continue { site, .. }
             | St::Loop { site, .. }
             | St::Do { site, .. }
             | St::Switch { site, .. } => (*site != 0).then_some(*site),
@@ -4041,16 +4044,22 @@ impl<'a> Builder<'a> {
                 };
                 self.return_exit(v, sid, *line, out)?;
             }
-            Stmt::Break { .. } => {
+            Stmt::Break { line } => {
                 if let Some(Some(u)) = self.walks.last().cloned() {
                     self.release_unreached(&u, sid, out);
                 }
                 self.drops_at(Exit::Break, sid, out)?;
-                out.push(St::Break { site: sid });
+                out.push(St::Break {
+                    site: sid,
+                    line: *line,
+                });
             }
-            Stmt::Continue { .. } => {
+            Stmt::Continue { line } => {
                 self.drops_at(Exit::Continue, sid, out)?;
-                out.push(St::Continue { site: sid });
+                out.push(St::Continue {
+                    site: sid,
+                    line: *line,
+                });
             }
             Stmt::If {
                 cond,
@@ -4142,7 +4151,7 @@ impl<'a> Builder<'a> {
                 l.push(St::If {
                     cond: c,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0 }],
+                    els: vec![St::Break { site: 0, line: 0 }],
                     site: 0,
                 });
                 self.loop_marks.push(self.body.names.len());
@@ -4303,7 +4312,7 @@ impl<'a> Builder<'a> {
                 l.push(St::If {
                     cond,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0 }],
+                    els: vec![St::Break { site: 0, line: 0 }],
                     site: 0,
                 });
                 // Whose is each element? The loop VARIABLE is the last owner
@@ -4653,7 +4662,7 @@ impl<'a> Builder<'a> {
             St::If {
                 cond: Val::Name(c),
                 then: Vec::new(),
-                els: vec![St::Break { site: 0 }],
+                els: vec![St::Break { site: 0, line: 0 }],
                 site: 0,
             },
         ];
@@ -8379,7 +8388,9 @@ fn typed(program: &Program, top: &Body, file: &Option<String>) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
     TYPED.with(|t| {
         let (out, seen) = &mut *t.borrow_mut();
-        let found = crate::typed::stores(top, &global_mutable, seen);
+        let mut found = crate::typed::stores(top, &global_mutable, seen);
+        found.extend(crate::typed::loops(top, seen));
+        found.sort_by_key(|(line, _)| *line);
         let refused = !found.is_empty();
         out.extend(
             found

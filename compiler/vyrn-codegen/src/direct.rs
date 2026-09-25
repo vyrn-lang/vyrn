@@ -18118,7 +18118,7 @@ impl<'p> Fn_<'_, 'p> {
                     els,
                     site: 0,
                 } if then.is_empty()
-                    && matches!(els.as_slice(), [St::Break { site: 0 }])
+                    && matches!(els.as_slice(), [St::Break { site: 0, .. }])
                     && !self.loops.is_empty() =>
                 {
                     self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;

@@ -996,3 +996,47 @@ fn each_store(stmts: &[St], names: &[NameInfo], f: &mut dyn FnMut(&Place, usize,
         }
     }
 }
+
+/// Every `break` and `continue` with no loop around it in its own frame, as
+/// the sentence `vyrn check` gives and its line: RFC-0125 M7, the rule the
+/// checker's `stmt` stated at two sites. A lambda's body is a frame of its
+/// own, so a loop outside the lambda does not count. `seen` is as in
+/// [`stores`].
+pub fn loops(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(usize, String)> {
+    fn walk(
+        stmts: &[St],
+        in_loop: bool,
+        seen: &mut std::collections::HashSet<usize>,
+        out: &mut Vec<(usize, String)>,
+    ) {
+        for s in stmts {
+            match s {
+                St::Break { site, line } | St::Continue { site, line } if !in_loop => {
+                    if seen.insert(*site) {
+                        let what = if matches!(s, St::Break { .. }) {
+                            "break"
+                        } else {
+                            "continue"
+                        };
+                        out.push((*line, format!("`{what}` outside a loop")));
+                    }
+                }
+                St::If { then, els, .. } => {
+                    walk(then, in_loop, seen, out);
+                    walk(els, in_loop, seen, out);
+                }
+                St::Loop { body, .. } => walk(body, true, seen, out),
+                St::Block { body, .. } => walk(body, in_loop, seen, out),
+                St::Switch { arms, .. } => {
+                    arms.iter().for_each(|a| walk(&a.body, in_loop, seen, out))
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for f in body.frames() {
+        walk(&f.stmts, false, seen, &mut out);
+    }
+    out
+}
