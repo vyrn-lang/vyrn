@@ -247,8 +247,9 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {",
-            Shared, Twice,
-            "RFC-0013's module state: the initializer and the teardown, and the \
+            Shared, Both,
+            "RFC-0013's module state: the initializer, walked from the core's \
+             module-state body where that carries it, the teardown, and the \
              one-line entry to a function body",
         ),
         sec(
