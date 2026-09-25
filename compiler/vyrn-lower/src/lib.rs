@@ -750,7 +750,7 @@ fn build<'a>(
 /// The corpus has none; one would fail `tests/lowered.rs` as a missing
 /// instantiation rather than hide under a rule, which is the failure that file
 /// prefers.
-fn dispatched<'f>(
+pub(crate) fn dispatched<'f>(
     releases: &[Release],
     by_name: &HashMap<&str, &'f Function>,
 ) -> Vec<(&'f str, HashMap<String, Type>)> {

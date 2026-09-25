@@ -1,0 +1,6 @@
+// a generic release the kernel places inside a generic release
+// pin: 0 break, 0 continue
+// `Outer<T>`'s release takes `p` and never drops it, so the kernel places
+// `Pair<T>`'s release inside it, and the placer lowers a second time to
+// build that instance. Main's binary leaked `p` here (the m7-slotrel record).
+type Pair<T> = { a: Array<T>, n: Int64 }          impl<T> Owned for Pair<T> { fn release(consume self) { let a = consume self.a drop a } }          type Outer<T> = { p: Pair<T>, k: Int64 }          impl<T> Owned for Outer<T> { fn release(consume self) { let p = consume self.p } }          fn vyrnTestMain() -> Int64 { let o = Outer { p: Pair { a: ["x"], n: 4 }, k: 2 } return o.k + o.p.n }

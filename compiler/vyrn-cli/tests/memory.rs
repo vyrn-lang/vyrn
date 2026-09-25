@@ -2417,3 +2417,39 @@ fn main() -> Int64 {
         assert_eq!(got, (Some(0), "1\n".to_string()));
     }
 }
+
+// A generic release that takes a field of a generic declared release type and
+// never drops it: the kernel places that release inside the body, and the
+// placer lowers a second time to build it (record `m7-slotrel`). Both walks
+// free the field.
+#[test]
+fn a_generic_release_placed_inside_a_generic_release_is_freed_on_both_walks() {
+    let shape = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/shapes/a-generic-release-placed-inside-a-generic-release.vyrn");
+    let src = std::fs::read_to_string(shape).unwrap()
+        + "\nfn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }\n";
+    let dir = std::env::temp_dir().join(format!("vyrn-slotrel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("m.vyrn");
+    std::fs::write(&file, src).unwrap();
+    for ast in [false, true] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+        cmd.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
+        if ast {
+            cmd.env("VYRN_NO_CORE_WALK", "1");
+        }
+        let run = cmd.output().expect("vyrn run");
+        let got = (
+            run.status.code(),
+            String::from_utf8_lossy(&run.stdout).to_string(),
+            String::from_utf8_lossy(&run.stderr).to_string(),
+        );
+        assert_eq!(
+            got,
+            (Some(0), "6\n".to_string(), String::new()),
+            "ast walk: {ast}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
