@@ -733,10 +733,11 @@ impl<'b> Kernel<'b> {
     /// rule about every value. A borrow is not owned; everything else the
     /// body binds is, whatever its type owns: a value that owns no heap, and
     /// a name holding static data (`let s = "a"`), which owes no release and
-    /// is still this frame's to hand over once.
+    /// is still this frame's to hand over once. A must-use parameter is the
+    /// callee's too, whatever its capability ([`crate::core::NameInfo::must_use_param`]).
     fn owned(&self, n: Name) -> bool {
         let i = &self.body.names[n as usize];
-        i.releases || !i.borrow
+        i.releases || !i.borrow || i.must_use_param
     }
 
     /// Whether a held `n` owes a RELEASE at an exit — RFC-0114, which is a

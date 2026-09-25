@@ -4619,7 +4619,7 @@ impl<'a> Builder<'a> {
                     // The loop pulled the stream to its end, or a `break`
                     // left early: either way the loop closes it here, where
                     // the loop is the stream's last owner.
-                    if self.body.names[it as usize].releases && self.taken_by_loop(it, sid) {
+                    if self.stream_owed(it) && self.taken_by_loop(it, sid) {
                         out.push(St::Drop(it, Site::None, 0, None));
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {
@@ -4852,6 +4852,14 @@ impl<'a> Builder<'a> {
         frees
     }
 
+    /// Whether the stream `it` a `for` walks is this frame's to close: one it
+    /// holds, or a parameter, which carries the obligation into the callee
+    /// ([`NameInfo::must_use_param`]).
+    fn stream_owed(&self, it: Name) -> bool {
+        let info = &self.body.names[it as usize];
+        info.releases || info.must_use_param
+    }
+
     /// The rows a `return` or a `?` runs for every enclosing `for`, innermost
     /// first: the elements no turn reached, then the stream it walks, closed.
     fn leave_loops(&mut self, exit: usize, out: &mut Vec<St>) {
@@ -4859,7 +4867,7 @@ impl<'a> Builder<'a> {
             self.release_unreached(u, exit, out);
         }
         for it in self.stream_loops.iter().rev() {
-            if self.body.names[*it as usize].releases {
+            if self.stream_owed(*it) {
                 out.push(St::Drop(*it, Site::None, 0, None));
             }
         }
