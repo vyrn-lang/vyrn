@@ -134,7 +134,7 @@ fn sections() -> Vec<Section> {
              blocks of `Checker::call` until then",
         ),
         sec(
-            "pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {",
+            "pub fn check_accum_with_json_types(program: &Program) -> CheckedJson {",
             Shared,
             "the full-check entry point and the two renderers a conformance \
              refusal quotes an impl head with",

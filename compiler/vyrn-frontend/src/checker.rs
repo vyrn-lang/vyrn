@@ -99,7 +99,7 @@ pub fn check_accum_reusing(
     program: &Program,
     module_hashes: &std::collections::HashMap<String, String>,
 ) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (out, binders, _, _, _) = check_accum_inner(program, Some(module_hashes));
+    let (out, binders, _, _, _, _) = check_accum_inner(program, Some(module_hashes));
     (out, binders)
 }
 
@@ -420,7 +420,7 @@ pub(crate) fn local_index(
 }
 
 pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (out, binders, _, _, _) = check_accum_full(program);
+    let (out, binders, _, _, _, _) = check_accum_full(program);
     (out, binders)
 }
 
@@ -688,10 +688,21 @@ pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
 
 use crate::types::INT32;
 
-pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {
-    let (out, _, _, json, jdec) = check_accum_full(program);
-    (out, json, jdec)
+/// The fourth answer is the functions with a refused statement, where every
+/// diagnostic is one of theirs, so every other function's body is typed.
+/// `None` where a refusal stands outside a function body.
+pub fn check_accum_with_json_types(program: &Program) -> CheckedJson {
+    let (out, _, _, json, jdec, refused) = check_accum_full(program);
+    (out, json, jdec, refused)
 }
+
+/// What [`check_accum_with_json_types`] answers.
+pub type CheckedJson = (
+    Vec<Diagnostic>,
+    Vec<Type>,
+    Vec<Type>,
+    Option<HashSet<String>>,
+);
 
 /// The full checking pass: diagnostics, the root module's bindings, and the
 /// RFC-0037 stored-function-value collection.
@@ -703,6 +714,7 @@ fn check_accum_full(
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
+    Option<HashSet<String>>,
 ) {
     check_accum_inner(program, None)
 }
@@ -769,8 +781,13 @@ fn check_accum_inner(
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
+    Option<HashSet<String>>,
 ) {
     let mut out = Vec::new();
+    // The functions with a refused statement, and how many diagnostics they
+    // gave: when that is every diagnostic, every other body is typed.
+    let mut refused: HashSet<String> = HashSet::new();
+    let mut in_bodies = 0usize;
 
     // 1. Collect and validate type declarations.
     let mut types: HashMap<String, TypeDecl> = HashMap::new();
@@ -1481,6 +1498,10 @@ fn check_accum_inner(
                     None
                 }
             }) {
+                if !cached.is_empty() {
+                    refused.insert(f.name.clone());
+                    in_bodies += cached.len();
+                }
                 out.extend(cached);
                 continue;
             }
@@ -1557,6 +1578,10 @@ fn check_accum_inner(
             d.file = f.module.clone();
             out.push(d);
         }
+        if out.len() > produced_from {
+            refused.insert(f.name.clone());
+            in_bodies += out.len() - produced_from;
+        }
         if let Some(k) = memo_key {
             let produced = out[produced_from..].to_vec();
             if let Some(fp) = sig_fp {
@@ -1606,7 +1631,8 @@ fn check_accum_inner(
     json_types.dedup_by_key(|t| format!("{t:?}"));
     let mut json_dec_types = checker.json_dec_types.borrow().clone();
     json_dec_types.dedup_by_key(|t| format!("{t:?}"));
-    (out, binders, effects, json_types, json_dec_types)
+    let typed = (in_bodies == out.len()).then_some(refused);
+    (out, binders, effects, json_types, json_dec_types, typed)
 }
 
 /// Check every `place` projection body (RFC-0091 M2).
@@ -2060,7 +2086,7 @@ fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Re
     RECORD.with(|r| *r.borrow_mut() = Recorded::new());
     PENDING_SUBST.with(|p| *p.borrow_mut() = None);
     RECORDING.with(|c| c.set(true));
-    let (diags, binders, _, _, _) = check_accum_full(program);
+    let (diags, binders, _, _, _, _) = check_accum_full(program);
     RECORDING.with(|c| c.set(false));
     let made = RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()));
     (diags, binders, made)

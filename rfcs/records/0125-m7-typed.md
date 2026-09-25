@@ -15,3 +15,19 @@ Findings:
 - `testsweep --ignored` fails on main 513bae71: `refusals.rs` literal #937 is accepted without the kernel and refused with it (`kids` handed to a `consume` parameter). This track does not touch it.
 - the checker states every refused statement of a body, not only the first (`Checker::block`). So under decision A a body with a checker refusal and a moved rule's refusal loses the second: `twoPasses` in the census program prints lines 299 and 300 today, and would print 300 alone.
 Left: every move, blocked by stage 2 of decision A (#474): the core built for each body the checker typed.
+
+#### The core is built for every body the checker typed (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, decision A stage 2 (#474).
+Decision: a program the checker refused in function bodies alone still has the core built for the rest, and the kernel's list is still read only when no pass refused. The lead's staging.
+Went: nothing. Stayed: every rule; this stage moves none.
+Lines: `vyrn-frontend` `lib.rs` 263 to 351 (+88, `lower_typed`), `checker.rs` 14,962 to 14,988 (+26, the refused set). Nothing is deleted: this is the pipeline the rules leave the checker through. Refusals: 0 lost / 0 gained. Manifest: untouched.
+Shape: `check_accum_with_json_types` answers the functions with a refused statement, or `None` where a refusal stands outside a function body. `lower_typed` moves the refused functions out of the program by value, and every function that calls or names one, to a fixpoint. It builds nothing when a test, a bench, module state or an impl method names one, and nothing for a generator's own program. It runs `own::analyze`, drops the kernel's refusals, and moves the functions back in the source's order. No line of `vyrn-lower` changed, so it composes with `m7-slotrel`'s fixpoint in `augment`: a refused body is never in the program the lowering sees.
+Licence:
+- `vyrn check` over 496 roots on af4c7316, the census commit's binary against this one: byte-identical stderr and exit codes, 419 accepted, 77 refused. 18 refused roots take the new build, and the same 18 under a debug build print the same bytes.
+- `checker-rules` pin unchanged. `nextest -p vyrn-cli` 670 passed; `lowered_dump`, `kernel`, `wasmhash` (check), `letswalk`, `columns`, `refusals` `--ignored` passed; `vyrn-frontend` 1,084 passed; `vyrn-lsp` 100 passed.
+- pins: `checker-census` shared machinery 2,371 to 2,397 lines; the anchor of `check_accum_with_json_types` follows its new signature.
+- time, `vyrn check`, best of interleaved runs: `site/export.vyrn`, accepted, 1,529 to 1,582 ms (8 rounds; medians 2,279 and 2,254, inside the band). The same file with one refused function added: 679 to 1,572 ms (6 rounds), because the core is now built for it; that is the accepted program's cost. The census program: 182 to 313 ms.
+Findings:
+- the editor pays the same: `load_warned` reaches `check_and_synthesize`, so a keystroke in a file with a checker refusal now builds the core.
+- a typed caller of a refused generic function is moved out with it, the lead's fallback, not an invented instance. `callsRefused` in the census program is the witness: once the store rule is the judgment's, its line goes.
+Left: the rules, groups 1 to 4 first.
