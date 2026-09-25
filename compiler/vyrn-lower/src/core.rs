@@ -580,6 +580,10 @@ pub enum Target {
     /// captures first. Each capture is the instance's parameter that carries
     /// it, by name and type, in the order the caller forwards them.
     Lambda(String, Vec<(String, Type)>),
+    /// A stored value (RFC-0037), which the instance takes as the parameter
+    /// this names: the bound parameter stays, under that name, and a call
+    /// through it stays a call through the value.
+    Value(String),
 }
 
 /// WHO a [`Rhs::Call`]'s name resolves to (RFC-0125 §3 M3, the callee slice).
@@ -7902,6 +7906,15 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
         return None;
     }
     let mut out = body.clone();
+    let values: Vec<Name> = (bound.iter())
+        .filter_map(|(n, t)| match t {
+            Target::Value(source) => {
+                out.names[*n as usize].source = source.clone();
+                Some(*n)
+            }
+            _ => None,
+        })
+        .collect();
     let mut caps: Vec<(Name, Vec<Name>)> = Vec::new();
     for (n, t) in bound {
         let Target::Lambda(_, cs) = t else { continue };
@@ -7919,13 +7932,14 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     bind_targets(&mut out.stmts, bound, &caps);
     let mut reads = vec![0; out.names.len()];
     count_reads(&out.stmts, &mut reads);
-    if bound.iter().any(|(n, _)| reads[*n as usize] > 0) {
+    let gone = |n: &Name| !values.contains(n);
+    if bound.iter().any(|(n, _)| gone(n) && reads[*n as usize] > 0) {
         return None;
     }
     out.params = (out.params.iter())
         .flat_map(|p| match caps.iter().find(|(n, _)| n == p) {
             Some((_, names)) => names.clone(),
-            None if bound.iter().any(|(n, _)| n == p) => Vec::new(),
+            None if gone(p) && bound.iter().any(|(n, _)| n == p) => Vec::new(),
             None => vec![*p],
         })
         .collect();
@@ -7960,6 +7974,7 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
                             let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
                             args.splice(0..0, lead.collect::<Vec<_>>());
                         }
+                        Some((_, Target::Value(source))) => *callee = source.clone(),
                         _ => {}
                     }
                 }

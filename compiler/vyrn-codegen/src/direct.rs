@@ -2821,13 +2821,26 @@ fn lower_body(
 }
 
 /// What a `fn` parameter bound to `b` calls, as the core names it: a
-/// function this module calls with no captures, or a lifted lambda with the
-/// captures `b` forwards. `None` for a dispatcher, and for a lambda key two
-/// bodies share, which [`vyrn_lower::core::body_of`] names no body for
-/// (#459).
+/// function this module calls with no captures, a stored value called through
+/// its signature's dispatcher, or a lifted lambda with the captures `b`
+/// forwards. `None` for a lambda key two bodies share, which
+/// [`vyrn_lower::core::body_of`] names no body for (#459).
 fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
     if let Some(f) = cx.named(&b.target) {
         return Some(Target::Fn(f));
+    }
+    let index = b.target.sig.index;
+    if cx
+        .dispatch
+        .borrow()
+        .sigs
+        .iter()
+        .any(|(_, s)| s.index == index)
+    {
+        return match b.cap_srcs.as_slice() {
+            [value] => Some(Target::Value(value.clone())),
+            _ => None,
+        };
     }
     let key = cx.lambda_key(b.target.sig.index)?;
     vyrn_lower::core::body_of(&key)?;
