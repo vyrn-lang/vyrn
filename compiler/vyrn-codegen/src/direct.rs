@@ -2824,7 +2824,7 @@ fn lower_body(
 /// function this module calls with no captures, a stored value called through
 /// its signature's dispatcher, or a lifted lambda with the captures `b`
 /// forwards. `None` for a lambda key two bodies share, which
-/// [`vyrn_lower::core::body_of`] names no body for (#459).
+/// [`vyrn_lower::core::body_of`] names no body for.
 fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
     if let Some(f) = cx.named(&b.target) {
         return Some(Target::Fn(f));
@@ -9925,19 +9925,18 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// The one literal `owner` holds on `line`, which is where the core names
-    /// the lambda a row makes ([`vyrn_lower::core::lambda_spelling`]). `None`
-    /// for two literals on one line, whose core body is absent anyway (#459).
-    fn literal(&self, owner: &str, line: usize) -> Option<&'p Expr> {
-        let mut at = self
-            .cx
-            .lambdas
-            .values()
-            .filter(|(o, e)| *o == owner && e.line() == line);
-        match (at.next(), at.next()) {
-            (Some((_, e)), None) => Some(e),
+    /// The literal this body holds under the key a closure row names
+    /// ([`vyrn_lower::core::lambda_spelling`]).
+    fn literal(&self, key: &str) -> Option<&'p Expr> {
+        self.cx.lambdas.values().find_map(|(o, e)| match e {
+            Expr::Lambda { line, col, .. }
+                if *o == self.owner
+                    && vyrn_lower::core::lambda_spelling(&self.core_key, *line, *col) == key =>
+            {
+                Some(*e)
+            }
             _ => None,
-        }
+        })
     }
 
     /// Lift a lambda literal to a top-level function: `(captures.., params..) ->
@@ -9966,6 +9965,7 @@ impl<'p> Fn_<'_, 'p> {
             params,
             body,
             line: at_line,
+            col: at_col,
         } = at
         else {
             return unsupported("a lambda lifted from another expression", line);
@@ -10110,7 +10110,7 @@ impl<'p> Fn_<'_, 'p> {
             queued,
             self.cx.subst.clone(),
             HashMap::new(),
-            vyrn_lower::core::lambda_spelling(&self.core_key, *at_line),
+            vyrn_lower::core::lambda_spelling(&self.core_key, *at_line, *at_col),
         )?;
         let srcs = cap_names
             .iter()
@@ -17644,7 +17644,7 @@ impl<'p> Fn_<'_, 'p> {
                     (Some(top), Some(t)) if top == *n => t,
                     _ => &body.names[*n as usize].ty,
                 };
-                if !self.core_makes(body, *n, at, rhs) {
+                if !self.core_makes(body, at, rhs) {
                     return None;
                 }
                 made.push(*n);
@@ -17874,9 +17874,9 @@ impl<'p> Fn_<'_, 'p> {
                 // and then binds, and a record or an array is never on the
                 // operand stack to be bound.
                 St::Let(n, rhs)
-                    if self.core_makes(body, *n, &body.names[*n as usize].ty, rhs)
+                    if self.core_makes(body, &body.names[*n as usize].ty, rhs)
                         || self.core_bound.as_ref().is_some_and(|(top, t)| {
-                            top == n && self.core_makes(body, *n, t, rhs)
+                            top == n && self.core_makes(body, t, rhs)
                         }) =>
                 {
                     let info = &body.names[*n as usize];
@@ -19507,9 +19507,9 @@ impl<'p> Fn_<'_, 'p> {
         }
         // A lambda: the literal lifted as the arm lifts it, and its captures
         // read off the row in the order the lifted signature takes them.
-        if let Rhs::Prim(Op::Closure, vs, _) = rhs {
+        if let Rhs::Prim(Op::Closure(key), vs, _) = rhs {
             let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
-            let Some(at) = self.literal(&self.owner, line) else {
+            let Some(at) = self.literal(key) else {
                 return unsupported("a lambda this walk does not find", line);
             };
             let (target, srcs) = self.lift_stored(m, at, &sig_ty)?;
@@ -19696,13 +19696,12 @@ impl<'p> Fn_<'_, 'p> {
     fn core_makes(
         &self,
         body: &vyrn_lower::core::Body,
-        n: vyrn_lower::core::Name,
         ty: &Type,
         rhs: &Rhs,
     ) -> bool {
         match rhs {
             Rhs::Make(c, vs) => self.core_made(body, ty, c, vs),
-            Rhs::Prim(Op::Closure, vs, _) => self.core_lambda(body, n, ty, vs),
+            Rhs::Prim(Op::Closure(key), vs, _) => self.core_lambda(body, key, ty, vs),
             Rhs::Call {
                 callee,
                 args,
@@ -19830,10 +19829,7 @@ impl<'p> Fn_<'_, 'p> {
         ty: &Type,
         rhs: &Rhs,
     ) -> bool {
-        let St::Let(n, _) = &ss[i] else {
-            return false;
-        };
-        if !self.core_makes(body, *n, ty, rhs) {
+        if !matches!(ss[i], St::Let(..)) || !self.core_makes(body, ty, rhs) {
             return false;
         }
         let Rhs::Make(ctor, vs) = rhs else {
@@ -19887,7 +19883,7 @@ impl<'p> Fn_<'_, 'p> {
         let St::Let(t, rhs) = &ss[i] else {
             return None;
         };
-        let made = matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure, ..)) || self.core_ctor(rhs);
+        let made = matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..)) || self.core_ctor(rhs);
         let taken = self.core_take_part(body, rhs);
         if body.names[*t as usize].binding.is_some()
             || w.occurs.get(*t as usize) != Some(&2)
@@ -19900,7 +19896,7 @@ impl<'p> Fn_<'_, 'p> {
         let fits = |part: &Type| {
             !self.checks(part)
                 && if made {
-                    self.core_makes(body, *t, part, rhs)
+                    self.core_makes(body, part, rhs)
                 } else {
                     self.core_payload_layout(body, &Val::Name(*t), part)
                 }
@@ -20280,7 +20276,7 @@ impl<'p> Fn_<'_, 'p> {
         Some((sig_ty, self.core_target(t)?))
     }
 
-    /// Whether this walk makes the lambda a closure row binds to `n` at `ty`:
+    /// Whether this walk makes the lambda a closure row names by `key` at `ty`:
     /// RFC-0125 M7, [`Fn_::core_make`]'s screen. The row's
     /// captures are names this walk reads, and they are exactly the captures
     /// the lifted signature takes ([`crate::lambda_captures`]), so every part
@@ -20291,7 +20287,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_lambda(
         &self,
         body: &vyrn_lower::core::Body,
-        n: vyrn_lower::core::Name,
+        key: &str,
         ty: &Type,
         vs: &[Val],
     ) -> bool {
@@ -20303,7 +20299,7 @@ impl<'p> Fn_<'_, 'p> {
             }),
         ) = (
             &sig_ty,
-            self.literal(&self.owner, body.names[n as usize].line),
+            self.literal(key),
         )
         else {
             return false;
@@ -20526,7 +20522,7 @@ impl<'p> Fn_<'_, 'p> {
                 Lit::Opaque(_) => return None,
             },
             Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
-            Rhs::Call { ret, .. } | Rhs::Prim(Op::Closure, _, ret) => ret.clone()?,
+            Rhs::Call { ret, .. } | Rhs::Prim(Op::Closure(_), _, ret) => ret.clone()?,
             Rhs::Prim(Op::Conv(to), ..) => to.clone(),
             Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
             Rhs::Read(p) | Rhs::Take(p) => self.core_place_ty(body, p)?,
@@ -20624,7 +20620,7 @@ impl<'p> Fn_<'_, 'p> {
                 && !(!self.annotated_apart(&annotated, info)
                     && lets.iter().any(|(b, rhs)| {
                         *b as usize == n
-                            && (self.core_makes(body, *b, &info.ty, rhs)
+                            && (self.core_makes(body, &info.ty, rhs)
                                 || self.core_agg_call(body, rhs)
                                 || self.core_take_part(body, rhs)
                                 || self.core_rebuild(body, rhs))
@@ -20724,7 +20720,7 @@ impl<'p> Fn_<'_, 'p> {
             // storage where the `return` after it hands it back
             // ([`Fn_::core_lands`]) (RFC-0125 M7).
             St::Let(n, rhs)
-                if matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure, ..))
+                if matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..))
                     || self.core_ctor(rhs) =>
             {
                 let part = self.core_part_at(body, ss, i, &self.core_w);
@@ -21261,7 +21257,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_rhs_readable(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         match rhs {
             Rhs::Val(v) => self.core_val_readable(body, v),
-            Rhs::Prim(Op::Closure, ..) => false,
+            Rhs::Prim(Op::Closure(_), ..) => false,
             Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op(body, *o, l, r)) => {
                 vs.iter().all(|v| self.core_val_readable(body, v))
             }

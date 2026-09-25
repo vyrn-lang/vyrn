@@ -1,6 +1,5 @@
 // two lambdas on one line
 // pin: 0 break, 0 continue
-// The two lambdas share one key, so `body_of` names neither and both are
-// the arm's; reading one for the other made `closures2.vyrn` print -198
-// for 2 (the m7-keys record).
+// The two lambdas are two keys, by column (#459); reading one for the
+// other made `closures2.vyrn` print -198 for 2 (the m7-keys record).
 type Ops = { plus: fn(Int64) -> Int64, minus: fn(Int64) -> Int64 }          fn vyrnTestMain() -> Int64 { let o = Ops { plus: x -> x + 100, minus: x -> x - 100 } let p = o.plus let m = o.minus return p(1) * 1000 + m(1) }

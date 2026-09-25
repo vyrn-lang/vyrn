@@ -1533,6 +1533,10 @@ pub enum Expr {
         params: Vec<Binder>,
         body: LambdaBody,
         line: usize,
+        /// The column of the literal's first token. With `line` it is the key
+        /// the lifted function is found under, so two lambdas on one line are
+        /// two functions (#459).
+        col: usize,
     },
     /// `consume place` — a take: the value at `place` is moved out and the place
     /// is dead from that point (RFC-0093). The third position of the word:

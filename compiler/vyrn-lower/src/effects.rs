@@ -573,12 +573,7 @@ pub(crate) fn judge_built<R>(
         for f in b.frames() {
             if std::ptr::eq(f, *b) {
                 top.push(refs.len());
-            } else if let Some(line) = f
-                .name
-                .rsplit("@lambda:")
-                .next()
-                .and_then(|l| l.parse::<usize>().ok())
-            {
+            } else if let Some(line) = crate::core::lambda_line(&f.name) {
                 lambda_frames
                     .entry((name, line))
                     .or_default()
@@ -592,12 +587,7 @@ pub(crate) fn judge_built<R>(
     // type reaches their frames.
     let state = crate::core::build_module_state(program, own, &lowered.globals).ok();
     for f in state.iter().flat_map(|b| b.frames()).skip(1) {
-        if let Some(line) = f
-            .name
-            .rsplit("@lambda:")
-            .next()
-            .and_then(|l| l.parse::<usize>().ok())
-        {
+        if let Some(line) = crate::core::lambda_line(&f.name) {
             lambda_frames
                 .entry(("", line))
                 .or_default()

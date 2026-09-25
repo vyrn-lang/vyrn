@@ -711,8 +711,9 @@ pub enum Op {
     /// RFC-0023: a lambda literal. Its operands are the captures the closure
     /// snapshots and its result is the closure value, which is why it is a
     /// prim and not a [`Ctor`] — the parts are READ, where a constructor's
-    /// are taken.
-    Closure,
+    /// are taken. The key is the one its lifted body is built and emitted
+    /// under ([`lambda_spelling`]).
+    Closure(String),
 }
 
 /// What a [`Rhs::Make`] row constructs (RFC-0125 §3 M3, the operation slice).
@@ -1332,7 +1333,7 @@ impl Body {
                     Op::Un(o) => format!("{o:?}").to_lowercase(),
                     Op::Bin(o) => format!("{o:?}").to_lowercase(),
                     Op::Conv(t) => format!("conv {t}"),
-                    Op::Closure => "closure".into(),
+                    Op::Closure(_) => "closure".into(),
                 },
                 vs.iter()
                     .map(|v| self.val(v))
@@ -2220,7 +2221,7 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
                 }
             }
         }
-        Rhs::Prim(Op::Closure, vs, _) => {
+        Rhs::Prim(Op::Closure(_), vs, _) => {
             out.push("Lambda".into());
             vals(vs, out);
         }
@@ -3245,7 +3246,7 @@ impl<'a> Builder<'a> {
     /// String temporaries the reading site frees (RFC-0096 M3). After, because
     /// the result is named first and the temporaries were its operands.
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
-        if matches!(rhs, Rhs::Prim(Op::Closure, ..)) {
+        if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
             self.body.names[n as usize].closure_reads = self.pending_closure.take();
         }
         out.push(St::Let(n, rhs));
@@ -6022,8 +6023,8 @@ impl<'a> Builder<'a> {
         // in a later argument of the same call — asks the position it is
         // written at rather than this one's.
         self.body.names[t as usize].closure_reads = self.closure_reads(e, &caps);
-        out.push(St::Let(t, Rhs::Prim(Op::Closure, caps.clone(), Some(ty))));
-        self.lambda_frame(e, &caps)?;
+        let key = self.lambda_frame(e, &caps)?;
+        out.push(St::Let(t, Rhs::Prim(Op::Closure(key), caps, Some(ty))));
         Ok(Val::Name(t))
     }
 
@@ -6037,9 +6038,16 @@ impl<'a> Builder<'a> {
     /// owner's name; `lib.rs` keeps `placed` across the lift). An expression
     /// body is a `return` of its value at no site: nothing an engine runs
     /// stands there, so a name still held at it is refused, not placed.
-    fn lambda_frame(&mut self, e: &'a Expr, caps: &[Val]) -> Result<(), Gap> {
-        let Expr::Lambda { params, body, line } = e else {
-            return Ok(());
+    /// Answers the key the frame is built under.
+    fn lambda_frame(&mut self, e: &'a Expr, caps: &[Val]) -> Result<String, Gap> {
+        let Expr::Lambda {
+            params,
+            body,
+            line,
+            col,
+        } = e
+        else {
+            return gap("a lambda frame of no lambda literal", e.line());
         };
         let decls = self.proto.types();
         let (ptys, ret): (Vec<Type>, Option<Type>) = match self.ty_of(e).ok() {
@@ -6091,7 +6099,7 @@ impl<'a> Builder<'a> {
                 unbound_drops: Vec::new(),
             },
         );
-        self.body.name = lambda_spelling(&outer.name, *line);
+        self.body.name = lambda_spelling(&outer.name, *line, *col);
         let saved = (
             std::mem::take(&mut self.scope),
             std::mem::take(&mut self.by_binding),
@@ -6149,8 +6157,9 @@ impl<'a> Builder<'a> {
         ) = saved;
         self.ret = outer_ret;
         r?;
+        let key = frame.name.clone();
         self.body.lambdas.push(frame);
-        Ok(())
+        Ok(key)
     }
 
     /// The names of this body a lambda mentions, as a place or as a callee
@@ -6955,8 +6964,8 @@ impl<'a> Builder<'a> {
                 // The name this closure binds is `bind`'s to give, so the
                 // fact waits for it ([`Builder::pending_closure`]).
                 self.pending_closure = self.closure_reads(e, &caps);
-                self.lambda_frame(e, &caps)?;
-                Ok(Rhs::Prim(Op::Closure, caps, self.produced(e)))
+                let key = self.lambda_frame(e, &caps)?;
+                Ok(Rhs::Prim(Op::Closure(key), caps, self.produced(e)))
             }
         }
     }
@@ -7875,21 +7884,29 @@ pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
-/// The name a lambda literal on `line` inside the body named `outer` is built
-/// and emitted under, and so its key in [`body_of`].
-pub fn lambda_spelling(outer: &str, line: usize) -> String {
-    format!("{outer}@lambda:{line}")
+/// The name a lambda literal at `line` and `col` inside the body named
+/// `outer` is built and emitted under, and so its key in [`body_of`].
+pub fn lambda_spelling(outer: &str, line: usize, col: usize) -> String {
+    format!("{outer}@lambda:{line}:{col}")
+}
+
+/// The line of a lambda key [`lambda_spelling`] spelled, which is how
+/// RFC-0037 names a lambda source. `None` for any other name.
+pub fn lambda_line(name: &str) -> Option<usize> {
+    let (_, at) = name.rsplit_once("@lambda:")?;
+    at.split(':').next()?.parse().ok()
 }
 
 /// The core's own body for the function emitted under `name`, or `None` where
 /// this pass built none — RFC-0125 §3 M3, the driver slice.
 ///
 /// The key is [`crate::spell`] of the instance, which is the name the emitters
-/// lower a function under: `max<Int64>` for a specialization, `main@lambda:26` for a
-/// lifted lambda, `test@1` for a `test` block, and the empty name for module
-/// state. A body this pass could not build (a [`Gap`]) is absent, and so is
-/// one whose name another body shares; a reader walks the source instead —
-/// the same standing down every reader of [`facts`] makes.
+/// lower a function under: `max<Int64>` for a specialization,
+/// `main@lambda:26:13` for a lifted lambda, `test@1` for a `test` block, and
+/// the empty name for module state. A body this pass could not build (a
+/// [`Gap`]) is absent, and so is one whose name another body shares; a
+/// reader walks the source instead — the same standing down every reader of
+/// [`facts`] makes.
 pub fn body_of(name: &str) -> Option<Body> {
     BODIES.with(|b| b.borrow().get(name).cloned().flatten())
 }

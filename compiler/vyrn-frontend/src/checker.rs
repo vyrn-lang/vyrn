@@ -8500,6 +8500,7 @@ impl<'a> Checker<'a> {
                 params,
                 body,
                 line: lline,
+                ..
             } => {
                 if params.len() != ptys.len() {
                     return Err(cerr!(
@@ -8688,7 +8689,10 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let Expr::Lambda { params, body, line } = expr else {
+        let Expr::Lambda {
+            params, body, line, ..
+        } = expr
+        else {
             unreachable!()
         };
         let sig = self.base(exp);
