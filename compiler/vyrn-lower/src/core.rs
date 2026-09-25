@@ -173,6 +173,10 @@ pub struct NameInfo {
     /// pattern binder and a temporary are keyed by a node too, and none of
     /// them is a binding the memory report is about.
     pub bound_by_let: bool,
+    /// Whether the reader may store into the name: a `let mut`, or a
+    /// `modify` parameter. The typed judgment refuses a store into any other
+    /// name the reader wrote ([`crate::typed::stores`]).
+    pub mutable: bool,
     /// For a name a LAMBDA literal binds: the captures the closure reads as
     /// VALUES, where the closure may outlive the call it is written at
     /// (RFC-0037, RFC-0125 §3 M3, row 24). `None` where it may not, and for
@@ -2443,6 +2447,7 @@ fn build_seeded(
         b.body.names[n as usize].must_use_param =
             b.proto.must_use(&b.body.names[n as usize].ty.clone());
         b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
+        b.body.names[n as usize].mutable = p.capability == Capability::Modify;
         b.scope.push((p.name.clone(), n));
         b.keyed(n, p as *const _ as usize);
         b.body.params.push(n);
@@ -2762,6 +2767,7 @@ impl<'a> Builder<'a> {
             walked: None,
             linear,
             bound_by_let: false,
+            mutable: false,
             closure_reads: None,
             not_owned: None,
         });
@@ -2778,9 +2784,10 @@ impl<'a> Builder<'a> {
 
     /// The same, for a `let` a reader wrote — the bindings the memory report
     /// is about.
-    fn keyed_let(&mut self, n: Name, binding: usize) {
-        self.keyed(n, binding);
+    fn keyed_let(&mut self, n: Name, s: &Stmt) {
+        self.keyed(n, s as *const Stmt as usize);
         self.body.names[n as usize].bound_by_let = true;
+        self.body.names[n as usize].mutable = matches!(s, Stmt::Let { mutable: true, .. });
     }
 
     /// Record the plan's key for a name, and the name for the key.
@@ -3804,7 +3811,7 @@ impl<'a> Builder<'a> {
                     self.release_receiver(value, out, true);
                     self.grows(n, name);
                     self.scope.push((name.clone(), n));
-                    self.keyed_let(n, sid);
+                    self.keyed_let(n, s);
                     return Ok(());
                 }
                 // A value crossing into a validated type is that type's
@@ -3872,7 +3879,7 @@ impl<'a> Builder<'a> {
                 }
                 self.grows(n, name);
                 self.scope.push((name.clone(), n));
-                self.keyed_let(n, sid);
+                self.keyed_let(n, s);
             }
             Stmt::Assign { name, value, line } => {
                 let n = self.lookup(name);
@@ -8348,6 +8355,51 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
+type Typed = (
+    Vec<vyrn_frontend::diagnostics::Diagnostic>,
+    std::collections::HashSet<usize>,
+);
+
+thread_local! {
+    /// What the typed judgment refused about the program last analysed on
+    /// this thread, as `vyrn check` words it, and the statements it refused.
+    static TYPED: std::cell::RefCell<Typed> = std::cell::RefCell::default();
+}
+
+/// Judge one built body with the typed judgment, and say whether it refused.
+/// A refused body is not remembered by the judgment memo: the memo serves
+/// the kernel's refusals alone, so the body is built and judged again.
+fn typed(program: &Program, top: &Body, file: &Option<String>) -> bool {
+    let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
+    TYPED.with(|t| {
+        let (out, seen) = &mut *t.borrow_mut();
+        let found = crate::typed::stores(top, &global_mutable, seen);
+        let refused = !found.is_empty();
+        out.extend(
+            found
+                .into_iter()
+                .map(|(line, message)| diagnostic(line, message, file)),
+        );
+        refused
+    })
+}
+
+fn diagnostic(
+    line: usize,
+    message: String,
+    file: &Option<String>,
+) -> vyrn_frontend::diagnostics::Diagnostic {
+    let mut d = vyrn_frontend::diagnostics::Diagnostic::error(line, 0, "check", message);
+    d.file = file.clone();
+    d
+}
+
+/// The typed judgment's refusals, drained. Installed into `own`'s slot by
+/// [`crate::install`].
+pub fn typed_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+    TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
+}
+
 /// The same refusals as `movecheck`-stage diagnostics, deduplicated, for the
 /// one list a file's refusals come out in
 /// (`vyrn_frontend::movecheck::refusals`, RFC-0125 §3 M3, the accumulation
@@ -8422,17 +8474,21 @@ pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
 /// typed the body, so every judgment over the core would pass over it in
 /// silence (RFC-0125 M7, the judgment's reach).
 fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
-    let message = g.rule.unwrap_or_else(|| {
+    let Some(message) = g.rule else {
         let detail = if g.detail.is_empty() {
             String::new()
         } else {
             format!(" `{}`", g.detail)
         };
-        format!(
+        let message = format!(
             "internal error: the core cannot state {}{detail}, so `{body}` is not judged",
             g.what
-        )
-    });
+        );
+        // With the typed judgment's refusals, which print whichever pass
+        // refused the program.
+        TYPED.with(|t| t.borrow_mut().0.push(diagnostic(g.line, message, file)));
+        return;
+    };
     REFUSALS.with(|v| {
         v.borrow_mut().push(crate::kernel::Refusal {
             message,
@@ -8593,12 +8649,16 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             // third slice).
             place_frames(top, &inst.func.name, own, &mut added, &mut touched, trace);
         }
+        let refused = top
+            .as_ref()
+            .is_some_and(|t| typed(program, t, &inst.func.module));
+        let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, refused_before);
         built.push(top);
     }
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
     for (ob, m) in lowered.bodies.iter().zip(made_outside) {
-        let (key, made) = match m {
+        let (mut key, made) = match m {
             Made::Served(rs) => {
                 REFUSALS.with(|v| v.borrow_mut().extend(rs));
                 outside.push(None);
@@ -8615,6 +8675,9 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     eprintln!("{}", top.render());
                 }
                 place_frames(&top, &ob.name, own, &mut added, &mut touched, trace);
+                if typed(program, &top, &ob.module) {
+                    key = None;
+                }
                 outside.push(Some(top));
             }
             Err(g) => {
@@ -8628,8 +8691,11 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // typed, so it is built once, for the judgment alone: it places no row
     // and is never emitted (RFC-0125 M7, the judgment's reach).
     for inst in crate::uninstantiated(program, &lowered, own) {
-        if let Err(g) = build(program, &inst, own) {
-            refuse_gap(g, &inst.func.module, &inst.func.name);
+        match build(program, &inst, own) {
+            Ok(top) => {
+                typed(program, &top, &inst.func.module);
+            }
+            Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name),
         }
     }
     // A placed release of a generic declared release is a call the lowering's

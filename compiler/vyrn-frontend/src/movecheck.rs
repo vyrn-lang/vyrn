@@ -593,9 +593,19 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
     // cache, so a refusal it left would print at the root's file and only
     // cold. Every gen body a generator compile judges, this analysis judges.
     let _ = crate::own::kernel_refusals();
+    let _ = crate::own::typed_refusals();
     JUDGING.with(|j| j.set(true));
     crate::own::hand_on(program, &crate::own::analyze(program));
     JUDGING.with(|j| j.set(false));
+    // Typing before the judgments (RFC-0125 M7, decision A): a program the
+    // typed judgment refuses gets its refusals alone, as one the checker
+    // refused does.
+    let mut typed = crate::own::typed_refusals();
+    if !typed.is_empty() {
+        let _ = crate::own::kernel_refusals();
+        in_source_order(&mut typed);
+        return typed;
+    }
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
         lines.insert((d.file.clone(), d.line));

@@ -46,7 +46,8 @@ use std::collections::HashMap;
 
 use vyrn_frontend::ast::Type;
 
-use crate::core::{Body, Name, Place, Rhs, St, Val};
+use crate::core::{Arg, Body, Name, NameInfo, Place, Rhs, Site, St, Val};
+use vyrn_frontend::ast::Capability;
 
 /// A step from one type into the type a place holds, for the caller that
 /// resolves a place's type. `Global` has no base.
@@ -902,5 +903,96 @@ pub mod obligation {
             Stmt::Region { body, .. } => diverges(&body.stmts),
             _ => false,
         })
+    }
+}
+
+/// Every store into a name the reader wrote without `mut`, as the sentence
+/// `vyrn check` gives and its line, one per source statement: RFC-0125 M7,
+/// the rule the checker's `stmt` stated at three sites. A store is a
+/// `St::Store` or a place passed to a `modify` argument, which is how a
+/// removal through a path is stated. `global_mutable` answers for module
+/// state. A temporary this pass minted (`@t`) is no name the reader wrote.
+/// `seen` holds the statements already refused, so the instances of one
+/// generic function refuse a statement once.
+pub fn stores(
+    body: &Body,
+    global_mutable: &dyn Fn(&str) -> bool,
+    seen: &mut std::collections::HashSet<usize>,
+) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for f in body.frames() {
+        each_store(&f.stmts, &f.names, &mut |place, line, site| {
+            // The step the store takes out of the root decides the words.
+            let mut step = None;
+            let mut at = place;
+            while let Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) = at {
+                step = Some(at);
+                at = b;
+            }
+            let name = match at {
+                Place::Name(n) => {
+                    let info = &f.names[*n as usize];
+                    if info.mutable || info.source.starts_with('@') {
+                        return;
+                    }
+                    &info.source
+                }
+                Place::Global(g) if !global_mutable(g) => g,
+                _ => return,
+            };
+            if site.is_some_and(|k| !seen.insert(k)) {
+                return;
+            }
+            let what = match step {
+                None => "cannot assign to",
+                Some(Place::Field(..)) => "cannot mutate a field of",
+                Some(_) => "cannot store into",
+            };
+            out.push((line, format!("{what} `{name}` (declared without `mut`)")));
+        });
+    }
+    out
+}
+
+/// Every place `stmts` stores into, with its line and the source statement it
+/// is keyed by where the row names one.
+fn each_store(stmts: &[St], names: &[NameInfo], f: &mut dyn FnMut(&Place, usize, Option<usize>)) {
+    let modified = |rhs: &Rhs| match rhs {
+        Rhs::Call { args, .. } => args
+            .iter()
+            .filter_map(|a| match a {
+                (Arg::Place(p), Capability::Modify) => Some(p.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for s in stmts {
+        match s {
+            St::Store {
+                place, line, site, ..
+            } => {
+                let key = match site {
+                    Site::Node(k) => Some(*k),
+                    _ => None,
+                };
+                f(place, *line, key)
+            }
+            St::Do { rhs, line, site } => {
+                let key = Some(*site).filter(|k| *k != 0);
+                modified(rhs).iter().for_each(|p| f(p, *line, key))
+            }
+            St::Let(n, rhs) => {
+                let line = names[*n as usize].line;
+                modified(rhs).iter().for_each(|p| f(p, line, None))
+            }
+            St::If { then, els, .. } => {
+                each_store(then, names, f);
+                each_store(els, names, f);
+            }
+            St::Loop { body, .. } | St::Block { body, .. } => each_store(body, names, f),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| each_store(&a.body, names, f)),
+            _ => {}
+        }
     }
 }

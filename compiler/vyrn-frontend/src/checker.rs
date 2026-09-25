@@ -4299,12 +4299,6 @@ impl<'a> Checker<'a> {
                 let b = self
                     .lookup(scope, name)
                     .ok_or_else(|| cerr!(line, "assignment to unknown variable `{name}`"))?;
-                if !b.mutable {
-                    return Err(cerr!(
-                        line,
-                        "cannot assign to `{name}` (declared without `mut`)"
-                    ));
-                }
                 let vty = self.expr(value, scope, Some(&b.ty), Some(ret))?;
                 if !self.coercible(&vty, &b.ty) {
                     return Err(cerr!(line, "`{name}` is {} but assigned {}", b.ty, vty));
@@ -4323,12 +4317,6 @@ impl<'a> Checker<'a> {
                 let b = self.lookup(scope, name).ok_or_else(|| {
                     cerr!(line, "assignment to field of unknown variable `{name}`")
                 })?;
-                if !b.mutable {
-                    return Err(cerr!(
-                        line,
-                        "cannot mutate a field of `{name}` (declared without `mut`)"
-                    ));
-                }
                 // Validated data is rebuilt, not mutated: a field write on a
                 // record with a cross-field `where` could break the invariant
                 // mid-update, so it must go through whole-value reassignment
@@ -4389,12 +4377,6 @@ impl<'a> Checker<'a> {
                 let b = self
                     .lookup(scope, name)
                     .ok_or_else(|| cerr!(line, "index-assignment to unknown variable `{name}`"))?;
-                if !b.mutable {
-                    return Err(cerr!(
-                        line,
-                        "cannot store into `{name}` (declared without `mut`)"
-                    ));
-                }
                 // `m[k] = v` on a Map (RFC-0028) inserts or updates in place: the
                 // key coerces to the map's key type `K` (RFC-0117), the value to
                 // `V` (auto-validated when `V` is predicated, exactly like an
@@ -11574,12 +11556,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_assign_to_immutable() {
-        let e = check_src("fn main() -> Int64 { let x = 1; x = 2; return x; }").unwrap_err();
-        assert!(e.contains("without `mut`"), "{e}");
-    }
-
-    #[test]
     fn rejects_missing_return() {
         let e = check_src("fn f() -> Int64 { } fn main() -> Int64 { return 0; }").unwrap_err();
         assert!(e.contains("must return"), "{e}");
@@ -12136,16 +12112,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_field_mutation_without_mut() {
-        let e = check_src(
-            "type P = { x: Int64 }; \
-                           fn main() -> Int64 { let p = P { x: 1 }; p.x = 2; return p.x; }",
-        )
-        .unwrap_err();
-        assert!(e.contains("without `mut`"), "{e}");
-    }
-
-    #[test]
     fn rejects_field_mutation_wrong_type() {
         let e = check_src(
             "type P = { x: Int64 }; \
@@ -12188,14 +12154,6 @@ mod tests {
                    a[1] = 25; let g = a.swapRemove(0); let p = a.pop(); \
                    return a.length + g; }";
         assert!(check_src(src).is_ok());
-    }
-
-    #[test]
-    fn index_store_requires_mut() {
-        let e =
-            check_src("fn main() -> Int64 { let a: Array<Int64> = [1, 2]; a[0] = 9; return 0; }")
-                .unwrap_err();
-        assert!(e.contains("without `mut`"), "{e}");
     }
 
     #[test]
@@ -13278,17 +13236,6 @@ mod tests {
     }
 
     #[test]
-    fn assigning_non_mut_global_is_an_error() {
-        let e = check_src(
-            "let banner = \"hi\"\n\
-             fn f() -> Int64 { banner = \"bye\" return 0 }\n\
-             fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("without `mut`"), "{e}");
-    }
-
-    #[test]
     fn validated_global_rejects_provably_invalid_constant() {
         let e = check_src(
             "type Age = Int64 where value >= 0\n\
@@ -13343,19 +13290,6 @@ mod tests {
     }
 
     #[test]
-    fn a_local_shadows_a_global() {
-        // `hits` as a local `let` shadows the global; assigning the immutable
-        // local is the error (not the global's mutability).
-        let e = check_src(
-            "let mut hits = 0\n\
-             fn f() -> Int64 { let hits = 1 hits = 2 return hits }\n\
-             fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("without `mut`"), "{e}");
-    }
-
-    #[test]
     fn where_predicate_may_not_reference_a_global() {
         // A global is not a constant; a refinement predicate can't see it.
         let e = check_src(
@@ -13368,17 +13302,6 @@ mod tests {
     }
 
     // ---- RFC-0011 addendum: `a[i].field = v` write-through --------------
-
-    #[test]
-    fn index_field_assign_requires_mut_array() {
-        // Storing the modified element back needs a `mut` array (the IndexSet leg).
-        let e = check_src(
-            "type P = { x: Int64 }\n\
-             fn main() -> Int64 { let a: Array<P> = [P { x: 1 }]  a[0].x = 9  return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("without `mut`"), "{e}");
-    }
 
     #[test]
     fn index_field_assign_unknown_field_is_rejected() {

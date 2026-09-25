@@ -53,6 +53,9 @@ pub fn install() {
     // rule about a TYPE and not about ownership, so it is the typed judgment's
     // and reaches the same list through the same kind of slot.
     vyrn_frontend::own::install_must_use(typed::obligation::judge);
+    // RFC-0125 M7, decision A: the typed judgment's refusals over the core,
+    // which `vyrn check` reads before the kernel's.
+    vyrn_frontend::own::install_typed(core::typed_diagnostics);
     // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);

@@ -314,6 +314,45 @@ fn callsRefused() -> Int64 {
     x = 2
     return refusedGeneric(x)
 }
+// "A store needs `mut`" is the typed judgment's (RFC-0125 M7, group 1).
+// These bodies witness what the checker's three sites reached and the
+// corpus does not: a store through a path, into a projected container,
+// a removal through a path, and into module state with no declared type.
+type Held = { a: Array<Int64> }
+let untyped = [1, 2]
+fn storePath() -> Int64 {
+    let h = Held { a: [1, 2] }
+    let i = 0
+    h.a[i] = 5
+    return 0
+}
+fn storeProjected() -> Int64 {
+    let k = Keyed { data: [1] }
+    k["a"] = 2
+    return 0
+}
+fn removePath() -> Int64 {
+    let h = Held { a: [1, 2] }
+    let p = h.a.pop()
+    return 0
+}
+fn storeUntyped() -> Int64 {
+    untyped[0] = 4
+    return 0
+}
+// A generic function no instance reaches: the judgment reads its body once.
+fn storeUncalled<T>(v: T) -> Int64 {
+    let x = 1
+    x = 2
+    return x
+}
+// A moved rule and a checker rule on one statement: the checker's sentence
+// prints, because the body it refuses has no core (#487).
+fn storeMismatch() -> Int64 {
+    let x = 1
+    x = "s"
+    return x
+}
 fn main() -> Int64 {
     return 0
 }
