@@ -430,7 +430,7 @@ fn forSizeOnly() -> Int64 {
 }
 fn movedBesideChecker() -> Int64 {
     let a: Int64 = "s"
-    let n = -"x"
+    let n: Int8 = 300
     return 0
 }
 // A value its slot does not take is the typed judgment's. A name bound to
@@ -483,6 +483,29 @@ fn storeGeneric<T>(b: Boxed<T>) -> Int64 {
 }
 fn callsStoreGeneric() -> Int64 {
     return storeGeneric(Boxed { v: "s" })
+}
+// An operator, a field read, `T?(..)` and a variant read are the typed
+// judgment's, in module state, in a generic function as written and in a
+// lambda. A shift by a constant keeps its operand's type, so the slot it
+// fills judges it as well.
+let stateNeg = -"s"
+fn fieldGeneric<T>(t: T) -> Int64 {
+    return t.a
+}
+fn callsFieldGeneric() -> Int64 {
+    return fieldGeneric(1)
+}
+fn variantInLambda() -> Int64 {
+    let f: fn(Int64) -> Unit = x -> {
+        let e = A
+    }
+    return 0
+}
+fn shiftInto() -> Int64 {
+    let s: String = 1 << 70
+    let n: Int32 = 1
+    let m = n << 32
+    return 0
 }
 fn main() -> Int64 {
     return 0

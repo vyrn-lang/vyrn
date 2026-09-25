@@ -83,7 +83,7 @@ checker-rules.vyrn:400:0: `if` condition must be Bool, found Int64
 checker-rules.vyrn:405:0: `for` needs an Array, a String, or a type that declares `impl Iterate` (a `size` method and an `nth` projection, `fn nth(read self, ..) -> read T`), found Map<String, Int64>
 checker-rules.vyrn:410:0: `if` condition must be Bool, found T
 checker-rules.vyrn:427:0: `for` needs an Array, a String, or a type that declares `impl Iterate` (a `size` method and an `nth` projection, `fn nth(read self, ..) -> read T`), found { data: Array<Int64> }
-checker-rules.vyrn:433:0: unary `-` needs a numeric type, found String
+checker-rules.vyrn:433:0: integer literal 300 does not fit Int8 (its range is -128..=127)
 checker-rules.vyrn:440:0: cannot bind `u` to a Unit value
 checker-rules.vyrn:445:0: return type mismatch: expected Int64, found T
 checker-rules.vyrn:451:0: return type mismatch: expected Unit, found Int64
@@ -94,3 +94,9 @@ checker-rules.vyrn:468:0: record `ps[]` has no field `zz`
 checker-rules.vyrn:470:0: `ns[]` is not a record, so it has no field `f`
 checker-rules.vyrn:475:0: `stateArray` holds Int64 but the stored value is String
 checker-rules.vyrn:481:0: field `v` is T but assigned Int64
+checker-rules.vyrn:491:0: unary `-` needs a numeric type, found String
+checker-rules.vyrn:493:0: cannot access field `a` on non-record type T
+checker-rules.vyrn:500:0: variant `A` needs 1 argument(s)
+checker-rules.vyrn:505:0: shift amount 70 is out of range for a 64-bit value (valid range is 0..64)
+checker-rules.vyrn:505:0: `s` declared String but initializer is Int64
+checker-rules.vyrn:507:0: shift amount 32 is out of range for a 32-bit value (valid range is 0..32)

@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern,
-    Program, Stmt, Type, UnOp,
+    Program, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::Owned;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -2444,6 +2444,97 @@ fn row_facts(rows: &[crate::Row<'_>]) -> RowFacts {
     (types, produced, solved)
 }
 
+/// The refusals the typed judgment states over the checker's answers at the
+/// nodes of `rows` (RFC-0125 M7, group 6d): a shift by a constant amount out
+/// of its operand's width, and at a node the checker typed `Err` whose
+/// operands it typed, an operator the operand's type does not take, a field
+/// the receiver has not, `T?(..)` of a type or an argument that does not fit,
+/// and a variant read without its arguments.
+fn judged(
+    rows: &[crate::Row<'_>],
+    types: &HashMap<usize, Type>,
+    decls: &HashMap<String, TypeDecl>,
+) -> Vec<(usize, String)> {
+    let recorded = |e: &Expr| {
+        types
+            .get(&(e as *const Expr as usize))
+            .filter(|t| **t != Type::Err)
+    };
+    let resolved = |e: &Expr| recorded(e).map(|t| vyrn_frontend::types::resolve(t, decls));
+    let refusal = |e: &Expr| -> Option<String> {
+        if let Expr::Binary {
+            op: BinOp::Shl | BinOp::Shr,
+            rhs,
+            ..
+        } = e
+        {
+            let bits = match resolved(e)? {
+                Type::IntN { bits, .. } => i64::from(bits),
+                _ => 64,
+            };
+            let Some(vyrn_frontend::consteval::ConstVal::Int(amt)) =
+                vyrn_frontend::consteval::eval(rhs, &HashMap::new())
+            else {
+                return None;
+            };
+            return (amt < 0 || amt >= bits).then(|| {
+                format!(
+                    "shift amount {amt} is out of range for a {bits}-bit value (valid range is 0..{bits})"
+                )
+            });
+        }
+        if types.get(&(e as *const Expr as usize)) != Some(&Type::Err) {
+            return None;
+        }
+        match e {
+            Expr::Unary { op, expr, .. } => {
+                let t = resolved(expr)?;
+                Some(match op {
+                    UnOp::Neg => format!("unary `-` needs a numeric type, found {t}"),
+                    UnOp::Not => format!("unary `!` needs Bool, found {t}"),
+                    UnOp::BitNot => format!("unary `~` needs an integer type, found {t}"),
+                })
+            }
+            Expr::Field { expr, field, .. } => Some(match resolved(expr)? {
+                Type::Record(_) => format!("type {} has no field `{field}`", recorded(expr)?),
+                other => format!("cannot access field `{field}` on non-record type {other}"),
+            }),
+            Expr::TryConstruct { name, args, .. } => {
+                let base = &decls.get(name)?.base;
+                if !matches!(base, Type::Int | Type::Bool | Type::Str) {
+                    return Some(format!(
+                        "`{name}?(..)` is only for validated/nominal scalar types"
+                    ));
+                }
+                let [arg] = &args[..] else {
+                    return Some(format!("`{name}?` takes 1 argument, got {}", args.len()));
+                };
+                let aty = recorded(arg)?;
+                Some(format!(
+                    "`{name}` is built from {base}, but the argument is {aty}"
+                ))
+            }
+            Expr::Var { name, .. } => {
+                let payload = decls
+                    .values()
+                    .filter_map(|d| vyrn_frontend::types::declared_variants(&d.base))
+                    .flatten()
+                    .find(|v| &v.name == name)?
+                    .payload
+                    .len();
+                Some(format!("variant `{name}` needs {payload} argument(s)"))
+            }
+            _ => None,
+        }
+    };
+    rows.iter()
+        .filter_map(|r| match r.node {
+            Node::Expr(e) => Some((e.line(), refusal(e)?)),
+            Node::Stmt(_) => None,
+        })
+        .collect()
+}
+
 fn build_seeded(
     program: &Program,
     inst: &Instance<'_>,
@@ -2451,6 +2542,7 @@ fn build_seeded(
     seed: &std::collections::HashSet<usize>,
 ) -> Result<Body, Gap> {
     let (types, produced, solved) = row_facts(&inst.rows);
+    let mistyped = judged(&inst.rows, &types, own.proto.types());
     // The placed releases, by the exit they are at — the PLAN's own rows and
     // not the instance's copy of them. The copy is made where the lowering
     // names the instance, which is before [`augment`] places the rows the plan
@@ -2483,7 +2575,7 @@ fn build_seeded(
             unreached: Vec::new(),
             unbound_drops: Vec::new(),
             refused: Vec::new(),
-            mistyped: Vec::new(),
+            mistyped,
             after_check: inst.func.after_check,
         },
         scope: Vec::new(),
@@ -2816,6 +2908,7 @@ impl<'a> Builder<'a> {
         placed: HashMap<(Exit, usize), Vec<&'a Release>>,
     ) -> Self {
         let (types, produced, solved) = row_facts(rows);
+        let mistyped = judged(rows, &types, own.proto.types());
         Builder {
             program,
             own,
@@ -2837,7 +2930,7 @@ impl<'a> Builder<'a> {
                 unreached: Vec::new(),
                 unbound_drops: Vec::new(),
                 refused: Vec::new(),
-                mistyped: Vec::new(),
+                mistyped,
                 after_check: false,
             },
             scope: Vec::new(),
@@ -5486,7 +5579,7 @@ impl<'a> Builder<'a> {
     /// module state answers, or `T?(..)` of an undeclared type.
     fn unknown_of(&self, e: &Expr) -> Option<(usize, String)> {
         match e {
-            Expr::Var { name, line } if !self.answers(name) => {
+            Expr::Var { name, line } if !self.answers(name) && !self.is_variant(name) => {
                 Some((*line, format!("unknown variable `{name}`")))
             }
             Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
