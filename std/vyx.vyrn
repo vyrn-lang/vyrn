@@ -2415,11 +2415,11 @@ gen fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, src: String, clsBas
                 // Themed class: a static literal is proven `⊆ Tw` at compile time,
                 // a dynamic expr coerces at runtime — both hoisted so the check
                 // maps to the class string's exact column.
-                let cv = if a.dyn { a.value } else { vyxStrLit(a.value) }
+                let cv = if a.dyn { a.value.copy() } else { vyxStrLit(a.value) }
                 pre = pre + vyxRegion("let " + slot + ": Attr = vyxTheme.cls(" + cv + ")\n", src, a.line, a.col)
                 parts.push(slot)
             } else {
-                let cv = if a.dyn { a.value } else { vyxStrLit(a.value) }
+                let cv = if a.dyn { a.value.copy() } else { vyxStrLit(a.value) }
                 if a.dyn {
                     pre = pre + vyxRegion("let " + slot + ": Attr = Cls((" + cv + ").copy())\n", src, a.line, a.col)
                     parts.push(slot)

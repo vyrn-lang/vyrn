@@ -280,7 +280,7 @@ fn twFlattenArr(prefix: String, items: Array<Json>, entries: modify Array<TwEntr
 /// dot-joining keys. Returns "" or the first leaf error.
 fn twFlattenObj(prefix: String, fields: Array<JsonField>, entries: modify Array<TwEntry>) -> String {
     for f in fields {
-        let key = if prefix == "" { f.key } else { prefix + "." + f.key }
+        let key = if prefix == "" { f.key.copy() } else { prefix + "." + f.key }
         let e = twFlatten(key, f.value, entries)
         if e != "" {
             return e

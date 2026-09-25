@@ -236,7 +236,7 @@ fn addEntry(entries: modify Array<LocaleEntry>, key: String, value: String) -> S
 /// dot-joining keys. Returns "" or the first leaf error.
 fn flattenObj(prefix: String, fields: Array<JsonField>, entries: modify Array<LocaleEntry>) -> String {
     for f in fields {
-        let key = if prefix == "" { f.key } else { prefix + "." + f.key }
+        let key = if prefix == "" { f.key.copy() } else { prefix + "." + f.key }
         let e = flattenValue(key, f.value, entries)
         if e != "" {
             return e
