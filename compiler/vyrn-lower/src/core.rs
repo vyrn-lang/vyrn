@@ -2008,6 +2008,10 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ),
             ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
             ("@pull", Spec::Pulls),
+            (
+                "pullAt",
+                Spec::Builds(Type::option(Type::Param("T".into()))),
+            ),
             ("@pop", Spec::Removes),
             ("@swapRemove", Spec::Removes),
             ("@remove", Spec::Removes),
