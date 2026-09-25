@@ -1,0 +1,9 @@
+// a borrowed layout bound by a refutable let
+// pin: 0 break, 0 continue
+// `j` is a borrowed parameter, so the payload `xs` the refutable `let` binds
+// is a borrow. It is bound out of the join the switch stores into, and it
+// takes the join's place with no slot and no copy (`core_renames`). Both
+// walks print 36 with no leak line (RFC-0125 M7, `m7-small`).
+type J = | Arr(Array<Int64>) | Num(Int64)
+fn at2(j: J) -> Int64 { let Arr(xs) = j return xs.length * 10 + xs[2] }
+fn vyrnTestMain() -> Int64 { let j = Arr([4, 5, 6]) return at2(j) }

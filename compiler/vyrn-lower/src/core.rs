@@ -2051,6 +2051,11 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 "listDirKinds",
                 Spec::Builds(Type::result(Type::Array(Box::new(Type::Str)), Type::Str)),
             ),
+            // A SmallArray's live elements copied out to a growable array.
+            (
+                "@toArray",
+                Spec::Builds(Type::Array(Box::new(Type::Param("T".into())))),
+            ),
             // A snapshot of a map's keys, at the prelude's own parameter.
             (
                 "@keys",

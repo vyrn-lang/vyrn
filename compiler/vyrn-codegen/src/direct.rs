@@ -8782,24 +8782,11 @@ impl<'p> Fn_<'_, 'p> {
                     _ => self.map_tally_bytes(m, b, hdr, &mty, &mut operand, line),
                 };
             }
-            // A `SmallArray` receiver takes the four-field path. Dispatched on
-            // `peek` rather than on an emitted type, because the receiver must not
-            // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
-            // and `swapRemove` it needs the BINDING rather than a value.
-            "@pop" | "@swapRemove" | "@toArray"
-                if !args.is_empty()
-                    && matches!(
-                        self.peek(&args[0], line).map(|t| self.cx.resolve(&t)),
-                        Ok(Type::SmallArray(..))
-                    ) =>
-            {
-                let Ok(Type::SmallArray(inner, n)) =
-                    self.peek(&args[0], line).map(|t| self.cx.resolve(&t))
-                else {
-                    return unsupported(&format!("`{name}` on a non-SmallArray"), line);
-                };
-                let aty = Type::SmallArray(inner.clone(), n);
-                return self.sa_method(m, b, name, args, &aty, &inner, n, line);
+            "@toArray" if args.len() == 1 => {
+                let aty = self.expr(m, b, &args[0])?;
+                let hdr = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(hdr));
+                return self.sa_to_array(m, b, hdr, &aty, line);
             }
             // RFC-0075 M2b. `fromArray` is no longer a retype: a stream is a
             // six-word header now and the array's three words go into it, with
@@ -11854,10 +11841,6 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        if let (Type::SmallArray(inner, n), "@push") = (self.cx.resolve(&aty), name) {
-            let ty = self.cx.resolve(&aty);
-            return self.sa_push(m, b, &ty, &inner, n, &args[1], line);
-        }
         let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match args {
             [_, a] => s.expr_as(m, b, a, t).map(|_| ()),
             _ => unsupported(&format!("`{name}` with no operand"), line),
@@ -11894,6 +11877,10 @@ impl<'p> Fn_<'_, 'p> {
         operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
+        if let (Type::SmallArray(inner, n), "@push") = (self.cx.resolve(aty), name) {
+            let aty = Type::SmallArray(inner.clone(), n);
+            return self.sa_push(m, b, &aty, &inner, n, operand, line);
+        }
         let verb = name.trim_start_matches('@');
         let (elem, l, stride, src) = self.arr_recv(b, aty, verb, line)?;
         let rt = &self.cx.rt;
@@ -12102,8 +12089,10 @@ impl<'p> Fn_<'_, 'p> {
         aty: &Type,
         line: usize,
     ) -> Result<Type, String> {
-        let Type::Array(elem) = self.cx.resolve(aty) else {
-            return unsupported(&format!("`pop` on `{aty}`"), line);
+        let elem = match self.cx.resolve(aty) {
+            Type::Array(elem) => elem,
+            Type::SmallArray(..) => return self.sa_pop(b, slot, aty, line),
+            _ => return unsupported(&format!("`pop` on `{aty}`"), line),
         };
         let elem = *elem;
         let al = self.layout_of(aty, line)?;
@@ -12184,8 +12173,10 @@ impl<'p> Fn_<'_, 'p> {
         index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let Type::Array(elem) = self.cx.resolve(aty) else {
-            return unsupported(&format!("`swapRemove` on `{aty}`"), line);
+        let elem = match self.cx.resolve(aty) {
+            Type::Array(elem) => elem,
+            Type::SmallArray(..) => return self.sa_swap_remove(m, b, slot, aty, index, line),
+            _ => return unsupported(&format!("`swapRemove` on `{aty}`"), line),
         };
         let elem = *elem;
         let al = self.layout_of(aty, line)?;
@@ -15435,7 +15426,7 @@ impl<'p> Fn_<'_, 'p> {
         aty: &Type,
         inner: &Type,
         n: usize,
-        value: &Expr,
+        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
         let l = self.layout_of(aty, line)?;
@@ -15502,7 +15493,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         self.elem_addr(b, &w, len);
         let r = self.cx.repr(inner, line)?;
-        self.expr_as(m, b, value, inner)?;
+        operand(self, m, b, inner)?;
         match &r {
             Repr::Scalar(_) => {
                 b.ins(&store_of(&self.cx.ll(inner)));
@@ -15527,188 +15518,197 @@ impl<'p> Fn_<'_, 'p> {
         Ok(aty.clone())
     }
 
-    /// `xs.pop()`, `xs.swapRemove(i)` and `xs.toArray()` on a `SmallArray`.
-    ///
-    /// The first two shrink the binding in place through its own header, so they
-    /// take the `Place` rather than a value — the same restriction the `Array`
-    /// forms have, and the checker's.
-    fn sa_method(
+    /// The layout of the `SmallArray` whose header address is in `hdr`, and
+    /// the walk over its live slots.
+    fn sa_open(
         &mut self,
-        m: &mut Module,
         b: &mut Frame,
-        name: &str,
-        args: &[Expr],
+        hdr: u32,
         aty: &Type,
-        inner: &Type,
-        n: usize,
         line: usize,
-    ) -> Result<Type, String> {
+    ) -> Result<(Layout, Walk), String> {
+        let Type::SmallArray(inner, n) = self.cx.resolve(aty) else {
+            return unsupported(&format!("a SmallArray operation on `{aty}`"), line);
+        };
         let l = self.layout_of(aty, line)?;
-        let stride = self.stride(inner, line)? as u32;
-        let hdr = b.local(ValType::I32);
-        if name == "@toArray" {
-            self.expr(m, b, &args[0])?;
-        } else {
-            let (place, _) = self.receiver(args, name.trim_start_matches('@'), line)?;
-            place
-                .addr(b, 0)
-                .ok_or_else(|| gap(&format!("`{name}` on a non-SmallArray binding"), line))?;
-        }
-        b.ins(&Instruction::LocalSet(hdr));
+        let stride = self.stride(&inner, line)?;
         let (len, _cap, base) = self.sa_parts(b, hdr, &l, n);
         let w = Walk {
             data: base,
             len,
             stride,
-            elem: inner.clone(),
+            elem: *inner,
             byte: false,
         };
+        Ok((l, w))
+    }
 
-        match name {
-            // A fresh growable `Array<T>` holding a copy of the live elements —
-            // the one explicit conversion RFC-0056 has, and the interpreter's is
-            // the identity because both are `Val::Array`.
-            //
-            // The result is a fresh `Array<T>` and an array owns its elements
-            // (RFC-0092 M2), so the words it copies are given their own heap.
-            // Before M2 it handed back the receiver's element POINTERS and the
-            // census counted it as one of the three view constructors.
-            "@toArray" => {
-                let want = Type::Array(Box::new(inner.clone()));
-                let al = self.layout_of(&want, line)?;
-                let buf = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I64Const(stride as i64));
-                b.ins(&Instruction::I64Mul);
-                b.ins(&Instruction::I64Const(1));
-                b.ins(&Instruction::I64Add);
-                b.ins(&Instruction::Call(self.cx.rt.malloc));
-                b.ins(&Instruction::LocalTee(buf));
-                b.ins(&Instruction::LocalGet(base));
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::I32Mul);
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-                let count = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::LocalSet(count));
-                self.each(m, b, false, buf, count, stride, inner, line)?;
-                let off = b.alloc(al.size, al.align);
-                b.slot(off + al.fields[0]);
-                b.ins(&Instruction::LocalGet(buf));
-                b.ins(&Instruction::I32Store(word()));
-                for f in [al.fields[1], al.fields[2]] {
-                    b.slot(off + f);
-                    b.ins(&Instruction::LocalGet(len));
-                    b.ins(&Instruction::I64Store(word8()));
-                }
-                b.slot(off);
-                Ok(want)
+    /// `xs.toArray()` on the `SmallArray` whose header address is in `hdr`.
+    ///
+    /// The result is a fresh `Array<T>` holding a copy of the live elements,
+    /// the one explicit conversion RFC-0056 has; the interpreter's is the
+    /// identity because both are `Val::Array`. An array owns its elements
+    /// (RFC-0092 M2), so the words it copies are given their own heap.
+    fn sa_to_array(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        hdr: u32,
+        aty: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let (_, w) = self.sa_open(b, hdr, aty, line)?;
+        let (len, base, stride, inner) = (w.len, w.data, w.stride, &w.elem);
+        let want = Type::Array(Box::new(inner.clone()));
+        let al = self.layout_of(&want, line)?;
+        let buf = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(buf));
+        b.ins(&Instruction::LocalGet(base));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride as i32));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        let count = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(count));
+        self.each(m, b, false, buf, count, stride, inner, line)?;
+        let off = b.alloc(al.size, al.align);
+        b.slot(off + al.fields[0]);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word()));
+        for f in [al.fields[1], al.fields[2]] {
+            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(len));
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(want)
+    }
+
+    /// `xs.pop()` on the `SmallArray` whose header address is in `hdr`: an
+    /// `Option<T>`, `None` on empty, else the last element with the header
+    /// shrunk. It never un-spills, like the LLVM path.
+    fn sa_pop(&mut self, b: &mut Frame, hdr: u32, aty: &Type, line: usize) -> Result<Type, String> {
+        let (l, w) = self.sa_open(b, hdr, aty, line)?;
+        let (len, inner) = (w.len, &w.elem);
+        let oty = Type::option(inner.clone());
+        let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
+            return unsupported("an `Option` that is not an aggregate", line);
+        };
+        let off = b.alloc(ol.size, ol.align);
+        b.slot(off);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32Const(ol.size as i32));
+        b.ins(&Instruction::MemoryFill(0));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Eqz);
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let last = b.local(ValType::I64);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::LocalSet(last));
+        b.slot(off + ol.fields[0]);
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + ol.fields[1]);
+        self.elem_addr(b, &w, last);
+        match self.word2(inner)? {
+            Word::Inline2 => {
+                // The payload word IS the address here, so the two-word
+                // copy has to be the destination's, not an encode.
+                return unsupported("a `SmallArray` of two-word values", line);
             }
-            // `Option<T>`: `None` on empty, else the last element with the header
-            // shrunk. Never un-spills, exactly like the LLVM path.
-            "@pop" => {
-                let oty = Type::option(inner.clone());
-                let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
-                    return unsupported("an `Option` that is not an aggregate", line);
-                };
-                let off = b.alloc(ol.size, ol.align);
-                b.slot(off);
-                b.ins(&Instruction::I32Const(0));
-                b.ins(&Instruction::I32Const(ol.size as i32));
-                b.ins(&Instruction::MemoryFill(0));
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I64Eqz);
-                b.ins(&Instruction::I32Eqz);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                let last = b.local(ValType::I64);
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I64Const(1));
-                b.ins(&Instruction::I64Sub);
-                b.ins(&Instruction::LocalSet(last));
-                b.slot(off + ol.fields[0]);
-                b.ins(&Instruction::I64Const(1));
-                b.ins(&Instruction::I64Store(word8()));
-                b.slot(off + ol.fields[1]);
-                self.elem_addr(b, &w, last);
-                match self.word2(inner)? {
-                    Word::Inline2 => {
-                        // The payload word IS the address here, so the two-word
-                        // copy has to be the destination's, not an encode.
-                        return unsupported("a `SmallArray` of two-word values", line);
-                    }
-                    Word::Boxed if matches!(self.cx.repr(inner, line)?, Repr::Agg(_)) => {
-                        self.box_value(b, inner, line)?;
-                    }
-                    _ => {
-                        b.ins(&load_of(&self.cx.ll(inner), 0, self.cx.signed(inner)));
-                        self.encode_word2(b, inner, line)?;
-                    }
-                }
-                b.ins(&Instruction::I64Store(word8()));
-                b.ins(&Instruction::LocalGet(hdr));
-                b.ins(&Instruction::LocalGet(last));
-                b.ins(&Instruction::I64Store(at(l.fields[0])));
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                b.slot(off);
-                Ok(oty)
+            Word::Boxed if matches!(self.cx.repr(inner, line)?, Repr::Agg(_)) => {
+                self.box_value(b, inner, line)?;
             }
-            // The removed element, with the last one moved into its place — for
-            // `i == len - 1` those are the same address, and the copy is a no-op.
             _ => {
-                self.expr_as(m, b, &args[1], &Type::Int)?;
-                let idx = b.local(ValType::I64);
-                b.ins(&Instruction::LocalSet(idx));
-                self.bounds_check(b, &w, idx, false);
-                let r = self.cx.repr(inner, line)?;
-                let taken = self.place_for(b, &r, line)?;
-                match (taken, &r) {
-                    (Place::Local(loc), _) => {
-                        self.elem_addr(b, &w, idx);
-                        self.load_elem(b, &w, line)?;
-                        b.ins(&Instruction::LocalSet(loc));
-                    }
-                    (Place::Slot(o), Repr::Agg(el)) => {
-                        b.slot(o);
-                        self.elem_addr(b, &w, idx);
-                        b.ins(&Instruction::I32Const(el.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                    }
-                    _ => return unsupported("a SmallArray of Unit", line),
-                }
-                let last = b.local(ValType::I64);
-                b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I64Const(1));
-                b.ins(&Instruction::I64Sub);
-                b.ins(&Instruction::LocalSet(last));
-                self.elem_addr(b, &w, idx);
-                self.elem_addr(b, &w, last);
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-                b.ins(&Instruction::LocalGet(hdr));
-                b.ins(&Instruction::LocalGet(last));
-                b.ins(&Instruction::I64Store(at(l.fields[0])));
-                match taken {
-                    Place::Local(loc) => b.ins(&Instruction::LocalGet(loc)),
-                    Place::Slot(o) => b.slot(o),
-                    Place::Static(_) => return unsupported("a static temporary", line),
-                };
-                Ok(inner.clone())
+                b.ins(&load_of(&self.cx.ll(inner), 0, self.cx.signed(inner)));
+                self.encode_word2(b, inner, line)?;
             }
         }
+        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(last));
+        b.ins(&Instruction::I64Store(at(l.fields[0])));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.slot(off);
+        Ok(oty)
+    }
+
+    /// `xs.swapRemove(i)` on the `SmallArray` whose header address is in
+    /// `hdr`, with `index` writing the index: the removed element, with the
+    /// last one moved into its place. For `i == len - 1` those are the same
+    /// address, and the copy is a no-op.
+    fn sa_swap_remove(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        hdr: u32,
+        aty: &Type,
+        index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let (l, w) = self.sa_open(b, hdr, aty, line)?;
+        let (len, stride, inner) = (w.len, w.stride, &w.elem);
+        index(self, m, b)?;
+        let idx = b.local(ValType::I64);
+        b.ins(&Instruction::LocalSet(idx));
+        self.bounds_check(b, &w, idx, false);
+        let r = self.cx.repr(inner, line)?;
+        let taken = self.place_for(b, &r, line)?;
+        match (taken, &r) {
+            (Place::Local(loc), _) => {
+                self.elem_addr(b, &w, idx);
+                self.load_elem(b, &w, line)?;
+                b.ins(&Instruction::LocalSet(loc));
+            }
+            (Place::Slot(o), Repr::Agg(el)) => {
+                b.slot(o);
+                self.elem_addr(b, &w, idx);
+                b.ins(&Instruction::I32Const(el.size as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            }
+            _ => return unsupported("a SmallArray of Unit", line),
+        }
+        let last = b.local(ValType::I64);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::LocalSet(last));
+        self.elem_addr(b, &w, idx);
+        self.elem_addr(b, &w, last);
+        b.ins(&Instruction::I32Const(stride as i32));
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(last));
+        b.ins(&Instruction::I64Store(at(l.fields[0])));
+        match taken {
+            Place::Local(loc) => b.ins(&Instruction::LocalGet(loc)),
+            Place::Slot(o) => b.slot(o),
+            Place::Static(_) => return unsupported("a static temporary", line),
+        };
+        Ok(inner.clone())
     }
 }
 
@@ -18814,6 +18814,13 @@ impl<'p> Fn_<'_, 'p> {
                 return match (callee, args) {
                     ("bytes", _) => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
                     ("stringFromBytes", _) => self.string_from_bytes(m, b, &mut operand, line),
+                    ("@toArray", [(v, _)]) => {
+                        let aty = self.core_ty(body, v, &Type::Int);
+                        self.core_val(m, b, body, w, v, &aty, line)?;
+                        let hdr = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(hdr));
+                        self.sa_to_array(m, b, hdr, &aty, line)
+                    }
                     ("@keys", [(v, _)]) => {
                         let mty = self.core_ty(body, v, &Type::Int);
                         self.core_val(m, b, body, w, v, &mty, line)?;
@@ -19373,10 +19380,7 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<vyrn_lower::core::Name> {
         let info = &body.names[n as usize];
-        if info.borrow
-            || self.checks(&info.ty)
-            || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
-        {
+        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
         let mut lets = Vec::new();
@@ -19396,7 +19400,9 @@ impl<'p> Fn_<'_, 'p> {
         };
         let from = &body.names[*x as usize];
         let unwritten = |m: vyrn_lower::core::Name| !written.iter().any(|(w, _)| *w == m);
-        // A join's stores are its branches', which run before the rename.
+        // A join's stores are its branches', which run before the rename. A
+        // borrow takes over only a join's place: the join holds the bytes the
+        // borrow reads, and neither name releases them.
         // A borrowed layout parameter holds the caller's address for the
         // whole body, so the temporary a scrutinee binds to it is that
         // address while neither name is written: a declared release's
@@ -19404,7 +19410,7 @@ impl<'p> Fn_<'_, 'p> {
         let joins = self.core_joins(body, *x);
         let param =
             from.borrow && body.params.contains(x) && info.source.starts_with('@') && unwritten(n);
-        ((joins || param || (self.owns_heap(&info.ty) && !from.borrow))
+        ((joins || (!info.borrow && (param || (self.owns_heap(&info.ty) && !from.borrow))))
             && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
             && (joins || unwritten(*x)))
         .then_some(*x)
@@ -20953,9 +20959,9 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Whether a row rebuilds a named `Array` or `Map` receiver or a String
-    /// accumulator in place ([`Spec::Rebuilds`]), with operands this walk
-    /// writes.
+    /// Whether a row rebuilds a named `Array` or `Map` receiver, a
+    /// `SmallArray` one it pushes to, or a String accumulator in place
+    /// ([`Spec::Rebuilds`]), with operands this walk writes.
     fn core_rebuild(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         let Rhs::Call {
             callee, kind, args, ..
@@ -20968,7 +20974,9 @@ impl<'p> Fn_<'_, 'p> {
                 if (body.names[*x as usize].grows
                     || matches!(
                         (callee.as_str(), self.cx.resolve(&body.names[*x as usize].ty)),
-                        (_, Type::Array(_)) | ("@tally" | "@tallyBytes", Type::Map(..))
+                        (_, Type::Array(_))
+                            | ("@push", Type::SmallArray(..))
+                            | ("@tally" | "@tallyBytes", Type::Map(..))
                     ))
                     && core_global(body, *x).is_none_or(|g| self.cx.gappend.contains_key(g))
                     && self.core_args_readable(body, rest))
@@ -21010,8 +21018,10 @@ impl<'p> Fn_<'_, 'p> {
         };
         let agg = match (callee, self.cx.resolve(&ty)) {
             ("@remove", Type::Map(..)) => false,
-            ("@pop", Type::Array(_)) => true,
-            ("@swapRemove", Type::Array(e)) => matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))),
+            ("@pop", Type::Array(_) | Type::SmallArray(..)) => true,
+            ("@swapRemove", Type::Array(e) | Type::SmallArray(e, _)) => {
+                matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_)))
+            }
             _ => return None,
         };
         (readable
