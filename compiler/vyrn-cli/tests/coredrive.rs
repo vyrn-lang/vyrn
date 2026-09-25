@@ -503,7 +503,7 @@ fn run() {
         }
     }
     // The forms whose arm the rows have started to relieve. An arm goes when
-    // its first number reaches zero, and this pin says which six are on that
+    // its first number reaches zero, and this pin says which seven are on that
     // road: a form that drops off the list has lost a reader the record has to
     // explain, and one that joins it is a slice's own count. The count is per
     // statement, so a form whose whole body the core walk takes leaves it:
@@ -514,6 +514,8 @@ fn run() {
     // `Stmt::IfLet` left again when #499 and #507 to #511 merged together, and
     // `Stmt::If` when the user-container loop took container and slots `main`
     // whole (the m7-letpay record).
+    // `Stmt::While` came back with `capturefn`'s `applyAll`, whose loop the
+    // rows take beside a `let` they do not (the m7-streamfn record).
     let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
         .iter()
         .enumerate()
@@ -529,6 +531,7 @@ fn run() {
                 "Stmt::Assign",
                 "Stmt::Return",
                 "Stmt::Expr",
+                "Stmt::While",
                 "Stmt::ForIn",
                 "Stmt::Break"
             ],
