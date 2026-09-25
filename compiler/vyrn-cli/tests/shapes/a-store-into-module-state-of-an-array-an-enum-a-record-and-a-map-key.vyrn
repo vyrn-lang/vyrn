@@ -1,0 +1,6 @@
+// a store into module state of an array, an enum, a record and a map key
+// pin: 0 break, 0 continue
+// A store into module state is a store into a place with an address: the
+// static's bytes take the value's and what they held is released where the
+// row says so, as a name's would (RFC-0125 M7, `m7-stores`).
+type R = { s: String, n: Int64 }          type E = | Blank | Tagged(String, Int64)          let mut xs: Array<String> = []          let mut e: E = Blank          let mut r: R = R { s: "", n: 0 }          let mut m: Map<String, R> = [:]          fn fill(n: Int64) { let mut ys: Array<String> = [] let mut i = 0          while i < n { ys.push(i.toString()) i = i + 1 } xs = ys }          fn tag(n: Int64) { if let Blank = e { e = Tagged("t" + n.toString(), n) } else { e = Blank } }          fn put(k: String, n: Int64) { let v = R { s: k + "!", n: n } m[k.copy()] = v r.s = k + "?" }          fn vyrnTestMain() -> Int64 { fill(2) fill(5) tag(1) tag(2) tag(33) put("a", 1) put("a", 2) put("bb", 3) let t = match e { Tagged(s, n) => s.byteLength * 100 + n, Blank => 7 } return xs.length * 100000 + t * 10 + m.length + r.s.byteLength }

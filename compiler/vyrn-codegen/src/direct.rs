@@ -8693,29 +8693,13 @@ impl<'p> Fn_<'_, 'p> {
                     };
                 return self.slot_call(m, b, n, &mut operand, line);
             }
-            // RFC-0111: `print` for bytes. `write_all` is already the gathered
-            // stdout writer every printed line goes through, so this is that call
-            // with the caller's buffer — same buffering, same ordering against
-            // `print` and against standard error. Its status is dropped, for the
-            // reason `print` drops it.
-            "writeStdout" if args.len() == 1 => {
-                let bytes = Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }));
-                self.expr_as(m, b, &args[0], &bytes)?;
-                let src = self.scratch(b, ValType::I32, 0);
-                let al = self.layout_of(&bytes, line)?;
-                b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I64Load(at(al.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::Call(self.cx.rt.write_all));
-                b.ins(&Instruction::Drop);
-                return Ok(Type::Unit);
+            "writeStdout" | "close" if args.len() == 1 => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, want: Option<&Type>| match want {
+                        Some(t) => s.expr_as(m, b, &args[0], t).map(|_| t.clone()),
+                        None => s.expr(m, b, &args[0]),
+                    };
+                return self.effect(m, b, name, &mut operand, line);
             }
             n if matches!(vyrn_lower::core::builtin_row(n), Some(Spec::Lanes)) => {
                 let mut operand =
@@ -8810,22 +8794,6 @@ impl<'p> Fn_<'_, 'p> {
             "boxStream" if args.len() == 1 => return self.stream_box(m, b, args, line),
             "unboxStream" if args.len() == 1 => return self.stream_unbox(m, b, args, line),
             "pullAt" if args.len() == 1 => return self.stream_pull_at(m, b, args, line),
-            // `close` reclaims what this backend CAN reclaim. Its `malloc` is a
-            // bump pointer that never frees, so a buffer stream's teardown is
-            // still nothing — but a stepped one owns a cell, and cells come from
-            // a fixed slab of 65536 that a leak would exhaust. Which of the two
-            // it is, is the tag.
-            "close" if args.len() == 1 => {
-                let got = self.expr(m, b, &args[0])?;
-                let elem = match self.cx.resolve(&got) {
-                    Type::Stream(i) => *i,
-                    other => return unsupported(&format!("`close` of `{other}`"), line),
-                };
-                let s = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(s));
-                self.stream_release(m, b, Place::Local(s), &elem, line)?;
-                return Ok(Type::Unit);
-            }
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
             "@swapRemove" if args.len() == 2 => return self.swap_remove(m, b, args, line),
             // `list([..])` is the explicit spelling of the contextual literal;
@@ -14791,6 +14759,65 @@ impl<'p> Fn_<'_, 'p> {
         Ok(oty)
     }
 
+    /// `writeStdout(bytes)` and `close(s)`, the builtins [`Spec::Effect`]
+    /// names. `operand` writes the argument at the type asked for, or at its
+    /// own where none is, and answers the type it wrote.
+    fn effect(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            Option<&Type>,
+        ) -> Result<Type, String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        match name {
+            // RFC-0111: `print` for bytes. `write_all` is already the gathered
+            // stdout writer every printed line goes through, so this is that call
+            // with the caller's buffer — same buffering, same ordering against
+            // `print` and against standard error. Its status is dropped, for the
+            // reason `print` drops it.
+            "writeStdout" => {
+                let bytes = Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }));
+                operand(self, m, b, Some(&bytes))?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::I32Const(1));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::Call(self.cx.rt.write_all));
+                b.ins(&Instruction::Drop);
+            }
+            // `close` reclaims what this backend CAN reclaim. Its `malloc` is a
+            // bump pointer that never frees, so a buffer stream's teardown is
+            // still nothing — but a stepped one owns a cell, and cells come from
+            // a fixed slab of 65536 that a leak would exhaust. Which of the two
+            // it is, is the tag.
+            _ => {
+                let got = operand(self, m, b, None)?;
+                let elem = match self.cx.resolve(&got) {
+                    Type::Stream(i) => *i,
+                    other => return unsupported(&format!("`{name}` of `{other}`"), line),
+                };
+                let s = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(s));
+                self.stream_release(m, b, Place::Local(s), &elem, line)?;
+            }
+        }
+        Ok(Type::Unit)
+    }
+
     /// A SIMD builtin (RFC-0083): a lane constructor, a lane read or write at
     /// a constant index, a mask reduction, or a load or store of consecutive
     /// array elements. The vector operand's own type chooses the opcode.
@@ -18360,6 +18387,7 @@ impl<'p> Fn_<'_, 'p> {
             ) {
                 (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
                 (None, Some(Spec::Traps)) => Ok(Type::Never),
+                (None, Some(Spec::Effect)) => Ok(Type::Unit),
                 // [`Fn_::lanes`] decides a lane builtin's type as it emits, and
                 // the row carries the checker's answer for the site.
                 (None, Some(Spec::Lanes)) => at
@@ -18582,6 +18610,20 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     _ => self.slot_call(m, b, callee, &mut operand, line),
                 };
+            }
+            Some(Spec::Effect) => {
+                let [(v, _)] = args else {
+                    return unsupported(&format!("`{callee}` of other than one value"), line);
+                };
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, want: Option<&Type>| {
+                        let t = want
+                            .cloned()
+                            .unwrap_or_else(|| s.core_ty(body, v, &Type::Int));
+                        s.core_val(m, b, body, w, v, &t, line)?;
+                        Ok(t)
+                    };
+                return self.effect(m, b, callee, &mut operand, line);
             }
             // A routed builtin is the declared call below, through the
             // signature [`Fn_::core_sig`] answers for the function it names.
@@ -20371,17 +20413,14 @@ impl<'p> Fn_<'_, 'p> {
             }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
-            // A store into a place with an address ([`Fn_::core_stmts`]). A
+            // A store into a place with an address ([`Fn_::core_stmts`]),
+            // module state's static address as much as a name's slot. A
             // layout's value is a name of its type, whose bytes are copied.
-            // Module state takes a scalar, and a String stored into the
-            // global itself, released by the row's `releases` with its
-            // accumulator's word cleared.
             St::Store { place, value, .. } => {
                 use vyrn_lower::core::Place as At;
-                let scalar_only = vyrn_lower::kernel::root_of(place).is_none();
                 let ty = match place {
                     At::Name(n) => Some(body.names[*n as usize].ty.clone()),
-                    At::Key(_, k) if scalar_only || !self.core_val_readable(body, k) => None,
+                    At::Key(_, k) if !self.core_val_readable(body, k) => None,
                     At::Key(m, _) => {
                         match self.core_place_ty(body, m).map(|t| self.cx.resolve(&t)) {
                             Some(Type::Map(_, v)) => Some(*v),
@@ -20390,18 +20429,12 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     p => self.core_place_ty(body, p),
                 };
-                let global = matches!(place, At::Global(_));
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
                     let fits = match self.cx.repr(&t, 0) {
-                        Ok(Repr::Unit) => self.core_val_readable(body, value),
-                        _ if scalar_only => {
-                            (core_scalar(&r) || (global && r == Type::Str))
-                                && self.core_val_readable(body, value)
-                        }
-                        Ok(Repr::Scalar(_)) => self.core_val_readable(body, value),
+                        Ok(Repr::Unit | Repr::Scalar(_)) => self.core_val_readable(body, value),
                         Ok(Repr::Agg(_)) => {
                             matches!(value, Val::Name(v)
                                     if self.cx.resolve(&body.names[*v as usize].ty) == r)
@@ -20786,7 +20819,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::OwnType) => {
                 matches!(args, [_]) && self.core_copy_impl(body, callee, kind, args).is_none()
             }
-            Some(Spec::Renders(_)) => matches!(args, [_]),
+            Some(Spec::Renders(_) | Spec::Effect) => matches!(args, [_]),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Val::Lit(Lit::Str(_)), _)]),
             // A lane index is an immediate, so the row carries it as a literal.
             Some(Spec::Lanes) => {
