@@ -8582,42 +8582,23 @@ impl<'p> Fn_<'_, 'p> {
                 self.print_value(b, &t, line)?;
                 return Ok(Type::Unit);
             }
-            // RFC-0008's facade. A `Logger` IS its name string — the handle has no
-            // other content — so `logger(name)` is the identity on a `ptr` and
-            // costs nothing at all.
-            "logger" if args.len() == 1 => {
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                return Ok(Type::Logger);
-            }
-            // The five levels, written subject-first, so `args` is the logger then
-            // the message (the parser's method sugar).
-            //
-            // Both arguments are evaluated WHATEVER the threshold says, because the
-            // interpreter evaluates them before it checks (RFC-0008 Q4, pinned), and
-            // then the write is emitted only if the level clears it. That test is
-            // the whole feature: with `logging { level: warn }` a `.debug(..)` call
-            // emits no `write_all` at all, which is why a disabled log site costs
-            // nothing on any engine. Making it a runtime comparison would turn a
-            // deleted call into a branch — RFC-0078's census names that mistake.
-            // (The five spellings are the parser's own, so no user function can
-            // reach this arm: `log.info(m)` carries `@info` and a module that
-            // declares `info` gets the surface word back before this.)
+            // RFC-0008's facade, written subject-first, so a level's `args` is
+            // the logger then the message (the parser's method sugar). (The five
+            // spellings are the parser's own, so no user function can reach this
+            // arm: `log.info(m)` carries `@info` and a module that declares
+            // `info` gets the surface word back before this.)
             // Literal rather than [`vyrn_frontend::ast::log_internal`]:
             // `primitives.rs` greps THIS FILE for each census name to decide
             // whether the direct backend covers it, and a predicate is
             // invisible to a text scan.
-            "@trace" | "@debug" | "@info" | "@warn" | "@error" if args.len() == 2 => {
-                self.expr_as(m, b, &args[0], &Type::Logger)?;
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                if log_internal(name).unwrap_or(0) < self.cx.log_level {
-                    // Below the threshold: the two values are the only thing this
-                    // site leaves behind, and `Unit` means nobody consumes them.
-                    b.ins(&Instruction::Drop);
-                    b.ins(&Instruction::Drop);
-                    return Ok(Type::Unit);
-                }
-                self.log_write(m, b, name, line)?;
-                return Ok(Type::Unit);
+            "logger" | "@trace" | "@debug" | "@info" | "@warn" | "@error"
+                if args.len() == logs_arity(name) =>
+            {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.expr_as(m, b, &args[i], t)
+                    };
+                return self.logs(m, b, name, &mut operand, line);
             }
             // String interpolation desugars to these two (parser), so they are
             // the whole of `"a \{b}"`.
@@ -14834,6 +14815,49 @@ impl<'p> Fn_<'_, 'p> {
         Ok(Type::Unit)
     }
 
+    /// The builtins [`Spec::Logs`] names. `operand` writes the `i`th
+    /// argument at the type asked for.
+    ///
+    /// `logger(name)` is the identity on a `ptr`: a `Logger` is its name
+    /// string and has no other content. A level evaluates both operands
+    /// whatever the threshold says, because the interpreter evaluates them
+    /// before it checks (RFC-0008 Q4, pinned), and emits the write only if
+    /// the level clears it. That test is the whole feature: with `logging {
+    /// level: warn }` a `.debug(..)` call emits no `write_all` at all, so a
+    /// disabled log site costs nothing on any engine. A runtime comparison
+    /// would turn a deleted call into a branch, the mistake RFC-0078's census
+    /// names.
+    fn logs(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        if name == "logger" {
+            operand(self, m, b, 0, &Type::Str)?;
+            return Ok(Type::Logger);
+        }
+        operand(self, m, b, 0, &Type::Logger)?;
+        operand(self, m, b, 1, &Type::Str)?;
+        if log_internal(name).unwrap_or(0) < self.cx.log_level {
+            // Below the threshold: the two values are the only thing this
+            // site leaves behind, and `Unit` means nobody consumes them.
+            b.ins(&Instruction::Drop);
+            b.ins(&Instruction::Drop);
+        } else {
+            self.log_write(m, b, name, line)?;
+        }
+        Ok(Type::Unit)
+    }
+
     /// A SIMD builtin (RFC-0083): a lane constructor, a lane read or write at
     /// a constant index, a mask reduction, or a load or store of consecutive
     /// array elements. The vector operand's own type chooses the opcode.
@@ -16973,6 +16997,12 @@ fn disown(b: &mut Frame, own: Place) {
         .ins(&Instruction::I32Store(word()));
 }
 
+/// How many operands a [`Spec::Logs`] builtin takes: `logger` its name, a
+/// level the logger and the message.
+fn logs_arity(name: &str) -> usize {
+    1 + usize::from(name != "logger")
+}
+
 fn core_builtin(callee: &str, kind: Callee) -> Option<&'static Spec> {
     matches!(kind, Callee::Builtin | Callee::Reserved)
         .then(|| vyrn_lower::core::builtin_row(callee))
@@ -18423,6 +18453,8 @@ impl<'p> Fn_<'_, 'p> {
                 (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
                 (None, Some(Spec::Traps)) => Ok(Type::Never),
                 (None, Some(Spec::Effect)) => Ok(Type::Unit),
+                (None, Some(Spec::Logs)) if callee == "logger" => Ok(Type::Logger),
+                (None, Some(Spec::Logs)) => Ok(Type::Unit),
                 // [`Fn_::lanes`] decides a lane builtin's type as it emits, and
                 // the row carries the checker's answer for the site.
                 (None, Some(Spec::Lanes)) => at
@@ -18708,6 +18740,16 @@ impl<'p> Fn_<'_, 'p> {
                         Ok(t)
                     };
                 return self.effect(m, b, callee, &mut operand, line);
+            }
+            Some(Spec::Logs) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
+                        .get(i)
+                    {
+                        Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
+                        None => unsupported(&format!("`{callee}` with too few operands"), line),
+                    };
+                return self.logs(m, b, callee, &mut operand, line);
             }
             // A routed builtin is the declared call below, through the
             // signature [`Fn_::core_sig`] answers for the function it names.
@@ -20972,6 +21014,7 @@ impl<'p> Fn_<'_, 'p> {
                 matches!(args, [(Arg::Val(v), _)] if self.core_copy_impl(body, callee, kind, v).is_none())
             }
             Some(Spec::Renders(_) | Spec::Effect) => matches!(args, [_]),
+            Some(Spec::Logs) => args.len() == logs_arity(callee),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
             // A lane index is an immediate, so the row carries it as a literal.
             Some(Spec::Lanes) => {
