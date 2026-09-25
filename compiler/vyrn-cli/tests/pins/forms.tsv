@@ -10,7 +10,7 @@ Stmt::If	2	3	1	0	8	0	4	0	18
 Stmt::IfLet	2	2	1	0	9	0	5	0	19
 Stmt::While	2	3	1	0	8	0	4	0	18
 Stmt::ForIn	1	4	1	0	8	0	5	0	19
-Stmt::Drop	1	3	1	0	5	0	4	0	14
+Stmt::Drop	1	3	1	0	5	0	5	0	15
 Stmt::Expr	2	1	1	0	9	0	6	0	19
 Stmt::Region	1	3	1	0	8	0	3	0	16
 Expr::Int	4	6	1	0	7	0	5	1	24
@@ -36,4 +36,4 @@ Pattern::Variant	11	4	1	0	3	0	5	0	24
 Pattern::Success	1	4	2	0	4	0	6	0	17
 Pattern::Failure	1	3	1	0	2	0	3	0	10
 Pattern::Other	1	2	0	0	2	0	4	0	9
-all	150	134	58	2	342	2	192	9	889
+all	150	134	58	2	342	2	193	9	890

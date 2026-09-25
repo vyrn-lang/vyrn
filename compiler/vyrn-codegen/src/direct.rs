@@ -5735,12 +5735,13 @@ impl<'p> Fn_<'_, 'p> {
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
             }
-            // Retired, and its flag in `FORMS` says so: the core states every
-            // `continue`, and this arm read zero over the corpus and every gated
-            // suite. The match is exhaustive, so what stands here is the answer
-            // for a `continue` the core did not state, which is a defect there.
-            Stmt::Continue { line } => {
-                return unsupported("a `continue` the core did not state", *line)
+            // Retired, and their flags in `FORMS` say so: the core states every
+            // `continue` and every `drop`, and these arms read zero over the
+            // corpus and every gated suite. The match is exhaustive, so what
+            // stands here is the answer for a statement the core did not state,
+            // which is a defect there.
+            Stmt::Continue { line } | Stmt::Drop { line, .. } => {
+                return unsupported("a statement the core did not state", *line)
             }
             // `region { .. }` (RFC-0004 §4). An arena scope, and in this backend
             // that is a counter and its trap — see `region_exit` for why the arena
@@ -5760,12 +5761,6 @@ impl<'p> Fn_<'_, 'p> {
                 let mark = self.region_marks.pop().expect("one mark per open region");
                 r?;
                 self.region_exit(b, mark);
-            }
-            Stmt::Drop { name, line } => {
-                let (place, ty) = self.lookup(name, *line)?;
-                if let Some(r) = self.rel_for(&ty, *line)? {
-                    self.emit_rel(m, b, place, &r, *line)?;
-                }
             }
             Stmt::Expr(e) => {
                 // A call for its effect leaves its result on the stack; drop it,
@@ -16907,7 +16902,7 @@ pub const FORMS: [(&str, bool); 20] = [
     ("Stmt::Break", true),
     ("Stmt::Continue", false),
     ("Stmt::IfLet", true),
-    ("Stmt::Drop", true),
+    ("Stmt::Drop", false),
     ("a statement of another form", true),
     ("Expr::Int", true),
     ("Expr::Byte", true),
@@ -17679,6 +17674,7 @@ impl<'p> Fn_<'_, 'p> {
             (Stmt::While { .. } | Stmt::ForIn { .. }, St::Loop { .. }) => {}
             (Stmt::IfLet { .. }, St::Switch { .. }) => {}
             (Stmt::Region { .. }, St::Block { region: true, .. }) => {}
+            (Stmt::Drop { .. }, St::Drop(..)) => {}
             _ => return None,
         }
         // Every OTHER binding of the run: the row types it by its destination
@@ -22079,8 +22075,12 @@ const CORE_EXITS: [ExitKind; 4] = [
 
 /// The row a run states its statement with: the last one, but for the
 /// releases of its temporaries after it ([`vyrn_lower::core::Body::rows_by_statement`]).
+/// A release this pass placed has line 0; a `drop` the reader wrote is its
+/// statement's own row.
 fn core_head(run: &[St]) -> Option<&St> {
-    run.iter().rev().find(|r| !matches!(r, St::Drop(..)))
+    run.iter()
+        .rev()
+        .find(|r| !matches!(r, St::Drop(_, _, 0, _)))
 }
 
 /// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
