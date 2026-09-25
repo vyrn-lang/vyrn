@@ -32,6 +32,7 @@ use vyrn_frontend::ast::{
 use vyrn_frontend::declared::Owned;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
+use vyrn_frontend::project::is_place_read;
 
 use crate::kernel::{MissingKind, Root};
 use crate::{Instance, Node};
@@ -1454,25 +1455,11 @@ pub struct Gap {
     pub rule: Option<String>,
 }
 
-/// A field read or an element read: a place, not a value the reader owns.
 /// Whether `rhs` is a validated type's constructor over a literal, which
 /// hands the literal back.
 fn over_a_literal(rhs: &Rhs) -> bool {
     matches!(rhs, Rhs::Call { kind: Callee::Named | Callee::Proven, args, .. }
         if matches!(args.as_slice(), [(Arg::Val(Val::Lit(l)), _)] if !matches!(l, Lit::Opaque(_))))
-}
-
-fn is_place_read(e: &Expr) -> bool {
-    match e {
-        Expr::Field { expr, .. } => {
-            matches!(&**expr, Expr::Var { .. } | Expr::Field { .. }) || is_place_read(expr)
-        }
-        Expr::Call { name, args, .. } => {
-            name == "@at" && args.len() == 2 && is_place_read(&args[0])
-        }
-        Expr::Var { .. } => true,
-        _ => false,
-    }
 }
 
 /// A field read or an element read, whatever its receiver: the reads whose
@@ -3006,8 +2993,8 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether a call's result points into one of its arguments, so the name
-    /// bound to it is a borrow: a lending prelude row (`at`, `bytes`), the
-    /// `value` box, or a projection an `impl` declares (RFC-0120).
+    /// bound to it is a borrow: a lending prelude row (`at`, `bytes`) or a
+    /// projection an `impl` declares (RFC-0120).
     fn lends(&self, e: &Expr) -> bool {
         match e {
             Expr::Call { name, args, .. } => {
@@ -3033,14 +3020,13 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether a call by this name lends: `a[i]` and the seeded element row
-    /// it dispatches to, a lending prelude row, the `value` box, a projection.
+    /// it dispatches to, a lending prelude row, a projection.
     /// A call that hands its argument back is [`Self::lends`]'s question,
     /// because the answer depends on the argument.
     fn lends_name(&self, name: &str) -> bool {
         name == vyrn_frontend::project::AT
             || name == vyrn_frontend::project::ELEM
             || prelude::lends(name)
-            || name == "value"
             || self.projection(name).is_some()
     }
 
@@ -7546,6 +7532,33 @@ impl<'a> Builder<'a> {
         if let (vyrn_frontend::project::AT, [recv, rest @ ..]) = (name, args) {
             if let Some(p) = self.inlined("at", recv, rest, line, out)? {
                 return Ok(Rhs::Read(p));
+            }
+        }
+        // `value(s)` of a String: the box owns its payload (#512). It takes a
+        // temporary, and a copy of a String read out of a place, which the
+        // copy row before it makes.
+        if let ("value", [arg]) = (name, args) {
+            let string = self
+                .ty_of(arg)
+                .is_ok_and(|t| vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Str);
+            if string {
+                let v = if prelude::boxes_a_copy(arg, string) {
+                    let copy = self.call("@copy", args, line, Some(Type::Str), out)?;
+                    let c = self.temp(Type::Str, line);
+                    self.bind(c, copy, out);
+                    Val::Name(c)
+                } else {
+                    self.val(arg, out)?
+                };
+                return Ok(Rhs::Call {
+                    callee: name.to_string(),
+                    args: vec![(Arg::Val(v), Capability::Consume)],
+                    write_back: false,
+                    kind: Callee::Reserved,
+                    ret,
+                    solved: Vec::new(),
+                    targets: Vec::new(),
+                });
             }
         }
         // The capability of each argument position, by who the callee is.

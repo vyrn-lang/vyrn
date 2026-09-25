@@ -53,6 +53,18 @@ pub const ELEM: &str = "@slot";
 /// moved.
 pub const AT: &str = "@at";
 
+/// A field read or an element read: a place, not a value the reader owns.
+pub fn is_place_read(e: &Expr) -> bool {
+    match e {
+        Expr::Field { expr, .. } => {
+            matches!(&**expr, Expr::Var { .. } | Expr::Field { .. }) || is_place_read(expr)
+        }
+        Expr::Call { name, args, .. } => name == AT && args.len() == 2 && is_place_read(&args[0]),
+        Expr::Var { .. } => true,
+        _ => false,
+    }
+}
+
 /// One access site's lowering: statements to run first, then the place.
 #[derive(Debug, Clone)]
 pub struct Projection {

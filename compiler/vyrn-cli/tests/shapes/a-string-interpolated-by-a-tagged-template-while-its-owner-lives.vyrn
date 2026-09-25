@@ -1,0 +1,7 @@
+// a String interpolated by a tagged template while its owner lives
+// pin: 0 break, 0 continue
+// Each hole is `value(s)`, and each boxes a copy of `s` (#512), so the tag's
+// arrays are released without freeing `s`. Both walks print abcd, then 324,
+// with no free-audit line (RFC-0125 M7, `m7-small`).
+fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { return parts.length * 10 + values.length }
+fn vyrnTestMain() -> Int64 { let s = "ab" + "cd" let n = sql"x \{s} y \{s}" print(s) return n * 10 + s.byteLength }
