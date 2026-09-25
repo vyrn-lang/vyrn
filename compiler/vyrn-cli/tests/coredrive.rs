@@ -503,7 +503,7 @@ fn run() {
         }
     }
     // The forms whose arm the rows have started to relieve. An arm goes when
-    // its first number reaches zero, and this pin says which eight are on that
+    // its first number reaches zero, and this pin says which seven are on that
     // road: a form that drops off the list has lost a reader the record has to
     // explain, and one that joins it is a slice's own count. The count is per
     // statement, so a form whose whole body the core walk takes leaves it:
@@ -527,6 +527,9 @@ fn run() {
     // fnvalarg `main` were taken whole, with each arm at 0 (the m7-fnval2
     // record), and `Stmt::Expr` with them once a body lifts its targets
     // before the screen.
+    // `Stmt::While` left again when `applyAll`'s last instance was taken
+    // whole (the m7-boxrel record), and with it `Stmt::Let` and
+    // `Stmt::Return`: every body coredrive reaches is taken whole.
     let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
         .iter()
         .enumerate()
@@ -535,10 +538,9 @@ fn run() {
         .collect();
     // A shard carries a subset of the forms, so the list is the corpus's.
     if shard().is_none() {
-        assert_eq!(
-            carrying,
-            ["Stmt::Let", "Stmt::Return", "Stmt::While"],
-            "the forms the core's rows carry are not the ones the record names"
+        assert!(
+            carrying.is_empty(),
+            "the core's rows carry {carrying:?}, and the record names none"
         );
     }
     // The driver is a screen and not a judgement: where it stands down, the

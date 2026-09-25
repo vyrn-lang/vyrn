@@ -19920,7 +19920,7 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         if let Rhs::Make(Ctor::Closure(t), vs) = rhs {
-            let Some((sig_ty, target)) = self.core_closure(ty, t, vs) else {
+            let Some((sig_ty, target)) = self.core_closure(body, ty, t, vs) else {
                 return unsupported("a function value this walk does not make", line);
             };
             return self.fnval_into(
@@ -19929,7 +19929,7 @@ impl<'p> Fn_<'_, 'p> {
                 dest,
                 &sig_ty,
                 target,
-                &mut Parts::Core(body, &[], w),
+                &mut Parts::Core(body, vs, w),
                 line,
             );
         }
@@ -20249,7 +20249,7 @@ impl<'p> Fn_<'_, 'p> {
             return false;
         }
         if let Ctor::Closure(t) = ctor {
-            return self.core_closure(ty, t, vs).is_some();
+            return self.core_closure(body, ty, t, vs).is_some();
         }
         self.core_part_tys(ty, ctor, vs.len()).is_some_and(|tys| {
             vs.iter().zip(&tys).all(|(v, t)| {
@@ -20320,9 +20320,14 @@ impl<'p> Fn_<'_, 'p> {
         if !matches!(ss[i], St::Let(..)) || !self.core_makes(body, ty, rhs) {
             return false;
         }
+        // A function value's captures are read into its capture box
+        // ([`Fn_::core_closure`]), as a lambda's are.
         let Rhs::Make(ctor, vs) = rhs else {
             return true;
         };
+        if let Ctor::Closure(_) = ctor {
+            return true;
+        }
         let Some(tys) = self.core_part_tys(ty, ctor, vs.len()) else {
             return false;
         };
@@ -20866,12 +20871,24 @@ impl<'p> Fn_<'_, 'p> {
     /// The signature and the target of a function value a row makes
     /// (RFC-0037), [`Fn_::core_target`]'s with no parts. `None` where `ty` is
     /// no function type.
-    fn core_closure(&self, ty: &Type, t: &Target, parts: &[Val]) -> Option<(Type, FnTarget)> {
+    fn core_closure(
+        &self,
+        body: &vyrn_lower::core::Body,
+        ty: &Type,
+        t: &Target,
+        parts: &[Val],
+    ) -> Option<(Type, FnTarget)> {
         let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
-        let (Type::Fn(..), []) = (&sig_ty, parts) else {
+        if !matches!(sig_ty, Type::Fn(..)) {
             return None;
-        };
-        Some((sig_ty, self.core_target(t)?))
+        }
+        let target = self.core_target(t)?;
+        let readable = parts.iter().all(|v| {
+            matches!(v, Val::Name(c)
+                if self.core_val_readable(body, v)
+                    || self.core_payload_layout(body, v, &body.names[*c as usize].ty))
+        });
+        (target.ncaps == parts.len() && readable).then_some((sig_ty, target))
     }
 
     /// Whether this walk makes the lambda a closure row names by `key` at `ty`:

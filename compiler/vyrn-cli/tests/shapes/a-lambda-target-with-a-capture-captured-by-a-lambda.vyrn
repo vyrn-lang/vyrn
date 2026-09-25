@@ -1,0 +1,6 @@
+// a lambda target with a capture bound to a parameter a lambda captures
+// pin: 0 break, 0 continue
+// The instance makes `f`'s value, which owns a capture box, and the
+// lambda `g` copies it, so the instance releases `f` after `g` (the
+// m7-boxrel record): 63.
+fn applyAll(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Int64 { let g: fn(Int64) -> Int64 = n -> f(n) + 1 let mut s = 0 for x in xs { s = s + g(x) } return s }          fn via(xs: Array<Int64>, k: Int64) -> Int64 { return applyAll(xs, n -> n * k) }          fn vyrnTestMain() -> Int64 { return via([1, 2, 3], 10) }
