@@ -1,0 +1,5 @@
+// a crossing the checker proved at a let, an argument and a return
+// pin: 0 break, 0 continue
+// A constant and a contained string flow are the checker's proof, so their
+// constructor rows check nothing; a value built at run time still checks.
+type Adult = Int64 where value >= 18          type Side = String where value =~ "left|right"          type Key = String where value =~ "go\\.(left|right)"          fn keyOf(s: Side) -> Key { return "go.\{s}" }          fn older(a: Adult) -> Int64 { return a + 1 }          fn vyrnTestMain() -> Int64 { let s: Side = "left" let k = keyOf(s) let n = k.byteLength let a: Adult = n + 20 if older(30) + older(a) + older(19) == 79 { return 1 } return 0 }

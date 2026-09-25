@@ -622,6 +622,10 @@ pub enum Callee {
     /// A declared type's constructor: `T(v)` for a record or a
     /// `where`-checked type (RFC-0079). Its arguments are taken.
     Named,
+    /// A validated type's constructor at a crossing the checker proved
+    /// ([`Builder::proven`]): its argument is taken at the base, and nothing
+    /// is checked.
+    Proven,
     /// A reserved name with no seeded row: `fromJson`, `value`, a log level,
     /// a generation-time surface builtin, a `@`-spelled operation, `print`.
     Reserved,
@@ -1456,6 +1460,13 @@ pub struct Gap {
 }
 
 /// A field read or an element read: a place, not a value the reader owns.
+/// Whether `rhs` is a validated type's constructor over a literal, which
+/// hands the literal back.
+fn over_a_literal(rhs: &Rhs) -> bool {
+    matches!(rhs, Rhs::Call { kind: Callee::Named | Callee::Proven, args, .. }
+        if matches!(args.as_slice(), [(Arg::Val(Val::Lit(l)), _)] if !matches!(l, Lit::Opaque(_))))
+}
+
 fn is_place_read(e: &Expr) -> bool {
     match e {
         Expr::Field { expr, .. } => {
@@ -2209,8 +2220,10 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
             // A call through a stored value is one call to its signature's
             // dispatcher (`direct::Fn_::core_call`); through a `fn`-typed
             // parameter it waits on the specialization.
-            if !matches!(kind, Callee::Fn | Callee::Ctor | Callee::Named)
-                && builtin_row(callee).is_none()
+            if !matches!(
+                kind,
+                Callee::Fn | Callee::Ctor | Callee::Named | Callee::Proven
+            ) && builtin_row(callee).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
                 let tag = match kind {
@@ -3229,23 +3242,61 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The validated type a value of `from` crosses into at a destination
-    /// of `to`, where the core states the crossing as `to`'s constructor.
+    /// The validated type the value `e` of `from` crosses into at a
+    /// destination of `to`, where the core states the crossing as `to`'s
+    /// constructor.
     ///
     /// WHICH crossings check is `validate::required`'s, which the arm asks
-    /// too. A value that owns heap is not stated here: the constructor takes
-    /// its argument, and a plain binding moves or borrows it, so the
-    /// kernel's verdict on a borrowed operand would change.
-    fn checked(&self, from: &Type, to: &Type) -> Option<String> {
-        let decls = self.proto.types();
-        vyrn_frontend::validate::required(from, to, &decls)
-            .filter(|_| !self.owns(from))
+    /// too. An owned value is the constructor's to take. A borrowed heap value
+    /// is not stated here: the constructor would take what a plain binding
+    /// borrows, so the kernel's verdict on the operand would change.
+    fn checked(&self, from: &Type, to: &Type, e: &Expr) -> Option<String> {
+        vyrn_frontend::validate::required(from, to, self.proto.types())
+            .filter(|_| !(self.owns(from) && (is_place_read(e) || self.lends(e))))
             .map(|d| d.name.clone())
     }
 
+    /// Whether the checker proved `e` a value of `to`
+    /// ([`vyrn_frontend::validate::proven`]), with this body's scope resolving
+    /// a name. The emitter reads the answer as [`Callee::Proven`].
+    fn proven(&self, e: &Expr, to: &Type) -> bool {
+        let resolve = |x: &Expr| match x {
+            Expr::Var { name, .. } => self
+                .lookup(name)
+                .map(|n| self.body.names[n as usize].ty.clone()),
+            _ => None,
+        };
+        vyrn_frontend::validate::proven(e, to, self.proto.types(), &resolve)
+    }
+
+    /// [`Builder::checked`] where the checker proved the crossing.
+    fn proven_crossing(&self, e: &Expr, to: &Type) -> Option<String> {
+        let from = self.ty_of(e).ok()?;
+        self.checked(&from, to, e).filter(|_| self.proven(e, to))
+    }
+
+    /// [`Builder::check`] bound to a temporary of the validated type `to`.
+    /// A constructor hands its argument back, so over a literal the temporary
+    /// is static data, as the literal is.
+    fn checked_temp(
+        &mut self,
+        to: &str,
+        value: &'a Expr,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Name, Gap> {
+        let rhs = self.check(to, value, line, out)?;
+        let t = self.temp(Type::Named(to.to_string()), line);
+        if over_a_literal(&rhs) {
+            self.body.names[t as usize].releases = false;
+            self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+        }
+        self.bind(t, rhs, out);
+        Ok(t)
+    }
+
     /// The constructor of the validated type `to` over `value`: the row a
-    /// checked crossing is. A literal is its own producer, because the
-    /// checker proves it against `to` (RFC-0003).
+    /// crossing is.
     fn check(
         &mut self,
         to: &str,
@@ -3253,9 +3304,6 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
-        if let Some(l) = lit_of(value) {
-            return Ok(Rhs::Val(Val::Lit(l)));
-        }
         let ty = Type::Named(to.to_string());
         self.call(to, std::slice::from_ref(value), line, Some(ty), out)
     }
@@ -3894,7 +3942,9 @@ impl<'a> Builder<'a> {
                 ..
             } => {
                 let ty = self.ty_of(value)?;
-                let check = annotation.as_ref().and_then(|t| self.checked(&ty, t));
+                let check = annotation
+                    .as_ref()
+                    .and_then(|t| self.checked(&ty, t, value));
                 if check.is_none()
                     && !matches!(value, Expr::Var { .. })
                     && is_place_read(value)
@@ -3924,6 +3974,7 @@ impl<'a> Builder<'a> {
                 // nothing allocated it.
                 let static_value = match &rhs {
                     Rhs::Val(Val::Lit(l)) => !matches!(l, Lit::Opaque(_)),
+                    _ if over_a_literal(&rhs) => true,
                     Rhs::Val(Val::Name(m)) => matches!(
                         self.body.names[*m as usize].not_owned,
                         Some(NotOwned::Static)
@@ -3987,7 +4038,7 @@ impl<'a> Builder<'a> {
                 let check = match n {
                     Some(n) => {
                         let to = self.body.names[n as usize].ty.clone();
-                        self.checked(&self.ty_of(value)?, &to)
+                        self.checked(&self.ty_of(value)?, &to, value)
                     }
                     None => None,
                 };
@@ -4025,13 +4076,7 @@ impl<'a> Builder<'a> {
                 self.rebinding = grown.is_none();
                 let v = match (check, grown) {
                     (_, Some((n, parts))) => self.str_append(n, &parts, *line, out),
-                    (Some(to), None) if lit_of(value).is_none() => {
-                        self.check(&to, value, *line, out).map(|rhs| {
-                            let t = self.temp(Type::Named(to), *line);
-                            self.bind(t, rhs, out);
-                            Val::Name(t)
-                        })
-                    }
+                    (Some(to), None) => self.checked_temp(&to, value, *line, out).map(Val::Name),
                     _ => self.val(value, out),
                 };
                 self.rebinding = false;
@@ -4140,9 +4185,14 @@ impl<'a> Builder<'a> {
                         return Ok(());
                     }
                 }
-                let v = match value {
-                    Some(e) => Some(self.val(e, out)?),
-                    None => None,
+                let proven = value
+                    .as_ref()
+                    .zip(self.ret.clone())
+                    .and_then(|(e, r)| self.proven_crossing(e, &r));
+                let v = match (value, proven) {
+                    (Some(e), Some(to)) => Some(Val::Name(self.checked_temp(&to, e, *line, out)?)),
+                    (Some(e), None) => Some(self.val(e, out)?),
+                    (None, _) => None,
                 };
                 self.return_exit(v, sid, *line, out)?;
             }
@@ -7326,7 +7376,14 @@ impl<'a> Builder<'a> {
                 .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
                 .collect()
         } else if decls.contains_key(name) {
-            kind = Callee::Named;
+            kind = match args {
+                [v] if decls[name].predicate.is_some()
+                    && self.proven(v, &Type::Named(name.to_string())) =>
+                {
+                    Callee::Proven
+                }
+                _ => Callee::Named,
+            };
             vec![Capability::Consume; args.len()]
         } else if name.starts_with('@') {
             vec![Capability::Read; args.len()]
@@ -7414,6 +7471,16 @@ impl<'a> Builder<'a> {
             Callee::Fn => self.targets_of(name, args),
             _ => Vec::new(),
         };
+        let param_tys: Vec<Type> = match kind {
+            Callee::Fn => self
+                .program
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| f.params.iter().map(|p| p.ty.clone()).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let mut targets = Vec::new();
         for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
             if let Some(Some(t)) = bound.get(k) {
@@ -7444,7 +7511,17 @@ impl<'a> Builder<'a> {
                 vs.push((Arg::Place(Place::Global(name.clone())), *cap));
                 continue;
             }
-            let v = if *cap == Capability::Consume {
+            let proven = param_tys.get(k).and_then(|to| self.proven_crossing(a, to));
+            let v = if let Some(to) = proven {
+                // A crossing into the parameter's validated type the checker
+                // proved is that type's constructor row, bound to a name of
+                // the type, so no reader checks it again.
+                let t = self.checked_temp(&to, a, line, out)?;
+                if self.arg_released(a, t, name, k) {
+                    self.body.names[t as usize].arg_drop = Some(a as *const Expr as usize);
+                }
+                Val::Name(t)
+            } else if *cap == Capability::Consume {
                 // Module state as the receiver (`books.push(b)`): a read of
                 // it is a borrow nothing may take, so the write-back form
                 // takes the place and the store after the call fills it, as

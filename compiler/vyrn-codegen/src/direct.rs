@@ -18839,14 +18839,13 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::Routes(_)) | None => {}
         }
         // `T(v)` of a validated type: the operand at the base, then the check
-        // (RFC-0125 §2.2). A literal was proven by the checker, which refuses
-        // one that fails at compile time, so it runs no check.
+        // (RFC-0125 §2.2), which a crossing the checker proved does not run.
         if let Some(decl) = self.core_named(callee, kind) {
             let [(v, _)] = args else {
                 return unsupported(&format!("`{callee}` at this arity"), line);
             };
             self.core_val(m, b, body, w, v, &decl.base, line)?;
-            if !matches!(v, Val::Lit(_)) {
+            if kind == Callee::Named {
                 self.emit_validation(b, &decl, line)?;
             }
             return Ok(Type::Named(decl.name));
@@ -20090,8 +20089,9 @@ impl<'p> Fn_<'_, 'p> {
             .types
             .get(callee)
             .filter(|d| d.predicate.is_some())?;
-        (kind == Callee::Named && matches!(self.cx.repr(&decl.base, 0), Ok(Repr::Scalar(_))))
-            .then(|| decl.clone())
+        (matches!(kind, Callee::Named | Callee::Proven)
+            && matches!(self.cx.repr(&decl.base, 0), Ok(Repr::Scalar(_))))
+        .then(|| decl.clone())
     }
 
     /// The signature this walk calls a [`Callee::Fn`] through, and `None` for
