@@ -1045,6 +1045,21 @@ pub fn loops(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(u
     out
 }
 
+/// Every name no binding, module state or declaration answers, as the
+/// sentence `vyrn check` gives and its line: RFC-0125 M7, the rule the
+/// checker stated at five sites. `seen` is as in [`stores`].
+pub fn unknowns(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for f in body.frames() {
+        for (site, line, refusal) in &f.unknown {
+            if seen.insert(*site) {
+                out.push((*line, refusal.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// Every `drop` a reader wrote that cannot release what it names, as the
 /// sentence `vyrn check` gives and its line: RFC-0125 M7, the rule the
 /// checker's `stmt` stated at four sites. A name no binding answers is module
@@ -1087,7 +1102,9 @@ pub fn drops(body: &Body, program: &vyrn_frontend::ast::Program) -> Vec<(usize, 
                 Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
             ) || (types::is_sum_alias(&t)
                 && vyrn_frontend::declared::owns_heap(&t, decls));
-            if owned || heap {
+            // `Err` is a name the checker could not type, and its refusal
+            // is the unknown name's (`unknowns`).
+            if owned || heap || t == Type::Err {
                 continue;
             }
             let name = &info.source;

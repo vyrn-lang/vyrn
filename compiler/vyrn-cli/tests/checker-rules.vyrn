@@ -372,6 +372,29 @@ fn dropGiven<T>(x: consume T) -> Int64 {
 fn givesString() -> Int64 {
     return dropGiven("a" + "b")
 }
+// An unknown name is the typed judgment's. The checker types it `Err` and
+// goes on, so two in one body both print, and a statement that reads a name
+// typed `Err` adds no refusal of its own.
+fn twoUnknowns() -> Int64 {
+    for x in zz {
+    }
+    let v = yy
+    if v {
+    }
+    return 0
+}
+fn poisoned() -> Int64 {
+    let v: Int64 = "s"
+    if v {
+    }
+    return 0
+}
+// Module state and a `where` predicate are roots of the judgment too, and a
+// predicate sees no module state.
+let unknownState = zz
+type Unknowable = Int64 where zz > 0
+let bound = 3
+type Bounded = Int64 where value >= bound
 fn main() -> Int64 {
     return 0
 }

@@ -2150,6 +2150,21 @@ pub fn node_addrs_one(s: &Stmt, out: &mut Vec<usize>) {
     ast_stmt(s, &mut std::collections::HashSet::new(), &mut Addrs(out));
 }
 
+struct Exprs<'o>(&'o mut dyn FnMut(&Expr, &std::collections::HashSet<String>));
+
+impl AstVisit<'_> for Exprs<'_> {
+    fn expr(&mut self, e: &Expr, locals: &std::collections::HashSet<String>) -> bool {
+        (self.0)(e, locals);
+        true
+    }
+}
+
+/// Calls `f` on every expression in `s`, with the names `s` itself binds
+/// where the expression stands.
+pub fn exprs_one(s: &Stmt, f: &mut dyn FnMut(&Expr, &std::collections::HashSet<String>)) {
+    ast_stmt(s, &mut std::collections::HashSet::new(), &mut Exprs(f));
+}
+
 /// [`node_addrs`] for one expression — the entry a lifted lambda SHELL's
 /// value form is zipped with (the wrapper statement is synthesized and has
 /// no original; the expression inside does).

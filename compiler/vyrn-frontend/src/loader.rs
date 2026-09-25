@@ -2102,6 +2102,7 @@ fn run_generator(
     //     program's ownership plan, and the kernel and the lowering's own lint
     //     are both about a program a tool holds (RFC-0125 §3 M3, the
     //     accumulation slice).
+    let _ = crate::own::typed_refusals();
     let out = crate::movecheck::comptime(|| {
         crate::gen::generate(
             &gen_program,
@@ -2121,7 +2122,17 @@ fn run_generator(
             },
         )
     })
-    .map_err(|trap| err(format!("generator `{name}({arg_repr})` failed: {trap}")))?;
+    .map_err(|trap| {
+        // The check above is the checker's alone. A rule the typed judgment
+        // states reaches a generator through the engine's compile, which
+        // judges the program and declines it (RFC-0125 M7, group 5).
+        let typed = crate::own::typed_refusals();
+        if typed.is_empty() {
+            err(format!("generator `{name}({arg_repr})` failed: {trap}"))
+        } else {
+            typed
+        }
+    })?;
     bump_gen_runs();
 
     // 6. Cache the output keyed by its recorded inputs, for the next load / the

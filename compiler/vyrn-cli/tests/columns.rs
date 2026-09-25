@@ -94,6 +94,27 @@ fn every_refusal_the_editor_shows_is_pinned_to_a_token() {
     );
 }
 
+/// An `unknown variable` diagnostic is pinned to the variable **identifier** on
+/// the error's line. Guards the generalized pinner's identifier path (a user
+/// name, the offending use being on the line).
+#[test]
+fn unknown_variable_pinned_to_ident() {
+    let src = "\
+fn main() -> Int64 {
+    return x;
+}
+";
+    let d = first(src).expect("an unknown-variable diagnostic");
+    // Line 2: `    return x;` — `x` at 1-based col 12 (4 spaces + "return" +
+    // space + x).
+    assert_eq!(d.line, 2);
+    assert_eq!(
+        d.col, 12,
+        "pinned to the `x` identifier, not col 0 (whole line)"
+    );
+    assert_eq!(d.end_col, 13);
+}
+
 /// The table for RFC-0125 §3 M3, printed from the corpus:
 /// `cargo test -p vyrn-cli --test columns -- --ignored --nocapture`.
 #[test]
