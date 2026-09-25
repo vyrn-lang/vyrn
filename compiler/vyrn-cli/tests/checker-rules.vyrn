@@ -459,6 +459,31 @@ impl Index for Ringed {
         return self.data[i]
     }
 }
+// A store into a field or an element is the typed judgment's, through a
+// named root, through a path, into module state and in a generic function
+// as written. A root with no such field refuses its store and no other.
+fn storeThroughElement() -> Int64 {
+    let mut ps = [P { a: 1, age: Age(20) }]
+    ps[0].a = "s"
+    ps[0].zz = 1
+    let mut ns = [1]
+    ns[0].f = 2
+    return 0
+}
+let mut stateArray = [1]
+fn storeIntoState() -> Int64 {
+    stateArray[0] = "s"
+    return 0
+}
+type Boxed<T> = { v: T }
+fn storeGeneric<T>(b: Boxed<T>) -> Int64 {
+    let mut c = b
+    c.v = 1
+    return 0
+}
+fn callsStoreGeneric() -> Int64 {
+    return storeGeneric(Boxed { v: "s" })
+}
 fn main() -> Int64 {
     return 0
 }

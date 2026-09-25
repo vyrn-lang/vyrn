@@ -4158,6 +4158,9 @@ impl<'a> Checker<'a> {
                 self.region_store_guard(name, &b.ty, scope, *line)?;
                 Ok(false)
             }
+            // A store into a field or an element is the typed judgment's to
+            // refuse (RFC-0125 M7, group 6c): where one of its rules fails,
+            // the statement stops here, unrefused.
             Stmt::SetField {
                 name,
                 field,
@@ -4168,57 +4171,37 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(false);
                 };
-                // Validated data is rebuilt, not mutated: a field write on a
-                // record with a cross-field `where` could break the invariant
-                // mid-update, so it must go through whole-value reassignment
-                // (`r = T { .. }`), which re-validates automatically.
-                if let Type::Named(n) = &b.ty {
-                    if self.types.get(n).is_some_and(|d| d.predicate.is_some()) {
-                        return Err(cerr!(
-                            line,
-                            "cannot mutate a field of `{n}` in place (its \
-                             `where` invariant could be broken mid-update); rebuild it: \
-                             `{name} = {n} {{ .. }}`"
-                        ));
-                    }
+                if matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()))
+                {
+                    return Ok(false);
                 }
-                let fields = crate::types::record_fields(&b.ty, self.types).ok_or_else(|| {
-                    cerr!(
-                        line,
-                        "`{name}` is not a record, so it has no field `{field}`"
-                    )
-                })?;
-                let fty = fields
-                    .iter()
-                    .find(|f| &f.name == field)
-                    .map(|f| f.ty.clone())
-                    .ok_or_else(|| cerr!(line, "record `{name}` has no field `{field}`"))?;
-                // A predicated FIELD type cannot be written in place either: the
-                // interpreter's record values are type-erased, so the field's
-                // check has no reliable runtime hook there. Only the exact named
-                // type (already validated at its own construction) may flow in.
-                let field_is_predicated = matches!(&fty, Type::Named(fnm)
-                    if self.types.get(fnm).is_some_and(|d| d.predicate.is_some()));
+                let Some(fty) = crate::types::record_fields(&b.ty, self.types)
+                    .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
+                    .map(|f| f.ty)
+                else {
+                    return Ok(false);
+                };
                 let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
-                if field_is_predicated {
-                    if !self.assignable(&vty, &fty) {
-                        return Err(cerr!(
-                            line,
-                            "field `{field}` is {fty} (validated); assign an \
-                             already-constructed `{fty}` value, e.g. `{fty}(..)`"
-                        ));
-                    }
-                } else if !self.coercible(&vty, &fty) {
-                    return Err(cerr!(line, "field `{field}` is {fty} but assigned {vty}"));
+                // A predicated field takes only a value of its own type: the
+                // interpreter's record values are type-erased, so the field's
+                // check has no runtime hook there.
+                let validated = matches!(&fty, Type::Named(n)
+                    if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
+                if !(if validated {
+                    self.assignable(&vty, &fty)
+                } else {
+                    self.coercible(&vty, &fty)
+                }) {
+                    return Ok(false);
                 }
                 self.region_store_guard(name, &fty, scope, *line)?;
                 Ok(false)
             }
-            // `name[index] = value` — in-place element store (RFC-0011). Same
-            // `mut` rule as `Assign`/`push`; the index coerces to Int64 and the
-            // value coerces into the element type (validated element types are
-            // rejected at compile time here via `prove_coercion`, at runtime via
-            // the coerce the interpreter/codegen emit on store).
+            // `name[index] = value` — in-place element store (RFC-0011). The
+            // index coerces to the key and the value into the element type
+            // (validated element types are rejected at compile time here via
+            // `prove_coercion`, at runtime via the coerce the engines emit on
+            // store).
             Stmt::IndexSet {
                 name,
                 index,
@@ -4236,19 +4219,12 @@ impl<'a> Checker<'a> {
                 if let Type::Map(key, val) = self.base(&b.ty) {
                     let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
                     if !matches!(k, Type::Err) && !self.key_fits(&k, &key) {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` is keyed by {key}, but the key here is {k}"
-                        ));
+                        return Ok(false);
                     }
                     self.prove_coercion(index, &key, *line)?;
                     let vty = self.expr(value, scope, Some(&val), Some(ret))?;
                     if !self.coercible(&vty, &val) {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` holds values of type {val} but the stored \
-                             value is {vty}"
-                        ));
+                        return Ok(false);
                     }
                     self.prove_coercion(value, &val, *line)?;
                     self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
@@ -4265,7 +4241,7 @@ impl<'a> Checker<'a> {
                         (*inner).clone()
                     }
                     Type::Err => return Ok(false),
-                    other => {
+                    _ => {
                         // RFC-0091 M3: a user container declares where its
                         // element is, and `place atSet` is the writing half of
                         // that. The element type is what it yields. Keyed by the
@@ -4277,31 +4253,17 @@ impl<'a> Checker<'a> {
                                 }
                                 self.solve_head(imp, &b.ty, &f.ret, *line)
                             }
-                            None => {
-                                return Err(cerr!(
-                                    line,
-                                    "`{name}[i] = ..` needs an Array, a Map, or a \
-                                     type whose impl declares the `atSet` projection \
-                                     (`fn atSet(modify self, ..) -> modify T`), found {other}"
-                                ))
-                            }
+                            None => return Ok(false),
                         }
                     }
                 };
                 let i = self.expr(index, scope, Some(&key), Some(ret))?;
                 if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
-                    return Err(if key == Type::Int {
-                        cerr!(line, "array index must be an Int64, found {i}")
-                    } else {
-                        cerr!(line, "`{name}[..] = ..` is keyed by {key}, found {i}")
-                    });
+                    return Ok(false);
                 }
                 let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
                 if !self.coercible(&vty, &elem) {
-                    return Err(cerr!(
-                        line,
-                        "`{name}` holds {elem} but the stored value is {vty}"
-                    ));
+                    return Ok(false);
                 }
                 self.prove_coercion(value, &elem, *line)?;
                 self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
@@ -10320,14 +10282,6 @@ mod tests {
              let mut r = Ring {{ data: d }}\n r[0] = 9\n return 0 }}"
         ))
         .is_ok());
-        // Without the row the store has nowhere to land, and the refusal names
-        // what would give it one.
-        let e = check_src(&format!(
-            "{RING}\
-             fn main() -> Int64 {{ let mut r = Ring {{ data: [] }}\n r[0] = 9\n return 0 }}"
-        ))
-        .unwrap_err();
-        assert!(e.contains("`atSet` projection"), "{e}");
     }
 
     /// RFC-0091 M3. A user container iterates through `Iterate`, and the loop
@@ -11738,16 +11692,6 @@ mod tests {
         assert!(check_src(src).is_ok());
     }
 
-    #[test]
-    fn rejects_field_mutation_wrong_type() {
-        let e = check_src(
-            "type P = { x: Int64 }; \
-                           fn main() -> Int64 { let mut p = P { x: 1 }; p.x = \"s\"; return 0; }",
-        )
-        .unwrap_err();
-        assert!(e.contains("field `x`"), "{e}");
-    }
-
     // ---- growable arrays ------------------------------------------------
 
     #[test]
@@ -11790,24 +11734,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("without `mut`"), "{e}");
-    }
-
-    #[test]
-    fn index_store_rejects_wrong_element_type() {
-        let e = check_src(
-            "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[0] = \"x\"; return 0; }",
-        )
-        .unwrap_err();
-        assert!(e.contains("holds Int64"), "{e}");
-    }
-
-    #[test]
-    fn index_store_rejects_non_int_index() {
-        let e = check_src(
-            "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[\"i\"] = 9; return 0; }",
-        )
-        .unwrap_err();
-        assert!(e.contains("index must be an Int64"), "{e}");
     }
 
     #[test]
@@ -12132,29 +12058,7 @@ mod tests {
     }
 
     #[test]
-    fn setfield_on_predicated_record_is_rejected() {
-        // In-place field mutation could break the cross-field invariant —
-        // rebuild the whole value instead (which re-validates).
-        let src = "type Range = { start: Int64, end: Int64 } where start < end \
-                   fn main() -> Int64 { \
-                       let mut r = Range { start: 1, end: 5 } \
-                       r.start = 10 \
-                       return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("cannot mutate a field of `Range`"), "{e}");
-    }
-
-    #[test]
-    fn setfield_into_predicated_field_needs_constructed_value() {
-        let src = "type Age = Int64 where value >= 18 \
-                   type User = { age: Age } \
-                   fn main() -> Int64 { \
-                       let mut u = User { age: 30 } \
-                       u.age = 5 \
-                       return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("assign an already-constructed `Age`"), "{e}");
-        // With an explicitly constructed (and therefore validated) value it's fine.
+    fn setfield_into_predicated_field_takes_a_constructed_value() {
         let ok = "type Age = Int64 where value >= 18 \
                   type User = { age: Age } \
                   fn main() -> Int64 { \
@@ -12908,29 +12812,6 @@ mod tests {
     // ---- RFC-0011 addendum: `a[i].field = v` write-through --------------
 
     #[test]
-    fn index_field_assign_unknown_field_is_rejected() {
-        let e = check_src(
-            "type P = { x: Int64 }\n\
-             fn main() -> Int64 { let mut a: Array<P> = [P { x: 1 }]  a[0].z = 9  return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("no field `z`"), "{e}");
-    }
-
-    #[test]
-    fn index_field_assign_into_validated_field_is_rejected() {
-        // A predicated field type cannot be written in place — same rule (and
-        // wording) SetField enforces for a plain record.
-        let e = check_src(
-            "type Age = Int64 where value >= 0\n\
-             type P = { age: Age }\n\
-             fn main() -> Int64 { let mut a: Array<P> = []  a.push(P { age: 1 })  a[0].age = 5  return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("(validated)"), "{e}");
-    }
-
-    #[test]
     fn index_field_assign_accepts_plain_record_element() {
         assert!(check_src(
             "type P = { x: Int64, y: Int64 }\n\
@@ -13403,15 +13284,6 @@ mod tests {
              return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("scalar operands"), "{e}");
-    }
-
-    #[test]
-    fn map_value_type_must_match() {
-        let src = "fn main() -> Int64 {\n\
-             let mut m: Map<String, Int64> = [:]\n\
-             m[\"a\"] = true\n\
-             return 0 }";
-        assert!(check_src(src).is_err());
     }
 
     #[test]
@@ -14509,17 +14381,12 @@ mod tests {
     }
 
     /// An index store takes a named key type as the lookup does: both ask
-    /// [`Checker::key_fits`]. A key of another type keeps its sentence (#509).
+    /// [`Checker::key_fits`] (#509). A key of another type is the typed
+    /// judgment's refusal (RFC-0125 M7).
     #[test]
     fn an_index_store_takes_the_key_type_a_lookup_takes() {
         let head = "protocol Hashable { fn hash(self) -> UInt64 }                     type Suit = | Clubs | Hearts                     impl Hashable for Suit { fn hash(self) -> UInt64 { return UInt64(1) } }                     fn main() -> Int64 { let mut s: Map<Suit, Int64> = [:] ";
         let ok = format!("{head} let h: Suit = Hearts s[h] = 1 s[Clubs] = 2 return s.length }}");
         assert_eq!(check_src(&ok), Ok(()));
-        let bad = format!("{head} s[3] = 1 return s.length }}");
-        let e = check_src(&bad).unwrap_err();
-        assert!(
-            e.contains("`s` is keyed by Suit, but the key here is Int64"),
-            "{e}"
-        );
     }
 }

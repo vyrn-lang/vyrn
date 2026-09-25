@@ -89,3 +89,8 @@ checker-rules.vyrn:445:0: return type mismatch: expected Int64, found T
 checker-rules.vyrn:451:0: return type mismatch: expected Unit, found Int64
 checker-rules.vyrn:458:0: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:459:0: return type mismatch: expected String, found Int64
+checker-rules.vyrn:467:0: field `a` is Int64 but assigned String
+checker-rules.vyrn:468:0: record `ps[]` has no field `zz`
+checker-rules.vyrn:470:0: `ns[]` is not a record, so it has no field `f`
+checker-rules.vyrn:475:0: `stateArray` holds Int64 but the stored value is String
+checker-rules.vyrn:481:0: field `v` is T but assigned Int64

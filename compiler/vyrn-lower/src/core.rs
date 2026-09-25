@@ -3880,45 +3880,50 @@ impl<'a> Builder<'a> {
     fn stmt_list(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<(), Gap> {
         let mut k = 0;
         while k < ss.len() {
-            k += match self.nested_store(&ss[k..], out)? {
-                Some(n) => n,
-                None => {
-                    let (scope, at) = (self.scope.len(), out.len());
-                    if let Err(g) = self.stmt(&ss[k], out) {
-                        // The checker typed an unknown name `Err` and went
-                        // on, so a gap may come before the builder meets it.
-                        let mut named = Vec::new();
-                        vyrn_frontend::ast::exprs_one(&ss[k], &mut |e, locals| {
-                            let local =
-                                matches!(e, Expr::Var { name, .. } if locals.contains(name));
-                            let typed = self.types.get(&(e as *const Expr as usize));
-                            if !local && matches!(typed, None | Some(Type::Err)) {
-                                named.extend(self.unknown_of(e));
-                            }
-                        });
-                        self.body.refused.extend(named);
-                        if self.body.refused.is_empty() && self.body.mistyped.is_empty() {
-                            return Err(g);
-                        }
-                        // The body is refused: the statement goes, and a
-                        // name it binds is poisoned in its turn.
-                        out.truncate(at);
-                        self.scope.truncate(scope);
-                        if let Stmt::Let {
-                            name,
-                            line,
-                            mutable,
-                            ..
-                        } = &ss[k]
-                        {
-                            let n = self.name(name, Type::Err, false, *line);
-                            self.body.names[n as usize].mutable = *mutable;
-                            self.scope.push((name.clone(), n));
-                        }
-                    }
-                    1
+            let (scope, at) = (self.scope.len(), out.len());
+            // A window spans its temps, its store and the stores back.
+            let (span, r) = match self.nested_store(&ss[k..], out) {
+                Ok(Some(n)) => (n, Ok(())),
+                Ok(None) => (1, self.stmt(&ss[k], out)),
+                Err(g) => {
+                    let lets = ss[k..].iter().take_while(|s| moves_out(s)).count();
+                    ((2 * lets + 1).min(ss.len() - k), Err(g))
                 }
             };
+            if let Err(g) = r {
+                // The checker typed an unknown name `Err` and went on, so a
+                // gap may come before the builder meets it.
+                let mut named = Vec::new();
+                for s in &ss[k..k + span] {
+                    vyrn_frontend::ast::exprs_one(s, &mut |e, locals| {
+                        let local = matches!(e, Expr::Var { name, .. } if locals.contains(name));
+                        let typed = self.types.get(&(e as *const Expr as usize));
+                        if !local && matches!(typed, None | Some(Type::Err)) {
+                            named.extend(self.unknown_of(e));
+                        }
+                    });
+                }
+                self.body.refused.extend(named);
+                if self.body.refused.is_empty() && self.body.mistyped.is_empty() {
+                    return Err(g);
+                }
+                // The body is refused: the statements go, and a name one
+                // binds is poisoned in its turn.
+                out.truncate(at);
+                self.scope.truncate(scope);
+                if let [Stmt::Let {
+                    name,
+                    line,
+                    mutable,
+                    ..
+                }] = &ss[k..k + span]
+                {
+                    let n = self.name(name, Type::Err, false, *line);
+                    self.body.names[n as usize].mutable = *mutable;
+                    self.scope.push((name.clone(), n));
+                }
+            }
+            k += span;
         }
         Ok(())
     }
@@ -5217,6 +5222,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
+        self.field_store(&base.1, name, field, value, line)?;
         let (base, bty) = base;
         let fty = self.field_ty(&bty, field, line)?;
         let v = self.proven_val(value, Some(&fty), line, out)?;
@@ -5245,6 +5251,132 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// The rules of a store into `name.field`, whose root has type `bty`
+    /// (RFC-0125 M7, group 6c): a validated record is rebuilt and not
+    /// mutated, the root names the field, and the field takes the value. A
+    /// root that names no field is a gap, refused.
+    fn field_store(
+        &mut self,
+        bty: &Type,
+        name: &str,
+        field: &str,
+        value: &Expr,
+        line: usize,
+    ) -> Result<(), Gap> {
+        let decls = self.proto.types();
+        let fields = vyrn_frontend::types::record_fields(bty, decls);
+        let refusal = match bty {
+            Type::Err => return Ok(()),
+            Type::Named(n) if decls.get(n).is_some_and(|d| d.predicate.is_some()) => format!(
+                "cannot mutate a field of `{n}` in place (its `where` invariant could be broken mid-update); rebuild it: `{name} = {n} {{ .. }}`"
+            ),
+            _ => match fields.as_ref().map(|fs| fs.iter().find(|f| f.name == field)) {
+                None => format!("`{name}` is not a record, so it has no field `{field}`"),
+                Some(None) => format!("record `{name}` has no field `{field}`"),
+                Some(Some(f)) => {
+                    let fty = &f.ty;
+                    let Some(vty) = node_ty(value as *const Expr as usize) else {
+                        return Ok(());
+                    };
+                    let validated = matches!(fty, Type::Named(n)
+                        if decls.get(n).is_some_and(|d| d.predicate.is_some()));
+                    let refusal = if validated {
+                        (!vyrn_frontend::types::assignable(&vty, fty, decls)).then(|| {
+                            format!(
+                                "field `{field}` is {fty} (validated); assign an already-constructed `{fty}` value, e.g. `{fty}(..)`"
+                            )
+                        })
+                    } else {
+                        (!vyrn_frontend::types::coercible(&vty, fty, decls))
+                            .then(|| format!("field `{field}` is {fty} but assigned {vty}"))
+                    };
+                    self.body.mistyped.extend(refusal.map(|r| (line, r)));
+                    return Ok(());
+                }
+            },
+        };
+        self.body.mistyped.push((line, refusal));
+        gap("a store into a field its root has not", line)
+    }
+
+    /// The rules of a store into `name[index]`, whose root has type `bty`
+    /// (RFC-0125 M7, group 6c): the root is a container, the key or index is
+    /// its key, and the element takes the value. A root that is no container
+    /// is a gap, refused.
+    fn index_store(
+        &mut self,
+        bty: &Type,
+        name: &str,
+        index: &Expr,
+        value: &Expr,
+        line: usize,
+    ) -> Result<(), Gap> {
+        let decls = self.proto.types();
+        let coercible = |a: &Type, b: &Type| vyrn_frontend::types::coercible(a, b, decls);
+        let (ity, vty) = (
+            node_ty(index as *const Expr as usize),
+            node_ty(value as *const Expr as usize),
+        );
+        let refusal = match vyrn_frontend::types::resolve(bty, decls) {
+            Type::Err => None,
+            Type::Map(key, val) => {
+                let k = ity.map(|t| vyrn_frontend::types::resolve(&t, decls));
+                match (k, vty) {
+                    // Both at their base, as a lookup takes its key.
+                    (Some(k), _)
+                        if k != Type::Err
+                            && !coercible(&k, &vyrn_frontend::types::resolve(&key, decls)) =>
+                    {
+                        Some(format!(
+                            "`{name}` is keyed by {key}, but the key here is {k}"
+                        ))
+                    }
+                    (_, Some(v)) if !coercible(&v, &val) => Some(format!(
+                        "`{name}` holds values of type {val} but the stored value is {v}"
+                    )),
+                    _ => None,
+                }
+            }
+            shape => {
+                let (key, elem) = match shape {
+                    Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => (Type::Int, *e),
+                    other => {
+                        match vyrn_frontend::project::lookup_in(&self.program.impls, bty, "atSet") {
+                            Some(f) => (
+                                f.params
+                                    .get(1)
+                                    .map_or(Type::Int, |p| self.under_impl(&p.ty, bty)),
+                                self.under_impl(&f.ret, bty),
+                            ),
+                            None => {
+                                let refusal = format!(
+                                "`{name}[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` projection (`fn atSet(modify self, ..) -> modify T`), found {other}"
+                            );
+                                self.body.mistyped.push((line, refusal));
+                                return gap("a store into an element of what has none", line);
+                            }
+                        }
+                    }
+                };
+                let i = ity.filter(|i| {
+                    !coercible(i, &key) && vyrn_frontend::types::resolve(i, decls) != Type::Err
+                });
+                match (i, vty) {
+                    (Some(i), _) if key == Type::Int => {
+                        Some(format!("array index must be an Int64, found {i}"))
+                    }
+                    (Some(i), _) => Some(format!("`{name}[..] = ..` is keyed by {key}, found {i}")),
+                    (None, Some(v)) if !coercible(&v, &elem) => {
+                        Some(format!("`{name}` holds {elem} but the stored value is {v}"))
+                    }
+                    _ => None,
+                }
+            }
+        };
+        self.body.mistyped.extend(refusal.map(|r| (line, r)));
+        Ok(())
+    }
+
     /// A store into the element or the entry of the place `base` at `index`,
     /// which the source names `name`.
     #[allow(clippy::too_many_arguments)]
@@ -5258,6 +5390,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
+        self.index_store(&base.1, name, index, value, line)?;
         let (base, bty) = base;
         // A user container's element is the place its `atSet` yields
         // (RFC-0091 M2), after the projection's prologue.
