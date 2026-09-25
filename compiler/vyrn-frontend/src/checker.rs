@@ -3124,6 +3124,13 @@ impl<'a> Checker<'a> {
         matches!(ty, Type::Param(_)) && self.mentions_open_param(ty)
     }
 
+    /// Whether a key of type `k` fits a map keyed by `key`: both at their
+    /// base, so a named key type meets the value its name stands for. A store,
+    /// a lookup, a literal entry, `has` and `remove` ask this one question.
+    fn key_fits(&self, k: &Type, key: &Type) -> bool {
+        self.coercible(&self.base(k), &self.base(key))
+    }
+
     /// Whether `from` may flow into `to` at a **value boundary** (a `let`
     /// annotation, an assignment, a call argument, a return, a record field, an
     /// array element): everything `assignable` allows, **plus automatic
@@ -4380,7 +4387,7 @@ impl<'a> Checker<'a> {
                 // array element store).
                 if let Type::Map(key, val) = self.base(&b.ty) {
                     let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
-                    if !matches!(k, Type::Err) && !self.coercible(&k, &key) {
+                    if !matches!(k, Type::Err) && !self.key_fits(&k, &key) {
                         return Err(cerr!(
                             line,
                             "`{name}` is keyed by {key}, but the key here is {k}"
@@ -5385,7 +5392,7 @@ impl<'a> Checker<'a> {
                 };
                 for (i, (k, v)) in entries.iter().enumerate() {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
-                    if !self.coercible(&self.base(&kt), &self.base(&key_ty)) {
+                    if !self.key_fits(&kt, &key_ty) {
                         return Err(cerr!(
                             line,
                             "the map is keyed by {key_ty}, but this key is {kt}"
@@ -7212,7 +7219,7 @@ impl<'a> Checker<'a> {
                 if matches!(k, Type::Err) {
                     return Ok(Type::Err);
                 }
-                if !self.coercible(&k, &self.base(&key)) {
+                if !self.key_fits(&k, &key) {
                     return Err(cerr!(
                         line,
                         "the map is keyed by {key}, but the key here is {k}"
@@ -7470,7 +7477,7 @@ impl<'a> Checker<'a> {
                 }
             }
             let k = self.base(&self.expr(&args[1], scope, Some(&key_ty), fn_ret)?);
-            if !matches!(k, Type::Err) && !self.coercible(&k, &self.base(&key_ty)) {
+            if !matches!(k, Type::Err) && !self.key_fits(&k, &key_ty) {
                 return Err(cerr!(
                     line,
                     "the map is keyed by {key_ty}, but the key here is {k}"
@@ -14705,5 +14712,20 @@ mod tests {
                    fn g<U: P2>(u: U) -> Int64 { return u.frob() } \
                    fn main() -> Int64 { return g(T { v: 7 }) }";
         assert!(check_src(src).is_ok());
+    }
+
+    /// An index store takes a named key type as the lookup does: both ask
+    /// [`Checker::key_fits`]. A key of another type keeps its sentence (#509).
+    #[test]
+    fn an_index_store_takes_the_key_type_a_lookup_takes() {
+        let head = "protocol Hashable { fn hash(self) -> UInt64 }                     type Suit = | Clubs | Hearts                     impl Hashable for Suit { fn hash(self) -> UInt64 { return UInt64(1) } }                     fn main() -> Int64 { let mut s: Map<Suit, Int64> = [:] ";
+        let ok = format!("{head} let h: Suit = Hearts s[h] = 1 s[Clubs] = 2 return s.length }}");
+        assert_eq!(check_src(&ok), Ok(()));
+        let bad = format!("{head} s[3] = 1 return s.length }}");
+        let e = check_src(&bad).unwrap_err();
+        assert!(
+            e.contains("`s` is keyed by Suit, but the key here is Int64"),
+            "{e}"
+        );
     }
 }

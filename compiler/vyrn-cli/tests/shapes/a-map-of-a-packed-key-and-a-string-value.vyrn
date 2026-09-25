@@ -1,0 +1,6 @@
+// a map of a packed key and a String value, released and copied
+// pin: 0 break, 0 continue
+// A record or fieldless enum key is packed bytes, so the map's deep release
+// and deep copy walk only the values; a String key column alone is walked
+// per entry (#508).
+import { Hashable } from "std/hash"          type Point = { x: Int64, y: Int64 }          impl Hashable for Point { fn hash(self) -> UInt64 { return UInt64(self.x) * 31 + UInt64(self.y) } }          type Suit = | Clubs | Hearts          impl Hashable for Suit { fn hash(self) -> UInt64 { return match self { Clubs => UInt64(1), Hearts => UInt64(2) } } }          fn points() -> Int64 { let mut m: Map<Point, String> = [:] m[Point { x: 1, y: 2 }] = "a".copy() m[Point { x: 3, y: 4 }] = "bb" m[Point { x: 1, y: 2 }] = "ccc".copy() let c = m.copy() m.remove(Point { x: 3, y: 4 }) let a = match c[Point { x: 1, y: 2 }] { Some(s) => s.byteLength, None => 0 } return a * 100 + c.length * 10 + m.length }          fn suits() -> Int64 { let s: Map<Suit, String> = [Hearts: "h".copy(), Clubs: "cc"] let c = s.copy() let n = match c[Clubs] { Some(v) => v.byteLength, None => 0 } return n * 10 + c.length }          fn vyrnTestMain() -> Int64 { return points() + suits() * 1000 }
