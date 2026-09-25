@@ -582,6 +582,11 @@ fn gate() {
     // the backend answers every question here from the AST alone: the gate then
     // measures one compiler against itself.
     vyrn_lower::install();
+    // The backend answers compared here are the AST walk's, so the gate turns
+    // the core walk off and every body reaches that walk. With the core walk on,
+    // the core takes the bodies and the gate compares nothing (#465). Remove
+    // this line when #465 compares the core's own typing.
+    std::env::set_var("VYRN_NO_CORE_WALK", "1");
     let mut t = Tally::default();
     // The residue, by the engine that answered and the kind of expression —
     // the axis RFC-0101 §3 M2c classified by hand and this milestone re-measured
@@ -1166,30 +1171,19 @@ fn gate() {
 
     // A gate that compares nothing passes trivially. This floor exists so a
     // refactor that quietly stops recording fails here rather than passing.
-    // Only the AST walk answers, so the count falls as the core walk takes
-    // bodies from it: 9,414 when the emitter found generic instances and
-    // lambdas by their keys, 4,902 when it took the `Slots` windows, and
-    // about 4,000 each time it took the logging facade, module state handed
-    // to `modify` and map tallies (RFC-0125 M7). The gate needs a witness of
-    // its own before the arm retires (#465).
+    // The core walk is off above, so the AST walk answers every body:
+    // 1,125,774 answers on 2026-09-25.
     assert!(
-        t.compared > 3_000,
+        t.compared > 500_000,
         "only {} backend answers were compared — the gate stopped seeing the corpus",
         t.compared
     );
     // …and the same floor for the pair's second member. A change that quietly
     // stopped deriving it would otherwise read as green, with every one of
-    // those falling back to a rule. Only the AST walk answers, so the count
-    // falls as the core walk takes bodies from it: 21,154 before the driver,
-    // 9,911 when a temporary took a slot, 4,831 when the rows took a `while`
-    // that hoists its header, 350 when a field taken into a literal moved
-    // `num$scan` to the rows, 138 when a store into a layout's name did, 48
-    // when the screen stopped asking a name's type, 19 when a field taken and
-    // handed back by a push did, 10 with the Unit and release slices beside it
-    // (RFC-0125 M7). The floor is one answer: it reaches zero when the arm
-    // retires, and this gate needs another witness before then.
+    // those falling back to a rule. 36,511 answers on 2026-09-25, with the
+    // core walk off.
     assert!(
-        t.answered_has > 0,
+        t.answered_has > 18_000,
         "only {} backend answers matched the pair's has-type — the form stopped          carrying it",
         t.answered_has
     );
