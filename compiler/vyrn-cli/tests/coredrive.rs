@@ -95,7 +95,7 @@ const CLASSES: [&str; 5] = [
 /// occurrence slice and its arm is retired, so the column reads zero here
 /// because there is no arm left to reach. `Stmt::Break`'s does not: it stands
 /// at 8 over this corpus and at 298 over the gate list, and [`PIN`] names the
-/// three programs this walk sees.
+/// programs this walk sees.
 const BREAK: usize = 7;
 const CONT: usize = 8;
 
@@ -103,18 +103,16 @@ const CONT: usize = 8;
 /// arm emitted, for every program where either is not zero. The residue the
 /// next slice on this line has to empty, program by program and not as one sum.
 ///
-/// The one left is a projection's body INLINED at its caller.
-/// `jchain.vyrn`'s is `doc.field("items")[1]`, where the emitter inlines
-/// `Json`'s `at` and then inlines `field` from the CLONE of the receiver that
-/// expansion holds, so the `break` stands on a node the core never saw; the
-/// core would have to inline `a[i]` on a user container too, and the store
-/// side of that is `atSet`.
+/// Empty: the core inlines `a[i]` on a user container where the checker
+/// dispatches it, so a projection's `break` inlined at its caller stands on a
+/// node the core keyed (`jchain.vyrn`'s `doc.field("items")[1]`, record
+/// `0125-m7-atrhs`).
 ///
 /// The other rewrite that put an exit out of the core's reach,
 /// `project::iterate_loop`'s clone of a user container's loop body, is off this
 /// table since the exits slice — `own::ReleasePlan::key_of` maps a clone back
 /// to the node the core keyed.
-const PIN: [(&str, usize, usize); 1] = [("jchain.vyrn", 1, 0)];
+const PIN: [(&str, usize, usize); 0] = [];
 
 /// Per program and callee: the projection CALL rows the core still states.
 ///

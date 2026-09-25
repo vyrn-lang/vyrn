@@ -3697,10 +3697,21 @@ impl<'a> Builder<'a> {
         for ((_, part), next) in parts.iter().zip(tys) {
             place = match part {
                 Ok(f) => Place::Field(Box::new(place), f.to_string()),
-                Err(_) if self.projected(&ty) => match self.yielded(&ss[2 * lets], out)? {
-                    Some(p) => p,
-                    None => return Ok(None),
-                },
+                Err(_) if self.projected(&ty) => {
+                    let Stmt::IndexSet {
+                        name,
+                        index,
+                        value,
+                        line,
+                    } = &ss[2 * lets]
+                    else {
+                        return Ok(None);
+                    };
+                    match self.yielded(name, index, value, *line, out)? {
+                        Some((p, _)) => p,
+                        None => return Ok(None),
+                    }
+                }
                 Err(args) => Place::Elem(Box::new(place), self.read_val(&args[1], out)?),
             };
             ty = next;
@@ -3708,29 +3719,38 @@ impl<'a> Builder<'a> {
         Ok(Some((lets, last, place, ty)))
     }
 
-    /// The place `atSet` yields for a window's put-back `back` into a
+    /// The place `atSet` yields for the store `name[index] = value` into a
     /// container a projection answers for, with the projection's prologue
-    /// stated. The checker expanded that store (`project::stored`): the
-    /// prologue, then the yielded place written as a store of the window's
-    /// temp. The store's path is the place. `None`, with nothing stated, where
-    /// the checker expanded no such store.
-    fn yielded(&mut self, back: &'a Stmt, out: &mut Vec<St>) -> Result<Option<Place>, Gap> {
-        let Stmt::IndexSet {
-            name,
-            index,
-            value,
-            line,
-        } = back
-        else {
-            return Ok(None);
-        };
+    /// stated: a window's put-back or a direct store. The checker expanded
+    /// that store (`project::stored`): the prologue, then the yielded place
+    /// written as a store. The store's path is the place, and its value is
+    /// what the place receives: `value`, or the temp the prologue binds for a
+    /// value that reads the container (`c[h] = c[h] + 1`). `None`, with
+    /// nothing stated, where the checker expanded no such store.
+    fn yielded(
+        &mut self,
+        name: &str,
+        index: &'a Expr,
+        value: &'a Expr,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Option<(Place, &'a Expr)>, Gap> {
         let Some(blk) = vyrn_frontend::project::stored(name, index, value) else {
             return Ok(None);
         };
         let Some(k) = vyrn_frontend::project::store_node(blk)
             .and_then(|s| blk.stmts.iter().position(|t| std::ptr::eq(t, s)))
         else {
-            return gap("an `atSet` expansion with no store", *line);
+            return gap("an `atSet` expansion with no store", line);
+        };
+        let (into, part, stored) = match &blk.stmts[k] {
+            Stmt::IndexSet {
+                name, index, value, ..
+            } => (name, Ok(index), value),
+            Stmt::SetField {
+                name, field, value, ..
+            } => (name, Err(field), value),
+            _ => return gap("an `atSet` expansion whose store is no place", line),
         };
         let group = blk.stmts[..k]
             .iter()
@@ -3739,30 +3759,15 @@ impl<'a> Builder<'a> {
         for s in &blk.stmts[..group] {
             self.stmt(s, out)?;
         }
-        let (base, store) = match self.window(&blk.stmts[group..], out)? {
-            Some((_, _, p, _)) => (p, &blk.stmts[k]),
-            None => match &blk.stmts[k] {
-                s @ (Stmt::IndexSet { name, .. } | Stmt::SetField { name, .. }) => {
-                    (self.named_place(name, *line)?.0, s)
-                }
-                _ => return gap("an `atSet` expansion whose store is no place", *line),
-            },
+        let base = match self.window(&blk.stmts[group..], out)? {
+            Some((_, _, p, _)) => p,
+            None => self.named_place(into, line)?.0,
         };
-        let place = match store {
-            Stmt::IndexSet {
-                index, value: v, ..
-            } if v == value => Place::Elem(Box::new(base), self.read_val(index, out)?),
-            Stmt::SetField {
-                field, value: v, ..
-            } if v == value => Place::Field(Box::new(base), field.clone()),
-            _ => {
-                return gap(
-                    "an `atSet` expansion that stores other than the temp",
-                    *line,
-                )
-            }
+        let place = match part {
+            Ok(index) => Place::Elem(Box::new(base), self.read_val(index, out)?),
+            Err(field) => Place::Field(Box::new(base), field.clone()),
         };
-        Ok(Some(place))
+        Ok(Some((place, if stored == value { value } else { stored })))
     }
 
     /// A removal whose receiver is a move-out window's temp
@@ -4800,14 +4805,25 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
         let (base, bty) = base;
-        let place = if self.is_map(&bty) {
-            let k = self.val(index, out)?;
-            Place::Key(Box::new(base), k)
+        // A user container's element is the place its `atSet` yields
+        // (RFC-0091 M2), after the projection's prologue.
+        let yielded = if self.projected(&bty) {
+            self.yielded(name, index, value, line, out)?
         } else {
-            let i = self.read_val(index, out)?;
-            Place::Elem(Box::new(base), i)
+            None
         };
-        let v = self.val(value, out)?;
+        let (place, stored) = match yielded {
+            Some(y) => y,
+            None if self.is_map(&bty) => {
+                let k = self.val(index, out)?;
+                (Place::Key(Box::new(base), k), value)
+            }
+            None => {
+                let i = self.read_val(index, out)?;
+                (Place::Elem(Box::new(base), i), value)
+            }
+        };
+        let v = self.val(stored, out)?;
         // A user container's `place at` yields the element's place
         // (RFC-0091 M2), and the element's type is the value's. Such
         // a store is REWRITTEN into a block of its own before the
@@ -7132,6 +7148,13 @@ impl<'a> Builder<'a> {
         ret: Option<Type>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
+        // `a[i]` asks the receiver's type for `at` before any builtin row
+        // answers, as `Checker::call` dispatches it (RFC-0091 M2).
+        if let (vyrn_frontend::project::AT, [recv, rest @ ..]) = (name, args) {
+            if let Some(p) = self.inlined("at", recv, rest, line, out)? {
+                return Ok(Rhs::Read(p));
+            }
+        }
         // The capability of each argument position, by who the callee is.
         let decls = self.proto.types();
         let method = self
@@ -8422,9 +8445,11 @@ thread_local! {
 /// are the instance's and not the ones the checker typed the body with.
 fn typed(program: &Program, top: &Body, file: &Option<String>, as_written: bool) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
+    let projected =
+        |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
     TYPED.with(|t| {
         let (out, seen) = &mut *t.borrow_mut();
-        let mut found = crate::typed::stores(top, &global_mutable, seen);
+        let mut found = crate::typed::stores(top, &global_mutable, &projected, seen);
         found.extend(crate::typed::loops(top, seen));
         if as_written {
             found.extend(crate::typed::drops(top, program));

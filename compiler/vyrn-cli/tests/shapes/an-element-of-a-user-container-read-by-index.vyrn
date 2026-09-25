@@ -1,0 +1,6 @@
+// an element of a user container read by index
+// pin: 0 break, 0 continue
+// `w[i]` asks the receiver's `at` before any builtin row, as the checker
+// does, so the core inlines the projection at the site and no Builtin `@at`
+// row stands for it (`0125-m7-atrhs`).
+type Window = { data: Array<Int64>, start: Int64 } impl Index for Window { fn at(read self, i: Int64) -> read Int64 { return self.data[self.start + i] } }          fn vyrnTestMain() -> Int64 { let w = Window { data: [10, 20, 30, 40], start: 1 } let a = w[0] let b = w[2] print("\{w[1]}") return a * 100 + b }
