@@ -1,0 +1,7 @@
+// a switch on a name an enclosing list made
+// pin: 0 break, 0 continue
+// An optional projection's `if let` nests the rest of the body in an arm, so
+// the second `tryField` switches on `doc` from a list inside the one that
+// made it. The screen passes the names an enclosing list made down the path
+// (RFC-0125 M7).
+import { Json, JsonField } from "std/json"          fn vyrnTestMain() -> Int64 { let doc = JObj([JsonField { key: "a", value: JStr("xy") }]) let mut t = 0 if let Some(v) = doc.tryField("a") { if let JStr(s) = v { t = t + s.byteLength } } if let Some(v) = doc.tryField("b") { t = t + 100 } else { t = t + 10 } return t }
