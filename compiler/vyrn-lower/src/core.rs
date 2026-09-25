@@ -1898,9 +1898,11 @@ pub enum Spec {
     /// call builds in storage of its own. The caller lands it as it lands any
     /// aggregate result.
     Builds(Type),
-    /// One operand at the type the row put on its name, and no result. The
-    /// call writes the operand out (`writeStdout`) or releases it (`close`).
-    Effect,
+    /// One operand at the type the row put on its name, and a result at the
+    /// stated type. The call writes the operand out (`writeStdout`), releases
+    /// it (`close`), or moves it into a heap box and answers the box's
+    /// address (`boxStream`).
+    Effect(Type),
     /// RFC-0008's facade. `logger(name)` takes a String and hands it back
     /// as the `Logger`, which is its name. A level takes a `Logger` and a
     /// String message, and writes the line to the build's sink, or nothing
@@ -1968,8 +1970,9 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("panic", Spec::Traps),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
             ("serveStream", Spec::Traps),
-            ("writeStdout", Spec::Effect),
-            ("close", Spec::Effect),
+            ("writeStdout", Spec::Effect(Type::Unit)),
+            ("close", Spec::Effect(Type::Unit)),
+            ("boxStream", Spec::Effect(Type::Int)),
             ("logger", Spec::Logs),
             ("@trace", Spec::Logs),
             ("@debug", Spec::Logs),

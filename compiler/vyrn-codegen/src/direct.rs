@@ -8807,7 +8807,13 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 return self.stream_from_step(m, b, &mut operand, line);
             }
-            "boxStream" if args.len() == 1 => return self.stream_box(m, b, args, line),
+            "boxStream" if args.len() == 1 => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, _: Option<&Type>| {
+                        s.expr(m, b, &args[0])
+                    };
+                return self.stream_box(m, b, &mut operand, line);
+            }
             "unboxStream" if args.len() == 1 => {
                 let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
                     Some(Type::Stream(i)) => *i,
@@ -10745,7 +10751,12 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            Option<&Type>,
+        ) -> Result<Type, String>,
         line: usize,
     ) -> Result<Type, String> {
         let sl = self.stream_layout(line)?;
@@ -10758,7 +10769,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(p));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        let got = self.expr(m, b, &args[0])?;
+        let got = operand(self, m, b, None)?;
         if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
             return unsupported(&format!("`boxStream` of `{got}`"), line);
         }
@@ -14821,9 +14832,9 @@ impl<'p> Fn_<'_, 'p> {
         Ok(oty)
     }
 
-    /// `writeStdout(bytes)` and `close(s)`, the builtins [`Spec::Effect`]
-    /// names. `operand` writes the argument at the type asked for, or at its
-    /// own where none is, and answers the type it wrote.
+    /// `writeStdout(bytes)`, `close(s)` and `boxStream(s)`, the builtins
+    /// [`Spec::Effect`] names. `operand` writes the argument at the type asked
+    /// for, or at its own where none is, and answers the type it wrote.
     fn effect(
         &mut self,
         m: &mut Module,
@@ -14861,6 +14872,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(self.cx.rt.write_all));
                 b.ins(&Instruction::Drop);
             }
+            "boxStream" => return self.stream_box(m, b, operand, line),
             // `close` reclaims what this backend CAN reclaim. Its `malloc` is a
             // bump pointer that never frees, so a buffer stream's teardown is
             // still nothing — but a stepped one owns a cell, and cells come from
@@ -18640,9 +18652,10 @@ impl<'p> Fn_<'_, 'p> {
                 builtin_spec(callee, args.len()),
                 core_builtin(callee, *kind),
             ) {
-                (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret))) => Ok(ret.clone()),
+                (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret) | Spec::Effect(ret))) => {
+                    Ok(ret.clone())
+                }
                 (None, Some(Spec::Traps)) => Ok(Type::Never),
-                (None, Some(Spec::Effect)) => Ok(Type::Unit),
                 (None, Some(Spec::Logs)) if callee == "logger" => Ok(Type::Logger),
                 (None, Some(Spec::Logs)) => Ok(Type::Unit),
                 // [`Fn_::lanes`] decides a lane builtin's type as it emits, and
@@ -18967,7 +18980,7 @@ impl<'p> Fn_<'_, 'p> {
                     _ => self.slot_call(m, b, callee, &mut operand, line),
                 };
             }
-            Some(Spec::Effect) => {
+            Some(Spec::Effect(_)) => {
                 let [(v, _)] = args else {
                     return unsupported(&format!("`{callee}` of other than one value"), line);
                 };
@@ -21371,7 +21384,7 @@ impl<'p> Fn_<'_, 'p> {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
             Some(Spec::OwnType) => matches!(args, [(Arg::Val(_), _)]),
-            Some(Spec::Renders(_) | Spec::Effect) => matches!(args, [_]),
+            Some(Spec::Renders(_) | Spec::Effect(_)) => matches!(args, [_]),
             Some(Spec::Logs) => args.len() == logs_arity(callee),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
             // A lane index is an immediate, so the row carries it as a literal.
