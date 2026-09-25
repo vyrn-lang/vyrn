@@ -1,0 +1,6 @@
+// module state handed to a modify parameter
+// pin: 0 break, 0 continue
+// A global handed to `modify` is its place, `Arg::Place(Place::Global)`,
+// and crosses as its address (the m7-reads record). `examples/` writes it
+// only through `std/slots` `insert`.
+type Cell = { pos: Int64, src: Int64 }          let mut cells: Array<Cell> = []          fn add(xs: modify Array<Cell>, c: consume Cell) -> Int64 { xs.push(c) return xs.length }          fn put(p: Int64) -> Int64 { let n = add(cells, Cell { pos: p, src: 0 }) return n }          fn vyrnTestMain() -> Int64 { let a = put(3) let b = put(4) return a * 100 + b * 10 + cells[1].pos }
