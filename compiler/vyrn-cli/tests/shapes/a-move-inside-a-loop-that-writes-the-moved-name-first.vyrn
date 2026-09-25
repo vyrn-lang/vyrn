@@ -1,0 +1,6 @@
+// a move inside a loop that writes the moved name first
+// pin: 0 break, 0 continue
+// The loop stores into `a` and then moves it into `b`. A loop runs its
+// earlier rows again after the move, so the rename is not taken and its `let`
+// stays on the arm. Both walks print 6 with no leak line (RFC-0125 M7, `m7-rest`).
+fn vyrnTestMain() -> Int64 { let mut s = 0 let mut i = 0 while i < 3 { let mut a: Array<Int64> = [0] a = [i, i + 1] let b = a s = s + b[1] i = i + 1 } return s }

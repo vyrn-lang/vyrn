@@ -1,0 +1,6 @@
+// a move after a store into the moved name
+// pin: 0 break, 0 continue
+// `a` is written, then moved into `b` by a `let` of the body's own. The store
+// runs before the move, so `b` takes `a`'s place with no copy
+// (`core_after`). Both walks print 36 with no leak line (RFC-0125 M7, `m7-rest`).
+fn vyrnTestMain() -> Int64 { let mut a: Array<Int64> = [1] a = [4, 5, 6] let b = a return b.length * 10 + b[2] }
