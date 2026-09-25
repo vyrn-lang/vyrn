@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
-use crate::lexer::{Tok, Token};
+use crate::lexer::{Hole, Tok, Token};
 use std::collections::HashSet;
 
 /// Whether `name`, written in a contract member's type, is one of that member's
@@ -4516,7 +4516,7 @@ impl Parser {
     fn template(
         &mut self,
         parts: Vec<String>,
-        exprs: Vec<String>,
+        exprs: Vec<Hole>,
         line: usize,
         col: usize,
     ) -> Result<Expr, Diagnostic> {
@@ -4557,7 +4557,8 @@ impl Parser {
 
     /// Re-lex and parse one interpolation hole's raw source as an expression,
     /// sharing the enclosing function's generic parameters.
-    fn parse_hole(&self, src: &str, line: usize, col: usize) -> Result<Expr, Diagnostic> {
+    fn parse_hole(&self, hole: &Hole, line: usize, col: usize) -> Result<Expr, Diagnostic> {
+        let src = hole.src.as_str();
         let toks = crate::lexer::lex(src).map_err(|e| {
             Diagnostic::error(
                 line,
@@ -4566,6 +4567,20 @@ impl Parser {
                 format!("in interpolation: {}", e.render()),
             )
         })?;
+        // The hole's tokens count from line 1, column 1 of the hole; place them
+        // where the hole stands, so a node's line and a lambda's key are its own.
+        let toks = toks
+            .into_iter()
+            .map(|t| Token {
+                line: hole.line + t.line - 1,
+                col: if t.line == 1 {
+                    hole.col + t.col - 1
+                } else {
+                    t.col
+                },
+                ..t
+            })
+            .collect();
         let mut sub = self.sub(toks);
         // A sub-parser diagnostic carries line numbers relative to the hole
         // snippet — anchor it at the template and embed the detail, exactly
@@ -4600,7 +4615,7 @@ impl Parser {
         &self,
         tag: String,
         parts: Vec<String>,
-        exprs: Vec<String>,
+        exprs: Vec<Hole>,
         line: usize,
         col: usize,
     ) -> Result<Expr, Diagnostic> {
@@ -4676,7 +4691,7 @@ impl Parser {
     fn code_quote(
         &self,
         parts: Vec<String>,
-        exprs: Vec<String>,
+        exprs: Vec<Hole>,
         line: usize,
         col: usize,
     ) -> Result<Expr, Diagnostic> {
@@ -4743,7 +4758,7 @@ impl Parser {
     ///     literal is valid wherever an expression is, so a position that rejects
     ///     one is not an expression).
     ///   * `0` — expression position (a `String` there becomes an escaped literal).
-    fn hole_context(&self, parts: &[String], exprs: &[String], i: usize) -> i64 {
+    fn hole_context(&self, parts: &[String], exprs: &[Hole], i: usize) -> i64 {
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         let before = parts[i].chars().next_back().is_some_and(word);
         let after = parts
@@ -5995,6 +6010,19 @@ mod tests {
         let e = parse(toks).unwrap_err();
         assert_eq!(e.line, 2, "{e:?}");
         assert!(e.message.contains("in interpolation"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_node_in_a_hole_names_the_line_and_column_it_sits_on() {
+        // Two lambdas in two holes are two keys (#471).
+        let mut p = parse_src("fn main() -> Int64 {\n  print(\"\\{f(x -> x)} \\{f(x -> x)}\")\n}");
+        let mut at = Vec::new();
+        crate::project::walk_block(&mut p.functions[0].body, &mut |e| {
+            if let Expr::Lambda { line, col, .. } = e {
+                at.push((*line, *col));
+            }
+        });
+        assert_eq!(at, [(2, 14), (2, 27)]);
     }
 
     #[test]
