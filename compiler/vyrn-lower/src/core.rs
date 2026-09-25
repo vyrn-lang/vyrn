@@ -4806,28 +4806,15 @@ impl<'a> Builder<'a> {
             return Ok((Place::Name(n), self.body.names[n as usize].ty.clone()));
         }
         match self.program.globals.iter().find(|g| &g.name == name) {
-            Some(g) => match g.ty.clone().or_else(|| self.init_ty(&g.init)) {
+            Some(g) => match g
+                .ty
+                .clone()
+                .or_else(|| node_ty(&g.init as *const Expr as usize))
+            {
                 Some(t) => Ok((Place::Global(name.to_string()), t)),
-                None => gap_d("a global without a declared type", name, line),
+                None => gap_d("a global the checker did not type", name, line),
             },
             None => gap("a place that is not a binding", line),
-        }
-    }
-
-    /// The type of a global's initializer, from its shape: the checker's rows
-    /// are per instance and a global is instantiated nowhere.
-    fn init_ty(&self, init: &Expr) -> Option<Type> {
-        match init {
-            Expr::StructLit { name, .. } => Some(Type::Named(name.clone())),
-            Expr::Str(_) => Some(Type::Str),
-            Expr::Bool(_) => Some(Type::Bool),
-            Expr::Call { name, .. } => self
-                .program
-                .functions
-                .iter()
-                .find(|f| &f.name == name)
-                .map(|f| f.ret.clone()),
-            _ => None,
         }
     }
 
@@ -7182,6 +7169,21 @@ impl<'a> Builder<'a> {
             // takes the String by address and stashes atoms of its own —
             // so the guest keeps every argument it owns.
             vec![Capability::Read; args.len()]
+        } else if let Some(g) = self.program.globals.iter().find(|g| {
+            g.name == name
+                && matches!(
+                    vyrn_frontend::types::resolve(&g.ty.clone().unwrap_or(Type::Unit), decls),
+                    Type::Fn(..)
+                )
+        }) {
+            // Module state of function type (RFC-0029): the value is read
+            // out of the global, which is a borrow of it, and called
+            // through, as a forced `lazy` field is.
+            let ty = g.ty.clone().unwrap_or(Type::Unit);
+            let n = self.name(name, ty, false, line);
+            out.push(St::Let(n, Rhs::Read(Place::Global(name.to_string()))));
+            kind = Callee::Value(n);
+            vec![Capability::Read; args.len()]
         } else {
             return gap_d("a call this slice cannot attribute", name, line);
         };
@@ -8414,6 +8416,33 @@ pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
 /// the plan sees the same rows. A body the core cannot build, or the kernel
 /// refuses for a reason other than a missing release (a double free, a use
 /// after release), is left exactly as the plan had it.
+/// Reports a body the core did not build. A gap with a rule is the program's
+/// refusal, in the checker's own sentence (RFC-0125 §3 M3, the checker's
+/// deletion path). A gap without one is a defect in the builder: the checker
+/// typed the body, so every judgment over the core would pass over it in
+/// silence (RFC-0125 M7, the judgment's reach).
+fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
+    let message = g.rule.unwrap_or_else(|| {
+        let detail = if g.detail.is_empty() {
+            String::new()
+        } else {
+            format!(" `{}`", g.detail)
+        };
+        format!(
+            "internal error: the core cannot state {}{detail}, so `{body}` is not judged",
+            g.what
+        )
+    });
+    REFUSALS.with(|v| {
+        v.borrow_mut().push(crate::kernel::Refusal {
+            message,
+            line: g.line,
+            file: file.clone(),
+            body: body.to_string(),
+        })
+    });
+}
+
 pub fn augment(program: &Program, own: &mut Ownership) {
     let _p = vyrn_frontend::prof::phase("placer");
     // A node is an address, and the allocator hands the same one out again:
@@ -8549,26 +8578,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         let top = match made {
             Ok(b) => Some(b),
             Err(g) => {
-                // A rule the core states, rather than a construct it cannot
-                // lower: reported like the kernel's own refusals (RFC-0125
-                // §3 M3, the checker's deletion path).
-                if let Some(message) = g.rule {
-                    REFUSALS.with(|v| {
-                        v.borrow_mut().push(crate::kernel::Refusal {
-                            message,
-                            line: g.line,
-                            file: inst.func.module.clone(),
-                            body: inst.func.name.clone(),
-                        })
-                    });
-                } else if trace {
-                    eprintln!(
-                        "placer: {} not lowered: {} {}",
-                        inst.spelling(),
-                        g.what,
-                        g.detail
-                    );
-                }
+                refuse_gap(g, &inst.func.module, &inst.func.name);
                 None
             }
         };
@@ -8608,18 +8618,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 outside.push(Some(top));
             }
             Err(g) => {
-                if let Some(message) = g.rule {
-                    REFUSALS.with(|v| {
-                        v.borrow_mut().push(crate::kernel::Refusal {
-                            message,
-                            line: g.line,
-                            file: ob.module.clone(),
-                            body: ob.name.clone(),
-                        })
-                    });
-                } else if trace {
-                    eprintln!("placer: {} not lowered: {} {}", ob.name, g.what, g.detail);
-                }
+                refuse_gap(g, &ob.module, &ob.name);
                 outside.push(None);
             }
         }
