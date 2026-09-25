@@ -8739,8 +8739,19 @@ impl<'p> Fn_<'_, 'p> {
                 return self.rebuild(m, b, name, args, line)
             }
             "@clear" if args.len() == 1 => return self.rebuild(m, b, name, args, line),
-            "@tally" if args.len() == 3 => return self.map_tally(m, b, args, line),
-            "@tallyBytes" if args.len() == 3 => return self.map_tally_bytes(m, b, args, line),
+            "@tally" | "@tallyBytes" if args.len() == 3 => {
+                let mty = self.expr(m, b, &args[0])?;
+                let hdr = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(hdr));
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                        s.expr_as(m, b, &args[i + 1], t).map(|_| ())
+                    };
+                return match name {
+                    "@tally" => self.map_tally(m, b, hdr, &mty, &mut operand, line),
+                    _ => self.map_tally_bytes(m, b, hdr, &mty, &mut operand, line),
+                };
+            }
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
             // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
@@ -14120,26 +14131,35 @@ impl<'p> Fn_<'_, 'p> {
     /// allocates nothing. Only a miss goes through `str_from_bytes` (whose Err
     /// is the trap) and the insert path, where the fresh key is stored, not
     /// copied.
+    ///
+    /// The map's header address is in `hdr`. `operand` pushes operand 0, the
+    /// bytes, or operand 1, `n`, at the type it is handed, as for
+    /// [`Fn_::map_tally`].
     fn map_tally_bytes(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        hdr: u32,
+        mty: &Type,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let mty = self.expr(m, b, &args[0])?;
-        let Type::Map(..) = self.cx.resolve(&mty) else {
+        let Type::Map(..) = self.cx.resolve(mty) else {
             return unsupported(&format!("`tallyBytes` on `{mty}`"), line);
         };
-        let l = self.layout_of(&mty, line)?;
-        let hdr = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(hdr));
+        let l = self.layout_of(mty, line)?;
         let bytes = Type::Array(Box::new(Type::IntN {
             bits: 8,
             signed: false,
         }));
         let wsrc = b.local(ValType::I32);
-        self.expr_as(m, b, &args[1], &bytes)?;
+        operand(self, m, b, 0, &bytes)?;
         b.ins(&Instruction::LocalSet(wsrc));
         let al = self.layout_of(&bytes, line)?;
         let (wdata, wlen) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -14151,7 +14171,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalSet(wlen));
         let n = b.local(ValType::I64);
-        self.expr_as(m, b, &args[2], &Type::Int)?;
+        operand(self, m, b, 1, &Type::Int)?;
         b.ins(&Instruction::LocalSet(n));
         // One probe, before any key exists: kind 3, the window's length as
         // `klen`, the window's address as the key.
@@ -14238,50 +14258,40 @@ impl<'p> Fn_<'_, 'p> {
         self.depth -= 1;
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalGet(hdr));
-        Ok(mty)
+        Ok(mty.clone())
     }
 
     /// `m.tally(k, n)` (RFC-0116): insert-or-add, ONE probe. The callee never
     /// takes the key — a hit adds in place and touches nothing else, a miss
     /// stores a COPY — so the caller's ownership is the same on both paths.
+    ///
+    /// The map's header address is in `hdr`. `operand` pushes operand 0, the
+    /// key, or operand 1, `n`, at the type it is handed: the arm over the
+    /// source evaluates expressions and the core's walk reads names off the
+    /// row (RFC-0125 M7).
     fn map_tally(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        hdr: u32,
+        mty: &Type,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let mty = self.expr(m, b, &args[0])?;
-        let key_t = match self.cx.resolve(&mty) {
-            Type::Map(k, _) => *k,
-            _ => return unsupported(&format!("`tally` on `{mty}`"), line),
-        };
-        let mk = self.map_key(&key_t, line)?;
-        let l = self.layout_of(&mty, line)?;
-        let hdr = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(hdr));
-        let k = match mk {
-            MapKey::I64 => {
-                let k = b.local(ValType::I64);
-                self.expr_as(m, b, &args[1], &Type::Int)?;
-                b.ins(&Instruction::LocalSet(k));
-                k
-            }
-            MapKey::Pack(_) => {
-                let raw = b.local(ValType::I32);
-                self.expr_as(m, b, &args[1], &key_t)?;
-                b.ins(&Instruction::LocalSet(raw));
-                self.pack_key(b, raw, &key_t, line)?
-            }
-            MapKey::Str => {
-                let k = b.local(ValType::I32);
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                b.ins(&Instruction::LocalSet(k));
-                k
-            }
-        };
+        if !matches!(self.cx.resolve(mty), Type::Map(..)) {
+            return unsupported(&format!("`tally` on `{mty}`"), line);
+        }
+        let mut key =
+            |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| operand(s, m, b, 0, t);
+        let (k, l, mk) = self.map_key_local(m, b, mty, &mut key, line)?;
         let n = b.local(ValType::I64);
-        self.expr_as(m, b, &args[2], &Type::Int)?;
+        operand(self, m, b, 1, &Type::Int)?;
         b.ins(&Instruction::LocalSet(n));
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
@@ -14345,7 +14355,7 @@ impl<'p> Fn_<'_, 'p> {
         self.depth -= 1;
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalGet(hdr));
-        Ok(mty)
+        Ok(mty.clone())
     }
 
     fn map_set(
@@ -14652,6 +14662,22 @@ impl<'p> Fn_<'_, 'p> {
         key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
     ) -> Result<(u32, Layout, MapKey), String> {
+        let (k, l, mk) = self.map_key_local(m, b, mty, key, line)?;
+        let idx = b.local(ValType::I32);
+        self.map_scan(b, hdr, &l, k, idx, mk);
+        Ok((idx, l, mk))
+    }
+
+    /// The key `key` pushes, in a local at the form [`Fn_::map_scan`] probes
+    /// with, with the map's layout and key family.
+    fn map_key_local(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        mty: &Type,
+        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        line: usize,
+    ) -> Result<(u32, Layout, MapKey), String> {
         let key_t = match self.cx.resolve(mty) {
             Type::Map(k, _) => *k,
             _ => Type::Str,
@@ -14678,9 +14704,7 @@ impl<'p> Fn_<'_, 'p> {
                 k
             }
         };
-        let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx, mk);
-        Ok((idx, l, mk))
+        Ok((k, l, mk))
     }
 
     /// `m[k]` — an honest `Option<V>`, never a trap.
@@ -18653,14 +18677,27 @@ impl<'p> Fn_<'_, 'p> {
                 })?;
                 return Ok(Type::Never);
             }
-            // `xs.push(v)` and its siblings: the receiver's address, which the
-            // runtime rebuilds in place, and the operand the row names.
+            // `xs.push(v)` and its siblings, and `m.tally(k, n)`: the
+            // receiver's address, which the call rebuilds in place, and the
+            // operands the row names.
             Some(Spec::Rebuilds) => {
                 let [(Val::Name(x), _), rest @ ..] = args else {
                     return unsupported("a rebuild of no named receiver", line);
                 };
                 let aty = body.names[*x as usize].ty.clone();
                 self.core_addr_of(b, w, body, *x, line)?;
+                if let ("@tally" | "@tallyBytes", [_, _]) = (callee, rest) {
+                    let hdr = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalSet(hdr));
+                    let mut operand =
+                        |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
+                            s.core_val(m, b, body, w, &rest[i].0, t, line)
+                        };
+                    return match callee {
+                        "@tally" => self.map_tally(m, b, hdr, &aty, &mut operand, line),
+                        _ => self.map_tally_bytes(m, b, hdr, &aty, &mut operand, line),
+                    };
+                }
                 let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match rest
                 {
                     [(v, _)] => s.core_val(m, b, body, w, v, t, line),
@@ -20896,7 +20933,7 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Whether a row rebuilds a named `Array` receiver or a String
+    /// Whether a row rebuilds a named `Array` or `Map` receiver or a String
     /// accumulator in place ([`Spec::Rebuilds`]), with operands this walk
     /// writes.
     fn core_rebuild(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
@@ -20909,7 +20946,10 @@ impl<'p> Fn_<'_, 'p> {
         matches!(core_builtin(callee, *kind), Some(Spec::Rebuilds))
             && matches!(args.split_first(), Some(((Arg::Val(Val::Name(x)), _), rest))
                 if (body.names[*x as usize].grows
-                    || matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Array(_)))
+                    || matches!(
+                        (callee.as_str(), self.cx.resolve(&body.names[*x as usize].ty)),
+                        (_, Type::Array(_)) | ("@tally" | "@tallyBytes", Type::Map(..))
+                    ))
                     && core_global(body, *x).is_none_or(|g| self.cx.gappend.contains_key(g))
                     && self.core_args_readable(body, rest))
     }

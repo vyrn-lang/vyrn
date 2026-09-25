@@ -1843,7 +1843,12 @@ pub enum Spec {
     /// and its operands are Strings: the runtime grows the buffer when the
     /// accumulator's ownership word says this path allocated it and copies
     /// it otherwise, and the store after the call puts the new address
-    /// into the name.
+    /// into the name. `@tally`'s receiver is a map, and its operands are a
+    /// key at the map's key type and a count at `Int64`. The call reads the
+    /// key and never takes it: a miss stores a copy the map owns, so the
+    /// caller's key is the caller's to release on both paths. `@tallyBytes`
+    /// reads bytes in place of the key, and a miss stores a String the call
+    /// builds from them, which the map owns.
     Rebuilds,
     /// A SIMD operation (RFC-0083): the lane constructors, a lane read or
     /// write, a mask reduction, and a load or store of consecutive array
@@ -1957,6 +1962,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("@append", Spec::Rebuilds),
             ("@copyFrom", Spec::Rebuilds),
             ("@strAppend", Spec::Rebuilds),
+            ("@tally", Spec::Rebuilds),
+            ("@tallyBytes", Spec::Rebuilds),
             ("F32x4", Spec::Lanes),
             ("I32x4", Spec::Lanes),
             ("F64x2", Spec::Lanes),
