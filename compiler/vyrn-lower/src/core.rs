@@ -2056,6 +2056,20 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 "@toArray",
                 Spec::Builds(Type::Array(Box::new(Type::Param("T".into())))),
             ),
+            // A stream's producers (RFC-0075 M2b, RFC-0090 M3) build its
+            // six-word header in a slot of their own.
+            (
+                "fromArray",
+                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
+            ),
+            (
+                "fromStep",
+                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
+            ),
+            (
+                "unboxStream",
+                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
+            ),
             // A snapshot of a map's keys, at the prelude's own parameter.
             (
                 "@keys",

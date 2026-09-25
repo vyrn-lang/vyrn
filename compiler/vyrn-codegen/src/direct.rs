@@ -8799,9 +8799,24 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 return self.stream_from_array(b, &inner, line);
             }
-            "fromStep" if args.len() == 3 => return self.stream_from_step(m, b, args, line),
+            "fromStep" if args.len() == 3 => {
+                let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize| match i {
+                    0 | 1 => s.expr_as(m, b, &args[i], &Type::Int).map(|_| Type::Int),
+                    _ => s.expr(m, b, &args[i]),
+                };
+                return self.stream_from_step(m, b, &mut operand, line);
+            }
             "boxStream" if args.len() == 1 => return self.stream_box(m, b, args, line),
-            "unboxStream" if args.len() == 1 => return self.stream_unbox(m, b, args, line),
+            "unboxStream" if args.len() == 1 => {
+                let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
+                    Some(Type::Stream(i)) => *i,
+                    _ => return unsupported("an `unboxStream` with no expected Stream type", line),
+                };
+                let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                    s.expr_as(m, b, &args[0], &Type::Int).map(|_| ())
+                };
+                return self.stream_unbox(m, b, &elem, &mut addr, line);
+            }
             "pullAt" if args.len() == 1 => return self.stream_pull_at(m, b, args, line),
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
             "@swapRemove" if args.len() == 2 => return self.swap_remove(m, b, args, line),
@@ -10593,11 +10608,14 @@ impl<'p> Fn_<'_, 'p> {
     /// each written straight into the pair of header fields that IS that value.
     /// The cursor arrives from the caller since RFC-0090 M3 — `std/stream` minted
     /// it out of its own `Slots` — so nothing is allocated here.
+    ///
+    /// `operand` emits the `i`th argument: the two cursor words at `Int64`, and
+    /// the step at its own type, which it answers.
     fn stream_from_step(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, usize) -> Result<Type, String>,
         line: usize,
     ) -> Result<Type, String> {
         // Written argument order — the interpreter evaluates `slot`, `gen` and
@@ -10605,13 +10623,13 @@ impl<'p> Fn_<'_, 'p> {
         // that order here too. The step's SIGNATURE names the element type, but
         // its value is not needed until the header exists, so the two cursor
         // words wait in locals while the step is evaluated.
-        self.expr_as(m, b, &args[0], &Type::Int)?;
+        operand(self, m, b, 0)?;
         let c0 = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(c0));
-        self.expr_as(m, b, &args[1], &Type::Int)?;
+        operand(self, m, b, 1)?;
         let c1 = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(c1));
-        let fty = self.expr(m, b, &args[2])?;
+        let fty = operand(self, m, b, 2)?;
         let fv = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(fv));
         let sig = self.cx.resolve(&fty);
@@ -10669,15 +10687,15 @@ impl<'p> Fn_<'_, 'p> {
     const BOX_MAGIC: i64 = 3735928559;
 
     /// Leave the address of a checked box's `Stream` on the stack, or trap.
+    /// `addr` emits the box's address as an `Int64`.
     fn stream_box_at(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
-        _line: usize,
+        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
     ) -> Result<u32, String> {
         let a = b.local(ValType::I32);
-        self.expr_as(m, b, &args[0], &Type::Int)?;
+        addr(self, m, b)?;
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(a));
         b.ins(&Instruction::I32Eqz);
@@ -10749,15 +10767,12 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        elem: &Type,
+        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
-            Some(Type::Stream(i)) => *i,
-            _ => return unsupported("an `unboxStream` with no expected Stream type", line),
-        };
         let sl = self.stream_layout(line)?;
-        let a = self.stream_box_at(m, b, args, line)?;
+        let a = self.stream_box_at(m, b, addr)?;
         let off = b.alloc(sl.size, sl.align);
         b.slot(off);
         b.ins(&Instruction::LocalGet(a));
@@ -10774,7 +10789,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::Call(self.cx.rt.free));
         b.slot(off);
-        Ok(Type::Stream(Box::new(elem)))
+        Ok(Type::Stream(Box::new(elem.clone())))
     }
 
     /// `pullAt(a)`: one element from the stream in that box (RFC-0075 M2c),
@@ -10797,7 +10812,10 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        let a = self.stream_box_at(m, b, args, line)?;
+        let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+            s.expr_as(m, b, &args[0], &Type::Int).map(|_| ())
+        };
+        let a = self.stream_box_at(m, b, &mut addr)?;
         let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(8));
@@ -18820,6 +18838,35 @@ impl<'p> Fn_<'_, 'p> {
                         let hdr = b.local(ValType::I32);
                         b.ins(&Instruction::LocalSet(hdr));
                         self.sa_to_array(m, b, hdr, &aty, line)
+                    }
+                    ("fromArray", [(v, _)]) => {
+                        let aty = self.core_ty(body, v, &Type::Int);
+                        let Type::Array(inner) = self.cx.resolve(&aty) else {
+                            return unsupported(&format!("`fromArray` of `{aty}`"), line);
+                        };
+                        self.core_val(m, b, body, w, v, &aty, line)?;
+                        self.stream_from_array(b, &inner, line)
+                    }
+                    ("fromStep", [_, _, _]) => {
+                        let mut step = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize| {
+                            let v = &args[i].0;
+                            let t = match i {
+                                0 | 1 => Type::Int,
+                                _ => s.core_ty(body, v, &Type::Int),
+                            };
+                            s.core_val(m, b, body, w, v, &t, line)?;
+                            Ok(t)
+                        };
+                        self.stream_from_step(m, b, &mut step, line)
+                    }
+                    // The element type is no reader's here: a header's layout
+                    // is the shape's, and the checker types the name.
+                    ("unboxStream", [(v, _)]) => {
+                        let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
+                            s.core_val(m, b, body, w, v, &Type::Int, line)
+                        };
+                        let elem = Type::Param("T".into());
+                        self.stream_unbox(m, b, &elem, &mut addr, line)
                     }
                     ("@keys", [(v, _)]) => {
                         let mty = self.core_ty(body, v, &Type::Int);
