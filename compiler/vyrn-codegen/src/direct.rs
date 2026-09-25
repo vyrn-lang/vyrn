@@ -2607,6 +2607,7 @@ fn lower_body(
             built: vec![None; core.names.len()],
             bufs: vec![None; core.names.len()],
             over: Vec::new(),
+            pulled: vec![None; core.names.len()],
         };
     }
 
@@ -17164,6 +17165,9 @@ struct Walked {
     /// own row writes it.
     bufs: Vec<Option<u32>>,
     over: Vec<(vyrn_lower::core::Name, vyrn_lower::core::Name)>,
+    /// The place a stream's pull wrote its element to, by the pull's name,
+    /// until the read at that name binds it ([`Spec::Pulls`]).
+    pulled: Vec<Option<(Place, Type)>>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -17868,6 +17872,43 @@ impl<'p> Fn_<'_, 'p> {
                     {
                         w.slot[*n as usize] = w.slot[*x as usize].take();
                     }
+                }
+                // The head of a `for` over a stream: the element goes into a
+                // place of its own, which the read at this row's name binds,
+                // and the name is whether one came, as the arm's `for` pulls.
+                St::Let(
+                    n,
+                    Rhs::Call {
+                        callee, kind, args, ..
+                    },
+                ) if matches!(core_builtin(callee, *kind), Some(Spec::Pulls)) => {
+                    let line = body.names[*n as usize].line;
+                    let [(Arg::Val(Val::Name(s)), _)] = args.as_slice() else {
+                        return unsupported("a pull of no named stream", line);
+                    };
+                    let Some(elem) = self.core_stream_elem(body, *s) else {
+                        return unsupported("a pull of no stream", line);
+                    };
+                    self.core_addr_of(b, w, body, *s, line)?;
+                    let src = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalSet(src));
+                    let r = self.cx.repr(&elem, line)?;
+                    let place = self.place_for(b, &r, line)?;
+                    let has = self.stream_next(m, b, src, place, &elem, line)?;
+                    w.pulled[*n as usize] = Some((place, elem));
+                    self.core_bind(b, body, w, *n, Place::Local(has), Type::Bool)?;
+                }
+                St::Let(n, Rhs::Read(vyrn_lower::core::Place::Elem(s, c)))
+                    if self.core_pulls(body, s) =>
+                {
+                    let line = body.names[*n as usize].line;
+                    let Some((place, ty)) = (match c {
+                        Val::Name(c) => w.pulled[*c as usize].take(),
+                        Val::Lit(_) => None,
+                    }) else {
+                        return unsupported("an element read of a stream no pull wrote", line);
+                    };
+                    self.core_bind(b, body, w, *n, place, ty)?;
                 }
                 // The store that puts the rebuilt receiver back, which the
                 // rebuild already wrote.
@@ -18902,6 +18943,8 @@ impl<'p> Fn_<'_, 'p> {
                     };
                 return self.logs(m, b, callee, &mut operand, line);
             }
+            // A pull binds two names, and [`Fn_::core_stmts`] emits it.
+            Some(Spec::Pulls) => return unsupported("a pull apart from its loop head", line),
             // A routed builtin is the declared call below, through the
             // signature [`Fn_::core_sig`] answers for the function it names.
             Some(Spec::Routes(_)) | None => {}
@@ -20089,6 +20132,24 @@ impl<'p> Fn_<'_, 'p> {
             .ok_or_else(|| gap("an aggregate result with no out-pointer", line))
     }
 
+    /// The element type of `n` where it is a stream, and `None` elsewhere.
+    fn core_stream_elem(
+        &self,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<Type> {
+        match self.cx.resolve(&body.names[n as usize].ty) {
+            Type::Stream(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Whether an element read of `base` is the read a stream's pull answers:
+    /// a stream is pulled and never indexed.
+    fn core_pulls(&self, body: &vyrn_lower::core::Body, base: &vyrn_lower::core::Place) -> bool {
+        matches!(base, vyrn_lower::core::Place::Name(s) if self.core_stream_elem(body, *s).is_some())
+    }
+
     /// Push the address of the aggregate the name `n` holds: a slot's, or the
     /// one a parameter's local holds, which is what `Expr::Var` pushes for a
     /// layout.
@@ -20775,6 +20836,22 @@ impl<'p> Fn_<'_, 'p> {
             St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
                 self.core_place_ty(body, p).is_some()
             }
+            // The head of a `for` over a stream, whose element is one wasm
+            // value ([`Spec::Pulls`]).
+            St::Let(
+                _,
+                Rhs::Call {
+                    callee, kind, args, ..
+                },
+            ) if matches!(core_builtin(callee, *kind), Some(Spec::Pulls)) => {
+                matches!(args.as_slice(), [(Arg::Val(Val::Name(s)), _)]
+                    if self.core_stream_elem(body, *s).is_some_and(|t| self.core_framed(&t)))
+            }
+            St::Let(_, Rhs::Read(vyrn_lower::core::Place::Elem(s, _)))
+                if self.core_pulls(body, s) =>
+            {
+                true
+            }
             St::Let(n, _)
                 if self.core_alias(body, *n).is_some()
                     || self.core_copies(body, *n).is_some()
@@ -21242,7 +21319,7 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_rebuilt`]), a built aggregate as an aggregate call
             // ([`Fn_::core_agg_call`]), and a routed builtin as the declared
             // call [`Fn_::core_sig`] answers for; none alone.
-            Some(Spec::Rebuilds | Spec::Builds(_) | Spec::Routes(_)) | None => false,
+            Some(Spec::Rebuilds | Spec::Builds(_) | Spec::Routes(_) | Spec::Pulls) | None => false,
         }
     }
 

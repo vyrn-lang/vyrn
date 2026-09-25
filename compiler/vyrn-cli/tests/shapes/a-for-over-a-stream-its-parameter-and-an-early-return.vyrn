@@ -1,0 +1,6 @@
+// a for over a stream, its parameter and an early return
+// pin: 0 break, 0 continue
+// A `for` over a stream pulls: one call answers whether an element came,
+// and the read at its name is the element. The loop closes the stream it
+// walks, a parameter too, and a `return` inside it closes it first.
+fn feed(n: Int64) -> Stream<Int64> { let mut xs: Array<Int64> = [] let mut i = 0 while i < n { xs.push(i + 1) i = i + 1 } return fromArray(xs) }          fn total(s: Stream<Int64>) -> Int64 { let mut t = 0 for v in s { t = t * 10 + v } return t }          fn first(s: Stream<Int64>, over: Int64) -> Int64 { for v in s { if v > over { return v } } return 0 }          fn words() -> Int64 { let names: Array<String> = ["ab", "cde"] let mut t = 0 for w in fromArray(names) { t = t * 10 + w.byteLength } return t }          fn vyrnTestMain() -> Int64 { return total(feed(3)) * 10000 + first(feed(5), 2) * 1000 + words() }

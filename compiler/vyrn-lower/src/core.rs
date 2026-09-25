@@ -408,8 +408,7 @@ pub enum Lit {
 /// What a row stands on where it names no value.
 ///
 /// Each kind is one producer in this pass, and each one blocks on something
-/// of its own: [`Opaque::Pull`] on a stream's pull, which is a call the row
-/// does not state, [`Opaque::Trapped`] on nothing, because the statement after
+/// of its own: [`Opaque::Trapped`] on nothing, because the statement after
 /// it never runs, and [`Opaque::Unbound`] on a store with nothing to store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opaque {
@@ -420,10 +419,6 @@ pub enum Opaque {
     /// sink: IntSink = double`) is the tag RFC-0037's defunctionalizer
     /// chose, which the emitter holds and this pass does not.
     Static,
-    /// A `for` head over a stream: its exit test and the index its element is
-    /// read at. A stream is pulled and not indexed, so both are the one call
-    /// that answers the next element or none, and the row states no such call.
-    Pull,
     /// The result of a call that traps (`panic`). Only a row after the
     /// `St::Trap` reads it, and no finished body holds one ([`cut`]).
     Trapped,
@@ -1912,6 +1907,10 @@ pub enum Spec {
     /// when the level is below the build's threshold. Both operands are
     /// evaluated either way.
     Logs,
+    /// A stream receiver the call advances in its own storage: the head of a
+    /// `for` over a stream. The call answers whether an element came, and
+    /// the read of the stream at the call's own name is that element.
+    Pulls,
 }
 
 /// Every builtin the row specifies, by name.
@@ -2008,6 +2007,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
                 Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_MODULE_INTERFACE),
             ),
             ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
+            ("@pull", Spec::Pulls),
             ("@pop", Spec::Removes),
             ("@swapRemove", Spec::Removes),
             ("@remove", Spec::Removes),
@@ -4523,10 +4523,25 @@ impl<'a> Builder<'a> {
                         ));
                         (Val::Name(c), Val::Name(i))
                     }
-                    None => (
-                        Val::Lit(Lit::Opaque(Opaque::Pull)),
-                        Val::Lit(Lit::Opaque(Opaque::Pull)),
-                    ),
+                    // A stream is pulled and not indexed: one call answers
+                    // whether an element came, and its name stands for the
+                    // element in the read below.
+                    None => {
+                        let c = self.temp(Type::Bool, *line);
+                        l.push(St::Let(
+                            c,
+                            Rhs::Call {
+                                callee: "@pull".into(),
+                                args: vec![(Arg::Val(Val::Name(it)), Capability::Modify)],
+                                write_back: false,
+                                kind: Callee::Reserved,
+                                ret: Some(Type::Bool),
+                                solved: Vec::new(),
+                                targets: Vec::new(),
+                            },
+                        ));
+                        (Val::Name(c), Val::Name(c))
+                    }
                 };
                 l.push(St::If {
                     cond,
