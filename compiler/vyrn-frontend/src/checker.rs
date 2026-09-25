@@ -5133,7 +5133,25 @@ impl<'a> Checker<'a> {
                 args,
                 type_args,
                 line,
-            } => self.call(name, args, type_args, *line, scope, expected, fn_ret),
+            } => {
+                let t = self.call(name, args, type_args, *line, scope, expected, fn_ret)?;
+                // `schemaOf<T>()` lowers through the literal it stands for, so
+                // the checker types those nodes too (`project::schema`).
+                if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
+                    (name.as_str(), type_args.as_slice(), recording())
+                {
+                    if let Some(lit) = self
+                        .types
+                        .get(tn)
+                        .and_then(|d| crate::project::schema(expr, d))
+                    {
+                        self.record_desugar(scope, |c, sc| {
+                            let _ = c.expr(lit, sc, Some(&t), fn_ret);
+                        });
+                    }
+                }
+                Ok(t)
+            }
             Expr::Match {
                 scrutinee,
                 arms,

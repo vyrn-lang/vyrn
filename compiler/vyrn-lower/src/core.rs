@@ -7062,6 +7062,11 @@ impl<'a> Builder<'a> {
                 if let Some(l) = self.schema(e) {
                     return Ok(Rhs::Val(Val::Lit(l)));
                 }
+                // `schemaOf<T>()` is the `Schema` literal it stands for, whose
+                // nodes the checker typed (`project::schema_at`).
+                if let Some(lit) = vyrn_frontend::project::schema_at(e) {
+                    return self.rhs(lit, out);
+                }
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {
                     kind: Callee::Fn,
