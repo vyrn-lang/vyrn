@@ -1,0 +1,7 @@
+// a borrow rebound in a let mut is a copy
+// pin: 0 break, 0 continue
+// A `let mut` bound to a `read` parameter or a field read, then stored into
+// whole, names a value of its own (#501): the core states the `let` as a copy,
+// so each store releases the value it replaces and the exit releases the last,
+// in a loop and on the path that skips the store too (the m7-rebind record).
+type R = { name: String, n: Int64 }          fn mk(k: Int64) -> String { return "q" + k.toString() }          fn plain(s: String) -> Int64 { let mut t = s t = mk(1) t = mk(2) return t.byteLength }          fn grown(s: String) -> Int64 { let mut t = s let mut i = 0 while i < 3 { t = t + "y" i = i + 1 } return t.byteLength }          fn maybe(s: String, b: Bool) -> Int64 { let mut t = s if b { t = t + "w" } return t.byteLength }          fn field(r: R) -> Int64 { let mut t = r.name t = t + "z" return t.byteLength }          fn whole(r: R) -> Int64 { let mut c = r c = R { name: mk(3), n: 2 } return c.n }          fn vyrnTestMain() -> Int64 { let s = "a" + "b" let r = R { name: "c" + "d", n: 1 } return plain(s) * 100000 + grown(s) * 10000 + maybe(s, true) * 1000 + maybe(s, false) * 100 + field(r) * 10 + whole(r) + s.byteLength * 0 + r.name.byteLength * 0 }
