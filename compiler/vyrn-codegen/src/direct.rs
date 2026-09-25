@@ -20371,17 +20371,14 @@ impl<'p> Fn_<'_, 'p> {
             }
             St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
             St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
-            // A store into a place with an address ([`Fn_::core_stmts`]). A
+            // A store into a place with an address ([`Fn_::core_stmts`]),
+            // module state's static address as much as a name's slot. A
             // layout's value is a name of its type, whose bytes are copied.
-            // Module state takes a scalar, and a String stored into the
-            // global itself, released by the row's `releases` with its
-            // accumulator's word cleared.
             St::Store { place, value, .. } => {
                 use vyrn_lower::core::Place as At;
-                let scalar_only = vyrn_lower::kernel::root_of(place).is_none();
                 let ty = match place {
                     At::Name(n) => Some(body.names[*n as usize].ty.clone()),
-                    At::Key(_, k) if scalar_only || !self.core_val_readable(body, k) => None,
+                    At::Key(_, k) if !self.core_val_readable(body, k) => None,
                     At::Key(m, _) => {
                         match self.core_place_ty(body, m).map(|t| self.cx.resolve(&t)) {
                             Some(Type::Map(_, v)) => Some(*v),
@@ -20390,18 +20387,12 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     p => self.core_place_ty(body, p),
                 };
-                let global = matches!(place, At::Global(_));
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
                     let fits = match self.cx.repr(&t, 0) {
-                        Ok(Repr::Unit) => self.core_val_readable(body, value),
-                        _ if scalar_only => {
-                            (core_scalar(&r) || (global && r == Type::Str))
-                                && self.core_val_readable(body, value)
-                        }
-                        Ok(Repr::Scalar(_)) => self.core_val_readable(body, value),
+                        Ok(Repr::Unit | Repr::Scalar(_)) => self.core_val_readable(body, value),
                         Ok(Repr::Agg(_)) => {
                             matches!(value, Val::Name(v)
                                     if self.cx.resolve(&body.names[*v as usize].ty) == r)
