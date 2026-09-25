@@ -1686,6 +1686,23 @@ impl<'a> Cx<'a> {
             .map(|(n, _)| n.clone())
     }
 
+    /// The core key a lifted lambda was queued under, by its function index.
+    fn lambda_key(&self, index: u32) -> Option<String> {
+        let mono = self.mono.borrow();
+        let p = (mono.insts.iter())
+            .find(|p| p.sig.index == index && matches!(p.key, Key::Lambda(..)))?;
+        Some(p.core_key.clone())
+    }
+
+    /// The signature of the one lifted lambda queued under `key`.
+    fn lambda_sig(&self, key: &str) -> Option<Sig> {
+        let mono = self.mono.borrow();
+        let mut hits =
+            (mono.insts.iter()).filter(|p| p.core_key == key && matches!(p.key, Key::Lambda(..)));
+        let p = hits.next()?;
+        hits.next().is_none().then(|| p.sig.clone())
+    }
+
     /// An RFC-0023 specialization: [`Cx::enqueue`] of `f` with each `fn`
     /// parameter bound to its target, under the shell [`ho_shell`] states.
     fn specialize(
@@ -2809,6 +2826,22 @@ fn lower_body(
     Ok(b)
 }
 
+/// What a `fn` parameter bound to `b` calls, as the core names it: a
+/// function this module calls with no captures, or a lifted lambda with the
+/// captures `b` forwards. `None` for a dispatcher, and for a lambda key two
+/// bodies share, which [`vyrn_lower::core::body_of`] names no body for
+/// (#459).
+fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
+    if let Some(f) = cx.named(&b.target) {
+        return Some(Target::Fn(f));
+    }
+    let key = cx.lambda_key(b.target.sig.index)?;
+    vyrn_lower::core::body_of(&key)?;
+    let tys = b.target.sig.params.get(..b.target.ncaps)?;
+    (b.cap_srcs.len() == tys.len())
+        .then(|| Target::Lambda(key, b.cap_srcs.iter().cloned().zip(tys.to_vec()).collect()))
+}
+
 /// The core body a queued function reads: its own, and for an RFC-0023
 /// specialization the instance [`vyrn_lower::core::specialize`] states for
 /// its targets. A specialization with a target the core does not name reads
@@ -2828,7 +2861,7 @@ fn core_body(
     let body = vyrn_lower::core::body_of(key)?;
     let bound: Option<Vec<(vyrn_lower::core::Name, Target)>> = (body.params.iter())
         .filter_map(|&n| Some((n, binds.get(&body.names[n as usize].source)?)))
-        .map(|(n, b)| Some((n, Target::Fn(cx.named(&b.target)?))))
+        .map(|(n, b)| Some((n, core_target_of(cx, b)?)))
         .collect();
     let body = match bound {
         Some(bound) if !binds.is_empty() && bound.len() == binds.len() => {
@@ -19675,7 +19708,7 @@ impl<'p> Fn_<'_, 'p> {
         // [`Fn_::out_ptr`] states for both walks.
         match self.core_instance(callee, kind, solved) {
             Some((f, _, subst)) => self.cx.signature(&instance_shell(f, &subst)).ok(),
-            None => self.cx.sigs.get(callee).cloned(),
+            None => (self.cx.sigs.get(callee).cloned()).or_else(|| self.cx.lambda_sig(callee)),
         }
     }
 

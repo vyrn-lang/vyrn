@@ -1,0 +1,6 @@
+// two lambdas on one line as targets
+// pin: 0 break, 0 continue
+// The two lambdas share one key, so neither is a target the core can name
+// and both instances of `twice` stay on the arm (#459). Calling one for
+// the other gives 12004 or 90018, not 12018.
+fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(f(x)) }          fn vyrnTestMain() -> Int64 { return twice(x -> x + 1, 10) * 1000 + twice(x -> x * 3, 2) }

@@ -553,6 +553,10 @@ pub enum Target {
     /// The target this body's own `fn`-typed parameter is bound to: a
     /// pass-through, which [`specialize`] replaces by the instance's target.
     Param(Name),
+    /// A lambda lifted under this key ([`lambda_spelling`]), called with its
+    /// captures first. Each capture is the instance's parameter that carries
+    /// it, by name and type, in the order the caller forwards them.
+    Lambda(String, Vec<(String, Type)>),
 }
 
 /// WHO a [`Rhs::Call`]'s name resolves to (RFC-0125 §3 M3, the callee slice).
@@ -7605,29 +7609,52 @@ pub fn body_of(name: &str) -> Option<Body> {
 /// The instance of `body` whose `fn`-typed parameters are bound (RFC-0023):
 /// each parameter in `bound` leaves the parameter list, a call through it is
 /// [`Callee::Fn`] to its target, and a call that passes it on names that
-/// target. `None` where a bound parameter is read any other way (stored,
-/// captured, handed to a position no target names).
+/// target. A parameter bound to a lambda is that lambda's captures: they take
+/// its place in the parameter list, and a call through it passes them first.
+/// `None` where a bound parameter is read any other way (stored, captured,
+/// handed to a position no target names).
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     if bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
         return None;
     }
     let mut out = body.clone();
-    bind_targets(&mut out.stmts, bound);
+    let mut caps: Vec<(Name, Vec<Name>)> = Vec::new();
+    for (n, t) in bound {
+        let Target::Lambda(_, cs) = t else { continue };
+        let names = (cs.iter())
+            .map(|(source, ty)| {
+                let mut info = out.names[*n as usize].clone();
+                info.source = source.clone();
+                info.ty = ty.clone();
+                out.names.push(info);
+                (out.names.len() - 1) as Name
+            })
+            .collect();
+        caps.push((*n, names));
+    }
+    bind_targets(&mut out.stmts, bound, &caps);
     let mut reads = vec![0; out.names.len()];
     count_reads(&out.stmts, &mut reads);
     if bound.iter().any(|(n, _)| reads[*n as usize] > 0) {
         return None;
     }
-    out.params.retain(|p| bound.iter().all(|(n, _)| n != p));
+    out.params = (out.params.iter())
+        .flat_map(|p| match caps.iter().find(|(n, _)| n == p) {
+            Some((_, names)) => names.clone(),
+            None if bound.iter().any(|(n, _)| n == p) => Vec::new(),
+            None => vec![*p],
+        })
+        .collect();
     Some(out)
 }
 
-fn bind_targets(ss: &mut [St], bound: &[(Name, Target)]) {
+fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name>)]) {
     for s in ss {
         match s {
             St::Let(_, rhs) | St::Do { rhs, .. } => {
                 let Rhs::Call {
                     callee,
+                    args,
                     kind,
                     targets,
                     ..
@@ -7636,9 +7663,20 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)]) {
                     continue;
                 };
                 if let Some(v) = kind.value() {
-                    if let Some((_, Target::Fn(f))) = bound.iter().find(|(n, _)| *n == v) {
-                        *kind = Callee::Fn;
-                        *callee = f.clone();
+                    match bound.iter().find(|(n, _)| *n == v) {
+                        Some((_, Target::Fn(f))) => {
+                            *kind = Callee::Fn;
+                            *callee = f.clone();
+                        }
+                        Some((_, Target::Lambda(key, _))) => {
+                            *kind = Callee::Fn;
+                            *callee = key.clone();
+                            let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
+                            let lead = names.into_iter().flatten();
+                            let lead = lead.map(|c| (Val::Name(*c), Capability::Read));
+                            args.splice(0..0, lead.collect::<Vec<_>>());
+                        }
+                        _ => {}
                     }
                 }
                 for t in targets.iter_mut() {
@@ -7650,13 +7688,13 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)]) {
                 }
             }
             St::If { then, els, .. } => {
-                bind_targets(then, bound);
-                bind_targets(els, bound);
+                bind_targets(then, bound, caps);
+                bind_targets(els, bound, caps);
             }
-            St::Loop { body, .. } | St::Block { body, .. } => bind_targets(body, bound),
+            St::Loop { body, .. } | St::Block { body, .. } => bind_targets(body, bound, caps),
             St::Switch { arms, .. } => {
                 for a in arms {
-                    bind_targets(&mut a.body, bound);
+                    bind_targets(&mut a.body, bound, caps);
                 }
             }
             _ => {}
