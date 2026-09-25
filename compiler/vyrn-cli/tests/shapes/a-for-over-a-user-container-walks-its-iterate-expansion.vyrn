@@ -1,0 +1,7 @@
+// a for over a user container walks its Iterate expansion
+// pin: 0 break, 0 continue
+// The core states `for x in w` over a type an `impl Iterate` answers for as
+// `project::iterate_loop`'s block, the one the emitters walk, with `nth`
+// inlined each turn in place of an element read of the container
+// (`0125-m7-letpay`).
+type Window = { data: Array<Int64>, start: Int64 } impl Iterate for Window { fn size(self) -> Int64 { return self.data.length - self.start } fn nth(read self, i: Int64) -> read Int64 { return self.data[self.start + i] } }          fn vyrnTestMain() -> Int64 { let w = Window { data: [10, 20, 30, 40, 50], start: 1 } let mut t = 0 for x in w { if x == 30 { continue } if x == 50 { break } t = t + x } return t }

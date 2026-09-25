@@ -3281,3 +3281,47 @@ fn a_gen_body_no_program_runs_is_refused() {
     assert!(!out.status.success(), "accepted:\n{err}");
     assert!(err.starts_with("lib.vyrn:9:"), "{err}");
 }
+
+/// A `for` over a user container holds the container for the whole loop, as
+/// a `for` over an `Array` does, so a store into it inside the body is
+/// refused. The core walks the container's `Iterate` expansion, whose `nth`
+/// reads it each turn (record `0125-m7-letpay`).
+#[test]
+fn a_store_into_a_user_container_inside_its_own_loop_is_refused() {
+    let window = "type Window = { data: Array<Int64>, start: Int64 }
+         impl Iterate for Window {
+             fn size(self) -> Int64 { return self.data.length - self.start }
+             fn nth(read self, i: Int64) -> read Int64 { return self.data[self.start + i] }
+         }";
+    let cases = [
+        ("a push", "`w.data` is written here", "w.data.push(x)"),
+        (
+            "a store",
+            "`w` is written here",
+            "w = Window { data: [], start: 0 }",
+        ),
+    ];
+    let dir = common::scratch("iterate-hold");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, store) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        let src = format!(
+            "{window}
+             fn main() -> Int64 {{
+                 let mut w = Window {{ data: [1, 2, 3], start: 0 }}
+                 for x in w {{ {store} }}
+                 return 0
+             }}"
+        );
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains(&format!("{says} while `w` still reads out of it")) {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a store inside the loop is accepted:\n  {}",
+        bad.join("\n  ")
+    );
+}
