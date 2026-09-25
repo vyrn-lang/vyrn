@@ -19617,6 +19617,16 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.repr(t, 0) == Ok(Repr::Unit)
     }
 
+    /// Whether `v` is a name of a layout with no check, which a read position
+    /// takes as its address ([`Fn_::core_val`]): a call's argument, and a
+    /// map's key, which [`Fn_::pack_key`] packs from there.
+    fn core_layout_name(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
+        matches!(v, Val::Name(n) if {
+            let t = &body.names[*n as usize].ty;
+            matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
+        })
+    }
+
     /// Whether this walk can put the value `v` on the operand stack: a name it
     /// frames, or a literal it writes ([`Fn_::core_val`]).
     ///
@@ -20684,7 +20694,11 @@ impl<'p> Fn_<'_, 'p> {
                 use vyrn_lower::core::Place as At;
                 let ty = match place {
                     At::Name(n) => Some(body.names[*n as usize].ty.clone()),
-                    At::Key(_, k) if !self.core_val_readable(body, k) => None,
+                    At::Key(_, k)
+                        if !self.core_val_readable(body, k) && !self.core_layout_name(body, k) =>
+                    {
+                        None
+                    }
                     At::Key(m, _) => {
                         match self.core_place_ty(body, m).map(|t| self.cx.resolve(&t)) {
                             Some(Type::Map(_, v)) => Some(*v),
@@ -20830,10 +20844,7 @@ impl<'p> Fn_<'_, 'p> {
                         });
                 }
             };
-            let layout = matches!(v, Val::Name(n) if {
-                let t = &body.names[*n as usize].ty;
-                matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
-            });
+            let layout = self.core_layout_name(body, v);
             match c {
                 Cap::Read | Cap::Consume => self.core_val_readable(body, v) || layout,
                 Cap::Modify => match v {
@@ -20887,7 +20898,7 @@ impl<'p> Fn_<'_, 'p> {
                             .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_lower::core::Place::Key(base, k)) => {
-                self.core_val_readable(body, k)
+                (self.core_val_readable(body, k) || self.core_layout_name(body, k))
                     && matches!(
                         self.core_place_ty(body, base).map(|t| self.cx.resolve(&t)),
                         Some(Type::Map(..))
