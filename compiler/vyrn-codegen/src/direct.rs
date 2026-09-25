@@ -7917,10 +7917,6 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Option<Type>, String> {
-        let g = self
-            .cx
-            .gen
-            .expect("the caller checked there is a generator host");
         if let Some(e) = self.gen_entry(name) {
             return self.call(m, b, &e, args, &[], line).map(Some);
         }
@@ -7937,28 +7933,7 @@ impl<'p> Fn_<'_, 'p> {
                 .host(m, b, name, args.len(), &mut ty, &mut operand, line)
                 .map(Some);
         }
-        match (name, args.len()) {
-            // M3b's atom stream. `reflect` computes the value host-side and leaves
-            // it as atoms; the two `next` calls pull them back. Nothing about the
-            // value's SHAPE is encoded here — the synthesized decoder walks the
-            // type, and so does the host.
-            (crate::GEN_REFLECT, 2) => {
-                self.expr_as(m, b, &args[0], &Type::Int)?;
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                b.ins(&Instruction::Call(g.reflect));
-                Ok(Some(Type::Unit))
-            }
-            (crate::GEN_NEXT_INT, 0) => {
-                b.ins(&Instruction::Call(g.next_int));
-                Ok(Some(Type::Int))
-            }
-            (crate::GEN_NEXT_STR, 0) => {
-                b.ins(&Instruction::Call(g.next_str));
-                self.fetch_str(b, g);
-                Ok(Some(Type::Str))
-            }
-            _ => Ok(None),
-        }
+        Ok(None)
     }
 
     /// A generator host import ([`Spec::Host`]): the operands at the types
@@ -8009,6 +7984,25 @@ impl<'p> Fn_<'_, 'p> {
             ("render", 1) => {
                 operand(self, m, b, 0, &code)?;
                 b.ins(&Instruction::Call(g.render));
+                self.fetch_str(b, g);
+                Ok(Type::Str)
+            }
+            // M3b's atom stream. `reflect` computes the value host-side and
+            // leaves it as atoms; the two `next` calls pull them back. Nothing
+            // about the value's SHAPE is encoded here: the synthesized decoder
+            // walks the type, and so does the host.
+            (crate::GEN_REFLECT, 2) => {
+                operand(self, m, b, 0, &Type::Int)?;
+                operand(self, m, b, 1, &Type::Str)?;
+                b.ins(&Instruction::Call(g.reflect));
+                Ok(Type::Unit)
+            }
+            (crate::GEN_NEXT_INT, 0) => {
+                b.ins(&Instruction::Call(g.next_int));
+                Ok(Type::Int)
+            }
+            (crate::GEN_NEXT_STR, 0) => {
+                b.ins(&Instruction::Call(g.next_str));
                 self.fetch_str(b, g);
                 Ok(Type::Str)
             }
@@ -18825,6 +18819,11 @@ impl<'p> Fn_<'_, 'p> {
                     .clone()
                     .ok_or_else(|| gap("a removal the checker did not type", line)),
                 (None, Some(Spec::Finds)) => Ok(Type::Bool),
+                // A generator host import answers at the type the checker
+                // gave the site.
+                (None, Some(Spec::Host)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a host import the checker did not type", line)),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(body, callee, *kind, solved, targets) {

@@ -1875,6 +1875,8 @@ pub enum Spec {
     /// RFC-0054): `@codeText`, `raw`, `rawAt` and `@codeSplice` hand the host
     /// a piece and get back a `Code` handle, and `render` hands it a handle
     /// and gets back a String. `@codeSplice`'s tag is its operand's own type.
+    /// `__vyrnGenReflect`, `__vyrnGenNextInt` and `__vyrnGenNextStr` are
+    /// RFC-0076 M3b's transfer: a value leaves the host as atoms.
     /// Outside a generator no body reaches one.
     Host,
     /// The call is a call to the named function, which the program links:
@@ -2006,6 +2008,9 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("raw", Spec::Host),
             ("rawAt", Spec::Host),
             ("render", Spec::Host),
+            (vyrn_frontend::checker::GEN_REFLECT, Spec::Host),
+            (vyrn_frontend::checker::GEN_NEXT_INT, Spec::Host),
+            (vyrn_frontend::checker::GEN_NEXT_STR, Spec::Host),
             (
                 "moduleInterface",
                 Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_MODULE_INTERFACE),
