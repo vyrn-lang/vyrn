@@ -8624,6 +8624,14 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         remember(memo.as_ref(), key, refused_before);
     }
+    // A generic function no instance reaches is still a body the checker
+    // typed, so it is built once, for the judgment alone: it places no row
+    // and is never emitted (RFC-0125 M7, the judgment's reach).
+    for inst in crate::uninstantiated(program, &lowered, own) {
+        if let Err(g) = build(program, &inst, own) {
+            refuse_gap(g, &inst.func.module, &inst.func.name);
+        }
+    }
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]), and it reads the rows only
     // once they are in the plan. So a program where one is placed is lowered
