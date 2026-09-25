@@ -26,9 +26,9 @@ Type::SmallArray	21	2	20	7	1	4	55
 Type::ConstInt	2	1	0	1	0	0	4
 Type::Map	19	3	25	7	6	4	64
 Type::Stream	14	1	10	7	1	1	34
-Type::Logger	0	1	2	1	2	1	7
+Type::Logger	0	1	3	1	2	1	8
 Type::Fn	26	5	30	10	1	0	72
 Type::Lazy	7	1	2	9	0	0	19
 Type::Never	4	2	6	2	0	0	14
 Type::Err	78	1	0	1	0	0	80
-all	573	74	495	220	30	47	1439
+all	573	74	496	220	30	47	1440

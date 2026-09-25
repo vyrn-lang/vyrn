@@ -1880,6 +1880,12 @@ pub enum Spec {
     /// One operand at the type the row put on its name, and no result. The
     /// call writes the operand out (`writeStdout`) or releases it (`close`).
     Effect,
+    /// RFC-0008's facade. `logger(name)` takes a String and hands it back
+    /// as the `Logger`, which is its name. A level takes a `Logger` and a
+    /// String message, and writes the line to the build's sink, or nothing
+    /// when the level is below the build's threshold. Both operands are
+    /// evaluated either way.
+    Logs,
 }
 
 /// Every builtin the row specifies, by name.
@@ -1939,6 +1945,12 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("serveStream", Spec::Traps),
             ("writeStdout", Spec::Effect),
             ("close", Spec::Effect),
+            ("logger", Spec::Logs),
+            ("@trace", Spec::Logs),
+            ("@debug", Spec::Logs),
+            ("@info", Spec::Logs),
+            ("@warn", Spec::Logs),
+            ("@error", Spec::Logs),
             ("@push", Spec::Rebuilds),
             ("@reserve", Spec::Rebuilds),
             ("@clear", Spec::Rebuilds),

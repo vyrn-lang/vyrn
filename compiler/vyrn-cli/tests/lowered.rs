@@ -1169,10 +1169,10 @@ fn gate() {
     // Only the AST walk answers, so the count falls as the core walk takes
     // bodies from it: 9,414 when the emitter found generic instances and
     // lambdas by their keys, 4,902 when it took the `Slots` windows
-    // (RFC-0125 M7). The gate needs a witness of its own before the arm
-    // retires (#465).
+    // (RFC-0125 M7), 3,985 when it took the logging facade. The gate needs
+    // a witness of its own before the arm retires (#465).
     assert!(
-        t.compared > 4_000,
+        t.compared > 3_900,
         "only {} backend answers were compared — the gate stopped seeing the corpus",
         t.compared
     );
