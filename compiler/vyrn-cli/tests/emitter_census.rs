@@ -270,7 +270,7 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {",
-            Shared, Source,
+            Shared, Neither,
             "RFC-0037's defunctionalisation: the copy helper and the dispatcher \
              a stored closure is called through",
         ),

@@ -3164,6 +3164,7 @@ fn lower_dispatcher(
     let (params, results) = cx.wasm_sig(dsig, 0)?;
     let mut b = Frame::new(&params, &results, &[], 0);
     let mut f = top_level(cx);
+    let mut args: Vec<(Place, Type)> = Vec::new();
 
     // param 0 is the aggregate-return destination when there is one, then the fn
     // value's address, then the signature's own parameters.
@@ -3191,14 +3192,8 @@ fn lower_dispatcher(
             Repr::Scalar(_) => Place::Local(local),
             Repr::Unit => return unsupported("a Unit parameter of a stored `fn`", 0),
         };
-        f.scope.push((format!("@a{i}"), place, pty.clone()));
+        args.push((place, pty.clone()));
     }
-    let args: Vec<Expr> = (0..ptys.len())
-        .map(|i| Expr::Var {
-            name: format!("@a{i}"),
-            line: 0,
-        })
-        .collect();
 
     let fl = layout::of_ll(&cx.ll(sig_ty)).map_err(|e| format!("direct backend: {e}"))?;
     let tag = b.local(ValType::I64);
@@ -3229,12 +3224,11 @@ fn lower_dispatcher(
         b.ins(&Instruction::I64Eq);
         b.ins(&Instruction::If(arm_ty));
         f.depth += 1;
-        let mark = f.scope.len();
         // The capture block, copied off the heap into a frame slot so each capture
         // has a `Place`. The copy is what the textual backend's `load {block_ll}`
         // is, and it is also the by-value read a capture is.
         let cap_tys = v.target.sig.params[..v.target.ncaps].to_vec();
-        let mut all: Vec<Expr> = Vec::new();
+        let mut all: Vec<(Place, Type)> = Vec::new();
         if !cap_tys.is_empty() {
             let bl = f.cap_block(&cap_tys)?;
             let blk = b.alloc(bl.size, bl.align);
@@ -3258,11 +3252,7 @@ fn lower_dispatcher(
                     Repr::Agg(_) => Place::Slot(at_off),
                     Repr::Unit => return unsupported("a captured Unit value", 0),
                 };
-                f.scope.push((format!("@c{ci}"), place, ct.clone()));
-                all.push(Expr::Var {
-                    name: format!("@c{ci}"),
-                    line: 0,
-                });
+                all.push((place, ct.clone()));
             }
         }
         all.extend(args.iter().cloned());
@@ -3272,7 +3262,14 @@ fn lower_dispatcher(
         if let Some(d) = dest {
             b.ins(&Instruction::LocalGet(d));
         }
-        let got = f.emit_call(m, &mut b, &v.target.sig, &all, None)?;
+        // Each value crosses at the target's parameter type, as an argument
+        // does ([`Fn_::expr_as`]).
+        let mut operand = |s: &mut Fn_, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
+            let (place, ty) = &all[i];
+            s.push_place(b, *place, ty, 0)?;
+            s.coerce(m, b, None, ty, p, 0).map(|_| None)
+        };
+        let got = f.emit_call_with(m, &mut b, &v.target.sig, all.len(), &mut operand, None)?;
         match (&dsig.ret, cx.repr(&got, 0)?) {
             // The target's declared result may differ from the signature's — a
             // named source's validated scalar, a wider record — so it crosses the
@@ -3294,7 +3291,6 @@ fn lower_dispatcher(
             (Repr::Unit, Repr::Unit) => {}
             _ => return unsupported("a stored `fn` whose result shape is not its signature's", 0),
         }
-        f.scope.truncate(mark);
         b.ins(&Instruction::Else);
     }
     // Unreachable by construction — a tag only ever comes from a registered
@@ -6623,26 +6619,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             Expr::Var { name, line } => {
                 let (place, t) = self.lookup(name, *line)?;
-                match place {
-                    Place::Local(l) => {
-                        b.ins(&Instruction::LocalGet(l));
-                    }
-                    Place::Slot(off) => {
-                        b.slot(off);
-                    }
-                    // A global aggregate IS its address, like a slot; a global
-                    // scalar has to be loaded out of memory, which is the one way
-                    // module state differs from a local at a read.
-                    Place::Static(at) => match self.cx.repr(&t, *line)? {
-                        Repr::Scalar(_) => {
-                            b.ins(&Instruction::I32Const(at as i32));
-                            b.ins(&load_of(&self.cx.ll(&t), 0, self.cx.signed(&t)));
-                        }
-                        _ => {
-                            b.ins(&Instruction::I32Const(at as i32));
-                        }
-                    },
-                }
+                self.push_place(b, place, &t, *line)?;
                 t
             }
             Expr::Field { expr, field, line } => {
@@ -9471,32 +9448,78 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
-        let dest = self.out_ptr(b, sig, hint);
         // A `modify` argument is the caller's binding by ADDRESS, and a scalar
         // in a wasm local has none ([`Fn_::spill`]).
-        let mut spilled = Vec::new();
-        for (i, (a, p)) in args.iter().zip(&sig.params).enumerate() {
+        let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
+            let a = &args[i];
             if sig.modify.get(i) != Some(&true) {
-                self.expr_as(m, b, a, p)?;
-                continue;
+                return s.expr_as(m, b, a, p).map(|_| None);
             }
             let line = Expr::line(a);
             let Expr::Var { name, .. } = a else {
                 return unsupported("a `modify` argument that is not a variable", line);
             };
-            let (place, ty) = self.lookup(name, line)?;
+            let (place, ty) = s.lookup(name, line)?;
             match place {
-                Place::Local(l) => {
-                    spilled.push(self.spill(b, l, &ty, line)?);
-                }
+                Place::Local(l) => s.spill(b, l, &ty, line).map(Some),
                 // A frame slot or module state: hand over the address itself, so
                 // the callee's copy-out lands in the caller's own storage.
                 _ => {
                     place
                         .addr(b, 0)
                         .ok_or_else(|| gap("a `modify` argument with no address", line))?;
+                    Ok(None)
                 }
             }
+        };
+        self.emit_call_with(m, b, sig, args.len(), &mut operand, hint)
+    }
+
+    /// Push the value of type `t` at `place`, as a read of a binding does: a
+    /// local's value, a slot's address, module state's address or, for a
+    /// scalar, its value. A global aggregate IS its address, like a slot; a
+    /// global scalar is loaded out of memory, which is the one way module
+    /// state differs from a local at a read.
+    fn push_place(&self, b: &mut Frame, place: Place, t: &Type, line: usize) -> Result<(), String> {
+        match place {
+            Place::Local(l) => {
+                b.ins(&Instruction::LocalGet(l));
+            }
+            Place::Slot(off) => {
+                b.slot(off);
+            }
+            Place::Static(at) => {
+                b.ins(&Instruction::I32Const(at as i32));
+                if let Repr::Scalar(_) = self.cx.repr(t, line)? {
+                    b.ins(&load_of(&self.cx.ll(t), 0, self.cx.signed(t)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Fn_::emit_call`] with argument `i` written by `operand` at its
+    /// parameter's type, which answers the slot a `modify` scalar was spilled
+    /// to, if any: the out-pointer, the operands, the call, the reloads.
+    fn emit_call_with(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        sig: &Sig,
+        argc: usize,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<Option<Spill>, String>,
+        hint: Option<(Dest, Type)>,
+    ) -> Result<Type, String> {
+        let dest = self.out_ptr(b, sig, hint);
+        let mut spilled = Vec::new();
+        for (i, p) in sig.params.iter().take(argc).enumerate() {
+            spilled.extend(operand(self, m, b, i, p)?);
         }
         b.ins(&Instruction::Call(sig.index));
         reload(b, &spilled);
