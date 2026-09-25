@@ -123,3 +123,25 @@ Findings:
 - the checker's `Err` poison never silenced `if`, `while`, `for` and `match`: main prints four cascade lines after `let v: Int64 = "s"`. The flag removes them.
 - a body the builder gaps in after an unknown name is refused, not an internal error: the poison walk finds the name the gap came before.
 Left: group 6, the 31 type comparisons; its order goes to the lead first.
+
+#### The type comparisons of the checker's two walks are stated once, over the core (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, decision A, group 6 (6a to 6d).
+Decision: the judgment states 6a conditions and the `for` container, 6b a value its slot does not take, 6c a store into a place, 6d an operator, a constant shift, a field read, `T?(..)` and a variant read. A compiler-written body is marked `Function::after_check`, not keyed by name. The lead's, per family.
+Went: 29 checker sites. The builder states each one where the core meets it or, for 6d, over the rows the checker typed `Err` (`core::judged`); the shift check leaves the checker whole. `coercible` and `assignable` move to `vyrn_frontend::types`, one copy for both passes. Stayed: 5 by the lead's 6d list (element, key and value sharing of a literal, the `=~` literal, the String `length` hint), because each produces the type the program reads.
+Lines: `checker.rs` 14,749 to 14,345. `core.rs` 10,171 to 10,478. `types.rs` 2,678 to 2,832 (the move). `ast.rs` +5, 11 `Function` literals +1 each. Net +63: the checker's rules leave with their walk, and the builder states each sentence beside its record. Refusals: 0 lost / 0 gained over the corpus. Manifest: untouched.
+Licence:
+- `vyrn check` over 539 roots, main 9a6665ee's binary against the tip: byte-identical but the census program. 0 internal errors.
+- `checker-rules` pin: every moved sentence prints on its line. New witnesses: a mismatch, a missing field and a non-record through an element path, stores into module state and in a generic, a projection body, and 6d in module state, a generic, a lambda and two shifts.
+- witness programs (C:/wtboxtmp/w6a to w6d), main's binary against the tip; each difference is listed under Findings.
+- pins: `checker-census` typing judgment 116 to 112 to 108 to 97 to 87 refusals; `surface`, `forms`, `emitter-census`, `emitter-reads` and the `parser_census`/`cli_census` counts move by the builder's lines and the marker.
+Findings:
+- gained, true lines: an immutable assign beside a mismatch (`cond_and_mut`, `mis_and_mut`); an unknown name beside `if 1` (`nested_block`, `same_body_checker`); `let s: String = 1 << 70` prints the mismatch beside the shift, because the shift keeps its type; `let x: Int64 = -"s"` keeps `x` an `Int64`, so a later `let y: String = x` is refused.
+- gained: an `impl` projection body is judged (`proj_mut`). On main a `let x = 1; x = 2` inside `at` was silently accepted.
+- lost, decision A: a moved line beside a checker refusal in the same body (`with_checker`), or beside a refused type declaration, where no core is built (`declbad`, `field_named`; main loses an unknown name there too).
+- changed: `1.5 << 70` printed the shift range; it prints the checker's "bitwise operators need integer operands", the rule the shift range sat in front of (`shift_float`).
+- lost, cascades: "must return on all paths" after a failed `return` (`ifexpr_ret`, `field_generic`, `unary_generic`), and `cond_lambda`'s second line.
+- a `for` over a Map was accepted by the builder's first version; it is refused explicitly.
+- the json decoder types `Array<Int64>` where it returns `Array<UiRouteInt>` in 5 corpus roots (#527). `after_check` keeps the judgment off compiler-written bodies.
+- a stale `checker-census` pin reached the pushed 754cbb1e: `merge=pin` kept main's side in the rebase. Each commit is re-pinned.
+Time: about 300 minutes: 170 work, 90 gates, 40 rebases and builds.
+Left: the ~70 refusals outside `Checker::stmt` and `Checker::expr`, blocked by their census (the lead's scope decision).

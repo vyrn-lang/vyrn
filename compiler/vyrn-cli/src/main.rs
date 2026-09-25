@@ -3163,6 +3163,7 @@ fn synth_fn(
         is_export_extern: door,
         is_gen: false,
         is_mut: false,
+        after_check: false,
     }
 }
 

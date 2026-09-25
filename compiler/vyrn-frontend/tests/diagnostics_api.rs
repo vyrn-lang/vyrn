@@ -19,18 +19,18 @@ fn valid_program_is_clean() {
 /// source: f before g.
 #[test]
 fn accumulates_across_functions() {
-    let src = "fn f() -> Int64 { return true; }\nfn g() -> Int64 { let y = \"s\" + 1; return y; }\nfn main() -> Int64 { return f(); }";
+    let src = "fn f() -> Int64 { let a: UInt8 = 300; return 0; }\nfn g() -> Int64 { let b: Int8 = 200; return 0; }\nfn main() -> Int64 { return f(); }";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 2, "{:?}", diags);
     assert_eq!(diags[0].stage, "check");
     assert_eq!(diags[1].stage, "check");
     assert!(
-        diags[0].message.contains("return type mismatch"),
+        diags[0].message.contains("does not fit UInt8"),
         "{:?}",
         diags[0]
     );
     assert!(
-        diags[1].message.contains("`+` concatenates two Strings"),
+        diags[1].message.contains("does not fit Int8"),
         "{:?}",
         diags[1]
     );
@@ -69,14 +69,14 @@ fn parse_error_suppresses_downstream() {
 /// existing callers/tests see the same string they always did.
 #[test]
 fn check_shim_matches_first_rendered() {
-    let src = "fn f() -> Int64 { return true; }\nfn g() -> Int64 { let y = \"s\" + 1; return y; }\nfn main() -> Int64 { return f(); }";
+    let src = "fn f() -> Int64 { let a: UInt8 = 300; return 0; }\nfn g() -> Int64 { let b: Int8 = 200; return 0; }\nfn main() -> Int64 { return f(); }";
     let diags = diagnostics(src);
     let via_shim = vyrn_frontend::check(src).unwrap_err();
     // The shim returns the FIRST diagnostic rendered, which is f's error on line 1.
     assert_eq!(via_shim, diags[0].render());
     assert_eq!(
         via_shim,
-        "line 1: return type mismatch: expected Int64, found Bool"
+        "line 1: integer literal 300 does not fit UInt8 (its range is 0..=255)"
     );
 }
 
@@ -95,8 +95,8 @@ fn check_shim_matches_first_rendered() {
 /// and `the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused`).
 #[test]
 fn the_checker_accumulates_across_declarations() {
-    let src = "fn bad() -> Int64 { return true; }
-               fn worse() -> String { return 1; }
+    let src = "fn bad() -> Int64 { let a: UInt8 = 300; return 0; }
+               fn worse() -> Int64 { let b: Int8 = 200; return 0; }
                fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 2, "{:?}", diags);

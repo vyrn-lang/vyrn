@@ -1981,6 +1981,7 @@ fn check_named_blocks(
             is_export_extern: false,
             is_gen: false,
             is_mut: false,
+            after_check: false,
         };
         if let Err(s) = checker.function_body(&synthetic, &t.body) {
             let mut d = s;
@@ -2312,9 +2313,8 @@ struct Checker<'a> {
     /// which is also what keeps them out of any backend (gen fn bodies are never
     /// emitted).
     in_gen: RefCell<bool>,
-    /// Whether the unit [`Checker::unit`] runs read a name nothing answers,
-    /// or a name typed [`Type::Err`]. An unknown name is typed `Err`, and the
-    /// typed judgment refuses it (RFC-0125 M7, group 5).
+    /// Whether the unit [`Checker::unit`] runs typed a node [`Checker::judged`],
+    /// or read a name typed [`Type::Err`].
     unknown: std::cell::Cell<bool>,
     /// The module whose body is being checked right now (RFC-0054, corrected).
     ///
@@ -2936,138 +2936,8 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// Whether a value of type `from` can be used where `to` is expected.
-    /// Validated types decay to their base (an `Age` is an `Int`), but the
-    /// reverse requires explicit construction.
     fn assignable(&self, from: &Type, to: &Type) -> bool {
-        self.assignable_d(from, to, 0)
-    }
-
-    /// Depth cap for [`Self::assignable_d`]: past it the comparison is a
-    /// recursive type revisiting itself, not a width-subtyping question.
-    const MAX_ASSIGNABLE_DEPTH: usize = 64;
-
-    /// [`Self::assignable`] with the descent depth in hand. Structural
-    /// width subtyping walks field by field, and a legal recursive record
-    /// (`type NodeA = { v: Int64, next: Option<NodeA> }`) compared against
-    /// another (`NodeB`) descends `NodeA -> Option<NodeA> -> NodeA`
-    /// forever — mutually recursive transparent aliases diverge the same
-    /// way through their expansion arms. A cycle here has no finite
-    /// witness, so past the cap the answer is simply "not assignable":
-    /// the program gets a type error instead of a stack overflow, the
-    /// same give-up `own::owns_heap` makes.
-    fn assignable_d(&self, from: &Type, to: &Type, depth: usize) -> bool {
-        if depth > Self::MAX_ASSIGNABLE_DEPTH {
-            return false;
-        }
-        if from == to {
-            return true;
-        }
-        // An `Err` (a recovered type-check failure) is compatible with anything:
-        // it should flow through without manufacturing a second diagnostic. This
-        // is what keeps inside-body error recovery cascade-free.
-        if matches!(from, Type::Err) || matches!(to, Type::Err) {
-            return true;
-        }
-        // `Never` (RFC-0079) is the bottom type: a `panic` produces no value, so
-        // it fits wherever a value is wanted. One direction only — a `String` is
-        // not a `Never`, and making it one would let a panic-typed context
-        // swallow a real value.
-        if matches!(from, Type::Never) {
-            return true;
-        }
-        // RFC-0085 M4a: a `lazy T` field takes exactly what a `fn() -> T` field
-        // takes — a lambda, a named function, or another stored value of that
-        // signature. The construction site writes the thunk and is meant to see
-        // that it is one; only the READ hides it.
-        if let Type::Lazy(t) = to {
-            return self.assignable_d(from, &Type::Fn(Vec::new(), t.clone()), depth + 1);
-        }
-        if let Type::Lazy(t) = from {
-            return self.assignable_d(&Type::Fn(Vec::new(), t.clone()), to, depth + 1);
-        }
-        // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
-        // DeleteResult = Result<Bool, String>`) is interchangeable with its
-        // resolved form — it carries no `where` obligation of its own.
-        let transparent = |b: &Type| {
-            crate::types::is_sum_alias(b)
-                || matches!(
-                    b,
-                    Type::Map(..)
-                    | Type::Array(_)
-                    | Type::ArrayN(..)
-                    // A named function type (`type Middleware = fn(..) -> ..`,
-                    // RFC-0037) is interchangeable with its structural form.
-                    | Type::Fn(..)
-                )
-        };
-        if let Type::Named(n) = to {
-            if let Some(d) = self.types.get(n) {
-                if d.predicate.is_none() && transparent(&d.base) {
-                    return self.assignable_d(from, &d.base, depth + 1);
-                }
-            }
-        }
-        if let Type::Named(n) = from {
-            if let Some(d) = self.types.get(n) {
-                if d.predicate.is_none() && transparent(&d.base) {
-                    return self.assignable_d(&d.base, to, depth + 1);
-                }
-            }
-        }
-        // A nominal/validated `Named` type decays to its base scalar for reading
-        // (an `Age` is an `Int`, a `UserId` is a `String`).
-        if let Type::Named(_) = from {
-            if matches!(to, Type::Int | Type::Bool | Type::Str) {
-                return &self.base(from) == to;
-            }
-        }
-        // Option/Result are covariant in their payloads (values are immutable).
-        if let (Some(a), Some(b)) = (
-            crate::types::option_payload(from),
-            crate::types::option_payload(to),
-        ) {
-            return self.assignable_d(a, b, depth + 1);
-        }
-        if let (Some((a, e1)), Some((b, e2))) = (
-            crate::types::result_payloads(from),
-            crate::types::result_payloads(to),
-        ) {
-            return self.assignable_d(a, b, depth + 1) && self.assignable_d(e1, e2, depth + 1);
-        }
-        // A Map is covariant in its value type (keys recurse the same way;
-        // values are immutable at a read boundary) — RFC-0028.
-        if let (Type::Map(ka, va), Type::Map(kb, vb)) = (from, to) {
-            return self.assignable_d(ka, kb, depth + 1) && self.assignable_d(va, vb, depth + 1);
-        }
-        if let (Type::Array(a), Type::Array(b)) = (from, to) {
-            return self.assignable_d(a, b, depth + 1);
-        }
-        // A `SmallArray<T, N>` (RFC-0056) is covariant in `T` and invariant in
-        // `N` (the capacity is part of the type — no widening/narrowing).
-        if let (Type::SmallArray(a, na), Type::SmallArray(b, nb)) = (from, to) {
-            return na == nb && self.assignable_d(a, b, depth + 1);
-        }
-        // `assignable` is the STRICT relation: a predicated named type admits
-        // only itself here. Value boundaries use `coercible`, which adds the
-        // automatic-validation rule on top.
-        if let Type::Named(n) = to {
-            if let Some(d) = self.types.get(n) {
-                if d.predicate.is_some() {
-                    return matches!(from, Type::Named(m) if m == n);
-                }
-            }
-        }
-        // Structural width subtyping: `from` is usable as `to` if it has every
-        // field `to` requires, with an assignable type. Extra fields are fine.
-        if let (Type::Record(ff), Type::Record(tf)) = (&self.base(from), &self.base(to)) {
-            return tf.iter().all(|need| {
-                ff.iter().any(|have| {
-                    have.name == need.name && self.assignable_d(&have.ty, &need.ty, depth + 1)
-                })
-            });
-        }
-        false
+        crate::types::assignable(from, to, self.types)
     }
 
     /// Does `ty` mention a type parameter that nothing has settled?
@@ -3131,30 +3001,8 @@ impl<'a> Checker<'a> {
         self.coercible(&self.base(k), &self.base(key))
     }
 
-    /// Whether `from` may flow into `to` at a **value boundary** (a `let`
-    /// annotation, an assignment, a call argument, a return, a record field, an
-    /// array element): everything `assignable` allows, **plus automatic
-    /// validation** — a value structurally compatible with a predicated named
-    /// type's base may flow in, and the boundary itself runs the `where`
-    /// predicate (a provably-false constant is rejected at compile time by
-    /// [`Self::prove_coercion`]; anything else is checked at runtime by both
-    /// backends, trapping with `validation failed for \`T\``).
-    ///
-    /// The rule applies at the top level only: a payload inside an
-    /// `Option`/`Result`/`Array` *type* does not auto-coerce — each element is
-    /// validated at its own literal/argument boundary instead.
     fn coercible(&self, from: &Type, to: &Type) -> bool {
-        if self.assignable(from, to) {
-            return true;
-        }
-        if let Type::Named(n) = to {
-            if let Some(d) = self.types.get(n) {
-                if d.predicate.is_some() {
-                    return self.assignable(from, &d.base);
-                }
-            }
-        }
-        false
+        crate::types::coercible(from, to, self.types)
     }
 
     /// Compile-time half of automatic validation: when a constant expression
@@ -4199,15 +4047,23 @@ impl<'a> Checker<'a> {
     }
 
     /// Runs one unit of checking: a statement, a type declaration or a
-    /// module-state initializer. A refusal in a unit that read a name typed
-    /// `Type::Err` is `Err(None)`: it follows from that type. An unknown name
-    /// is the typed judgment's refusal, and any other `Err` is the refusal of
-    /// the statement that bound it (RFC-0125 M7, group 5).
+    /// module-state initializer. A refusal in a unit that typed a node
+    /// [`Checker::judged`] or read a name typed `Type::Err` is `Err(None)`: it
+    /// follows from that type. The judged node is the typed judgment's
+    /// refusal, and any other `Err` is the refusal of the statement that bound
+    /// it (RFC-0125 M7, groups 5 and 6d).
     fn unit<T>(&self, f: impl FnOnce() -> Result<T, Diagnostic>) -> Result<T, Option<Diagnostic>> {
         let outer = self.unknown.replace(false);
         let r = f();
         let read = self.unknown.replace(outer);
         r.map_err(|d| Some(d).filter(|_| !read))
+    }
+
+    /// The type of a node whose refusal the typed judgment states: `Err`, and
+    /// the unit's other refusals follow from it (RFC-0125 M7, groups 5 and 6d).
+    fn judged(&self) -> Result<Type, Diagnostic> {
+        self.unknown.set(true);
+        Ok(Type::Err)
     }
 
     /// Bind the name of a failed `let`/`for`-in to `Type::Err` in the current
@@ -4269,21 +4125,21 @@ impl<'a> Checker<'a> {
                     self.ensure_type_exists(declared, *line)?;
                 }
                 let vty = self.expr(value, scope, ty.as_ref(), Some(ret))?;
-                if let Some(declared) = ty {
-                    if !self.coercible(&vty, declared) {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` declared {declared} but initializer is {vty}"
-                        ));
-                    }
+                // A value its slot does not take is the typed judgment's
+                // refusal (RFC-0125 M7), and so is a Unit bound to a name.
+                if let Some(declared) = ty.as_ref().filter(|d| self.coercible(&vty, d)) {
                     self.prove_coercion(value, declared, *line)?;
                     self.prove_string_interpolation(value, declared, scope, Some(ret), *line)?;
                 }
-                if self.base(&vty) == Type::Unit {
-                    return Err(cerr!(line, "cannot bind `{name}` to a Unit value"));
-                }
-                // The binding takes the declared type when present, else the value's.
-                let bty = ty.clone().unwrap_or(vty);
+                // The binding takes the declared type when present, else the
+                // value's. Where either is refused, the name is typed `Err`,
+                // so its uses add no refusal of their own.
+                let bty = match ty {
+                    Some(t) if self.coercible(&vty, t) => t.clone(),
+                    Some(_) => Type::Err,
+                    None if self.base(&vty) == Type::Unit => Type::Err,
+                    None => vty,
+                };
                 // Retain it for the symbol-query layer so hovering an
                 // unannotated `let x = 5` shows `let x: Int`.
                 self.bind_seen(Some(bty.clone()), *line, *col);
@@ -4302,14 +4158,16 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 };
                 let vty = self.expr(value, scope, Some(&b.ty), Some(ret))?;
-                if !self.coercible(&vty, &b.ty) {
-                    return Err(cerr!(line, "`{name}` is {} but assigned {}", b.ty, vty));
+                if self.coercible(&vty, &b.ty) {
+                    self.prove_coercion(value, &b.ty, *line)?;
+                    self.prove_string_interpolation(value, &b.ty, scope, Some(ret), *line)?;
                 }
-                self.prove_coercion(value, &b.ty, *line)?;
-                self.prove_string_interpolation(value, &b.ty, scope, Some(ret), *line)?;
                 self.region_store_guard(name, &b.ty, scope, *line)?;
                 Ok(false)
             }
+            // A store into a field or an element is the typed judgment's to
+            // refuse (RFC-0125 M7, group 6c): where one of its rules fails,
+            // the statement stops here, unrefused.
             Stmt::SetField {
                 name,
                 field,
@@ -4320,57 +4178,37 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(false);
                 };
-                // Validated data is rebuilt, not mutated: a field write on a
-                // record with a cross-field `where` could break the invariant
-                // mid-update, so it must go through whole-value reassignment
-                // (`r = T { .. }`), which re-validates automatically.
-                if let Type::Named(n) = &b.ty {
-                    if self.types.get(n).is_some_and(|d| d.predicate.is_some()) {
-                        return Err(cerr!(
-                            line,
-                            "cannot mutate a field of `{n}` in place (its \
-                             `where` invariant could be broken mid-update); rebuild it: \
-                             `{name} = {n} {{ .. }}`"
-                        ));
-                    }
+                if matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()))
+                {
+                    return Ok(false);
                 }
-                let fields = crate::types::record_fields(&b.ty, self.types).ok_or_else(|| {
-                    cerr!(
-                        line,
-                        "`{name}` is not a record, so it has no field `{field}`"
-                    )
-                })?;
-                let fty = fields
-                    .iter()
-                    .find(|f| &f.name == field)
-                    .map(|f| f.ty.clone())
-                    .ok_or_else(|| cerr!(line, "record `{name}` has no field `{field}`"))?;
-                // A predicated FIELD type cannot be written in place either: the
-                // interpreter's record values are type-erased, so the field's
-                // check has no reliable runtime hook there. Only the exact named
-                // type (already validated at its own construction) may flow in.
-                let field_is_predicated = matches!(&fty, Type::Named(fnm)
-                    if self.types.get(fnm).is_some_and(|d| d.predicate.is_some()));
+                let Some(fty) = crate::types::record_fields(&b.ty, self.types)
+                    .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
+                    .map(|f| f.ty)
+                else {
+                    return Ok(false);
+                };
                 let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
-                if field_is_predicated {
-                    if !self.assignable(&vty, &fty) {
-                        return Err(cerr!(
-                            line,
-                            "field `{field}` is {fty} (validated); assign an \
-                             already-constructed `{fty}` value, e.g. `{fty}(..)`"
-                        ));
-                    }
-                } else if !self.coercible(&vty, &fty) {
-                    return Err(cerr!(line, "field `{field}` is {fty} but assigned {vty}"));
+                // A predicated field takes only a value of its own type: the
+                // interpreter's record values are type-erased, so the field's
+                // check has no runtime hook there.
+                let validated = matches!(&fty, Type::Named(n)
+                    if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
+                if !(if validated {
+                    self.assignable(&vty, &fty)
+                } else {
+                    self.coercible(&vty, &fty)
+                }) {
+                    return Ok(false);
                 }
                 self.region_store_guard(name, &fty, scope, *line)?;
                 Ok(false)
             }
-            // `name[index] = value` — in-place element store (RFC-0011). Same
-            // `mut` rule as `Assign`/`push`; the index coerces to Int64 and the
-            // value coerces into the element type (validated element types are
-            // rejected at compile time here via `prove_coercion`, at runtime via
-            // the coerce the interpreter/codegen emit on store).
+            // `name[index] = value` — in-place element store (RFC-0011). The
+            // index coerces to the key and the value into the element type
+            // (validated element types are rejected at compile time here via
+            // `prove_coercion`, at runtime via the coerce the engines emit on
+            // store).
             Stmt::IndexSet {
                 name,
                 index,
@@ -4388,19 +4226,12 @@ impl<'a> Checker<'a> {
                 if let Type::Map(key, val) = self.base(&b.ty) {
                     let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
                     if !matches!(k, Type::Err) && !self.key_fits(&k, &key) {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` is keyed by {key}, but the key here is {k}"
-                        ));
+                        return Ok(false);
                     }
                     self.prove_coercion(index, &key, *line)?;
                     let vty = self.expr(value, scope, Some(&val), Some(ret))?;
                     if !self.coercible(&vty, &val) {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` holds values of type {val} but the stored \
-                             value is {vty}"
-                        ));
+                        return Ok(false);
                     }
                     self.prove_coercion(value, &val, *line)?;
                     self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
@@ -4417,7 +4248,7 @@ impl<'a> Checker<'a> {
                         (*inner).clone()
                     }
                     Type::Err => return Ok(false),
-                    other => {
+                    _ => {
                         // RFC-0091 M3: a user container declares where its
                         // element is, and `place atSet` is the writing half of
                         // that. The element type is what it yields. Keyed by the
@@ -4429,31 +4260,17 @@ impl<'a> Checker<'a> {
                                 }
                                 self.solve_head(imp, &b.ty, &f.ret, *line)
                             }
-                            None => {
-                                return Err(cerr!(
-                                    line,
-                                    "`{name}[i] = ..` needs an Array, a Map, or a \
-                                     type whose impl declares the `atSet` projection \
-                                     (`fn atSet(modify self, ..) -> modify T`), found {other}"
-                                ))
-                            }
+                            None => return Ok(false),
                         }
                     }
                 };
                 let i = self.expr(index, scope, Some(&key), Some(ret))?;
                 if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
-                    return Err(if key == Type::Int {
-                        cerr!(line, "array index must be an Int64, found {i}")
-                    } else {
-                        cerr!(line, "`{name}[..] = ..` is keyed by {key}, found {i}")
-                    });
+                    return Ok(false);
                 }
                 let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
                 if !self.coercible(&vty, &elem) {
-                    return Err(cerr!(
-                        line,
-                        "`{name}` holds {elem} but the stored value is {vty}"
-                    ));
+                    return Ok(false);
                 }
                 self.prove_coercion(value, &elem, *line)?;
                 self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
@@ -4494,29 +4311,17 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if !self.coercible(&vty, ret) {
-                    // Report the mismatch but still count this path as returning:
-                    // a `return <wrong type>` does return, so it must NOT also
-                    // trigger the "must return on all paths" diagnostic (that
-                    // would be a cascade). Push to the sink and return `Ok(true)`.
-                    self.errors.borrow_mut().push(cerr!(
-                        line,
-                        "return type mismatch: expected {ret}, found {vty}"
-                    ));
-                    return Ok(true);
-                }
+                // A value the result does not take is the typed judgment's
+                // refusal (RFC-0125 M7); the path returns either way.
                 Ok(true)
             }
             Stmt::If {
                 cond,
                 then_block,
                 else_block,
-                line,
+                ..
             } => {
-                let cty = self.expr(cond, scope, None, Some(ret))?;
-                if self.base(&cty) != Type::Bool {
-                    return Err(cerr!(line, "`if` condition must be Bool, found {cty}"));
-                }
+                self.expr(cond, scope, None, Some(ret))?;
                 let then_ret = self.block(then_block, ret, scope);
                 match else_block {
                     Some(eb) => {
@@ -4572,11 +4377,8 @@ impl<'a> Checker<'a> {
                 Ok(false)
             }
             Stmt::Continue { .. } => Ok(false),
-            Stmt::While { cond, body, line } => {
-                let cty = self.expr(cond, scope, None, Some(ret))?;
-                if self.base(&cty) != Type::Bool {
-                    return Err(cerr!(line, "`while` condition must be Bool, found {cty}"));
-                }
+            Stmt::While { cond, body, .. } => {
+                self.expr(cond, scope, None, Some(ret))?;
                 self.block(body, ret, scope);
                 Ok(false)
             }
@@ -4600,7 +4402,7 @@ impl<'a> Checker<'a> {
                     Type::Stream(inner) => (*inner).clone(),
                     // Iterating a String yields each byte as an Int.
                     Type::Str => Type::Int,
-                    other => {
+                    _ => {
                         // RFC-0091 M3: a user container declares how it is
                         // iterated, and the element type is what its `place nth`
                         // yields. The resolved shape cannot answer, so the
@@ -4617,15 +4419,8 @@ impl<'a> Checker<'a> {
                                     None => nth.ret.clone(),
                                 }
                             }
-                            None => {
-                                return Err(cerr!(
-                                    line,
-                                    "`for` needs an Array, a String, or a type that \
-                                     declares `impl Iterate` (a `size` method and an `nth` \
-                                     projection, `fn nth(read self, ..) -> read T`), \
-                                     found {other}"
-                                ))
-                            }
+                            // The typed judgment refuses the loop (RFC-0125 M7).
+                            None => Type::Err,
                         }
                     }
                 };
@@ -4933,11 +4728,7 @@ impl<'a> Checker<'a> {
                 // A nullary enum variant used as a value, e.g. `Empty`.
                 if let Some(info) = self.variants.get(name) {
                     if !info.payload.is_empty() {
-                        return Err(cerr!(
-                            line,
-                            "variant `{name}` needs {} argument(s)",
-                            info.payload.len()
-                        ));
+                        return self.judged();
                     }
                     let tps = self.enum_type_params(&info.enum_name);
                     if tps.is_empty() {
@@ -4976,10 +4767,9 @@ impl<'a> Checker<'a> {
                     });
                     return Ok(sig);
                 }
-                self.unknown.set(true);
-                Ok(Type::Err)
+                self.judged()
             }
-            Expr::Unary { op, expr, line } => {
+            Expr::Unary { op, expr, .. } => {
                 // `-9223372036854775808` is the one literal whose magnitude only
                 // exists negated (i64::MIN): the bare literal wraps to MIN in the
                 // lexer, and negation wraps it straight back — accept it here
@@ -5057,9 +4847,7 @@ impl<'a> Checker<'a> {
                     {
                         Ok(t)
                     }
-                    UnOp::Neg => Err(cerr!(line, "unary `-` needs a numeric type, found {t}")),
-                    UnOp::Not => Err(cerr!(line, "unary `!` needs Bool, found {t}")),
-                    UnOp::BitNot => Err(cerr!(line, "unary `~` needs an integer type, found {t}")),
+                    UnOp::Neg | UnOp::Not | UnOp::BitNot => self.judged(),
                 }
             }
             Expr::Binary { op, lhs, rhs, line } => {
@@ -5103,26 +4891,6 @@ impl<'a> Checker<'a> {
                                 line,
                                 "the right side of `=~` must be a string-literal pattern"
                             ))
-                        }
-                    }
-                }
-                // A shift by a COMPILE-TIME-CONSTANT amount out of range is a
-                // compile error, not a runtime trap (RFC-0045): the width comes
-                // from the (already literal-adapted) shifted operand's type.
-                if matches!(op, BinOp::Shl | BinOp::Shr) {
-                    let bits: i64 = match &l {
-                        Type::IntN { bits, .. } => (*bits).into(),
-                        _ => 64, // the literal `Int` shifts at 64 bits
-                    };
-                    if let Some(crate::consteval::ConstVal::Int(amt)) =
-                        crate::consteval::eval(rhs, &std::collections::HashMap::new())
-                    {
-                        if amt < 0 || amt >= bits {
-                            return Err(cerr!(
-                                line,
-                                "shift amount {amt} is out of range for a \
-                                 {bits}-bit value (valid range is 0..{bits})"
-                            ));
                         }
                     }
                 }
@@ -5210,42 +4978,23 @@ impl<'a> Checker<'a> {
                         .iter()
                         .find(|f| &f.name == field)
                         .map(|f| crate::types::forced(&f.ty))
-                        .ok_or_else(|| cerr!(line, "type {ety} has no field `{field}`")),
-                    other => Err(cerr!(
-                        line,
-                        "cannot access field `{field}` on non-record type {other}"
-                    )),
+                        .map_or_else(|| self.judged(), Ok),
+                    _ => self.judged(),
                 }
             }
-            Expr::TryConstruct { name, args, line } => {
+            Expr::TryConstruct { name, args, .. } => {
                 let base = match self.types.get(name) {
                     Some(d) if matches!(d.base, Type::Int | Type::Bool | Type::Str) => {
                         d.base.clone()
                     }
-                    Some(_) => {
-                        return Err(cerr!(
-                            line,
-                            "`{name}?(..)` is only for validated/nominal scalar types"
-                        ))
-                    }
-                    None => {
-                        self.unknown.set(true);
-                        return Ok(Type::Err);
-                    }
+                    _ => return self.judged(),
                 };
                 if args.len() != 1 {
-                    return Err(cerr!(
-                        line,
-                        "`{name}?` takes 1 argument, got {}",
-                        args.len()
-                    ));
+                    return self.judged();
                 }
                 let aty = self.expr(&args[0], scope, Some(&base), fn_ret)?;
                 if !self.assignable(&aty, &base) {
-                    return Err(cerr!(
-                        line,
-                        "`{name}` is built from {base}, but the argument is {aty}"
-                    ));
+                    return self.judged();
                 }
                 Ok(Type::option(Type::Named(name.clone())))
             }
@@ -5913,10 +5662,7 @@ impl<'a> Checker<'a> {
                  must yield a value)"
             ));
         };
-        let cty = self.expr(cond, scope, Some(&Type::Bool), fn_ret)?;
-        if self.base(&cty) != Type::Bool && !matches!(cty, Type::Err) {
-            return Err(cerr!(line, "`if` condition must be Bool, found {cty}"));
-        }
+        self.expr(cond, scope, Some(&Type::Bool), fn_ret)?;
         // Branches unify exactly like match arms: the first branch is checked
         // against the expected type, the second against the accumulated result.
         let mut result: Option<Type> = expected.cloned();
@@ -10497,14 +10243,6 @@ mod tests {
              let mut r = Ring {{ data: d }}\n r[0] = 9\n return 0 }}"
         ))
         .is_ok());
-        // Without the row the store has nowhere to land, and the refusal names
-        // what would give it one.
-        let e = check_src(&format!(
-            "{RING}\
-             fn main() -> Int64 {{ let mut r = Ring {{ data: [] }}\n r[0] = 9\n return 0 }}"
-        ))
-        .unwrap_err();
-        assert!(e.contains("`atSet` projection"), "{e}");
     }
 
     /// RFC-0091 M3. A user container iterates through `Iterate`, and the loop
@@ -10521,16 +10259,6 @@ mod tests {
              for x in r {{ s = s + x }}\n return s }}"
         ))
         .is_ok());
-        // A `size` alone is not an iterable, and the refusal says which half is
-        // missing.
-        let e = check_src(
-            "type Ring = { data: Array<Int64> }\n\
-             impl Iterate for Ring { fn size(self) -> Int64 { return 0 } }\n\
-             fn main() -> Int64 { let r = Ring { data: [] }\n \
-             for x in r { print(x) }\n return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("`nth` projection"), "{e}");
     }
 
     #[test]
@@ -10582,18 +10310,6 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.contains("uses `?`, which returns"), "{e}");
-    }
-
-    #[test]
-    fn a_projection_body_is_checked_like_a_function_body() {
-        let e = check_src(&format!(
-            "{RING}\
-             impl Index for Ring {{ fn at(read self, i: Int64) -> read String \
-             {{ return self.data[i] }} }}\n\
-             fn main() -> Int64 {{ return 0 }}"
-        ))
-        .unwrap_err();
-        assert!(e.contains("String"), "{e}");
     }
 
     // ---- RFC-0121: payload places -------------------------------------------
@@ -11235,12 +10951,6 @@ mod tests {
         assert!(module_state_use(&program, "handle", &Default::default()).is_none());
     }
 
-    #[test]
-    fn rejects_type_mismatch() {
-        let e = check_src("fn main() -> Int64 { return true; }").unwrap_err();
-        assert!(e.contains("return type mismatch"), "{e}");
-    }
-
     // ---- codability of payload enums / Result (RFC-0024) ----------------
 
     #[test]
@@ -11618,20 +11328,13 @@ mod tests {
         // RFC-0014 M2: `bytes(s)` is Array<UInt8> (was Array<Int64>).
         let ok = "fn main() -> Int64 { let b: Array<UInt8> = bytes(\"hi\") return b.length }";
         assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
-        let e =
-            check_src("fn main() -> Int64 { let b: Array<Int64> = bytes(\"hi\") return b.length }")
-                .unwrap_err();
-        assert!(e.contains("Array<UInt8>"), "{e}");
     }
 
     #[test]
     fn string_index_is_uint8() {
-        // RFC-0022: `s[i]` is a UInt8 — it flows into a UInt8 slot, and returning
-        // it as Int64 without an explicit `Int64(..)` is a type error.
+        // RFC-0022: `s[i]` is a UInt8 — it flows into a UInt8 slot.
         let ok = "fn main() -> Int64 { let s = \"hi\" let b: UInt8 = s[0] return Int64(b) }";
         assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
-        let e = check_src("fn main() -> Int64 { let s = \"hi\" return s[0] }").unwrap_err();
-        assert!(e.contains("expected Int64, found UInt8"), "{e}");
     }
 
     #[test]
@@ -11645,13 +11348,6 @@ mod tests {
         }
         let e = check_src("fn main() -> Int64 { if \"a\" < 3 { return 1 } return 0 }").unwrap_err();
         assert!(e.contains("numeric or String"), "{e}");
-    }
-
-    #[test]
-    fn rejects_binding_a_unit_call() {
-        // `print` yields Unit, which cannot be bound.
-        let e = check_src("fn main() -> Int64 { let x = print(1); return 0; }").unwrap_err();
-        assert!(e.contains("Unit"), "{e}");
     }
 
     // ---- structured concurrency -----------------------------------------
@@ -11762,10 +11458,10 @@ mod tests {
 
     #[test]
     fn test_body_analyses_apply() {
-        // A use-after-consume-style type error inside a test body is caught: the
-        // body is checked exactly like a function body.
-        let e = check_src("test \"t\" { let x: Int64 = true }").unwrap_err();
-        assert!(e.contains("mismatch") || e.contains("Bool"), "{e}");
+        // A type error inside a test body is caught: the body is checked
+        // exactly like a function body.
+        let e = check_src("test \"t\" { let x: UInt8 = 300 }").unwrap_err();
+        assert!(e.contains("does not fit UInt8"), "{e}");
     }
 
     #[test]
@@ -11957,16 +11653,6 @@ mod tests {
         assert!(check_src(src).is_ok());
     }
 
-    #[test]
-    fn rejects_field_mutation_wrong_type() {
-        let e = check_src(
-            "type P = { x: Int64 }; \
-                           fn main() -> Int64 { let mut p = P { x: 1 }; p.x = \"s\"; return 0; }",
-        )
-        .unwrap_err();
-        assert!(e.contains("field `x`"), "{e}");
-    }
-
     // ---- growable arrays ------------------------------------------------
 
     #[test]
@@ -12009,24 +11695,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("without `mut`"), "{e}");
-    }
-
-    #[test]
-    fn index_store_rejects_wrong_element_type() {
-        let e = check_src(
-            "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[0] = \"x\"; return 0; }",
-        )
-        .unwrap_err();
-        assert!(e.contains("holds Int64"), "{e}");
-    }
-
-    #[test]
-    fn index_store_rejects_non_int_index() {
-        let e = check_src(
-            "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[\"i\"] = 9; return 0; }",
-        )
-        .unwrap_err();
-        assert!(e.contains("index must be an Int64"), "{e}");
     }
 
     #[test]
@@ -12351,29 +12019,7 @@ mod tests {
     }
 
     #[test]
-    fn setfield_on_predicated_record_is_rejected() {
-        // In-place field mutation could break the cross-field invariant —
-        // rebuild the whole value instead (which re-validates).
-        let src = "type Range = { start: Int64, end: Int64 } where start < end \
-                   fn main() -> Int64 { \
-                       let mut r = Range { start: 1, end: 5 } \
-                       r.start = 10 \
-                       return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("cannot mutate a field of `Range`"), "{e}");
-    }
-
-    #[test]
-    fn setfield_into_predicated_field_needs_constructed_value() {
-        let src = "type Age = Int64 where value >= 18 \
-                   type User = { age: Age } \
-                   fn main() -> Int64 { \
-                       let mut u = User { age: 30 } \
-                       u.age = 5 \
-                       return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("assign an already-constructed `Age`"), "{e}");
-        // With an explicitly constructed (and therefore validated) value it's fine.
+    fn setfield_into_predicated_field_takes_a_constructed_value() {
         let ok = "type Age = Int64 where value >= 18 \
                   type User = { age: Age } \
                   fn main() -> Int64 { \
@@ -12881,7 +12527,7 @@ mod tests {
     #[test]
     fn pick_drops_unlisted_fields() {
         let src = "type User = { id: Int64, name: Int64 }; type Id = Pick<User, id>; \
-                   fn main() -> Int64 { let i: Id = User { id: 1, name: 2 }; return i.name; }";
+                   fn main() -> Int64 { let i = Id { id: 1, name: 2 }; return 0; }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("no field `name`"), "{e}");
     }
@@ -12943,14 +12589,6 @@ mod tests {
                    fn main() -> Int64 { let n = Named { name: 1 }; return f(n); }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("expects"), "{e}");
-    }
-
-    #[test]
-    fn rejects_unknown_field_access() {
-        let src = "type User = { name: Int64 }; \
-                   fn main() -> Int64 { let u = User { name: 1 }; return u.age; }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("no field `age`"), "{e}");
     }
 
     #[test]
@@ -13125,29 +12763,6 @@ mod tests {
     }
 
     // ---- RFC-0011 addendum: `a[i].field = v` write-through --------------
-
-    #[test]
-    fn index_field_assign_unknown_field_is_rejected() {
-        let e = check_src(
-            "type P = { x: Int64 }\n\
-             fn main() -> Int64 { let mut a: Array<P> = [P { x: 1 }]  a[0].z = 9  return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("no field `z`"), "{e}");
-    }
-
-    #[test]
-    fn index_field_assign_into_validated_field_is_rejected() {
-        // A predicated field type cannot be written in place — same rule (and
-        // wording) SetField enforces for a plain record.
-        let e = check_src(
-            "type Age = Int64 where value >= 0\n\
-             type P = { age: Age }\n\
-             fn main() -> Int64 { let mut a: Array<P> = []  a.push(P { age: 1 })  a[0].age = 5  return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("(validated)"), "{e}");
-    }
 
     #[test]
     fn index_field_assign_accepts_plain_record_element() {
@@ -13608,9 +13223,9 @@ mod tests {
         let src = "fn main() -> Int64 {\n\
              let mut m: Map<String, Int64> = [:]\n\
              m[\"a\"] = 1\n\
-             return m[\"a\"] }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("Option"), "{e}");
+             let v: Option<Int64> = m[\"a\"]\n\
+             return v ?? 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     #[test]
@@ -13622,15 +13237,6 @@ mod tests {
              return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("scalar operands"), "{e}");
-    }
-
-    #[test]
-    fn map_value_type_must_match() {
-        let src = "fn main() -> Int64 {\n\
-             let mut m: Map<String, Int64> = [:]\n\
-             m[\"a\"] = true\n\
-             return 0 }";
-        assert!(check_src(src).is_err());
     }
 
     #[test]
@@ -13671,15 +13277,6 @@ mod tests {
              return x }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("differing types"), "{e}");
-    }
-
-    #[test]
-    fn if_expression_condition_must_be_bool() {
-        let src = "fn main() -> Int64 {\n\
-             let x = if 3 { 1 } else { 2 }\n\
-             return x }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("condition must be Bool"), "{e}");
     }
 
     #[test]
@@ -14640,15 +14237,19 @@ mod tests {
     // ---- round two: recursion guards, sized literals, dispatch -------------
 
     /// Two DISTINCT legal recursive records compared by width subtyping must
-    /// report a type error — not diverge: the field walk re-enters each side
-    /// through its own head forever unless the descent is capped.
+    /// answer "not assignable" — not diverge: the field walk re-enters each
+    /// side through its own head forever unless the descent is capped.
     #[test]
     fn recursive_records_compare_to_a_type_error_not_a_crash() {
         let src = "type NodeA = { v: Int64, next: Option<NodeA> } \
-                   type NodeB = { v: Int64, next: Option<NodeB> } \
-                   fn main() -> Int64 { \
-                       let b: NodeB = NodeA { v: 1, next: None } return 0 }";
-        assert!(check_src(src).is_err());
+                   type NodeB = { v: Int64, next: Option<NodeB> }";
+        let decls = crate::types::decl_map(&parse(lex(src).unwrap()).unwrap());
+        let named = |n: &str| Type::Named(n.to_string());
+        assert!(!crate::types::coercible(
+            &named("NodeA"),
+            &named("NodeB"),
+            &decls
+        ));
     }
 
     /// A recursive record may still sit inside a `region`: the escape guard's
@@ -14733,17 +14334,12 @@ mod tests {
     }
 
     /// An index store takes a named key type as the lookup does: both ask
-    /// [`Checker::key_fits`]. A key of another type keeps its sentence (#509).
+    /// [`Checker::key_fits`] (#509). A key of another type is the typed
+    /// judgment's refusal (RFC-0125 M7).
     #[test]
     fn an_index_store_takes_the_key_type_a_lookup_takes() {
         let head = "protocol Hashable { fn hash(self) -> UInt64 }                     type Suit = | Clubs | Hearts                     impl Hashable for Suit { fn hash(self) -> UInt64 { return UInt64(1) } }                     fn main() -> Int64 { let mut s: Map<Suit, Int64> = [:] ";
         let ok = format!("{head} let h: Suit = Hearts s[h] = 1 s[Clubs] = 2 return s.length }}");
         assert_eq!(check_src(&ok), Ok(()));
-        let bad = format!("{head} s[3] = 1 return s.length }}");
-        let e = check_src(&bad).unwrap_err();
-        assert!(
-            e.contains("`s` is keyed by Suit, but the key here is Int64"),
-            "{e}"
-        );
     }
 }

@@ -115,6 +115,30 @@ fn main() -> Int64 {
     assert_eq!(d.end_col, 13);
 }
 
+/// A non-Bool `if` condition diagnostic is pinned to the `if` **keyword**, not
+/// left whole-line. The first backtick-quoted token in the message is `if`,
+/// which is a reserved word (never a `Tok::Ident`), so the keyword column map
+/// resolves it. Guards the generalized pinner's keyword path.
+#[test]
+fn if_condition_pinned_to_if_keyword() {
+    let src = "\
+fn main() -> Int64 {
+    if 5 {
+        print(1);
+    }
+    return 0;
+}
+";
+    let d = first(src).expect("an if-condition diagnostic");
+    // Line 2: `    if 5 {` — 4 spaces, then `if` at 1-based cols 5-6.
+    assert_eq!(d.line, 2);
+    assert_eq!(
+        d.col, 5,
+        "pinned to the `if` keyword, not col 0 (whole line)"
+    );
+    assert_eq!(d.end_col, 7);
+}
+
 /// The table for RFC-0125 §3 M3, printed from the corpus:
 /// `cargo test -p vyrn-cli --test columns -- --ignored --nocapture`.
 #[test]

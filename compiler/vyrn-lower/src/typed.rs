@@ -1056,16 +1056,17 @@ pub fn loops(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(u
     out
 }
 
-/// Every name no binding, module state or declaration answers, as the
-/// sentence `vyrn check` gives and its line: RFC-0125 M7, the rule the
-/// checker stated at five sites. `seen` is as in [`stores`].
-pub fn unknowns(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(usize, String)> {
+/// Every rule the builder met at its construct ([`Body::refused`], and
+/// [`Body::mistyped`] where the body's types are `as_written`), as the
+/// sentence `vyrn check` gives and its line: RFC-0125 M7, an unknown name,
+/// a condition that is not Bool, a value its slot does not take. The caller
+/// states each sentence once per line.
+pub fn refused(body: &Body, as_written: bool) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for f in body.frames() {
-        for (site, line, refusal) in &f.unknown {
-            if seen.insert(*site) {
-                out.push((*line, refusal.clone()));
-            }
+        let mistyped = f.mistyped.iter().filter(|_| as_written);
+        for (line, refusal) in f.refused.iter().chain(mistyped) {
+            out.push((*line, refusal.clone()));
         }
     }
     out
@@ -1114,7 +1115,7 @@ pub fn drops(body: &Body, program: &vyrn_frontend::ast::Program) -> Vec<(usize, 
             ) || (types::is_sum_alias(&t)
                 && vyrn_frontend::declared::owns_heap(&t, decls));
             // `Err` is a name the checker could not type, and its refusal
-            // is the unknown name's (`unknowns`).
+            // is the unknown name's (`refused`).
             if owned || heap || t == Type::Err {
                 continue;
             }

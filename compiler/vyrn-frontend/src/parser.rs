@@ -1952,6 +1952,7 @@ impl Parser {
                 is_export_extern: false,
                 is_gen: false,
                 is_mut: false,
+                after_check: false,
             },
             result_cap,
         ))
@@ -2598,6 +2599,7 @@ impl Parser {
             is_gen,
             // Set by the caller when a `mut` modifier preceded `fn` (RFC-0074 M4a).
             is_mut: false,
+            after_check: false,
         })
     }
 
@@ -2720,6 +2722,7 @@ impl Parser {
                 is_export_extern: true,
                 is_gen: false,
                 is_mut: false,
+                after_check: false,
             });
         }
         if has_body {
@@ -2747,6 +2750,7 @@ impl Parser {
             is_export_extern: false,
             is_gen: false,
             is_mut: false,
+            after_check: false,
         })
     }
 

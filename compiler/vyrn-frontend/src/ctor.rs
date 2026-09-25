@@ -206,5 +206,6 @@ fn synth(name: String, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Funct
         is_export_extern: false,
         is_gen: false,
         is_mut: false,
+        after_check: false,
     }
 }

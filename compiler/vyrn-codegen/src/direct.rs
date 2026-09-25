@@ -2191,6 +2191,7 @@ fn f_shell(line: usize) -> Function {
         is_export_extern: false,
         is_gen: false,
         is_mut: false,
+        after_check: false,
     }
 }
 

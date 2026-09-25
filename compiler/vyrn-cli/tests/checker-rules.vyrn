@@ -290,10 +290,10 @@ fn lambdaContext() -> Int64 {
     let f = x -> x
     return 0
 }
-// Two refused statements in one body, from two groups. The checker states
-// both. Once the store rule is the judgment's, only the `if 1` prints: the
-// checker refuses the body, so no core is built for it, and a body reports
-// the refusals of the first pass that refuses it (RFC-0125 M7, decision A).
+// Two refused statements in one body, from two groups the typed judgment
+// states, so both print. Beside a rule the checker still states, a moved
+// rule does not print: the checker refuses the body, and it has no core
+// (RFC-0125 M7, decision A). `movedBesideChecker` witnesses that.
 fn twoPasses() -> Int64 {
     let x = 1
     x = 2
@@ -346,8 +346,7 @@ fn storeUncalled<T>(v: T) -> Int64 {
     x = 2
     return x
 }
-// A moved rule and a checker rule on one statement: the checker's sentence
-// prints, because the body it refuses has no core (#487).
+// Two rules the typed judgment states, on one statement: both print.
 fn storeMismatch() -> Int64 {
     let x = 1
     x = "s"
@@ -395,6 +394,119 @@ let unknownState = zz
 type Unknowable = Int64 where zz > 0
 let bound = 3
 type Bounded = Int64 where value >= bound
+// A condition and a `for` container are the typed judgment's, judged with
+// the types the checker gave the body: a generic function as written.
+fn ifExprCond() -> Int64 {
+    let a = if 1 { 2 } else { 3 }
+    return a
+}
+fn forMap() -> Int64 {
+    let m: Map<String, Int64> = [:]
+    for x in m {
+    }
+    return 0
+}
+fn condGeneric<T>(x: T) -> Int64 {
+    if x {
+        return 1
+    }
+    return 0
+}
+fn callsCondGeneric() -> Int64 {
+    return condGeneric(1) + condGeneric(true)
+}
+// A `size` alone is not an iterable.
+type SizeOnly = { data: Array<Int64> }
+impl Iterate for SizeOnly {
+    fn size(self) -> Int64 {
+        return 0
+    }
+}
+fn forSizeOnly() -> Int64 {
+    let r = SizeOnly { data: [] }
+    for x in r {
+    }
+    return 0
+}
+fn movedBesideChecker() -> Int64 {
+    let a: Int64 = "s"
+    let n: Int8 = 300
+    return 0
+}
+// A value its slot does not take is the typed judgment's. A name bound to
+// Unit is typed `Err`, so its uses add nothing; a `test` body returns Unit;
+// a generic function is judged as written.
+fn unitThenUse() -> Int64 {
+    let u = unitFn()
+    let v = u + 1
+    return 0
+}
+fn returnGeneric<T>(x: T) -> Int64 {
+    return x
+}
+fn callsReturnGeneric() -> Int64 {
+    return returnGeneric(1)
+}
+test "returns a value" {
+    return 3
+}
+// An `impl` projection's body is judged like a function's.
+type Ringed = { data: Array<Int64> }
+impl Index for Ringed {
+    fn at(read self, i: Int64) -> read String {
+        let x = 1
+        x = 2
+        return self.data[i]
+    }
+}
+// A store into a field or an element is the typed judgment's, through a
+// named root, through a path, into module state and in a generic function
+// as written. A root with no such field refuses its store and no other.
+fn storeThroughElement() -> Int64 {
+    let mut ps = [P { a: 1, age: Age(20) }]
+    ps[0].a = "s"
+    ps[0].zz = 1
+    let mut ns = [1]
+    ns[0].f = 2
+    return 0
+}
+let mut stateArray = [1]
+fn storeIntoState() -> Int64 {
+    stateArray[0] = "s"
+    return 0
+}
+type Boxed<T> = { v: T }
+fn storeGeneric<T>(b: Boxed<T>) -> Int64 {
+    let mut c = b
+    c.v = 1
+    return 0
+}
+fn callsStoreGeneric() -> Int64 {
+    return storeGeneric(Boxed { v: "s" })
+}
+// An operator, a field read, `T?(..)` and a variant read are the typed
+// judgment's, in module state, in a generic function as written and in a
+// lambda. A shift by a constant keeps its operand's type, so the slot it
+// fills judges it as well.
+let stateNeg = -"s"
+fn fieldGeneric<T>(t: T) -> Int64 {
+    return t.a
+}
+fn callsFieldGeneric() -> Int64 {
+    return fieldGeneric(1)
+}
+fn variantInLambda() -> Int64 {
+    let f: fn(Int64) -> Unit = x -> {
+        let e = A
+    }
+    return 0
+}
+fn shiftInto() -> Int64 {
+    let s: String = 1 << 70
+    let n: Int32 = 1
+    let m = n << 32
+    return 0
+}
 fn main() -> Int64 {
     return 0
 }
