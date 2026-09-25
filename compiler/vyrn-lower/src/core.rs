@@ -4897,19 +4897,22 @@ impl<'a> Builder<'a> {
                 field("length")
             }
             _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
-                Some((size, _)) => Rhs::Call {
-                    kind: if self.concrete_fn(&size) {
-                        Callee::Fn
-                    } else {
-                        Callee::Method
-                    },
-                    callee: size,
-                    args: vec![(Arg::Val(Val::Name(it)), Capability::Read)],
-                    write_back: false,
-                    ret: Some(Type::Int),
-                    solved: Vec::new(),
-                    targets: Vec::new(),
-                },
+                Some((size, _)) => {
+                    let solved = self.impl_args(&size, ity);
+                    Rhs::Call {
+                        kind: if solved.is_some() {
+                            Callee::Fn
+                        } else {
+                            Callee::Method
+                        },
+                        callee: size,
+                        args: vec![(Arg::Val(Val::Name(it)), Capability::Read)],
+                        write_back: false,
+                        ret: Some(Type::Int),
+                        solved: solved.unwrap_or_default(),
+                        targets: Vec::new(),
+                    }
+                }
                 None => return gap("a `for` over a container with no length", line),
             },
         })
@@ -4952,20 +4955,11 @@ impl<'a> Builder<'a> {
     /// makes T Person.
     fn under_impl(&self, ty: &Type, recv: &Type) -> Type {
         let key = vyrn_frontend::types::type_key(recv);
-        let imp = self
-            .program
-            .impls
-            .iter()
-            .find(|i| vyrn_frontend::types::type_key(&i.ty) == key);
         let mut subst = HashMap::new();
-        if let (Some(imp), Type::App(_, args)) = (imp, recv) {
-            if let Type::App(_, params) = &imp.ty {
-                for (p, a) in params.iter().zip(args) {
-                    if let Type::Param(n) = p {
-                        subst.insert(n.clone(), a.clone());
-                    }
-                }
-            }
+        if let Some(imp) =
+            (self.program.impls.iter()).find(|i| vyrn_frontend::types::type_key(&i.ty) == key)
+        {
+            vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
         }
         vyrn_frontend::types::substitute(ty, &subst)
     }
@@ -4973,6 +4967,28 @@ impl<'a> Builder<'a> {
     /// Whether a projection answers for `ty`'s element place (RFC-0091).
     fn projected(&self, ty: &Type) -> bool {
         vyrn_frontend::project::lookup_in(&self.program.impls, ty, "atSet").is_some()
+    }
+
+    /// The type arguments of a call to the impl function `f` on a receiver
+    /// of type `recv`, in `f`'s order: its impl head's parameters solved
+    /// against the receiver, as [`Builder::under_impl`] solves them. Empty
+    /// for a function with none; `None` where the program declares no `f`
+    /// or the receiver leaves a parameter unsolved.
+    fn impl_args(&self, f: &str, recv: &Type) -> Option<Vec<(String, Type)>> {
+        let g = self.program.functions.iter().find(|g| g.name == f)?;
+        let key = vyrn_frontend::types::type_key(recv)?;
+        let mut subst = HashMap::new();
+        if let Some(imp) = self.program.impls.iter().find(|i| {
+            vyrn_frontend::types::type_key(&i.ty).as_deref() == Some(key.as_str())
+                && (i.methods.iter()).any(|m| {
+                    vyrn_frontend::types::impl_method_name(&i.protocol, &key, &m.name) == f
+                })
+        }) {
+            vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
+        }
+        (g.type_params.iter())
+            .map(|p| Some((p.clone(), subst.get(p)?.clone())))
+            .collect()
     }
 
     fn is_map(&self, ty: &Type) -> bool {
@@ -6582,11 +6598,9 @@ impl<'a> Builder<'a> {
                     ..
                 } = &mut r
                 {
-                    *solved = self
-                        .solved
-                        .get(&(e as *const Expr as usize))
-                        .cloned()
-                        .unwrap_or_default();
+                    if let Some(s) = self.solved.get(&(e as *const Expr as usize)) {
+                        *solved = s.clone();
+                    }
                 }
                 Ok(r)
             }
@@ -6919,12 +6933,14 @@ impl<'a> Builder<'a> {
         out.push(St::Let(
             held,
             Rhs::Call {
+                solved: self
+                    .impl_args(&method("isSuccess"), &ity)
+                    .unwrap_or_default(),
                 callee: method("isSuccess"),
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
                 kind: Callee::Fn,
                 ret: Some(Type::Bool),
-                solved: Vec::new(),
                 targets: Vec::new(),
             },
         ));
@@ -6947,6 +6963,7 @@ impl<'a> Builder<'a> {
         ok.push(St::Let(
             t,
             Rhs::Call {
+                solved: self.impl_args(&success, &ity).unwrap_or_default(),
                 callee: success,
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
@@ -6954,7 +6971,6 @@ impl<'a> Builder<'a> {
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
-                solved: Vec::new(),
                 targets: Vec::new(),
             },
         ));
@@ -7302,9 +7318,9 @@ impl<'a> Builder<'a> {
         }
         // A method is a call after dispatch (section 2.1), as the `Fallible`
         // switch states it.
-        let (callee, kind) = match args.first().and_then(|r| self.dispatched(name, r)) {
-            Some(f) if kind == Callee::Method => (f, Callee::Fn),
-            _ => (name.to_string(), kind),
+        let (callee, kind, solved) = match args.first().and_then(|r| self.dispatched(name, r)) {
+            Some((f, solved)) if kind == Callee::Method => (f, Callee::Fn, solved),
+            _ => (name.to_string(), kind, Vec::new()),
         };
         Ok(Rhs::Call {
             callee,
@@ -7312,24 +7328,24 @@ impl<'a> Builder<'a> {
             write_back,
             kind,
             ret,
-            solved: Vec::new(),
+            solved,
             targets,
         })
     }
 
-    /// The impl function the method `name` dispatches to on `recv`'s type:
-    /// the one function the program declares under a name some protocol with
-    /// that method mangles, and no generic function. A generic impl waits on
-    /// `Cx::sigs`, which holds no instance of one.
-    fn dispatched(&self, name: &str, recv: &Expr) -> Option<String> {
-        let key = vyrn_frontend::types::type_key(&self.ty_of(recv).ok()?)?;
-        let fs: std::collections::BTreeSet<String> = self
+    /// The impl function the method `name` dispatches to on `recv`'s type,
+    /// and its type arguments ([`Builder::impl_args`]): the one function the
+    /// program declares under a name some protocol with that method mangles.
+    fn dispatched(&self, name: &str, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
+        let rty = self.ty_of(recv).ok()?;
+        let key = vyrn_frontend::types::type_key(&rty)?;
+        let fs: std::collections::BTreeMap<String, Vec<(String, Type)>> = self
             .program
             .impls
             .iter()
             .filter(|i| i.methods.iter().any(|m| m.name == name))
             .map(|i| vyrn_frontend::types::impl_method_name(&i.protocol, &key, name))
-            .filter(|f| self.concrete_fn(f))
+            .filter_map(|f| Some((f.clone(), self.impl_args(&f, &rty)?)))
             .collect();
         let mut fs = fs.into_iter();
         match (fs.next(), fs.next()) {
