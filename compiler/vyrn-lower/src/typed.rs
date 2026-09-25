@@ -46,7 +46,7 @@ use std::collections::HashMap;
 
 use vyrn_frontend::ast::Type;
 
-use crate::core::{Arg, Body, Name, NameInfo, Place, Rhs, Site, St, Val};
+use crate::core::{Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Val};
 use vyrn_frontend::ast::Capability;
 
 /// A step from one type into the type a place holds, for the caller that
@@ -70,8 +70,10 @@ pub enum How {
     Constructor,
     /// A name already of the type — nothing crossed, so nothing is owed.
     ByName,
-    /// A literal. The checker proves a literal against its slot's type at
-    /// compile time (RFC-0003's const validation), so no producer runs.
+    /// A literal, or another crossing the checker proved, which the core
+    /// states as [`Callee::Proven`]: the checker proves it against its slot's
+    /// type at compile time (RFC-0003's const validation, RFC-0020's
+    /// containment), so no producer runs.
     Literal,
     /// A primitive over literals only, into a SIZED INTEGER: a constant the
     /// program wrote out. The checker ranges it against the destination where
@@ -278,6 +280,10 @@ impl<'a> Walk<'a, '_> {
             return;
         };
         let how = match rhs {
+            Rhs::Call {
+                kind: Callee::Proven,
+                ..
+            } => How::Literal,
             _ if ctor => How::Constructor,
             Rhs::Val(Val::Lit(_)) => How::Literal,
             // A constant into a sized integer, and only there: a named type's
@@ -314,6 +320,11 @@ impl<'a> Walk<'a, '_> {
             place,
             ty: name,
             producer: match rhs {
+                Rhs::Call {
+                    kind: Callee::Proven,
+                    args,
+                    ..
+                } if matches!(args.as_slice(), [(Arg::Val(Val::Lit(_)), _)]) => "@lit".into(),
                 Rhs::Call { callee, .. } => callee.clone(),
                 Rhs::Prim(..) => "@prim".into(),
                 Rhs::Make(..) => "@make".into(),

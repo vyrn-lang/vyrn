@@ -211,7 +211,10 @@ fn a_read_of_a_validated_place_produces_its_type() {
             .collect::<Vec<_>>()
     };
     assert_eq!(kind_of("shared.ages[]"), ["by-name"]);
-    assert_eq!(kind_of("@lit"), ["by-literal"]);
+    // `Age(41)`, `Age(20)` and `a = 30` are constants the checker proved, so
+    // each is a `Callee::Proven` row that runs no producer; `a = 30` stores
+    // the row's temporary into `a`, which is judged too.
+    assert_eq!(kind_of("@lit"), ["by-literal"; 4]);
 }
 
 #[test]

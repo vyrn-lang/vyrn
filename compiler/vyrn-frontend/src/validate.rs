@@ -29,7 +29,8 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Type, TypeDecl};
+use crate::ast::{Expr, Type, TypeDecl};
+use crate::consteval::{self, ConstVal};
 
 /// The declaration whose predicate a value ENTERING a named type must satisfy,
 /// or `None` when nothing is checked there.
@@ -57,11 +58,8 @@ pub fn of<T: std::borrow::Borrow<TypeDecl>>(found: Option<T>) -> Option<T> {
 /// are the same either way, which is why one rule can have two entry points and
 /// still be one rule.
 ///
-/// A second exemption is deliberately NOT here, because it needs the expression
-/// rather than the two types: [`crate::finite::string_flow_proven`], RFC-0020's
-/// containment proof. Both backends call that function themselves on the same
-/// AST — the consteval precedent — so it is single-sourced too, just one layer
-/// out.
+/// A second exemption needs the expression rather than the two types, so it is
+/// [`proven`], asked beside this one.
 pub fn required<'t>(
     from: &Type,
     to: &Type,
@@ -72,6 +70,49 @@ pub fn required<'t>(
         return None;
     }
     of(types.get(n))
+}
+
+/// The checker's verdict on a constant crossing into `decl` (RFC-0003):
+/// `Some(true)` where the predicate holds, `Some(false)` where the checker
+/// refuses the crossing, and `None` where the value or the predicate is not
+/// a constant, which leaves the runtime check. A scalar binds `value`; a
+/// record literal over a record base binds each field. The scalar's constant
+/// is handed back for the refusal's wording.
+pub fn constant_verdict(expr: &Expr, decl: &TypeDecl) -> Option<(bool, Option<ConstVal>)> {
+    let pred = decl.predicate.as_ref()?;
+    let (env, cv) = match (consteval::eval(expr, &HashMap::new()), expr, &decl.base) {
+        (Some(cv), ..) => (HashMap::from([("value".to_string(), cv.clone())]), Some(cv)),
+        (None, Expr::StructLit { fields, .. }, Type::Record(_)) => {
+            let env = fields
+                .iter()
+                .map(|(f, e)| Some((f.clone(), consteval::eval(e, &HashMap::new())?)))
+                .collect::<Option<HashMap<_, _>>>()?;
+            (env, None)
+        }
+        _ => return None,
+    };
+    consteval::eval(pred, &env)
+        .and_then(ConstVal::as_bool)
+        .map(|holds| (holds, cv))
+}
+
+/// Whether the checker proved `e` a value of the validated type `to`, so the
+/// crossing runs no check: a constant whose predicate holds
+/// ([`constant_verdict`]), or a string flow RFC-0020's containment proof holds
+/// for ([`crate::finite::string_flow_proven`]). `resolve` gives the type of a
+/// name in the caller's scope. Every walk that skips a check asks this.
+pub fn proven(
+    e: &Expr,
+    to: &Type,
+    types: &HashMap<String, TypeDecl>,
+    resolve: &dyn Fn(&Expr) -> Option<Type>,
+) -> bool {
+    let Type::Named(n) = to else { return false };
+    types
+        .get(n)
+        .and_then(|d| constant_verdict(e, d))
+        .is_some_and(|(holds, _)| holds)
+        || crate::finite::string_flow_proven(e, to, types, resolve)
 }
 
 /// The width and signedness of an integer type, or `None` for a type that is
