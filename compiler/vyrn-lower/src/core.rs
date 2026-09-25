@@ -3698,6 +3698,120 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// The loop `for var in iter` over a user container expands to
+    /// (RFC-0091 M3): [`vyrn_frontend::project::iterate_loop`]'s, the one
+    /// block the checker types and every emitter walks. `None` for a
+    /// container no `impl Iterate` answers for, for one read out of a path
+    /// or module state, which [`Builder::iterate`] cannot hold for the loop,
+    /// and outside a compile scope, where the expansion is no shared node.
+    fn iterated(&self, var: &str, iter: &Expr, body: &Block, ity: &Type) -> Option<&'static Block> {
+        let held = match iter {
+            Expr::Var { name, .. } => self.lookup(name).is_some(),
+            e => !is_place_read(e),
+        };
+        if !held || !vyrn_frontend::project::memo_open() {
+            return None;
+        }
+        let (size_fn, nth) = vyrn_frontend::types::iterate_impl(&self.program.impls, ity)?;
+        vyrn_frontend::project::iterate_loop(&size_fn, nth, var, iter, body, iter.line()).ok()
+    }
+
+    /// [`Builder::iterated`]'s block, with the source's `body` in place of the
+    /// expansion's copy of it. The copy's nodes resolve to the source's
+    /// through [`vyrn_frontend::project::iterate_aliases`], so the rows of the
+    /// body are keyed where a reader of either tree looks them up; the
+    /// scaffolding around it is the expansion's own.
+    ///
+    /// A named container is read by the scaffolding through a borrow taken
+    /// before the loop, as the `Array` loop reads its container: a store into
+    /// the container inside the body then ends a borrow the next turn reads,
+    /// and the kernel refuses it. The body itself names the container.
+    fn iterate(
+        &mut self,
+        blk: &'a Block,
+        iter: &'a Expr,
+        ity: Type,
+        body: &'a Block,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        let Some((
+            w @ Stmt::While {
+                cond,
+                body: inner,
+                line,
+            },
+            head,
+        )) = blk.stmts.split_last()
+        else {
+            return gap("an `Iterate` expansion that is no loop", 0);
+        };
+        let mark = self.scope.len();
+        let site = blk as *const Block as usize;
+        let mut rows = Vec::new();
+        let lent = match iter {
+            Expr::Var { name, .. } => self.lookup(name).map(|n| {
+                let t = self.borrow_name(iter, ity, *line);
+                self.body.names[t as usize].walked = Some(Walk::For);
+                rows.push(St::Let(t, Rhs::Read(Place::Name(n))));
+                (name.clone(), t)
+            }),
+            _ => None,
+        };
+        self.scaffold(head, &lent, &mut rows)?;
+        let mut l = Vec::new();
+        let c = self.read_val(cond, &mut l)?;
+        l.push(St::If {
+            cond: c,
+            then: Vec::new(),
+            els: vec![St::Break { site: 0, line: 0 }],
+            site: 0,
+        });
+        self.loop_marks.push(self.body.names.len());
+        self.walks.push(None);
+        let turn = self.scope.len();
+        let scaffold = &inner.stmts[..inner.stmts.len() - body.stmts.len()];
+        let mut h = Vec::new();
+        let r = self
+            .scaffold(scaffold, &lent, &mut h)
+            .and_then(|()| self.block_with(body, h, &mut l));
+        self.scope.truncate(turn);
+        self.walks.pop();
+        self.loop_marks.pop();
+        r?;
+        self.hoist_headers(&mut l, *line, &mut rows);
+        rows.push(St::Loop {
+            body: l,
+            site: w as *const Stmt as usize,
+        });
+        self.drops_at(Exit::Block, site, &mut rows)?;
+        self.scope.truncate(mark);
+        out.push(St::Block {
+            site,
+            body: rows,
+            region: false,
+        });
+        Ok(())
+    }
+
+    /// Statements of [`Builder::iterate`]'s scaffolding, with the container's
+    /// name bound to the loop's borrow of it while they are stated.
+    fn scaffold(
+        &mut self,
+        ss: &'a [Stmt],
+        lent: &Option<(String, Name)>,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        let at = self.scope.len();
+        if let Some(l) = lent {
+            self.scope.push(l.clone());
+        }
+        let r = self.stmt_list(ss, out);
+        if lent.is_some() {
+            self.scope.remove(at);
+        }
+        r
+    }
+
     /// The statements of a list, where a store into a nested place is one
     /// store into the place's path (RFC-0125 M7).
     ///
@@ -4409,6 +4523,9 @@ impl<'a> Builder<'a> {
                 // same rule as the prefix form, at the other spelling.
                 if *consuming {
                     take_names_a_place(iter, *line, true)?;
+                }
+                if let Some(blk) = self.iterated(var, iter, body, &ity).filter(|_| !*consuming) {
+                    return self.iterate(blk, iter, ity, body, out);
                 }
                 // The container: a name the loop reads, or one it takes.
                 // `owner` is the name whose ownership the element sentence
