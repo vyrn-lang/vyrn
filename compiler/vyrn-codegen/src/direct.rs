@@ -3825,19 +3825,8 @@ impl<'p> Fn_<'_, 'p> {
                 self.rel_holes.clear();
                 r
             }
-            // The receiver is parked under a reserved name so the ordinary call
-            // path finds it as it finds any argument — the same trick `?` uses
-            // for `@try` — and the release is then just a call.
             Rel::Call(f, ty) => {
-                let mark = self.scope.len();
-                self.scope.push(("@rel".to_string(), p, ty.clone()));
-                let recv = [Expr::Var {
-                    name: "@rel".to_string(),
-                    line,
-                }];
-                let r = self.call(m, b, f, &recv, &[], line);
-                self.scope.truncate(mark);
-                r?;
+                self.release_call(m, b, f, ty, p, line)?;
                 // RFC-0096: the payload boxes are the enum's own storage and the
                 // declaration cannot reach them. Only a user enum has any, and
                 // only it gets an address taken for one.
@@ -3849,6 +3838,57 @@ impl<'p> Fn_<'_, 'p> {
                 self.free_declared_boxes(b, a, &ty, line)
             }
         }
+    }
+
+    /// Call the `release` a type declares (`impl Owned`, RFC-0096) on the value
+    /// at `p`: the instance whose type arguments `ty` fixes where the impl is
+    /// generic. The value crosses as a read of a binding does: a local's
+    /// value, a slot's address, module state's address or scalar.
+    fn release_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        f: &str,
+        ty: &Type,
+        p: Place,
+        line: usize,
+    ) -> Result<(), String> {
+        let sig = match self.cx.generics.get(f).copied() {
+            Some(g) => {
+                let params: Vec<Type> = g.params.iter().map(|p| p.ty.clone()).collect();
+                let (subst, solved) = crate::solve_with_expected(
+                    &g.type_params,
+                    &params,
+                    std::slice::from_ref(ty),
+                    &g.ret,
+                    None,
+                );
+                let Some(type_args) = solved.into_iter().collect::<Option<Vec<_>>>() else {
+                    return unsupported(&format!("a release `{f}` that `{ty}` does not fix"), line);
+                };
+                self.cx.instantiate(m, g, type_args, subst)?
+            }
+            None => match self.cx.sigs.get(f) {
+                Some(sig) => sig.clone(),
+                None => return unsupported(&format!("the release `{f}`"), line),
+            },
+        };
+        match p {
+            Place::Local(l) => {
+                b.ins(&Instruction::LocalGet(l));
+            }
+            Place::Slot(off) => {
+                b.slot(off);
+            }
+            Place::Static(at) => {
+                b.ins(&Instruction::I32Const(at as i32));
+                if let Repr::Scalar(_) = self.cx.repr(ty, line)? {
+                    b.ins(&load_of(&self.cx.ll(ty), 0, self.cx.signed(ty)));
+                }
+            }
+        }
+        b.ins(&Instruction::Call(sig.index));
+        Ok(())
     }
 
     /// Free the payload BOXES of an enum whose release the type declared, and

@@ -14,4 +14,4 @@ Licence, at the tip on main `daabd078`:
 Time: 70 minutes: 25 work, 35 gates, 10 finding where generator modules compile.
 Findings:
 - no gate counts a generator body's walk. coredrive drops them on purpose, and the form tally sees them only through `typed` and `effects`, which compile generators as a side effect.
-Left: a coredrive column for generator modules, blocked by a decision on which suite owns generator compiles. After this commit the form tally, not coredrive, is the measure for the arms these bodies reached.
+Left: no gate of its own for generator bodies, the lead's decision. Once the wide tally reads 0, the AST walk is deleted in one piece (#525), and no arm is left to regress to. Until then the wide tally with the core walk on, run over the `typed` and `effects` suites, is the measure for these bodies.
