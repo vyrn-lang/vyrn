@@ -595,8 +595,10 @@ pub enum Callee {
     /// a generation-time surface builtin, a `@`-spelled operation, `print`.
     Reserved,
     /// A call through a function VALUE in scope (RFC-0023): a lambda takes
-    /// its parameters by read.
-    Value,
+    /// its parameters by read. The name holds the value, and the call READS
+    /// it: every walker that counts a row's names counts it
+    /// ([`Callee::value`]). The row's `callee` spells it for a message.
+    Value(Name),
 }
 
 impl Callee {
@@ -611,6 +613,15 @@ impl Callee {
     /// caller keeps its own (`movecheck::sinks` asks `owns_heap` there and
     /// asks nothing at a declared parameter). RFC-0125 §3 M3, the
     /// two-questions slice.
+    /// The name a call through a value reads, or `None` for every other
+    /// callee.
+    pub fn value(self) -> Option<Name> {
+        match self {
+            Callee::Value(n) => Some(n),
+            _ => None,
+        }
+    }
+
     pub fn declared(self) -> bool {
         matches!(self, Callee::Fn | Callee::Method | Callee::Projection)
     }
@@ -1623,7 +1634,10 @@ impl Reads {
                     self.handed[n as usize] = true;
                 }
             }
-            Rhs::Call { args, .. } => {
+            Rhs::Call { args, kind, .. } => {
+                if let Some(f) = kind.value() {
+                    self.val(&Val::Name(f));
+                }
                 for (v, c) in args {
                     if *c == vyrn_frontend::ast::Capability::Consume {
                         self.hand(v);
@@ -1983,7 +1997,7 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// `VYRN_GAP_TALLY` tables them over the gate list.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
-    gaps_of(&body.stmts, &mut out);
+    gaps_of(body, &body.stmts, &mut out);
     let mut seen = std::collections::HashSet::new();
     out.retain(|t| seen.insert(t.clone()));
     out
@@ -2032,10 +2046,10 @@ fn traps(s: &St) -> bool {
     }
 }
 
-fn gaps_of(ss: &[St], out: &mut Vec<String>) {
+fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
     for s in ss {
         match s {
-            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(r, out),
+            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(body, r, out),
             St::Store { place, value, .. } => {
                 gaps_place(place, out);
                 gaps_val(value, out);
@@ -2048,13 +2062,13 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
                 cond, then, els, ..
             } => {
                 gaps_val(cond, out);
-                gaps_of(then, out);
-                gaps_of(els, out);
+                gaps_of(body, then, out);
+                gaps_of(body, els, out);
             }
             // Since the loop slice the exit is the row's: the pass makes up the
             // two-way branch and the `break` at the head of the loop it
             // desugared, and a walk emits wasm's conditional branch for it.
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(b, out),
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(body, b, out),
             St::Break { .. } | St::Continue { .. } | St::Trap => {}
             St::Return { value, .. } => {
                 if let Some(v) = value {
@@ -2066,14 +2080,14 @@ fn gaps_of(ss: &[St], out: &mut Vec<String>) {
             St::Switch { on, arms, .. } => {
                 gaps_val(on, out);
                 for a in arms {
-                    gaps_of(&a.body, out);
+                    gaps_of(body, &a.body, out);
                 }
             }
         }
     }
 }
 
-fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
+fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
     let vals = |vs: &[Val], out: &mut Vec<String>| {
         for v in vs {
             gaps_val(v, out);
@@ -2111,10 +2125,18 @@ fn gaps_rhs(r: &Rhs, out: &mut Vec<String>) {
             // the result back, two rows an emitter reads, for a name, a field,
             // an element and a global alike. What such a body waits on is its
             // CALLEE, which is `@push` and its siblings, and the tag says so.
+            // A call through a stored value is one call to its signature's
+            // dispatcher (`direct::Fn_::core_call`); through a `fn`-typed
+            // parameter it waits on the specialization.
             if !matches!(kind, Callee::Fn | Callee::Ctor | Callee::Named)
                 && builtin_row(callee).is_none()
+                && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
-                out.push(format!("Call:{kind:?}:{callee}"));
+                let tag = match kind {
+                    Callee::Value(_) => "Value".to_string(),
+                    k => format!("{k:?}"),
+                };
+                out.push(format!("Call:{tag}:{callee}"));
             }
             for (v, _) in args {
                 gaps_val(v, out);
@@ -3593,7 +3615,11 @@ impl<'a> Builder<'a> {
             } => {
                 let ty = self.ty_of(value)?;
                 let check = annotation.as_ref().and_then(|t| self.checked(&ty, t));
-                if check.is_none() && !matches!(value, Expr::Var { .. }) && is_place_read(value) {
+                if check.is_none()
+                    && !matches!(value, Expr::Var { .. })
+                    && is_place_read(value)
+                    && self.deferred_of(value).is_none()
+                {
                     let place = self.place(value, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -5421,9 +5447,15 @@ impl<'a> Builder<'a> {
             .contains(&mc::fn_sig_key(&ps, &r, &decls))
     }
 
-    /// The type a forced `lazy` field read yields, or `None` where the read is
-    /// an ordinary field of a record — see [`Builder::arg_released`].
+    /// The type a forced `lazy` field read yields where it owns heap, or
+    /// `None` — see [`Builder::arg_released`].
     fn forced_ty(&self, e: &Expr) -> Option<Type> {
+        self.deferred_of(e).filter(|t| self.proto.owns_heap(t))
+    }
+
+    /// The `T` of a read of a `lazy T` field, or `None` where `e` reads no
+    /// deferred field.
+    fn deferred_of(&self, e: &Expr) -> Option<Type> {
         let Expr::Field {
             expr: base, field, ..
         } = e
@@ -5436,8 +5468,31 @@ impl<'a> Builder<'a> {
             return None;
         };
         let f = fields.iter().find(|f| &f.name == field)?;
-        let inner = vyrn_frontend::types::deferred(&f.ty)?;
-        self.proto.owns_heap(inner).then(|| inner.clone())
+        vyrn_frontend::types::deferred(&f.ty).cloned()
+    }
+
+    /// A read of a `lazy T` field FORCES it (RFC-0085 M4a): the stored
+    /// nullary closure is read out of the field, which is a borrow of it,
+    /// and called through (RFC-0037). The call's result is a fresh value
+    /// every read, and its release is keyed by the read (`arg_released`).
+    fn force(&mut self, e: &'a Expr, inner: Type, out: &mut Vec<St>) -> Result<Rhs, Gap> {
+        let place = self.place(e, out)?;
+        let thunk = Type::Fn(Vec::new(), Box::new(inner.clone()));
+        let n = self.name("@thunk", thunk, false, e.line());
+        let callee = format!("@thunk{n}");
+        self.body.names[n as usize].source = callee.clone();
+        self.body.names[n as usize].path = reader_path(e);
+        out.push(St::Let(n, Rhs::Read(place)));
+        self.release_receiver(e, out, true);
+        Ok(Rhs::Call {
+            callee,
+            args: Vec::new(),
+            write_back: false,
+            kind: Callee::Value(n),
+            ret: Some(inner),
+            solved: Vec::new(),
+            targets: Vec::new(),
+        })
     }
 
     fn forces_a_thunk(&self, e: &Expr) -> bool {
@@ -5448,7 +5503,7 @@ impl<'a> Builder<'a> {
         let ty = self.ty_of(e).ok();
         let owns = ty.as_ref().is_some_and(|t| self.owns(t));
         match e {
-            Expr::Field { .. } if owns => {
+            Expr::Field { .. } if owns && self.deferred_of(e).is_none() => {
                 let place = self.place(e, out)?;
                 let t = self.borrow_name(e, ty.unwrap(), e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
@@ -5643,7 +5698,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
                 let ty = self.ty_of(e)?;
-                if is_place_read(e) && self.owns(&ty) {
+                if is_place_read(e) && self.owns(&ty) && self.deferred_of(e).is_none() {
                     // `best = m.name`, `if c { parts[0] } else { "" }`: the
                     // name this reaches is a borrow (`movecheck::names_a_place`
                     // says so at the `let` and at the store), and every take
@@ -6245,6 +6300,9 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Prim(Op::Bin(*op), vec![a, b], self.produced(e)))
             }
             Expr::Field { expr, field, .. } => {
+                if let Some(inner) = self.deferred_of(e) {
+                    return Ok(self.force(e, inner, out)?);
+                }
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
@@ -6855,15 +6913,15 @@ impl<'a> Builder<'a> {
         // A binding of function type is asked first, as `Checker::call` asks
         // it: a `fn`-typed parameter `h` shadows a function `h` the program
         // declares, and `h(req)` is a call through the value.
-        let bound = self.lookup(name).is_some_and(|n| {
+        let bound = self.lookup(name).filter(|n| {
             matches!(
-                vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, decls),
+                vyrn_frontend::types::resolve(&self.body.names[*n as usize].ty, decls),
                 Type::Fn(..)
             )
         });
-        let mut caps: Vec<Capability> = if bound {
+        let mut caps: Vec<Capability> = if let Some(n) = bound {
             // A lambda captures by read and takes by read (RFC-0023).
-            kind = Callee::Value;
+            kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
         } else if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
             kind = Callee::Fn;
@@ -7548,22 +7606,13 @@ pub fn body_of(name: &str) -> Option<Body> {
 /// each parameter in `bound` leaves the parameter list, a call through it is
 /// [`Callee::Fn`] to its target, and a call that passes it on names that
 /// target. `None` where a bound parameter is read any other way (stored,
-/// captured, handed to a position no target names), or where another name
-/// shares its spelling, because a call through a value names its callee by
-/// spelling.
+/// captured, handed to a position no target names).
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
-    let spelled = |n: Name| &body.names[n as usize].source;
-    let shared = bound.iter().any(|(n, _)| {
-        (body.names.iter().enumerate()).any(|(m, i)| m != *n as usize && i.source == *spelled(*n))
-    });
-    if shared || bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
+    if bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
         return None;
     }
-    let by_spelling: Vec<(&str, &Target)> = (bound.iter())
-        .map(|(n, t)| (spelled(*n).as_str(), t))
-        .collect();
     let mut out = body.clone();
-    bind_targets(&mut out.stmts, &by_spelling, bound);
+    bind_targets(&mut out.stmts, bound);
     let mut reads = vec![0; out.names.len()];
     count_reads(&out.stmts, &mut reads);
     if bound.iter().any(|(n, _)| reads[*n as usize] > 0) {
@@ -7573,7 +7622,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     Some(out)
 }
 
-fn bind_targets(ss: &mut [St], by_spelling: &[(&str, &Target)], bound: &[(Name, Target)]) {
+fn bind_targets(ss: &mut [St], bound: &[(Name, Target)]) {
     for s in ss {
         match s {
             St::Let(_, rhs) | St::Do { rhs, .. } => {
@@ -7586,9 +7635,8 @@ fn bind_targets(ss: &mut [St], by_spelling: &[(&str, &Target)], bound: &[(Name, 
                 else {
                     continue;
                 };
-                if *kind == Callee::Value {
-                    if let Some((_, Target::Fn(f))) = by_spelling.iter().find(|(c, _)| c == callee)
-                    {
+                if let Some(v) = kind.value() {
+                    if let Some((_, Target::Fn(f))) = bound.iter().find(|(n, _)| *n == v) {
                         *kind = Callee::Fn;
                         *callee = f.clone();
                     }
@@ -7602,15 +7650,13 @@ fn bind_targets(ss: &mut [St], by_spelling: &[(&str, &Target)], bound: &[(Name, 
                 }
             }
             St::If { then, els, .. } => {
-                bind_targets(then, by_spelling, bound);
-                bind_targets(els, by_spelling, bound);
+                bind_targets(then, bound);
+                bind_targets(els, bound);
             }
-            St::Loop { body, .. } | St::Block { body, .. } => {
-                bind_targets(body, by_spelling, bound)
-            }
+            St::Loop { body, .. } | St::Block { body, .. } => bind_targets(body, bound),
             St::Switch { arms, .. } => {
                 for a in arms {
-                    bind_targets(&mut a.body, by_spelling, bound);
+                    bind_targets(&mut a.body, bound);
                 }
             }
             _ => {}
@@ -7631,7 +7677,10 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
                 Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
                     vs.iter().for_each(|v| hit(v, out));
                 }
-                Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| hit(v, out)),
+                Rhs::Call { args, kind, .. } => {
+                    kind.value().iter().for_each(|f| hit(&Val::Name(*f), out));
+                    args.iter().for_each(|(v, _)| hit(v, out))
+                }
                 Rhs::Read(_) | Rhs::Take(_) => {}
             },
             St::Store { value, .. } => hit(value, out),
@@ -7823,7 +7872,10 @@ fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
     match r {
         Rhs::Val(v) => names_in_val(v, out),
         Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().for_each(|v| names_in_val(v, out)),
-        Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| names_in_val(v, out)),
+        Rhs::Call { args, kind, .. } => {
+            out.extend(kind.value());
+            args.iter().for_each(|(v, _)| names_in_val(v, out))
+        }
         Rhs::Read(p) | Rhs::Take(p) => names_in_place(p, out),
     }
 }

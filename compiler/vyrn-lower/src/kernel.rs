@@ -2092,6 +2092,10 @@ impl<'b> Kernel<'b> {
                 // Reads first, takes after: the call sees every argument
                 // before it owns any, so a receiver handed back through the
                 // result (`dup.append(dup)`) is read and taken by one call.
+                // A call through a value reads the value.
+                if let Some(f) = kind.value() {
+                    self.read(st, &Val::Name(f))?;
+                }
                 for (v, cap) in args {
                     if !matches!(cap, Capability::Consume) {
                         self.read(st, v)?;

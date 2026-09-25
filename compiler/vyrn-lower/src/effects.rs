@@ -342,27 +342,20 @@ impl Walk<'_> {
     /// What `callee` is: by name first, and for a name of this body, by its
     /// type — a callable local holds a function value, whatever alias the
     /// type is spelled through.
-    fn callee(&mut self, callee: &str) -> Callee {
-        let c = match self.memo.get(callee) {
-            Some(c) => c.clone(),
-            None => {
-                let c = (self.resolve)(callee);
-                self.memo.insert(callee.to_string(), c.clone());
-                c
-            }
+    /// Who a call row reaches. A call through a value (`value`) reaches what
+    /// the value's type may hold; any other callee is resolved by name.
+    fn callee(&mut self, callee: &str, value: Option<crate::core::Name>) -> Callee {
+        let Some(n) = value else {
+            return match self.memo.get(callee) {
+                Some(c) => c.clone(),
+                None => {
+                    let c = (self.resolve)(callee);
+                    self.memo.insert(callee.to_string(), c.clone());
+                    c
+                }
+            };
         };
-        if !matches!(c, Callee::Unknown) {
-            return c;
-        }
-        let Some(ty) = self
-            .body
-            .names
-            .iter()
-            .find(|n| n.source == callee)
-            .map(|n| &n.ty)
-        else {
-            return Callee::Unknown;
-        };
+        let ty = &self.body.names[n as usize].ty;
         let key = ty.to_string();
         let c = match self.memo_ty.get(&key) {
             Some(c) => c.clone(),
@@ -381,10 +374,10 @@ impl Walk<'_> {
     /// Whether the right-hand side was a call that is not a user body — the
     /// caller's own allocation when the result is owned.
     fn rhs(&mut self, r: &Rhs, line: usize) -> bool {
-        let Rhs::Call { callee, .. } = r else {
+        let Rhs::Call { callee, kind, .. } = r else {
             return false;
         };
-        let c = self.callee(callee);
+        let c = self.callee(callee, kind.value());
         self.calls.push((callee.clone(), c.clone()));
         let atom = match c {
             Callee::Atom(e) => {

@@ -11,7 +11,7 @@ fn makeAdder(n: Int64) -> Transform {
 export fn demo() -> String {
     let tenfold: Transform = x -> x * 10
     let addFive = makeAdder(5)
-    let steps: Array<Transform> = [tenfold, addFive]
+    let steps: Array<Transform> = [tenfold.copy(), addFive.copy()]
 
     let mut value = 1
     for step in steps {

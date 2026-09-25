@@ -181,17 +181,15 @@ fn lazy_is_still_an_ordinary_identifier_everywhere_else() {
 }
 
 /// The cost claim, checked rather than asserted in prose: a `lazy T` field IS
-/// `fn() -> T` (RFC-0037) and nothing else. The same program written both ways —
-/// deferred, and an ordinary fn-typed field read into a binding and called —
-/// emits **identical IR everywhere outside the one function that reads it**: the
-/// record lowers to the same aggregate, the constructor is the same function,
-/// and the force goes through the same synthesized dispatcher.
+/// `fn() -> T` (RFC-0037) and nothing else. The same program written both ways,
+/// deferred and as an ordinary fn-typed field read into a binding and called,
+/// emits **identical IR**: the record lowers to the same aggregate, the
+/// constructor is the same function, and the force is the same named read and
+/// the same call through the synthesized dispatcher (#452).
 ///
 /// Which is also the answer to what a lazy field costs a record that has none.
 /// Nothing: no shape changed, so nothing that is not deferred can pay for
-/// something that is. Inside the reader the explicit spelling is shorter: the
-/// core gives the named closure a place, and the implicit force is the arm's,
-/// which copies the closure into a temporary (the m7-names2 record).
+/// something that is.
 #[test]
 fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
     let wat_of = |name: &str, src: &str| -> String {
@@ -232,22 +230,13 @@ fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
          \x20   return 0\n\
          }\n",
     );
-    // Byte for byte outside the reader. The two programs differ in one token,
-    // whether the field is declared `lazy` or `fn() -> String`, and in whether
-    // `main` names the closure before calling it. The first difference
-    // does not reach the module. A deferral that built anything of its own, or
-    // a read that forced through a second path, would show here as one more
-    // function that differs.
-    let outside_main = |wat: &str| -> String {
-        let at = wat.find("\n  (func $main ").expect("a named `main`");
-        let end = wat[at + 1..]
-            .find("\n  (")
-            .map_or(wat.len(), |e| at + 1 + e);
-        format!("{}{}", &wat[..at], &wat[end..])
-    };
+    // The two programs differ in one token, whether the field is declared
+    // `lazy` or `fn() -> String`, and in whether `main` names the closure
+    // before calling it. Neither difference reaches the module. A deferral
+    // that built anything of its own, or a read that forced through a second
+    // path, would show here.
     assert_eq!(
-        outside_main(&deferred),
-        outside_main(&explicit),
+        deferred, explicit,
         "a lazy field must lower as the stored closure it is, and nothing else"
     );
 }
