@@ -18662,27 +18662,12 @@ impl<'p> Fn_<'_, 'p> {
             // `x.copy()` (RFC-0089 M1b): the operand at its own type, which
             // the row put on the name, and then the duplication the arm over
             // the source makes from the type `peek` answers with. A type that
-            // declares `impl Copy for T` says what duplicating it means, and
-            // that call is the declaration's, so the row stands down.
+            // declares `impl Copy for T` never reaches here: the core states
+            // that call as the declaration's.
             Some(Spec::OwnType) => {
                 let [(v, _)] = args else {
                     return unsupported("`copy` of other than one value", line);
                 };
-                if let Some(f) = self.core_copy_impl(body, callee, kind, v) {
-                    return self.core_call_vals(
-                        m,
-                        b,
-                        body,
-                        w,
-                        &f,
-                        Callee::Fn,
-                        &[],
-                        &[],
-                        args,
-                        hint,
-                        line,
-                    );
-                }
                 let ty = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &ty, line)?;
                 self.copy_stack(m, b, &ty, line)?;
@@ -20280,23 +20265,6 @@ impl<'p> Fn_<'_, 'p> {
             })
     }
 
-    /// The declared function a `x.copy()` row calls when the receiver's type
-    /// declares `impl Copy for T` (RFC-0091 M1), as the arm's `@copy` does.
-    fn core_copy_impl(
-        &self,
-        body: &vyrn_lower::core::Body,
-        callee: &str,
-        kind: Callee,
-        v: &Val,
-    ) -> Option<String> {
-        match core_builtin(callee, kind) {
-            Some(Spec::OwnType) => {
-                ftypes::copy_impl(&self.cx.impls, &self.core_ty(body, v, &Type::Int))
-            }
-            _ => None,
-        }
-    }
-
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
     /// operation slice's own reader.
     ///
@@ -20909,22 +20877,10 @@ impl<'p> Fn_<'_, 'p> {
                             Some(Spec::Builds(_)) => true,
                             // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
                             // the copy in a slot of its own, as `Builds` does.
-                            // A type that declares `impl Copy` is copied by that
-                            // declaration's function, a call like any other.
-                            Some(Spec::OwnType) => match args.as_slice() {
-                                [(Arg::Val(v), _)] => {
-                                    match self.core_copy_impl(body, callee, *kind, v) {
-                                        Some(f) => self
-                                            .core_sig(body, &f, Callee::Fn, &[], &[])
-                                            .is_some_and(|s| {
-                                                s.params.len() == 1 && s.ret.agg().is_some()
-                                            }),
-                                        None => matches!(v, Val::Name(n)
-                                if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_)))),
-                                    }
-                                }
-                                _ => false,
-                            },
+                            Some(Spec::OwnType) => {
+                                matches!(args.as_slice(), [(Arg::Val(Val::Name(n)), _)]
+                                if matches!(self.cx.repr(&body.names[*n as usize].ty, 0), Ok(Repr::Agg(_))))
+                            }
                             _ => false,
                         } || self
                             .core_sig(body, callee, *kind, solved, targets)
@@ -21144,8 +21100,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether a call row's builtin is one [`Fn_::core_call`] emits: the
-    /// arity the row states, and for a duplication a type that does not
-    /// declare its own `copy`.
+    /// arity the row states.
     fn core_builtin_readable(
         &self,
         body: &vyrn_lower::core::Body,
@@ -21155,9 +21110,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> bool {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
-            Some(Spec::OwnType) => {
-                matches!(args, [(Arg::Val(v), _)] if self.core_copy_impl(body, callee, kind, v).is_none())
-            }
+            Some(Spec::OwnType) => matches!(args, [(Arg::Val(_), _)]),
             Some(Spec::Renders(_) | Spec::Effect) => matches!(args, [_]),
             Some(Spec::Logs) => args.len() == logs_arity(callee),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),

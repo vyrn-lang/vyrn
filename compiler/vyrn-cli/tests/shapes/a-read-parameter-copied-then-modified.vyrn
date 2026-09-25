@@ -1,0 +1,7 @@
+// a read parameter copied, then modified
+// pin: 0 break, 0 continue
+// `let mut s = sc.copy()` of a `read` parameter that owns a String and an
+// Array, handed to `modify`, which replaces both. The copy is a fresh owner
+// released at block exit, and the caller's value is untouched (the m7-copy
+// record). Without `.copy()` the kernel refuses the `modify` argument.
+type Cur = { src: String, marks: Array<Int64>, pos: Int64 }          fn advance(c: modify Cur) -> Unit { c.src = c.src + "!" c.marks.push(c.pos) c.pos = c.pos + 1 }          fn after(sc: Cur) -> Int64 { let mut s = sc.copy() advance(s) advance(s) return s.src.byteLength * 100 + s.marks.length * 10 + s.pos }          fn vyrnTestMain() -> Int64 { let c = Cur { src: "ab" + "c", marks: [7], pos: 0 } let k = after(c) return k * 1000 + c.src.byteLength * 100 + c.marks.length * 10 + c.pos }

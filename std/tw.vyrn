@@ -190,7 +190,7 @@ fn twCssSingleToken(v: String) -> Bool {
 
 /// Whether only whitespace/comments remain (the token was the whole value).
 fn twCssNothingAfter(sc: Scanner) -> Bool {
-    let mut s = sc
+    let mut s = sc.copy()
     skipWs(s)
     return atEnd(s)
 }
