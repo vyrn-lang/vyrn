@@ -146,6 +146,7 @@ sh ../scripts/check-corpus.sh <main's tree> <out-base>
 sh ../scripts/check-corpus.sh .. <out-head>
 diff -r <out-base> <out-head>
 ```
+On the local machine, run `coredrive` as two shards, `VYRN_SHARD=0/2` and `VYRN_SHARD=1/2`, each under `timeout 600`, and add the two totals. A shard skips the pin of the forms the rows carry, and CI does not run `coredrive`, so a slice that takes bodies whole also runs it once unsharded at the tip.
 Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates.
 - The lexer's reserved words: `node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"`; the editor grammar's keywords must equal the lexer's.
