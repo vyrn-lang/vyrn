@@ -8739,7 +8739,7 @@ impl<'p> Fn_<'_, 'p> {
                 return self.rebuild(m, b, name, args, line)
             }
             "@clear" if args.len() == 1 => return self.rebuild(m, b, name, args, line),
-            "@tally" if args.len() == 3 => {
+            "@tally" | "@tallyBytes" if args.len() == 3 => {
                 let mty = self.expr(m, b, &args[0])?;
                 let hdr = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(hdr));
@@ -8747,9 +8747,11 @@ impl<'p> Fn_<'_, 'p> {
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
                         s.expr_as(m, b, &args[i + 1], t).map(|_| ())
                     };
-                return self.map_tally(m, b, hdr, &mty, &mut operand, line);
+                return match name {
+                    "@tally" => self.map_tally(m, b, hdr, &mty, &mut operand, line),
+                    _ => self.map_tally_bytes(m, b, hdr, &mty, &mut operand, line),
+                };
             }
-            "@tallyBytes" if args.len() == 3 => return self.map_tally_bytes(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
             // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
@@ -14129,26 +14131,35 @@ impl<'p> Fn_<'_, 'p> {
     /// allocates nothing. Only a miss goes through `str_from_bytes` (whose Err
     /// is the trap) and the insert path, where the fresh key is stored, not
     /// copied.
+    ///
+    /// The map's header address is in `hdr`. `operand` pushes operand 0, the
+    /// bytes, or operand 1, `n`, at the type it is handed, as for
+    /// [`Fn_::map_tally`].
     fn map_tally_bytes(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        args: &[Expr],
+        hdr: u32,
+        mty: &Type,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            &Type,
+        ) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
-        let mty = self.expr(m, b, &args[0])?;
-        let Type::Map(..) = self.cx.resolve(&mty) else {
+        let Type::Map(..) = self.cx.resolve(mty) else {
             return unsupported(&format!("`tallyBytes` on `{mty}`"), line);
         };
-        let l = self.layout_of(&mty, line)?;
-        let hdr = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(hdr));
+        let l = self.layout_of(mty, line)?;
         let bytes = Type::Array(Box::new(Type::IntN {
             bits: 8,
             signed: false,
         }));
         let wsrc = b.local(ValType::I32);
-        self.expr_as(m, b, &args[1], &bytes)?;
+        operand(self, m, b, 0, &bytes)?;
         b.ins(&Instruction::LocalSet(wsrc));
         let al = self.layout_of(&bytes, line)?;
         let (wdata, wlen) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -14160,7 +14171,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalSet(wlen));
         let n = b.local(ValType::I64);
-        self.expr_as(m, b, &args[2], &Type::Int)?;
+        operand(self, m, b, 1, &Type::Int)?;
         b.ins(&Instruction::LocalSet(n));
         // One probe, before any key exists: kind 3, the window's length as
         // `klen`, the window's address as the key.
@@ -14247,7 +14258,7 @@ impl<'p> Fn_<'_, 'p> {
         self.depth -= 1;
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalGet(hdr));
-        Ok(mty)
+        Ok(mty.clone())
     }
 
     /// `m.tally(k, n)` (RFC-0116): insert-or-add, ONE probe. The callee never
@@ -18675,14 +18686,17 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 let aty = body.names[*x as usize].ty.clone();
                 self.core_addr_of(b, w, body, *x, line)?;
-                if let ("@tally", [_, _]) = (callee, rest) {
+                if let ("@tally" | "@tallyBytes", [_, _]) = (callee, rest) {
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
                     let mut operand =
                         |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
                             s.core_val(m, b, body, w, &rest[i].0, t, line)
                         };
-                    return self.map_tally(m, b, hdr, &aty, &mut operand, line);
+                    return match callee {
+                        "@tally" => self.map_tally(m, b, hdr, &aty, &mut operand, line),
+                        _ => self.map_tally_bytes(m, b, hdr, &aty, &mut operand, line),
+                    };
                 }
                 let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match rest
                 {
@@ -20934,7 +20948,7 @@ impl<'p> Fn_<'_, 'p> {
                 if (body.names[*x as usize].grows
                     || matches!(
                         (callee.as_str(), self.cx.resolve(&body.names[*x as usize].ty)),
-                        (_, Type::Array(_)) | ("@tally", Type::Map(..))
+                        (_, Type::Array(_)) | ("@tally" | "@tallyBytes", Type::Map(..))
                     ))
                     && core_global(body, *x).is_none_or(|g| self.cx.gappend.contains_key(g))
                     && self.core_args_readable(body, rest))

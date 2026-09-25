@@ -1,0 +1,5 @@
+// a map tallyBytes the rows carry, on a hit and on a miss
+// pin: 0 break, 0 continue
+// (RFC-0125 M7, `m7-mapcall`). A miss builds the String key from the
+// bytes, which the map owns; a hit builds nothing.
+fn counts() -> Map<String, Int64> { let mut m: Map<String, Int64> = [:] return m }          fn vyrnTestMain() -> Int64 { let mut m = counts() let w = bytes("ab" + "c") let v = bytes("x")          m.tallyBytes(w, 1) m.tallyBytes(w, 2) m.tallyBytes(v, 5) m.tally("abc", 10)          let t = match m["abc"] { Some(c) => c, None => 0 } * 10 + match m["x"] { Some(c) => c, None => 0 }          return t + m.length * 1000 + w.length * 10000 }
