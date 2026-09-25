@@ -655,6 +655,26 @@ fn rows() -> Vec<Function> {
             arr(Type::Param("K".to_string())),
             &[],
         ),
+        // `m.remove(k)` (RFC-0028) shrinks the map where it lies, as `@pop`
+        // shrinks an array: the receiver is `modify`. The checker's map arm
+        // types the call.
+        row(
+            "@remove",
+            &["K", "V"],
+            &[
+                (
+                    "m",
+                    Modify,
+                    Type::Map(
+                        Box::new(Type::Param("K".to_string())),
+                        Box::new(Type::Param("V".to_string())),
+                    ),
+                ),
+                ("k", Read, Type::Param("K".to_string())),
+            ],
+            Bool,
+            &[],
+        ),
         // `m.tally(k, n)` (RFC-0116): insert-or-add on a count map, one probe.
         // This row types the whole call since RFC-0125 §3 M6, for the reason on
         // `@reserve` above. The key is READ — a hit keeps the key the map
@@ -1217,7 +1237,7 @@ mod tests {
                 "`{name}` argument {i} is taken for good"
             );
         }
-        for name in ["@pop", "@swapRemove"] {
+        for name in ["@pop", "@swapRemove", "@remove"] {
             assert_eq!(capability(name, 0), Some(Capability::Modify));
         }
     }

@@ -14118,13 +14118,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `m[k] = v` — update in place on a hit, append on a miss.
-    ///
-    /// `hdr` is a local holding the header's address. `drop_old` is rule 4's own
-    /// question — may this store release what the slot holds now — answered by
-    /// the caller, because a new value that names the map could name the very
-    /// bytes this frees. The map takes the value as well as the key, so a hit
-    /// that only stored over the old value leaked it.
     /// `m.tallyBytes(w, n)` (RFC-0116): the byte-keyed probe, on this backend
     /// too. `mapFind`'s kind 3 compares the window where it lies, so a hit — the
     /// hot path in a counting loop — builds no String, validates nothing, and
@@ -14358,6 +14351,13 @@ impl<'p> Fn_<'_, 'p> {
         Ok(mty.clone())
     }
 
+    /// `m[k] = v` — update in place on a hit, append on a miss.
+    ///
+    /// `hdr` is a local holding the header's address. `drop_old` is rule 4's own
+    /// question — may this store release what the slot holds now — answered by
+    /// the caller, because a new value that names the map could name the very
+    /// bytes this frees. The map takes the value as well as the key, so a hit
+    /// that only stored over the old value leaked it.
     fn map_set(
         &mut self,
         m: &mut Module,
