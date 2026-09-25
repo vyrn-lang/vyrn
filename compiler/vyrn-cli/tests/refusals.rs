@@ -350,6 +350,22 @@ fn census() -> Vec<Row> {
             "`s` may not be stored into `push(..)` — it is a `read` parameter",
             Kernel::Its,
         ),
+        row(
+            "r35_write_into_a_second_name_for_a_read_parameter.vyrn",
+            "rule 2: a store into a part of a second name for a parameter",
+            "RFC-0089",
+            "`c` may not be written through the field `name` — it is a second name for the \
+             `read` parameter `r`",
+            Kernel::Its,
+        ),
+        row(
+            "r36_modify_a_second_name_for_a_read_parameter.vyrn",
+            "rule 2: a second name for a parameter into a `modify` argument",
+            "RFC-0089",
+            "`c` may not be passed to a `modify` parameter via `lengthen(..)` — it is a second \
+             name for the `read` parameter `r`",
+            Kernel::Its,
+        ),
     ]
 }
 

@@ -528,7 +528,7 @@ struct Kernel<'b> {
     made: Vec<String>,
     part: std::cell::Cell<usize>,
     /// How that taker takes ([`Taker`]).
-    takes: Taker,
+    takes: std::cell::Cell<Taker>,
     /// Whether the name being consumed is leaving its SCOPE rather than
     /// being taken: the release this pass places, and a literal whose scope
     /// ends. Nothing took it, so the report records no taker — the statement
@@ -617,6 +617,10 @@ enum Taker {
     Stores,
     /// A variant constructor: the value is PUT INTO what it makes.
     Constructs,
+    /// A `modify` parameter: the value is PASSED to it, and written.
+    Modifies,
+    /// A store into a part: the value is WRITTEN THROUGH it.
+    Writes,
 }
 
 struct LoopCtx {
@@ -674,7 +678,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
         by: String::new(),
         made: Vec::new(),
         part: std::cell::Cell::new(0),
-        takes: Taker::Stores,
+        takes: std::cell::Cell::new(Taker::Stores),
         how: TookHow::Other,
         ending: std::cell::Cell::new(false),
         builtin: false,
@@ -767,7 +771,7 @@ impl<'b> Kernel<'b> {
         // A part of a literal is STORED into the field, whatever the statement
         // around it does.
         let takes = match self.part.get() {
-            0 => self.takes,
+            0 => self.takes.get(),
             _ => Taker::Stores,
         };
         st.taker[n as usize] = Some((self.here, by.clone(), takes));
@@ -1392,7 +1396,7 @@ impl<'b> Kernel<'b> {
             }
             _ => path.as_str(),
         };
-        if self.takes == Taker::Declared && path.contains('[') {
+        if self.takes.get() == Taker::Declared && path.contains('[') {
             return vec![
                 format!("`{path}.copy()` — the callee owns its copy"),
                 format!(
@@ -1426,6 +1430,8 @@ impl<'b> Kernel<'b> {
     /// names one. The verb is the taker's ([`Taker`]) and the words are
     /// `movecheck`'s: a declared `consume` parameter is passed to, a builtin's
     /// sink and a store are stored into, a variant constructor is put into.
+    /// A `modify` parameter is passed to, and a part stored into is written
+    /// through (#501).
     fn may_not(&self, s: &str) -> String {
         let by = &self.by;
         if by == "a literal" {
@@ -1443,15 +1449,17 @@ impl<'b> Kernel<'b> {
                 None => format!("`{s}` may not be stored into the literal"),
             };
         }
-        if !by.ends_with("(..)`") {
+        if !by.ends_with("(..)`") && self.takes.get() != Taker::Writes {
             return format!("`{s}` may not be stored into {by}");
         }
-        match self.takes {
+        match self.takes.get() {
             Taker::Declared => {
                 format!("`{s}` may not be passed to a `consume` parameter via {by}")
             }
             Taker::Constructs => format!("`{s}` may not be put into {by}"),
             Taker::Stores => format!("`{s}` may not be stored into {by}"),
+            Taker::Writes => format!("`{s}` may not be written through {by}"),
+            Taker::Modifies => format!("`{s}` may not be passed to a `modify` parameter via {by}"),
         }
     }
 
@@ -1869,7 +1877,7 @@ impl<'b> Kernel<'b> {
         // A constructor names one way out: the value it makes owns what it is
         // given, so the copy is the answer and a `consume` on the parameter is
         // not (RFC-0125 §3 M3, row 19).
-        let fixes = if self.takes == Taker::Constructs && !capture {
+        let fixes = if self.takes.get() == Taker::Constructs && !capture {
             vec![format!("`{s}.copy()` if the value should own it")]
         } else if by == "a `return`" && capture {
             vec![format!("`{s}.copy()` if the caller needs its own value")]
@@ -1889,6 +1897,32 @@ impl<'b> Kernel<'b> {
         };
         self.refuse_at::<()>(self.here, menu(msg, fixes))
             .unwrap_err()
+    }
+
+    /// The kind of borrow `n` is, where a take of it is refused by that kind
+    /// ([`Kernel::param_take`]). A must-use parameter is the callee's to hand
+    /// on, whatever its capability says (RFC-0075 M1,
+    /// [`NameInfo::must_use_param`]).
+    fn kind_of_borrow(&self, n: Name) -> Option<&BorrowKind> {
+        let i = &self.body.names[n as usize];
+        i.borrow_kind
+            .as_ref()
+            .filter(|_| self.borrowed(n) && !i.must_use_param)
+    }
+
+    /// A write into a part of a second name for a parameter, or a `modify`
+    /// argument of one, is refused as a take is (#501). The name holds the
+    /// parameter's bytes and so the caller's heap, and the write would
+    /// replace or release what the caller still owns. A name bound to a place
+    /// this frame owns writes that place's buffer, which is defined
+    /// (`an-alias-of-a-field-written-through`).
+    fn write(&self, n: Name) -> Result<(), Refusal> {
+        match self.kind_of_borrow(n) {
+            Some(b @ BorrowKind::Param { .. }) if !self.body.params.contains(&n) => {
+                Err(self.param_take(n, b))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// A take of a name: it must be held, and it is gone afterwards. An
@@ -1912,14 +1946,8 @@ impl<'b> Kernel<'b> {
     ) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if !write_back {
-                let i = &self.body.names[*n as usize];
-                if let Some(b) = &i.borrow_kind {
-                    // RFC-0075 M1: a must-use parameter is the callee's to
-                    // hand on, whatever its capability says, so this take is
-                    // not the caller's value leaving ([`NameInfo::must_use_param`]).
-                    if self.borrowed(*n) && !i.must_use_param {
-                        return Err(self.param_take(*n, b));
-                    }
+                if let Some(b) = self.kind_of_borrow(*n) {
+                    return Err(self.param_take(*n, b));
                 }
             }
             if st.alias[*n as usize].is_some() {
@@ -2104,6 +2132,19 @@ impl<'b> Kernel<'b> {
                         Arg::Val(v) if !matches!(cap, Capability::Consume) => self.read(st, v)?,
                         Arg::Val(_) => {}
                     }
+                    if *cap == Capability::Modify {
+                        let root = match a {
+                            Arg::Place(p) => root_of(p).map(|(n, _)| n),
+                            Arg::Val(Val::Name(n)) => Some(*n),
+                            Arg::Val(_) => None,
+                        };
+                        if let Some(n) = root {
+                            let takes = self.takes.replace(Taker::Modifies);
+                            let r = self.write(n);
+                            self.takes.set(takes);
+                            r?;
+                        }
+                    }
                 }
                 for (i, (a, cap)) in args.iter().enumerate() {
                     if let (Arg::Val(v), Capability::Consume) = (a, cap) {
@@ -2245,7 +2286,7 @@ impl<'b> Kernel<'b> {
             St::Let(n, rhs) => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = self.by_of(rhs, Some(*n));
-                self.takes = taker_of(rhs);
+                self.takes.set(taker_of(rhs));
                 self.made = self.body.names[*n as usize].fields.clone();
                 self.rebound(*n);
                 self.released.borrow_mut()[*n as usize] = None;
@@ -2256,7 +2297,7 @@ impl<'b> Kernel<'b> {
                     self.released.borrow_mut()[*n as usize] = None;
                 }
                 self.here = *line;
-                self.takes = Taker::Stores;
+                self.takes.set(Taker::Stores);
                 self.by = match place {
                     Place::Name(n) if !self.src(*n).starts_with('@') => {
                         format!("the binding `{}`", self.src(*n))
@@ -2279,11 +2320,11 @@ impl<'b> Kernel<'b> {
             St::Return { line, .. } => {
                 self.here = *line;
                 self.by = "a `return`".to_string();
-                self.takes = Taker::Stores;
+                self.takes.set(Taker::Stores);
             }
             St::Do { rhs, line, .. } => {
                 self.here = *line;
-                self.takes = taker_of(rhs);
+                self.takes.set(taker_of(rhs));
                 self.by = self.by_of(rhs, None);
             }
             St::Switch { line, .. } => {
@@ -2429,6 +2470,14 @@ impl<'b> Kernel<'b> {
                         self.read(st, value)?;
                         st.dead[*m as usize] = Some((self.here, self.place_text(place)));
                         return Ok(());
+                    }
+                }
+                if let Some((n, path)) = root_of(place) {
+                    if !path.is_empty() {
+                        let takes = self.takes.replace(Taker::Writes);
+                        let r = self.write(n);
+                        self.takes.set(takes);
+                        r?;
                     }
                 }
                 // Read before the take, which ends the temporary: a store
