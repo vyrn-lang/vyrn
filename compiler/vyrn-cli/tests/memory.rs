@@ -2457,7 +2457,7 @@ fn a_map_of_a_packed_key_and_a_string_value_is_freed_on_both_walks() {
 fn a_stored_function_value_passed_on_is_freed_on_both_walks() {
     shape_runs_clean(
         "a-stored-function-value-passed-to-a-higher-order-function",
-        "0\n4\n301353\n",
+        "0\n4\n321353\n",
     );
 }
 

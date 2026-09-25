@@ -9582,6 +9582,12 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        // Every alias this call registers dies with it, the ones
+        // `resolve_fn_arg` registers for its capture sources included: an
+        // alias that outlives its clone resolves a later node at the same
+        // address to the caller's row, and a capture read there was freed
+        // (#526).
+        let mark = self.cx.plan.alias_scope();
         let generic = !f.type_params.is_empty();
         let mut subst: HashMap<String, Type> = HashMap::new();
         // Pass 1: the ordinary arguments, so a `map<T, U>` lambda sees a concrete
@@ -9656,7 +9662,6 @@ impl<'p> Fn_<'_, 'p> {
         // what fixes them at this site.
         let mut call_args: Vec<Expr> = Vec::new();
         let mut srcs = cap_srcs.iter();
-        let mark = self.cx.plan.alias_scope();
         // RFC-0114 §26: `call_args` holds CLONES of the caller's argument
         // expressions, so plan rows on the originals would go undischarged —
         // each element remembers its source's node addresses, and the pairs
