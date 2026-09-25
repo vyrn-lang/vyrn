@@ -1,0 +1,21 @@
+#### A move-out window and a place through a projected container are stated on their path (2026-09-25, `m7-window`)
+RFC-0125, milestone M7.
+Decision: B, the lead's (#464). The core states the window on its path: a call takes a place argument, and a place through a container a projection answers for is the place that projection yields, prologue included. Three commits: the call window, the projected place (#458's patch plus its store half), and the prologue's bindings.
+Went: the window's `let` and put-back around a removal (`s.free.pop()`) are no rows; a `Slots` element read or stored through a window is no bare `Place::Elem`. Stayed: a direct `s[h] = v` into a user container is still a bare element, because it is not a window and no body this track measured needed it.
+Lines: `direct.rs` 21,409 to 21,519; `core.rs` 8,858 to 9,064; `kernel.rs` and `effects.rs` +14 net. More than it deletes: `Arg` is a new row, and `Builder::window` and `Builder::yielded` are new walks. Refusals: 0 lost / 0 gained. Manifest: 14 programs against main, below.
+Licence:
+- coredrive on main `6406139e` and at the tip: taken 20,922 to 20,977 of 21,172 (+55), 0 run apart. Per commit, measured on `765d23aa`: taken 20,905, then 20,938 (+33, the `std/slots` `insert<T>` and `remove<T>` instances), 20,947 (+9: `cursorGet` and `srcOf` in 4 programs, `namedplace` `main`), 20,960 (+13: `cursorSet` x4, `freeNode` x3, `sum` x2, `length`, `measure`, `maxDepth`, `treeSum`), of 21,177.
+- manifest, per function from `wasm2wat` with `VYRN_WASM_NAMES=1`: commit 1, 33 `insert`/`remove` functions in 13 programs, each 11 `memory.copy` fewer and a frame 48 to 96 bytes smaller. Commit 2, `cursorGet` and `srcOf` 184 to 193 lines, same copies and frame: the core keeps `at`'s prologue joins in locals where the arm kept them on the stack. Commit 3, `cursorSet` 359 to 219 lines and 7 to 2 copies, frame 128 to 64; `freeNode`, `sum`, `length`, `maxDepth`, `treeSum` frames 16 to 64 bytes smaller, 20 to 70 lines longer from the same joins.
+- `vyrn check` over 492 roots with main's binary and each tip: every shared root byte-identical, the two new shapes accepted. `examples/slots.vyrn` accepted: the first cut's refusal at line 35 is gone.
+- kernel 27,061 accepted, as on main / 0 refused / 0 unlowered; residue engine 173 clean / 0 leaking, route 173 / 0.
+- effects: 29,619 functions judged on main and at the tip, 0 differ; pure 9,951 to 9,945. The 6 that stop reading as pure read a `Slots` element, whose prologue can panic: `freelist` `sum`, `linkedlist` `length` and `sum`, `tree` `maxDepth`, `treeDepth` and `treeSum`.
+- the moved programs under `VYRN_LEAK_CHECK=1`, the base binary of each commit and its tip: stdout, stderr and exit code equal, no audit line.
+- the shape `an-element-of-a-slots-read-through-a-dead-handle` prints 7 and then traps with "slots: handle is not alive (std/slots.vyrn:204)" on both walks; `a-removal-from-a-field-of-a-modify-parameter` prints 5221 on both walks.
+Findings:
+- the per-statement walk emitted a windowed removal's row, and the arm emitted the window's `let` and put-back around it, so the put-back undid the pop. `core_run` refuses such a run; only a whole body takes it.
+- `atSet` inlined at the window's element read has no checker types (the substituted index is a clone), so `slots` `main` had no core body and its three `Slots` releases were never emitted: a leak. `Builder::yielded` reads the expansion the checker made for the put-back (`project::stored`) instead.
+- the bare element hid `at`'s trap from the effect judgment, which read those 6 functions as pure.
+- `lowered`'s compared-answers floor: 4,902 answers at the tip, under the floor of 5,000, because only the AST walk answers; the floor is 4,000 and names #465.
+- `core_moves_on` (#473) reads a place argument rooted at the take's root as sharing it.
+- `core_copies` keyed a copy on the spelling `@`; `NameInfo::bound_by_let` is the key.
+Left: 7 refused bodies hold `@pN.h` beside another clause (`takeCursor` x4, a `@borrow` of the global `cells`; 3 `main`s), blocked by those clauses; a direct `s[h] = v` store through `atSet`, blocked by `Stmt::IndexSet` carrying a name and no receiver node for `project::site`; the has-type floor, #465.

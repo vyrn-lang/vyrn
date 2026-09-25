@@ -274,7 +274,7 @@ fn operation(rhs: &Rhs, ops: &mut BTreeMap<String, usize>) {
         }
         Rhs::Val(v) => literal(v, ops),
         Rhs::Call { args, .. } => {
-            for (v, _) in args {
+            for v in args.iter().filter_map(|(a, _)| a.val()) {
                 literal(v, ops);
             }
         }

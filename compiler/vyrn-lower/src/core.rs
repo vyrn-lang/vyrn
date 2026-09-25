@@ -457,6 +457,25 @@ pub enum Val {
     Lit(Lit),
 }
 
+/// One argument of a call: a value, or the place a `modify` parameter
+/// writes. A place argument is RFC-0082's move-out window stated on its path
+/// ([`Builder::nested_store`]): the window's extent is the call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Arg {
+    Val(Val),
+    Place(Place),
+}
+
+impl Arg {
+    /// The value, where the argument is one.
+    pub fn val(&self) -> Option<&Val> {
+        match self {
+            Arg::Val(v) => Some(v),
+            Arg::Place(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Place {
     Name(Name),
@@ -499,7 +518,7 @@ pub enum Rhs {
     Take(Place),
     Call {
         callee: String,
-        args: Vec<(Val, Capability)>,
+        args: Vec<(Arg, Capability)>,
         /// Argument 0 is the receiver of a rebuilding builtin passed by name
         /// (`out.push(v)`): the call hands the buffer back through its result
         /// and the store after it puts it back, so the take changes no owner.
@@ -1283,7 +1302,13 @@ impl Body {
                 "{} {callee}({})",
                 format!("{kind:?}").to_lowercase(),
                 args.iter()
-                    .map(|(v, c)| format!("{:?} {}", c, self.val(v)).to_lowercase())
+                    .map(|(a, c)| {
+                        let a = match a {
+                            Arg::Val(v) => self.val(v),
+                            Arg::Place(p) => self.place(p),
+                        };
+                        format!("{c:?} {a}").to_lowercase()
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -1642,11 +1667,13 @@ impl Reads {
                 if let Some(f) = kind.value() {
                     self.val(&Val::Name(f));
                 }
-                for (v, c) in args {
-                    if *c == vyrn_frontend::ast::Capability::Consume {
-                        self.hand(v);
-                    } else {
-                        self.val(v);
+                for (a, c) in args {
+                    match a {
+                        Arg::Place(p) => self.place(p),
+                        Arg::Val(v) if *c == vyrn_frontend::ast::Capability::Consume => {
+                            self.hand(v)
+                        }
+                        Arg::Val(v) => self.val(v),
                     }
                 }
             }
@@ -2147,8 +2174,11 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
                 };
                 out.push(format!("Call:{tag}:{callee}"));
             }
-            for (v, _) in args {
-                gaps_val(v, out);
+            for (a, _) in args {
+                match a {
+                    Arg::Val(v) => gaps_val(v, out),
+                    Arg::Place(p) => gaps_place(p, out),
+                }
             }
         }
         Rhs::Prim(Op::Closure, vs, _) => {
@@ -2931,6 +2961,10 @@ impl<'a> Builder<'a> {
     ///   [`vyrn_frontend::project::optional_inline`] mints a different tree.
     ///   [`Builder::optional_if_let`] states that split at the `if let`.
     /// - The receiver has no recorded type, so the tree cannot be keyed.
+    ///
+    /// The answer is the yielded place: a read of it here, and a place path
+    /// through it in [`Builder::place`], so `s[h].next` walks what `at`
+    /// yields after its prologue has run.
     fn inlined(
         &mut self,
         method: &str,
@@ -2938,7 +2972,7 @@ impl<'a> Builder<'a> {
         args: &'a [Expr],
         line: usize,
         out: &mut Vec<St>,
-    ) -> Result<Option<Rhs>, Gap> {
+    ) -> Result<Option<Place>, Gap> {
         if !vyrn_frontend::project::memo_open() {
             return Ok(None);
         }
@@ -2982,8 +3016,7 @@ impl<'a> Builder<'a> {
         if !is_place_read(&p.place) {
             return gap_d("a projection whose yield is not a place", method, line);
         }
-        let place = self.place(&p.place, out)?;
-        Ok(Some(Rhs::Read(place)))
+        self.place(&p.place, out).map(Some)
     }
 
     /// `if let Some(x) = s.tryAt(h)` (RFC-0122), stated at the site — RFC-0125
@@ -3498,17 +3531,37 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The store at the head of `ss` when it is a move-out window
+    /// The store or removal at the head of `ss` when it is a move-out window
     /// ([`Builder::stmt_list`]), stated into its path; how many statements it
     /// spans, or `None` when `ss` does not start with one.
     fn nested_store(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<Option<usize>, Gap> {
-        let lets = ss
-            .iter()
-            .take_while(|s| {
-                matches!(s, Stmt::Let { name, mutable: true, .. }
-                    if vyrn_frontend::ast::is_place_temp(name))
-            })
-            .count();
+        let Some((lets, last, place, ty)) = self.window(ss, out)? else {
+            return Ok(None);
+        };
+        let store = &ss[lets];
+        let sid = store as *const Stmt as usize;
+        match store {
+            Stmt::SetField {
+                field, value, line, ..
+            } => self.set_field((place, ty), last, field, value, sid, *line, out)?,
+            Stmt::IndexSet {
+                index, value, line, ..
+            } => self.index_set((place, ty), last, index, value, sid, *line, out)?,
+            _ => self.removal_at(place, ty, last, store, store.line(), out)?,
+        }
+        Ok(Some(2 * lets + 1))
+    }
+
+    /// The move-out window at the head of `ss`: how many temps it moves out,
+    /// and the name, place and type of the last, which the statement after
+    /// them writes. `None`, with nothing stated, when `ss` does not start with
+    /// one.
+    fn window(
+        &mut self,
+        ss: &'a [Stmt],
+        out: &mut Vec<St>,
+    ) -> Result<Option<(usize, &'a String, Place, Type)>, Gap> {
+        let lets = ss.iter().take_while(|s| moves_out(s)).count();
         if lets == 0 || ss.len() < 2 * lets + 1 {
             return Ok(None);
         }
@@ -3527,7 +3580,7 @@ impl<'a> Builder<'a> {
                 },
                 Expr::Call { name: at, args, .. } if at == "@at" && args.len() == 2 => {
                     match (&args[0], &args[1]) {
-                        (Expr::Var { name: p, .. }, idx @ Expr::Var { .. }) => (p, Err(idx)),
+                        (Expr::Var { name: p, .. }, Expr::Var { .. }) => (p, Err(&args[..])),
                         _ => return Ok(None),
                     }
                 }
@@ -3551,7 +3604,7 @@ impl<'a> Builder<'a> {
                         value: Expr::Var { name: v, .. },
                         ..
                     },
-                    Err(Expr::Var { name: i2, .. }),
+                    Err([_, Expr::Var { name: i2, .. }]),
                 ) => p == parent && j == i2 && v == name,
                 _ => false,
             };
@@ -3562,54 +3615,163 @@ impl<'a> Builder<'a> {
             parts.push((parent, part));
         }
         let store = &ss[lets];
-        let (Stmt::SetField { name, line, .. } | Stmt::IndexSet { name, line, .. }) = store else {
-            return Ok(None);
-        };
         let Stmt::Let { name: last, .. } = &ss[lets - 1] else {
             return Ok(None);
         };
-        if name != last {
+        let into = match store {
+            Stmt::SetField { name, .. } | Stmt::IndexSet { name, .. } => Some(name),
+            Stmt::Expr(e) | Stmt::Let { value: e, .. } => removal(e),
+            _ => None,
+        };
+        if into != Some(last) {
             return Ok(None);
         }
+        let line = &store.line();
         // The path is a record's fields and an array's elements. A map's
-        // entry is a key read and a user container's element is its `place
-        // at`, which the rows state apart.
+        // entry is a key read, which the rows state apart. A container a
+        // projection answers for yields its element's place from `atSet`
+        // (RFC-0091), whose prologue runs once, where the window opens; its
+        // receiver is the root, which a later temp's is not
+        // ([`Builder::yielded`]).
         let (mut place, mut ty) = self.named_place(parts[0].0, *line)?;
         let mut t = ty.clone();
-        for (_, part) in &parts {
+        let mut tys = Vec::new();
+        for (i, (_, part)) in parts.iter().enumerate() {
             let next = match part {
                 Ok(f) => self.field_ty(&t, f, *line),
                 Err(_) if self.is_map(&t) => return Ok(None),
+                Err(_) if self.projected(&t) && i > 0 => return Ok(None),
+                Err(_) if self.projected(&t) => match &ss[i] {
+                    Stmt::Let { value, .. } => self.ty_of(value),
+                    _ => return Ok(None),
+                },
                 Err(_) => self.elem_ty(&t, *line),
             };
             let Ok(next) = next else {
                 return Ok(None);
             };
-            t = next;
+            t = next.clone();
+            tys.push(next);
         }
-        for (_, part) in &parts {
-            (place, ty) = match part {
-                Ok(f) => (
-                    Place::Field(Box::new(place), f.to_string()),
-                    self.field_ty(&ty, f, *line)?,
-                ),
-                Err(idx) => (
-                    Place::Elem(Box::new(place), self.read_val(idx, out)?),
-                    self.elem_ty(&ty, *line)?,
-                ),
+        for ((_, part), next) in parts.iter().zip(tys) {
+            place = match part {
+                Ok(f) => Place::Field(Box::new(place), f.to_string()),
+                Err(_) if self.projected(&ty) => match self.yielded(&ss[2 * lets], out)? {
+                    Some(p) => p,
+                    None => return Ok(None),
+                },
+                Err(args) => Place::Elem(Box::new(place), self.read_val(&args[1], out)?),
             };
+            ty = next;
         }
-        let sid = store as *const Stmt as usize;
-        match store {
-            Stmt::SetField { field, value, .. } => {
-                self.set_field((place, ty), name, field, value, sid, *line, out)?
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                self.index_set((place, ty), name, index, value, sid, *line, out)?
-            }
-            _ => return Ok(None),
+        Ok(Some((lets, last, place, ty)))
+    }
+
+    /// The place `atSet` yields for a window's put-back `back` into a
+    /// container a projection answers for, with the projection's prologue
+    /// stated. The checker expanded that store (`project::stored`): the
+    /// prologue, then the yielded place written as a store of the window's
+    /// temp. The store's path is the place. `None`, with nothing stated, where
+    /// the checker expanded no such store.
+    fn yielded(&mut self, back: &'a Stmt, out: &mut Vec<St>) -> Result<Option<Place>, Gap> {
+        let Stmt::IndexSet {
+            name,
+            index,
+            value,
+            line,
+        } = back
+        else {
+            return Ok(None);
+        };
+        let Some(blk) = vyrn_frontend::project::stored(name, index, value) else {
+            return Ok(None);
+        };
+        let Some(k) = vyrn_frontend::project::store_node(blk)
+            .and_then(|s| blk.stmts.iter().position(|t| std::ptr::eq(t, s)))
+        else {
+            return gap("an `atSet` expansion with no store", *line);
+        };
+        let group = blk.stmts[..k]
+            .iter()
+            .rposition(|s| !moves_out(s))
+            .map_or(0, |j| j + 1);
+        for s in &blk.stmts[..group] {
+            self.stmt(s, out)?;
         }
-        Ok(Some(2 * lets + 1))
+        let (base, store) = match self.window(&blk.stmts[group..], out)? {
+            Some((_, _, p, _)) => (p, &blk.stmts[k]),
+            None => match &blk.stmts[k] {
+                s @ (Stmt::IndexSet { name, .. } | Stmt::SetField { name, .. }) => {
+                    (self.named_place(name, *line)?.0, s)
+                }
+                _ => return gap("an `atSet` expansion whose store is no place", *line),
+            },
+        };
+        let place = match store {
+            Stmt::IndexSet {
+                index, value: v, ..
+            } if v == value => Place::Elem(Box::new(base), self.read_val(index, out)?),
+            Stmt::SetField {
+                field, value: v, ..
+            } if v == value => Place::Field(Box::new(base), field.clone()),
+            _ => {
+                return gap(
+                    "an `atSet` expansion that stores other than the temp",
+                    *line,
+                )
+            }
+        };
+        Ok(Some(place))
+    }
+
+    /// A removal whose receiver is a move-out window's temp
+    /// ([`Builder::nested_store`]), stated with the window's place as its
+    /// `modify` argument: the call shrinks the place where it lies, and the
+    /// temp and its put-back are no rows.
+    fn removal_at(
+        &mut self,
+        place: Place,
+        ty: Type,
+        temp: &str,
+        store: &'a Stmt,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        let t = self.name(temp, ty, false, line);
+        self.scope.push((temp.to_string(), t));
+        let mut rows = Vec::new();
+        let lowered = self.stmt(store, &mut rows);
+        if let Some(at) = self.scope.iter().rposition(|(_, n)| *n == t) {
+            self.scope.remove(at);
+        }
+        lowered?;
+        let mut placed = false;
+        for r in &mut rows {
+            if let St::Let(_, Rhs::Call { args, .. })
+            | St::Do {
+                rhs: Rhs::Call { args, .. },
+                ..
+            } = r
+            {
+                if let Some(a) = args
+                    .first_mut()
+                    .filter(|a| !placed && *a == &(Arg::Val(Val::Name(t)), Capability::Modify))
+                {
+                    a.0 = Arg::Place(place.clone());
+                    placed = true;
+                }
+            }
+        }
+        let mut named = Vec::new();
+        rows.iter().for_each(|s| names_in(s, &mut named));
+        if !placed || named.contains(&t) {
+            return gap(
+                "a move-out window whose removal does not modify the temp alone",
+                line,
+            );
+        }
+        out.extend(rows);
+        Ok(())
     }
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
@@ -4351,9 +4513,12 @@ impl<'a> Builder<'a> {
     ) -> Result<Val, Gap> {
         let outer = std::mem::take(&mut self.after);
         self.drain += 1;
-        let mut args = vec![(Val::Name(s), Capability::Read)];
+        let mut args = vec![(Arg::Val(Val::Name(s)), Capability::Read)];
         let read = parts.iter().try_for_each(|p| {
-            args.push((self.read_arg(p, out, "@concat", 1)?, Capability::Read));
+            args.push((
+                Arg::Val(self.read_arg(p, out, "@concat", 1)?),
+                Capability::Read,
+            ));
             Ok(())
         });
         self.drain -= 1;
@@ -4739,7 +4904,7 @@ impl<'a> Builder<'a> {
                         Callee::Method
                     },
                     callee: size,
-                    args: vec![(Val::Name(it), Capability::Read)],
+                    args: vec![(Arg::Val(Val::Name(it)), Capability::Read)],
                     write_back: false,
                     ret: Some(Type::Int),
                     solved: Vec::new(),
@@ -4803,6 +4968,11 @@ impl<'a> Builder<'a> {
             }
         }
         vyrn_frontend::types::substitute(ty, &subst)
+    }
+
+    /// Whether a projection answers for `ty`'s element place (RFC-0091).
+    fn projected(&self, ty: &Type) -> bool {
+        vyrn_frontend::project::lookup_in(&self.program.impls, ty, "atSet").is_some()
     }
 
     fn is_map(&self, ty: &Type) -> bool {
@@ -6338,7 +6508,7 @@ impl<'a> Builder<'a> {
                     let msg = Lit::Str(vyrn_frontend::trap::SERVE_STREAM.into());
                     Rhs::Call {
                         callee: name.clone(),
-                        args: vec![(Val::Lit(msg), Capability::Read)],
+                        args: vec![(Arg::Val(Val::Lit(msg)), Capability::Read)],
                         write_back: false,
                         kind: Callee::Builtin,
                         ret: self.produced(e),
@@ -6394,7 +6564,7 @@ impl<'a> Builder<'a> {
                     self.after.push(t);
                     return Ok(Rhs::Call {
                         callee: name.clone(),
-                        args: vec![(Val::Name(t), Capability::Read)],
+                        args: vec![(Arg::Val(Val::Name(t)), Capability::Read)],
                         write_back: false,
                         kind: Callee::Reserved,
                         ret: self.produced(e),
@@ -6633,7 +6803,7 @@ impl<'a> Builder<'a> {
                             t,
                             Rhs::Call {
                                 callee: "Err".into(),
-                                args: vec![(Val::Name(*n), Capability::Consume)],
+                                args: vec![(Arg::Val(Val::Name(*n)), Capability::Consume)],
                                 write_back: false,
                                 kind: Callee::Ctor,
                                 ret: Some(rt),
@@ -6750,7 +6920,7 @@ impl<'a> Builder<'a> {
             held,
             Rhs::Call {
                 callee: method("isSuccess"),
-                args: vec![(sv.clone(), Capability::Read)],
+                args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
                 kind: Callee::Fn,
                 ret: Some(Type::Bool),
@@ -6778,7 +6948,7 @@ impl<'a> Builder<'a> {
             t,
             Rhs::Call {
                 callee: success,
-                args: vec![(sv.clone(), Capability::Read)],
+                args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
                 kind: Callee::Fn,
                 // `success` answers the unwrapped value, which is what the
@@ -6848,7 +7018,12 @@ impl<'a> Builder<'a> {
                 let base = self.place(expr, out)?;
                 Ok(Place::Field(Box::new(base), field.clone()))
             }
-            Expr::Call { name, args, .. } if name == "@at" && args.len() == 2 => {
+            Expr::Call {
+                name, args, line, ..
+            } if name == "@at" && args.len() == 2 => {
+                if let Some(p) = self.inlined("at", &args[0], &args[1..], *line, out)? {
+                    return Ok(p);
+                }
                 let bty = self.ty_of(&args[0])?;
                 let base = self.place(&args[0], out)?;
                 // The receiver is this read's, and a field read in the index
@@ -6994,8 +7169,8 @@ impl<'a> Builder<'a> {
             return gap("a call with more arguments than parameters", line);
         }
         if let (Callee::Projection, Some(recv)) = (kind, args.first()) {
-            if let Some(r) = self.inlined(name, recv, &args[1..], line, out)? {
-                return Ok(r);
+            if let Some(p) = self.inlined(name, recv, &args[1..], line, out)? {
+                return Ok(Rhs::Read(p));
             }
         }
         let mut vs = Vec::new();
@@ -7097,7 +7272,7 @@ impl<'a> Builder<'a> {
                     temps_to_drop.push(t);
                 }
             }
-            vs.push((v, *cap));
+            vs.push((Arg::Val(v), *cap));
         }
         if drains {
             self.drain -= 1;
@@ -7110,12 +7285,15 @@ impl<'a> Builder<'a> {
         // (RFC-0125 §3 M7). The operand is read above, where every argument
         // of every call is read, so the row states the operation over it and
         // the argument keying and the drains do not move.
-        if let (1, Some(to)) = (vs.len(), vyrn_frontend::types::numeric_conv_target(name)) {
-            return Ok(Rhs::Prim(Op::Conv(to), vec![vs[0].0.clone()], ret));
+        if let (Some(to), [(Arg::Val(v), _)]) = (
+            vyrn_frontend::types::numeric_conv_target(name),
+            vs.as_slice(),
+        ) {
+            return Ok(Rhs::Prim(Op::Conv(to), vec![v.clone()], ret));
         }
         // `@concat(a, b)` is the String `+` the interpolation spine spells as
         // a call, so the row is the operator's, over the same arguments.
-        if let ("@concat", [(a, _), (b, _)]) = (name, vs.as_slice()) {
+        if let ("@concat", [(Arg::Val(a), _), (Arg::Val(b), _)]) = (name, vs.as_slice()) {
             return Ok(Rhs::Prim(
                 Op::Bin(BinOp::Add),
                 vec![a.clone(), b.clone()],
@@ -7678,7 +7856,7 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
                             *callee = key.clone();
                             let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
                             let lead = names.into_iter().flatten();
-                            let lead = lead.map(|c| (Val::Name(*c), Capability::Read));
+                            let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
                             args.splice(0..0, lead.collect::<Vec<_>>());
                         }
                         _ => {}
@@ -7722,7 +7900,11 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
                 }
                 Rhs::Call { args, kind, .. } => {
                     kind.value().iter().for_each(|f| hit(&Val::Name(*f), out));
-                    args.iter().for_each(|(v, _)| hit(v, out))
+                    args.iter().for_each(|(a, _)| {
+                        if let Arg::Val(v) = a {
+                            hit(v, out)
+                        }
+                    })
                 }
                 Rhs::Read(_) | Rhs::Take(_) => {}
             },
@@ -7911,13 +8093,37 @@ pub fn names_bound(s: &St, out: &mut Vec<Name>) {
     }
 }
 
+/// Whether `s` moves a place out into a window's temp (RFC-0082).
+fn moves_out(s: &Stmt) -> bool {
+    matches!(s, Stmt::Let { name, mutable: true, .. } if vyrn_frontend::ast::is_place_temp(name))
+}
+
+/// The receiver of a removal the parser brackets with a move-out window
+/// (`parser::hoist_mutating_receiver`), where `e` is one.
+fn removal(e: &Expr) -> Option<&String> {
+    match e {
+        Expr::Call { name, args, .. }
+            if matches!(name.as_str(), "@pop" | "@swapRemove" | "@remove") =>
+        {
+            match args.first() {
+                Some(Expr::Var { name, .. }) => Some(name),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
     match r {
         Rhs::Val(v) => names_in_val(v, out),
         Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().for_each(|v| names_in_val(v, out)),
         Rhs::Call { args, kind, .. } => {
             out.extend(kind.value());
-            args.iter().for_each(|(v, _)| names_in_val(v, out))
+            args.iter().for_each(|(a, _)| match a {
+                Arg::Val(v) => names_in_val(v, out),
+                Arg::Place(p) => names_in_place(p, out),
+            })
         }
         Rhs::Read(p) | Rhs::Take(p) => names_in_place(p, out),
     }

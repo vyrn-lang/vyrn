@@ -83,7 +83,7 @@
 //! Every other name the body does not own — a pattern binder of a
 //! non-consuming switch over a value that owns heap — is invisible here.
 
-use crate::core::{Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Val, Walk};
+use crate::core::{Arg, Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Val, Walk};
 use vyrn_frontend::ast::Capability;
 use vyrn_frontend::own::Exit;
 
@@ -250,7 +250,7 @@ enum Write<'s> {
     Hand(&'s Val, bool),
     Release(Name),
     /// A `modify` argument: the callee may replace or free what it names.
-    Modify(&'s Val),
+    Modify(&'s Arg),
     /// A call whose callee may store into these globals, by the effect
     /// judgment's write half ([`crate::effects::writes_state`]).
     State(Vec<String>),
@@ -284,8 +284,8 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<
                 let consumed = args.iter().filter(|(_, c)| *c == Capability::Consume);
                 let modified = args.iter().filter(|(_, c)| *c == Capability::Modify);
                 let state = crate::effects::writes_state(body, callee);
-                (consumed.map(|(v, _)| Write::Hand(v, kind.declared())))
-                    .chain(modified.map(|(v, _)| Write::Modify(v)))
+                (consumed.filter_map(|(a, _)| Some(Write::Hand(a.val()?, kind.declared()))))
+                    .chain(modified.map(|(a, _)| Write::Modify(a)))
                     .chain((!state.is_empty()).then_some(Write::State(state)))
                     .collect()
             }
@@ -409,7 +409,8 @@ impl Writes<'_> {
         let hit = writes_of(s, self.names, self.body)
             .into_iter()
             .any(|w| match w {
-                Write::Modify(v) => matches!(v, Val::Name(k) if self.under(&Root::N(*k))),
+                Write::Modify(Arg::Val(v)) => matches!(v, Val::Name(k) if self.under(&Root::N(*k))),
+                Write::Modify(Arg::Place(p)) => self.under(&root(p).0),
                 _ if self.modify => false,
                 Write::Store(p) => {
                     let (r, path) = root(p);
@@ -1017,10 +1018,11 @@ impl<'b> Kernel<'b> {
                 name = Place::Name(*n);
                 &name
             }
-            Write::Release(n) | Write::Modify(&Val::Name(n)) => {
+            Write::Release(n) | Write::Modify(&Arg::Val(Val::Name(n))) => {
                 name = Place::Name(n);
                 &name
             }
+            Write::Modify(Arg::Place(p)) => p,
             Write::Hand(..) | Write::Modify(_) | Write::State(_) => return,
         };
         let by_call = matches!(w, Write::Modify(_));
@@ -2096,13 +2098,15 @@ impl<'b> Kernel<'b> {
                 if let Some(f) = kind.value() {
                     self.read(st, &Val::Name(f))?;
                 }
-                for (v, cap) in args {
-                    if !matches!(cap, Capability::Consume) {
-                        self.read(st, v)?;
+                for (a, cap) in args {
+                    match a {
+                        Arg::Place(p) => self.place(st, p)?,
+                        Arg::Val(v) if !matches!(cap, Capability::Consume) => self.read(st, v)?,
+                        Arg::Val(_) => {}
                     }
                 }
-                for (i, (v, cap)) in args.iter().enumerate() {
-                    if matches!(cap, Capability::Consume) {
+                for (i, (a, cap)) in args.iter().enumerate() {
+                    if let (Arg::Val(v), Capability::Consume) = (a, cap) {
                         // Only a DECLARED `consume` parameter takes a value
                         // that owns no heap: it is the author's word that the
                         // callee owns what it is handed (RFC-0089 rule 1). A
