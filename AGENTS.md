@@ -131,6 +131,8 @@ Fast: before you claim speed or spend lines on it, write down which layer the ch
 
 Local tests run in the release profile under `cargo nextest`: one build profile per worktree, every test binary at once. CI keeps the debug profile, so a debug-only failure still reaches a gate. Measured on 2026-09-24: the CLI suite in 63 s, the ignored suites in 107 s, the corpus diff in 24 s; `coredrive` alone took 280 s to 550 s in debug.
 
+Set `CARGO_PROFILE_RELEASE_INCREMENTAL=true` for every local cargo command. Measured on 2026-09-25, a one-line edit to `direct.rs` rebuilds in 14 s instead of 42 s; the first build fills the cache in 74 s. The compiler's output is the same, so the manifest and the pins hold. For a claim about the compiler's own speed, build without it, because incremental code runs slower.
+
 The short list, run once at the tip, from `compiler/`:
 ```
 cargo fmt --all --check
