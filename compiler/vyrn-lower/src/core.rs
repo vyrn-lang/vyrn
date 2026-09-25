@@ -1836,6 +1836,9 @@ pub enum Spec {
     /// call builds in storage of its own. The caller lands it as it lands any
     /// aggregate result.
     Builds(Type),
+    /// One operand at the type the row put on its name, and no result. The
+    /// call writes the operand out (`writeStdout`) or releases it (`close`).
+    Effect,
 }
 
 /// Every builtin the row specifies, by name.
@@ -1893,6 +1896,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("panic", Spec::Traps),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
             ("serveStream", Spec::Traps),
+            ("writeStdout", Spec::Effect),
+            ("close", Spec::Effect),
             ("@push", Spec::Rebuilds),
             ("@reserve", Spec::Rebuilds),
             ("@clear", Spec::Rebuilds),
