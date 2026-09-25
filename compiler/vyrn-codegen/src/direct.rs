@@ -19147,8 +19147,9 @@ impl<'p> Fn_<'_, 'p> {
     /// `let y = x` of an owned layout that owns heap moves `x`, and the kernel
     /// refuses a read of `x` after it. So `y` is `x`'s place, with no slot and
     /// no copy of its own, and the release the driver placed for the value is
-    /// `y`'s. `None` where the body stores into `x`, because a store after the
-    /// move writes the storage `y` holds.
+    /// `y`'s. `None` where the body stores into `x` after the move
+    /// ([`core_after`]), because such a store writes the storage `y` holds. A
+    /// store before it is part of the value that moves.
     fn core_renames(
         &self,
         body: &vyrn_lower::core::Body,
@@ -19165,7 +19166,12 @@ impl<'p> Fn_<'_, 'p> {
         let mut written = Vec::new();
         for s in &body.stmts {
             core_lets(s, &mut lets);
-            core_written(&body.names, s, &mut written);
+        }
+        match core_after(&body.stmts, n) {
+            Some(after) => after
+                .into_iter()
+                .for_each(|s| core_written(&body.names, s, &mut written)),
+            None => (body.stmts.iter()).for_each(|s| core_written(&body.names, s, &mut written)),
         }
         let mut at = lets.iter().filter(|(b, _)| *b == n);
         let (Some((_, Rhs::Val(Val::Name(x)))), None) = (at.next(), at.next()) else {
@@ -21273,6 +21279,23 @@ fn core_written(
         }
         _ => {}
     }
+}
+
+/// The rows that run after the `let` of `n`: its later siblings and those of
+/// every statement around it. `None` where no list binds `n` or a loop holds
+/// the `let`, because a loop runs its earlier rows again after it.
+fn core_after(ss: &[St], n: vyrn_lower::core::Name) -> Option<Vec<&St>> {
+    ss.iter().enumerate().find_map(|(i, s)| {
+        let mut after = match s {
+            St::Let(b, _) if *b == n => Vec::new(),
+            St::Block { body, .. } => core_after(body, n)?,
+            St::If { then, els, .. } => core_after(then, n).or_else(|| core_after(els, n))?,
+            St::Switch { arms, .. } => arms.iter().find_map(|a| core_after(&a.body, n))?,
+            _ => return None,
+        };
+        after.extend(&ss[i + 1..]);
+        Some(after)
+    })
 }
 
 /// The rows of `ss`, or of a list inside it, from the `let` of `n` to the row
