@@ -7898,7 +7898,9 @@ pub fn body_of(name: &str) -> Option<Body> {
 /// each parameter in `bound` leaves the parameter list, a call through it is
 /// [`Callee::Fn`] to its target, and a call that passes it on names that
 /// target. A parameter bound to a lambda is that lambda's captures: they take
-/// its place in the parameter list, and a call through it passes them first.
+/// its place in the parameter list, a call through it passes them first, and
+/// a call that passes it on takes them after its own arguments, which the
+/// emitter puts back where the `fn` parameter stands (`direct::ho_args`).
 /// `None` where a bound parameter is read any other way (stored, captured,
 /// handed to a position no target names).
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
@@ -7979,11 +7981,15 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
                     }
                 }
                 for t in targets.iter_mut() {
-                    if let Target::Param(p) = t {
-                        if let Some((_, to)) = bound.iter().find(|(n, _)| n == p) {
-                            *t = to.clone();
-                        }
-                    }
+                    let Target::Param(p) = t else { continue };
+                    let p = *p;
+                    let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
+                        continue;
+                    };
+                    *t = to.clone();
+                    let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
+                    let forwarded = forwarded.into_iter().flatten();
+                    args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
                 }
             }
             St::If { then, els, .. } => {

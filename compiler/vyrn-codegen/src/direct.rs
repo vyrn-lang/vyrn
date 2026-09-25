@@ -2849,6 +2849,33 @@ fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
         .then(|| Target::Lambda(key, b.cap_srcs.iter().cloned().zip(tys.to_vec()).collect()))
 }
 
+/// A higher-order call row's arguments in its instance's order. The row
+/// leaves out each `fn` argument, and [`vyrn_lower::core::specialize`]
+/// appends the captures a lambda target forwards after the row's own
+/// arguments, target by target; the instance takes them where the `fn`
+/// parameter stood. `None` where the counts disagree.
+fn ho_args(
+    f: &Function,
+    targets: &[Target],
+    args: &[(Arg, vyrn_frontend::ast::Capability)],
+) -> Option<Vec<(Arg, vyrn_frontend::ast::Capability)>> {
+    let caps = |t: &Target| match t {
+        Target::Lambda(_, c) => c.len(),
+        _ => 0,
+    };
+    let at = args.len().checked_sub(targets.iter().map(caps).sum())?;
+    let (mut own, mut forwarded, mut ts) = (args[..at].iter(), args[at..].iter(), targets.iter());
+    let mut out = Vec::new();
+    for p in &f.params {
+        if matches!(p.ty, Type::Fn(..)) {
+            out.extend(forwarded.by_ref().take(caps(ts.next()?)).cloned());
+        } else {
+            out.push(own.next()?.clone());
+        }
+    }
+    (own.next().is_none() && forwarded.next().is_none()).then_some(out)
+}
+
 /// The core body a queued function reads: its own, and for an RFC-0023
 /// specialization the instance [`vyrn_lower::core::specialize`] states for
 /// its targets. A specialization with a target the core does not name reads
@@ -18886,6 +18913,7 @@ impl<'p> Fn_<'_, 'p> {
         // signature's dispatcher, with the value as its leading argument, as
         // [`Fn_::fnval_call`] makes it.
         let through: Vec<(Arg, vyrn_frontend::ast::Capability)>;
+        let mut spliced = Vec::new();
         let (sig, args) = match self.core_through(body, callee, kind) {
             Some((n, sig_ty)) => {
                 through =
@@ -18901,6 +18929,10 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 let sig = match (ho, self.core_instance(callee, kind, solved)) {
                     (Some((f, targs, subst, bound)), _) => {
+                        let Some(ordered) = ho_args(f, targets, args) else {
+                            return unsupported("a core call this walk does not read", line);
+                        };
+                        spliced = ordered;
                         self.cx.specialize(m, f, targs, subst, bound)?
                     }
                     (None, Some((f, targs, subst))) => self.cx.instantiate(m, f, targs, subst)?,
@@ -18909,7 +18941,14 @@ impl<'p> Fn_<'_, 'p> {
                         None => return unsupported("a core call this walk does not read", line),
                     },
                 };
-                (sig, args)
+                (
+                    sig,
+                    if spliced.is_empty() {
+                        args
+                    } else {
+                        &spliced[..]
+                    },
+                )
             }
         };
         let dest = self.out_ptr(b, &sig, hint);
@@ -20182,12 +20221,20 @@ impl<'p> Fn_<'_, 'p> {
     /// specialization binds, and for a function taking a `modify` parameter,
     /// which no function value may name.
     fn core_target(&self, t: &Target) -> Option<FnTarget> {
-        let Target::Fn(name) = t else { return None };
-        let sig = (self.cx.sigs.get(name)).filter(|s| !s.modify.iter().any(|m| *m))?;
-        Some(FnTarget {
-            sig: sig.clone(),
-            ncaps: 0,
-        })
+        match t {
+            Target::Fn(name) => {
+                let sig = (self.cx.sigs.get(name)).filter(|s| !s.modify.iter().any(|m| *m))?;
+                Some(FnTarget {
+                    sig: sig.clone(),
+                    ncaps: 0,
+                })
+            }
+            Target::Lambda(key, caps) => Some(FnTarget {
+                sig: self.cx.lambda_sig(key)?,
+                ncaps: caps.len(),
+            }),
+            Target::Param(_) | Target::Value(_) => None,
+        }
     }
 
     /// The stored value a call row calls through, and its signature. `None`

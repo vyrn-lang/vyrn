@@ -1,0 +1,6 @@
+// a lambda target passed on with its captures
+// pin: 0 break, 0 continue
+// A parameter bound to a lambda and passed on hands its captures to the
+// inner instance where the `fn` parameter stands, before `x` and `y`:
+// 1013, and 1115 with the captures swapped.
+fn applyAt(f: fn(Int64) -> Int64, x: Int64, y: Int64) -> Int64 { return f(x) * 100 + f(y) }          fn via(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return applyAt(f, x, x + 1) }          fn vyrnTestMain() -> Int64 { let k = 3 let m = 4 return via(x -> x * k + m, 2) }
