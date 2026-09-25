@@ -2452,6 +2452,7 @@ fn build_seeded(
         drain: 0,
         after: Vec::new(),
         after_of_rhs: Vec::new(),
+        owed: None,
         stream_loops: Vec::new(),
         walks: Vec::new(),
         reading: Vec::new(),
@@ -2691,6 +2692,9 @@ struct Builder<'a> {
     after: Vec<Name>,
     /// What `rhs` left for the binding that follows it.
     after_of_rhs: Vec<Name>,
+    /// The check `rhs` owes a record literal of a validated type, with its
+    /// line: [`Builder::bind`] states it after the literal's row.
+    owed: Option<(String, usize)>,
     /// The streams the enclosing `for` loops walk, innermost last. A `return`
     /// or a `?` inside such a loop closes every one of them on its way out
     /// (the direct backend's cursor stack), and the loop's end closes its own.
@@ -2793,6 +2797,7 @@ impl<'a> Builder<'a> {
             drain: 0,
             after: Vec::new(),
             after_of_rhs: Vec::new(),
+            owed: None,
             stream_loops: Vec::new(),
             walks: Vec::new(),
             reading: Vec::new(),
@@ -3341,7 +3346,28 @@ impl<'a> Builder<'a> {
         if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
             self.body.names[n as usize].closure_reads = self.pending_closure.take();
         }
+        let owed = match (&rhs, self.owed.take()) {
+            (Rhs::Make(Ctor::Record(r, _), _), Some((to, line))) if *r == to => Some((to, line)),
+            _ => None,
+        };
         out.push(St::Let(n, rhs));
+        // A validated record literal the checker did not prove is checked
+        // whole once it is made: its constructor reads it.
+        if let Some((to, line)) = owed {
+            out.push(St::Do {
+                rhs: Rhs::Call {
+                    ret: Some(Type::Named(to.clone())),
+                    callee: to,
+                    args: vec![(Arg::Val(Val::Name(n)), Capability::Read)],
+                    write_back: false,
+                    kind: Callee::Named,
+                    solved: Vec::new(),
+                    targets: Vec::new(),
+                },
+                line,
+                site: 0,
+            });
+        }
         for t in std::mem::take(&mut self.after_of_rhs) {
             out.push(St::Drop(t, Site::None, 0, None));
         }
@@ -3950,6 +3976,14 @@ impl<'a> Builder<'a> {
     }
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
+        self.stmt_rows(s, out)?;
+        match self.owed.take() {
+            Some((to, line)) => gap_d("a check of a validated record no binding took", &to, line),
+            None => Ok(()),
+        }
+    }
+
+    fn stmt_rows(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
         let sid = s as *const Stmt as usize;
         match s {
             Stmt::Let {
@@ -4601,10 +4635,11 @@ impl<'a> Builder<'a> {
             Stmt::Expr(e) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
-                if self.owns(&ty) {
+                if self.owns(&ty) || self.owed.is_some() {
+                    let owns = self.owns(&ty);
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
-                    if self.discards(e) {
+                    if owns && self.discards(e) {
                         out.push(St::Drop(t, Site::Node(sid), 0, None));
                     }
                 } else {
@@ -6856,6 +6891,16 @@ impl<'a> Builder<'a> {
                 for (f, a) in fields {
                     let fty = ty.as_ref().and_then(|t| self.field_ty(t, f, *line).ok());
                     vs.push(self.proven_val(a, fty.as_ref(), *line, out)?);
+                }
+                let to = Type::Named(name.clone());
+                if self
+                    .proto
+                    .types()
+                    .get(name)
+                    .is_some_and(|d| d.predicate.is_some())
+                    && !self.proven(e, &to)
+                {
+                    self.owed = Some((name.clone(), *line));
                 }
                 Ok(Rhs::Make(
                     Ctor::Record(

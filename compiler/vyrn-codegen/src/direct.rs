@@ -18394,6 +18394,20 @@ impl<'p> Fn_<'_, 'p> {
                 // is dropped, or the enclosing block's type will not check —
                 // the same sentence the AST walk's statement arm writes, on
                 // the row rather than on the node.
+                St::Do { rhs, line, .. } if self.core_checks_made(body, rhs).is_some() => {
+                    let (decl, n) = self.core_checks_made(body, rhs).expect("the guard's");
+                    self.core_val(
+                        m,
+                        b,
+                        body,
+                        w,
+                        &Val::Name(n),
+                        &Type::Named(decl.name.clone()),
+                        *line,
+                    )?;
+                    self.emit_validation(b, &decl, *line)?;
+                    b.ins(&Instruction::Drop);
+                }
                 St::Do { rhs, line, .. } => {
                     let got = self.core_rhs_ty(body, rhs, *line)?;
                     self.core_rhs(m, b, body, w, rhs, &got, *line)?;
@@ -19605,13 +19619,14 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.repr(t, 0) == Ok(Repr::Unit)
     }
 
-    /// Whether `v` is a name of a layout with no check, which a read position
-    /// takes as its address ([`Fn_::core_val`]): a call's argument, and a
-    /// map's key, which [`Fn_::pack_key`] packs from there.
+    /// Whether `v` is a name of a layout, which a read position takes as its
+    /// address ([`Fn_::core_val`]): a call's argument, and a map's key, which
+    /// [`Fn_::pack_key`] packs from there. A layout of a validated type was
+    /// checked where it was made.
     fn core_layout_name(&self, body: &vyrn_lower::core::Body, v: &Val) -> bool {
         matches!(v, Val::Name(n) if {
             let t = &body.names[*n as usize].ty;
-            matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t)
+            matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_)))
         })
     }
 
@@ -19717,12 +19732,11 @@ impl<'p> Fn_<'_, 'p> {
     /// [`Fn_::map_set`] moves its bytes into the entry.
     fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
         let layout = |t: &Type| matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t);
-        // A cross-field `where` runs on the finished literal (RFC-0079) and
-        // the row states no check.
-        if !layout(ty)
-            || matches!(ctor, Ctor::Record(name, _)
-                if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()))
-        {
+        // A record of a validated type is its own: its cross-field `where`
+        // is the constructor row after it (RFC-0079), or the checker's proof.
+        let own =
+            matches!(ctor, Ctor::Record(name, _) if self.cx.sub(ty) == Type::Named(name.clone()));
+        if !(layout(ty) || own && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))) {
             return false;
         }
         if let Ctor::Closure(t) = ctor {
@@ -20092,6 +20106,37 @@ impl<'p> Fn_<'_, 'p> {
         (matches!(kind, Callee::Named | Callee::Proven)
             && matches!(self.cx.repr(&decl.base, 0), Ok(Repr::Scalar(_))))
         .then(|| decl.clone())
+    }
+
+    /// The check a validated record owes once it is made
+    /// ([`vyrn_lower::core::Builder`]'s `bind`): its constructor reading the
+    /// made layout `n` in place, and the declaration whose `where` it runs.
+    fn core_checks_made(
+        &self,
+        body: &vyrn_lower::core::Body,
+        rhs: &Rhs,
+    ) -> Option<(TypeDecl, vyrn_lower::core::Name)> {
+        let Rhs::Call {
+            callee,
+            args,
+            kind: Callee::Named,
+            ..
+        } = rhs
+        else {
+            return None;
+        };
+        let [(Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Read)] = args.as_slice()
+        else {
+            return None;
+        };
+        let decl = self
+            .cx
+            .types
+            .get(callee)
+            .filter(|d| d.predicate.is_some())?;
+        (matches!(self.cx.repr(&decl.base, 0), Ok(Repr::Agg(_)))
+            && body.names[*n as usize].ty == Type::Named(callee.clone()))
+        .then(|| (decl.clone(), *n))
     }
 
     /// The signature this walk calls a [`Callee::Fn`] through, and `None` for
@@ -20474,9 +20519,19 @@ impl<'p> Fn_<'_, 'p> {
         // result, which crosses through the caller's out-pointer and is
         // written at the `return` ([`Fn_::core_lands`]); what is refused is a
         // result checked where it is returned, because the row states no
-        // check (RFC-0079).
+        // check (RFC-0079). A value of the result's own validated type was
+        // checked where it was made.
         if matches!(self.ret, Repr::Agg(_)) && self.checks(&self.ret_ty) {
-            return false;
+            let mut crosses = false;
+            for st in &body.stmts {
+                core_leaf_rows(st, &mut |x| {
+                    crosses |= matches!(x, St::Return { value: Some(v), .. }
+                        if !matches!(v, Val::Name(r) if body.names[*r as usize].ty == self.ret_ty));
+                });
+            }
+            if crosses {
+                return false;
+            }
         }
         let mut lets = Vec::new();
         let mut binders = Vec::new();
@@ -20787,8 +20842,9 @@ impl<'p> Fn_<'_, 'p> {
             // row's own that the row's end gives back, as an unbound
             // temporary's is.
             St::Do { rhs, line, .. } => {
-                (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))
-                    && self.core_rhs_ty(body, rhs, *line).is_ok()
+                self.core_checks_made(body, rhs).is_some()
+                    || (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))
+                        && self.core_rhs_ty(body, rhs, *line).is_ok()
             }
             // A release stated as a statement ([`Fn_::core_drop`]) needs the
             // name's place: one wasm local, or a layout the walk bound, which
