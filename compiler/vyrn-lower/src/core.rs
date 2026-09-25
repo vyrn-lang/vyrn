@@ -7132,6 +7132,13 @@ impl<'a> Builder<'a> {
         ret: Option<Type>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
+        // `a[i]` asks the receiver's type for `at` before any builtin row
+        // answers, as `Checker::call` dispatches it (RFC-0091 M2).
+        if let (vyrn_frontend::project::AT, [recv, rest @ ..]) = (name, args) {
+            if let Some(p) = self.inlined("at", recv, rest, line, out)? {
+                return Ok(Rhs::Read(p));
+            }
+        }
         // The capability of each argument position, by who the callee is.
         let decls = self.proto.types();
         let method = self
