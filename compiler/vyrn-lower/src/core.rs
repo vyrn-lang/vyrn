@@ -1845,6 +1845,10 @@ pub enum Spec {
     /// `serveStream`'s message is the frontend's sentence, stated as a
     /// literal in place of the stream, which a compiled build never pulls.
     Traps,
+    /// `assert(c)` and `assertEq(a, b)` (RFC-0015): a `Bool`, or two operands
+    /// at one scalar type, checked where the call stands. A failure writes
+    /// the interpreter's line and traps; the result is `Unit`.
+    Asserts,
     /// A receiver first, rebuilt in place by the runtime. An array's
     /// receiver takes at most one operand at whatever type the row put on
     /// its name: the runtime writes the new triple into the receiver's own
@@ -1963,6 +1967,8 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("print", Spec::Renders(Type::Unit)),
             ("@str", Spec::Renders(Type::Str)),
             ("panic", Spec::Traps),
+            ("assert", Spec::Asserts),
+            ("assertEq", Spec::Asserts),
             (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
             ("serveStream", Spec::Traps),
             ("writeStdout", Spec::Effect(Type::Unit)),

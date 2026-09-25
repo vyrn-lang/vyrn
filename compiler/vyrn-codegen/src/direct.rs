@@ -8489,122 +8489,15 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 return Ok(r);
             }
-            // `assert(c)` (RFC-0015): the interpreter's trap, in its words. Lowered
-            // here rather than rewritten into `panic` by the CLI before the compile
-            // (RFC-0125 §3 M5), so the rule is stated once.
-            "assert" if args.len() == 1 => {
-                self.expr_as(m, b, &args[0], &Type::Bool)?;
-                let msg = self.cx.rt.intern(
-                    m,
-                    &vyrn_frontend::trap::line(&format!("assertion failed at line {line}")),
-                );
-                b.ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::I32Const(msg as i32))
-                    .ins(&Instruction::Call(self.cx.rt.trap))
-                    .ins(&Instruction::End);
-                return Ok(Type::Unit);
-            }
-            // `assertEq(a, b)` (RFC-0015): each operand evaluated once into a
-            // local, the two compared by their type — the checker allows one
-            // equatable scalar type for both — and on a mismatch rendered the way
-            // `toString` renders them, around ` != `, after the interpreter's
-            // `scalar_to_string`. The line is written in pieces the way `panic`
-            // writes its message, and `trap` writes the last piece and exits. An
-            // operand that allocated is released by [`Fn_::call`] after this
-            // returns, as every call argument is (`rfcs/census-call-arguments.md`).
-            "assertEq" if args.len() == 2 => {
-                let t = self.expr(m, b, &args[0])?;
-                let t = self.cx.resolve(&t);
-                let Some(vt) = self.cx.repr(&t, line)?.val() else {
-                    return unsupported("`assertEq` on a non-scalar", line);
-                };
-                let la = b.local(vt);
-                b.ins(&Instruction::LocalSet(la));
-                self.expr_as(m, b, &args[1], &t)?;
-                let lb = b.local(vt);
-                b.ins(&Instruction::LocalSet(lb));
-                b.ins(&Instruction::LocalGet(la))
-                    .ins(&Instruction::LocalGet(lb));
-                match &t {
-                    Type::Str => {
-                        b.ins(&Instruction::Call(self.cx.rt.strcmp))
-                            .ins(&Instruction::I32Const(0))
-                            .ins(&Instruction::I32Ne);
-                    }
-                    Type::Float => {
-                        b.ins(&Instruction::F64Ne);
-                    }
-                    Type::Float32 => {
-                        b.ins(&Instruction::F32Ne);
-                    }
-                    Type::Bool => {
-                        b.ins(&Instruction::I32Ne);
-                    }
-                    it => match Num::of(it) {
-                        Some(n) if n.wide() => {
-                            b.ins(&Instruction::I64Ne);
+            "assert" | "assertEq" if args.len() == assert_arity(name) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: Option<&Type>| {
+                        match t {
+                            Some(t) => s.expr_as(m, b, &args[i], t).map(|_| t.clone()),
+                            None => s.expr(m, b, &args[i]),
                         }
-                        Some(_) => {
-                            b.ins(&Instruction::I32Ne);
-                        }
-                        None => return unsupported(&format!("`assertEq` on `{t}`"), line),
-                    },
-                }
-                let (write_all, trap, strlen) =
-                    (self.cx.rt.write_all, self.cx.rt.trap, self.cx.rt.strlen);
-                let head = format!("error: assertion failed at line {line}: ");
-                let (head_at, sep_at, nl_at) = (
-                    self.cx.rt.intern(m, &head),
-                    self.cx.rt.intern(m, " != "),
-                    self.cx.rt.intern(m, "\n"),
-                );
-                let rendered = self.scratch(b, ValType::I32, 7);
-                b.ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::I32Const(head_at as i32))
-                    .ins(&Instruction::I32Const(head.len() as i32))
-                    .ins(&Instruction::Call(write_all))
-                    .ins(&Instruction::Drop);
-                for (side, local) in [(0, la), (1, lb)] {
-                    if side == 1 {
-                        b.ins(&Instruction::I32Const(2))
-                            .ins(&Instruction::I32Const(sep_at as i32))
-                            .ins(&Instruction::I32Const(4))
-                            .ins(&Instruction::Call(write_all))
-                            .ins(&Instruction::Drop);
-                    }
-                    // The same three renderings `@str` uses, on a value that is
-                    // about to be the last thing the program prints, so nothing
-                    // rendered here is released.
-                    b.ins(&Instruction::LocalGet(local));
-                    match &t {
-                        Type::Str => {}
-                        Type::Float | Type::Float32 => self.f64_str(b, &t, line)?,
-                        Type::Bool => {
-                            b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
-                                .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
-                                .ins(&Instruction::Call(self.cx.rt.bool_str));
-                        }
-                        it => {
-                            let n = Num::of(it).expect("compared as a number above");
-                            widen(b, n);
-                            b.ins(&Instruction::I32Const(n.signed as i32));
-                            b.ins(&Instruction::Call(self.cx.rt.int_str));
-                        }
-                    }
-                    b.ins(&Instruction::LocalSet(rendered))
-                        .ins(&Instruction::I32Const(2))
-                        .ins(&Instruction::LocalGet(rendered))
-                        .ins(&Instruction::LocalGet(rendered))
-                        .ins(&Instruction::Call(strlen))
-                        .ins(&Instruction::Call(write_all))
-                        .ins(&Instruction::Drop);
-                }
-                b.ins(&Instruction::I32Const(nl_at as i32))
-                    .ins(&Instruction::Call(trap))
-                    .ins(&Instruction::End);
-                return Ok(Type::Unit);
+                    };
+                return self.asserts(m, b, name, &mut operand, line);
             }
             "panic" | vyrn_frontend::ast::PANIC_AT => {
                 if args.is_empty() || args.len() > 2 {
@@ -14870,6 +14763,143 @@ impl<'p> Fn_<'_, 'p> {
         Ok(oty)
     }
 
+    /// `assert(c)` and `assertEq(a, b)`, the builtins [`Spec::Asserts`] names.
+    /// `operand` writes argument `i` at the type asked for, or at its own
+    /// where none is, and answers the type it wrote.
+    fn asserts(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        operand: &mut dyn FnMut(
+            &mut Self,
+            &mut Module,
+            &mut Frame,
+            usize,
+            Option<&Type>,
+        ) -> Result<Type, String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        match name {
+            // `assert(c)` (RFC-0015): the interpreter's trap, in its words. Lowered
+            // here rather than rewritten into `panic` by the CLI before the compile
+            // (RFC-0125 §3 M5), so the rule is stated once.
+            "assert" => {
+                operand(self, m, b, 0, Some(&Type::Bool))?;
+                let msg = self.cx.rt.intern(
+                    m,
+                    &vyrn_frontend::trap::line(&format!("assertion failed at line {line}")),
+                );
+                b.ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(msg as i32))
+                    .ins(&Instruction::Call(self.cx.rt.trap))
+                    .ins(&Instruction::End);
+            }
+            // `assertEq(a, b)` (RFC-0015): each operand evaluated once into a
+            // local, the two compared by their type — the checker allows one
+            // equatable scalar type for both — and on a mismatch rendered the way
+            // `toString` renders them, around ` != `, after the interpreter's
+            // `scalar_to_string`. The line is written in pieces the way `panic`
+            // writes its message, and `trap` writes the last piece and exits. An
+            // operand that allocated is released by [`Fn_::call`] after this
+            // returns, as every call argument is (`rfcs/census-call-arguments.md`).
+            _ => {
+                let t = operand(self, m, b, 0, None)?;
+                let t = self.cx.resolve(&t);
+                let Some(vt) = self.cx.repr(&t, line)?.val() else {
+                    return unsupported("`assertEq` on a non-scalar", line);
+                };
+                let la = b.local(vt);
+                b.ins(&Instruction::LocalSet(la));
+                operand(self, m, b, 1, Some(&t))?;
+                let lb = b.local(vt);
+                b.ins(&Instruction::LocalSet(lb));
+                b.ins(&Instruction::LocalGet(la))
+                    .ins(&Instruction::LocalGet(lb));
+                match &t {
+                    Type::Str => {
+                        b.ins(&Instruction::Call(self.cx.rt.strcmp))
+                            .ins(&Instruction::I32Const(0))
+                            .ins(&Instruction::I32Ne);
+                    }
+                    Type::Float => {
+                        b.ins(&Instruction::F64Ne);
+                    }
+                    Type::Float32 => {
+                        b.ins(&Instruction::F32Ne);
+                    }
+                    Type::Bool => {
+                        b.ins(&Instruction::I32Ne);
+                    }
+                    it => match Num::of(it) {
+                        Some(n) if n.wide() => {
+                            b.ins(&Instruction::I64Ne);
+                        }
+                        Some(_) => {
+                            b.ins(&Instruction::I32Ne);
+                        }
+                        None => return unsupported(&format!("`assertEq` on `{t}`"), line),
+                    },
+                }
+                let (write_all, trap, strlen) =
+                    (self.cx.rt.write_all, self.cx.rt.trap, self.cx.rt.strlen);
+                let head = format!("error: assertion failed at line {line}: ");
+                let (head_at, sep_at, nl_at) = (
+                    self.cx.rt.intern(m, &head),
+                    self.cx.rt.intern(m, " != "),
+                    self.cx.rt.intern(m, "\n"),
+                );
+                let rendered = self.scratch(b, ValType::I32, 7);
+                b.ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Const(head_at as i32))
+                    .ins(&Instruction::I32Const(head.len() as i32))
+                    .ins(&Instruction::Call(write_all))
+                    .ins(&Instruction::Drop);
+                for (side, local) in [(0, la), (1, lb)] {
+                    if side == 1 {
+                        b.ins(&Instruction::I32Const(2))
+                            .ins(&Instruction::I32Const(sep_at as i32))
+                            .ins(&Instruction::I32Const(4))
+                            .ins(&Instruction::Call(write_all))
+                            .ins(&Instruction::Drop);
+                    }
+                    // The same three renderings `@str` uses, on a value that is
+                    // about to be the last thing the program prints, so nothing
+                    // rendered here is released.
+                    b.ins(&Instruction::LocalGet(local));
+                    match &t {
+                        Type::Str => {}
+                        Type::Float | Type::Float32 => self.f64_str(b, &t, line)?,
+                        Type::Bool => {
+                            b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                                .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                                .ins(&Instruction::Call(self.cx.rt.bool_str));
+                        }
+                        it => {
+                            let n = Num::of(it).expect("compared as a number above");
+                            widen(b, n);
+                            b.ins(&Instruction::I32Const(n.signed as i32));
+                            b.ins(&Instruction::Call(self.cx.rt.int_str));
+                        }
+                    }
+                    b.ins(&Instruction::LocalSet(rendered))
+                        .ins(&Instruction::I32Const(2))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::Call(strlen))
+                        .ins(&Instruction::Call(write_all))
+                        .ins(&Instruction::Drop);
+                }
+                b.ins(&Instruction::I32Const(nl_at as i32))
+                    .ins(&Instruction::Call(trap))
+                    .ins(&Instruction::End);
+            }
+        }
+        Ok(Type::Unit)
+    }
+
     /// `writeStdout(bytes)`, `close(s)` and `boxStream(s)`, the builtins
     /// [`Spec::Effect`] names. `operand` writes the argument at the type asked
     /// for, or at its own where none is, and answers the type it wrote.
@@ -17147,6 +17177,15 @@ fn disown(b: &mut Frame, own: Place) {
         .ins(&Instruction::I32Store(word()));
 }
 
+/// How many operands `assert` (one) and `assertEq` (two) take.
+fn assert_arity(name: &str) -> usize {
+    if name == "assert" {
+        1
+    } else {
+        2
+    }
+}
+
 /// How many operands a [`Spec::Logs`] builtin takes: `logger` its name, a
 /// level the logger and the message.
 fn logs_arity(name: &str) -> usize {
@@ -18772,6 +18811,7 @@ impl<'p> Fn_<'_, 'p> {
                     Ok(ret.clone())
                 }
                 (None, Some(Spec::Traps)) => Ok(Type::Never),
+                (None, Some(Spec::Asserts)) => Ok(Type::Unit),
                 (None, Some(Spec::Logs)) if callee == "logger" => Ok(Type::Logger),
                 (None, Some(Spec::Logs)) => Ok(Type::Unit),
                 // [`Fn_::lanes`] decides a lane builtin's type as it emits, and
@@ -18932,6 +18972,18 @@ impl<'p> Fn_<'_, 'p> {
                     s.core_val(m, b, body, w, v, &Type::Str, line)
                 })?;
                 return Ok(Type::Never);
+            }
+            Some(Spec::Asserts) => {
+                let mut operand =
+                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: Option<&Type>| {
+                        let Some((v, _)) = args.get(i) else {
+                            return unsupported(&format!("`{callee}` with too few operands"), line);
+                        };
+                        let t = t.cloned().unwrap_or_else(|| s.core_ty(body, v, &Type::Int));
+                        s.core_val(m, b, body, w, v, &t, line)?;
+                        Ok(t)
+                    };
+                return self.asserts(m, b, callee, &mut operand, line);
             }
             // `xs.push(v)` and its siblings, and `m.tally(k, n)`: the
             // receiver's address, which the call rebuilds in place, and the
@@ -21590,6 +21642,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::Renders(_) | Spec::Effect(_)) => matches!(args, [_]),
             Some(Spec::Logs) => args.len() == logs_arity(callee),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
+            Some(Spec::Asserts) => args.len() == assert_arity(callee),
             // A lane index is an immediate, so the row carries it as a literal.
             Some(Spec::Lanes) => {
                 !matches!(callee, "@lane" | "@replaceLane")
