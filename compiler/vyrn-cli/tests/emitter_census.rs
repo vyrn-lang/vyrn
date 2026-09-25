@@ -303,7 +303,7 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn emit_releases(",
-            Mapping, Source,
+            Mapping, Neither,
             "the core's drop rows at an exit become calls, in the order the core \
              placed them — §2.3's \"`drop` to a call\"",
         ),
