@@ -1,0 +1,8 @@
+// a SmallArray shrunk and copied out by core rows
+// pin: 0 break, 0 continue
+// `push`, `swapRemove`, `pop` and `toArray` on a SmallArray of Strings that
+// spills at its second push. Each is a row the core states: the push a
+// rebuild the store after it puts back, the removals shrinking the header
+// where it lies, and `toArray` a build in a slot of its own. Both walks
+// print 231 with no leak line (RFC-0125 M7, `m7-small`).
+fn vyrnTestMain() -> Int64 { let mut s: SmallArray<String, 1> = [] s.push("ab") s.push("cde") s.push("f") let r = s.swapRemove(0) let o = match s.pop() { Some(x) => x.byteLength, None => 0 } let a = s.toArray() return r.byteLength * 100 + o * 10 + a.length }
