@@ -72,6 +72,25 @@ fn corpus() -> Vec<PathBuf> {
     names
 }
 
+/// The shard `VYRN_SHARD=k/n` names: this run walks the roots, and the
+/// shapes, whose index in path order is `k` modulo `n`. Unset, it walks all
+/// of them. The totals a shard prints are its own; the corpus total is the
+/// sum over the shards, so a check that needs the whole corpus runs only
+/// unsharded.
+fn shard() -> Option<(usize, usize)> {
+    let v = std::env::var("VYRN_SHARD").ok()?;
+    let parsed = v
+        .split_once('/')
+        .and_then(|(k, n)| Some((k.parse().ok()?, n.parse().ok()?)))
+        .filter(|&(k, n): &(usize, usize)| k < n);
+    Some(parsed.unwrap_or_else(|| panic!("VYRN_SHARD must be `k/n` with k < n, not {v:?}")))
+}
+
+/// Whether the root or shape at `i` in path order is this run's.
+fn mine(i: usize) -> bool {
+    shard().is_none_or(|(k, n)| i % n == k)
+}
+
 /// What a body waits on before the core's rows could carry it, hardest first.
 ///
 /// A body's class is the HARDEST thing in it, so the counts partition the
@@ -284,10 +303,15 @@ fn run() {
     let mut exits: Vec<(String, usize, usize)> = Vec::new();
     let mut calls: std::collections::BTreeMap<(String, String), usize> = Default::default();
     let mut same = 0usize;
-    for path in corpus() {
+    let mut ours: Vec<String> = Vec::new();
+    for (i, path) in corpus().into_iter().enumerate() {
+        if !mine(i) {
+            continue;
+        }
         let Ok(program) = load(&path) else { continue };
         programs += 1;
         let name = path.file_name().unwrap().to_string_lossy().to_string();
+        ours.push(name.clone());
         {
             let _memo = vyrn_frontend::project::Memo::open();
             let lowered = vyrn_lower::lower(&program);
@@ -362,6 +386,9 @@ fn run() {
         pin,
         src,
     } in shapes()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, s)| mine(i).then_some(s))
     {
         let root = repo_root().join("examples/@shape.vyrn");
         let src = format!("{src}\n{WRAP}\n");
@@ -396,6 +423,9 @@ fn run() {
         per_shape.push((what, per[BREAK].0, per[CONT].0));
     }
 
+    if let Some((k, n)) = shard() {
+        eprintln!("shard {k}/{n}: the totals below are this shard's alone");
+    }
     eprintln!("{programs} programs, {bodies} bodies");
     eprintln!("{judged_only} more bodies the kernel judges and no emitter reads");
     eprintln!("what a body waits on before the core's rows could carry it:");
@@ -438,16 +468,24 @@ fn run() {
     }
     let named_exits: Vec<(&str, usize, usize)> =
         exits.iter().map(|(n, b, c)| (n.as_str(), *b, *c)).collect();
+    let pinned: Vec<(&str, usize, usize)> = PIN
+        .into_iter()
+        .filter(|(n, ..)| ours.iter().any(|o| o == n))
+        .collect();
     assert_eq!(
-        named_exits, PIN,
+        named_exits, pinned,
         "a `break` or a `continue` reaches the AST arm somewhere the record does not name"
     );
     let named_calls: Vec<(&str, &str, usize)> = calls
         .iter()
         .map(|((p, c), n)| (p.as_str(), c.as_str(), *n))
         .collect();
+    let pinned: Vec<(&str, &str, usize)> = CALLS
+        .into_iter()
+        .filter(|(n, ..)| ours.iter().any(|o| o == n))
+        .collect();
     assert_eq!(
-        named_calls, CALLS,
+        named_calls, pinned,
         "the core states a projection call somewhere the record does not name"
     );
     assert!(
@@ -482,18 +520,21 @@ fn run() {
         .filter(|(i, _)| forms[*i].1 > 0)
         .map(|(_, w)| w.0)
         .collect();
-    assert_eq!(
-        carrying,
-        [
-            "Stmt::Let",
-            "Stmt::Assign",
-            "Stmt::Return",
-            "Stmt::Expr",
-            "Stmt::ForIn",
-            "Stmt::Break"
-        ],
-        "the forms the core's rows carry are not the ones the record names"
-    );
+    // A shard carries a subset of the forms, so the list is the corpus's.
+    if shard().is_none() {
+        assert_eq!(
+            carrying,
+            [
+                "Stmt::Let",
+                "Stmt::Assign",
+                "Stmt::Return",
+                "Stmt::Expr",
+                "Stmt::ForIn",
+                "Stmt::Break"
+            ],
+            "the forms the core's rows carry are not the ones the record names"
+        );
+    }
     // The driver is a screen and not a judgement: where it stands down, the
     // AST walk emits exactly what it did. So a body it takes has to reach the
     // corpus at all, or this test measures nothing.
