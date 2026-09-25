@@ -61,3 +61,21 @@ Licence:
 - coredrive: the emitter took the core's walk for 21,033 of 21,172 bodies; 1 of 168 programs emit the same module, 167 run the same.
 Time: about 150 minutes: 70 work, 60 gates, 20 builds.
 Left: groups 2 to 4.
+
+#### A loop exit and a written `drop` are stated once, over the core (2026-09-25, `m7-typed`)
+RFC-0125, milestone M7, decision A, groups 2 and 3.
+Decision: the judgment states both. The kernel's copy of the loop rule goes, and the kernel ends the path there. The lead's.
+Went: group 2, the checker's two sites, its `in_loop` flag (8 lines of save and restore), the kernel's two refusals and one checker unit test. Group 3, the checker's four `drop` sites, `resolves_to_global` and one unit test.
+Stayed: group 4, the literal checks, because the core cannot state them (Left).
+Lines: `checker.rs` 14,911 to 14,862 (group 2) to 14,765 (group 3). `typed.rs` 998 to 1,042 to 1,127. `core.rs` 9,302 to 9,313 to 9,327. `kernel.rs` 3,084 to 3,088. Refusals: 0 lost / 0 gained over the corpus. Manifest: untouched.
+Shape: `St::Break` and `St::Continue` carry their line. `typed::loops` refuses one with no `St::Loop` around it in its own frame, so a lambda does not inherit the loop. `Body.unbound_drops` holds a `drop` whose name no binding answers. `typed::drops` words it as module state or an unbound name, and refuses a bound name whose type owns no heap or is a type parameter. The types must be as the checker typed them, so every generic function is built once with its parameters as written, not only one with no instance. An instance is not judged for `drop`.
+Licence:
+- `vyrn check` over 507 roots against main 6ad6dfc2: byte-identical, 430 accepted, 77 refused, 0 internal errors. The census program under main's binary and the tip: byte-identical.
+- 27 witness programs (C:/wtboxtmp/w2, w3), main against the tip: equal except the three decided cases. Two print the checker's line alone, because the checker refuses their body. One (`drop x`, `x = 2`, `break` in one body) prints the moved `mut` line as well: the checker no longer refuses that body.
+- `checker-rules` pin: 361 (`break` in a lambda in a loop) and 369 (`drop` of `T` in a generic with an instance) are new witnesses.
+- `nextest -p vyrn-cli` 674 passed. `-p vyrn-frontend -p vyrn-lower` 1,079 passed. The ten ignored suites passed, with `wasmhash` in check. `vyrn-lsp` 100 passed.
+- pins: `checker-census` typing judgment 129 to 127 to 123 refusals; `declarations` and `surface` lose the checker's mentions.
+- coredrive: 21,053 of 21,172 bodies take the core's walk; 1 of 168 programs emit the same module, 167 run the same.
+- `site/export.vyrn`, best of 8 interleaved: 3,835 ms on main, 3,485 ms at the tip, inside the noise.
+Time: about 110 minutes: 50 work, 45 gates, 15 builds.
+Left: group 4, blocked by a decision. A literal row names no width and no node (`Lit`, "the WIDTH is not here"). So the judgment cannot tell `let x: UInt8 = 300` from `let x: Int64 = 300`, and cannot say which statement's line it is on. The checker states the fit rule twice (`Checker::expr` and `adapt_int_literal`).

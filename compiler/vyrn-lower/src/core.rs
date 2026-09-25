@@ -866,11 +866,14 @@ pub enum St {
         region: bool,
     },
     /// `site` is the statement's node, or 0 for a break this pass made up.
+    /// `line` is the statement's, and 0 where `site` is.
     Break {
         site: usize,
+        line: usize,
     },
     Continue {
         site: usize,
+        line: usize,
     },
     Return {
         value: Option<Val>,
@@ -1052,6 +1055,9 @@ pub struct Body {
     /// elements no turn of that `for` reached, innermost loop first
     /// ([`Facts::unreached`]).
     pub(crate) unreached: Vec<(usize, usize)>,
+    /// A `drop` whose name no binding in scope answers: the name and the
+    /// line. The core has no row for it; [`crate::typed::drops`] refuses it.
+    pub unbound_drops: Vec<(String, usize)>,
 }
 
 /// What a candidate construct is, which is what [`last_owner`] has to ask of
@@ -1229,8 +1235,8 @@ impl Body {
                 ..
             } => (*site != 0).then_some(*site),
             St::If { site, .. }
-            | St::Break { site }
-            | St::Continue { site }
+            | St::Break { site, .. }
+            | St::Continue { site, .. }
             | St::Loop { site, .. }
             | St::Do { site, .. }
             | St::Switch { site, .. } => (*site != 0).then_some(*site),
@@ -2394,6 +2400,7 @@ fn build_seeded(
             cands: Vec::new(),
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
+            unbound_drops: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2502,6 +2509,7 @@ pub fn build_module_state<'a>(
             cands: Vec::new(),
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
+            unbound_drops: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2605,6 +2613,7 @@ fn build_outside_seeded<'a>(
             cands: Vec::new(),
             loop_buffers: Vec::new(),
             unreached: Vec::new(),
+            unbound_drops: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -4041,16 +4050,22 @@ impl<'a> Builder<'a> {
                 };
                 self.return_exit(v, sid, *line, out)?;
             }
-            Stmt::Break { .. } => {
+            Stmt::Break { line } => {
                 if let Some(Some(u)) = self.walks.last().cloned() {
                     self.release_unreached(&u, sid, out);
                 }
                 self.drops_at(Exit::Break, sid, out)?;
-                out.push(St::Break { site: sid });
+                out.push(St::Break {
+                    site: sid,
+                    line: *line,
+                });
             }
-            Stmt::Continue { .. } => {
+            Stmt::Continue { line } => {
                 self.drops_at(Exit::Continue, sid, out)?;
-                out.push(St::Continue { site: sid });
+                out.push(St::Continue {
+                    site: sid,
+                    line: *line,
+                });
             }
             Stmt::If {
                 cond,
@@ -4142,7 +4157,7 @@ impl<'a> Builder<'a> {
                 l.push(St::If {
                     cond: c,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0 }],
+                    els: vec![St::Break { site: 0, line: 0 }],
                     site: 0,
                 });
                 self.loop_marks.push(self.body.names.len());
@@ -4303,7 +4318,7 @@ impl<'a> Builder<'a> {
                 l.push(St::If {
                     cond,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0 }],
+                    els: vec![St::Break { site: 0, line: 0 }],
                     site: 0,
                 });
                 // Whose is each element? The loop VARIABLE is the last owner
@@ -4406,7 +4421,8 @@ impl<'a> Builder<'a> {
             }
             Stmt::Drop { name, line } => {
                 let Some(n) = self.lookup(name) else {
-                    return gap("a `drop` of module state", *line);
+                    self.body.unbound_drops.push((name.clone(), *line));
+                    return Ok(());
                 };
                 // `drop s` inside a `region` used to lower to nothing,
                 // because this pass read the binding as the arena's and the
@@ -4653,7 +4669,7 @@ impl<'a> Builder<'a> {
             St::If {
                 cond: Val::Name(c),
                 then: Vec::new(),
-                els: vec![St::Break { site: 0 }],
+                els: vec![St::Break { site: 0, line: 0 }],
                 site: 0,
             },
         ];
@@ -6033,6 +6049,7 @@ impl<'a> Builder<'a> {
                 cands: Vec::new(),
                 loop_buffers: Vec::new(),
                 unreached: Vec::new(),
+                unbound_drops: Vec::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line);
@@ -8375,11 +8392,18 @@ thread_local! {
 /// Judge one built body with the typed judgment, and say whether it refused.
 /// A refused body is not remembered by the judgment memo: the memo serves
 /// the kernel's refusals alone, so the body is built and judged again.
-fn typed(program: &Program, top: &Body, file: &Option<String>) -> bool {
+/// `as_written` is false for an instance of a generic function, whose types
+/// are the instance's and not the ones the checker typed the body with.
+fn typed(program: &Program, top: &Body, file: &Option<String>, as_written: bool) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
     TYPED.with(|t| {
         let (out, seen) = &mut *t.borrow_mut();
-        let found = crate::typed::stores(top, &global_mutable, seen);
+        let mut found = crate::typed::stores(top, &global_mutable, seen);
+        found.extend(crate::typed::loops(top, seen));
+        if as_written {
+            found.extend(crate::typed::drops(top, program));
+        }
+        found.sort_by_key(|(line, _)| *line);
         let refused = !found.is_empty();
         out.extend(
             found
@@ -8657,7 +8681,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         let refused = top
             .as_ref()
-            .is_some_and(|t| typed(program, t, &inst.func.module));
+            .is_some_and(|t| typed(program, t, &inst.func.module, inst.subst.is_empty()));
         let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, refused_before);
         built.push(top);
@@ -8681,7 +8705,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     eprintln!("{}", top.render());
                 }
                 place_frames(&top, &ob.name, own, &mut added, &mut touched, trace);
-                if typed(program, &top, &ob.module) {
+                if typed(program, &top, &ob.module, true) {
                     key = None;
                 }
                 outside.push(Some(top));
@@ -8693,13 +8717,14 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         remember(memo.as_ref(), key, refused_before);
     }
-    // A generic function no instance reaches is still a body the checker
-    // typed, so it is built once, for the judgment alone: it places no row
-    // and is never emitted (RFC-0125 M7, the judgment's reach).
-    for inst in crate::uninstantiated(program, &lowered, own) {
+    // Every generic function is built once more with its parameters as
+    // written, for the judgment alone: the checker typed the body that way
+    // whatever instances the program has. It places no row and is never
+    // emitted (RFC-0125 M7, the judgment's reach).
+    for inst in crate::as_written(program, own) {
         match build(program, &inst, own) {
             Ok(top) => {
-                typed(program, &top, &inst.func.module);
+                typed(program, &top, &inst.func.module, true);
             }
             Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name),
         }

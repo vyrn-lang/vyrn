@@ -996,3 +996,132 @@ fn each_store(stmts: &[St], names: &[NameInfo], f: &mut dyn FnMut(&Place, usize,
         }
     }
 }
+
+/// Every `break` and `continue` with no loop around it in its own frame, as
+/// the sentence `vyrn check` gives and its line: RFC-0125 M7, the rule the
+/// checker's `stmt` stated at two sites. A lambda's body is a frame of its
+/// own, so a loop outside the lambda does not count. `seen` is as in
+/// [`stores`].
+pub fn loops(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(usize, String)> {
+    fn walk(
+        stmts: &[St],
+        in_loop: bool,
+        seen: &mut std::collections::HashSet<usize>,
+        out: &mut Vec<(usize, String)>,
+    ) {
+        for s in stmts {
+            match s {
+                St::Break { site, line } | St::Continue { site, line } if !in_loop => {
+                    if seen.insert(*site) {
+                        let what = if matches!(s, St::Break { .. }) {
+                            "break"
+                        } else {
+                            "continue"
+                        };
+                        out.push((*line, format!("`{what}` outside a loop")));
+                    }
+                }
+                St::If { then, els, .. } => {
+                    walk(then, in_loop, seen, out);
+                    walk(els, in_loop, seen, out);
+                }
+                St::Loop { body, .. } => walk(body, true, seen, out),
+                St::Block { body, .. } => walk(body, in_loop, seen, out),
+                St::Switch { arms, .. } => {
+                    arms.iter().for_each(|a| walk(&a.body, in_loop, seen, out))
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for f in body.frames() {
+        walk(&f.stmts, false, seen, &mut out);
+    }
+    out
+}
+
+/// Every `drop` a reader wrote that cannot release what it names, as the
+/// sentence `vyrn check` gives and its line: RFC-0125 M7, the rule the
+/// checker's `stmt` stated at four sites. A name no binding answers is module
+/// state, which lives for the whole module, or no name at all. A bound name
+/// needs a type that owns heap: a String, an array, a map, a built-in sum
+/// that carries heap, or a type declaring `impl Owned`. A type parameter is
+/// refused, because no instance check runs on the body. The types are read
+/// as written, so the caller passes no instance of a generic function.
+pub fn drops(body: &Body, program: &vyrn_frontend::ast::Program) -> Vec<(usize, String)> {
+    use vyrn_frontend::types;
+    let mut out = Vec::new();
+    let mut decls = None;
+    for f in body.frames() {
+        for (name, line) in &f.unbound_drops {
+            out.push((
+                *line,
+                if program.globals.iter().any(|g| &g.name == name) {
+                    format!(
+                        "cannot `drop` module state `{name}` \u{2014} it lives for the whole \
+                     module and is reclaimed at process exit"
+                    )
+                } else {
+                    format!("`drop` of unbound variable `{name}`")
+                },
+            ));
+        }
+        let mut written = Vec::new();
+        each_drop(&f.stmts, &mut written);
+        for (n, line) in written {
+            let info = &f.names[n as usize];
+            let owned = types::type_key(&info.ty).is_some_and(|k| {
+                program.impls.iter().any(|i| {
+                    i.protocol == types::OWNED && types::type_key(&i.ty).as_ref() == Some(&k)
+                })
+            });
+            let decls = decls.get_or_insert_with(|| types::decl_map(program));
+            let t = types::resolve(&info.ty, decls);
+            let heap = matches!(
+                t,
+                Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
+            ) || (types::is_sum_alias(&t)
+                && vyrn_frontend::declared::owns_heap(&t, decls));
+            if owned || heap {
+                continue;
+            }
+            let name = &info.source;
+            out.push((
+                line,
+                if matches!(t, Type::Param(_)) {
+                    format!(
+                        "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this \
+                     body cannot know whether the rule below holds for the instance \u{2014} a \
+                     plain record would be released here where `drop` on it directly is \
+                     refused. Release the value where its concrete type is known, or \
+                     `consume` the heap field and `drop` that"
+                    )
+                } else {
+                    format!(
+                        "`drop` needs a heap value (a String, an Array, a Map, a Ref, \
+                     or an Option/Result carrying one, or a type declaring `impl Owned`), but \
+                     `{name}` is {t}"
+                    )
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// Every `drop` a reader wrote under `stmts`: the name and the line.
+fn each_drop(stmts: &[St], out: &mut Vec<(Name, usize)>) {
+    for s in stmts {
+        match s {
+            St::Drop(n, _, line, _) if *line > 0 => out.push((*n, *line)),
+            St::If { then, els, .. } => {
+                each_drop(then, out);
+                each_drop(els, out);
+            }
+            St::Loop { body, .. } | St::Block { body, .. } => each_drop(body, out),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| each_drop(&a.body, out)),
+            _ => {}
+        }
+    }
+}

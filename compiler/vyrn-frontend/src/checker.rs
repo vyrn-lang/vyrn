@@ -1370,7 +1370,6 @@ fn check_accum_inner(
         impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
-        in_loop: RefCell::new(false),
         binder_types: RefCell::new(HashMap::new()),
         in_root: std::cell::Cell::new(false),
         errors: RefCell::new(Vec::new()),
@@ -2333,12 +2332,6 @@ struct Checker<'a> {
     /// one (`let x: Int8 = 300`) would otherwise report line 0; this is the
     /// enclosing statement's answer, updated at every [`Self::stmt`] entry.
     stmt_line: RefCell<usize>,
-    /// True while checking the body of a `for`/`while`/`while let` loop
-    /// (RFC-0060). `break`/`continue` are legal only when this is set; elsewhere
-    /// they are a checker error. Saved/restored around each loop body and reset
-    /// to `false` when descending into a lambda body (a loop does not extend
-    /// across a function boundary).
-    in_loop: RefCell<bool>,
     /// Names of `extern` (host-provided) functions — not usable as function
     /// values (RFC-0037: closures do not cross the host boundary).
     extern_fns: &'a std::collections::HashSet<String>,
@@ -4562,28 +4555,18 @@ impl<'a> Checker<'a> {
                     None => Ok(false),
                 }
             }
-            Stmt::Break { line } => {
-                if !*self.in_loop.borrow() {
-                    return Err(cerr!(line, "`break` outside a loop"));
-                }
+            Stmt::Break { .. } => {
                 // `break` diverges but does not return — it never satisfies the
                 // "returns on all paths" obligation.
                 Ok(false)
             }
-            Stmt::Continue { line } => {
-                if !*self.in_loop.borrow() {
-                    return Err(cerr!(line, "`continue` outside a loop"));
-                }
-                Ok(false)
-            }
+            Stmt::Continue { .. } => Ok(false),
             Stmt::While { cond, body, line } => {
                 let cty = self.expr(cond, scope, None, Some(ret))?;
                 if self.base(&cty) != Type::Bool {
                     return Err(cerr!(line, "`while` condition must be Bool, found {cty}"));
                 }
-                let prev = self.in_loop.replace(true);
                 self.block(body, ret, scope);
-                self.in_loop.replace(prev);
                 Ok(false)
             }
             Stmt::ForIn {
@@ -4647,9 +4630,7 @@ impl<'a> Checker<'a> {
                         mutable: false,
                     },
                 );
-                let prev = self.in_loop.replace(true);
                 self.block(body, ret, scope);
-                self.in_loop.replace(prev);
                 scope.pop();
                 // A `for` over a user container is a desugar too, one level up:
                 // the loop three engines walk is `place nth` inlined per turn
@@ -4677,83 +4658,7 @@ impl<'a> Checker<'a> {
                 // A `for` may run zero times, so it never guarantees a return.
                 Ok(false)
             }
-            Stmt::Drop { name, line } => {
-                // `drop name;` reclaims a heap value. The binding must exist and
-                // hold something that owns heap memory. (Use-after-drop is caught
-                // separately by move checking, which treats this as a consume.)
-                // Module state (RFC-0013) is never dropped — it has module
-                // lifetime and is reclaimed only at process exit.
-                if self.resolves_to_global(scope, name) {
-                    return Err(cerr!(
-                        line,
-                        "cannot `drop` module state `{name}` — it lives for the \
-                         whole module and is reclaimed at process exit"
-                    ));
-                }
-                let b = self
-                    .lookup(scope, name)
-                    .ok_or_else(|| cerr!(line, "`drop` of unbound variable `{name}`"))?;
-                // Phase 5 made `drop` deep, so an `Option`/`Result` carrying heap
-                // is droppable too — the two aggregates rule 4 now releases. A
-                // record and a user enum are NOT here, and `own::release_kind`
-                // carries the measurement that kept them off; this list follows it
-                // rather than deciding a second time.
-                let t = self.base(&b.ty);
-                // A type PARAMETER is REFUSED (RFC-0118 M2's finding). It used
-                // to pass "so the instance decides", which kept a generic
-                // container's per-element loop legal (census U4) — but that
-                // loop is gone (`Slots` releases its arrays, never a bare `T`),
-                // and what the pass actually did in the tree was launder this
-                // very rule: `vyxGive<T>(v: consume T) { drop v }` accepted a
-                // plain record as `T` and dropped it, where the direct spelling
-                // is refused below. No instance check runs on a generic body,
-                // so the only sound gate is here. A generic fn that needs to
-                // release a `T` again is the program that reopens this, with
-                // the per-instance check the old comment promised.
-                // A DECLARED row passes too, and the key is read off the written
-                // type rather than off `base` — `impl Owned for Ring` is what
-                // `Ring` means, so resolving it to its record shape first is
-                // exactly the lookup that loses the answer.
-                //
-                // RFC-0086 M3 is why this arm exists. `impl MustUse for T` says a
-                // value must be disposed of BY NAME, and `drop` is the only
-                // terminal way to say that — handing it to a call or returning it
-                // only moves the obligation on. Without this arm the milestone
-                // would have shipped an obligation with no way to discharge it,
-                // and the fix menu would have named a statement the checker
-                // refuses. Nothing else was needed: `release_kind` already
-                // answers `Release(..)` for the type and every engine's `drop`
-                // lowering already asks it, so the gate was the whole gap.
-                if crate::types::type_key(&b.ty)
-                    .is_some_and(|k| self.impls.contains(&(crate::types::OWNED.to_string(), k)))
-                {
-                    return Ok(false);
-                }
-                if matches!(
-                    t,
-                    Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
-                ) || (crate::types::is_sum_alias(&t)
-                    && crate::declared::owns_heap(&t, &self.types))
-                {
-                    return Ok(false);
-                }
-                if matches!(t, Type::Param(_)) {
-                    return Err(cerr!(
-                        line,
-                        "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this \
-                         body cannot know whether the rule below holds for the instance — a \
-                         plain record would be released here where `drop` on it directly is \
-                         refused. Release the value where its concrete type is known, or \
-                         `consume` the heap field and `drop` that"
-                    ));
-                }
-                Err(cerr!(
-                    line,
-                    "`drop` needs a heap value (a String, an Array, a Map, a Ref, \
-                     or an Option/Result carrying one, or a type declaring `impl Owned`), but \
-                     `{name}` is {t}"
-                ))
-            }
+            Stmt::Drop { .. } => Ok(false),
             Stmt::Expr(e) => {
                 // A `panic` statement is `Never`-typed, so it satisfies the
                 // return-path check the way a `return` does (RFC-0079): the
@@ -8664,12 +8569,7 @@ impl<'a> Checker<'a> {
                                  use an expression body `|..| expr`"
                             ));
                         }
-                        // A lambda is a function boundary: an enclosing loop does
-                        // not extend into it (`break`/`continue` inside would be a
-                        // checker error), so reset the in-loop flag (RFC-0060).
-                        let prev_loop = self.in_loop.replace(false);
                         let returns = self.block(b, &ret, &mut inner);
-                        self.in_loop.replace(prev_loop);
                         if ret != Type::Unit && !returns {
                             return Err(cerr!(lline, "this lambda must return {ret} on all paths"));
                         }
@@ -8859,10 +8759,7 @@ impl<'a> Checker<'a> {
                 }
             }
             LambdaBody::Block(b) => {
-                // Function boundary — reset the in-loop flag (RFC-0060).
-                let prev_loop = self.in_loop.replace(false);
                 let returns = self.block(b, &ret, &mut inner);
-                self.in_loop.replace(prev_loop);
                 if ret != Type::Unit && !returns {
                     return Err(cerr!(line, "this lambda must return {ret} on all paths"));
                 }
@@ -9474,16 +9371,6 @@ impl<'a> Checker<'a> {
             return self.globals.borrow().get(name).cloned();
         }
         None
-    }
-
-    /// Whether `name` resolves to a module-state binding rather than a local: no
-    /// frame carries it and module state does. A local of the same name shadows
-    /// it, so this returns `false` then.
-    fn resolves_to_global(&self, scope: &Scope, name: &str) -> bool {
-        if scope.iter().any(|f| f.contains_key(name)) {
-            return false;
-        }
-        scope.globals && self.globals.borrow().contains_key(name)
     }
 
     /// The element type of the array a `pop`/`swapRemove` receiver names, after
@@ -11240,28 +11127,6 @@ mod tests {
         // With no annotation at all the advice to add one still stands.
         let none = check_src("fn main() -> Int64 { let a = [] return 0 }").unwrap_err();
         assert!(none.contains("annotate it"), "{none}");
-    }
-
-    #[test]
-    fn break_continue_only_inside_loops() {
-        // Legal inside `for`/`while` bodies.
-        assert!(check_src(
-            "fn main() -> Int64 { for x in [1, 2] { if x == 2 { break } continue } return 0 }"
-        )
-        .is_ok());
-        // `break` at a function's top level is an error.
-        let b = check_src("fn main() -> Int64 { break return 0 }").unwrap_err();
-        assert!(b.contains("`break` outside a loop"), "{b}");
-        // `continue` outside a loop is an error.
-        let c = check_src("fn main() -> Int64 { continue return 0 }").unwrap_err();
-        assert!(c.contains("`continue` outside a loop"), "{c}");
-        // A loop does not extend into a lambda — a `break` inside is an error.
-        let l = check_src(
-            "fn ap(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
-             fn main() -> Int64 { while true { let r = ap(x -> { break }) } return 0 }",
-        )
-        .unwrap_err();
-        assert!(l.contains("`break` outside a loop"), "{l}");
     }
 
     #[test]
@@ -13276,17 +13141,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("read itself"), "{e}");
-    }
-
-    #[test]
-    fn dropping_a_global_is_an_error() {
-        let e = check_src(
-            "let s = \"hi\"\n\
-             fn f() -> Int64 { drop s return 0 }\n\
-             fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("module state"), "{e}");
     }
 
     #[test]

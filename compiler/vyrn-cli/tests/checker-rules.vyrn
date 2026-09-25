@@ -353,6 +353,25 @@ fn storeMismatch() -> Int64 {
     x = "s"
     return x
 }
+// `break` and `continue` outside a loop are the typed judgment's. A lambda
+// is a frame of its own, so the loop around it does not count.
+fn breakInLambda() -> Int64 {
+    while true {
+        let f: fn(Int64) -> Unit = x -> {
+            break
+        }
+    }
+    return 0
+}
+// The `drop` rules are the typed judgment's. A generic function with an
+// instance is read with its parameters as written, as the checker read it.
+fn dropGiven<T>(x: consume T) -> Int64 {
+    drop x
+    return 0
+}
+fn givesString() -> Int64 {
+    return dropGiven("a" + "b")
+}
 fn main() -> Int64 {
     return 0
 }

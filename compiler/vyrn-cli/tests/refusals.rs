@@ -815,6 +815,87 @@ fn the_checkers_mut_unit_tests_are_still_refused() {
     );
 }
 
+/// The checker's unit test of `break` and `continue` outside a loop, asked
+/// of the whole compiler after the rule moved to the typed judgment (RFC-0125
+/// M7, group 2).
+#[test]
+fn the_checkers_loop_unit_test_is_still_refused() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("a break", "`break` outside a loop", "fn main() -> Int64 { break return 0 }"),
+        (
+            "a continue",
+            "`continue` outside a loop",
+            "fn main() -> Int64 { continue return 0 }",
+        ),
+        (
+            "a break in a lambda in a loop",
+            "`break` outside a loop",
+            "fn main() -> Int64 { while true {              let f: fn(Int64) -> Unit = x -> { break } } return 0 }",
+        ),
+    ];
+    let dir = common::scratch("loop-rule");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains(says) {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a loop exit outside a loop no longer refuses:
+  {}",
+        bad.join(
+            "
+  "
+        )
+    );
+}
+
+/// The checker's unit test of `drop` of module state, asked of the whole
+/// compiler after the `drop` rules moved to the typed judgment (RFC-0125 M7,
+/// group 3), with a generic function that has an instance, whose body the
+/// judgment reads with its parameters as written.
+#[test]
+fn the_checkers_drop_unit_test_is_still_refused() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "module state",
+            "cannot `drop` module state `s`",
+            "let s = \"hi\"
+             fn f() -> Int64 { drop s return 0 }
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a called generic",
+            "cannot `drop` `v`: its type `T` is a type parameter",
+            "fn give<T>(v: consume T) -> Int64 { drop v return 0 }
+             fn main() -> Int64 { return give(\"a\" + \"b\") }",
+        ),
+    ];
+    let dir = common::scratch("drop-rule");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains(says) {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a `drop` rule no longer refuses:
+  {}",
+        bad.join(
+            "
+  "
+        )
+    );
+}
+
 /// The shapes row 07's own unit tests pinned, still refused after the rule
 /// left `movecheck.rs` (RFC-0125 §3 M3, row 07).
 ///
