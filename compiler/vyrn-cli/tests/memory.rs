@@ -2451,6 +2451,16 @@ fn a_map_of_a_packed_key_and_a_string_value_is_freed_on_both_walks() {
     shape_runs_clean("a-map-of-a-packed-key-and-a-string-value", "22321\n");
 }
 
+// A stored function value passed to a higher-order function, and passed on
+// (record `m7-fnval2`).
+#[test]
+fn a_stored_function_value_passed_on_is_freed_on_both_walks() {
+    shape_runs_clean(
+        "a-stored-function-value-passed-to-a-higher-order-function",
+        "0\n4\n301353\n",
+    );
+}
+
 /// Runs the shape `stem` of `tests/shapes/` under the free audit, on the
 /// core's rows and on the AST walk, and asserts each prints `want`, exits 0
 /// and prints nothing on stderr.

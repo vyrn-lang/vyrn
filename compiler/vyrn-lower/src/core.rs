@@ -583,7 +583,8 @@ pub enum Target {
     Lambda(String, Vec<(String, Type)>),
     /// A stored value (RFC-0037), which the instance takes as the parameter
     /// this names: the bound parameter stays, under that name, and a call
-    /// through it stays a call through the value.
+    /// through it stays a call through the value. At a call site the row
+    /// passes the value after its own arguments, as a lambda's captures.
     Value(String),
 }
 
@@ -8144,20 +8145,27 @@ impl<'a> Builder<'a> {
             _ => Vec::new(),
         };
         let mut targets = Vec::new();
+        // A lambda target's frame is its own body; its captures, and a stored
+        // value, follow the call's own arguments, which is where
+        // [`specialize`] puts a forwarded target's.
         let mut forwarded = Vec::new();
         for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
-            if let Some(Some(t)) = bound.get(k) {
-                // A lambda target's frame is its own body, and its captures
-                // follow the call's own arguments, which is where
-                // [`specialize`] puts a forwarded target's.
-                if let Target::Lambda(..) = t {
-                    let vals = self.captures(a);
-                    self.lambda_frame(a, &vals)?;
-                    forwarded.extend(vals.into_iter().map(|v| (Arg::Val(v), Capability::Read)));
+            let forwards = match bound.get(k) {
+                Some(Some(t @ Target::Value(_))) => {
+                    targets.push(t.clone());
+                    true
                 }
-                targets.push(t.clone());
-                continue;
-            }
+                Some(Some(t)) => {
+                    if let Target::Lambda(..) = t {
+                        let vals = self.captures(a);
+                        self.lambda_frame(a, &vals)?;
+                        forwarded.extend(vals.into_iter().map(|v| (Arg::Val(v), Capability::Read)));
+                    }
+                    targets.push(t.clone());
+                    continue;
+                }
+                _ => false,
+            };
             // Whether THIS position may keep what it is handed, for a lambda
             // literal written AT it ([`NameInfo::closure_reads`]). The
             // capability is read where the rule about a position is stated
@@ -8225,7 +8233,10 @@ impl<'a> Builder<'a> {
                     temps_to_drop.push(t);
                 }
             }
-            vs.push((Arg::Val(v), *cap));
+            match forwards {
+                true => forwarded.push((Arg::Val(v), *cap)),
+                false => vs.push((Arg::Val(v), *cap)),
+            }
         }
         vs.extend(forwarded);
         if drains {
@@ -8317,11 +8328,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Per argument of a call to `name`, the [`Target`] a `fn`-typed
-    /// parameter is bound to: a function the program declares, or a
-    /// parameter of this body that is itself bound, or a lambda literal
-    /// written there, with its captures. Empty where the callee takes no
-    /// function, and where any function argument is a value no target names
-    /// (a stored value), so the call keeps every argument as a value.
+    /// parameter is bound to: a function the program declares, a parameter
+    /// of this body that is itself bound, a lambda literal written there,
+    /// with its captures, or a stored value (RFC-0037), which the row
+    /// forwards as its one capture. Empty where the callee takes no
+    /// function, and where a lambda literal goes to a `consume` position, so
+    /// the call keeps every argument as a value.
     ///
     /// A parameter is `fn`-typed as written: one of an alias type takes the
     /// stored value (RFC-0037), which is a value like any other.
@@ -8335,8 +8347,8 @@ impl<'a> Builder<'a> {
                 out.push(None);
                 continue;
             }
-            let v = match a {
-                Expr::Var { name, .. } => name,
+            let value = Target::Value(p.name.clone());
+            let t = match a {
                 // A `consume` position may keep the closure, so the literal
                 // is a value the kernel judges ([`NameInfo::closure_reads`]).
                 Expr::Lambda { line, col, .. } if p.capability != Capability::Consume => {
@@ -8351,21 +8363,21 @@ impl<'a> Builder<'a> {
                         })
                         .collect();
                     let key = lambda_spelling(&self.body.name, *line, *col);
-                    out.push(Some(Target::Lambda(key, caps)));
-                    continue;
+                    Target::Lambda(key, caps)
                 }
-                _ => return Vec::new(),
-            };
-            let t = match self.lookup(v) {
-                Some(n)
-                    if self.body.params.contains(&n)
-                        && matches!(self.body.names[n as usize].ty, Type::Fn(..)) =>
-                {
-                    Target::Param(n)
-                }
-                Some(_) => return Vec::new(),
-                None if self.concrete_fn(v) => Target::Fn(v.clone()),
-                None => return Vec::new(),
+                Expr::Lambda { .. } => return Vec::new(),
+                Expr::Var { name: v, .. } => match self.lookup(v) {
+                    Some(n)
+                        if self.body.params.contains(&n)
+                            && matches!(self.body.names[n as usize].ty, Type::Fn(..)) =>
+                    {
+                        Target::Param(n)
+                    }
+                    Some(_) => value,
+                    None if self.concrete_fn(v) => Target::Fn(v.clone()),
+                    None => return Vec::new(),
+                },
+                _ => value,
             };
             out.push(Some(t));
         }
@@ -8992,6 +9004,11 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
                         continue;
                     };
                     *t = to.clone();
+                    // A stored value forwards itself, the parameter that
+                    // stays under its name.
+                    if matches!(to, Target::Value(_)) {
+                        args.push((Arg::Val(Val::Name(p)), Capability::Read));
+                    }
                     let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
                     let forwarded = forwarded.into_iter().flatten();
                     args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));

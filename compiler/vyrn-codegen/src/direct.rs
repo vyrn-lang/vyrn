@@ -2877,6 +2877,7 @@ fn ho_args(
 ) -> Option<Vec<(Arg, vyrn_frontend::ast::Capability)>> {
     let caps = |t: &Target| match t {
         Target::Lambda(_, c) => c.len(),
+        Target::Value(_) => 1,
         _ => 0,
     };
     let at = args.len().checked_sub(targets.iter().map(caps).sum())?;
@@ -19337,6 +19338,15 @@ impl<'p> Fn_<'_, 'p> {
                 (self.dispatcher(m, &sig_ty, line)?, &through[..])
             }
             None => {
+                // A stored value's dispatcher is registered before the
+                // instance is named, so the target carries its index.
+                if let Some((.., bound)) = self.core_ho(callee, kind, solved, targets) {
+                    for (t, ft) in targets.iter().zip(&bound) {
+                        if matches!(t, Target::Value(_)) {
+                            self.dispatcher(m, &ft.sig.params[0], line)?;
+                        }
+                    }
+                }
                 let ho = match targets {
                     [] => None,
                     _ => self.core_ho(callee, kind, solved, targets),
@@ -20751,12 +20761,18 @@ impl<'p> Fn_<'_, 'p> {
     )> {
         let f = (self.cx.higher_order.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
         let (targs, subst) = solved_instance(f, solved)?;
-        let fns = f.params.iter().filter(|p| matches!(p.ty, Type::Fn(..)));
-        if fns.count() != targets.len() {
+        let fns: Vec<&Type> = (f.params.iter())
+            .map(|p| &p.ty)
+            .filter(|t| matches!(t, Type::Fn(..)))
+            .collect();
+        if fns.len() != targets.len() {
             return None;
         }
-        let bound = (targets.iter())
-            .map(|t| self.core_target(t))
+        let bound = (targets.iter().zip(fns))
+            .map(|(t, p)| match t {
+                Target::Value(_) => self.core_dispatch(&ftypes::substitute(p, &subst)),
+                t => self.core_target(t),
+            })
             .collect::<Option<_>>()?;
         Some((f, targs, subst, bound))
     }
@@ -20780,6 +20796,34 @@ impl<'p> Fn_<'_, 'p> {
             }),
             Target::Param(_) | Target::Value(_) => None,
         }
+    }
+
+    /// The target a stored value of the `fn` type `p` is (RFC-0037): its
+    /// signature's dispatcher, with the value as its one capture, as the arm's
+    /// [`Fn_::resolve_fn_arg`] makes it. The index is the registered
+    /// dispatcher's, which [`Fn_::core_call`] registers before it emits;
+    /// a screen asks before that and reads 0.
+    fn core_dispatch(&self, p: &Type) -> Option<FnTarget> {
+        let sig_ty = crate::normalize_fn_sig(&self.cx.sub(p), &self.cx.types);
+        let Type::Fn(ptys, ret) = &sig_ty else {
+            return None;
+        };
+        let index = (self.cx.dispatch.borrow().sigs.iter())
+            .find(|(t, _)| *t == sig_ty)
+            .map_or(0, |(_, s)| s.index);
+        let params: Vec<Type> = std::iter::once(sig_ty.clone())
+            .chain(ptys.iter().cloned())
+            .collect();
+        Some(FnTarget {
+            sig: Sig {
+                index,
+                modify: vec![false; params.len()],
+                params,
+                ret: self.cx.repr(ret, 0).ok()?,
+                ret_ty: (**ret).clone(),
+            },
+            ncaps: 1,
+        })
     }
 
     /// The stored value a call row calls through, and its signature. `None`
@@ -21722,6 +21766,40 @@ impl<'p> Fn_<'_, 'p> {
                     if self.core_framed(&body.names[*n as usize].ty)) =>
             {
                 None
+            }
+            // A higher-order call pushes its arguments in its instance's
+            // order ([`ho_args`]), which puts a target's captures where the
+            // `fn` parameter stands.
+            St::Let(
+                _,
+                Rhs::Call {
+                    callee,
+                    kind,
+                    solved,
+                    targets,
+                    args,
+                    ..
+                },
+            )
+            | St::Do {
+                rhs:
+                    Rhs::Call {
+                        callee,
+                        kind,
+                        solved,
+                        targets,
+                        args,
+                        ..
+                    },
+                ..
+            } if !targets.is_empty() => {
+                let (f, ..) = self.core_ho(callee, *kind, solved, targets)?;
+                let ordered = ho_args(f, targets, args)?;
+                let (a, _) = ordered.first()?;
+                match a.val()? {
+                    Val::Name(n) => Some(*n),
+                    Val::Lit(_) => None,
+                }
             }
             s => first_read(s),
         }

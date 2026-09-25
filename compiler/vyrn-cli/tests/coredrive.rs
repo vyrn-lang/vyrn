@@ -523,6 +523,10 @@ fn run() {
     // `Stmt::If` joined again when a lambda literal handed to a call became
     // its target (the m7-capture record), and left when a body lifts its
     // targets before the screen (the m7-mains record).
+    // `Stmt::Assign`, `Stmt::ForIn` and `Stmt::Drop` left when closures2 and
+    // fnvalarg `main` were taken whole, with each arm at 0 (the m7-fnval2
+    // record), and `Stmt::Expr` with them once a body lifts its targets
+    // before the screen.
     let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
         .iter()
         .enumerate()
@@ -533,15 +537,7 @@ fn run() {
     if shard().is_none() {
         assert_eq!(
             carrying,
-            [
-                "Stmt::Let",
-                "Stmt::Assign",
-                "Stmt::Return",
-                "Stmt::Expr",
-                "Stmt::While",
-                "Stmt::ForIn",
-                "Stmt::Drop"
-            ],
+            ["Stmt::Let", "Stmt::Return", "Stmt::While"],
             "the forms the core's rows carry are not the ones the record names"
         );
     }
