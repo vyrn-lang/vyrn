@@ -8605,6 +8605,17 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         remember(memo.as_ref(), key, refused_before);
     }
+    // A placed release of a generic declared release is a call the lowering's
+    // worklist follows ([`crate::dispatched`]), and it reads the rows only
+    // once they are in the plan. So a program where one is placed is lowered
+    // again below, and the instances that lowering adds are built there.
+    let by_name: HashMap<&str, &vyrn_frontend::ast::Function> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+    let placed: Vec<Release> = added.iter().map(|(_, r)| r.clone()).collect();
+    let mut dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     for (f, row) in added {
         touched.insert(f.clone());
         own.releases.entry(f).or_default().push(row);
@@ -8668,6 +8679,39 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         for body in top.frames() {
             fold_frame(body, &own.proto, &mut facts);
         }
+    }
+    // A worklist to a fixpoint. Each body is built, placed, and built again,
+    // because the first build read the plan before the rows its own placement
+    // adds; a row that reaches a generic declared release turns it again.
+    // Measure: the instances not yet built, a finite set (the declared
+    // releases times the types the program instantiates). A round turns only
+    // after one that built at least one of them, since only a new body's
+    // placement adds to `placed`.
+    let mut had: std::collections::HashSet<String> =
+        lowered.instances.iter().map(Instance::spelling).collect();
+    while dispatches {
+        let again = crate::lower_with(program, own);
+        let mut placed: Vec<Release> = Vec::new();
+        for inst in &again.instances {
+            if !had.insert(inst.spelling()) {
+                continue;
+            }
+            if let Ok(top) = build(program, inst, own) {
+                let mut rows = Vec::new();
+                place_frames(&top, &inst.func.name, own, &mut rows, &mut touched, trace);
+                for (f, row) in rows {
+                    placed.push(row.clone());
+                    own.releases.entry(f).or_default().push(row);
+                }
+            }
+            let Ok(top) = build(program, inst, own) else {
+                continue;
+            };
+            for body in top.frames() {
+                fold_frame(body, &own.proto, &mut facts);
+            }
+        }
+        dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     }
     FACTS.with(|f| *f.borrow_mut() = Some(facts));
     crate::effects::set_state_callees(None);
