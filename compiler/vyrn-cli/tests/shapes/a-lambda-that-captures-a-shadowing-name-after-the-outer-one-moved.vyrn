@@ -1,0 +1,7 @@
+// a lambda that captures a shadowing name after the outer one moved
+// pin: 0 break, 0 continue
+// The outer `x` is consumed before the inner `x` is captured. The capture is
+// the inner binding's, so the kernel accepts the body (#483). Both walks
+// print 25 with no leak line (RFC-0125 M7, `m7-captures`).
+fn keep(s: consume String) -> Int64 { return s.byteLength }
+fn vyrnTestMain() -> Int64 { let x = "outer" let n = keep(x) let mut r = 0 if n > 0 { let x = 20 let f: fn(Int64) -> Int64 = y -> x + y r = f(n) } return r }

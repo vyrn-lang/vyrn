@@ -6118,7 +6118,11 @@ impl<'a> Builder<'a> {
         mentions_in_lambda(body, &mut vars, &mut calls);
         let mut caps = Vec::new();
         for (name, n) in &self.scope {
-            if params.iter().any(|p| p.name == *name) || caps.contains(&Val::Name(*n)) {
+            // A shadowed entry is no binding the body can name (#483).
+            if params.iter().any(|p| p.name == *name)
+                || caps.contains(&Val::Name(*n))
+                || self.lookup(name) != Some(*n)
+            {
                 continue;
             }
             if reads_place(&vars, name) || calls.contains(&name.as_str()) {
