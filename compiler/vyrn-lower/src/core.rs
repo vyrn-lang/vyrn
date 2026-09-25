@@ -2961,6 +2961,10 @@ impl<'a> Builder<'a> {
     ///   [`vyrn_frontend::project::optional_inline`] mints a different tree.
     ///   [`Builder::optional_if_let`] states that split at the `if let`.
     /// - The receiver has no recorded type, so the tree cannot be keyed.
+    ///
+    /// The answer is the yielded place: a read of it here, and a place path
+    /// through it in [`Builder::place`], so `s[h].next` walks what `at`
+    /// yields after its prologue has run.
     fn inlined(
         &mut self,
         method: &str,
@@ -2968,7 +2972,7 @@ impl<'a> Builder<'a> {
         args: &'a [Expr],
         line: usize,
         out: &mut Vec<St>,
-    ) -> Result<Option<Rhs>, Gap> {
+    ) -> Result<Option<Place>, Gap> {
         if !vyrn_frontend::project::memo_open() {
             return Ok(None);
         }
@@ -3012,8 +3016,7 @@ impl<'a> Builder<'a> {
         if !is_place_read(&p.place) {
             return gap_d("a projection whose yield is not a place", method, line);
         }
-        let place = self.place(&p.place, out)?;
-        Ok(Some(Rhs::Read(place)))
+        self.place(&p.place, out).map(Some)
     }
 
     /// `if let Some(x) = s.tryAt(h)` (RFC-0122), stated at the site — RFC-0125
@@ -3532,13 +3535,33 @@ impl<'a> Builder<'a> {
     /// ([`Builder::stmt_list`]), stated into its path; how many statements it
     /// spans, or `None` when `ss` does not start with one.
     fn nested_store(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<Option<usize>, Gap> {
-        let lets = ss
-            .iter()
-            .take_while(|s| {
-                matches!(s, Stmt::Let { name, mutable: true, .. }
-                    if vyrn_frontend::ast::is_place_temp(name))
-            })
-            .count();
+        let Some((lets, last, place, ty)) = self.window(ss, out)? else {
+            return Ok(None);
+        };
+        let store = &ss[lets];
+        let sid = store as *const Stmt as usize;
+        match store {
+            Stmt::SetField {
+                field, value, line, ..
+            } => self.set_field((place, ty), last, field, value, sid, *line, out)?,
+            Stmt::IndexSet {
+                index, value, line, ..
+            } => self.index_set((place, ty), last, index, value, sid, *line, out)?,
+            _ => self.removal_at(place, ty, last, store, store.line(), out)?,
+        }
+        Ok(Some(2 * lets + 1))
+    }
+
+    /// The move-out window at the head of `ss`: how many temps it moves out,
+    /// and the name, place and type of the last, which the statement after
+    /// them writes. `None`, with nothing stated, when `ss` does not start with
+    /// one.
+    fn window(
+        &mut self,
+        ss: &'a [Stmt],
+        out: &mut Vec<St>,
+    ) -> Result<Option<(usize, &'a String, Place, Type)>, Gap> {
+        let lets = ss.iter().take_while(|s| moves_out(s)).count();
         if lets == 0 || ss.len() < 2 * lets + 1 {
             return Ok(None);
         }
@@ -3557,7 +3580,7 @@ impl<'a> Builder<'a> {
                 },
                 Expr::Call { name: at, args, .. } if at == "@at" && args.len() == 2 => {
                     match (&args[0], &args[1]) {
-                        (Expr::Var { name: p, .. }, idx @ Expr::Var { .. }) => (p, Err(idx)),
+                        (Expr::Var { name: p, .. }, Expr::Var { .. }) => (p, Err(&args[..])),
                         _ => return Ok(None),
                     }
                 }
@@ -3581,7 +3604,7 @@ impl<'a> Builder<'a> {
                         value: Expr::Var { name: v, .. },
                         ..
                     },
-                    Err(Expr::Var { name: i2, .. }),
+                    Err([_, Expr::Var { name: i2, .. }]),
                 ) => p == parent && j == i2 && v == name,
                 _ => false,
             };
@@ -3595,57 +3618,110 @@ impl<'a> Builder<'a> {
         let Stmt::Let { name: last, .. } = &ss[lets - 1] else {
             return Ok(None);
         };
-        let line = match store {
-            Stmt::SetField { name, line, .. } | Stmt::IndexSet { name, line, .. }
-                if name == last =>
-            {
-                line
-            }
-            Stmt::Expr(e) | Stmt::Let { value: e, .. } => match removal(e) {
-                Some((recv, line)) if recv == last => line,
-                _ => return Ok(None),
-            },
-            _ => return Ok(None),
+        let into = match store {
+            Stmt::SetField { name, .. } | Stmt::IndexSet { name, .. } => Some(name),
+            Stmt::Expr(e) | Stmt::Let { value: e, .. } => removal(e),
+            _ => None,
         };
+        if into != Some(last) {
+            return Ok(None);
+        }
+        let line = &store.line();
         // The path is a record's fields and an array's elements. A map's
-        // entry is a key read and a user container's element is its `place
-        // at`, which the rows state apart.
+        // entry is a key read, which the rows state apart. A container a
+        // projection answers for yields its element's place from `atSet`
+        // (RFC-0091), whose prologue runs once, where the window opens; its
+        // receiver is the root, which a later temp's is not
+        // ([`Builder::yielded`]).
         let (mut place, mut ty) = self.named_place(parts[0].0, *line)?;
         let mut t = ty.clone();
-        for (_, part) in &parts {
+        let mut tys = Vec::new();
+        for (i, (_, part)) in parts.iter().enumerate() {
             let next = match part {
                 Ok(f) => self.field_ty(&t, f, *line),
                 Err(_) if self.is_map(&t) => return Ok(None),
+                Err(_) if self.projected(&t) && i > 0 => return Ok(None),
+                Err(_) if self.projected(&t) => match &ss[i] {
+                    Stmt::Let { value, .. } => self.ty_of(value),
+                    _ => return Ok(None),
+                },
                 Err(_) => self.elem_ty(&t, *line),
             };
             let Ok(next) = next else {
                 return Ok(None);
             };
-            t = next;
+            t = next.clone();
+            tys.push(next);
         }
-        for (_, part) in &parts {
-            (place, ty) = match part {
-                Ok(f) => (
-                    Place::Field(Box::new(place), f.to_string()),
-                    self.field_ty(&ty, f, *line)?,
-                ),
-                Err(idx) => (
-                    Place::Elem(Box::new(place), self.read_val(idx, out)?),
-                    self.elem_ty(&ty, *line)?,
-                ),
+        for ((_, part), next) in parts.iter().zip(tys) {
+            place = match part {
+                Ok(f) => Place::Field(Box::new(place), f.to_string()),
+                Err(_) if self.projected(&ty) => match self.yielded(&ss[2 * lets], out)? {
+                    Some(p) => p,
+                    None => return Ok(None),
+                },
+                Err(args) => Place::Elem(Box::new(place), self.read_val(&args[1], out)?),
             };
+            ty = next;
         }
-        let sid = store as *const Stmt as usize;
-        match store {
-            Stmt::SetField { field, value, .. } => {
-                self.set_field((place, ty), last, field, value, sid, *line, out)?
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                self.index_set((place, ty), last, index, value, sid, *line, out)?
-            }
-            _ => self.removal_at(place, ty, last, store, *line, out)?,
+        Ok(Some((lets, last, place, ty)))
+    }
+
+    /// The place `atSet` yields for a window's put-back `back` into a
+    /// container a projection answers for, with the projection's prologue
+    /// stated. The checker expanded that store (`project::stored`): the
+    /// prologue, then the yielded place written as a store of the window's
+    /// temp. The store's path is the place. `None`, with nothing stated, where
+    /// the checker expanded no such store.
+    fn yielded(&mut self, back: &'a Stmt, out: &mut Vec<St>) -> Result<Option<Place>, Gap> {
+        let Stmt::IndexSet {
+            name,
+            index,
+            value,
+            line,
+        } = back
+        else {
+            return Ok(None);
+        };
+        let Some(blk) = vyrn_frontend::project::stored(name, index, value) else {
+            return Ok(None);
+        };
+        let Some(k) = vyrn_frontend::project::store_node(blk)
+            .and_then(|s| blk.stmts.iter().position(|t| std::ptr::eq(t, s)))
+        else {
+            return gap("an `atSet` expansion with no store", *line);
+        };
+        let group = blk.stmts[..k]
+            .iter()
+            .rposition(|s| !moves_out(s))
+            .map_or(0, |j| j + 1);
+        for s in &blk.stmts[..group] {
+            self.stmt(s, out)?;
         }
-        Ok(Some(2 * lets + 1))
+        let (base, store) = match self.window(&blk.stmts[group..], out)? {
+            Some((_, _, p, _)) => (p, &blk.stmts[k]),
+            None => match &blk.stmts[k] {
+                s @ (Stmt::IndexSet { name, .. } | Stmt::SetField { name, .. }) => {
+                    (self.named_place(name, *line)?.0, s)
+                }
+                _ => return gap("an `atSet` expansion whose store is no place", *line),
+            },
+        };
+        let place = match store {
+            Stmt::IndexSet {
+                index, value: v, ..
+            } if v == value => Place::Elem(Box::new(base), self.read_val(index, out)?),
+            Stmt::SetField {
+                field, value: v, ..
+            } if v == value => Place::Field(Box::new(base), field.clone()),
+            _ => {
+                return gap(
+                    "an `atSet` expansion that stores other than the temp",
+                    *line,
+                )
+            }
+        };
+        Ok(Some(place))
     }
 
     /// A removal whose receiver is a move-out window's temp
@@ -4892,6 +4968,11 @@ impl<'a> Builder<'a> {
             }
         }
         vyrn_frontend::types::substitute(ty, &subst)
+    }
+
+    /// Whether a projection answers for `ty`'s element place (RFC-0091).
+    fn projected(&self, ty: &Type) -> bool {
+        vyrn_frontend::project::lookup_in(&self.program.impls, ty, "atSet").is_some()
     }
 
     fn is_map(&self, ty: &Type) -> bool {
@@ -6937,7 +7018,12 @@ impl<'a> Builder<'a> {
                 let base = self.place(expr, out)?;
                 Ok(Place::Field(Box::new(base), field.clone()))
             }
-            Expr::Call { name, args, .. } if name == "@at" && args.len() == 2 => {
+            Expr::Call {
+                name, args, line, ..
+            } if name == "@at" && args.len() == 2 => {
+                if let Some(p) = self.inlined("at", &args[0], &args[1..], *line, out)? {
+                    return Ok(p);
+                }
                 let bty = self.ty_of(&args[0])?;
                 let base = self.place(&args[0], out)?;
                 // The receiver is this read's, and a field read in the index
@@ -7083,8 +7169,8 @@ impl<'a> Builder<'a> {
             return gap("a call with more arguments than parameters", line);
         }
         if let (Callee::Projection, Some(recv)) = (kind, args.first()) {
-            if let Some(r) = self.inlined(name, recv, &args[1..], line, out)? {
-                return Ok(r);
+            if let Some(p) = self.inlined(name, recv, &args[1..], line, out)? {
+                return Ok(Rhs::Read(p));
             }
         }
         let mut vs = Vec::new();
@@ -8007,16 +8093,23 @@ pub fn names_bound(s: &St, out: &mut Vec<Name>) {
     }
 }
 
-/// The receiver and line of a removal the parser brackets with a move-out
-/// window (`parser::hoist_mutating_receiver`), where `e` is one.
-fn removal(e: &Expr) -> Option<(&String, &usize)> {
+/// Whether `s` moves a place out into a window's temp (RFC-0082).
+fn moves_out(s: &Stmt) -> bool {
+    matches!(s, Stmt::Let { name, mutable: true, .. } if vyrn_frontend::ast::is_place_temp(name))
+}
+
+/// The receiver of a removal the parser brackets with a move-out window
+/// (`parser::hoist_mutating_receiver`), where `e` is one.
+fn removal(e: &Expr) -> Option<&String> {
     match e {
-        Expr::Call {
-            name, args, line, ..
-        } if matches!(name.as_str(), "@pop" | "@swapRemove" | "@remove") => match args.first() {
-            Some(Expr::Var { name, .. }) => Some((name, line)),
-            _ => None,
-        },
+        Expr::Call { name, args, .. }
+            if matches!(name.as_str(), "@pop" | "@swapRemove" | "@remove") =>
+        {
+            match args.first() {
+                Some(Expr::Var { name, .. }) => Some(name),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

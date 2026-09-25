@@ -1,0 +1,6 @@
+// an element of a Slots read through a dead handle
+// pin: 0 break, 0 continue
+// A place through `s[h]` is the place `at` yields, after its prologue, so a
+// field of a `Slots` element read through a handle that is no longer alive
+// traps with `at`'s own sentence on both walks (RFC-0125 M7, `m7-slotsel`).
+import { Slots, Handle, newSlots, insert, remove } from "std/slots"          type Node = { value: Int64, next: Option<Handle<Node>> }          fn nextValue(s: Slots<Node>, h: Handle<Node>) -> Int64 { let n = s[h].next.copy() return match n { Some(k) => s[k].value, None => 0 } }          fn vyrnTestMain() -> Int64 { let mut s: Slots<Node> = newSlots() let a = insert(s, Node { value: 7, next: None }) let b = insert(s, Node { value: 2, next: Some(a) }) let live = nextValue(s, b) print(live.toString()) remove(s, a) return live * 100 + nextValue(s, b) }
