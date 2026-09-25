@@ -39,15 +39,10 @@ caller porting a pattern from Perl should know which one they have.
 ## Regex
 
 ```vyrn
-type Regex = { op: Array<Int64>, a: Array<Int64>, b: Array<Int64>, sets: Array<UInt8>, start: Int64, first: Array<UInt8>, firstKnown: Bool }
+type Regex = { op: Array<Int64>, a: Array<Int64>, b: Array<Int64>, cls: Array<ByteSet>, start: Int64, first: ByteSet, firstKnown: Bool }
 ```
 
 A compiled pattern.
-
-`sets` holds one 32-byte bitmap per class, so class `k` owns bytes
-`k * 32 .. k * 32 + 32` and byte `c` is in it when bit `c % 8` of
-`sets[k * 32 + c / 8]` is set. A bitmap rather than 256 booleans because a
-pattern with twenty classes is 640 bytes this way and 5,120 the other.
 
 ## Match
 

@@ -40,11 +40,11 @@ import { substring } from "std/strings"
 // The compiled form
 //
 // A Thompson NFA held as flat arrays, because that is what this language makes
-// cheap: three integer arrays and one byte array, no pointers and no recursive
-// type. One instruction is one index into `op`/`a`/`b`.
+// cheap: four parallel arrays, no pointers and no recursive type. One
+// instruction is one index into `op`/`a`/`b`/`cls`.
 // ---------------------------------------------------------------------------
 
-/// `op[i]` is a byte-class test: `a[i]` is the class, `b[i]` the next pc.
+/// `op[i]` is a byte-class test: `cls[i]` is the class, `b[i]` the next pc.
 let opClass = 0
 
 /// `op[i]` is a fork: `a[i]` and `b[i]` are both next pcs, tried as one set.
@@ -53,24 +53,26 @@ let opSplit = 1
 /// `op[i]` accepts.
 let opMatch = 2
 
-/// A compiled pattern.
+/// A set of bytes: byte `c` is in it when bit `c % 64` of word `c / 64` is set.
 ///
-/// `sets` holds one 32-byte bitmap per class, so class `k` owns bytes
-/// `k * 32 .. k * 32 + 32` and byte `c` is in it when bit `c % 8` of
-/// `sets[k * 32 + c / 8]` is set. A bitmap rather than 256 booleans because a
-/// pattern with twenty classes is 640 bytes this way and 5,120 the other.
+/// Four words and not an array, so a membership test reads no array and has no
+/// bounds to check; and one per instruction, so the class of instruction `pc`
+/// is `cls[pc]`, in bounds wherever `op[pc]` is.
+type ByteSet = { w0: Int64, w1: Int64, w2: Int64, w3: Int64 }
+
+/// A compiled pattern.
 export type Regex = {
     op: Array<Int64>,
     a: Array<Int64>,
     b: Array<Int64>,
-    sets: Array<UInt8>,
+    cls: Array<ByteSet>,
     start: Int64,
-    // `first` is the bytes that can begin a match, as a 32-byte bitmap: the
-    // search skips any position whose byte is not in it, which keeps a scan over
-    // a sequence from paying a match attempt per base. `firstKnown` is false
-    // when the pattern can match the empty string, in which case every position
-    // begins a match and the filter says nothing.
-    first: Array<UInt8>,
+    // `first` is the bytes that can begin a match: the search skips any
+    // position whose byte is not in it, which keeps a scan over a sequence from
+    // paying a match attempt per base. `firstKnown` is false when the pattern
+    // can match the empty string, in which case every position begins a match
+    // and the filter says nothing.
+    first: ByteSet,
     firstKnown: Bool,
 }
 
@@ -81,44 +83,28 @@ export type Match = { at: Int64, end: Int64 }
 // Bitmaps
 // ---------------------------------------------------------------------------
 
-fn emptySet() -> Array<UInt8> {
-    let mut s: Array<UInt8> = []
-    let mut i = 0
-    while i < 32 {
-        s.push(0)
-        i = i + 1
+fn noBytes() -> ByteSet {
+    return ByteSet { w0: 0, w1: 0, w2: 0, w3: 0 }
+}
+
+/// `c` is a byte, 0 to 255.
+fn addByte(s: modify ByteSet, c: Int64) {
+    let bit = 1 << (c & 63)
+    if c < 64 {
+        s.w0 = s.w0 | bit
+    } else if c < 128 {
+        s.w1 = s.w1 | bit
+    } else if c < 192 {
+        s.w2 = s.w2 | bit
+    } else {
+        s.w3 = s.w3 | bit
     }
-    return s
 }
 
-/// The bit within a bitmap byte that stands for `c`. Shared, because the two
-/// setters below differ only in which array they reach — `modify` takes a
-/// variable and not a field, so a builder cannot hand its own `sets` to the
-/// plain one.
-fn bitMask(c: Int64) -> Int64 {
-    let bit = c % 8
-    let mut mask = 1
-    let mut k = 0
-    while k < bit {
-        mask = mask * 2
-        k = k + 1
-    }
-    return mask
-}
-
-fn setAdd(s: modify Array<UInt8>, at: Int64, c: Int64) {
-    let idx = at + c / 8
-    s[idx] = UInt8(Int64(s[idx]) | bitMask(c))
-}
-
-/// The same store, into the builder's class table.
-fn classAdd(bd: modify Builder, base: Int64, c: Int64) {
-    let idx = base + c / 8
-    bd.sets[idx] = UInt8(Int64(bd.sets[idx]) | bitMask(c))
-}
-
-fn setHas(s: Array<UInt8>, at: Int64, c: Int64) -> Bool {
-    return (Int64(s[at + c / 8]) & bitMask(c)) != 0
+/// `c` is a byte, 0 to 255.
+fn hasByte(s: ByteSet, c: Int64) -> Bool {
+    let w = if c < 64 { s.w0 } else if c < 128 { s.w1 } else if c < 192 { s.w2 } else { s.w3 }
+    return ((w >> (c & 63)) & 1) != 0
 }
 
 // ---------------------------------------------------------------------------
@@ -136,18 +122,18 @@ type Builder = {
     op: Array<Int64>,
     a: Array<Int64>,
     b: Array<Int64>,
-    sets: Array<UInt8>,
-    nsets: Int64,
+    cls: Array<ByteSet>,
     pat: Array<UInt8>,
     at: Int64,
     err: String,
 }
 
-fn emit(bd: modify Builder, o: Int64, x: Int64, y: Int64) -> Int64 {
+fn emit(bd: modify Builder, o: Int64, x: Int64, y: Int64, s: ByteSet) -> Int64 {
     let pc = bd.op.length
     bd.op.push(o)
     bd.a.push(x)
     bd.b.push(y)
+    bd.cls.push(s)
     return pc
 }
 
@@ -186,29 +172,9 @@ fn peek(bd: Builder) -> Int64 {
     return Int64(bd.pat[bd.at])
 }
 
-/// A new class, filled by the caller, answered as its index.
-fn newClass(bd: modify Builder) -> Int64 {
-    let k = bd.nsets
-    let mut i = 0
-    while i < 32 {
-        bd.sets.push(0)
-        i = i + 1
-    }
-    bd.nsets = bd.nsets + 1
-    return k
-}
-
-/// One class holding exactly `c`.
-fn literalClass(bd: modify Builder, c: Int64) -> Int64 {
-    let k = newClass(bd)
-    classAdd(bd, k * 32, c)
-    return k
-}
-
 /// `[...]` — the bracket is already consumed.
-fn bracketClass(bd: modify Builder) -> Int64 {
-    let k = newClass(bd)
-    let base = k * 32
+fn bracketClass(bd: modify Builder) -> ByteSet {
+    let mut k = noBytes()
     let mut negate = false
     if peek(bd) == '^' {
         negate = true
@@ -222,11 +188,7 @@ fn bracketClass(bd: modify Builder) -> Int64 {
         if c == ']' && any {
             bd.at = bd.at + 1
             if negate {
-                let mut i = 0
-                while i < 32 {
-                    bd.sets[base + i] = UInt8(Int64(bd.sets[base + i]) ^ 255)
-                    i = i + 1
-                }
+                return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
             }
             return k
         }
@@ -255,29 +217,15 @@ fn bracketClass(bd: modify Builder) -> Int64 {
             }
             let mut x = lo
             while x <= hi {
-                classAdd(bd, base, x)
+                addByte(k, x)
                 x = x + 1
             }
         } else {
-            classAdd(bd, base, lo)
+            addByte(k, lo)
         }
         any = true
     }
     bd.err = "a character class with no closing `]`"
-    return k
-}
-
-/// Every byte but `\n`, which is what `.` means everywhere that is not a flag.
-fn dotClass(bd: modify Builder) -> Int64 {
-    let k = newClass(bd)
-    let base = k * 32
-    let mut c = 0
-    while c < 256 {
-        if c != 10 {
-            classAdd(bd, base, c)
-        }
-        c = c + 1
-    }
     return k
 }
 
@@ -297,35 +245,29 @@ fn parseAtom(bd: modify Builder) -> Frag {
         bd.at = bd.at + 1
         return inner
     }
-    if c == '[' {
-        bd.at = bd.at + 1
-        let k = bracketClass(bd)
-        let pc = emit(bd, opClass, k, 0)
-        return Frag { start: pc, holes: [pc * 2 + 1] }
-    }
-    if c == '.' {
-        bd.at = bd.at + 1
-        let k = dotClass(bd)
-        let pc = emit(bd, opClass, k, 0)
-        return Frag { start: pc, holes: [pc * 2 + 1] }
-    }
     if c == '^' || c == '$' {
         bd.err = "anchors (`^` and `$`) are not supported"
         bd.at = bd.at + 1
         return Frag { start: 0, holes: [] }
     }
-    let mut lit = c
-    if c == 92 {
-        bd.at = bd.at + 1
+    bd.at = bd.at + 1
+    let mut k = noBytes()
+    if c == '[' {
+        k = bracketClass(bd)
+    } else if c == '.' {
+        // Every byte but `\n`, which is what `.` means everywhere that is not a flag.
+        k = ByteSet { w0: ~(1 << 10), w1: -1, w2: -1, w3: -1 }
+    } else if c == 92 {
         if bd.at >= bd.pat.length {
             bd.err = "a backslash at the end of the pattern"
             return Frag { start: 0, holes: [] }
         }
-        lit = Int64(bd.pat[bd.at])
+        addByte(k, Int64(bd.pat[bd.at]))
+        bd.at = bd.at + 1
+    } else {
+        addByte(k, c)
     }
-    bd.at = bd.at + 1
-    let k = literalClass(bd, lit)
-    let pc = emit(bd, opClass, k, 0)
+    let pc = emit(bd, opClass, 0, 0, k)
     return Frag { start: pc, holes: [pc * 2 + 1] }
 }
 
@@ -342,7 +284,7 @@ fn parseRepeat(bd: modify Builder) -> Frag {
             // A split that either enters the body or leaves; the body loops
             // back to the split. Zero or more, and greedy because the enter
             // edge is the first operand.
-            let sp = emit(bd, opSplit, f.start, 0)
+            let sp = emit(bd, opSplit, f.start, 0, noBytes())
             patch(bd, f.holes, sp)
             f = Frag { start: sp, holes: [sp * 2 + 1] }
         } else if c == '+' {
@@ -351,12 +293,12 @@ fn parseRepeat(bd: modify Builder) -> Frag {
                 bd.err = "non-greedy repetition (`+?`) is not supported"
                 return f
             }
-            let sp = emit(bd, opSplit, f.start, 0)
+            let sp = emit(bd, opSplit, f.start, 0, noBytes())
             patch(bd, f.holes, sp)
             f = Frag { start: f.start, holes: [sp * 2 + 1] }
         } else if c == '?' {
             bd.at = bd.at + 1
-            let sp = emit(bd, opSplit, f.start, 0)
+            let sp = emit(bd, opSplit, f.start, 0, noBytes())
             f = Frag { start: sp, holes: joinHoles(f.holes, [sp * 2 + 1]) }
         } else if c == '{' {
             bd.err = "counted repetition (`{m,n}`) is not supported"
@@ -373,7 +315,7 @@ fn parseConcat(bd: modify Builder) -> Frag {
     if c < 0 || c == '|' || c == ')' {
         // The empty branch, as in `(a|)`. A split with both edges dangling is
         // the fragment that matches nothing and leaves immediately.
-        let sp = emit(bd, opSplit, 0, 0)
+        let sp = emit(bd, opSplit, 0, 0, noBytes())
         return Frag { start: sp, holes: [sp * 2, sp * 2 + 1] }
     }
     let mut f = parseRepeat(bd)
@@ -394,7 +336,7 @@ fn parseAlt(bd: modify Builder) -> Frag {
     while bd.err.byteLength == 0 && peek(bd) == '|' {
         bd.at = bd.at + 1
         let g = parseConcat(bd)
-        let sp = emit(bd, opSplit, f.start, g.start)
+        let sp = emit(bd, opSplit, f.start, g.start, noBytes())
         f = Frag { start: sp, holes: joinHoles(f.holes, g.holes) }
     }
     return f
@@ -409,7 +351,7 @@ fn parseAlt(bd: modify Builder) -> Frag {
 ///
 /// A pattern that can match the empty string has no such set — every position
 /// begins a match — and that is what `firstKnown: false` says.
-type First = { set: Array<UInt8>, known: Bool }
+type First = { set: ByteSet, known: Bool }
 
 fn firstBytes(bd: Builder, start: Int64) -> First {
     let mut seen: Array<Int64> = []
@@ -419,7 +361,7 @@ fn firstBytes(bd: Builder, start: Int64) -> First {
         i = i + 1
     }
     let mut stack: Array<Int64> = [start]
-    let mut set = emptySet()
+    let mut set = noBytes()
     let mut known = true
     while stack.length > 0 {
         let pc = stack[stack.length - 1]
@@ -438,14 +380,8 @@ fn firstBytes(bd: Builder, start: Int64) -> First {
             stack.push(bd.a[pc])
             stack.push(bd.b[pc])
         } else {
-            let base = bd.a[pc] * 32
-            let mut c = 0
-            while c < 256 {
-                if setHas(bd.sets, base, c) {
-                    setAdd(set, 0, c)
-                }
-                c = c + 1
-            }
+            let k = bd.cls[pc]
+            set = ByteSet { w0: set.w0 | k.w0, w1: set.w1 | k.w1, w2: set.w2 | k.w2, w3: set.w3 | k.w3 }
         }
     }
     return First { set: set, known: known }
@@ -461,8 +397,7 @@ export fn compile(pattern: String) -> Result<Regex, String> {
         op: [],
         a: [],
         b: [],
-        sets: [],
-        nsets: 0,
+        cls: [],
         pat: bytes(pattern),
         at: 0,
         err: "",
@@ -478,7 +413,7 @@ export fn compile(pattern: String) -> Result<Regex, String> {
         // The only way out of `parseAlt` with input left is an unbalanced `)`.
         return Err("a `)` with no `(` before it")
     }
-    let m = emit(bd, opMatch, 0, 0)
+    let m = emit(bd, opMatch, 0, 0, noBytes())
     patch(bd, f.holes, m)
     // The filter is read off the builder BEFORE the builder gives its arrays up,
     // so the record is constructed once and nothing is copied.
@@ -487,9 +422,9 @@ export fn compile(pattern: String) -> Result<Regex, String> {
         op: consume bd.op,
         a: consume bd.a,
         b: consume bd.b,
-        sets: consume bd.sets,
+        cls: consume bd.cls,
         start: f.start,
-        first: consume head.set,
+        first: head.set,
         firstKnown: head.known,
     })
 }
@@ -555,7 +490,7 @@ fn matchAt(re: Regex, hay: Array<UInt8>, at: Int64, mark: modify Array<Int64>, g
         let mut j = 0
         while j < clist.length {
             let pc = clist[j]
-            if re.op[pc] == opClass && setHas(re.sets, re.a[pc] * 32, c) {
+            if re.op[pc] == opClass && hasByte(re.cls[pc], c) {
                 addThread(re, nlist, mark, g, re.b[pc])
             }
             j = j + 1
@@ -586,7 +521,7 @@ export fn find(re: Regex, hay: String, from: Int64) -> Option<Match> {
         // The first-byte filter. Without it a scan pays a match attempt per
         // position; with it a DNA pattern skips three bases in four.
         let viable = if re.firstKnown {
-            if i < raw.length { setHas(re.first, 0, Int64(raw[i])) } else { false }
+            if i < raw.length { hasByte(re.first, Int64(raw[i])) } else { false }
         } else {
             true
         }
@@ -614,7 +549,7 @@ export fn countMatches(re: Regex, hay: String) -> Int64 {
     let mut i = 0
     while i <= raw.length {
         let viable = if re.firstKnown {
-            if i < raw.length { setHas(re.first, 0, Int64(raw[i])) } else { false }
+            if i < raw.length { hasByte(re.first, Int64(raw[i])) } else { false }
         } else {
             true
         }
@@ -647,7 +582,7 @@ export fn replaceAll(re: Regex, hay: String, with: String) -> String {
     let mut i = 0
     while i <= raw.length {
         let viable = if re.firstKnown {
-            if i < raw.length { setHas(re.first, 0, Int64(raw[i])) } else { false }
+            if i < raw.length { hasByte(re.first, Int64(raw[i])) } else { false }
         } else {
             true
         }
