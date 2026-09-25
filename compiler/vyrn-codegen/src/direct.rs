@@ -15109,7 +15109,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(aty)
     }
 
-    /// `m.has(k)`, `m.remove(k)` and `m.keys()`.
+    /// `m.has(k)` and `m.keys()`, and `m.remove(k)` through [`Fn_::map_remove`].
     fn map_method(
         &mut self,
         m: &mut Module,
@@ -15118,85 +15118,105 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
+            s.expr_as(m, b, &args[1], t).map(|_| ())
+        };
         // `remove` mutates, so it needs the binding rather than a value; the other
         // two read, and read through the same address for one code path.
-        let (hdr, mty, owns) = if name == "@remove" {
-            let (place, ty) = self.receiver(args, "remove", line)?;
+        if name == "@remove" {
+            let (place, mty) = self.receiver(args, "remove", line)?;
             let hdr = b.local(ValType::I32);
             place
                 .addr(b, 0)
                 .ok_or_else(|| gap("`remove` on a non-map binding", line))?;
             b.ins(&Instruction::LocalSet(hdr));
-            // An entry a `remove` drops is unreachable afterwards whoever owns
-            // the map, and nothing aliases it (RFC-0092 M2 made `keys()` copy).
-            // A `region` is not asked here either: a `String` key routed into
-            // the arena comes back refused, and a `Map<String, Array<Int>>`
-            // built inside one holds buffers the arena never had.
-            (hdr, ty, true)
-        } else {
-            let ty = self.expr(m, b, &args[0])?;
-            let hdr = b.local(ValType::I32);
-            b.ins(&Instruction::LocalSet(hdr));
-            (hdr, ty, false)
-        };
+            return self.map_remove(m, b, hdr, &mty, &mut key, line);
+        }
+        let mty = self.expr(m, b, &args[0])?;
+        let hdr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(hdr));
         if name == "@keys" {
             return self.map_keys(m, b, hdr, &mty, line);
         }
-        let Type::Map(_, val) = self.cx.resolve(&mty) else {
+        if !matches!(self.cx.resolve(&mty), Type::Map(..)) {
             return unsupported(&format!("`{name}` on `{mty}`"), line);
-        };
-        let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-            s.expr_as(m, b, &args[1], t).map(|_| ())
-        };
-        let (idx, l, mk) = self.map_find(m, b, hdr, &mty, &mut key, line)?;
+        }
+        let (idx, ..) = self.map_find(m, b, hdr, &mty, &mut key, line)?;
         let found = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32GeS);
         b.ins(&Instruction::LocalSet(found));
-        if name == "@remove" {
-            // Shift the survivors down, so first-insertion order survives a
-            // removal — which is why a remove-then-insert moves a key to the end.
-            let esz = self.stride(&val, line)? as i32;
-            b.ins(&Instruction::LocalGet(found));
-            b.ins(&Instruction::If(BlockType::Empty));
-            self.depth += 1;
-            // The map took the key and the value, so the map hands both back
-            // when the entry goes — BEFORE the shift moves the survivors over
-            // the slots they live in. The runtime's `map_remove_at` twin shifts
-            // bytes and is handed no types, so this is the only place that can.
-            // An Int64 key owns nothing to hand back (RFC-0117).
-            if owns {
-                let mut cols = vec![(l.fields[1], esz, val.as_ref().clone())];
-                if mk == MapKey::Str {
-                    cols.insert(0, (l.fields[0], 4i32, Type::Str));
-                }
-                for (field, stride, ety) in cols {
-                    let a = b.local(ValType::I32);
-                    b.ins(&Instruction::LocalGet(hdr));
-                    b.ins(&Instruction::I32Load(word_at(field)));
-                    b.ins(&Instruction::LocalGet(idx));
-                    b.ins(&Instruction::I32Const(stride));
-                    b.ins(&Instruction::I32Mul);
-                    b.ins(&Instruction::I32Add);
-                    b.ins(&Instruction::LocalSet(a));
-                    self.rel_entry(m, b, a, &ety, line)?;
-                }
-            }
-            // `mapRemoveAt(kind, klen, hdr, esz, i)`: the shift of both
-            // columns, the length, and the index rebuilt — every survivor
-            // after the hole moved down a slot, so every bucket naming one
-            // was off by one.
-            let (kind, klen) = mk.kind();
-            b.ins(&Instruction::I32Const(kind));
-            b.ins(&Instruction::I32Const(klen));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I32Const(esz));
-            b.ins(&Instruction::LocalGet(idx));
-            b.ins(&Instruction::Call(self.cx.rt.map_remove_at));
-            self.depth -= 1;
-            b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(found));
+        Ok(Type::Bool)
+    }
+
+    /// `m.remove(k)` on the map whose header address is in `hdr`: the entry
+    /// of the key `key` pushes released and dropped, and whether there was
+    /// one left on the stack. The arm over the source and the core's walk
+    /// (RFC-0125 M7) differ only in how they push the key.
+    fn map_remove(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        hdr: u32,
+        mty: &Type,
+        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Map(_, val) = self.cx.resolve(mty) else {
+            return unsupported(&format!("`remove` on `{mty}`"), line);
+        };
+        let (idx, l, mk) = self.map_find(m, b, hdr, mty, key, line)?;
+        let found = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32GeS);
+        b.ins(&Instruction::LocalSet(found));
+        // Shift the survivors down, so first-insertion order survives a
+        // removal — which is why a remove-then-insert moves a key to the end.
+        let esz = self.stride(&val, line)? as i32;
+        b.ins(&Instruction::LocalGet(found));
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        // The map took the key and the value, so the map hands both back
+        // when the entry goes — BEFORE the shift moves the survivors over
+        // the slots they live in. The runtime's `map_remove_at` twin shifts
+        // bytes and is handed no types, so this is the only place that can.
+        // An Int64 key owns nothing to hand back (RFC-0117). An entry a
+        // `remove` drops is unreachable afterwards whoever owns the map, and
+        // nothing aliases it (RFC-0092 M2 made `keys()` copy). A `region` is
+        // not asked here either: a `String` key routed into the arena comes
+        // back refused, and a `Map<String, Array<Int>>` built inside one
+        // holds buffers the arena never had.
+        let mut cols = vec![(l.fields[1], esz, val.as_ref().clone())];
+        if mk == MapKey::Str {
+            cols.insert(0, (l.fields[0], 4i32, Type::Str));
         }
+        for (field, stride, ety) in cols {
+            let a = b.local(ValType::I32);
+            b.ins(&Instruction::LocalGet(hdr));
+            b.ins(&Instruction::I32Load(word_at(field)));
+            b.ins(&Instruction::LocalGet(idx));
+            b.ins(&Instruction::I32Const(stride));
+            b.ins(&Instruction::I32Mul);
+            b.ins(&Instruction::I32Add);
+            b.ins(&Instruction::LocalSet(a));
+            self.rel_entry(m, b, a, &ety, line)?;
+        }
+        // `mapRemoveAt(kind, klen, hdr, esz, i)`: the shift of both
+        // columns, the length, and the index rebuilt — every survivor
+        // after the hole moved down a slot, so every bucket naming one
+        // was off by one.
+        let (kind, klen) = mk.kind();
+        b.ins(&Instruction::I32Const(kind));
+        b.ins(&Instruction::I32Const(klen));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Const(esz));
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::Call(self.cx.rt.map_remove_at));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
         b.ins(&Instruction::LocalGet(found));
         Ok(Type::Bool)
     }
@@ -18620,8 +18640,9 @@ impl<'p> Fn_<'_, 'p> {
                     };
                 return self.host(m, b, callee, args.len(), &mut ty, &mut operand, line);
             }
-            // `xs.pop()` and `xs.swapRemove(i)`: the receiver's address, which
-            // the call shrinks in place, and the index the row names.
+            // `xs.pop()`, `xs.swapRemove(i)` and `m.remove(k)`: the receiver's
+            // address, which the call shrinks in place, and the operand the
+            // row names.
             Some(Spec::Removes) => {
                 let [(Val::Name(x), _), rest @ ..] = args else {
                     return unsupported("a removal from no named receiver", line);
@@ -18834,7 +18855,7 @@ impl<'p> Fn_<'_, 'p> {
     /// own access and an aggregate step adds. `None` is an address that is
     /// already the place's. The distinction is what keeps the bytes the
     /// `Expr::Field` arm's: it loads at the offset rather than adding it.
-    /// A removal from the `Array` of type `aty` whose address is in `slot`.
+    /// A removal from the receiver of type `aty` whose address is in `slot`.
     fn core_remove(
         &mut self,
         m: &mut Module,
@@ -18854,6 +18875,12 @@ impl<'p> Fn_<'_, 'p> {
                     s.core_val(m, b, body, w, i, &Type::Int, line)
                 };
                 self.swap_remove_at(m, b, slot, aty, &mut index, line)
+            }
+            ("@remove", [(k, _)]) => {
+                let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
+                    s.core_val(m, b, body, w, k, t, line)
+                };
+                self.map_remove(m, b, slot, aty, &mut key, line)
             }
             _ => unsupported(&format!("`{callee}` at this arity"), line),
         }
@@ -20758,7 +20785,7 @@ impl<'p> Fn_<'_, 'p> {
                     && self.core_args_readable(body, rest))
     }
 
-    /// Whether a row removes from an `Array` receiver, a name or a place
+    /// Whether a row removes from a receiver, a name or a place
     /// ([`Spec::Removes`]), with operands this walk writes, and if so whether
     /// what it hands back is an aggregate, which lands through a slot.
     fn core_removes(
@@ -20782,13 +20809,16 @@ impl<'p> Fn_<'_, 'p> {
             Arg::Place(p) => (self.core_place_ty(body, p)?, true),
             Arg::Val(Val::Lit(_)) => return None,
         };
-        let Type::Array(e) = self.cx.resolve(&ty) else {
-            return None;
+        let agg = match (callee, self.cx.resolve(&ty)) {
+            ("@remove", Type::Map(..)) => false,
+            ("@pop", Type::Array(_)) => true,
+            ("@swapRemove", Type::Array(e)) => matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))),
+            _ => return None,
         };
         (readable
             && self.core_args_readable(body, rest)
-            && rest.len() == usize::from(callee == "@swapRemove"))
-        .then(|| callee == "@pop" || matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_))))
+            && rest.len() == usize::from(callee != "@pop"))
+        .then_some(agg)
     }
 
     /// The receiver and the result of the rebuild before `ss[i]` when `ss[i]`
