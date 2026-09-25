@@ -14659,30 +14659,24 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::End);
     }
 
-    /// `m[k]` — an honest `Option<V>`, never a trap.
-    ///
-    /// The map's address is already on the stack. `key` pushes the key at the
-    /// type it is handed: the arm over the source evaluates an expression and
-    /// the core's walk reads a name off the row (RFC-0125 M7), and the lookup
-    /// between them is this one sequence.
-    fn map_at(
+    /// The entry of the key `key` pushes in the map whose header address is in
+    /// `hdr`: its index, negative when the map has none, with the map's layout
+    /// and key family. `key` pushes the key at the type it is handed.
+    fn map_find(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        hdr: u32,
         mty: &Type,
-        val: &Type,
         key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
-    ) -> Result<Type, String> {
+    ) -> Result<(u32, Layout, MapKey), String> {
         let key_t = match self.cx.resolve(mty) {
             Type::Map(k, _) => *k,
             _ => Type::Str,
         };
         let mk = self.map_key(&key_t, line)?;
         let l = self.layout_of(mty, line)?;
-        let esz = self.stride(val, line)? as i32;
-        let hdr = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(hdr));
         let k = match mk {
             MapKey::I64 => {
                 let k = b.local(ValType::I64);
@@ -14705,6 +14699,28 @@ impl<'p> Fn_<'_, 'p> {
         };
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
+        Ok((idx, l, mk))
+    }
+
+    /// `m[k]` — an honest `Option<V>`, never a trap.
+    ///
+    /// The map's address is already on the stack. `key` pushes the key at the
+    /// type it is handed: the arm over the source evaluates an expression and
+    /// the core's walk reads a name off the row (RFC-0125 M7), and the lookup
+    /// between them is this one sequence.
+    fn map_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        mty: &Type,
+        val: &Type,
+        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let esz = self.stride(val, line)? as i32;
+        let hdr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(hdr));
+        let (idx, l, _) = self.map_find(m, b, hdr, mty, key, line)?;
 
         let oty = Type::option(val.clone());
         let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
@@ -15126,35 +15142,13 @@ impl<'p> Fn_<'_, 'p> {
         if name == "@keys" {
             return self.map_keys(m, b, hdr, &mty, line);
         }
-        let (key_t, val) = match self.cx.resolve(&mty) {
-            Type::Map(k, v) => (*k, v),
-            _ => return unsupported(&format!("`{name}` on `{mty}`"), line),
+        let Type::Map(_, val) = self.cx.resolve(&mty) else {
+            return unsupported(&format!("`{name}` on `{mty}`"), line);
         };
-        let mk = self.map_key(&key_t, line)?;
-        let l = self.layout_of(&mty, line)?;
-
-        let k = match mk {
-            MapKey::I64 => {
-                let k = b.local(ValType::I64);
-                self.expr_as(m, b, &args[1], &Type::Int)?;
-                b.ins(&Instruction::LocalSet(k));
-                k
-            }
-            MapKey::Pack(_) => {
-                let raw = b.local(ValType::I32);
-                self.expr_as(m, b, &args[1], &key_t)?;
-                b.ins(&Instruction::LocalSet(raw));
-                self.pack_key(b, raw, &key_t, line)?
-            }
-            MapKey::Str => {
-                let k = b.local(ValType::I32);
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                b.ins(&Instruction::LocalSet(k));
-                k
-            }
+        let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
+            s.expr_as(m, b, &args[1], t).map(|_| ())
         };
-        let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx, mk);
+        let (idx, l, mk) = self.map_find(m, b, hdr, &mty, &mut key, line)?;
         let found = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
@@ -18419,6 +18413,7 @@ impl<'p> Fn_<'_, 'p> {
                 (None, Some(Spec::Removes)) => at
                     .clone()
                     .ok_or_else(|| gap("a removal the checker did not type", line)),
+                (None, Some(Spec::Finds)) => Ok(Type::Bool),
                 (None, _) => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(body, callee, *kind, solved, targets) {
@@ -18636,6 +18631,25 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_addr_of(b, w, body, *x, line)?;
                 b.ins(&Instruction::LocalSet(slot));
                 return self.core_remove(m, b, body, w, callee, slot, &aty, rest, line);
+            }
+            // `m.has(k)`: the map's address, and the scan [`Fn_::map_at`]
+            // makes, answered as whether it found an entry.
+            Some(Spec::Finds) => {
+                let [(mv, _), (kv, _)] = args else {
+                    return unsupported(&format!("`{callee}` at this arity"), line);
+                };
+                let mty = self.core_ty(body, mv, &Type::Int);
+                self.core_val(m, b, body, w, mv, &mty, line)?;
+                let hdr = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(hdr));
+                let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
+                    s.core_val(m, b, body, w, kv, t, line)
+                };
+                let (idx, ..) = self.map_find(m, b, hdr, &mty, &mut key, line)?;
+                b.ins(&Instruction::LocalGet(idx));
+                b.ins(&Instruction::I32Const(0));
+                b.ins(&Instruction::I32GeS);
+                return Ok(Type::Bool);
             }
             // `bytes` and `stringFromBytes`: built in a slot of the call's
             // own, which [`agg_landed`] copies into the destination.
@@ -20932,6 +20946,8 @@ impl<'p> Fn_<'_, 'p> {
             // A removal that hands back a scalar leaves it on the stack; one
             // that hands back an aggregate is an aggregate call.
             Some(Spec::Removes) => self.core_removes(body, callee, kind, args) == Some(false),
+            Some(Spec::Finds) => matches!(args, [(Arg::Val(Val::Name(x)), _), _]
+                if matches!(self.cx.resolve(&body.names[*x as usize].ty), Type::Map(..))),
             // A rebuild is read together with the store after it
             // ([`Fn_::core_rebuilt`]), a built aggregate as an aggregate call
             // ([`Fn_::core_agg_call`]), and a routed builtin as the declared

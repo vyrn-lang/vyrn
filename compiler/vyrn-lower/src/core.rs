@@ -1858,6 +1858,9 @@ pub enum Spec {
     /// removed: `@pop` an `Option` of the last element, `@swapRemove` the
     /// element at the index.
     Removes,
+    /// A map and a key at the map's key type. The answer is a `Bool`: whether
+    /// the map holds an entry for the key.
+    Finds,
     /// Operands at whatever type the row put on their names, and a result at
     /// the stated type, whose parameters the operands' types solve, that the
     /// call builds in storage of its own. The caller lands it as it lands any
@@ -1956,6 +1959,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
             ("@pop", Spec::Removes),
             ("@swapRemove", Spec::Removes),
+            ("@has", Spec::Finds),
             ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),
             (
                 "stringFromBytes",
