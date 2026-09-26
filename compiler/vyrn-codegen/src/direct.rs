@@ -14715,14 +14715,14 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// `None` where the program can observe the copy. A binding the body
     /// stores into, or hands to `modify`, writes a value of its own; a store
-    /// into an element of an Array writes the buffer ([`core_written`]). A root on
-    /// the chain handed to `consume` anywhere in the body may be freed under
-    /// the name. A row of the name's extent that hands a root on the chain to
-    /// `modify` ([`vyrn_lower::kernel::modifies`]), or rebuilds it as a
-    /// write-back receiver (`out.push(v)`), may replace what the name points
-    /// into. Outside the extent the kernel ends the alias at that call
-    /// and refuses a read after it, as it does at a store into the root; for
-    /// module state, a callee's store too.
+    /// into an element of an Array writes the buffer ([`core_written`]). A row
+    /// of the name's extent that hands a root on the chain to `consume` may
+    /// free it under the name; one that hands it to `modify`
+    /// ([`vyrn_lower::kernel::modifies`]), or rebuilds it as a write-back
+    /// receiver (`out.push(v)`), may replace what the name points into.
+    /// Outside the extent the kernel ends the alias at that call and refuses
+    /// a read after it, as it does at a store into the root; for module
+    /// state, a callee's store too.
     fn core_alias<'b>(
         &self,
         body: &'b vyrn_lower::core::Body,
@@ -14782,19 +14782,14 @@ impl<'p> Fn_<'_, 'p> {
             let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
                 return Some(place);
             };
-            if written
-                .iter()
-                .any(|(m, c)| *m == root && *c == Some(Capability::Consume))
-                || rebuilt
-                    .iter()
-                    .any(|(m, c)| *m == root && *c == Some(Capability::Modify))
-                || vyrn_lower::kernel::modifies(
-                    extent,
-                    vyrn_lower::kernel::Root::N(root),
-                    &body.names,
-                    &body.name,
-                )
-            {
+            if rebuilt.iter().any(|(m, c)| {
+                *m == root && matches!(c, Some(Capability::Consume | Capability::Modify))
+            }) || vyrn_lower::kernel::modifies(
+                extent,
+                vyrn_lower::kernel::Root::N(root),
+                &body.names,
+                &body.name,
+            ) {
                 return None;
             }
             match read(root) {

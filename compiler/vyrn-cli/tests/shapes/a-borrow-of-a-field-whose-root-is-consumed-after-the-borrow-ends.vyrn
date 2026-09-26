@@ -1,0 +1,4 @@
+// a borrow of a field whose root is consumed after the borrow ends
+// A root handed to `consume` after the borrow's last read frees nothing
+// the borrow reads, in a loop or not (the m7-aliasconsume record): 3112.
+type Bag = { items: Array<Int64>, n: Int64 }          fn eat(b: consume Bag) -> Int64 { return b.n }          fn mk(k: Int64) -> Bag { return Bag { items: [k, 2, 3], n: 3 } }          fn vyrnTestMain() -> Int64 { let b = mk(5) let xs = b.items.copy() let ys = b.items let n = ys[0] + ys.length let k = eat(b) let mut i = 0 let mut t = 0 while i < 3 { let c = mk(i) let zs = c.items t = t + zs[0] t = t + eat(c) i = i + 1 } return xs[1] * 1000 + (n + k) * 100 + t }
