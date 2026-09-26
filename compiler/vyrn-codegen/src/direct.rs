@@ -15683,7 +15683,8 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_walked`]).
             //
             // Or a layout bound by a move, which holds the place the moved
-            // name held ([`Fn_::core_renames`]).
+            // name held ([`Fn_::core_renames`]), or by `blackBox` of a name,
+            // which takes over that name's slot ([`Fn_::core_stmts`]'s `let`).
             //
             // Or a payload binder, whose place the switch gives it
             // ([`Fn_::core_payload`]).
@@ -15709,7 +15710,10 @@ impl<'p> Fn_<'_, 'p> {
                             && (self.core_makes(body, &self.core_made_ty(body, *b), rhs)
                                 || self.core_agg_call(body, rhs)
                                 || self.core_take_part(body, rhs)
-                                || self.core_rebuild(body, rhs))
+                                || self.core_rebuild(body, rhs)
+                                || matches!(rhs, Rhs::Call { callee, kind, args, .. }
+                                    if matches!(core_builtin(callee, *kind), Some(Spec::Barrier))
+                                        && matches!(args.as_slice(), [(Arg::Val(Val::Name(_)), _)])))
                     }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
                 && self
