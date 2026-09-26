@@ -2067,9 +2067,6 @@ struct Fn_<'a, 'p> {
     /// (RFC-0101 M4): a `break` reads the steps the placement put at that
     /// `break`, so no engine derives an index into its own frames any more.
     loops: Vec<(u32, u32, u32)>,
-    /// RFC-0125 M1: the header parts of every binding a `while` hoisted
-    /// (`hoist_walks`), keyed by name, live for the loop's extent.
-    walks: HashMap<String, Walk>,
     /// RFC-0125 M1: the two locals a failed bounds check parks its message
     /// and index in before branching to the function's one trap site — see
     /// `bounds_check`. `None` for a frame that has no site (the globals
@@ -2223,7 +2220,6 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
-        walks: HashMap::new(),
         trap_site: None,
         ret: Repr::Unit,
         ret_ty: Type::Unit,
@@ -2383,7 +2379,6 @@ fn lower_body(
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
-        walks: HashMap::new(),
         trap_site: None,
         ret: sig.ret.clone(),
         // As DECLARED, not resolved. A function returning `Age` has to validate
@@ -12799,20 +12794,6 @@ impl<'p> Fn_<'_, 'p> {
             matches!(r, St::Drop(n, ..) if matches!(body.names[*n as usize].ty, Type::Stream(_)))
         }) {
             return None;
-        }
-        // A statement inside a `while` the arm emits that names a binding the
-        // arm's hoist holds in locals, which the rows would walk again.
-        if !self.walks.is_empty() {
-            let mut names = Vec::new();
-            for st in run {
-                vyrn_lower::core::names_in(st, &mut names);
-            }
-            if names.iter().any(|n| {
-                self.walks
-                    .contains_key(body.names[*n as usize].source.as_str())
-            }) {
-                return None;
-            }
         }
         // A result checked where a `return` of the run hands it back, under a
         // branch or at the run's end, is a check the row does not state
