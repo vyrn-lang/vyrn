@@ -2258,16 +2258,11 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
 fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
-    // The core's module-state body ([`vyrn_lower::core::build_module_state`])
-    // stores each initializer's value and states no check, so a global whose
-    // type validates is refused here.
-    let from_core = vyrn_lower::core::body_of("")
-        .filter(|_| (program.globals.iter()).all(|g| !f.checks(&cx.globals[&g.name].1)))
-        .filter(|core| {
-            f.core_enter(core);
-            f.core = Some(std::rc::Rc::new(core.clone()));
-            f.core_walkable(core, None)
-        });
+    let from_core = vyrn_lower::core::body_of("").filter(|core| {
+        f.core_enter(core);
+        f.core = Some(std::rc::Rc::new(core.clone()));
+        f.core_walkable(core, None)
+    });
     match &from_core {
         Some(core) => f.core_body(m, &mut b, core)?,
         None => {
