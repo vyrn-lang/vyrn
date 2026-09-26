@@ -432,11 +432,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     }
 
     let ownership = vyrn_frontend::own::analyze(program);
-    // RFC-0114 §25's instrument, and never on the GENERATOR path (RFC-0076
-    // M7): a generator module runs inside the compiler and its exit code is a
-    // protocol between the host and the module, so a residue report there
-    // would fail the build instead of measuring the program.
-    let audited = gen.is_none() && vyrn_frontend::loader::audit_build();
+    // RFC-0114 §25's instrument, which a generator host never carries
+    // ([`vyrn_frontend::loader::audit_build`]).
+    let audited = vyrn_frontend::loader::audit_build();
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
@@ -5999,17 +5997,6 @@ impl<'p> Fn_<'_, 'p> {
         };
         b.ins(&Instruction::Call(sig.index));
         Ok(())
-    }
-
-    /// Whether this build drops the call to `name` rather than emitting it.
-    ///
-    /// RFC-0114 §25: the residue instrument's hooks are calls only in an
-    /// audited build. The arm drops the whole expression, operand included,
-    /// and an unaudited core states no row for either (RFC-0125 M7). A
-    /// generator's build is never audited, so its core can still state a
-    /// hook, and [`Fn_::core_sig`] refuses that row.
-    fn audit_dropped(&self, name: &str) -> bool {
-        !self.cx.audit && vyrn_frontend::loader::audit_hook(name)
     }
 
     /// Whether `name` is an `extern fn` (RFC-0012) or one of RFC-0043's
@@ -15874,7 +15861,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::Routes(f)) => (*f, Callee::Fn),
             _ => (callee, kind),
         };
-        if kind != Callee::Fn || self.audit_dropped(callee) {
+        if kind != Callee::Fn {
             return None;
         }
         // A `modify` parameter crosses as the address of the caller's binding,

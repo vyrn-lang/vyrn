@@ -871,8 +871,13 @@ pub const RUNTIME_PREFIX: &str = "runtime$";
 /// `VYRN_WASM_MANIFEST=check` is measuring the instrument instead of the
 /// language. Read here rather than in each crate so the emitter and the
 /// lowering cannot disagree about what a build is.
+///
+/// A generator host is never audited (RFC-0076 M7): it runs inside the
+/// compiler, and its exit code is a protocol between the host and the module,
+/// so a residue report there would fail the build instead of measuring it.
 pub fn audit_build() -> bool {
     std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0")
+        && !crate::checker::gen_host()
 }
 
 /// Whether `name` is one of `std/runtime`'s audit hooks, which a build emits
