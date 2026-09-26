@@ -378,7 +378,7 @@ fn sections() -> Vec<Section> {
              renderings they share with `print`",
         ),
         sec(
-            "fn audit_dropped(&self, name: &str) -> bool {",
+            "fn is_extern(&self, name: &str) -> bool {",
             Mapping, Neither,
             "which names lend their result, and RFC-0012's `extern` call",
         ),
