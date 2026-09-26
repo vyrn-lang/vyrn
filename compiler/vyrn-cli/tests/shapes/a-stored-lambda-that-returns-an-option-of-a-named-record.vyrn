@@ -1,0 +1,6 @@
+// a stored lambda that returns an Option of a named record
+// A stored lambda's signature is normalized, so its result spells
+// `Option<R>` as the record `R` names. Its `return` crosses nothing
+// (`Fn_::core_returns_as_is`), in module state and in a function, as a
+// block and as a value: 1209, no leak (the m7-pages record).
+type R = { code: Int64, text: String }          type Chooser = fn(Int64) -> Option<R>          let mut picks: Array<Chooser> = [n -> { if n > 0 { return Some(R { code: n, text: "one" }) } return None }, n -> if n > 1 { Some(R { code: n * 2, text: "two" }) } else { None }]          fn score(ps: Array<Chooser>, n: Int64) -> Int64 { let mut s = 0 for p in ps { if let Some(r) = p(n) { s = s + r.code + r.text.byteLength } } return s }          fn vyrnTestMain() -> Int64 { let local: Array<Chooser> = [k -> { return Some(R { code: k + 5, text: "loc" }) }] return score(picks, 2) * 100 + score(picks, 0) * 10 + score(local, 1) }
