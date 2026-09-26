@@ -1,0 +1,17 @@
+// a consume parameter of a generic instance and of a higher-order instance
+// pin: 0 break, 0 continue
+// An instance's shell copies its declaration's parameters, and the plan keys
+// a `consume` parameter's release by the declaration's node. A stored value
+// at a `consume fn` parameter is that parameter (RFC-0125 M7, `m7-lamval`).
+fn keepG<T>(s: consume String, x: T) -> Int64 { return s.byteLength }
+fn four() -> Int64 { return 4 }
+fn keep2(s: consume String, run: fn() -> Int64) -> Int64 { return run() + s.byteLength }
+fn keep(run: consume fn() -> Int64) -> Int64 { return run() }
+fn vyrnTestMain() -> Int64 {
+    let k = 3
+    let g: fn() -> Int64 = () -> k + 1
+    let a = keepG("a" + "b", 1)
+    let b = keep2("a" + "b", four)
+    let c = keep(g)
+    return a + b * 10 + c * 100
+}
