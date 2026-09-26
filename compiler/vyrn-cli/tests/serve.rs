@@ -13,6 +13,8 @@
 //! server surviving the next request; garbage → 400; and `main`'s startup
 //! `print` reaching stdout before the first request is served.
 
+mod serving;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -86,26 +88,6 @@ impl Drop for TempFile {
     }
 }
 
-/// Continuously read `r` into `acc` on a background thread (so the child never
-/// blocks on a full pipe).
-fn drain<R: Read + Send + 'static>(mut r: R) -> Arc<Mutex<String>> {
-    let acc = Arc::new(Mutex::new(String::new()));
-    let a = acc.clone();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 1024];
-        loop {
-            match r.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => a
-                    .lock()
-                    .unwrap()
-                    .push_str(&String::from_utf8_lossy(&buf[..n])),
-            }
-        }
-    });
-    acc
-}
-
 /// Poll `acc` until it contains `needle` (or panic after `timeout`).
 fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) -> String {
     let start = Instant::now();
@@ -119,34 +101,6 @@ fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) -> String
         if start.elapsed() > timeout {
             let s = acc.lock().unwrap();
             panic!("timed out waiting for {needle:?}; captured so far:\n{}", *s);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Read the port out of the startup banner (`serving <file> on
-/// http://localhost:<port>`), or panic after `timeout`. The whole number must
-/// have arrived — a digit run that reaches the end of what was captured could
-/// still be half a port — so the wait ends on the character after it.
-fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
-    let start = Instant::now();
-    loop {
-        {
-            let s = acc.lock().unwrap();
-            if let Some((_, rest)) = s.split_once("http://localhost:") {
-                if let Some((digits, _)) = rest.split_once(|c: char| !c.is_ascii_digit()) {
-                    if let Ok(port) = digits.parse() {
-                        return port;
-                    }
-                }
-            }
-        }
-        if start.elapsed() > timeout {
-            let s = acc.lock().unwrap();
-            panic!(
-                "timed out waiting for the serving banner; captured so far:\n{}",
-                *s
-            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -169,20 +123,21 @@ fn start_server_on(src: &str, extra: &[&str]) -> Serve {
         .spawn()
         .expect("spawn vyrn serve");
 
-    let stdout = drain(child.stdout.take().unwrap());
-    let stderr = drain(child.stderr.take().unwrap());
-    let mut server = Serve {
-        child,
-        port: 0,
-        stdout,
-        stderr,
-        _file: file,
-    };
+    let stdout = serving::drain(child.stdout.take().unwrap());
+    let stderr = serving::drain(child.stderr.take().unwrap());
+    let (out, err) = (stdout.0.clone(), stderr.0.clone());
     // The accept loop is live once the banner prints. The wait is long because a
     // saturated machine (several checkouts building at once) starts the child
     // slowly; it is not a race, so a generous limit costs a green run nothing.
-    server.port = wait_for_port(&server.stderr, Duration::from_secs(60));
-    server
+    let port = serving::wait_for_port(&mut child, stdout, stderr, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("{e}"));
+    Serve {
+        child,
+        port,
+        stdout: out,
+        stderr: err,
+        _file: file,
+    }
 }
 
 /// Spawn `vyrn serve <tmp> --port 0` on `SERVER_SRC` and wait for the startup
