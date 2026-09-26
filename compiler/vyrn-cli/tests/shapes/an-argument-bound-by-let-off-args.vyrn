@@ -1,0 +1,6 @@
+// an argument bound by let off args
+// pin: 0 break, 0 continue
+// `args()` is a builtin's fresh array, so `let a = args()[0]` copies the
+// String out and releases the array whole, as a declared function's result
+// is (the generator host's argv). Run with no arguments, the guard is false.
+fn vyrnTestMain() -> Int64 { let n = args().length if n > 0 { let a = args()[0] return a.byteLength } return 5 }
