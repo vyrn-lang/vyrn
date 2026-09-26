@@ -1117,24 +1117,15 @@ fn gate() {
         t.in_predicate
     );
 
-    // …and the FLOOR, which is the other half of the same sentence. `peek`'s
-    // share of the residue is the class RFC-0101 §2.3 assigns to the backend on
-    // purpose: the type of a release receiver or of a dispatched call the
-    // emitter builds at an emit site, which is a fact about a wasm local rather
-    // than about a program. It is not waiting for a mechanism, and a milestone
-    // that drives it to zero is moving a decision INTO the form that §2.3 puts
-    // in the backend. Both bounds fail loudly rather than one: a rise means a
-    // new engine-built tree, a fall means §2.3 moved.
-    //
-    // IT IS 68, AND THE SERIES BEFORE IT WAS A DIFFERENT COMPILER. 299, 109, 72
-    // and 46 were all read in a process that never called `vyrn_lower::install`
-    // — no placer, no rows, and the AST dispatch answering everything. The 46
-    // was attributed to the driver asking the core; the driver did not run here
-    // at all. The band is the width the old one had, around the number this
-    // gate reads now that it compiles the way `vyrn run` compiles.
-    assert!(
-        (48..=96).contains(&t.peek_off),
-        "`peek` answered {} questions about AST no instantiation holds. RFC-0125 §3 M3          measured this class at 68 with the lowering installed and §2.3 owns every          one of them; outside 48..96 the class has changed and the RFC's §2.3          leaves need re-reading",
+    // …and `peek`'s share of it, at zero. RFC-0101 §2.3 gave the backend the
+    // type of a tree it built at an emit site, a release receiver or a
+    // dispatched call. The AST walk built those trees, and it is deleted
+    // (RFC-0125, "The AST walk is deleted in one piece"), so a question here
+    // means an emitter builds source again.
+    assert_eq!(
+        t.peek_off, 0,
+        "`peek` answered {} questions about AST no instantiation holds. The emitter \
+         builds no source tree of its own since the AST walk was deleted",
         t.peek_off
     );
 
