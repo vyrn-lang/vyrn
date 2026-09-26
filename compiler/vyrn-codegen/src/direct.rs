@@ -14760,6 +14760,30 @@ impl<'p> Fn_<'_, 'p> {
         };
         let place = read(n)?;
         let extent = core_extent(&body.stmts, n, &body.occurrences())?;
+        // The name is read through itself and through what is read out of it
+        // and still points into it. A value copied out of it, a scalar that
+        // owns no heap, holds nothing of it, so the rows the chain test judges
+        // end at the last row that reads a holder: `xs[0] + eat(b)` reads
+        // `xs[0]` into a temporary before the call.
+        let mut holders = vec![n];
+        let mut inner = Vec::new();
+        extent.iter().for_each(|s| core_lets(s, &mut inner));
+        for (m, rhs) in &inner {
+            let Rhs::Read(p) = rhs else { continue };
+            let ty = &body.names[*m as usize].ty;
+            if vyrn_lower::kernel::root_of(p).is_some_and(|(r, _)| holders.contains(&r))
+                && (self.owns_heap(ty)
+                    || !matches!(self.cx.repr(ty, 0), Ok(Repr::Scalar(_) | Repr::Unit)))
+            {
+                holders.push(*m);
+            }
+        }
+        let last = extent.iter().rposition(|s| {
+            let mut ns = Vec::new();
+            vyrn_lower::core::names_in(s, &mut ns);
+            ns.iter().any(|x| holders.contains(x))
+        })?;
+        let extent = &extent[..=last];
         let mut rebuilt = Vec::new();
         extent
             .iter()
