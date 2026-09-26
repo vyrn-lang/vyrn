@@ -521,6 +521,8 @@ jobs:
     # and not the sum. They are `#[ignore]`d for the same reason the route
     # harness is, and they gate here instead, in parallel (RFC-0125
     # §3 M2, M3 and M6: each carries its own RATCHET).
+    # The test sweep runs here too: it checks every program a test writes with
+    # the kernel and without it, and it is ignored for the same reason.
     runs-on: ubuntu-latest
     steps:
       # actions/checkout@v4
@@ -542,6 +544,9 @@ jobs:
       - name: Typed by construction over the corpus (RFC-0125 M6)
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test typed -- --ignored --nocapture
+      - name: No program a test writes is refused by the kernel alone (RFC-0125 M3)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test testsweep -- --ignored --nocapture
 
   route:
     name: the native route (wasm2c == wasm)
