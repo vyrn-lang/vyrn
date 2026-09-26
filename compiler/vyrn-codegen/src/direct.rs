@@ -3839,8 +3839,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Call the `release` a type declares (`impl Owned`, RFC-0096) on the value
     /// at `p`: the instance whose type arguments `ty` fixes where the impl is
-    /// generic. The value crosses as a read of a binding does: a local's
-    /// value, a slot's address, module state's address or scalar.
+    /// generic. The value crosses as a read of a binding does and coerces to
+    /// the release's one parameter.
     fn release_call(
         &mut self,
         m: &mut Module,
@@ -3850,41 +3850,45 @@ impl<'p> Fn_<'_, 'p> {
         p: Place,
         line: usize,
     ) -> Result<(), String> {
+        // Inside a monomorphized instance the value's type names the
+        // instance's parameters, which the solve reads substituted.
         let sig = match self.cx.generics.get(f).copied() {
-            Some(g) => {
-                let params: Vec<Type> = g.params.iter().map(|p| p.ty.clone()).collect();
-                let (subst, solved) = crate::solve_with_expected(
-                    &g.type_params,
-                    &params,
-                    std::slice::from_ref(ty),
-                    &g.ret,
-                    None,
-                );
-                let Some(type_args) = solved.into_iter().collect::<Option<Vec<_>>>() else {
-                    return unsupported(&format!("a release `{f}` that `{ty}` does not fix"), line);
-                };
-                self.cx.instantiate(m, g, type_args, subst)?
-            }
+            Some(g) => self.generic_sig(m, g, &[self.cx.sub(ty)], None, line)?,
             None => match self.cx.sigs.get(f) {
                 Some(sig) => sig.clone(),
                 None => return unsupported(&format!("the release `{f}`"), line),
             },
         };
-        match p {
+        let ([param], [false]) = (sig.params.as_slice(), sig.modify.as_slice()) else {
+            return unsupported(&format!("the release `{f}` at this signature"), line);
+        };
+        let param = param.clone();
+        self.push_place(b, p, ty, line)?;
+        self.coerce(m, b, None, ty, &param, line)?;
+        b.ins(&Instruction::Call(sig.index));
+        Ok(())
+    }
+
+    /// Push the value of type `t` at `place`: a local's value, a slot's
+    /// address, and module state's value or, for an aggregate, its address.
+    fn push_place(&self, b: &mut Frame, place: Place, t: &Type, line: usize) -> Result<(), String> {
+        match place {
             Place::Local(l) => {
                 b.ins(&Instruction::LocalGet(l));
             }
             Place::Slot(off) => {
                 b.slot(off);
             }
+            // A global aggregate IS its address, like a slot; a global
+            // scalar has to be loaded out of memory, which is the one way
+            // module state differs from a local at a read.
             Place::Static(at) => {
                 b.ins(&Instruction::I32Const(at as i32));
-                if let Repr::Scalar(_) = self.cx.repr(ty, line)? {
-                    b.ins(&load_of(&self.cx.ll(ty), 0, self.cx.signed(ty)));
+                if let Repr::Scalar(_) = self.cx.repr(t, line)? {
+                    b.ins(&load_of(&self.cx.ll(t), 0, self.cx.signed(t)));
                 }
             }
         }
-        b.ins(&Instruction::Call(sig.index));
         Ok(())
     }
 
@@ -8883,32 +8887,7 @@ impl<'p> Fn_<'_, 'p> {
                 line,
             )?;
             let want = self.expect.last().cloned();
-            let (subst, solved) = crate::solve_with_expected(
-                &f.type_params,
-                &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
-                &arg_tys,
-                &f.ret,
-                want.as_ref(),
-            );
-            let mut type_args = Vec::new();
-            for (tp, got) in f.type_params.iter().zip(solved) {
-                match got {
-                    Some(t) => type_args.push(t),
-                    // The textual emitter substitutes `Unit` and lowers it to
-                    // `void`; in wasm that is a signature with one fewer
-                    // parameter, which is a different function rather than a
-                    // diagnostic.
-                    None => {
-                        return unsupported(
-                            &format!(
-                                "a generic type parameter `{tp}` the call `{name}` does not fix"
-                            ),
-                            line,
-                        )
-                    }
-                }
-            }
-            let sig = self.cx.instantiate(m, &f, type_args, subst)?;
+            let sig = self.generic_sig(m, f, &arg_tys, want.as_ref(), line)?;
             return self.emit_call(m, b, &sig, args, hint);
         }
         if self.is_extern(name) {
@@ -9439,6 +9418,45 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// The instance of the generic `f` that arguments of `arg_tys`, and the
+    /// expected result `want`, solve, which hands out its function index.
+    fn generic_sig(
+        &mut self,
+        m: &mut Module,
+        f: &'p Function,
+        arg_tys: &[Type],
+        want: Option<&Type>,
+        line: usize,
+    ) -> Result<Sig, String> {
+        let (subst, solved) = crate::solve_with_expected(
+            &f.type_params,
+            &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+            arg_tys,
+            &f.ret,
+            want,
+        );
+        let mut type_args = Vec::new();
+        for (tp, got) in f.type_params.iter().zip(solved) {
+            match got {
+                Some(t) => type_args.push(t),
+                // The textual emitter substitutes `Unit` and lowers it to
+                // `void`; in wasm that is a signature with one fewer
+                // parameter, which is a different function rather than a
+                // diagnostic.
+                None => {
+                    return unsupported(
+                        &format!(
+                            "a generic type parameter `{tp}` the call `{}` does not fix",
+                            f.name
+                        ),
+                        line,
+                    )
+                }
+            }
+        }
+        self.cx.instantiate(m, f, type_args, subst)
+    }
+
     /// The call itself, once the callee's signature is known.
     fn emit_call(
         &mut self,
@@ -9473,29 +9491,6 @@ impl<'p> Fn_<'_, 'p> {
             }
         };
         self.emit_call_with(m, b, sig, args.len(), &mut operand, hint)
-    }
-
-    /// Push the value of type `t` at `place`, as a read of a binding does: a
-    /// local's value, a slot's address, module state's address or, for a
-    /// scalar, its value. A global aggregate IS its address, like a slot; a
-    /// global scalar is loaded out of memory, which is the one way module
-    /// state differs from a local at a read.
-    fn push_place(&self, b: &mut Frame, place: Place, t: &Type, line: usize) -> Result<(), String> {
-        match place {
-            Place::Local(l) => {
-                b.ins(&Instruction::LocalGet(l));
-            }
-            Place::Slot(off) => {
-                b.slot(off);
-            }
-            Place::Static(at) => {
-                b.ins(&Instruction::I32Const(at as i32));
-                if let Repr::Scalar(_) = self.cx.repr(t, line)? {
-                    b.ins(&load_of(&self.cx.ll(t), 0, self.cx.signed(t)));
-                }
-            }
-        }
-        Ok(())
     }
 
     /// [`Fn_::emit_call`] with argument `i` written by `operand` at its
