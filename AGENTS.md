@@ -138,7 +138,8 @@ The short list, run once at the tip, from `compiler/`:
 cargo fmt --all --check
 cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check
 cargo build --release -p vyrn-cli                 # no new warning
-cargo nextest run --release -p vyrn-cli --no-fail-fast --status-level fail
+cargo nextest run --release --workspace --no-fail-fast --status-level fail
+cargo test --release --manifest-path vyrn-play/Cargo.toml
 VYRN_WASM_MANIFEST=check cargo nextest run --release -p vyrn-cli --no-fail-fast \
   --status-level fail --success-output final --run-ignored only \
   -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash)'
@@ -146,7 +147,7 @@ sh ../scripts/check-corpus.sh <main's tree> <out-base>
 sh ../scripts/check-corpus.sh .. <out-head>
 diff -r <out-base> <out-head>
 ```
-On the local machine, run `coredrive` as two shards, `VYRN_SHARD=0/2` and `VYRN_SHARD=1/2`, each under `timeout 600`, and add the two totals. A shard skips the pin of the forms the rows carry, and CI does not run `coredrive`, so a slice that takes bodies whole also runs it once unsharded at the tip.
+The workspace line runs every crate's tests, not only the CLI's: CI does, and a slice that ran `-p vyrn-cli` alone missed 38 failures in `vyrn-frontend` and `vyrn-play` (#545). CI does not run `coredrive`; with one walk it runs unsharded in about 150 s.
 Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates.
 - The lexer's reserved words: `node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"`; the editor grammar's keywords must equal the lexer's.
