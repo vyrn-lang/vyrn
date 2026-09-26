@@ -57,14 +57,16 @@ fn vyrn() -> Command {
 }
 
 struct Serve {
-    #[allow(dead_code)]
     child: Child,
     port: u16,
     stderr: Arc<Mutex<String>>,
     _dir: PathBuf,
 }
 
-fn drain_into<R: Read + Send + 'static>(mut r: R, acc: Arc<Mutex<String>>) {
+fn drain_into<R: Read + Send + 'static>(
+    mut r: R,
+    acc: Arc<Mutex<String>>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 1024];
         loop {
@@ -76,16 +78,24 @@ fn drain_into<R: Read + Send + 'static>(mut r: R, acc: Arc<Mutex<String>>) {
                     .push_str(&String::from_utf8_lossy(&buf[..n])),
             }
         }
-    });
+    })
 }
 
 /// Read the port out of the startup banner (`serving <file> on
 /// http://localhost:<port>`), or report the capture after `timeout`. The whole
 /// number must have arrived — a digit run that reaches the end of what was
 /// captured could still be half a port — so the wait ends on the character
-/// after it.
-fn wait_for_port_or(acc: &Arc<Mutex<String>>, timeout: Duration) -> Result<u16, String> {
+/// after it. A server that exits before its banner fails the wait at once,
+/// with everything it printed: `drains` are the threads reading its output,
+/// joined so the error is whole.
+fn wait_for_port_or(
+    child: &mut Child,
+    drains: Vec<std::thread::JoinHandle<()>>,
+    acc: &Arc<Mutex<String>>,
+    timeout: Duration,
+) -> Result<u16, String> {
     let start = Instant::now();
+    let mut drains = Some(drains);
     loop {
         {
             let s = acc.lock().unwrap();
@@ -96,6 +106,19 @@ fn wait_for_port_or(acc: &Arc<Mutex<String>>, timeout: Duration) -> Result<u16, 
                     }
                 }
             }
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            for d in drains.take().into_iter().flatten() {
+                let _ = d.join();
+            }
+            // The banner may be the last thing it printed before it exited.
+            if acc.lock().unwrap().contains("http://localhost:") {
+                continue;
+            }
+            return Err(format!(
+                "the server exited ({status}) before its serving banner:\n{}",
+                acc.lock().unwrap()
+            ));
         }
         if start.elapsed() > timeout {
             return Err(format!(
@@ -151,8 +174,10 @@ fn spawn_bin_server() -> Result<u16, String> {
     // The `serving` banner goes to stdout, generation errors to stderr — combine
     // both so the wait sees the banner and a failure surfaces its cause.
     let out = Arc::new(Mutex::new(String::new()));
-    drain_into(child.stdout.take().unwrap(), out.clone());
-    drain_into(child.stderr.take().unwrap(), out.clone());
+    let drains = vec![
+        drain_into(child.stdout.take().unwrap(), out.clone()),
+        drain_into(child.stderr.take().unwrap(), out.clone()),
+    ];
     let mut s = Serve {
         child,
         port: 0,
@@ -162,7 +187,7 @@ fn spawn_bin_server() -> Result<u16, String> {
     // Cold, cache-disabled generation of the WHOLE bin app in a debug build is
     // minutes, not seconds — the old 60s wait panicked mid-generation and the
     // per-test retries ground for an hour. 600s is the honest ceiling.
-    s.port = wait_for_port_or(&s.stderr, Duration::from_secs(600))?;
+    s.port = wait_for_port_or(&mut s.child, drains, &s.stderr, Duration::from_secs(600))?;
     let port = s.port;
     std::mem::forget(s); // keep the server alive for the whole run
     Ok(port)
