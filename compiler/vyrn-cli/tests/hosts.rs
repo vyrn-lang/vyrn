@@ -5,9 +5,9 @@
 //! refusals come out in, the must-use judgment into the same list, and the
 //! effect judgment into the floor. A process that does
 //! not call it runs a DIFFERENT compiler: the placer never runs, `core::BODIES`
-//! stays empty, `Fn_::core` is `None` for every function, and the emitter's AST
-//! dispatch is the whole of it. Its refusals are the ones `movecheck.rs` still
-//! states and not the kernel's.
+//! stays empty, `Fn_::core` is `None` for every function, and the emitter
+//! refuses every body. Its refusals are the ones `movecheck.rs` still states
+//! and not the kernel's.
 //!
 //! `vyrn-frontend/tests/semantics.rs` was such a host. 193 tests over the
 //! emitter, none of them over the walk the emitter has taken since the driver
@@ -45,7 +45,7 @@ enum Core {
     /// The host names `vyrn_lower::install()`.
     Installed,
     /// The host does not, with the reason. Every entry of this kind is a
-    /// process that compiles with the AST dispatch alone.
+    /// process whose emitter has no core to read.
     None_(&'static str),
 }
 use Core::{Installed, None_};
@@ -102,9 +102,9 @@ fn the_only_thing_that_compiles_without_a_core_is_not_a_process() {
     assert_eq!(
         without,
         ["compiler/vyrn-genwasm/src/lib.rs"],
-        "a host compiles with no core. Its emitter is the AST dispatch alone and \
-         its refusals are not the kernel's, so it is a second compiler with a \
-         second, weaker rule"
+        "a host compiles with no core. Its emitter refuses every body and its \
+         refusals are not the kernel's, so it is a second compiler with a \
+         second rule"
     );
 }
 

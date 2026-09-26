@@ -252,8 +252,8 @@ mod std_modules {
 ///
 /// THE LOWERING IS INSTALLED HERE, and this is the one place both entry points
 /// pass through. Without it the placer never runs, `core::BODIES` stays empty
-/// and the emitter's AST dispatch is the whole compiler — a second, weaker
-/// compiler on a shipping surface. A program `vyrn run` refuses, the page
+/// and the emitter refuses every body — a second compiler on a shipping
+/// surface. A program `vyrn run` refuses, the page
 /// refuses, in the same sentence. The call writes five slots and is idempotent,
 /// so it costs a load nothing worth measuring.
 fn load(

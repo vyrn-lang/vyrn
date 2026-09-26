@@ -515,13 +515,10 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);",
-            Decision, Source,
-            "the AST walks the hoist above needs, and the header-invariance \
-             proof it runs: does the loop body write the name, rebind it, or \
-             call anything that could. An optimizer's analysis, in the emitter. \
-             The walks READ `ast::body_scope_descent!` since RFC-0125 §3 M6's \
-             second body slice; what is left is the one line this reader writes \
-             at a node — hand it over, and stop at a lambda",
+            Shared, Source,
+            "the source descent the statement screen reads for a `let` that \
+             annotates a type, through `ast::body_scope_descent!`: the one line \
+             this reader writes at a node — hand it over, and stop at a lambda",
         ),
         sec(
             "fn store_of(ll: &str) -> Instruction<'static> {",

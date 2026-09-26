@@ -93,9 +93,8 @@ const CLASSES: [&str; 5] = [
 /// [`Callee::Projection`] row is a site the core did NOT inline — its rows
 /// are in the projection's own body ([`vyrn_lower::Lowered::places`]) keyed to
 /// the projection's own parameters, and at a site those parameters are the
-/// caller's expressions, so no row there can stand for this call. That is what
-/// the eight `break` occurrences on the AST arm were, while that arm existed:
-/// the emitter inlines and the core did not.
+/// caller's expressions, so no row there can stand for this call: the emitter
+/// inlines and the core did not.
 ///
 /// The table is EMPTY since the optional slice: the last five rows were the
 /// OPTIONAL kind (RFC-0122), whose body splits into four parts at a miss test

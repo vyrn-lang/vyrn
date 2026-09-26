@@ -671,7 +671,7 @@ const ROWS: &[Row] = &[
         why: "RFC-0093 M2: a take moves a field out of a record and leaves a hole, and the \
               release walk is the TYPE — which does not know the field left. M1 left the whole \
               binding unreclaimed, because a leak is a task and a double free is a bug; M2 \
-              carries the hole set from `movecheck` to `own` to both walks, so the record is \
+              carries the hole set from `movecheck` to `own` to the emitter, so the record is \
               reclaimed MINUS the place it gave away. The row is the arithmetic: N turns \
               allocate two Strings and free two — N, not 2N and not 0. Where the walk cannot be \
               told, the binding still leaks whole: a declared `release` is a user function, a \
@@ -2202,7 +2202,7 @@ fn a_store_runs_the_declared_release_of_what_it_displaces() {
 // A payload binder read out of a scrutinee the frame owns, handed to a
 // `consume` parameter, leaves a hole in the scrutinee, and the scrutinee's
 // release walks around it (RFC-0125 M7, `vyxProcessElem` in `std/vyx.vyrn`).
-// Each program exited 134, "double or foreign free", under both walks.
+// Each program exited 134, "double or foreign free".
 const PAYLOAD_DECLS: &str = r#"type Node =
     | Elem(String, Array<Int64>, Int64)
     | Text(String)
@@ -2336,7 +2336,7 @@ fn main() -> Int64 {
 
 // A `for` whose elements each leave through the loop variable frees its
 // buffer alone; a `return` or a `break` out of it releases the elements no
-// turn reached first. Each exit leaked those elements under both walks.
+// turn reached first. Each exit leaked those elements.
 #[test]
 fn a_for_that_leaves_early_releases_the_elements_it_never_reached() {
     let body = r#"type Rec = { name: String, k: Int64 }
@@ -2386,7 +2386,7 @@ fn main() -> Int64 {
 }
 
 // A removal hands back what it took out, and a statement that discards it is
-// no site that reads it. A popped record's box leaked under both walks.
+// no site that reads it. A popped record's box leaked.
 #[test]
 fn a_discarded_removal_releases_what_it_took_out() {
     let body = r#"type Q = { k: Int64 }
@@ -2410,8 +2410,8 @@ fn main() -> Int64 {
 
 // A generic release that takes a field of a generic declared release type and
 // never drops it: the kernel places that release inside the body, and the
-// placer lowers a second time to build it (record `m7-slotrel`). Both walks
-// free the field.
+// placer lowers a second time to build it (record `m7-slotrel`). The field
+// is freed.
 #[test]
 fn a_generic_release_placed_inside_a_generic_release_is_freed() {
     shape_runs_clean("a-generic-release-placed-inside-a-generic-release", "6\n");

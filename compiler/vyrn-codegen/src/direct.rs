@@ -1920,7 +1920,7 @@ fn mem_pre(b: &mut Frame, prim: &str) {
 
 /// The end of an aggregate store, with the destination's address and the
 /// value's on the stack: two drops when the value was built `in_place`, and
-/// the copy of `size` bytes otherwise. Both walks end a store with it.
+/// the copy of `size` bytes otherwise.
 fn agg_landed(b: &mut Frame, size: u32, in_place: bool) {
     if in_place {
         b.ins(&Instruction::Drop);
@@ -1973,10 +1973,8 @@ impl Dest {
 /// family.
 ///
 /// A record literal, an array literal and a map literal each write their parts
-/// at offsets the layout decides, and the offsets are the same whichever walk
-/// is emitting: the AST arm has an expression per part and the core's row has a
-/// [`Val`]. The builders below take this rather than a slice of expressions, so
-/// the placement is stated once and the two walks cannot drift on it.
+/// at offsets the layout decides. The core's row names each part as a [`Val`],
+/// and the builders below take this, so the placement is stated once.
 enum Parts<'a, 'c> {
     Core(&'a vyrn_lower::core::Body, &'a [Val], &'c mut Walked),
 }
@@ -2182,11 +2180,10 @@ struct Fn_<'a, 'p> {
     /// This frame's own core body, and where each of its names lives — RFC-0125
     /// §3 M3, the interleave slice.
     ///
-    /// The driver used to pick its walk per FUNCTION, so an AST arm could only
-    /// go when every body of the corpus went through the core. The unit is the
-    /// STATEMENT now: the two walks share this frame — its locals, its scope
-    /// and the places below — and each statement goes to whichever walk carries
-    /// it. `None` for a frame the core states no body for.
+    /// A body the rows carry whole is walked by [`Fn_::core_body`]; any other
+    /// is walked a statement at a time by [`Fn_::core_took`], into this one
+    /// frame with its locals, its scope and the places below. `None` for a
+    /// frame the core states no body for.
     core: Option<std::rc::Rc<vyrn_lower::core::Body>>,
     /// The core's rows for each source statement of this body
     /// ([`vyrn_lower::core::Body::rows_by_statement`]).
@@ -2195,8 +2192,8 @@ struct Fn_<'a, 'p> {
     /// [`Fn_::core_releases`].
     core_rows: Vec<(vyrn_lower::core::Name, Vec<String>, ExitKind)>,
     /// Where the core's names live, and what the operand stack is holding.
-    /// Shared by the two walks: a name the AST arm bound is found through
-    /// [`Fn_::scope`], and one this walk bound is pushed onto it.
+    /// A name a parameter or a `let` bound is found through [`Fn_::scope`], and
+    /// one this walk bound is pushed onto it.
     core_w: Walked,
     /// The type the reader ANNOTATED the statement this walk is emitting with,
     /// for the one row that needs it — a made layout (RFC-0125 M7).
@@ -2496,8 +2493,7 @@ fn lower_body(
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
     // The core's parameters are the declaration's in order, and the prologue
-    // has just put each one where it lives, so the two walks agree about them
-    // before either runs.
+    // has just put each one where it lives.
     if let Some(core) = cx_fn.core.clone() {
         for (i, n) in core.params.iter().enumerate() {
             if let Some((_, place, ty)) = cx_fn.scope.get(i) {
@@ -2544,8 +2540,8 @@ fn lower_body(
     cx_fn.depth += 1;
     // RFC-0125 §2.3: "the emitter reads the core and writes wasm". Where the
     // core's rows carry the whole body, its statements are what this walks;
-    // everywhere else the AST dispatch below is what it always was, and it
-    // asks the core again at every statement ([`Fn_::core_took`]).
+    // everywhere else the core is asked at every statement
+    // ([`Fn_::core_took`]), and a statement it does not carry is refused.
     if let Some(core) = cx_fn.core.clone() {
         cx_fn.core_lift_targets(m, &core.stmts);
     }
@@ -4178,8 +4174,7 @@ impl<'p> Fn_<'_, 'p> {
     /// read mode after the path and read through the loader's resolver rather
     /// than `path_open` (RFC-0076 M7).
     ///
-    /// `operand` writes argument `i` at the type asked for. The arm over the
-    /// source and [`Fn_::core_call`] over the rows both call this.
+    /// `operand` writes argument `i` at the type asked for.
     fn slot_call(
         &mut self,
         m: &mut Module,
@@ -4618,8 +4613,8 @@ impl<'p> Fn_<'_, 'p> {
     /// `emit`) gets its own without anything being said about recursion.
     ///
     /// Emitted at the `let`, so the second trip through an enclosing loop starts
-    /// unowned again. Both walks call it at the accumulator's `let`, keyed by
-    /// its node `site`.
+    /// unowned again. The core walk calls it at the accumulator's `let`, keyed
+    /// by its node `site`.
     ///
     /// It starts OWNED when this `let` owns its initializer, which is the fact
     /// `own` already decided. Starting it unowned abandoned the initializer's
@@ -4640,7 +4635,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// `s = s + a + b` grown in place: one runtime `strAppend` per part into
     /// `place`, whose ownership word is at `own` (RFC-0125 M7, the `@strAppend`
-    /// row; the AST arm's spine calls it too). `operand` pushes part `i` and
+    /// row). `operand` pushes part `i` and
     /// hands back a String temporary to free once the part is copied.
     ///
     /// When the word says the buffer is not this path's, the first append
@@ -5534,9 +5529,8 @@ impl<'p> Fn_<'_, 'p> {
     /// is true of `b >= 'a'`, a signed 64-bit comparison in all three engines
     /// that would become an unsigned byte one here.
     ///
-    /// Stated once for the two walks that ask it (RFC-0125 §3 M3, the driver
-    /// slice): the AST walk peeks the right operand's node, and the core walk
-    /// reads the type off the name the row carries.
+    /// The core walk reads each operand's type off the name the row carries
+    /// (RFC-0125 §3 M3, the driver slice).
     fn op_width(&self, lt: &Type, rt: Option<&Type>) -> Type {
         let Some(rt) = rt else { return lt.clone() };
         let rt = self.cx.resolve(rt);
@@ -5800,8 +5794,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// A generator host import ([`Spec::Host`]): the operands at the types
-    /// the import takes, and the call. The arm over the source and
-    /// [`Fn_::core_call`] over the rows both call this.
+    /// the import takes, and the call, for [`Fn_::core_call`].
     ///
     /// `ty` answers operand `i`'s own type without writing it, and `operand`
     /// writes operand `i` at the type given.
@@ -6101,9 +6094,8 @@ impl<'p> Fn_<'_, 'p> {
         unsupported(&format!("the call `{name}`"), line)
     }
 
-    /// `print` of the value on the stack, rendered by its own type `t`. Both
-    /// walks call it: the arm over the source after it evaluates the operand,
-    /// and [`Fn_::core_call`] after it reads the name (RFC-0125 M7).
+    /// `print` of the value on the stack, rendered by its own type `t`.
+    /// [`Fn_::core_call`] calls it after it reads the name (RFC-0125 M7).
     fn print_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
         match self.cx.resolve(t) {
             // Every width goes through one `i64` printer: widened by its
@@ -6146,10 +6138,10 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `toString` of the value on the stack, rendered by its own type `t` into
-    /// a String the caller owns. `arg` is the operand's expression where the
-    /// arm over the source has one: a String temporary is freed once it is
-    /// copied ([`vyrn_frontend::declared::str_temporary`]), and the rows state
-    /// that release as a row of their own.
+    /// a String the caller owns. `arg` is the operand's expression where there
+    /// is one: a String temporary is freed once it is copied
+    /// ([`vyrn_frontend::declared::str_temporary`]), and the rows state that
+    /// release as a row of their own.
     fn str_value(
         &mut self,
         b: &mut Frame,
@@ -6450,8 +6442,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// The first half of the aggregate-result convention, which both walks
-    /// read (RFC-0125 M7): the out-pointer a call's result is written
+    /// The first half of the aggregate-result convention (RFC-0125 M7): the
+    /// out-pointer a call's result is written
     /// through, pushed before the arguments.
     ///
     /// The storage is the consumer's own when it holds this very type, so the
@@ -7834,12 +7826,11 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The line a `panic` writes, and the call that traps after it: `error: `,
     /// the message `msg` pushes, and the site where the call names one
-    /// (RFC-0125 M7). The arm over the source and [`Fn_::core_call`] both
-    /// write it, and the `unreachable` after it is the arm's own and the
-    /// core's [`St::Trap`].
+    /// (RFC-0125 M7). [`Fn_::core_call`] writes it, and the `unreachable` after
+    /// it is the core's [`St::Trap`].
     ///
     /// Both wordings are interned, and the local taken, before the message is
-    /// pushed, so the two walks lay out the same data and the same locals. The
+    /// pushed, so every site lays out the same data and the same locals. The
     /// message waits in the local because `write_all` consumes three operands,
     /// and it is pushed first because the other engines evaluate the argument
     /// before they write any byte of the line.
@@ -8025,9 +8016,8 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// `order[i]` is the part that fills the `i`th DECLARED field. The layout's
     /// order is the declaration's and a reader writes the fields in whatever
-    /// order suits, so the join is by name and the caller makes it: the AST arm
-    /// joins its `(name, expr)` pairs and the core's row joins the field names
-    /// on [`vyrn_lower::core::Ctor::Record`].
+    /// order suits, so the join is by name and the caller makes it: the core's
+    /// row joins the field names on [`vyrn_lower::core::Ctor::Record`].
     #[allow(clippy::too_many_arguments)]
     fn record_into(
         &mut self,
@@ -8058,8 +8048,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// One part of a literal, at the type the layout puts it at: the AST arm's
-    /// expression, or the value the core's row names (RFC-0125 M7).
+    /// One part of a literal, at the type the layout puts it at: the value the
+    /// core's row names (RFC-0125 M7).
     fn part(
         &mut self,
         m: &mut Module,
@@ -8078,10 +8068,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// One layout part of a literal, left at `dest`, which is the parent's
-    /// storage at the part's offset (RFC-0125 M7). The AST arm builds the
-    /// expression there. The core's row names the part: a part its own row
-    /// wrote there ([`Fn_::core_part_at`]) is left, and any other layout name
-    /// is copied from its place, as the arm copies a variable.
+    /// storage at the part's offset (RFC-0125 M7). The core's row names the
+    /// part: a part its own row wrote there ([`Fn_::core_part_at`]) is left,
+    /// and any other layout name is copied from its place.
     #[allow(clippy::too_many_arguments)]
     fn agg_part(
         &mut self,
@@ -8356,8 +8345,7 @@ impl<'p> Fn_<'_, 'p> {
         Some(self.cx.sub(&ftypes::substitute(&f.ret, &subst)))
     }
 
-    /// `pop` on the array whose address is in the local `slot`. The arm over
-    /// the source and [`Fn_::core_call`] over the rows both call this.
+    /// `pop` on the array whose address is in the local `slot`.
     fn pop_at(
         &mut self,
         b: &mut Frame,
@@ -8417,8 +8405,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `swapRemove` on the array whose address is in the local `slot`, with
-    /// `index` writing the index. The arm over the source and
-    /// [`Fn_::core_call`] over the rows both call this.
+    /// `index` writing the index.
     fn swap_remove_at(
         &mut self,
         m: &mut Module,
@@ -9197,8 +9184,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `Age?(n)` — a validated construction whose refinement answers with a tag
-    /// instead of a trap, yielding `Option<Age>` (RFC-0003). Both walks call it:
-    /// `operand` pushes the value at the base type it is handed, and `dest`
+    /// instead of a trap, yielding `Option<Age>` (RFC-0003). `operand` pushes the value at the base type it is handed, and `dest`
     /// names the storage the `Option` is written into, whose address is left
     /// on the stack.
     ///
@@ -9552,8 +9538,7 @@ impl<'p> Fn_<'_, 'p> {
     /// a duplicate key updates in place and keeps its slot —
     /// `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first. The
     /// value a repeated key shadows has no owner left, so the insert releases
-    /// it; inside a `region` the arena owns it. The AST arm and
-    /// [`Fn_::core_make`] both call this.
+    /// it; inside a `region` the arena owns it. [`Fn_::core_make`] calls this.
     fn map_into(
         &mut self,
         m: &mut Module,
@@ -9721,9 +9706,8 @@ impl<'p> Fn_<'_, 'p> {
     /// stores a COPY — so the caller's ownership is the same on both paths.
     ///
     /// The map's header address is in `hdr`. `operand` pushes operand 0, the
-    /// key, or operand 1, `n`, at the type it is handed: the arm over the
-    /// source evaluates expressions and the core's walk reads names off the
-    /// row (RFC-0125 M7).
+    /// key, or operand 1, `n`, at the type it is handed, read off the row
+    /// (RFC-0125 M7).
     fn map_tally(
         &mut self,
         m: &mut Module,
@@ -10172,9 +10156,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `m[k]` — an honest `Option<V>`, never a trap.
     ///
     /// The map's address is already on the stack. `key` pushes the key at the
-    /// type it is handed: the arm over the source evaluates an expression and
-    /// the core's walk reads a name off the row (RFC-0125 M7), and the lookup
-    /// between them is this one sequence.
+    /// type it is handed, read off the row (RFC-0125 M7).
     fn map_at(
         &mut self,
         m: &mut Module,
@@ -10489,8 +10471,6 @@ impl<'p> Fn_<'_, 'p> {
     /// `operand` writes argument `i`, at the type asked for or else at its own,
     /// and answers the type it wrote. `lane_at` answers argument `i` as a lane
     /// index below the count given, or `None` where it is no such constant.
-    /// The arm over the source and [`Fn_::core_call`] over the rows both call
-    /// this.
     fn lanes(
         &mut self,
         m: &mut Module,
@@ -10712,8 +10692,7 @@ impl<'p> Fn_<'_, 'p> {
     /// be mutated afterwards without disturbing it. String keys are then dup'd
     /// per element (RFC-0092 M2 — an array owns its elements, so a snapshot of
     /// the map's own pointers would be freed twice); Int64 keys copy with the
-    /// buffer (RFC-0117). The arm over the source and [`Fn_::core_call`] over
-    /// the rows both call this.
+    /// buffer (RFC-0117).
     fn map_keys(
         &mut self,
         m: &mut Module,
@@ -10759,8 +10738,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// `m.remove(k)` on the map whose header address is in `hdr`: the entry
     /// of the key `key` pushes released and dropped, and whether there was
-    /// one left on the stack. The arm over the source and the core's walk
-    /// (RFC-0125 M7) differ only in how they push the key.
+    /// one left on the stack (RFC-0125 M7).
     fn map_remove(
         &mut self,
         m: &mut Module,
@@ -10833,7 +10811,7 @@ impl<'p> Fn_<'_, 'p> {
 // ---------------------------------------------------------------------------
 
 /// Write the inline state of a `SmallArray<T, N>` header at `dest`: `len`,
-/// `cap == n` and a null `data` (RFC-0056). Both walks build one through it.
+/// `cap == n` and a null `data` (RFC-0056).
 fn sa_head(b: &mut Frame, dest: Dest, l: &Layout, len: usize, n: usize) {
     dest.addr(b, l.fields[0]);
     b.ins(&Instruction::I64Const(len as i64));
@@ -12358,10 +12336,10 @@ pub fn forget_walks() {
 /// operand stack is holding — RFC-0125 §3 M3, the driver slice.
 ///
 /// The core names EVERY value (§2.1) and wasm has an operand stack, so a walk
-/// that gave each name a local would emit a `local.set`/`local.get` pair the
-/// AST walk does not. `held` is the one name the stack is carrying: a value
-/// bound by the statement just walked and read by this one. Where a name is
-/// not stack-shaped it gets a local, in the order the AST walk allocates one.
+/// that gave each name a local would emit a `local.set`/`local.get` pair for a
+/// value the stack can carry. `held` is the one name the stack is carrying: a
+/// value bound by the statement just walked and read by this one. Where a name
+/// is not stack-shaped it gets a local.
 #[derive(Default)]
 struct Walked {
     /// The wasm place of each of the core's names, by [`vyrn_lower::core::Name`].
@@ -12416,7 +12394,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The row is the whole of the answer: the name, whose binding is the node
     /// the plan keys the slot by, and the holes the walk goes around.
     /// [`Fn_::emit_releases`] asks `own::placed` the same question by exit and
-    /// node, and its readers are the AST arms alone.
+    /// node.
     ///
     /// A name with no slot releases nothing: the walk registers one for every
     /// layout it makes, and a body it takes holds no other value that owns
@@ -12613,18 +12591,12 @@ impl<'p> Fn_<'_, 'p> {
     /// §2.3: "the emitter reads the core and writes wasm ... it decides
     /// nothing".
     ///
-    /// This is the walk the AST dispatch (`Fn_::stmt`, `Fn_::expr`) is beside.
     /// It reads [`vyrn_lower::core::Body`] and nothing else: a statement is a
     /// [`St`], what it computes is the [`Op`], the [`Ctor`] and the [`Lit`] the
     /// operation slice put on the rows, and the type of every operand is the
     /// checker's, carried on [`vyrn_lower::core::NameInfo`].
     ///
-    /// It runs only where [`Fn_::core_walkable`] says the rows carry the whole
-    /// body. What that leaves out is the ranked list in §3 M3 and not a
-    /// judgement of this walk's: each form it stands down at names the row the
-    /// core still lacks.
-    /// Hold `core`'s rows by statement and a place table for its names, so
-    /// either walk may read it.
+    /// Hold `core`'s rows by statement and a place table for its names.
     fn core_enter(&mut self, core: &vyrn_lower::core::Body) {
         self.core_at = core.rows_by_statement();
         self.core_w = Walked {
@@ -12642,6 +12614,19 @@ impl<'p> Fn_<'_, 'p> {
         };
     }
 
+    /// One function body, emitted from the core's own statements — RFC-0125
+    /// §3 M3, the driver slice.
+    ///
+    /// §2.3: "the emitter reads the core and writes wasm ... it decides
+    /// nothing".
+    ///
+    /// It reads [`vyrn_lower::core::Body`] and nothing else: a statement is a
+    /// [`St`], what it computes is the [`Op`], the [`Ctor`] and the [`Lit`] the
+    /// operation slice put on the rows, and the type of every operand is the
+    /// checker's, carried on [`vyrn_lower::core::NameInfo`].
+    ///
+    /// It runs only where [`Fn_::core_walkable`] says the rows carry the whole
+    /// body. Any other body goes a statement at a time ([`Fn_::core_took`]).
     fn core_body(
         &mut self,
         m: &mut Module,
@@ -12657,16 +12642,13 @@ impl<'p> Fn_<'_, 'p> {
     /// One SOURCE statement, emitted from the core's rows where they carry it —
     /// RFC-0125 §3 M3, the interleave slice.
     ///
-    /// [`Fn_::core_body`] picks its walk per FUNCTION, so an arm of the AST
-    /// dispatch could only go when every body of the corpus went through the
-    /// core. This is the same walk asked one statement at a time: where the
-    /// rows carry the statement it is emitted from them, and where they do not
-    /// the arm below emits it, into the same frame with the same locals and
-    /// the same scope. An arm goes when no occurrence of its form reaches it.
+    /// This is [`Fn_::core_body`]'s walk asked one statement at a time, into
+    /// the same frame with the same locals and the same scope, for a body the
+    /// rows do not carry whole.
     ///
     /// Returns whether the statement was emitted. The screen
-    /// ([`Fn_::core_run`]) stands before the first instruction, so a `false`
-    /// costs nothing and the arm emits exactly what it always did.
+    /// ([`Fn_::core_run`]) stands before the first instruction, so on a
+    /// `false` nothing was emitted and [`Fn_::stmt`] refuses the statement.
     fn core_took(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<bool, String> {
         let Some(body) = self.core.clone() else {
             return Ok(false);
@@ -12747,8 +12729,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Three clauses, and each one is a line of the record. The FRAME clause: a
     /// placed release and an aggregate destination are emissions the rows do
     /// not carry. The PLACE clause, per statement rather than per body: a name
-    /// the run reads, or a `let` binds, has a place whose type is its type on
-    /// both walks, whatever that type is. The STATEMENT screen:
+    /// the run reads, or a `let` binds, has a place whose type is its type,
+    /// whatever that type is. The STATEMENT screen:
     /// [`Fn_::core_readable`], unchanged.
     fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
         // A node is an ADDRESS, and `project::iterate_loop`'s copy of a loop
@@ -12767,9 +12749,8 @@ impl<'p> Fn_<'_, 'p> {
         // placement keyed a release AT — 8,362 of them per body, and the `if`s
         // of every frame that placed one. Since the release slice it names the
         // three exits this walk gives back at itself: a `break`, a `continue`
-        // and a `return` each run the same [`Fn_::emit_releases`] the arm runs,
-        // keyed by the row's own site. A block's fall-through release and a
-        // scrutinee's stay the arm's, and their rows are what
+        // and a `return` each run [`Fn_::emit_releases`], keyed by the row's
+        // own site. A block's fall-through release and a scrutinee's are what
         // [`Fn_::core_readable`] refuses, so no run reaches this walk holding
         // one.
         if self
@@ -12882,11 +12863,11 @@ impl<'p> Fn_<'_, 'p> {
                         || (matches!(self.ret, Repr::Agg(_)) && !self.checks(&self.ret_ty))) => {}
             // RFC-0114 Rule N's edge releases are the plan's rows at the JOIN,
             // and the core states them as drops inside the branch — which the
-            // statement screen refuses. An `if` that owes one is the arm's.
+            // statement screen refuses. An `if` that owes one is refused.
             (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
             // The four forms the site slice took off the floor. Each names its
             // own node on the row now, so the FORM is the whole of the
-            // agreement: no binding to check and no type the arm would bind.
+            // agreement: no binding to check and no type to bind.
             // What each still waits on is the statement screen below — a `for`
             // reads its element through a place row, an `if let` is a switch,
             // and the tag on `Arm` is the list's row 6.
@@ -12946,7 +12927,7 @@ impl<'p> Fn_<'_, 'p> {
         // A made layout other than the statement's own binding lands in a slot
         // of its own, which the row gives back at its extent's end, and is
         // built at its name's type. A `let` under the statement that annotates
-        // another type is the arm's, as it is for the per-body walk.
+        // another type is refused, as it is for the per-body walk.
         let under = self.annotations(|fs| {
             hoist_stmt(
                 s,
@@ -13004,8 +12985,8 @@ impl<'p> Fn_<'_, 'p> {
                 continue;
             }
             let (_, ty) = self.core_place(&self.core_w, body, *n)?;
-            // And the two walks have to agree about the type of a name they
-            // share: `stringops.vyrn` compared two bytes at byte width from the
+            // And the row and the frame have to agree about the type of a
+            // name: `stringops.vyrn` compared two bytes at byte width from the
             // row and at `Int64` from the frame, for the same source. The
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
@@ -13021,7 +13002,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Where one of the core's names lives: the place this walk bound it at, or
-    /// the one the AST arm bound it at, which is the scope's.
+    /// the scope's.
     fn core_place(
         &self,
         w: &Walked,
@@ -13164,7 +13145,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // The head of a `for` over a stream: the element goes into a
                 // place of its own, which the read at this row's name binds,
-                // and the name is whether one came, as the arm's `for` pulls.
+                // and the name is whether one came.
                 St::Let(
                     n,
                     Rhs::Call {
@@ -13256,8 +13237,8 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
                 // A LAYOUT TAKEN OUT OF A FIELD in part position: the header
-                // moves to the part's offset, as the arm's `consume t.d` in a
-                // literal moves it, and the field is the hole the root's
+                // moves to the part's offset, as `consume t.d` in a literal
+                // moves it, and the field is the hole the root's
                 // release carries.
                 St::Let(n, Rhs::Take(p)) if self.core_part_at(body, ss, i, w).is_some() => {
                     let line = body.names[*n as usize].line;
@@ -13350,12 +13331,11 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // An AGGREGATE CALL RESULT, written through the out-pointer
                 // into the binding's own slot, or into the caller's storage
-                // when the `return` after it hands the temporary back. The
-                // bytes are the AST arm's at `let p = f(a)` and at
-                // `return f(a)`: [`Fn_::agg_into`]'s destination, then the
-                // call's own convention ([`Fn_::out_ptr`]). Any other
+                // when the `return` after it hands the temporary back: the
+                // destination, then the call's own convention
+                // ([`Fn_::out_ptr`]). Any other
                 // temporary is the storage the call wrote, and its name holds
-                // that address, as the arm hands the call's own slot on: to
+                // that address, the call's own slot handed on: to
                 // the reader, or to the `match` or `for` the plan keys it by.
                 St::Let(
                     n,
@@ -13534,8 +13514,8 @@ impl<'p> Fn_<'_, 'p> {
                         }
                     };
                     // The store releases what the name held where the row says
-                    // so, in the arm's order: the old value aside, the new one
-                    // in, the old one freed.
+                    // so: the old value aside, the new one in, the old one
+                    // freed.
                     let snap = match (*releases, self.cx.repr(&ty, *line)?) {
                         (false, _) => None,
                         (true, Repr::Scalar(v)) => self.snap_word(b, l, v, &ty, *line)?,
@@ -13574,8 +13554,8 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A place with an address: the address, what the place held
                 // kept aside where the row releases it, the value landed, and
-                // the kept value freed, the arm's order at `x = v`, `r.f = v`
-                // and `a[i] = v`. A layout lands as a copy of its bytes. A
+                // the kept value freed, for `x = v`, `r.f = v` and `a[i] = v`
+                // alike. A layout lands as a copy of its bytes. A
                 // String in module state has its word cleared, as a String
                 // name's.
                 St::Store {
@@ -13751,16 +13731,16 @@ impl<'p> Fn_<'_, 'p> {
                         }
                     }
                     self.core_releases(m, b, body)?;
-                    // Every region scope this return leaves, as the AST arm
-                    // does: a returned value built inside a region points into
+                    // Every region scope this return leaves: a returned value
+                    // built inside a region points into
                     // the arena and its caller owns it, so the scope POPS
                     // rather than frees.
                     self.exit_regions_above(b, 0, false);
                     b.ins(&Instruction::Br(self.depth));
                 }
                 // An exit's releases run AFTER the read it hands back, which
-                // is the order the AST arm writes and the order a reader of
-                // the wasm expects: the value is on the operand stack and a
+                // is the order a reader of the wasm expects: the value is on
+                // the operand stack and a
                 // release does not disturb it. The row states the release and
                 // not its place among the reads, so the two commute.
                 St::Row {
@@ -13786,9 +13766,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::Unreachable);
                 }
                 // An expression for its effect. What it leaves on the stack
-                // is dropped, or the enclosing block's type will not check —
-                // the same sentence the AST walk's statement arm writes, on
-                // the row rather than on the node.
+                // is dropped, or the enclosing block's type will not check.
                 St::Do { rhs, line, .. } if self.core_checks_made(body, rhs).is_some() => {
                     let (decl, n) = self.core_checks_made(body, rhs).expect("the guard's");
                     self.core_val(
@@ -14063,7 +14041,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction and
         // never a call, so no signature answers for it. The table is
-        // [`Fn_::mem_spec`]'s, which the arm over the source reads too.
+        // [`Fn_::mem_spec`]'s.
         if let Some(prim) = callee.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
             return self.core_mem(m, b, body, w, prim, args, line);
         }
@@ -14082,8 +14060,8 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(ret.clone());
             }
             // `x.copy()` (RFC-0089 M1b): the operand at its own type, which
-            // the row put on the name, and then the duplication the arm over
-            // the source makes from the type `peek` answers with. A type that
+            // the row put on the name, and then the duplication that type
+            // asks for. A type that
             // declares `impl Copy for T` never reaches here: the core states
             // that call as the declaration's.
             Some(Spec::OwnType) => {
@@ -14134,8 +14112,7 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(ty.clone());
             }
             // `print(x)` and `x.toString()`: the operand at its own type, and
-            // the rendering that type chooses, which the arm over the source
-            // calls too.
+            // the rendering that type chooses.
             Some(Spec::Renders(ret)) => {
                 let [(v, _)] = args else {
                     return unsupported("a rendering of other than one value", line);
@@ -15018,8 +14995,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The bytes are the destination's address, the parts at the offsets the layout gives them,
     /// the address again, and the two drops that stand for the copy an in-place
     /// build does not make. The placement itself is [`Fn_::record_into`]'s,
-    /// [`Fn_::array_lit_heap`]'s and [`Fn_::build_variant`]'s, which the AST arm
-    /// calls with the same destination.
+    /// [`Fn_::array_lit_heap`]'s and [`Fn_::build_variant`]'s.
     #[allow(clippy::too_many_arguments)]
     fn core_make(
         &mut self,
@@ -15137,8 +15113,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => return unsupported("a made layout this walk does not build", line),
         }
-        // `dest_used` is the AST arm's answer to [`Fn_::agg_into`], and this
-        // walk writes the in-place build's bytes itself.
+        // This walk writes the in-place build's bytes itself.
         self.dest_used = false;
         b.ins(&Instruction::Drop);
         b.ins(&Instruction::Drop);
@@ -15154,10 +15129,10 @@ impl<'p> Fn_<'_, 'p> {
         self.core_framed(t)
     }
 
-    /// Whether this walk gives a name of `t` the place the AST walk gives it —
-    /// RFC-0125 M7, the frame.
+    /// Whether this walk gives a name of `t` a place of its own — RFC-0125 M7,
+    /// the frame.
     ///
-    /// The allocation is [`Fn_::place_for`]'s and both walks call it, so what
+    /// The allocation is [`Fn_::place_for`]'s, so what
     /// is asked here is whether the type HAS a place of that kind: a value
     /// that lives in one wasm local, which a `String`, a stream cursor and a
     /// vector are as much as an `Int64` is. A layout is the make arm's, which
@@ -15171,7 +15146,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether `t` is Unit, which is no value (RFC-0125 M7): a name of it
     /// needs no place, a read of it writes nothing, and its `let` or store
-    /// emits only the right-hand side's effects, as the arm's statement does.
+    /// emits only the right-hand side's effects.
     fn core_unit(&self, t: &Type) -> bool {
         self.cx.repr(t, 0) == Ok(Repr::Unit)
     }
@@ -15329,7 +15304,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether `v` is a layout name that fills a payload or a part of `t` from
     /// its address: [`Fn_::build_variant`] boxes it or copies its two words,
     /// [`Fn_::agg_part`] copies its bytes, and [`Fn_::core_val`] pushes the
-    /// address, as the arm's `Expr::Var` does.
+    /// address.
     fn core_payload_layout(&self, body: &vyrn_lower::core::Body, v: &Val, t: &Type) -> bool {
         matches!(v, Val::Name(n) if {
             let nt = &body.names[*n as usize].ty;
@@ -15731,10 +15706,10 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Bind the core name `n` at `place`. A name a `Stmt::Let` wrote goes on
-    /// the scope too, so a statement the AST arm emits after this one finds it
-    /// exactly where that arm would have put it (RFC-0125 §3 M3, the
-    /// interleave slice), with the release it owes, keyed as the arm keys it:
-    /// the plan names the `Stmt::Let` and the row carries the same node.
+    /// the scope too, so a later statement walked on its own finds it
+    /// (RFC-0125 §3 M3, the interleave slice), with the release it owes,
+    /// keyed by the node: the plan names the `Stmt::Let` and the row carries
+    /// the same node.
     ///
     /// The question is the ROW's: [`vyrn_lower::core::NameInfo::binding`] is
     /// the node the plan keys the binding by, and a temporary this pass minted
@@ -15846,7 +15821,7 @@ impl<'p> Fn_<'_, 'p> {
         // A `modify` parameter crosses as the address of the caller's binding,
         // which [`Fn_::core_args_readable`] admits for a layout alone. An
         // aggregate result crosses through the out-pointer, which
-        // [`Fn_::out_ptr`] states for both walks.
+        // [`Fn_::out_ptr`] states.
         match self.core_instance(callee, kind, solved) {
             Some((f, _, subst)) => self.cx.signature(&instance_shell(f, &subst)).ok(),
             None => (self.cx.sigs.get(callee).cloned()).or_else(|| self.cx.lambda_sig(callee)),
@@ -16030,8 +16005,8 @@ impl<'p> Fn_<'_, 'p> {
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
     /// operation slice's own reader.
     ///
-    /// The instruction is [`Fn_::bin_ins`]'s and [`Fn_::un_ins`]'s: the same
-    /// table the AST walk maps to, asked once. What this adds is where the
+    /// The instruction is [`Fn_::bin_ins`]'s and [`Fn_::un_ins`]'s. What this
+    /// adds is where the
     /// operands come from — a name the core carries a type for, or a literal
     /// the row names.
     fn core_prim(
@@ -16051,9 +16026,8 @@ impl<'p> Fn_<'_, 'p> {
                 self.un_ins(b, *u, &t, line)
             }
             // A conversion is the operand at its own type and then the
-            // coercion plan's rungs to the target, which is what the AST arm
-            // writes for `Int32(n)` (`Fn_::call_inner`'s conversion rung).
-            // The plan decides the instructions; this row decides nothing.
+            // coercion plan's rungs to the target, as for `Int32(n)`. The
+            // plan decides the instructions; this row decides nothing.
             (Op::Conv(to), [v]) => {
                 let from = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &from, line)?;
@@ -16129,8 +16103,7 @@ impl<'p> Fn_<'_, 'p> {
                 if self.core_unit(&body.names[*n as usize].ty) {
                     return Ok(());
                 }
-                // The place is this walk's, or — since the interleave slice —
-                // the one the AST arm bound the name at, which is the scope's.
+                // The place is this walk's, or the scope's.
                 let Some((place, ty)) = self.core_place(w, body, *n) else {
                     return unsupported("a core name with no place", line);
                 };
@@ -16146,8 +16119,8 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 ty
             }
-            // A literal is emitted at the type the AST walk gives one and
-            // reconciled by the same seam: an integer literal is an `Int64`
+            // A literal is emitted at its own type and reconciled by the
+            // coercion seam: an integer literal is an `Int64`
             // that its destination narrows (RFC-0058), not a constant this
             // walk sizes itself.
             Val::Lit(l) => match l {
@@ -16186,10 +16159,10 @@ impl<'p> Fn_<'_, 'p> {
         (params.len() == args).then_some(ret)
     }
 
-    /// What the AST arm would bind for one row — the screen's type clause.
+    /// The type a row binds — the screen's type clause.
     ///
     /// It is not the operator table stated twice: what it asks is which VALUE
-    /// the arm evaluates, whose type is the arm's answer for the binding. An
+    /// the row computes, whose type is the binding's. An
     /// operator's is its first operand's, because that is the one the width
     /// rule ([`Fn_::op_width`]) adopts from. A call and a closure bind what
     /// the checker typed at the site, which the row carries as its producer
@@ -16540,7 +16513,7 @@ impl<'p> Fn_<'_, 'p> {
                 // The place is the one this walk bound (a layout the run MAKES,
                 // which the `let` arm slots before the switch is reached, or a
                 // payload binder, which the enclosing switch binds when it
-                // enters the arm) or the one the AST arm bound.
+                // enters the arm) or the scope's.
                 let path = path(i);
                 let placed = path.contains(n)
                     || self.core_place(&self.core_w, body, *n).is_some()
@@ -17169,8 +17142,8 @@ fn core_taken(
 
 /// Whether the take `n` moves on at the next row and nowhere else: the value
 /// a store writes, or a `consume` argument no other argument's root shares.
-/// The part moves from its field to its destination, as the arm's
-/// `x = consume r.f` does, so the name needs no slot of its own. The take's
+/// The part moves from its field to its destination, as `x = consume r.f`
+/// moves it, so the name needs no slot of its own. The take's
 /// root is a local that the store does not write, so no row between the take
 /// and the move writes the field.
 fn core_moves_on(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
