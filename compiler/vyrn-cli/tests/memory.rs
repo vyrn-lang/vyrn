@@ -2441,6 +2441,13 @@ fn a_map_of_a_packed_key_and_a_string_value_is_freed() {
     shape_runs_clean("a-map-of-a-packed-key-and-a-string-value", "22321\n");
 }
 
+// A `consume` parameter of a generic instance and of a higher-order instance,
+// a stored value at a `consume fn` parameter among them (record `m7-lamval`).
+#[test]
+fn a_consume_parameter_of_an_instance_is_freed() {
+    shape_runs_clean("a-consume-parameter-of-an-instance", "462\n");
+}
+
 // A stored function value passed to a higher-order function, and passed on
 // (record `m7-fnval2`).
 #[test]

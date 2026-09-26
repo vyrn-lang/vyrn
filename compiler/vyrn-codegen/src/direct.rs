@@ -1511,6 +1511,22 @@ impl<'a> Cx<'a> {
         Ok(sig)
     }
 
+    /// Whether the function at `index` is a signature's dispatcher (RFC-0037).
+    fn is_dispatcher(&self, index: u32) -> bool {
+        (self.dispatch.borrow().sigs.iter()).any(|(_, s)| s.index == index)
+    }
+
+    /// The parameter `name` of `f`'s declaration, which `p` stands for, or `p`
+    /// itself. An instance's shell holds copies ([`instance_shell`],
+    /// [`ho_shell`]), and the plan keys a `consume` parameter's release by the
+    /// declaration's node.
+    fn declared_param<'f>(&'f self, f: &Function, name: &str, p: &'f Param) -> &'f Param {
+        (self.generics.get(&f.name))
+            .or_else(|| self.higher_order.get(&f.name))
+            .and_then(|d| d.params.iter().find(|q| q.name == name))
+            .unwrap_or(p)
+    }
+
     /// The function this module defines that `t` calls with no captures, by
     /// the name [`Cx::sigs`] holds it under.
     fn named(&self, t: &FnTarget) -> Option<String> {
@@ -1546,7 +1562,7 @@ impl<'a> Cx<'a> {
         subst: HashMap<String, Type>,
         targets: Vec<FnTarget>,
     ) -> Result<Sig, String> {
-        let (sf, binds) = ho_shell(f, &subst, &targets);
+        let (sf, binds) = ho_shell(self, f, &subst, &targets);
         let core_key = vyrn_lower::spell(&f.name, &type_args);
         self.enqueue(
             m,
@@ -2473,7 +2489,11 @@ fn lower_body(
         // drops is released at exit — same row, same placement, same key as
         // the textual backend.
         if p.capability == Capability::Consume {
-            let key = p as *const vyrn_frontend::ast::Param as usize;
+            // A stored value's capture stands for the `fn` parameter it binds.
+            let name = (cx_fn.fn_binds.iter())
+                .find(|(_, bnd)| bnd.cap_srcs == [p.name.as_str()])
+                .map_or(&p.name, |(n, _)| n);
+            let key = cx.declared_param(f, name, p) as *const vyrn_frontend::ast::Param as usize;
             if cx_fn.releases_whole(key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
                     cx_fn.register_rel(&b, key, place, r);
@@ -2636,14 +2656,7 @@ fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
     if let Some(f) = cx.named(&b.target) {
         return Some(Target::Fn(f));
     }
-    let index = b.target.sig.index;
-    if cx
-        .dispatch
-        .borrow()
-        .sigs
-        .iter()
-        .any(|(_, s)| s.index == index)
-    {
+    if cx.is_dispatcher(b.target.sig.index) {
         return match b.cap_srcs.as_slice() {
             [value] => Some(Target::Value(value.clone())),
             _ => None,
@@ -15790,7 +15803,10 @@ impl<'p> Fn_<'_, 'p> {
         }
         if !targets.is_empty() {
             let (f, _, subst, bound) = self.core_ho(callee, kind, solved, targets)?;
-            return self.cx.signature(&ho_shell(f, &subst, &bound).0).ok();
+            return self
+                .cx
+                .signature(&ho_shell(self.cx, f, &subst, &bound).0)
+                .ok();
         }
         // A routed builtin is a call to the function its row names.
         let (callee, kind) = match core_builtin(callee, kind) {
@@ -17368,6 +17384,7 @@ fn solved_instance(
 /// A capture parameter's name holds an `@`, which no Vyrn identifier can, so
 /// nothing the body names shadows it.
 fn ho_shell(
+    cx: &Cx<'_>,
     f: &Function,
     subst: &HashMap<String, Type>,
     targets: &[FnTarget],
@@ -17387,12 +17404,20 @@ fn ho_shell(
             continue;
         }
         let Some(target) = bound.next() else { break };
+        // A stored value's one capture is the value itself, so at a `consume`
+        // parameter it is consumed, and the prologue releases it as the
+        // parameter's row says ([`Cx::declared_param`]). A lambda's captures
+        // are the caller's names, read.
+        let value = cx.is_dispatcher(target.sig.index);
         let mut cap_srcs = Vec::new();
         for t in &target.sig.params[..target.ncaps] {
             let n = format!("@cap{}", sf.params.len());
             sf.params.push(Param {
                 name: n.clone(),
-                capability: Capability::Read,
+                capability: match p.capability {
+                    Capability::Consume if value => Capability::Consume,
+                    _ => Capability::Read,
+                },
                 ty: t.clone(),
                 line: 0,
                 col: 0,
