@@ -22105,13 +22105,14 @@ fn core_written(
 }
 
 /// The rows that run after the `let` of `n`: its later siblings and those of
-/// every statement around it. `None` where no list binds `n` or a loop holds
-/// the `let`, because a loop runs its earlier rows again after it.
+/// every statement around it. `None` where no list binds `n`. A loop's
+/// earlier rows run again only after `n`'s extent ends, since the `let` in
+/// the loop binds `n` anew each turn.
 fn core_after(ss: &[St], n: vyrn_lower::core::Name) -> Option<Vec<&St>> {
     ss.iter().enumerate().find_map(|(i, s)| {
         let mut after = match s {
             St::Let(b, _) if *b == n => Vec::new(),
-            St::Block { body, .. } => core_after(body, n)?,
+            St::Loop { body, .. } | St::Block { body, .. } => core_after(body, n)?,
             St::If { then, els, .. } => core_after(then, n).or_else(|| core_after(els, n))?,
             St::Switch { arms, .. } => arms.iter().find_map(|a| core_after(&a.body, n))?,
             _ => return None,
