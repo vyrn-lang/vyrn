@@ -6767,15 +6767,15 @@ impl<'a> Builder<'a> {
 
     /// A lambda literal (RFC-0023). Its captures are reads of the enclosing
     /// names — a capture is by read, and a stored closure snapshots what it
-    /// captured (RFC-0037), so the enclosing frame still owns its value. In an
-    /// argument position the literal is monomorphized away and owns nothing;
-    /// as a `let`'s initializer the plan's note says whether the closure
-    /// value is this frame's. The lambda's own body is a separate frame,
-    /// built by [`Builder::lambda_frame`].
+    /// captured (RFC-0037), so the enclosing frame still owns its value. A
+    /// literal a call's target names is monomorphized away and never reaches
+    /// here ([`Builder::targets_of`]); one that does is a closure value, and
+    /// it owns its snapshot like any other temporary. The lambda's own body is
+    /// a separate frame, built by [`Builder::lambda_frame`].
     fn lambda(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let caps = self.captures(e);
         let ty = self.ty_of(e).unwrap_or(Type::Unit);
-        let t = self.name("@lambda", ty.clone(), false, e.line());
+        let t = self.name("@lambda", ty.clone(), self.owns(&ty), e.line());
         // Where the literal is written ([`NameInfo::closure_reads`]). The cell
         // is taken, so a lambda in the BODY of this one — and a sibling lambda
         // in a later argument of the same call — asks the position it is
