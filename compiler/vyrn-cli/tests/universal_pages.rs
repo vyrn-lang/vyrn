@@ -30,7 +30,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 fn repo_file(rel: &str) -> PathBuf {
@@ -58,24 +58,37 @@ fn vyrn() -> Command {
     c
 }
 
-/// The port of a shared `vyrn serve examples/bin/server.vyrn`, started ONCE for the
-/// whole suite in a fresh temp cwd (an empty file store the tests seed). Generation
-/// is expensive (~10s, cache disabled); sharing one server keeps the suite fast and
-/// dodges the readiness-timeout that N parallel generations would blow. The child is
-/// intentionally leaked — it lives until the test process exits.
-fn bin_port() -> u16 {
-    // Single-flight INCLUDING failure: if the server never comes up, every test
-    // must fail fast on the recorded cause — a per-test retry would regenerate
-    // the whole bin app each time (the cold debug-build generation takes
-    // minutes, which is also why this suite is #[ignore]d into the parity tier).
-    static PORT: OnceLock<Result<u16, String>> = OnceLock::new();
-    match PORT.get_or_init(spawn_bin_server) {
-        Ok(p) => *p,
-        Err(e) => panic!("shared bin server failed to start: {e}"),
+/// The shared `vyrn serve examples/bin/server.vyrn`, in a fresh temp cwd (an
+/// empty file store the tests seed). Generation is expensive (~10s, cache
+/// disabled), so the tests one process runs at once share one server, and the
+/// last of them to finish kills it: each holds the handle, and the static holds
+/// only a `Weak`. A failure to start is recorded once, so every test after it
+/// fails fast on the cause rather than regenerating the whole bin app.
+fn bin_server() -> Arc<serving::Server> {
+    static SHARED: Mutex<Weak<serving::Server>> = Mutex::new(Weak::new());
+    static FAILED: OnceLock<String> = OnceLock::new();
+    let mut shared = SHARED.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(e) = FAILED.get() {
+        panic!("shared bin server failed to start: {e}");
+    }
+    if let Some(s) = shared.upgrade() {
+        return s;
+    }
+    match spawn_bin_server() {
+        Ok(s) => {
+            let s = Arc::new(s);
+            *shared = Arc::downgrade(&s);
+            s
+        }
+        Err(e) => {
+            let _ = FAILED.set(e.clone());
+            drop(shared);
+            panic!("shared bin server failed to start: {e}");
+        }
     }
 }
 
-fn spawn_bin_server() -> Result<u16, String> {
+fn spawn_bin_server() -> Result<serving::Server, String> {
     let server = repo_file("examples/bin/server.vyrn");
     let dir = std::env::temp_dir().join(format!("vyrn_upages_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -86,11 +99,10 @@ fn spawn_bin_server() -> Result<u16, String> {
         .arg("--port")
         .arg("0")
         .current_dir(&dir)
-        // EVERY stdio explicitly, `stdin` included. The server outlives this
-        // process by design (see the `mem::forget` below), and a child that
-        // inherits the console keeps the test runner's own stdout pipe OPEN after
-        // `cargo test` has exited — so a `cargo test … | tail` never sees EOF and
-        // hangs forever on a suite that already PASSED. That cost hours three
+        // EVERY stdio explicitly, `stdin` included. A child that inherits the
+        // console keeps the test runner's own stdout pipe OPEN for as long as it
+        // lives — so a `cargo test … | tail` never sees EOF and hangs forever on
+        // a suite that already PASSED. That cost hours three
         // times before it was understood, and it hid a real failure while it did
         // it. `parity.rs` has always spelled `stdin(Stdio::null())` and has never
         // hung; this suite did not, and did. Do not drop any of these three.
@@ -105,8 +117,7 @@ fn spawn_bin_server() -> Result<u16, String> {
     // minutes, not seconds — the old 60s wait panicked mid-generation and the
     // per-test retries ground for an hour. 600s is the honest ceiling.
     let port = serving::wait_for_port(&mut child, stdout, stderr, Duration::from_secs(600))?;
-    std::mem::forget(child); // keep the server alive for the whole run
-    Ok(port)
+    Ok(serving::Server { child, port })
 }
 
 /// Send a raw request, read the whole `Connection: close` response, split into
@@ -196,7 +207,8 @@ fn create_paste(port: u16, title: &str, body: &str, lang: &str) -> String {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn every_document_accept_is_byte_identical() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     const BROWSER: &str =
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
     for path in ["/about", "/", "/p/nope404"] {
@@ -221,7 +233,8 @@ fn every_document_accept_is_byte_identical() {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn document_about_is_html() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let (status, headers, body) = get_accept(port, "/about", "text/html");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "text/html");
@@ -240,7 +253,8 @@ fn unmarked_lazy_home_is_byte_identical_and_never_renders_the_skeleton() {
     // server always has the data, so it renders the `Ready` arm and the `Loading`
     // skeleton NEVER appears server-side. The unmarked home HTML is therefore
     // byte-identical to its pre-lazy shape.
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let (status, headers, body) = get(port, "/");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "text/html");
@@ -266,7 +280,8 @@ fn unmarked_lazy_home_is_byte_identical_and_never_renders_the_skeleton() {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn unmarked_missing_paste_is_404_html() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let (status, headers, _body) = get(port, "/p/nope404");
     assert_eq!(status, "HTTP/1.1 404 Not Found");
     assert_eq!(content_type(&headers), "text/html");
@@ -277,7 +292,8 @@ fn unmarked_missing_paste_is_404_html() {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_about_is_the_exact_static_payload() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let (status, headers, body) = get_data(port, "/about");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
@@ -291,7 +307,8 @@ fn marked_about_is_the_exact_static_payload() {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_home_payload_carries_the_loaded_list() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let id = create_paste(port, "hello", "world", "text");
     let (status, headers, body) = get_data(port, "/");
     assert_eq!(status, "HTTP/1.1 200 OK");
@@ -309,7 +326,8 @@ fn marked_home_payload_carries_the_loaded_list() {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_paste_props_round_trip_through_the_wire_codec() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let id = create_paste(port, "deep title", "the body text", "text");
     let (status, headers, body) = get_data(port, &format!("/p/{id}"));
     assert_eq!(status, "HTTP/1.1 200 OK");
@@ -332,7 +350,8 @@ fn marked_paste_props_round_trip_through_the_wire_codec() {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_missing_paste_is_the_error_payload() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let (status, headers, body) = get_data(port, "/p/ghost");
     // A miss on the DATA channel is a 200 carrying the @error payload (the client
     // renders the themed error page); the document channel still 404s.
@@ -348,7 +367,8 @@ fn marked_missing_paste_is_the_error_payload() {
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_non_client_route_falls_back_to_its_real_response() {
-    let port = bin_port();
+    let server = bin_server();
+    let port = server.port;
     let id = create_paste(port, "raw", "raw body content", "text");
     // /raw/[id] is a `.vyrn` respond page — NOT in the client bundle. A marked
     // request must NOT be answered as JSON, so the client hard-navs to it.
