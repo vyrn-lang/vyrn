@@ -1,23 +1,27 @@
-# The AST walk deleted in one piece, as a draft (2026-09-26, `m7-copy`)
+# The AST walk is deleted in one piece (2026-09-26, `m7-copy`)
 RFC-0125, milestone M7.
-Decision: the lead's, to draft the one-piece deletion on `aa63e0e1` before the wide tally reads 0, as a skeleton and a second measure of the finish line.
-Went: the arms of `Fn_::stmt` and `Fn_::expr_inner`, `Fn_::expr`, `expr_as`, `store_into`, `agg_into`, `elem_field_store`, `lambda_value`, every helper only they reached (about 90 functions), `Parts::Ast`, `ArmRef` and `BodyRef`, six dead `Fn_` and `Cx` fields, `FORMS` and its tally, `VYRN_NO_CORE_WALK`, `Fn_::reflected`, coredrive's second walk and run comparison, the `lowered` gate's core-off mode, the memory suite's second walk, and the `// pin:` line of 121 shapes.
-Stayed: `Fn_::block` and `Fn_::core_took`, the per-statement path, because 18 of 32,033 coredrive bodies are emitted statement by statement and not taken whole.
-Lines, final: direct.rs 22,793 to 17,947 against main `6232168e` at the integrated tip `cefecb26` (169 files, 980 insertions, 6,189 deletions), and to 17,901 at the merged tip with the closing commits and the serve helper (173 files, 1,244 insertions, 6,526 deletions). The draft on `aa63e0e1`: direct.rs 22,632 to 17,675. lib.rs 1,771 to 1,732. coredrive.rs 612 to 359. memory.rs 2,515 to 2,496. lowered.rs 1,443 to 1,438. forms census, wasm column: 192 to 44. surface census, wasm column: 517 to 414.
-Refusals and manifest, final: the CLI suite reads 684 of 684 at `06a81586`, with every port integrated; the probe's sites are empty.
-Licence: none yet. The skeleton refuses by name where the core states nothing: a statement (`a statement of <owner>`), a lambda body, a module-state initializer, and a dispatcher argument.
-- CLI suite: 424 passed, 257 failed of 681.
-- coredrive: 32,015 of 32,033 bodies taken whole; 90 programs and shapes refused: 70 module-state initializers, 14 dispatchers, 6 statements.
-- A probe that stubs each refused body and logs it (`VYRN_DELETE_PROBE`, not committed) over the CLI suite, every ignored suite but `residue`, coredrive, `emit-wat` of every example root and `vyrn test` of every std file with a test block, each with a fresh generator cache: 1,512 refusals on `aa63e0e1`; 1,021 on `95d9a531` (813 module state, 208 statements in 42 owners, 0 dispatchers after #535). coredrive on `95d9a531`: 34,362 of 34,380 taken whole. On the lead's stack `2ae7b2ab` (#538 to #541): 161 refusals, 0 module state, 0 dispatchers, all statements and one lambda body; coredrive 35,030 of 35,032. On `d1ac9b23` (#542), with the probe logging every refused statement and going on, and adding `vyrn test` of the 92 test-block files and `vyrn check` of every root (23 generate) with a fresh generator cache each: 207 refusals at 155 distinct sites, all statements but one lambda body; coredrive 35,137 of 35,138.
-Time: 110 minutes: 50 work, 45 gates, 15 waiting; then 80: 35 work, 45 probe.
+Decision: the lead's, to draft the one-piece deletion before the tally read 0, then, at the user's word, to land it and fix every remaining site on top of it (`m7-delete`, #545).
+Went: the arms of `Fn_::stmt` and `Fn_::expr_inner`, `Fn_::expr`, `expr_as`, `store_into`, `agg_into`, `elem_field_store`, `lambda_value`, about 90 helpers only they reached, `Parts::Ast`, `ArmRef` and `BodyRef`, `FORMS` and its tally, `VYRN_NO_CORE_WALK`, `Fn_::reflected`, coredrive's second walk, the `lowered` gate's core-off mode and its answer floors, the memory suite's second walk, the shapes' `// pin:` lines, and, once nothing read them, `Facts::copies`, `Facts::unreached`, `Body::unreached`, `NameInfo::copied` and `Fn_::walks`.
+Stayed: `Fn_::block` and `Fn_::core_took`, the per-statement path; coredrive takes every body whole, but the path is what refuses a statement by name.
+Lines: direct.rs 22,793 to 17,901, core.rs 10,588 to 10,556, against main `6232168e`. `git diff 6232168e...4fc646bf`: 174 files, 1,245 insertions, 6,527 deletions. The forms census's wasm column 192 to 44 on the draft.
+Refusals: 0 lost, 0 gained. Manifest: 2 rows, langbench and rest, each one more release of a closure temporary (m7-lamval); no other row moved.
+Licence, on the integrated branch (`cefecb26` to the tip):
+- CLI suite 684/684 at `39ad1de9`.
+- benching, universal_pages, derived: 17/17 at `cefecb26`.
+- universal_pages leaves no server running (0 leaky).
+- residue with a fresh gen cache: pass, 130 s.
+- coredrive unsharded with the manifest check: 36,058 of 36,058 bodies taken, 154 s.
+- 24 other ignored tests pass with the manifest check, and no row moved.
+- corpus diff against main `6232168e`: 554 shared roots byte-identical; 6 new roots are new shapes, all accepted.
+- route: 2/2 on `5fac9c8c`; the final tip's chunks are m7-spec2's.
+- fmt and LSP fmt clean; build with 0 warnings.
+The measure: a probe that stubs each refused body and logs it (`VYRN_DELETE_PROBE`, never committed) over the CLI suite, every ignored suite, `emit-wat` of every example root, `vyrn test` of the 92 test-block files and `vyrn check` of every root, each with a fresh generator cache. Refusals: 1,512 on `aa63e0e1`, 1,021 on `95d9a531`, 161 on `2ae7b2ab`, 207 at 155 sites on `d1ac9b23` with every refusal logged. The probe was not run after the ports landed; the gate table above is the evidence that no site is left.
+Time: about 6 hours over the day: draft 110 minutes, probes and rebases 180, integration and prose 70.
 Findings:
-- the globals initializer has no core body. `std/json.vyrn`'s `prettyOut` (line 450) reaches it in 496 compiles and `std/slots.vyrn`'s `issued` (line 75) in 85; every program with module state is refused.
-- `lower_dispatcher` builds `Expr::Var` arguments and emits them through the AST walk: 513 compiles. The tally counted them under "(the globals initializer)", because `top_level` has no owner.
+- the globals initializer had no core body: `std/json.vyrn`'s `prettyOut` alone reached it in 496 compiles, and every program with module state was refused (#538).
+- `lower_dispatcher` emitted its arguments through the AST walk in 513 compiles; the tally filed them under "(the globals initializer)", because `top_level` has no owner (#535).
 - `elem_field_store` emitted the `a[i].f = v` window from the AST before `core_took`, and no tally counted it.
 - the tally counted only eight expression forms, so a call, a record or a `match` the arm emitted was invisible unless a literal or a variable sat under it.
-- bench bodies (`__vyrn_bench_body_N`) are refused in every bench file; the relcall tally names none.
-- 28 doc links in direct.rs named deleted items; nine more are main's own.
-Test side, after the rebase onto `95d9a531`: emitter_census recut (17 anchors; 11 sections now read neither), the `lowered` gate pins `peek`'s off-program class at 0 in place of the band 48..96, the memory shapes lose `_on_both_walks`, and the 28 links name what stands.
-Left: every site the probe lists, blocked by the core stating it; 45 prose comments in direct.rs that still describe the AST walk as present.
-- Integration on `6232168e`: m7-atrhs, m7-stream (pages and the lowered floors), m7-spec2 and m7-where's commits were cherry-picked onto the draft. Their emitter census pins were re-pinned once at the tip, in one commit, not per commit.
-- Closing commits on `06a81586`: `Facts::copies`, `Facts::unreached`, `Body::unreached`, `NameInfo::copied` and `Fn_::walks` went, because nothing read them after the walk; about 80 comments that described two walks were rewritten or cut.
+- bench bodies reached the arm in every bench file, and no tally named them (`blackBox`, m7-small).
+- `universal_pages` waited 600 s on a server that had died at once; m7-stream made its harness fail on the child's exit.
+Left: nothing on this track.
