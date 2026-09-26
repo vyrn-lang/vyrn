@@ -8915,8 +8915,17 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
         let parts = (caps.iter().find(|(c, _)| c == n))
             .map(|(_, ns)| ns.iter().map(|c| Val::Name(*c)).collect())
             .unwrap_or_default();
+        // A target with captures makes a value that owns its capture box, and
+        // the lambda that captures it holds a copy, so it is released after.
+        let release = !Vec::is_empty(&parts);
+        if release {
+            let info = &mut out.names[*n as usize];
+            (info.releases, info.heap, info.borrow, info.borrow_kind) = (true, true, false, None);
+        }
         let made = St::Let(*n, Rhs::Make(Ctor::Closure(t.clone()), parts));
-        if reads[*n as usize] > 1 || !make_before_read(&mut out.stmts, reads.len(), *n, made) {
+        if reads[*n as usize] > 1
+            || !make_before_read(&mut out.stmts, reads.len(), *n, made, release)
+        {
             return None;
         }
     }
@@ -8931,9 +8940,10 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 }
 
 /// Put `made`, the row that binds `n`, before the one row that reads `n`, at
-/// that row's depth. `names` is the body's name count. `false` where no row
-/// reads it.
-fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St) -> bool {
+/// that row's depth, and with `release` a release of `n` after it. `names` is
+/// the body's name count. `false` where no row reads it, and where `release`
+/// and the read is no lambda's capture, which copies what it reads.
+fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: bool) -> bool {
     let mut reads = vec![0; names];
     for i in 0..ss.len() {
         let nested = match &mut ss[i] {
@@ -8954,10 +8964,16 @@ fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St) -> bool {
                     count_reads(b, &mut reads);
                     std::mem::take(&mut reads[n as usize]) > 0
                 })
-                .is_some_and(|b| make_before_read(b, names, n, made));
+                .is_some_and(|b| make_before_read(b, names, n, made, release));
         }
         count_reads(std::slice::from_ref(&ss[i]), &mut reads);
         if reads[n as usize] > 0 {
+            if release {
+                if !matches!(ss[i], St::Let(_, Rhs::Prim(Op::Closure(_), ..))) {
+                    return false;
+                }
+                ss.insert(i + 1, St::Drop(n, Site::None, 0, None));
+            }
             ss.insert(i, made);
             return true;
         }
