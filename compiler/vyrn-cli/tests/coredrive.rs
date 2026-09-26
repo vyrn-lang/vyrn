@@ -521,7 +521,8 @@ fn run() {
     // `Stmt::Drop` joined when a `drop` the reader wrote headed its own run
     // (the m7-retire record).
     // `Stmt::If` joined again when a lambda literal handed to a call became
-    // its target (the m7-capture record).
+    // its target (the m7-capture record), and left when a body lifts its
+    // targets before the screen (the m7-mains record).
     let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
         .iter()
         .enumerate()
@@ -536,7 +537,6 @@ fn run() {
                 "Stmt::Let",
                 "Stmt::Assign",
                 "Stmt::Return",
-                "Stmt::If",
                 "Stmt::Expr",
                 "Stmt::While",
                 "Stmt::ForIn",
