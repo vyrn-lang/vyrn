@@ -8330,12 +8330,7 @@ impl<'a> Checker<'a> {
                         ret.clone()
                     }
                 };
-                if ret == Type::Unit {
-                    let sig = crate::types::substitute(expected_fn, subst);
-                    self.record_arg_fn(&sig, None, Some(*lline));
-                    return Ok(());
-                }
-                if ret_known {
+                if ret_known && ret != Type::Unit {
                     if !self.coercible(&body_ty, &ret) {
                         return Err(cerr!(
                             lline,
@@ -8346,12 +8341,19 @@ impl<'a> Checker<'a> {
                     if let LambdaBody::Expr(e) = body {
                         self.prove_coercion(e, &ret, *lline)?;
                     }
-                } else {
+                } else if !ret_known {
                     // Infer the generic return parameter (`U`) from the body type.
                     self.unify(&ret, &body_ty, subst, *lline)?;
                 }
                 let sig = crate::types::substitute(expected_fn, subst);
                 self.record_arg_fn(&sig, None, Some(*lline));
+                // The literal is a value where no target names it (a `consume`
+                // position), and the core types its closure from this row, as
+                // it does a stored lambda's.
+                if recording() {
+                    let key = arg as *const Expr as usize;
+                    RECORD.with(|r| r.borrow_mut().node_types.insert(key, sig));
+                }
                 Ok(())
             }
             // A bare name: either a pass-through `fn`-typed parameter, or a named
