@@ -16513,7 +16513,7 @@ impl<'p> Fn_<'_, 'p> {
             St::Return { value, .. } => match value {
                 None => matches!(self.ret, Repr::Unit),
                 Some(Val::Name(n)) if matches!(self.ret, Repr::Agg(_)) => {
-                    self.cx.resolve(&body.names[*n as usize].ty) == self.cx.resolve(&self.ret_ty)
+                    self.core_returns_as_is(&body.names[*n as usize].ty)
                 }
                 Some(v) => self.core_val_readable(body, v),
             },
@@ -16779,6 +16779,18 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
+    /// Whether a layout of type `ty` is handed back with no instruction: its
+    /// bits are the declared result's, as `Array<Int64>` is
+    /// `Array<UiRouteInt>`'s of an alias, and a function value's are under
+    /// another spelling of its type. The arm asks the same plan
+    /// ([`crate::coerce_plan`]).
+    fn core_returns_as_is(&self, ty: &Type) -> bool {
+        matches!(
+            crate::coerce_plan(&self.cx.sub(ty), &self.cx.sub(&self.ret_ty), &self.cx.types),
+            crate::Rung::Identity | crate::Rung::FnRetag
+        )
+    }
+
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands
     /// back, so the value is built in the caller's storage (RFC-0125 M7).
     ///
@@ -16799,7 +16811,7 @@ impl<'p> Fn_<'_, 'p> {
         self.dest.is_some()
             && info.binding.is_none()
             && reads[*n as usize] == 1
-            && self.cx.resolve(&info.ty) == self.cx.resolve(&self.ret_ty)
+            && self.core_returns_as_is(&info.ty)
             && matches!(ss[i + 1..].iter().find(|s| {
                     !matches!(s, St::Row { .. }) && !matches!(s, St::Drop(d, ..) if d != n)
                 }),
