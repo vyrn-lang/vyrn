@@ -255,6 +255,8 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("jsonSchema", Compiler, "renders a declaration as JSON Schema at compile time"),
     ("value", Compiler, "boxes a scalar by its type; RFC-0094 M3 routes anything else to `impl Show`"),
     ("blackBox", Compiler, "RFC-0055: an optimizer barrier is a backend property"),
+    ("@pull", Compiler, "the core's callee for a stream `for` head; no program spells it"),
+    ("@strAppend", Compiler, "the core's callee for a String accumulator; no program spells it"),
     ("raw", Compiler, "RFC-0054: builds a code-quote value"),
     ("rawAt", Compiler, "RFC-0054: a code quote carrying an origin directive"),
     ("render", Compiler, "RFC-0054: a code quote back to text"),
