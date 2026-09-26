@@ -14931,9 +14931,12 @@ impl<'p> Fn_<'_, 'p> {
         // name is written: the temporary a scrutinee binds (a declared
         // release's `match consume self`, [`vyrn_lower::core`]'s
         // `owns_boxes`), or a reader's `let data = d`.
+        // A bound `fn` parameter [`vyrn_lower::core::specialize`] makes where
+        // it is read is still that borrowed parameter.
         let joins = self.core_joins(body, *x);
+        let made = |r: &Rhs| matches!(r, Rhs::Make(Ctor::Closure(_), _));
         let param = from.borrow
-            && body.params.contains(x)
+            && (body.params.contains(x) || lets.iter().any(|(b, r)| b == x && made(r)))
             && (info.source.starts_with('@') || info.borrow)
             && unwritten(n);
         ((joins || param || (!info.borrow && self.owns_heap(&info.ty) && !from.borrow))
