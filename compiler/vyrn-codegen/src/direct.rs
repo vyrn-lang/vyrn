@@ -19759,11 +19759,12 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The place the layout name `n` holds a COPY of — RFC-0125 M7, a layout
-    /// that owns no heap, and a take.
+    /// that owns no heap, a take, and a move that is no rename.
     ///
     /// A layout that owns no heap is a value, and the kernel lets its place be
     /// written while the name lives ([`Fn_::core_alias`]). A take leaves a hole
-    /// in its place, and a store may fill the hole while the name lives. So
+    /// in its place, and a store may fill the hole while the name lives; a
+    /// move leaves the whole place empty, which a store may fill. So
     /// the name takes a slot and the bytes, which is what the AST arm's `let`
     /// writes ([`Fn_::agg_into`]).
     fn core_copies(
@@ -19789,7 +19790,13 @@ impl<'p> Fn_<'_, 'p> {
         let p = match (at.next(), at.next()) {
             (Some((_, Rhs::Take(p))), None) => p.clone(),
             (Some((_, Rhs::Read(p))), None) if value => p.clone(),
-            (Some((_, Rhs::Val(Val::Name(x)))), None) if value => vyrn_lower::core::Place::Name(*x),
+            // A move [`Fn_::core_renames`] refuses takes the bytes, as a take
+            // does: the kernel refuses a read of `x` before its next store.
+            (Some((_, Rhs::Val(Val::Name(x)))), None)
+                if value || (info.heap && !info.borrow && !body.names[*x as usize].borrow) =>
+            {
+                vyrn_lower::core::Place::Name(*x)
+            }
             _ => return None,
         };
         (!matches!(p, vyrn_lower::core::Place::Key(..))
