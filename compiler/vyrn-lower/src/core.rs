@@ -8336,9 +8336,9 @@ impl<'a> Builder<'a> {
     /// parameter is bound to: a function the program declares, a parameter
     /// of this body that is itself bound, a lambda literal written there,
     /// with its captures, or a stored value (RFC-0037), which the row
-    /// forwards as its one capture. Empty where the callee takes no
-    /// function, and where a lambda literal goes to a `consume` position, so
-    /// the call keeps every argument as a value.
+    /// forwards as its one capture. A lambda literal at a `consume` position
+    /// is a stored value: the call may keep the closure. Empty where the
+    /// callee takes no function, so the call keeps every argument as a value.
     ///
     /// A parameter is `fn`-typed as written: one of an alias type takes the
     /// stored value (RFC-0037), which is a value like any other.
@@ -8355,7 +8355,8 @@ impl<'a> Builder<'a> {
             let value = Target::Value(p.name.clone());
             let t = match a {
                 // A `consume` position may keep the closure, so the literal
-                // is a value the kernel judges ([`NameInfo::closure_reads`]).
+                // is a value the kernel judges ([`NameInfo::closure_reads`]),
+                // and the last arm makes it one.
                 Expr::Lambda { line, col, .. } if p.capability != Capability::Consume => {
                     let caps = (self.captures(a).into_iter())
                         .filter_map(|c| match c {
@@ -8370,7 +8371,6 @@ impl<'a> Builder<'a> {
                     let key = lambda_spelling(&self.body.name, *line, *col);
                     Target::Lambda(key, caps)
                 }
-                Expr::Lambda { .. } => return Vec::new(),
                 Expr::Var { name: v, .. } => match self.lookup(v) {
                     Some(n)
                         if self.body.params.contains(&n)
