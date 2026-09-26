@@ -14888,16 +14888,19 @@ impl<'p> Fn_<'_, 'p> {
         let from = &body.names[*x as usize];
         let unwritten = |m: vyrn_lower::core::Name| !written.iter().any(|(w, _)| *w == m);
         // A join's stores are its branches', which run before the rename. A
-        // borrow takes over only a join's place: the join holds the bytes the
-        // borrow reads, and neither name releases them.
+        // borrow takes over a join's place, which holds the bytes the borrow
+        // reads, and neither name releases them; or a borrowed parameter's.
         // A borrowed layout parameter holds the caller's address for the
-        // whole body, so the temporary a scrutinee binds to it is that
-        // address while neither name is written: a declared release's
-        // `match consume self` ([`vyrn_lower::core`]'s `owns_boxes`).
+        // whole body, so a second name for it is that address while neither
+        // name is written: the temporary a scrutinee binds (a declared
+        // release's `match consume self`, [`vyrn_lower::core`]'s
+        // `owns_boxes`), or a reader's `let data = d`.
         let joins = self.core_joins(body, *x);
-        let param =
-            from.borrow && body.params.contains(x) && info.source.starts_with('@') && unwritten(n);
-        ((joins || (!info.borrow && (param || (self.owns_heap(&info.ty) && !from.borrow))))
+        let param = from.borrow
+            && body.params.contains(x)
+            && (info.source.starts_with('@') || info.borrow)
+            && unwritten(n);
+        ((joins || param || (!info.borrow && self.owns_heap(&info.ty) && !from.borrow))
             && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
             && (joins || unwritten(*x)))
         .then_some(*x)
