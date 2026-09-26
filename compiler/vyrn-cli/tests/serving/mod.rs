@@ -1,5 +1,5 @@
 //! The wait for a spawned `vyrn serve`, shared by the suites that start one
-//! (`rpc`, `serve`, `universal_pages`).
+//! (`rpc`, `serve`, `universal_pages`), and the handle that stops it.
 //!
 //! The server runs with `--port 0` and names the port the OS gave it in its
 //! `serving <file> on http://localhost:<port>` line on stderr. [`drain`] reads
@@ -12,6 +12,20 @@ use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// A running `vyrn serve` child and the port it serves on. Dropping it kills
+/// the child, so a test that fails or passes leaves no server behind.
+pub struct Server {
+    pub child: Child,
+    pub port: u16,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 /// What a stream of the child printed so far, and the thread reading it to its
 /// end.

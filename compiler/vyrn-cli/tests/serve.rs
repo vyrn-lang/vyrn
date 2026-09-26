@@ -17,7 +17,7 @@ mod serving;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,22 +46,15 @@ fn handle(req: Request) -> Response {
 }
 "#;
 
-/// A running `vyrn serve` child plus drained stdout/stderr buffers. The `Drop`
-/// impl kills the process so a panicking test never leaks a listening server.
+/// A running `vyrn serve` child plus drained stdout/stderr buffers. Dropping
+/// `server` kills the process, so a panicking test never leaks a listening
+/// server.
 struct Serve {
-    child: Child,
-    port: u16,
+    server: serving::Server,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     // Keep the temp file alive for the process's lifetime.
     _file: TempFile,
-}
-
-impl Drop for Serve {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 /// A temp file that deletes itself on drop.
@@ -132,8 +125,7 @@ fn start_server_on(src: &str, extra: &[&str]) -> Serve {
     let port = serving::wait_for_port(&mut child, stdout, stderr, Duration::from_secs(60))
         .unwrap_or_else(|e| panic!("{e}"));
     Serve {
-        child,
-        port,
+        server: serving::Server { child, port },
         stdout: out,
         stderr: err,
         _file: file,
@@ -170,7 +162,7 @@ fn get(port: u16, path: &str) -> (String, String) {
 #[test]
 fn health_returns_200_ok() {
     let s = start_server();
-    let (status, body) = get(s.port, "/health");
+    let (status, body) = get(s.server.port, "/health");
     assert_eq!(status, "HTTP/1.1 200 OK", "status line");
     assert_eq!(body, "ok", "health body");
 }
@@ -179,9 +171,9 @@ fn health_returns_200_ok() {
 fn module_state_persists_across_requests() {
     let s = start_server();
     // A fresh server: the counter starts at 0 and each request bumps it.
-    let (_, b1) = get(s.port, "/");
-    let (_, b2) = get(s.port, "/");
-    let (_, b3) = get(s.port, "/");
+    let (_, b1) = get(s.server.port, "/");
+    let (_, b2) = get(s.server.port, "/");
+    let (_, b3) = get(s.server.port, "/");
     assert_eq!(b1, "hits=1", "first request");
     assert_eq!(b2, "hits=2", "second request (state persisted)");
     assert_eq!(b3, "hits=3", "third request (state persisted)");
@@ -191,7 +183,7 @@ fn module_state_persists_across_requests() {
 fn handler_trap_yields_500_and_server_survives() {
     let s = start_server();
     // The trap path: division by zero inside `handle`.
-    let (status, body) = get(s.port, "/boom");
+    let (status, body) = get(s.server.port, "/boom");
     assert_eq!(
         status, "HTTP/1.1 500 Internal Server Error",
         "trap -> 500 status"
@@ -206,7 +198,7 @@ fn handler_trap_yields_500_and_server_survives() {
     );
 
     // A subsequent request still works — one bad request did not kill the server.
-    let (status, body) = get(s.port, "/health");
+    let (status, body) = get(s.server.port, "/health");
     assert_eq!(status, "HTTP/1.1 200 OK", "server survived the trap");
     assert_eq!(body, "ok");
 }
@@ -214,11 +206,11 @@ fn handler_trap_yields_500_and_server_survives() {
 #[test]
 fn garbage_request_yields_400_without_reaching_vyrn() {
     let s = start_server();
-    let (status, body) = request(s.port, "this is not http\r\n\r\n");
+    let (status, body) = request(s.server.port, "this is not http\r\n\r\n");
     assert_eq!(status, "HTTP/1.1 400 Bad Request", "garbage -> 400");
     assert_eq!(body, "bad request");
     // And the server is still alive for a real request afterward.
-    let (status, _) = get(s.port, "/health");
+    let (status, _) = get(s.server.port, "/health");
     assert_eq!(
         status, "HTTP/1.1 200 OK",
         "server survived the garbage request"
@@ -229,7 +221,7 @@ fn garbage_request_yields_400_without_reaching_vyrn() {
 fn chunked_body_yields_501() {
     let s = start_server();
     let (status, _) = request(
-        s.port,
+        s.server.port,
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(status, "HTTP/1.1 501 Not Implemented", "chunked -> 501");
@@ -240,7 +232,7 @@ fn post_body_reaches_handle() {
     let s = start_server();
     // A Content-Length body is read exactly and the request is served.
     let (status, body) = request(
-        s.port,
+        s.server.port,
         "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
     );
     assert_eq!(status, "HTTP/1.1 200 OK");
@@ -289,7 +281,7 @@ fn workers_answer_concurrent_requests_correctly() {
     wait_for(&s.stderr, "with 4 workers", Duration::from_secs(10));
 
     // Eight concurrent client threads; every response must be correct.
-    let port = s.port;
+    let port = s.server.port;
     let handles: Vec<_> = (0..8)
         .map(|i| {
             std::thread::spawn(move || {
@@ -336,14 +328,14 @@ fn handle(req: Request) -> Response {
 "#,
         &["--workers", "2"],
     );
-    let (status, _) = get(s.port, "/boom");
+    let (status, _) = get(s.server.port, "/boom");
     assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "trap -> 500");
     let err = wait_for(&s.stderr, "division by zero", Duration::from_secs(5));
     assert!(
         err.contains("error: division by zero"),
         "canonical wording logged:\n{err}"
     );
-    let (status, body) = get(s.port, "/health");
+    let (status, body) = get(s.server.port, "/health");
     assert_eq!(status, "HTTP/1.1 200 OK", "pool survived the trap");
     assert_eq!(body, "ok");
 }
@@ -400,7 +392,7 @@ fn sequential_default_is_unchanged_for_stateful_handles() {
         !err.contains("workers"),
         "default banner has no pool:\n{err}"
     );
-    let (_, b1) = get(s.port, "/");
+    let (_, b1) = get(s.server.port, "/");
     assert_eq!(b1, "hits=1");
 }
 
@@ -423,7 +415,7 @@ fn handle(req: Request) -> Response {
 fn the_response_header_map_reaches_the_wire() {
     let s = start_server_on(HEADER_SRC, &[]);
     let (status, raw) = request_raw(
-        s.port,
+        s.server.port,
         "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(status, "HTTP/1.1 200 OK", "{raw}");
@@ -436,7 +428,7 @@ fn the_response_header_map_reaches_the_wire() {
 fn a_304_carries_its_validators_and_neither_body_nor_content_type() {
     let s = start_server_on(HEADER_SRC, &[]);
     let (status, raw) = request_raw(
-        s.port,
+        s.server.port,
         "GET /cond HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(status, "HTTP/1.1 304 Not Modified", "{raw}");
@@ -577,7 +569,7 @@ fn open_stream(port: u16, path: &str, want: usize) -> (TcpStream, String) {
 #[test]
 fn a_stream_answers_with_frames_and_no_content_length() {
     let s = start_server_on(SSE_SRC, &[]);
-    let (live, text) = open_stream(s.port, "/live", 200);
+    let (live, text) = open_stream(s.server.port, "/live", 200);
     assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
     assert!(
         text.contains("\r\nContent-Type: text/event-stream\r\n"),
@@ -615,7 +607,7 @@ fn a_producer_with_nothing_to_say_answers_204_rather_than_an_empty_stream() {
     // reconnect" (WHATWG HTML 9.2.5), so a normally-completed feed costs the
     // client exactly one more request rather than an endless reconnect loop.
     let (status, raw) = request_raw(
-        s.port,
+        s.server.port,
         "GET /empty HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(status, "HTTP/1.1 204 No Content", "{raw}");
@@ -624,7 +616,7 @@ fn a_producer_with_nothing_to_say_answers_204_rather_than_an_empty_stream() {
         "no stream was opened:\n{raw}"
     );
     // The server is still there: the empty producer was released, not leaked.
-    let (status, body) = get(s.port, "/steps");
+    let (status, body) = get(s.server.port, "/steps");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(
         body, "1",
@@ -635,7 +627,7 @@ fn a_producer_with_nothing_to_say_answers_204_rather_than_an_empty_stream() {
 #[test]
 fn a_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
     let s = start_server_on(SSE_SRC, &[]);
-    let (live, text) = open_stream(s.port, "/live", 200);
+    let (live, text) = open_stream(s.server.port, "/live", 200);
     assert!(
         text.contains("id: 0\ndata: e0\n\n"),
         "events were flowing:\n{text}"
@@ -647,13 +639,13 @@ fn a_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
 
     // The first `/steps` blocks until the pump notices — which is the write
     // after the drop — so its answer is already the final count.
-    let (status, settled) = get(s.port, "/steps");
+    let (status, settled) = get(s.server.port, "/steps");
     assert_eq!(
         status, "HTTP/1.1 200 OK",
         "the server survived the disconnect"
     );
     std::thread::sleep(Duration::from_millis(300));
-    let (_, later) = get(s.port, "/steps");
+    let (_, later) = get(s.server.port, "/steps");
     assert_eq!(
         settled, later,
         "the producer kept running after the client went away ({settled} -> {later})"
@@ -663,7 +655,7 @@ fn a_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
     // `Ref` the step parked traps. This is the row's evidence rather than its
     // symptom — production stopping could be a stuck pump; a released cell
     // could only have come from `close`.
-    let (status, body) = get(s.port, "/probe");
+    let (status, body) = get(s.server.port, "/probe");
     assert_eq!(
         status, "HTTP/1.1 500 Internal Server Error",
         "cursor still live: {body}"
@@ -676,7 +668,7 @@ fn a_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
     assert!(err.contains("error: slots: handle is not alive"), "{err}");
 
     // One dropped client did not cost the server anything else.
-    let (status, _) = get(s.port, "/steps");
+    let (status, _) = get(s.server.port, "/steps");
     assert_eq!(status, "HTTP/1.1 200 OK");
 }
 
@@ -689,7 +681,7 @@ fn a_mapped_feed_streams_and_its_release_walks_the_chain() {
     // observed: `saved` is the INNER producer's cursor, one the host never
     // touched.
     let s = start_server_on(SSE_SRC, &[]);
-    let (live, text) = open_stream(s.port, "/mapped", 200);
+    let (live, text) = open_stream(s.server.port, "/mapped", 200);
     assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
     let (_, after) = text.split_once("\r\n\r\n").expect("header block");
     assert!(
@@ -702,19 +694,19 @@ fn a_mapped_feed_streams_and_its_release_walks_the_chain() {
     );
 
     drop(live);
-    let (status, settled) = get(s.port, "/steps");
+    let (status, settled) = get(s.server.port, "/steps");
     assert_eq!(
         status, "HTTP/1.1 200 OK",
         "the server survived the disconnect"
     );
     std::thread::sleep(Duration::from_millis(300));
-    let (_, later) = get(s.port, "/steps");
+    let (_, later) = get(s.server.port, "/steps");
     assert_eq!(
         settled, later,
         "the feed kept running behind the map after the client went away ({settled} -> {later})"
     );
 
-    let (status, body) = get(s.port, "/probe");
+    let (status, body) = get(s.server.port, "/probe");
     assert_eq!(
         status, "HTTP/1.1 500 Internal Server Error",
         "cursor still live: {body}"
@@ -928,7 +920,7 @@ fn write_client_frame(s: &mut TcpStream, opcode: u8, payload: &[u8], mask: bool)
 #[test]
 fn a_socket_handshake_answers_101_and_the_frames_carry_the_payload() {
     let s = start_server_on(WS_SRC, &[]);
-    let (mut sock, head) = open_socket(s.port, "/socket");
+    let (mut sock, head) = open_socket(s.server.port, "/socket");
     assert!(
         head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
         "{head}"
@@ -965,7 +957,7 @@ fn a_socket_client_that_vanishes_runs_the_producers_release_before_the_next_even
     // witnesses M3a's SSE test uses — which is the whole of what "the signal
     // generalises" claims. Nothing here asks the host about the client.
     let s = start_server_on(WS_SRC, &[]);
-    let (mut sock, head) = open_socket(s.port, "/socket");
+    let (mut sock, head) = open_socket(s.server.port, "/socket");
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
     assert_eq!(
         read_frame(&mut sock).expect("a frame").payload,
@@ -978,19 +970,19 @@ fn a_socket_client_that_vanishes_runs_the_producers_release_before_the_next_even
 
     // Blocks until the pump notices — which is the write after the drop — so this
     // answer is already the final count.
-    let (status, settled) = get(s.port, "/steps");
+    let (status, settled) = get(s.server.port, "/steps");
     assert_eq!(
         status, "HTTP/1.1 200 OK",
         "the server survived the disconnect"
     );
     std::thread::sleep(Duration::from_millis(300));
-    let (_, later) = get(s.port, "/steps");
+    let (_, later) = get(s.server.port, "/steps");
     assert_eq!(
         settled, later,
         "the producer kept running after the client went away ({settled} -> {later})"
     );
 
-    let (status, body) = get(s.port, "/probe");
+    let (status, body) = get(s.server.port, "/probe");
     assert_eq!(
         status, "HTTP/1.1 500 Internal Server Error",
         "cursor still live: {body}"
@@ -1009,7 +1001,7 @@ fn a_client_close_is_answered_with_a_close_frame() {
     // instantly, because it spends the time in between blocked in the producer —
     // which is the same fact that refuses `heartbeat`.
     let s = start_server_on(WS_SRC, &[]);
-    let (mut sock, _) = open_socket(s.port, "/socket");
+    let (mut sock, _) = open_socket(s.server.port, "/socket");
     read_frame(&mut sock).expect("a frame");
     write_client_frame(&mut sock, 8, &1000u16.to_be_bytes(), true);
     assert_eq!(
@@ -1018,7 +1010,7 @@ fn a_client_close_is_answered_with_a_close_frame() {
         "the close is answered"
     );
     // And the producer behind it was released.
-    let (status, _) = get(s.port, "/probe");
+    let (status, _) = get(s.server.port, "/probe");
     assert_eq!(
         status, "HTTP/1.1 500 Internal Server Error",
         "the cursor was released"
@@ -1031,7 +1023,7 @@ fn an_unmasked_client_frame_closes_with_1002() {
     // client's message, but a frame that breaks the framing rules is a protocol
     // error rather than something to skip past.
     let s = start_server_on(WS_SRC, &[]);
-    let (mut sock, _) = open_socket(s.port, "/socket");
+    let (mut sock, _) = open_socket(s.server.port, "/socket");
     read_frame(&mut sock).expect("a frame");
     write_client_frame(&mut sock, 1, b"hello", false);
     assert_eq!(read_until_close(&mut sock), Some(1002), "a protocol error");
@@ -1043,7 +1035,7 @@ fn max_frame_splits_a_message_and_the_feeds_end_carries_the_programs_close_code(
     // §5.4: the first fragment carries the data opcode with FIN clear, the rest
     // carry the continuation opcode, and only the last sets FIN.
     let s = start_server_on(WS_SRC, &[]);
-    let (mut sock, head) = open_socket(s.port, "/split");
+    let (mut sock, head) = open_socket(s.server.port, "/split");
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
     let a = read_frame(&mut sock).expect("first fragment");
     let b = read_frame(&mut sock).expect("second fragment");
@@ -1069,7 +1061,7 @@ fn a_socket_upgrade_the_program_refuses_is_an_ordinary_response() {
     // simply has no such path, so the default 404 proves the same thing — a
     // non-upgrading GET at a socket's URL is not framed.)
     let s = start_server_on(WS_SRC, &[]);
-    let (status, body) = get(s.port, "/nope");
+    let (status, body) = get(s.server.port, "/nope");
     assert_eq!(status, "HTTP/1.1 404 Not Found");
     assert_eq!(body, "no");
 }
@@ -1115,7 +1107,7 @@ fn handle(req: Request) -> Response {
 #[test]
 fn the_ws_projection_writes_its_own_handshake() {
     let s = start_server_on(WS_MOUNTED_SRC, &[]);
-    let mut sock = TcpStream::connect(("127.0.0.1", s.port)).expect("connect");
+    let mut sock = TcpStream::connect(("127.0.0.1", s.server.port)).expect("connect");
     sock.set_read_timeout(Some(Duration::from_secs(5))).ok();
     sock.write_all(
         format!(
@@ -1158,7 +1150,7 @@ fn the_ws_projection_writes_its_own_handshake() {
 #[test]
 fn a_subprotocol_the_client_did_not_offer_is_not_echoed() {
     let s = start_server_on(WS_MOUNTED_SRC, &[]);
-    let (_sock, head) = open_socket(s.port, "/chat");
+    let (_sock, head) = open_socket(s.server.port, "/chat");
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
     // §4.2.2: the server must not select a subprotocol the client did not send.
     assert!(!head.contains("Sec-WebSocket-Protocol"), "{head}");
@@ -1169,7 +1161,7 @@ fn an_upgrade_the_projection_refuses_never_opens_a_stream() {
     let s = start_server_on(WS_MOUNTED_SRC, &[]);
     // §4.4: a version we do not speak is answered 426 naming the one we do.
     let (status, raw) = request_raw(
-        s.port,
+        s.server.port,
         &format!(
             "GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
              Connection: Upgrade\r\nSec-WebSocket-Key: {WS_KEY}\r\n\
@@ -1180,13 +1172,13 @@ fn an_upgrade_the_projection_refuses_never_opens_a_stream() {
     assert!(raw.contains("\r\nSec-WebSocket-Version: 13\r\n"), "{raw}");
     // A plain GET at the socket's path is not an upgrade at all.
     let (status, body) = request(
-        s.port,
+        s.server.port,
         "GET /chat HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Version: 13\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(status, "HTTP/1.1 400 Bad Request", "{body}");
     assert_eq!(body, "not a WebSocket upgrade");
     // And the server is still there: no producer was opened and abandoned.
-    let (status, _) = get(s.port, "/elsewhere");
+    let (status, _) = get(s.server.port, "/elsewhere");
     assert_eq!(status, "HTTP/1.1 404 Not Found");
 }
 
@@ -1198,11 +1190,11 @@ fn many_opened_and_dropped_streams_leave_the_cursor_slab_alone() {
     // growth — the same property `examples/streamunfold.vyrn` measures in-process.
     let s = start_server_on(SSE_SRC, &[]);
     for _ in 0..200 {
-        let (live, text) = open_stream(s.port, "/live", 120);
+        let (live, text) = open_stream(s.server.port, "/live", 120);
         assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
         drop(live);
     }
-    let (status, _) = get(s.port, "/steps");
+    let (status, _) = get(s.server.port, "/steps");
     assert_eq!(
         status, "HTTP/1.1 200 OK",
         "200 opened-and-dropped streams later"

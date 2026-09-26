@@ -19,7 +19,7 @@ mod serving;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn repo_file(rel: &str) -> PathBuf {
@@ -45,20 +45,9 @@ fn vyrn() -> Command {
 // moment the OS assigns it, so no other process can take the port in between —
 // the harness must never pick a port itself.
 
-struct Serve {
-    child: Child,
-    port: u16,
-}
-impl Drop for Serve {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 /// Spawn `vyrn serve examples/fullstack/server.vyrn` and wait for the startup
 /// line — which names the port the OS gave it — before returning.
-fn start_server() -> Serve {
+fn start_server() -> serving::Server {
     let server = repo_file("examples/fullstack/server.vyrn");
     let mut child = vyrn()
         .arg("serve")
@@ -76,7 +65,7 @@ fn start_server() -> Serve {
     // slowly; it is not a race, so a generous limit costs a green run nothing.
     let port = serving::wait_for_port(&mut child, stdout, stderr, Duration::from_secs(60))
         .unwrap_or_else(|e| panic!("{e}"));
-    Serve { child, port }
+    serving::Server { child, port }
 }
 
 /// Send a raw request, read the whole `Connection: close` response, split into
