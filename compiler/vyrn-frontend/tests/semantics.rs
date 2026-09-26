@@ -140,6 +140,10 @@ fn main() -> Int64 {{
         std_root: Some("std".into()),
         ..Default::default()
     };
+    // The compile scope `vyrn run` opens before its load: a `schemaOf<T>()` is
+    // the literal the checker types inside it, and the lowering walks that
+    // literal. Outside it the call has no row.
+    let _memo = vyrn_frontend::project::Memo::open();
     // `load_warned`, not `loader::load`: it is what the CLI calls, and the
     // difference is SYNTHESIS — a validated type's constructor and a JSON codec
     // are generated there. The tree-walker validated and encoded in Rust and
