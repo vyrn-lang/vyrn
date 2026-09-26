@@ -12867,9 +12867,7 @@ impl<'p> Fn_<'_, 'p> {
                     let call = self.core_agg_call(body, rhs);
                     if matches!(rhs, Rhs::Make(..)) || self.core_ctor(body, rhs) || call {
                         if self.checks(t)
-                            || (call
-                                && self.cx.resolve(t)
-                                    != self.cx.resolve(&body.names[*n as usize].ty))
+                            || (call && !self.core_as_is(&body.names[*n as usize].ty, t))
                         {
                             return None;
                         }
@@ -13031,7 +13029,7 @@ impl<'p> Fn_<'_, 'p> {
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
             let named = &body.names[*n as usize].ty;
-            if self.cx.resolve(&ty) != self.cx.resolve(named)
+            if !self.core_as_is(&ty, named)
                 || ((self.checks(&ty) || self.checks(named)) && self.cx.sub(&ty) != *named)
             {
                 return None;
@@ -14856,7 +14854,7 @@ impl<'p> Fn_<'_, 'p> {
             || (owned && !matches!(place, vyrn_lower::core::Place::Elem(..)))
             || self
                 .core_place_ty(body, place)
-                .is_none_or(|t| self.cx.resolve(&t) != self.cx.resolve(&info.ty))
+                .is_none_or(|t| !self.core_as_is(&t, &info.ty))
         {
             return None;
         }
@@ -14928,7 +14926,7 @@ impl<'p> Fn_<'_, 'p> {
         (!matches!(p, vyrn_lower::core::Place::Key(..))
             && self
                 .core_place_ty(body, &p)
-                .is_some_and(|t| self.cx.resolve(&t) == self.cx.resolve(&info.ty)))
+                .is_some_and(|t| self.core_as_is(&t, &info.ty)))
         .then_some(p)
     }
 
@@ -14981,7 +14979,7 @@ impl<'p> Fn_<'_, 'p> {
             && (info.source.starts_with('@') || info.borrow)
             && unwritten(n);
         ((joins || param || (!info.borrow && self.owns_heap(&info.ty) && !from.borrow))
-            && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
+            && self.core_as_is(&from.ty, &info.ty)
             && (joins || unwritten(*x)))
         .then_some(*x)
     }
@@ -16372,14 +16370,14 @@ impl<'p> Fn_<'_, 'p> {
         walk(&mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
                 let at = self.cx.plan.key_of(s as *const Stmt as usize);
-                out.push((at, self.cx.resolve(t)));
+                out.push((at, t.clone()));
             }
         });
         out
     }
 
     /// Whether a name is bound by a `let` of `annotated` whose annotation is
-    /// another type than the name's. The core names a `let` by the type of its
+    /// not the name's type as is ([`Fn_::core_as_is`]). The core names a `let` by the type of its
     /// value, so the row does not state the annotation's layout.
     fn annotated_apart(
         &self,
@@ -16389,7 +16387,7 @@ impl<'p> Fn_<'_, 'p> {
         info.binding.is_some_and(|at| {
             annotated
                 .iter()
-                .any(|(a, t)| *a == at && *t != self.cx.resolve(&info.ty))
+                .any(|(a, t)| *a == at && !self.core_as_is(&info.ty, t))
         })
     }
 
@@ -16599,7 +16597,7 @@ impl<'p> Fn_<'_, 'p> {
             St::Return { value, .. } => match value {
                 None => matches!(self.ret, Repr::Unit),
                 Some(Val::Name(n)) if matches!(self.ret, Repr::Agg(_)) => {
-                    self.core_returns_as_is(&body.names[*n as usize].ty)
+                    self.core_as_is(&body.names[*n as usize].ty, &self.ret_ty)
                 }
                 Some(v) => self.core_val_readable(body, v),
             },
@@ -16865,14 +16863,13 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
-    /// Whether a layout of type `ty` is handed back with no instruction: its
-    /// bits are the declared result's, as `Array<Int64>` is
-    /// `Array<UiRouteInt>`'s of an alias, and a function value's are under
-    /// another spelling of its type. The arm asks the same plan
+    /// Whether a value of type `from` is one of `to` with no instruction: its
+    /// bits are `to`'s, as `Array<Int64>` is `Array<UiRouteInt>`'s of an
+    /// alias, and a function value's are under another spelling of its type
     /// ([`crate::coerce_plan`]).
-    fn core_returns_as_is(&self, ty: &Type) -> bool {
+    fn core_as_is(&self, from: &Type, to: &Type) -> bool {
         matches!(
-            crate::coerce_plan(&self.cx.sub(ty), &self.cx.sub(&self.ret_ty), &self.cx.types),
+            crate::coerce_plan(&self.cx.sub(from), &self.cx.sub(to), &self.cx.types),
             crate::Rung::Identity | crate::Rung::FnRetag
         )
     }
@@ -16897,7 +16894,7 @@ impl<'p> Fn_<'_, 'p> {
         self.dest.is_some()
             && info.binding.is_none()
             && reads[*n as usize] == 1
-            && self.core_returns_as_is(&info.ty)
+            && self.core_as_is(&info.ty, &self.ret_ty)
             && matches!(ss[i + 1..].iter().find(|s| {
                     !matches!(s, St::Row { .. }) && !matches!(s, St::Drop(d, ..) if d != n)
                 }),
