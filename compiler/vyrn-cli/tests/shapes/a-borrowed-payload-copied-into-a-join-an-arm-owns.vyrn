@@ -1,0 +1,8 @@
+// a borrowed payload copied into a join an arm owns
+// pin: 0 break, 0 continue
+// One arm yields a fresh String, so the join owns its value, and the arm that
+// reads the borrowed payload copies it (#518). Both walks release the join on
+// both paths: 2 * 10 + 3 = 23, with no free-audit line (RFC-0125 M7,
+// `m7-small`).
+fn f(o: Option<String>, k: Int64) -> String { let m = match o { Some(s) => s.copy(), None => k.toString() } return "a" + m }
+fn vyrnTestMain() -> Int64 { let x = "q" + "r" let a = f(None, 3) let b = f(Some(x), 3) return a.byteLength * 10 + b.byteLength }

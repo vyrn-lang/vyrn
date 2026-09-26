@@ -3415,6 +3415,19 @@ impl<'a> Builder<'a> {
 
     /// Whether a value is a borrow: a name whose type owns heap and which
     /// the body does not own (RFC-0089 rule 2).
+    /// Make the join `res` of an `if` or a `match` a borrow when an arm
+    /// yields one and no arm yields a value the frame owns
+    /// (`movecheck::names_a_place`): `if c { parts[0] } else { "Bool" }`.
+    /// Where an arm owns its value the join owns it too, and the kernel
+    /// refuses a borrowed arm's store into it, as for any store (#518).
+    fn join_borrows(&mut self, res: Name, yields: &[Val]) {
+        let owned = |v: &Val| matches!(v, Val::Name(n) if self.body.names[*n as usize].releases);
+        if yields.iter().any(|v| self.borrows(v)) && !yields.iter().any(owned) {
+            self.body.names[res as usize].releases = false;
+            self.body.names[res as usize].borrow = true;
+        }
+    }
+
     fn borrows(&self, v: &Val) -> bool {
         match v {
             Val::Name(n) => self.body.names[*n as usize].borrow,
@@ -7482,7 +7495,7 @@ impl<'a> Builder<'a> {
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
                 let mut aliased = self.alias_out(&tv, mark, *line);
-                let then_borrows = self.borrows(&tv);
+                let then_v = tv.clone();
                 t.push(St::Store {
                     place: Place::Name(res),
                     value: tv,
@@ -7497,7 +7510,7 @@ impl<'a> Builder<'a> {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
                         aliased = aliased.or(self.alias_out(&ev, mark, *line));
-                        let else_borrows = self.borrows(&ev);
+                        let else_v = ev.clone();
                         f.push(St::Store {
                             place: Place::Name(res),
                             value: ev,
@@ -7507,13 +7520,7 @@ impl<'a> Builder<'a> {
                             releases: false,
                         });
                         self.edge_drops(site, 1, &mut f)?;
-                        // `if c { parts[0] } else { "Bool" }`: an arm that
-                        // yields a borrow makes the result one
-                        // (`movecheck::names_a_place`, one arm is enough).
-                        if then_borrows || else_borrows {
-                            self.body.names[res as usize].releases = false;
-                            self.body.names[res as usize].borrow = true;
-                        }
+                        self.join_borrows(res, &[then_v, else_v]);
                         if let Some(a) = aliased {
                             self.loop_aliased.insert(res, a);
                         }
@@ -7543,6 +7550,7 @@ impl<'a> Builder<'a> {
                 let owns = self.owns_boxes(scrutinee, consuming);
                 let outer = self.body.names.len();
                 let mut core_arms = Vec::new();
+                let mut yields = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
                     let mut body = Vec::new();
                     let mark = self.scope.len();
@@ -7560,12 +7568,7 @@ impl<'a> Builder<'a> {
                             if let Some(a) = self.alias_out(&v, outer, *line) {
                                 self.loop_aliased.insert(res, a);
                             }
-                            // An arm that yields a borrow makes the result
-                            // one (`movecheck::names_a_place`).
-                            if self.borrows(&v) {
-                                self.body.names[res as usize].releases = false;
-                                self.body.names[res as usize].borrow = true;
-                            }
+                            yields.push(v.clone());
                             body.push(St::Store {
                                 place: Place::Name(res),
                                 value: v,
@@ -7589,6 +7592,7 @@ impl<'a> Builder<'a> {
                         index: i as u32,
                     });
                 }
+                self.join_borrows(res, &yields);
                 out.push(St::Switch {
                     on: sv,
                     arms: core_arms,

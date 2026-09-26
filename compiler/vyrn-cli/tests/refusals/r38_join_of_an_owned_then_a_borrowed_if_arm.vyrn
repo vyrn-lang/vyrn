@@ -1,0 +1,10 @@
+fn f(xs: Array<String>, c: Bool, k: Int64) -> String {
+    let m = if c { k.toString() } else { xs[0] }
+    return "a" + m
+}
+
+fn main() -> Int64 {
+    let xs: Array<String> = ["q" + "r"]
+    print(f(xs, false, 3))
+    return 0
+}
