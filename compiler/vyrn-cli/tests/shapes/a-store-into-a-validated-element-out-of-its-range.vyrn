@@ -1,0 +1,5 @@
+// a store into a validated element out of its range
+// pin: 0 break, 0 continue
+// The constructor traps with the type's own sentence on both walks (the
+// m7-elemcheck record).
+type Age = Int64 where value >= 18          type T = { xs: Array<Age> }          fn vyrnTestMain() -> Int64 { let mut t = T { xs: [18, 19] } let mut k = 0 while k < 2 { t.xs[k] = k + 17 k = k + 1 } return t.xs[1] }

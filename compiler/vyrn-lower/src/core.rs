@@ -5542,7 +5542,12 @@ impl<'a> Builder<'a> {
             Ok(t) => t,
             Err(_) => self.ty_of(value)?,
         };
-        let v = self.proven_val(stored, Some(&ety), line, out)?;
+        // A crossing into a validated element is its constructor, as a store
+        // to a name's is, whether or not the checker proved it.
+        let v = match self.checked(&self.ty_of(stored)?, &ety, stored) {
+            Some(to) => Val::Name(self.checked_temp(&to, stored, line, out)?),
+            None => self.val(stored, out)?,
+        };
         let key = self.store_key(sid);
         let site = Site::Node(key);
         // The same hand-back, and the INDEX counts as well: `xs[i] =
