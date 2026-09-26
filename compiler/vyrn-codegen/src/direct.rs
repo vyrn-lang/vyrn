@@ -335,6 +335,10 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
 }
 
 fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
+    // Every body is the core's, and the core is built through the lowering's
+    // slots, so a host that installed none (a generator run inside a load, a
+    // test) gets them here. Idempotent.
+    vyrn_lower::install();
     // RFC-0125 §3 M5: this emitter reads every expression's type off the
     // checker's record rather than deriving one. `vyrn build` has already
     // asked for it, through the lowering; a host that compiles a program the
