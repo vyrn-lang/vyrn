@@ -13480,6 +13480,21 @@ impl<'p> Fn_<'_, 'p> {
                     if self.core_unit(&info.ty) {
                         continue;
                     }
+                    // `blackBox` of a layout hands back the operand's own
+                    // address, so the name takes over the operand's slot to
+                    // the end of its own extent, as a rename does. Nothing is
+                    // copied.
+                    let barrier = match rhs {
+                        Rhs::Call {
+                            callee, kind, args, ..
+                        } if matches!(core_builtin(callee, *kind), Some(Spec::Barrier)) => {
+                            Some(args.as_slice())
+                        }
+                        _ => None,
+                    };
+                    if let Some([(Arg::Val(Val::Name(x)), _)]) = barrier {
+                        w.slot[*n as usize] = w.slot[*x as usize].take();
+                    }
                     // The slot rule (RFC-0125 M7). A temporary the next
                     // statement reads once, first, and nothing else reads
                     // stays on wasm's operand stack. Every other name takes a
@@ -13492,7 +13507,10 @@ impl<'p> Fn_<'_, 'p> {
                         continue;
                     }
                     let r = self.cx.repr(&info.ty, line)?;
-                    let place = self.place_for(b, &r, line)?;
+                    let place = match r {
+                        Repr::Agg(_) if barrier.is_some() => Place::Local(b.local(ValType::I32)),
+                        _ => self.place_for(b, &r, line)?,
+                    };
                     let Place::Local(l) = place else {
                         return unsupported("a core `let` of an aggregate", line);
                     };
@@ -13972,6 +13990,11 @@ impl<'p> Fn_<'_, 'p> {
                     .clone()
                     .ok_or_else(|| gap("a removal the checker did not type", line)),
                 (None, Some(Spec::Finds)) => Ok(Type::Bool),
+                // `blackBox` hands its operand back, at the type the checker
+                // gave the site.
+                (None, Some(Spec::Barrier)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a `blackBox` the checker did not type", line)),
                 // A generator host import answers at the type the checker
                 // gave the site.
                 (None, Some(Spec::Host)) => at
@@ -14092,6 +14115,44 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, v, &ty, line)?;
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
+            }
+            // `blackBox(v)` (RFC-0055): the operand, stored to and loaded from
+            // sixteen bytes that nothing else names, so clang at `-O2` on the
+            // native route cannot fold the work it measures. Not a global,
+            // which wasm2c forwards in one step, and not `data`, which shares
+            // identical contents: each site reserves its own bytes.
+            Some(Spec::Barrier) => {
+                let [(v, _)] = args else {
+                    return unsupported("`blackBox` of other than one value", line);
+                };
+                let Some(ty) = ret else {
+                    return unsupported("a `blackBox` the checker did not type", line);
+                };
+                self.core_val(m, b, body, w, v, ty, line)?;
+                let Some(t) = self.cx.repr(ty, line)?.val() else {
+                    return Ok(ty.clone());
+                };
+                let addr = m.reserve(16, 16) as i32;
+                let tmp = self.scratch(b, t, 9);
+                let at = |align: u32| MemArg {
+                    offset: 0,
+                    align,
+                    memory_index: 0,
+                };
+                let (store, load) = match t {
+                    ValType::I32 => (Instruction::I32Store(at(2)), Instruction::I32Load(at(2))),
+                    ValType::I64 => (Instruction::I64Store(at(3)), Instruction::I64Load(at(3))),
+                    ValType::F32 => (Instruction::F32Store(at(2)), Instruction::F32Load(at(2))),
+                    ValType::F64 => (Instruction::F64Store(at(3)), Instruction::F64Load(at(3))),
+                    _ => (Instruction::V128Store(at(4)), Instruction::V128Load(at(4))),
+                };
+                b.ins(&Instruction::LocalSet(tmp))
+                    .ins(&Instruction::I32Const(addr))
+                    .ins(&Instruction::LocalGet(tmp))
+                    .ins(&store)
+                    .ins(&Instruction::I32Const(addr))
+                    .ins(&load);
+                return Ok(ty.clone());
             }
             // `print(x)` and `x.toString()`: the operand at its own type, and
             // the rendering that type chooses, which the arm over the source
@@ -16922,7 +16983,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> bool {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
-            Some(Spec::OwnType) => matches!(args, [(Arg::Val(_), _)]),
+            Some(Spec::OwnType | Spec::Barrier) => matches!(args, [(Arg::Val(_), _)]),
             Some(Spec::Renders(_) | Spec::Effect(_)) => matches!(args, [_]),
             Some(Spec::Logs) => args.len() == logs_arity(callee),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
