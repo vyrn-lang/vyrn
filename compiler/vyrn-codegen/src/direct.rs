@@ -30,9 +30,8 @@
 //!
 //! **Destination-first at joins** (M0). wasm has no aggregate values, so an
 //! aggregate `if`-expression has nothing to leave on the stack: the slot is
-//! allocated BEFORE the branch and each arm copies into it. [`Fn_::join`] is that
-//! rule, and it is indifferent to how many arms there are — which is what M2a's
-//! pre-flight said mattered, 46 of the 149 joins having four to seven edges.
+//! allocated BEFORE the branch and each arm copies into it, however many arms
+//! there are.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1095,8 +1094,8 @@ enum Body<'a> {
     Block(&'a Block),
     /// A `|x| e` literal's expression. The block form's `return e` is a
     /// STATEMENT, and writing one here would mean owning a copy of `e` — which
-    /// is exactly the clone this milestone deleted — so the value and the branch
-    /// are emitted directly (see [`Fn_::lambda_value`]).
+    /// is exactly the clone this milestone deleted — so the core's rows state
+    /// the body, and [`lower_body`] refuses one they do not carry.
     Value(&'a Expr),
     /// The shell's own statements: a lifted lambda whose literal is not one of
     /// the program's nodes, so [`Cx::lambdas`] cannot hand back a borrow of it
@@ -1230,7 +1229,7 @@ type ShapeKey = (bool, Type, Vec<String>);
 ///
 /// Captures first, then the `fn` type's own parameters — a lifted lambda's shape,
 /// and the shape a bare named function already has with zero captures. So calling
-/// a target is [`Fn_::emit_call`] with the captures prepended to the argument
+/// a target is [`Fn_::emit_call_with`] with the captures prepended to the argument
 /// list, and no second call path exists to disagree with the first about the
 /// aggregate convention, `modify`, or coercion.
 ///
@@ -2132,7 +2131,7 @@ struct Fn_<'a, 'p> {
     region_marks: Vec<u32>,
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
-    /// call ends — see [`Fn_::call`].
+    /// call ends.
     arg_frees: Vec<(u32, Type)>,
     /// The holes the walk in progress must skip, relative to the place it is
     /// looking at (RFC-0093 M2). Taken at the top of [`Fn_::rel_at`], so a walk
@@ -2811,7 +2810,7 @@ fn call_depth_bump(b: &mut Frame, cx: &Cx<'_>, by: i32) {
 /// of tag tests, then one `malloc` and one `memory.copy`.
 ///
 /// The copy is **deep**, because the CONSTRUCTION is
-/// ([`Fn_::build_fnval`]): a heap capture is duplicated into the block, so the
+/// ([`Fn_::fnval_into`]): a heap capture is duplicated into the block, so the
 /// block owns what its captures point at and a copy of the block owes a second
 /// copy of that. The release twin below walks the same captures, so the two
 /// stay mirrors.
@@ -4761,9 +4760,9 @@ impl<'p> Fn_<'_, 'p> {
     /// [`Cx::ty_gap`] refused everything needing reconciliation — which is why a
     /// validated type, a `modify` parameter, a `SmallArray`, a `Map` index and a
     /// two-word `Option` payload were five gaps rather than one absence wearing
-    /// five hats. Every flow site reaches here through [`Fn_::expr_as`]: a typed
-    /// `let`, an assignment, a field or element store, a call argument, a return,
-    /// a join arm, an enum payload. A reconciliation added here is added at all
+    /// five hats. Every flow site reaches here: a typed `let`, an assignment, a
+    /// field or element store, a call argument, a return, a join arm, an enum
+    /// payload. A reconciliation added here is added at all
     /// of them at once, which is the property the five separate refusals lacked.
     ///
     /// **The decision is not here** — RFC-0125 §2.3, and §3 M6's coercion
@@ -5126,7 +5125,7 @@ impl<'p> Fn_<'_, 'p> {
     /// it and the flow can carry on with it afterwards.
     ///
     /// An aggregate base is on the stack as its ADDRESS, which is what a `read`
-    /// parameter of that type is passed as ([`Fn_::emit_call`]), so one local
+    /// parameter of that type is passed as ([`Fn_::emit_call_with`]), so one local
     /// holds either shape.
     fn park_for_predicate(
         &mut self,
@@ -5409,8 +5408,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// A String operator, both operands on the stack: `+` concatenates into
     /// the arena a `region` routes to, and a comparison is the sign of a byte
-    /// compare. [`Fn_::binary_inner`] and [`Fn_::core_prim`] read it; each
-    /// frees its operand temporaries its own way.
+    /// compare. [`Fn_::core_prim`] reads it.
     fn str_bin(&mut self, b: &mut Frame, op: BinOp, line: usize) -> Result<Type, String> {
         if op == BinOp::Add {
             self.arena_route(b, true);
@@ -5444,9 +5442,8 @@ impl<'p> Fn_<'_, 'p> {
     /// The instruction a unary operator IS, once its operand stands on the
     /// stack — RFC-0125 §2.3's "maps `prim` rows to wasm instructions".
     ///
-    /// Stated once, for the two walks that reach it: [`Fn_::expr`], which
-    /// reads an `Expr::Unary`, and [`Fn_::core_prim`], which reads the
-    /// operator off [`vyrn_lower::core::Op`]. Nothing here interleaves the
+    /// [`Fn_::core_prim`] reads the operator off [`vyrn_lower::core::Op`].
+    /// Nothing here interleaves the
     /// operand with anything, so unlike the binary table this one has no
     /// family left behind at its caller.
     fn un_ins(&mut self, b: &mut Frame, op: UnOp, t: &Type, line: usize) -> Result<Type, String> {
@@ -5541,9 +5538,7 @@ impl<'p> Fn_<'_, 'p> {
     /// stack at `opty` — RFC-0125 §2.3's "maps `prim` rows to wasm
     /// instructions".
     ///
-    /// Stated once, for the two walks that reach it: [`Fn_::binary_inner`],
-    /// which reads an `Expr::Binary`, and [`Fn_::core_prim`], which reads the
-    /// operator off [`vyrn_lower::core::Op`] and never looks at the source.
+    /// [`Fn_::core_prim`] reads the operator off [`vyrn_lower::core::Op`].
     /// The families NOT here are the ones that interleave the operands with
     /// something else, so an operand-first seam cannot hold them: `&&` and
     /// `||` branch, `=~` compiles its right operand to a DFA rather than
@@ -5967,7 +5962,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// A `Float32` promotes first, because the interpreter formats `*f as f64`.
     ///
-    /// A call by INDEX rather than by name through [`Fn_::call`]: the value is
+    /// A call by INDEX rather than by name: the value is
     /// already on the stack, which is the whole of a wasm call's argument passing,
     /// and `f64Str` takes one scalar and returns one. The 511 hand-written lines
     /// this replaced are the reason — they were the largest single thing in this
@@ -6005,9 +6000,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// One call to an `extern fn` or a host-boundary name, `argc` operands
-    /// written by `operand` at each parameter's type. Both walks call it:
-    /// [`Fn_::call_inner`] over the source and [`Fn_::core_call`] over the
-    /// rows.
+    /// written by `operand` at each parameter's type. [`Fn_::core_call`]
+    /// calls it over the rows.
     fn extern_call(
         &mut self,
         m: &mut Module,
@@ -6216,9 +6210,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// One `std/mem` primitive off the core's row: the same table
-    /// [`Fn_::mem_prim`] reads, its operands read from the row rather than
-    /// walked over the source (RFC-0125 M7).
+    /// One `std/mem` primitive off the core's row: [`Fn_::mem_spec`]'s table,
+    /// its operands read from the row (RFC-0125 M7).
     fn core_mem(
         &mut self,
         m: &mut Module,
@@ -6527,9 +6520,10 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.instantiate(m, f, type_args, subst)
     }
 
-    /// [`Fn_::emit_call`] with argument `i` written by `operand` at its
-    /// parameter's type, which answers the slot a `modify` scalar was spilled
-    /// to, if any: the out-pointer, the operands, the call, the reloads.
+    /// A call once the callee's signature is known, with argument `i` written
+    /// by `operand` at its parameter's type, which answers the slot a `modify`
+    /// scalar was spilled to, if any: the out-pointer, the operands, the call,
+    /// the reloads.
     fn emit_call_with(
         &mut self,
         m: &mut Module,
@@ -6870,9 +6864,8 @@ impl<'p> Fn_<'_, 'p> {
         layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))
     }
 
-    /// Write a stored function value into `dest`: its tag, and its payload,
-    /// which [`Fn_::build_fnval`] states. `caps` are the captures in the
-    /// target's order.
+    /// Write a stored function value into `dest`: its tag, and its payload.
+    /// `caps` are the captures in the target's order.
     #[allow(clippy::too_many_arguments)]
     fn fnval_into(
         &mut self,
@@ -6971,8 +6964,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The target a stored lambda calls, and its captures in the target's
-    /// order: [`Fn_::fnval_lambda`]'s lift, which the core walk's
-    /// [`Fn_::core_make`] shares.
+    /// order, for [`Fn_::core_make`].
     fn lift_stored(
         &mut self,
         m: &mut Module,
@@ -7426,8 +7418,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Write a value of type `t`, held in `place`, into a sum's payload words at
-    /// `w0` (RFC-0075 M2c). The encoding is [`Fn_::build_sum2`]'s, from a place
-    /// rather than from an expression — which is what `pull` has.
+    /// `w0` (RFC-0075 M2c), from a place, which is what `pull` has.
     fn store_payload(
         &mut self,
         b: &mut Frame,
@@ -9309,9 +9300,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `if`/`else`, which joins where it ends and needs neither
     /// ([`crate::two_way`]). `bt` is what the join carries.
     ///
-    /// One home for the shape, because both walks write it: [`Fn_::match_expr`]
-    /// over the arms the reader wrote, [`Fn_::core_switch`] over the row's
-    /// (RFC-0125 M7).
+    /// [`Fn_::core_switch`] writes it over the row's arms (RFC-0125 M7).
     fn chain_open(&mut self, b: &mut Frame, tags: &[Option<usize>], bt: BlockType) -> Chain {
         let two = crate::two_way(tags);
         let out = self.depth;
@@ -9524,9 +9513,8 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
-    /// Whether a placed row releases the value at `key` WHOLE — the question
-    /// [`Fn_::frees_boxes`] used to ask of the plan's own per-binding table
-    /// (RFC-0125 §3 M3, the walk's deletion).
+    /// Whether a placed row releases the value at `key` WHOLE (RFC-0125 §3 M3,
+    /// the walk's deletion).
     ///
     /// The two are not the same question. The table says the type of the
     /// value has a release; a ROW says one runs here. While the walk placed a
@@ -12238,9 +12226,9 @@ fn slot_arity(name: &str) -> Option<usize> {
 /// `vyrn_lower::core::builtin_row` states the types, because a row is what
 /// makes such a call a `call` with a specification and not a gap; this states
 /// the instruction, because an instruction is the emitter's. `None` where the
-/// name has no row, or where the site's arity is not the row's. Two readers
-/// ask it: [`Fn_::call_inner`] over the source and [`Fn_::core_call`] over the
-/// rows. `builtin_rows_all_emit` refuses a row with no instruction.
+/// name has no row, or where the site's arity is not the row's.
+/// [`Fn_::core_call`] asks it over the rows. `builtin_rows_all_emit` refuses a
+/// row with no instruction.
 fn builtin_spec(
     name: &str,
     argc: usize,
@@ -12494,11 +12482,10 @@ impl<'p> Fn_<'_, 'p> {
     /// A tag is read and an arm is chosen, off the row — RFC-0125 M7.
     ///
     /// The arms are a chain of `if`s inside one `block`, each leaving by a
-    /// branch to it: the shape [`Fn_::match_expr`] writes for the same
-    /// construct, tested by the same probe ([`Fn_::tag_is`]). What is not here
+    /// branch to it, tested by [`Fn_::tag_is`]. What is not here
     /// is the join, because the core's switch carries no value — every arm
-    /// stores its own into the name the reader bound, and `match_expr`'s
-    /// destination, result type and two-way collapse are all about a value
+    /// stores its own into the name the reader bound, and a `match`
+    /// expression's destination, result type and two-way collapse are all about a value
     /// this row does not have.
     ///
     /// The payload binder is the PLACE the row names (§2.1): the walk binds it
@@ -14007,9 +13994,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The ABI is the DECLARATION's and the emitter reads it there: which
     /// wasm index the callee is, what each parameter's type is, whether one
     /// crosses by address. What the row states is WHO the callee is
-    /// ([`Callee`]), which is the fourteen-rung ladder [`Fn_::call_inner`]
-    /// walks over the source at every site and this walk does not walk at
-    /// all.
+    /// ([`Callee`]), so this walk has no ladder of its own to decide it.
     fn core_call(
         &mut self,
         m: &mut Module,
@@ -14817,8 +14802,7 @@ impl<'p> Fn_<'_, 'p> {
     /// A layout that owns no heap is a value, and the kernel lets its place be
     /// written while the name lives ([`Fn_::core_alias`]). A take leaves a hole
     /// in its place, and a store may fill the hole while the name lives. So
-    /// the name takes a slot and the bytes, which is what the AST arm's `let`
-    /// writes ([`Fn_::agg_into`]).
+    /// the name takes a slot and the bytes.
     fn core_copies(
         &self,
         body: &vyrn_lower::core::Body,
@@ -14953,8 +14937,7 @@ impl<'p> Fn_<'_, 'p> {
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
     /// layout-made family.
     ///
-    /// The bytes are [`Fn_::agg_into`]'s at a `let` of a literal: the
-    /// destination's address, the parts at the offsets the layout gives them,
+    /// The bytes are the destination's address, the parts at the offsets the layout gives them,
     /// the address again, and the two drops that stand for the copy an in-place
     /// build does not make. The placement itself is [`Fn_::record_into`]'s,
     /// [`Fn_::array_lit_heap`]'s and [`Fn_::build_variant`]'s, which the AST arm
@@ -15225,9 +15208,8 @@ impl<'p> Fn_<'_, 'p> {
     /// The tag and the payload types of the variant `name` of the sum `ty` —
     /// RFC-0125 M7. `None` when `ty` is no sum, or names no such variant.
     ///
-    /// The AST arm reads the same pair off the EXPECTATION ([`Fn_::sum_ctor`]'s
-    /// `pick`). The row states the binding's type, which is what the
-    /// expectation was, so the two answer the same variant.
+    /// The row states the binding's type, which is the expectation the
+    /// variant is picked by.
     fn core_variant(&self, ty: &Type, name: &str) -> Option<(u64, Vec<Type>)> {
         let Type::Enum(vs) = self.cx.resolve(ty) else {
             return None;
@@ -15415,8 +15397,8 @@ impl<'p> Fn_<'_, 'p> {
     /// where its row stands. The row is a call, a variant or a literal, and a
     /// variant or a literal is built at the part's type.
     ///
-    /// The row writes the part at its offset, as the arm's [`Fn_::agg_into`]
-    /// lets a call, so the parent's storage is taken before it
+    /// The row writes the part at its offset, so the parent's storage is
+    /// taken before it
     /// ([`Fn_::core_part_dest`]). Every row stays where it stands, so no
     /// effect moves. Nothing names that storage until the parent's
     /// row, and no row between leaves the list, so a part written early is
@@ -15862,8 +15844,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The target a stored value of the `fn` type `p` is (RFC-0037): its
-    /// signature's dispatcher, with the value as its one capture, as the arm's
-    /// [`Fn_::resolve_fn_arg`] makes it. The index is the registered
+    /// signature's dispatcher, with the value as its one capture. The index is
+    /// the registered
     /// dispatcher's, which [`Fn_::core_call`] registers before it emits;
     /// a screen asks before that and reads 0.
     fn core_dispatch(&self, p: &Type) -> Option<FnTarget> {
@@ -16785,9 +16767,8 @@ impl<'p> Fn_<'_, 'p> {
     /// back, so the value is built in the caller's storage (RFC-0125 M7).
     ///
     /// A temporary, read once, by the `return` after it with nothing but
-    /// releases of other names between, at the declared result's own type:
-    /// the AST arm builds `return f(a)` and `return Some(a)` into `dest` the
-    /// same way ([`Fn_::ret_value`]).
+    /// releases of other names between, at the declared result's own type,
+    /// is built into `dest`.
     fn core_lands(
         &self,
         body: &vyrn_lower::core::Body,
