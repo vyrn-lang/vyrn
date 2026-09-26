@@ -1,5 +1,4 @@
 // a `let` of an extern call beside a statement the arm emits
-// pin: 0 break, 0 continue
 // A call's binding is typed by the producer type its row carries, and an
 // extern has no declared signature for the screen to ask (RFC-0125 M7).
 // The store into module state beside it keeps the body off the whole-body

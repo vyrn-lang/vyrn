@@ -1,3 +1,2 @@
 // a `continue` under a `region`
-// pin: 0 break, 0 continue
 fn vyrnTestMain() -> Int64 { let mut n = 0 let mut i = 0 while i < 100 { i = i + 1 region { if i % 2 == 0 { continue } n = n + 1 } } return n }

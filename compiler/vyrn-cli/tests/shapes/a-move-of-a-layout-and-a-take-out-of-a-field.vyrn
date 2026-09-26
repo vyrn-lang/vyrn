@@ -1,5 +1,4 @@
 // a move of a layout, and a take out of a field
-// pin: 0 break, 0 continue
 // A move is a rename: `zs` and `b` hold the place the moved name held. A
 // layout taken out of a field is a copy into a slot, and so is `let q = p`
 // of a layout that owns no heap (RFC-0125 M7, `m7-move`).

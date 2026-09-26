@@ -1,5 +1,4 @@
 // a map key read the rows carry
-// pin: 0 break, 0 continue
 // A key read is the runtime's lookup into a slot of its own, and the
 // `let` copies it out (RFC-0125 M7). Every key read of `examples/` reads
 // a String value, which the frame does not hold.

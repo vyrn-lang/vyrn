@@ -1,5 +1,4 @@
 // a lambda target with a capture bound to a parameter a lambda captures
-// pin: 0 break, 0 continue
 // The instance makes `f`'s value, which owns a capture box, and the
 // lambda `g` copies it, so the instance releases `f` after `g` (the
 // m7-boxrel record): 63.

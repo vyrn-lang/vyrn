@@ -1,5 +1,4 @@
 // a parameter bound to a lambda with two captures
-// pin: 0 break, 0 continue
 // A parameter bound to a lambda is its captures, in the order the caller
 // forwards them: 51 here, and 39 with `k` and `m` swapped.
 fn sumOf(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Int64 { let mut s = 0 for x in xs { s = s + f(x) } return s }          fn vyrnTestMain() -> Int64 { let k = 7 let m = 3 return sumOf([1, 2, 3], x -> x * k + m) }

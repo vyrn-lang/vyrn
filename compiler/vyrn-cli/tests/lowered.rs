@@ -582,11 +582,6 @@ fn gate() {
     // the backend answers every question here from the AST alone: the gate then
     // measures one compiler against itself.
     vyrn_lower::install();
-    // The backend answers compared here are the AST walk's, so the gate turns
-    // the core walk off and every body reaches that walk. With the core walk on,
-    // the core takes the bodies and the gate compares nothing (#465). Remove
-    // this line when #465 compares the core's own typing.
-    std::env::set_var("VYRN_NO_CORE_WALK", "1");
     let mut t = Tally::default();
     // The residue, by the engine that answered and the kind of expression —
     // the axis RFC-0101 §3 M2c classified by hand and this milestone re-measured

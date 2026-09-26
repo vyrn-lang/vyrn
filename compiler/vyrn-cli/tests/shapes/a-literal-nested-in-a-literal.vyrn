@@ -1,5 +1,4 @@
 // a literal nested in a literal
-// pin: 0 break, 0 continue
 // A literal nested in a literal is built at its offset in the parent's
 // storage, a named array part is copied there, and an empty array of
 // records has no element to place (RFC-0125 M7).

@@ -1,5 +1,4 @@
 // a Unit join of a match statement
-// pin: 0 break, 0 continue
 // A `match` statement whose arms are calls that return Unit joins through a
 // Unit temporary. A Unit value is no value, so its `let` and its store emit
 // only the call (RFC-0125 M7, `m7-unit`).

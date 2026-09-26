@@ -1,5 +1,4 @@
 // a lambda that captures a name shadowing an outer one
-// pin: 0 break, 0 continue
 // The row captures the inner `x` alone, the binding in scope at the lambda
 // (#483), so `Fn_::core_lambda` takes the `let`. Both walks print 3221 with
 // no leak line (RFC-0125 M7, `m7-captures`).

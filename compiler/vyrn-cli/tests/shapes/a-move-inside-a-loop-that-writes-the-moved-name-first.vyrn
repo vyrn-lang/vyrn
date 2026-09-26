@@ -1,5 +1,4 @@
 // a move inside a loop that writes the moved name first
-// pin: 0 break, 0 continue
 // The loop stores into `a` and then moves it into `b`. The loop runs its
 // earlier rows again only after `b`'s extent ends, so `b` takes `a`'s place.
 // Both walks print 6 with no leak line (RFC-0125 M7, `m7-rest`, `m7-mains`).

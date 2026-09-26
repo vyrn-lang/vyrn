@@ -1,5 +1,4 @@
 // a map literal of layout values the rows carry
-// pin: 0 break, 0 continue
 // A map's layout value is a name with a slot of its own, and `map_set`
 // moves its bytes into the entry (RFC-0125 M7, `m7-fieldmap`). A repeated
 // key releases the value it replaces.

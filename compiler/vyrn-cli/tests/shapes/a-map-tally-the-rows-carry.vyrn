@@ -1,5 +1,4 @@
 // a map tally the rows carry, with a String key on a hit and on a miss
-// pin: 0 break, 0 continue
 // (RFC-0125 M7, `m7-mapcall`). The key is read and never taken: a miss
 // stores a copy, so the caller releases its own key on both paths.
 fn counts() -> Map<String, Int64> { let mut m: Map<String, Int64> = [:] return m }          fn ids() -> Map<Int64, Int64> { let mut m: Map<Int64, Int64> = [:] return m }          fn vyrnTestMain() -> Int64 { let mut m = counts() let mut c = ids() let a = "k" + 1.toString() let b = "k" + 2.toString()          m.tally(a, 1) m.tally(a, 2) m.tally(b, 5) c.tally(7, 1) c.tally(7, 1)          let t = match m[a] { Some(v) => v, None => 0 } * 10 + match m[b] { Some(v) => v, None => 0 }          return t + m.length * 1000 + a.byteLength * 10000 + match c[7] { Some(v) => v, None => 0 } * 100000 }

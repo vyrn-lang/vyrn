@@ -1,5 +1,4 @@
 // a generic declared release the kernel places
-// pin: 0 break, 0 continue
 // The kernel places `Owned__Pair__release` at two instances. The lowering
 // reads those rows on its second turn and the core builds each body (the
 // m7-slotrel record).

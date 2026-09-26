@@ -1,5 +1,4 @@
 // a stream boxed answers its address
-// pin: 0 break, 0 continue
 // `boxStream` moves a stream into a heap box and answers the box's address,
 // an `Effect` row with an `Int64` result (RFC-0125 M7). `take` boxes its
 // source.

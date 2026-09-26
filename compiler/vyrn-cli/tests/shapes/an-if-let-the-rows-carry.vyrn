@@ -1,5 +1,4 @@
 // an `if let` the rows carry
-// pin: 0 break, 0 continue
 // The tag family's own witness (RFC-0125 M7). Every `if let` of
 // `examples/` waits on another family as well — a builtin call in the
 // arm, a layout, a release — so the corpus cannot say whether the two

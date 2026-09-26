@@ -1,5 +1,4 @@
 // an append whose argument is released before its store
-// pin: 0 break, 0 continue
 // `std/html`'s `escapeText`: the argument temporary of an `append` is
 // released between the rebuild and the store that puts it back.
 fn esc(s: String) -> Array<UInt8> { let raw = bytes(s) let mut out: Array<UInt8> = []          for b in raw { if b == '&' { out.append(bytes("&amp;")) } else { out.push(b) } }          return out }          fn vyrnTestMain() -> Int64 { let o = esc("a&b&&c") return o.length * 100 + Int64(o[1]) }

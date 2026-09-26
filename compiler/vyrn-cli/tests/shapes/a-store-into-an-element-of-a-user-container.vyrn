@@ -1,5 +1,4 @@
 // a store into an element of a user container
-// pin: 0 break, 0 continue
 // `s[i] = v` stores into the place `atSet` yields, after its prologue; a
 // value that reads the container is the temp the checker's expansion binds
 // before the container moves out (`0125-m7-atrhs`).

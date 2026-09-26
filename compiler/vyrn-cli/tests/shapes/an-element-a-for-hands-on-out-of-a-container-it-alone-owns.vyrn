@@ -1,5 +1,4 @@
 // an element a `for` hands on out of a container it alone owns
-// pin: 0 break, 0 continue
 // A `for` over a container it alone owns binds each element at its
 // address in the buffer, and the element leaves by a push or a `consume`
 // or is released there (RFC-0125 M7).

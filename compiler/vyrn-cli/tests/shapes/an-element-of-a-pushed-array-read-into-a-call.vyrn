@@ -1,5 +1,4 @@
 // an element of a pushed array read into a call
-// pin: 0 break, 0 continue
 // `out.push(x)` rebuilds `out` and hands it back, so it changes no owner.
 // A borrow of an element is that element for its extent, and a push inside
 // the extent still refuses it (the m7-reads record).

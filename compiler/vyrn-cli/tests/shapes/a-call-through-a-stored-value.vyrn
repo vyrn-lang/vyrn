@@ -1,5 +1,4 @@
 // a call through a stored value
-// pin: 0 break, 0 continue
 // A call through a stored value is one call to its signature's dispatcher,
 // with the value first (RFC-0037).
 type Op = fn(Int64) -> Int64          fn inc(x: Int64) -> Int64 { return x + 1 }          fn run(f: Op, n: Int64) -> Int64 { return f(n) * 10 + f(f(n)) }          fn vyrnTestMain() -> Int64 { let g: Op = inc return run(g, 3) }

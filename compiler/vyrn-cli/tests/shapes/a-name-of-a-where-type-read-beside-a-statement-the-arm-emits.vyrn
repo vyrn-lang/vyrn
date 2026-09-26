@@ -1,5 +1,4 @@
 // a name of a `where` type read beside a statement the arm emits
-// pin: 0 break, 0 continue
 // A name of a `where` type over Int64 is read at its resolved type on both
 // walks (the m7-names2 record); both walks emit the same bytes for it. The
 // store into module state keeps the body off the whole-body walk.

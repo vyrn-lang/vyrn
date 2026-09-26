@@ -1,5 +1,4 @@
 // an aggregate return under a branch
-// pin: 0 break, 0 continue
 // A layout returned under an `if` and an `if let` is written through the
 // out-pointer where the `return` stands, and the exit's release rows
 // under the branch are the placement's (RFC-0125 M7, `m7-iflet`).

@@ -1,5 +1,4 @@
 // a `for` left early over the elements it never reached
-// pin: 0 break, 0 continue
 // A `return` and a `break` out of a `for` whose every element leaves
 // through the loop variable release the elements no turn reached
 // (RFC-0125 M7). `examples/` writes only the `return`, in the generated

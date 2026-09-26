@@ -1,5 +1,4 @@
 // a borrowed layout bound by a refutable let
-// pin: 0 break, 0 continue
 // `j` is a borrowed parameter, so the payload `xs` the refutable `let` binds
 // is a borrow. It is bound out of the join the switch stores into, and it
 // takes the join's place with no slot and no copy (`core_renames`). Both

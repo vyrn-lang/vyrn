@@ -1,5 +1,4 @@
 // a SmallArray shrunk and copied out by core rows
-// pin: 0 break, 0 continue
 // `push`, `swapRemove`, `pop` and `toArray` on a SmallArray of Strings that
 // spills at its second push. Each is a row the core states: the push a
 // rebuild the store after it puts back, the removals shrinking the header

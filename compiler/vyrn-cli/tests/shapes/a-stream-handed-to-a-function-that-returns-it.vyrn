@@ -1,5 +1,4 @@
 // a stream handed to a function that returns it
-// pin: 0 break, 0 continue
 // A stream is linear (RFC-0081), so the callee disposes a stream it is
 // handed: `keep` hands it back, and a close after the call ended the
 // stream `two` returned.

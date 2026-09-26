@@ -1,5 +1,4 @@
 // a call to a generic function's instance
-// pin: 0 break, 0 continue
 // A call to a generic function calls the instance the checker solved,
 // from the arguments or from the type the call's result is bound to.
 type Box<T> = { v: T, n: Int64 }          fn wrap<T>(v: consume T) -> Box<T> { return Box { v: v, n: 1 } }          fn empty<T>() -> Array<T> { let xs: Array<T> = [] return xs }          fn size<T>(b: Box<T>) -> Int64 { return b.n }          fn pair<A, B>(a: A, b: B) -> Int64 { return 2 }          fn outer<T>(v: T) -> Int64 { let b = wrap(v.copy()) return size(b) + pair(v, 3) }          fn vyrnTestMain() -> Int64 { let b = wrap(7) let s = wrap("ab") let e: Array<String> = empty()          return size(b) + size(s) * 10 + e.length * 100 + pair(1, "x") * 1000 + outer("q") * 10000 + outer(5) * 100000 }

@@ -1,5 +1,4 @@
 // an element of a Slots read through a dead handle
-// pin: 0 break, 0 continue
 // A place through `s[h]` is the place `at` yields, after its prologue, so a
 // field of a `Slots` element read through a handle that is no longer alive
 // traps with `at`'s own sentence on both walks (RFC-0125 M7, `m7-slotsel`).

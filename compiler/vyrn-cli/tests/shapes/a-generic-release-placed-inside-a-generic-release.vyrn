@@ -1,5 +1,4 @@
 // a generic release the kernel places inside a generic release
-// pin: 0 break, 0 continue
 // `Outer<T>`'s release takes `p` and never drops it, so the kernel places
 // `Pair<T>`'s release inside it, and the placer lowers a second time to
 // build that instance. Main's binary leaked `p` here (the m7-slotrel record).

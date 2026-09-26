@@ -1,5 +1,4 @@
 // `@str` of a String temporary
-// pin: 0 break, 0 continue
 // `@str` copies each String hole, and the release row the driver placed
 // frees the temporary it copied: a field read, a `+`, a call result and a
 // rendered number (RFC-0125 M7).

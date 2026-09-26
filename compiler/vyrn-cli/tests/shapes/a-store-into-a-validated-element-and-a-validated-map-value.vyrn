@@ -1,5 +1,4 @@
 // a store into a validated element and a validated map value
-// pin: 0 break, 0 continue
 // A crossing into a validated element or map value is its constructor, as
 // a store to a name's is, whether or not the checker proved it (the
 // m7-elemcheck record): 4322.

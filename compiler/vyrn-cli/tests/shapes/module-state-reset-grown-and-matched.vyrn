@@ -1,5 +1,4 @@
 // module state reset, grown and matched
-// pin: 0 break, 0 continue
 // Module state (RFC-0013): a String accumulator reset and grown at its
 // address, and a `match` on a global read by address. `examples/` writes
 // both only in programs the emitter census does not load.

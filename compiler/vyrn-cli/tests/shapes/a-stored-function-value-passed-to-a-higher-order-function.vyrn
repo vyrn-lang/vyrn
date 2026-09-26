@@ -1,5 +1,4 @@
 // a stored function value passed to a higher-order function
-// pin: 0 break, 0 continue
 // A local, a field and a call's result of `fn` type bind a `fn` parameter to
 // the signature's dispatcher, with the value as its one capture (RFC-0037,
 // RFC-0125 M7, `m7-fnval2`). A body that passes such a parameter on

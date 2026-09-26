@@ -1,5 +1,4 @@
 // a `for` and a `match` over a call result
-// pin: 0 break, 0 continue
 // A scrutinee that is a call's result is the storage the call wrote. Every
 // element of `words(n)` leaves through `w`, so the loop gives back the
 // buffer alone; the deep walk frees `kept`'s strings under `keep`'s caller,

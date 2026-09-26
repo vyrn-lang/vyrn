@@ -1,5 +1,4 @@
 // a lambda that captures a shadowing name after the outer one moved
-// pin: 0 break, 0 continue
 // The outer `x` is consumed before the inner `x` is captured. The capture is
 // the inner binding's, so the kernel accepts the body (#483). Both walks
 // print 25 with no leak line (RFC-0125 M7, `m7-captures`).

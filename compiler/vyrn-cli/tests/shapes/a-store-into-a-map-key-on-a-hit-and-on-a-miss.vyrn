@@ -1,3 +1,2 @@
 // a store into a map key, on a hit and on a miss
-// pin: 0 break, 0 continue
 type P = { x: Int64, s: String }          fn mkp(x: Int64) -> P { return P { x: x, s: x.toString() + "p" } }          fn names() -> Map<String, String> { let mut m: Map<String, String> = [:] return m }          fn counts() -> Map<Int64, Int64> { let mut m: Map<Int64, Int64> = [:] return m }          fn recs() -> Map<String, P> { let mut m: Map<String, P> = [:] return m }          fn vyrnTestMain() -> Int64 { let mut m = names() let mut c = counts() let mut r = recs()          let mut i = 0 while i < 4 { m[(i % 2).toString()] = i.toString() + "v" c[i % 3] = i          r["k"] = mkp(i) i = i + 1 } return m.length * 1000 + c.length * 100 + r.length * 10 }

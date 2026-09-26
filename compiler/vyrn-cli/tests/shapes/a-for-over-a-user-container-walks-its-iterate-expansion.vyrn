@@ -1,5 +1,4 @@
 // a for over a user container walks its Iterate expansion
-// pin: 0 break, 0 continue
 // The core states `for x in w` over a type an `impl Iterate` answers for as
 // `project::iterate_loop`'s block, the one the emitters walk, with `nth`
 // inlined each turn in place of an element read of the container

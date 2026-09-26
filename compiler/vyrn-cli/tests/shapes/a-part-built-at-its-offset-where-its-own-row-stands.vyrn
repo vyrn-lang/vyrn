@@ -1,5 +1,4 @@
 // a part built at its offset where its own row stands
-// pin: 0 break, 0 continue
 // A part is written at its offset in the parent's storage where its own
 // row stands, whether a call, a variant or a literal makes it: a record's
 // or a fixed array's, the caller's where the parent is returned, its

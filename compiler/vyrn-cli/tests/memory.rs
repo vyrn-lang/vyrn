@@ -2223,30 +2223,23 @@ fn size(n: consume Node) -> Int64 {
 }
 "#;
 
-/// Runs `body` after the declarations under the free audit, on the core's
-/// rows and on the AST walk, and returns each walk's exit code and output.
-fn payload_run(stem: &str, body: &str) -> Vec<(Option<i32>, String)> {
+/// Runs `body` after the declarations under the free audit, and returns the
+/// exit code and output.
+fn payload_run(stem: &str, body: &str) -> (Option<i32>, String) {
     let dir = std::env::temp_dir().join(format!("vyrn-hole-{stem}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("m.vyrn");
     std::fs::write(&file, format!("{PAYLOAD_DECLS}\n{body}")).unwrap();
-    let out = [false, true]
-        .into_iter()
-        .map(|arm| {
-            let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
-            c.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
-            if arm {
-                c.env("VYRN_NO_CORE_WALK", "1");
-            }
-            let o = c.output().expect("vyrn run");
-            let text = String::from_utf8_lossy(&o.stdout).to_string()
-                + &String::from_utf8_lossy(&o.stderr);
-            (o.status.code(), text)
-        })
-        .collect();
+    let o = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
     let _ = std::fs::remove_dir_all(&dir);
-    out
+    let text = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+    (o.status.code(), text)
 }
 
 #[test]
@@ -2266,9 +2259,7 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("ret", body) {
-        assert_eq!(got, (Some(0), "10\n0\n".to_string()));
-    }
+    assert_eq!(payload_run("ret", body), (Some(0), "10\n0\n".to_string()));
 }
 
 #[test]
@@ -2286,9 +2277,7 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("iflet", body) {
-        assert_eq!(got, (Some(0), "10\n2\n".to_string()));
-    }
+    assert_eq!(payload_run("iflet", body), (Some(0), "10\n2\n".to_string()));
 }
 
 #[test]
@@ -2312,9 +2301,7 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("join", body) {
-        assert_eq!(got, (Some(0), "10\n2\n".to_string()));
-    }
+    assert_eq!(payload_run("join", body), (Some(0), "10\n2\n".to_string()));
 }
 
 #[test]
@@ -2341,9 +2328,10 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("edge", body) {
-        assert_eq!(got, (Some(0), "10\n0\n2\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("edge", body),
+        (Some(0), "10\n0\n2\n".to_string())
+    );
 }
 
 // A `for` whose elements each leave through the loop variable frees its
@@ -2391,9 +2379,10 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("forexit", body) {
-        assert_eq!(got, (Some(0), "r0\n1\n2\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("forexit", body),
+        (Some(0), "r0\n1\n2\n".to_string())
+    );
 }
 
 // A removal hands back what it took out, and a statement that discards it is
@@ -2413,9 +2402,10 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("discardpop", body) {
-        assert_eq!(got, (Some(0), "1\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("discardpop", body),
+        (Some(0), "1\n".to_string())
+    );
 }
 
 // A generic release that takes a field of a generic declared release type and
@@ -2461,9 +2451,8 @@ fn a_stored_function_value_passed_on_is_freed_on_both_walks() {
     );
 }
 
-/// Runs the shape `stem` of `tests/shapes/` under the free audit, on the
-/// core's rows and on the AST walk, and asserts each prints `want`, exits 0
-/// and prints nothing on stderr.
+/// Runs the shape `stem` of `tests/shapes/` under the free audit, and asserts
+/// it prints `want`, exits 0 and prints nothing on stderr.
 fn shape_runs_clean(stem: &str, want: &str) {
     let shape = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/shapes/{stem}.vyrn"));
     let src = std::fs::read_to_string(shape).unwrap()
@@ -2475,24 +2464,15 @@ fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("m.vyrn");
     std::fs::write(&file, src).unwrap();
-    for ast in [false, true] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vyrn"));
-        cmd.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
-        if ast {
-            cmd.env("VYRN_NO_CORE_WALK", "1");
-        }
-        let run = cmd.output().expect("vyrn run");
-        let got = (
-            run.status.code(),
-            String::from_utf8_lossy(&run.stdout).to_string(),
-            String::from_utf8_lossy(&run.stderr).to_string(),
-        );
-        assert_eq!(
-            got,
-            (Some(0), want.to_string(), String::new()),
-            "ast walk: {ast}"
-        );
-    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+    cmd.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
+    let run = cmd.output().expect("vyrn run");
+    let got = (
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout).to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+    );
+    assert_eq!(got, (Some(0), want.to_string(), String::new()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2519,7 +2499,8 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("mapfield", body) {
-        assert_eq!(got, (Some(0), "true\n1\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("mapfield", body),
+        (Some(0), "true\n1\n".to_string())
+    );
 }

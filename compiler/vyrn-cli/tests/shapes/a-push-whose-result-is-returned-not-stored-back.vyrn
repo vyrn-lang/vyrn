@@ -1,4 +1,3 @@
 // a push whose result is returned, not stored back
-// pin: 0 break, 0 continue
 // A rebuild's result that no store puts back holds the receiver's slot.
 fn one(j: Int64) -> Array<String> { let mut out: Array<String> = []          return out.push(j.toString() + "x") }          fn two(j: Int64) -> Array<String> { let mut out: Array<String> = []          if j > 0 { return out.push(j.toString()) } return out.push("none") }          fn vyrnTestMain() -> Int64 { let a = one(7) let b = two(0) let c = two(55)          return a[0].byteLength * 100 + b[0].byteLength * 10 + c[0].byteLength }

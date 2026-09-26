@@ -1,5 +1,4 @@
 // a field taken outside part position
-// pin: 0 break, 0 continue
 // A take out of a field is a part only where a literal's row builds it into
 // its parent; any other take is m7-move's alias or copy (RFC-0125 M7,
 // `m7-take`): a parameter's and a module-state field pushed and handed

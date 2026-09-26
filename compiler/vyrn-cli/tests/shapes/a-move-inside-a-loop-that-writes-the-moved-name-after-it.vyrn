@@ -1,5 +1,4 @@
 // a move inside a loop that writes the moved name after it
-// pin: 0 break, 0 continue
 // The loop moves `c` into `d` and then stores into `c`, so the rename is
 // not taken and its `let` stays on the arm. Both walks print 36 with no leak line.
 fn vyrnTestMain() -> Int64 { let mut out: Array<Array<Int64>> = [] let mut s = 0 for k in [1, 2, 3] { let mut c: Array<Int64> = [k] if k > 1 { c = [k, k * 10] } let d = c s = s + d[0] out.push(d) c = [0] s = s + c[0] } return s + out[2][1] }

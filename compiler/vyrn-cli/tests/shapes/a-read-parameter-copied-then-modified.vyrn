@@ -1,5 +1,4 @@
 // a read parameter copied, then modified
-// pin: 0 break, 0 continue
 // `let mut s = sc.copy()` of a `read` parameter that owns a String and an
 // Array, handed to `modify`, which replaces both. The copy is a fresh owner
 // released at block exit, and the caller's value is untouched (the m7-copy
