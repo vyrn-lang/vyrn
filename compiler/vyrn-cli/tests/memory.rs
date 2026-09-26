@@ -2413,21 +2413,21 @@ fn main() -> Int64 {
 // placer lowers a second time to build it (record `m7-slotrel`). Both walks
 // free the field.
 #[test]
-fn a_generic_release_placed_inside_a_generic_release_is_freed_on_both_walks() {
+fn a_generic_release_placed_inside_a_generic_release_is_freed() {
     shape_runs_clean("a-generic-release-placed-inside-a-generic-release", "6\n");
 }
 
 // A map literal whose values are layouts: a repeated key, a record with a
 // String field, and a nested array (record `m7-fieldmap`).
 #[test]
-fn a_map_literal_of_layout_values_is_freed_on_both_walks() {
+fn a_map_literal_of_layout_values_is_freed() {
     shape_runs_clean("a-map-literal-of-layout-values-the-rows-carry", "720323\n");
 }
 
 // A record and an enum as a map's key, stored over and looked up
 // (record `m7-mapkey2`).
 #[test]
-fn a_map_keyed_by_a_record_or_an_enum_is_freed_on_both_walks() {
+fn a_map_keyed_by_a_record_or_an_enum_is_freed() {
     shape_runs_clean(
         "a-map-keyed-by-a-record-or-an-enum-the-rows-carry",
         "622327\n",
@@ -2437,14 +2437,14 @@ fn a_map_keyed_by_a_record_or_an_enum_is_freed_on_both_walks() {
 // A record and an enum key with String values, released and copied. The
 // release freed the packed key bytes as String pointers and trapped (#508).
 #[test]
-fn a_map_of_a_packed_key_and_a_string_value_is_freed_on_both_walks() {
+fn a_map_of_a_packed_key_and_a_string_value_is_freed() {
     shape_runs_clean("a-map-of-a-packed-key-and-a-string-value", "22321\n");
 }
 
 // A stored function value passed to a higher-order function, and passed on
 // (record `m7-fnval2`).
 #[test]
-fn a_stored_function_value_passed_on_is_freed_on_both_walks() {
+fn a_stored_function_value_passed_on_is_freed() {
     shape_runs_clean(
         "a-stored-function-value-passed-to-a-higher-order-function",
         "0\n4\n321353\n",
