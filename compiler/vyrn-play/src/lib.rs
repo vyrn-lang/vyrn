@@ -297,6 +297,10 @@ fn check_json(src: &str) -> String {
 /// `check` reports warnings continuously, and a run does not change what the
 /// checker said.
 fn compile_result(src: &str) -> Vec<u8> {
+    // The load and the backend must walk one expansion of each desugared site
+    // (`schemaOf<T>()`, a user container's `a[i]`), or the core's rows, keyed
+    // by the load's nodes, miss the backend's.
+    let _memo = vyrn_frontend::project::Memo::open();
     let (result, _warnings) = load(src);
     let program = match result {
         Ok(p) => p,
