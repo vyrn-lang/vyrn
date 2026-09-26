@@ -205,8 +205,8 @@ fn sections() -> Vec<Section> {
         sec(
             "fn loop_buffer_only(&self, node: usize) -> bool {",
             Mapping, Core,
-            "the readers of the core's rows on `Cx`: the loop buffer, the edges \
-             and the argument drop. This IS \"the emitter reads the core\"",
+            "the reader of the core's loop-buffer fact on `Cx`. This IS \"the \
+             emitter reads the core\"",
         ),
         sec(
             "fn sub(&self, ty: &Type) -> Type {",
@@ -281,16 +281,12 @@ fn sections() -> Vec<Section> {
              the value a `return` leaves",
         ),
         sec(
-            "fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {",
-            Mapping, Neither,
-            "a block: its statements, then the releases the core placed at its \
-             brace",
-        ),
-        sec(
-            "fn emit_releases(",
-            Mapping, Neither,
-            "the core's drop rows at an exit become calls, in the order the core \
-             placed them — §2.3's \"`drop` to a call\"",
+            "fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {",
+            Mapping, Core,
+            "a release a core row names becomes calls: the place and the `Rel` \
+             it was registered with, and a loop buffer's elements left alone \
+             where the core says the loop owns the buffer only — §2.3's \
+             \"`drop` to a call\"",
         ),
         sec(
             "fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {",
@@ -312,12 +308,6 @@ fn sections() -> Vec<Section> {
             "fn lookup(&self, name: &str, line: usize) -> Result<(Place, Type), String> {",
             Shared, Neither,
             "a name's place: the scope stack, then module state",
-        ),
-        sec(
-            "fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {",
-            Mapping, Neither,
-            "one statement from the core's rows, or the refusal of one the core \
-             does not state",
         ),
         sec(
             "fn place_for(&mut self, b: &mut Frame, r: &Repr, line: usize) -> Result<Place, String> {",
@@ -687,7 +677,7 @@ fn rows(lines: &[String], a: usize, b: usize) -> usize {
         "discarded_row",
         "loop_gives_back",
         "arg_drop_row",
-        "edge_rows",
+        "loop_buffer_only",
         "arm_row",
         "owns_scrutinee",
         "frees_boxes",

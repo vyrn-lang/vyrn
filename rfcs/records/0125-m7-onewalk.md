@@ -1,0 +1,12 @@
+# A body is taken whole or refused by name (2026-09-26, `m7-atrhs`)
+RFC-0125, milestone M7, after the AST walk's deletion.
+Decision: the lead's. The deletion kept `Fn_::block` and `Fn_::core_took`, the per-statement path, for bodies the screen did not take whole. This deletes it and every item only it reached. `lower_body` refuses any other body as "the body of `<owner>` the core did not state", at the function's line.
+Count first, on `origin/m7-delete` `5fac9c8c`, with a tally at the per-statement branch. The runs: the CLI suite, `kernel`, `effects`, `typed`, `coretables`, `wasmhash` and `coredrive`; `vyrn check` of every root under `examples/` and `site/` with a fresh `VYRN_GEN_CACHE_DIR` each (301 generator modules); and `vyrn test` of the 91 roots with tests. 6 bodies reached the path and all 6 were refused: 5 bench bodies `__vyrn_body_0` (the blackBox port) and `uiPgData__from0` in `vyrn routes` (the lamval port). None was taken. On `0cb6cfa4` both ports have landed, and the CLI suite passes whole.
+Went: `Fn_::block`, `Fn_::stmt`, `Fn_::core_took`, `Fn_::core_run`, `Fn_::core_arm_ty`, `Fn_::emit_releases`, `Fn_::rel_floor`, `Cx::edge_rows`, `CORE_EXITS` and `core_head`. The fields `core_at`, `core_bound`, `rel_pending`, `cursors`, `rel_seq`, `RelSlot::seq` and `Body::Value`'s expression; an exit kind on each held release row. In `vyrn-lower`: `core::Body::rows_by_statement`, `rows_in` and `node_of`. Stayed: `Fn_::scope`, from which `Fn_::lookup` still answers a parameter and module state.
+Lines: `direct.rs` 17,901 to 17,293. `core.rs` 10,556 to 10,420. `emitter_census.rs` 877 to 867. Refusals: 0 lost / 0 gained. Manifest: untouched.
+Licence, base `origin/m7-delete` `0cb6cfa4`:
+- CLI suite with the manifest check: 684/684. The pins `emitter-census`, `emitter-reads`, `forms` and `surface` are re-pinned. The census drops its `block`, `emit_releases` and `stmt` sections, starts a Core section at `fn register_rel(`, and names `loop_buffer_only` where it named `edge_rows`.
+- `kernel`, `effects`, `typed`, `coretables`, `wasmhash`: 6/6.
+- `coredrive`, unsharded, alone, with the manifest check: 36,058 of 36,058, pass.
+- `check-corpus.sh`, base against tip, each with a fresh `VYRN_GEN_CACHE_DIR`: `diff -r` empty; 560 roots, 477 accepted, 83 refused.
+Time: about 150 minutes: 20 the count, 40 the deletion in four dead-code rounds, 20 redoing it on `0cb6cfa4`, 70 gates on two bases.
