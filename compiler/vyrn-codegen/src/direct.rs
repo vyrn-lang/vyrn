@@ -2451,10 +2451,26 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
 fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
+    // The core's module-state body ([`vyrn_lower::core::build_module_state`])
+    // stores each initializer's value and states no check, so a global whose
+    // type validates stays on the arm, where the store checks it.
+    let from_core = vyrn_lower::core::body_of("")
+        .filter(|_| !core_walk_off())
+        .filter(|_| (program.globals.iter()).all(|g| !f.checks(&cx.globals[&g.name].1)))
+        .filter(|core| {
+            f.core_enter(core);
+            f.core = Some(std::rc::Rc::new(core.clone()));
+            f.core_walkable(core, None)
+        });
+    if let Some(core) = &from_core {
+        f.core_body(m, &mut b, core)?;
+    }
     for g in &program.globals {
         let (place, ty) = cx.globals[&g.name].clone();
         let r = cx.repr(&ty, g.line)?;
-        f.store_into(m, &mut b, place, &r, &g.init, &ty, false)?;
+        if from_core.is_none() {
+            f.store_into(m, &mut b, place, &r, &g.init, &ty, false)?;
+        }
         // The accumulator's ownership word starts true for every initializer but a
         // literal, which is data-segment storage nothing allocated. Getting this
         // wrong one way abandons the initializer's buffer at the first append; the
@@ -2604,20 +2620,7 @@ fn lower_body(
         core_bound: None,
     };
     if let Some(core) = cx_fn.core.clone() {
-        cx_fn.core_at = core.rows_by_statement();
-        cx_fn.core_w = Walked {
-            at: vec![None; core.names.len()],
-            reads: core.reads(),
-            occurs: core.occurrences(),
-            slot: vec![None; core.names.len()],
-            held: None,
-            landed: None,
-            walks: vec![None; core.names.len()],
-            built: vec![None; core.names.len()],
-            bufs: vec![None; core.names.len()],
-            over: Vec::new(),
-            pulled: vec![None; core.names.len()],
-        };
+        cx_fn.core_enter(&core);
     }
 
     // By-value parameter semantics: an aggregate arrives as the caller's
@@ -17543,6 +17546,25 @@ impl<'p> Fn_<'_, 'p> {
     /// body. What that leaves out is the ranked list in §3 M3 and not a
     /// judgement of this walk's: each form it stands down at names the row the
     /// core still lacks.
+    /// Hold `core`'s rows by statement and a place table for its names, so
+    /// either walk may read it.
+    fn core_enter(&mut self, core: &vyrn_lower::core::Body) {
+        self.core_at = core.rows_by_statement();
+        self.core_w = Walked {
+            at: vec![None; core.names.len()],
+            reads: core.reads(),
+            occurs: core.occurrences(),
+            slot: vec![None; core.names.len()],
+            held: None,
+            landed: None,
+            walks: vec![None; core.names.len()],
+            built: vec![None; core.names.len()],
+            bufs: vec![None; core.names.len()],
+            over: Vec::new(),
+            pulled: vec![None; core.names.len()],
+        };
+    }
+
     fn core_body(
         &mut self,
         m: &mut Module,
