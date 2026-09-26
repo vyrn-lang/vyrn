@@ -1,0 +1,8 @@
+// a stored function value passed to a higher-order function
+// pin: 0 break, 0 continue
+// A local, a field and a call's result of `fn` type bind a `fn` parameter to
+// the signature's dispatcher, with the value as its one capture (RFC-0037,
+// RFC-0125 M7, `m7-fnval2`). A body that passes such a parameter on
+// forwards it, and the caller's argument is not read there as its own
+// (#526). The arguments run left to right.
+type Holder = { f: fn(Int64) -> Int64 }          fn apply(g: fn(Int64) -> Int64, v: Int64) -> Int64 { return g(v) }          fn twice(g: fn(Int64) -> Int64, v: Int64) -> Int64 { return apply(g, apply(g, v)) }          fn callWith<P, T>(run: fn(P) -> T, p: P) -> T { return run(p) }          fn scale(by: Int64) -> fn(Int64) -> Int64 { let g: fn(Int64) -> Int64 = n -> n * by return g }          fn side(k: Int64) -> Int64 { print(k) return k }          fn pick() -> fn(Int64) -> Int64 { print(0) return scale(3) }          fn label(n: Int64) -> String { return "n=\{n}" }          fn vyrnTestMain() -> Int64 { let bump: fn(Int64) -> Int64 = k -> k + 1 let h = Holder { f: scale(5) } let a = apply(bump, 2) let b = apply(h.f, 3) let c = apply(pick(), side(4)) let d = twice(scale(2), 5) let s = callWith(label, 7) return a + b * 10 + c * 100 + d * 1000 + s.byteLength * 100000 }
