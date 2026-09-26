@@ -2747,6 +2747,9 @@ fn lower_body(
     // core's rows carry the whole body, its statements are what this walks;
     // everywhere else the AST dispatch below is what it always was, and it
     // asks the core again at every statement ([`Fn_::core_took`]).
+    if let Some(core) = cx_fn.core.clone().filter(|_| !core_walk_off()) {
+        cx_fn.core_lift_targets(m, &core.stmts);
+    }
     let from_core = cx_fn
         .core
         .clone()
@@ -9755,7 +9758,7 @@ impl<'p> Fn_<'_, 'p> {
             line,
         };
         match arg {
-            Expr::Lambda { line, .. } => self.lift_lambda(m, arg, ptys, expected_ret, *line),
+            Expr::Lambda { line, .. } => self.lift_lambda(m, arg, ptys, expected_ret, None, *line),
             Expr::Var { name, .. } => {
                 // A pass-through `fn`-typed parameter: forward the target AND the
                 // captures, which are this instance's own capture parameters. The
@@ -9952,6 +9955,7 @@ impl<'p> Fn_<'_, 'p> {
         at: &Expr,
         ptys: &[Type],
         expected_ret: &Type,
+        caps: Option<&[(String, Type)]>,
         line: usize,
     ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
         // The key below is the literal's address. A literal the program does
@@ -9975,13 +9979,25 @@ impl<'p> Fn_<'_, 'p> {
         // because a capture list is part of the lifted function's signature and two
         // backends disagreeing about its length would emit calls with the wrong
         // number of arguments.
-        let cap_names = vyrn_lower::core::lambda_captures(
-            body,
-            params.iter().map(|p| p.name.clone()).collect(),
-            &|n| self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n),
-        );
-        let mut cap_tys = Vec::new();
-        for cn in &cap_names {
+        //
+        // A literal lifted from a core row takes the captures the row names,
+        // which the same walk computed where the literal stands: the frame
+        // lifts it before its first statement, where no capture is in scope.
+        let (cap_names, mut cap_tys) = match caps {
+            Some(c) => (
+                c.iter().map(|(n, _)| n.clone()).collect(),
+                c.iter().map(|(_, t)| self.cx.sub(t)).collect(),
+            ),
+            None => (
+                vyrn_lower::core::lambda_captures(
+                    body,
+                    params.iter().map(|p| p.name.clone()).collect(),
+                    &|n| self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n),
+                ),
+                Vec::new(),
+            ),
+        };
+        for cn in cap_names.iter().skip(cap_tys.len()) {
             // A `fn`-typed PARAMETER captured by the lambda has no slot: inside a
             // specialization it lives in `fn_binds`. It is captured as its own
             // `fn` TYPE, so the lifted function takes an ordinary function value
@@ -10331,7 +10347,7 @@ impl<'p> Fn_<'_, 'p> {
         // The expected-type stack must not leak into the lifted body: its own
         // storage boundaries push their own types.
         let saved = std::mem::take(&mut self.expect);
-        let r = self.lift_lambda(m, e, ptys, ret, *line);
+        let r = self.lift_lambda(m, e, ptys, ret, None, *line);
         self.expect = saved;
         r.map(|(target, srcs, _)| (target, srcs))
     }
@@ -17607,7 +17623,6 @@ impl<'p> Fn_<'_, 'p> {
         if core_walk_off() && FORMS[form].1 {
             return Ok(false);
         }
-        self.core_lift_targets(m, s);
         let Some(run) = self.core_run(&body, s) else {
             return Ok(false);
         };
@@ -17623,17 +17638,15 @@ impl<'p> Fn_<'_, 'p> {
         r.map(|()| true)
     }
 
-    /// Lift each lambda literal a call row of `s` names as a target, at the
-    /// callee's `fn` parameter type, so the screen finds its signature
+    /// Lift each lambda literal a call row of `rows` names as a target, at
+    /// the callee's `fn` parameter type, so the screen finds its signature
     /// ([`Cx::lambda_sig`]). The arm lifts the same literal at the same type
-    /// to the same instance, so a statement the screen refuses loses nothing.
-    fn core_lift_targets(&mut self, m: &mut Module, s: &Stmt) {
-        let at = self.cx.plan.key_of(s as *const Stmt as usize);
-        let Some(run) = self.core_at.get(&at).cloned() else {
-            return;
-        };
+    /// to the same instance, so rows the screen refuses lose nothing.
+    /// [`lower_body`] asks it once, of the body's rows, before either screen:
+    /// every statement's run is a part of them.
+    fn core_lift_targets(&mut self, m: &mut Module, rows: &[St]) {
         let mut calls = Vec::new();
-        for r in &run {
+        for r in rows {
             core_leaf_rows(r, &mut |x| {
                 if let St::Let(_, rhs) | St::Do { rhs, .. } = x {
                     if let Rhs::Call {
@@ -17661,7 +17674,9 @@ impl<'p> Fn_<'_, 'p> {
                 _ => None,
             });
             for ((ptys, ret), t) in fns.zip(&targets) {
-                let Target::Lambda(key, _) = t else { continue };
+                let Target::Lambda(key, caps) = t else {
+                    continue;
+                };
                 if self.cx.lambda_sig(key).is_some() {
                     continue;
                 }
@@ -17673,7 +17688,7 @@ impl<'p> Fn_<'_, 'p> {
                     .collect();
                 let ret = ftypes::substitute(ret, &subst);
                 let saved = std::mem::take(&mut self.expect);
-                let _ = self.lift_lambda(m, lit, &ptys, &ret, lit.line());
+                let _ = self.lift_lambda(m, lit, &ptys, &ret, Some(caps), lit.line());
                 self.expect = saved;
             }
         }
