@@ -257,6 +257,14 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "`@borrow` may not be returned",
         "row 17's other half, a borrow an arm yields",
     ),
+    // A rule the checker never had either: a declared `release` reads every
+    // payload, so a payload binder may not be handed to a `consume` parameter.
+    // `refusals.rs`'s `a_payload_of_a_type_that_declares_release_is_not_handed_on`
+    // writes the program to be refused and asserts the sentence itself.
+    (
+        "may not be handed to a `consume` parameter: ",
+        "m7-hole, a declared release reads every payload",
+    ),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {
