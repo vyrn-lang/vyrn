@@ -3,8 +3,8 @@ RFC-0125, milestone M7.
 Decision: the lead's, to draft the one-piece deletion on `aa63e0e1` before the wide tally reads 0, as a skeleton and a second measure of the finish line.
 Went: the arms of `Fn_::stmt` and `Fn_::expr_inner`, `Fn_::expr`, `expr_as`, `store_into`, `agg_into`, `elem_field_store`, `lambda_value`, every helper only they reached (about 90 functions), `Parts::Ast`, `ArmRef` and `BodyRef`, six dead `Fn_` and `Cx` fields, `FORMS` and its tally, `VYRN_NO_CORE_WALK`, `Fn_::reflected`, coredrive's second walk and run comparison, the `lowered` gate's core-off mode, the memory suite's second walk, and the `// pin:` line of 121 shapes.
 Stayed: `Fn_::block` and `Fn_::core_took`, the per-statement path, because 18 of 32,033 coredrive bodies are emitted statement by statement and not taken whole.
-Lines: direct.rs 22,632 to 17,675. lib.rs 1,771 to 1,732. coredrive.rs 612 to 359. memory.rs 2,515 to 2,496. lowered.rs 1,443 to 1,438. forms census, wasm column: 192 to 44. surface census, wasm column: 517 to 414.
-Refusals: not measured; the tip is red. Manifest: not measured.
+Lines, final: direct.rs 22,793 to 17,947 against main `6232168e` at the integrated tip `cefecb26` (169 files, 980 insertions, 6,189 deletions), and to 17,901 at the merged tip with the closing commits and the serve helper (173 files, 1,244 insertions, 6,526 deletions). The draft on `aa63e0e1`: direct.rs 22,632 to 17,675. lib.rs 1,771 to 1,732. coredrive.rs 612 to 359. memory.rs 2,515 to 2,496. lowered.rs 1,443 to 1,438. forms census, wasm column: 192 to 44. surface census, wasm column: 517 to 414.
+Refusals and manifest, final: the CLI suite reads 684 of 684 at `06a81586`, with every port integrated; the probe's sites are empty.
 Licence: none yet. The skeleton refuses by name where the core states nothing: a statement (`a statement of <owner>`), a lambda body, a module-state initializer, and a dispatcher argument.
 - CLI suite: 424 passed, 257 failed of 681.
 - coredrive: 32,015 of 32,033 bodies taken whole; 90 programs and shapes refused: 70 module-state initializers, 14 dispatchers, 6 statements.
@@ -20,3 +20,4 @@ Findings:
 Test side, after the rebase onto `95d9a531`: emitter_census recut (17 anchors; 11 sections now read neither), the `lowered` gate pins `peek`'s off-program class at 0 in place of the band 48..96, the memory shapes lose `_on_both_walks`, and the 28 links name what stands.
 Left: every site the probe lists, blocked by the core stating it; 45 prose comments in direct.rs that still describe the AST walk as present.
 - Integration on `6232168e`: m7-atrhs, m7-stream (pages and the lowered floors), m7-spec2 and m7-where's commits were cherry-picked onto the draft. Their emitter census pins were re-pinned once at the tip, in one commit, not per commit.
+- Closing commits on `06a81586`: `Facts::copies`, `Facts::unreached`, `Body::unreached`, `NameInfo::copied` and `Fn_::walks` went, because nothing read them after the walk; about 80 comments that described two walks were rewritten or cut.
