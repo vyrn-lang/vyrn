@@ -393,6 +393,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut generics: HashMap<String, &Function> = HashMap::new();
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
+    let mut skipped = std::collections::HashSet::new();
     for f in &program.functions {
         // An `extern` is an import (declared above); a `gen fn` (RFC-0021) runs
         // only in the compiler's own interpreter and may use builtins with no
@@ -407,6 +408,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // a function no run-time entry can reach.
         let entry = f.name == "main" || f.exported || f.is_export_extern;
         if gen_reach.contains(&f.name) && !entry {
+            skipped.insert(f.name.clone());
             continue;
         }
         // PLAN-0125-runtime §3.2: a `std/mem` declaration has no body this
@@ -445,6 +447,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         gen,
         generics,
         higher_order,
+        skipped,
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
         fnvals: RefCell::new(Vec::new()),
@@ -1332,6 +1335,9 @@ struct Cx<'a> {
     /// rather than this file's, which is also how RFC-0043's host boundary is
     /// reached by name.
     externs: HashMap<String, Ext>,
+    /// The functions [`gen_reach`] leaves out of the module. A call to one
+    /// refuses at its own site, naming it.
+    skipped: std::collections::HashSet<String>,
     /// Per function: every release step PLACED — at the exit that runs it, in
     /// the order it runs (RFC-0101 M4). One order for three engines, read at
     /// the exit instead of derived from a frame stack.
@@ -14405,6 +14411,9 @@ impl<'p> Fn_<'_, 'p> {
                     (None, Some((f, targs, subst))) => self.cx.instantiate(m, f, targs, subst)?,
                     (None, None) => match self.core_sig(body, callee, kind, solved, targets) {
                         Some(sig) => sig,
+                        None if self.cx.skipped.contains(callee) => {
+                            return unsupported(&format!("the call `{callee}`"), line);
+                        }
                         None => return unsupported("a core call this walk does not read", line),
                     },
                 };
@@ -16956,6 +16965,7 @@ impl<'p> Fn_<'_, 'p> {
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (self.core_builtin_readable(body, callee, *kind, args)
                             || (*kind == Callee::Fn && self.is_extern(callee))
+                            || (*kind == Callee::Fn && self.cx.skipped.contains(callee))
                             || self.core_named(callee, *kind).is_some()
                             || self.core_mem_ty(callee, args.len()).is_some()
                             || self
@@ -17590,6 +17600,7 @@ mod tests {
             gen: None,
             generics: HashMap::new(),
             higher_order: HashMap::new(),
+            skipped: std::collections::HashSet::new(),
             owned: Default::default(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
