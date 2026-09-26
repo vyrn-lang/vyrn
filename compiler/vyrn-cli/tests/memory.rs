@@ -2441,6 +2441,13 @@ fn a_map_of_a_packed_key_and_a_string_value_is_freed() {
     shape_runs_clean("a-map-of-a-packed-key-and-a-string-value", "22321\n");
 }
 
+// A capturing lambda literal handed to an alias `fn` parameter and to a
+// `consume fn` parameter (record `m7-lamval`).
+#[test]
+fn a_capturing_lambda_handed_on_as_a_value_is_freed() {
+    shape_runs_clean("a-capturing-lambda-handed-to-a-call-as-a-value", "415\n");
+}
+
 // A `consume` parameter of a generic instance and of a higher-order instance,
 // a stored value at a `consume fn` parameter among them (record `m7-lamval`).
 #[test]
