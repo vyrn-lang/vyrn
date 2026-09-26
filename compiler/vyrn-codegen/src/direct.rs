@@ -1101,7 +1101,7 @@ enum Body<'a> {
     /// STATEMENT, and writing one here would mean owning a copy of `e` — which
     /// is exactly the clone this milestone deleted — so the core's rows state
     /// the body, and [`lower_body`] refuses one they do not carry.
-    Value(&'a Expr),
+    Value,
     /// The shell's own statements: a lifted lambda whose literal is not one of
     /// the program's nodes, so [`Cx::lambdas`] cannot hand back a borrow of it
     /// and the synthesized block is all there is to walk. A literal inside a
@@ -1389,22 +1389,6 @@ impl<'a> Cx<'a> {
         self.facts
             .as_ref()
             .is_some_and(|f| f.loop_buffer_only.contains(&self.plan.key_of(node)))
-    }
-
-    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the derivation
-    /// slice): the releases one edge of the join at `node` owes because
-    /// another edge took the name. The core states each as a `St::Drop` at a
-    /// `Site::Edge`, which is the join and the edge — a position in a branch
-    /// is not a key, and this is why the drop carries one. The kernel's
-    /// `equalize` is the one statement of the rule, and `own.rs` states none.
-    fn edge_rows(&self, node: usize) -> Vec<vyrn_lower::core::EdgeRow> {
-        let Some(f) = self.facts.as_ref() else {
-            return Vec::new();
-        };
-        f.edges
-            .get(&self.plan.key_of(node))
-            .cloned()
-            .unwrap_or_default()
     }
 
     /// Substitute the monomorphization this lowering is inside.
@@ -1799,10 +1783,6 @@ fn stream_step_sig(elem: &Type) -> Type {
 struct RelSlot {
     place: Place,
     rel: Rel,
-    /// Registration order. Under a stack discipline the live bindings come off
-    /// in reverse of it, which is the one thing a stream cursor's position still
-    /// needs (see [`Fn_::cursors`]).
-    seq: u32,
 }
 
 /// What a release frame entry reclaims (RFC-0075 M2b added the second one,
@@ -2084,7 +2064,7 @@ struct Fn_<'a, 'p> {
     scratch: HashMap<(ValType, u8), u32>,
     /// What each owned binding of this function is released WITH, keyed by
     /// `own`'s own key — the `Stmt::Let`'s node address, or the construct's for
-    /// a temporary it owns. `seq` is the order it was registered in.
+    /// a temporary it owns.
     ///
     /// **RFC-0101 M4: this is a lookup table, not a plan.** Until the deletion
     /// phase it was one frame per open block, walked from a boundary index —
@@ -2095,49 +2075,9 @@ struct Fn_<'a, 'p> {
     /// lives in and the [`Rel`] that says which instructions reclaim it —
     /// `Rel::Buffers` carries LAYOUT OFFSETS, which is target vocabulary.
     rel_slots: HashMap<usize, RelSlot>,
-    /// Registrations so far, which is what a [`RelSlot::seq`] counts.
-    rel_seq: u32,
-    /// The rows that still name a frame slot, each with the frame top it was
-    /// registered at — the floor below which no statement may give a slot back.
-    ///
-    /// [`Frame::alloc`]'s rule reads "a slot is a statement's unless the
-    /// statement bound a name", and the body walker tested exactly that: the
-    /// scope's length. A NAME is not the only thing that outlives a statement.
-    /// A `for` over an unnamed iterable, an `if let` over a temporary and a
-    /// `match` over one each copy that value into a slot and register a release
-    /// row for it, and WHERE that row runs is the core's answer, not this
-    /// emitter's: for a `for` over an array literal the core says the
-    /// function's exit, because `declared::type_of` names no array literal's
-    /// type and `own` therefore places nothing at the loop's own end. The
-    /// statement bound no name, so the walker gave the slot back, the next
-    /// statement built its own temporary over it, and the two rows at the exit
-    /// released the second statement's value twice — a trap at address -16 in
-    /// `free`, on two `for` loops in one body.
-    ///
-    /// A row leaves this list when it is released on a FALL-THROUGH exit — a
-    /// block's or a construct's own — because the path that carries on is the
-    /// path that no longer holds it. A release at a `return`, a `?`, a `break`
-    /// or a `continue` is on a branch, and the fall-through still holds the
-    /// value, so such a row keeps its floor. Clearing on every release instead
-    /// would give the slot back on a path that still names it; keeping every
-    /// row to the end of the body instead summed a statement's temporaries
-    /// again, and 250 `print(match parseFloat64(..) { .. })` statements in one
-    /// `main` then wanted 10,048 bytes of a frame limited to 8,192.
-    rel_pending: Vec<(usize, u32)>,
     /// RFC-0101 M4: the release steps placed at every exit of this body, keyed
     /// by the node the exit is AT. Read, never derived.
     placed: HashMap<(ExitKind, usize), Vec<(usize, Option<Vec<String>>)>>,
-    /// The stream cursors a `for x in pull()` opened, innermost last, with the
-    /// registration count each was opened at.
-    ///
-    /// **The one step the placement has nothing for** (RFC-0101 M4's phase-2
-    /// gate names it `StreamCursor`): the cursor is not a row of `own`'s map,
-    /// because RFC-0075 M2b closes a stream's producer from the loop that made
-    /// it rather than from a reclamation rule. Only a function exit reaches one
-    /// — a `break` leaves through the loop's own release — and its POSITION in
-    /// such a walk is still frame structure, so a step registered before the
-    /// cursor is a frame outside the loop and the cursor runs first.
-    cursors: Vec<(Place, Type, u32)>,
     /// Lexical `region` nesting depth within this body, so an exit edge knows how
     /// many arena scopes it is leaving. The runtime counter is dynamic (a callee's
     /// region nests inside its caller's); this is only the part one body can see,
@@ -2181,35 +2121,16 @@ struct Fn_<'a, 'p> {
     /// The name the core built this body under, which a lambda it lifts is
     /// keyed under too ([`vyrn_lower::core::lambda_spelling`]).
     core_key: String,
-    /// This frame's own core body, and where each of its names lives — RFC-0125
-    /// §3 M3, the interleave slice.
-    ///
-    /// A body the rows carry whole is walked by [`Fn_::core_body`]; any other
-    /// is walked a statement at a time by [`Fn_::core_took`], into this one
-    /// frame with its locals, its scope and the places below. `None` for a
-    /// frame the core states no body for.
+    /// This frame's own core body, which [`Fn_::core_body`] walks. `None` for
+    /// a frame the core states no body for, which [`lower_body`] refuses.
     core: Option<std::rc::Rc<vyrn_lower::core::Body>>,
-    /// The core's rows for each source statement of this body
-    /// ([`vyrn_lower::core::Body::rows_by_statement`]).
-    core_at: HashMap<usize, Vec<St>>,
     /// The release rows held back for the read an exit hands back — see
     /// [`Fn_::core_releases`].
-    core_rows: Vec<(vyrn_lower::core::Name, Vec<String>, ExitKind)>,
+    core_rows: Vec<(vyrn_lower::core::Name, Vec<String>)>,
     /// Where the core's names live, and what the operand stack is holding.
     /// A name a parameter or a `let` bound is found through [`Fn_::scope`], and
     /// one this walk bound is pushed onto it.
     core_w: Walked,
-    /// The type the reader ANNOTATED the statement this walk is emitting with,
-    /// for the one row that needs it — a made layout (RFC-0125 M7).
-    ///
-    /// The row's type is the VALUE's (`core::Builder::stmt` asks `ty_of`) and
-    /// the arm builds into the annotation's layout, so `let xs: Array<Int64> =
-    /// [1, 2, 3]` writes a heap triple where the row alone says a fixed three.
-    /// Keyed by the statement's own binding, because the run makes other
-    /// layouts too, each at its own type. `None` for an unannotated statement
-    /// and for the per-body walk, which refuses a body that annotates anything
-    /// at all.
-    core_bound: Option<(vyrn_lower::core::Name, Type)>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -2227,10 +2148,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         dest: None,
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
-        rel_seq: 0,
-        rel_pending: Vec::new(),
         placed: HashMap::new(),
-        cursors: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
         arg_frees: Vec::new(),
@@ -2242,10 +2160,8 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         owner: String::new(),
         core_key: String::new(),
         core: None,
-        core_at: HashMap::new(),
         core_rows: Vec::new(),
         core_w: Walked::default(),
-        core_bound: None,
     }
 }
 
@@ -2354,7 +2270,7 @@ fn lower_body(
     let stmts = match body {
         Body::Block(b) => Some(b),
         Body::Shell => Some(&f.body),
-        Body::Value(_) => None,
+        Body::Value => None,
     };
     let sig = sig.clone();
     let (params, results) = cx.wasm_sig(&sig, f.line)?;
@@ -2384,8 +2300,6 @@ fn lower_body(
         dest,
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
-        rel_seq: 0,
-        rel_pending: Vec::new(),
         // RFC-0101 M4: the order this body releases in, decided once in
         // `own::place_body` and read here.
         placed: cx
@@ -2393,7 +2307,6 @@ fn lower_body(
             .get(&owner)
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
-        cursors: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
         arg_frees: Vec::new(),
@@ -2405,10 +2318,8 @@ fn lower_body(
         owner,
         core_key: key.to_string(),
         core,
-        core_at: HashMap::new(),
         core_rows: Vec::new(),
         core_w: Walked::default(),
-        core_bound: None,
     };
     if let Some(core) = cx_fn.core.clone() {
         cx_fn.core_enter(&core);
@@ -2485,7 +2396,7 @@ fn lower_body(
             let key = cx.declared_param(f, name, p) as *const vyrn_frontend::ast::Param as usize;
             if cx_fn.releases_whole(key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
-                    cx_fn.register_rel(&b, key, place, r);
+                    cx_fn.register_rel(key, place, r);
                 }
             }
         }
@@ -2537,10 +2448,9 @@ fn lower_body(
     // obeys that: the first cut returned from inside and leaked the frame.
     b.ins(&Instruction::Block(BlockType::Empty));
     cx_fn.depth += 1;
-    // RFC-0125 §2.3: "the emitter reads the core and writes wasm". Where the
-    // core's rows carry the whole body, its statements are what this walks;
-    // everywhere else the core is asked at every statement
-    // ([`Fn_::core_took`]), and a statement it does not carry is refused.
+    // RFC-0125 §2.3: "the emitter reads the core and writes wasm". A body
+    // whose rows the screen reads whole is walked from them; any other body is
+    // refused by name.
     if let Some(core) = cx_fn.core.clone() {
         cx_fn.core_lift_targets(m, &core.stmts);
     }
@@ -2552,20 +2462,11 @@ fn lower_body(
         let (from, all) = w.get();
         w.set((from + usize::from(from_core.is_some()), all + 1));
     });
-    match (from_core, stmts) {
-        (Some(core), _) => cx_fn.core_body(m, &mut b, &core)?,
-        (None, Some(blk)) => cx_fn.block(m, &mut b, blk)?,
-        (None, None) => match body {
-            Body::Value(e) => {
-                let what = format!(
-                    "the lambda body in `{}` the core did not state",
-                    cx_fn.owner
-                );
-                return unsupported(&what, e.line());
-            }
-            _ => unreachable!("only a lambda's expression has no statements"),
-        },
-    }
+    let Some(core) = from_core else {
+        let what = format!("the body of `{}` the core did not state", cx_fn.owner);
+        return unsupported(&what, f.line);
+    };
+    cx_fn.core_body(m, &mut b, &core)?;
     // A lowering that reaches an argument node outside [`Fn_::call`] would leave
     // its local here. Nothing in the corpus does; if anything ever did, the local
     // is simply never read, which is a leak rather than a free of a value still
@@ -3153,121 +3054,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.free));
     }
 
-    fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
-        let mark = self.scope.len();
-        let mut k = 0;
-        while k < blk.stmts.len() {
-            // RFC-0125 M1: a statement's temporaries are its own. A statement
-            // that bound nothing at this level gives its slots back (the rule
-            // on `Frame::alloc`); one that did — a `let`, a refutable `let` —
-            // keeps everything it took, binding and temporaries alike, because
-            // the cheap test is the scope's length and not which slot is which.
-            //
-            // A NAME is not the only thing that outlives a statement:
-            // [`Fn_::rel_pending`] is the floor the release rows that still
-            // name a slot raise, and the reset stops there.
-            let (frame, scope) = (b.mark(), self.scope.len());
-            self.stmt(m, b, &blk.stmts[k])?;
-            if self.scope.len() == scope {
-                b.reset(frame.max(self.rel_floor()));
-            }
-            k += 1;
-        }
-        // The fall-through exit. An early `return`/`break`/`continue` releases the
-        // same frames before its branch, so this runs after a branch only in code
-        // wasm has already marked unreachable.
-        self.emit_releases(m, b, ExitKind::Block, blk as *const Block as usize)?;
-        self.scope.truncate(mark);
-        Ok(())
-    }
-
-    /// Emit the releases the lowering PLACED at one exit — RFC-0101 M4.
-    ///
-    /// **This is the whole of the consumption.** What it replaced was a walk
-    /// over `self.releases[boundary..]`, from an index this engine derived for
-    /// itself, asserting an order the other two engines asserted separately
-    /// (§1.4). The order is `own::place_body`'s now; this is a lookup and an
-    /// encode.
-    ///
-    /// Nothing is popped, and that is still what makes an early exit safe: the
-    /// enclosing [`Fn_::block`] still emits its own copy, which lands after the
-    /// branch and is therefore unreachable rather than a second release.
-    fn emit_releases(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        exit: ExitKind,
-        at: usize,
-    ) -> Result<(), String> {
-        let steps = self.placed.get(&(exit, at)).cloned().unwrap_or_default();
-        // Only a function exit reaches a stream cursor — see [`Fn_::cursors`].
-        let mut cursors = match exit {
-            ExitKind::Return | ExitKind::Try => self.cursors.clone(),
-            _ => Vec::new(),
-        };
-        // A FALL-THROUGH exit ends what the row holds on the path that carries
-        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
-        // A `return`, a `?`, a `break` or a `continue` releases on a BRANCH and
-        // leaves the fall-through holding the value, so the floor stands.
-        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
-            self.rel_pending
-                .retain(|(k, _)| !steps.iter().any(|(step, _)| step == k));
-        }
-        let mut run: Vec<(Place, Rel)> = Vec::new();
-        for (step, holes) in steps {
-            let Some(r) = self.rel_slots.get(&step) else {
-                continue;
-            };
-            let (place, mut rel, seq) = (r.place, r.rel.clone(), r.seq);
-            // A row that carries its own hole set walks around exactly
-            // those: round fifty-two's pre-take exit walks the WHOLE value
-            // (the empty set), and the placer's row walks the rest of what
-            // the kernel saw taken at this exit (RFC-0125 M3). The textual
-            // backend's twin.
-            if let Some(h) = holes {
-                if let Rel::Deep(ty, _) = rel {
-                    rel = Rel::Deep(ty, h);
-                }
-            }
-            while cursors.last().is_some_and(|(_, _, at)| *at > seq) {
-                let (p, elem, _) = cursors.pop().unwrap();
-                run.push((p, Rel::Stream(elem)));
-            }
-            run.push((place, rel));
-        }
-        for (p, elem, _) in cursors.into_iter().rev() {
-            run.push((p, Rel::Stream(elem)));
-        }
-        for (p, k) in run {
-            self.emit_rel(m, b, p, &k, 0)?;
-        }
-        Ok(())
-    }
-
-    /// The floor the rows that still name a frame slot hold — see
-    /// [`Fn_::rel_pending`].
-    fn rel_floor(&self) -> u32 {
-        self.rel_pending
-            .iter()
-            .map(|(_, at)| *at)
-            .max()
-            .unwrap_or(0)
-    }
-
     /// Say what one owned binding is released WITH. The placement already said
     /// where and in what order.
-    fn register_rel(&mut self, b: &Frame, key: usize, place: Place, rel: Rel) {
-        let seq = self.rel_seq;
-        self.rel_seq += 1;
-        // The row names this slot until the exit the core placed it at, which
-        // may be past the statement that made it. So the statement cannot give
-        // the slot back: [`Fn_::rel_pending`] states the floor once, here, for
-        // every construct that registers one.
-        if matches!(place, Place::Slot(_)) {
-            self.rel_pending.retain(|(k, _)| *k != key);
-            self.rel_pending.push((key, b.mark()));
-        }
-        self.rel_slots.insert(key, RelSlot { place, rel, seq });
+    fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {
+        self.rel_slots.insert(key, RelSlot { place, rel });
     }
 
     /// Reclaim one binding, whichever of the four shapes it is.
@@ -4576,15 +4366,6 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     // -- statements ---------------------------------------------------------
-
-    /// Lower one statement from the core's rows (RFC-0125 §2.3).
-    fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {
-        if self.core_took(m, b, s)? {
-            return Ok(());
-        }
-        let what = format!("a statement of `{}` the core did not state", self.owner);
-        unsupported(&what, s.line())
-    }
 
     /// Where a new binding of representation `r` lives.
     fn place_for(&mut self, b: &mut Frame, r: &Repr, line: usize) -> Result<Place, String> {
@@ -6713,7 +6494,7 @@ impl<'p> Fn_<'_, 'p> {
         // carries it exactly as before.
         let queued = match self.lambda(at) {
             Some(LambdaBody::Block(b)) => Body::Block(b),
-            Some(LambdaBody::Expr(e)) => Body::Value(e),
+            Some(LambdaBody::Expr(_)) => Body::Value,
             None => Body::Shell,
         };
         let mut sf = f_shell(line);
@@ -12381,8 +12162,8 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         body: &vyrn_lower::core::Body,
     ) -> Result<(), String> {
-        for (name, holes, exit) in std::mem::take(&mut self.core_rows) {
-            self.core_release(m, b, body, name, &holes, exit)?;
+        for (name, holes) in std::mem::take(&mut self.core_rows) {
+            self.core_release(m, b, body, name, &holes)?;
         }
         Ok(())
     }
@@ -12392,8 +12173,6 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// The row is the whole of the answer: the name, whose binding is the node
     /// the plan keys the slot by, and the holes the walk goes around.
-    /// [`Fn_::emit_releases`] asks `own::placed` the same question by exit and
-    /// node.
     ///
     /// A name with no slot releases nothing: the walk registers one for every
     /// layout it makes, and a body it takes holds no other value that owns
@@ -12405,7 +12184,6 @@ impl<'p> Fn_<'_, 'p> {
         body: &vyrn_lower::core::Body,
         name: vyrn_lower::core::Name,
         holes: &[String],
-        exit: ExitKind,
     ) -> Result<(), String> {
         let Some(step) = body.names[name as usize].binding else {
             return unsupported("a release row whose binding the plan does not key", 0);
@@ -12414,11 +12192,6 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(());
         };
         let (place, rel) = (r.place, around(r.rel.clone(), holes));
-        // A FALL-THROUGH exit ends what the row holds on the path that carries
-        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
-        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
-            self.rel_pending.retain(|(k, _)| *k != step);
-        }
         self.emit_rel(m, b, place, &rel, 0)
     }
 
@@ -12451,9 +12224,6 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(());
         };
         let rel = around(rel, body.drop_holes(n, holes));
-        if let Some(step) = info.binding {
-            self.rel_pending.retain(|(k, _)| *k != step);
-        }
         self.emit_rel(m, b, place, &rel, line)
     }
 
@@ -12569,7 +12339,7 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     _ => self.bind_payload(b, addr, &sl, &ptys, i, &ty, line, free_box)?,
                 };
-                self.core_bind(b, body, w, *bn, at, ty)?;
+                self.core_bind(body, w, *bn, at, ty)?;
             }
             let to = b.mark();
             self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
@@ -12597,7 +12367,6 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// Hold `core`'s rows by statement and a place table for its names.
     fn core_enter(&mut self, core: &vyrn_lower::core::Body) {
-        self.core_at = core.rows_by_statement();
         self.core_w = Walked {
             at: vec![None; core.names.len()],
             reads: core.reads(),
@@ -12625,7 +12394,7 @@ impl<'p> Fn_<'_, 'p> {
     /// checker's, carried on [`vyrn_lower::core::NameInfo`].
     ///
     /// It runs only where [`Fn_::core_walkable`] says the rows carry the whole
-    /// body. Any other body goes a statement at a time ([`Fn_::core_took`]).
+    /// body; [`lower_body`] refuses any other.
     fn core_body(
         &mut self,
         m: &mut Module,
@@ -12636,34 +12405,6 @@ impl<'p> Fn_<'_, 'p> {
         let r = self.core_stmts(m, b, body, &mut w, &body.stmts);
         self.core_w = w;
         r
-    }
-
-    /// One SOURCE statement, emitted from the core's rows where they carry it —
-    /// RFC-0125 §3 M3, the interleave slice.
-    ///
-    /// This is [`Fn_::core_body`]'s walk asked one statement at a time, into
-    /// the same frame with the same locals and the same scope, for a body the
-    /// rows do not carry whole.
-    ///
-    /// Returns whether the statement was emitted. The screen
-    /// ([`Fn_::core_run`]) stands before the first instruction, so on a
-    /// `false` nothing was emitted and [`Fn_::stmt`] refuses the statement.
-    fn core_took(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<bool, String> {
-        let Some(body) = self.core.clone() else {
-            return Ok(false);
-        };
-        let Some(run) = self.core_run(&body, s) else {
-            return Ok(false);
-        };
-        self.core_bound = match (s, core_head(&run)) {
-            (Stmt::Let { ty: Some(t), .. }, Some(St::Let(n, _))) => Some((*n, t.clone())),
-            _ => None,
-        };
-        let mut w = std::mem::take(&mut self.core_w);
-        let r = self.core_stmts(m, b, &body, &mut w, &run);
-        self.core_w = w;
-        self.core_bound = None;
-        r.map(|()| true)
     }
 
     /// Lift each lambda literal a call row of `rows` names as a target, at
@@ -12722,284 +12463,6 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// The core's rows for one source statement, where this walk reads all of
-    /// them — RFC-0125 §3 M3, the interleave slice's screen.
-    ///
-    /// Three clauses, and each one is a line of the record. The FRAME clause: a
-    /// placed release and an aggregate destination are emissions the rows do
-    /// not carry. The PLACE clause, per statement rather than per body: a name
-    /// the run reads, or a `let` binds, has a place whose type is its type,
-    /// whatever that type is. The STATEMENT screen:
-    /// [`Fn_::core_readable`], unchanged.
-    fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
-        // A node is an ADDRESS, and `project::iterate_loop`'s copy of a loop
-        // body gives a statement a second one. `key_of` is the mapping back,
-        // and ten other readers of the plan in this file ask through it.
-        let at = self.cx.plan.key_of(s as *const Stmt as usize);
-        // A `region`'s row names its block, which is not the statement.
-        let run = match s {
-            Stmt::Region { body, .. } => self
-                .core_at
-                .get(&self.cx.plan.key_of(body as *const Block as usize))?,
-            _ => self.core_at.get(&at)?,
-        };
-        // THE FRAME CLAUSE, per statement. It was per BODY until the release
-        // half of it moved here, and then it refused any statement the
-        // placement keyed a release AT — 8,362 of them per body, and the `if`s
-        // of every frame that placed one. Since the release slice it names the
-        // three exits this walk gives back at itself: a `break`, a `continue`
-        // and a `return` each run [`Fn_::emit_releases`], keyed by the row's
-        // own site. A block's fall-through release and a scrutinee's are what
-        // [`Fn_::core_readable`] refuses, so no run reaches this walk holding
-        // one.
-        if self
-            .placed
-            .keys()
-            .any(|(kind, node)| *node == at && !CORE_EXITS.contains(kind))
-        {
-            return None;
-        }
-        // A stream cursor is a release at a function exit that no plan row
-        // names, so it belongs to a `return` and to nothing else:
-        // `streamlazy.vyrn` lost 51 bytes of a cursor when the rows took its
-        // `return`. The clause is about the RUN rather than about the form,
-        // because a subtree carries the `return` of every branch under it.
-        if !self.cursors.is_empty() && run.iter().any(core_returns) {
-            return None;
-        }
-        // A stream handed to a call is the callee's to close, where the arm
-        // hands it on, and the core states its release after the call. Streams
-        // wait for the runtime in Vyrn.
-        if run.iter().any(|r| {
-            matches!(r, St::Drop(n, ..) if matches!(body.names[*n as usize].ty, Type::Stream(_)))
-        }) {
-            return None;
-        }
-        // A result checked where a `return` of the run hands it back, under a
-        // branch or at the run's end, is a check the row does not state
-        // (RFC-0079).
-        //
-        // A place argument is a move-out window's call ([`Arg`]), whose `let`
-        // and put-back are source statements with no rows: the arm would emit
-        // them around the call, and the put-back would undo it.
-        let mut released = Vec::new();
-        let (mut returns, mut windowed) = (false, false);
-        for r in run {
-            core_leaf_rows(r, &mut |x| match x {
-                St::Return { .. } => returns = true,
-                St::Row { name, .. } => released.push(*name),
-                St::Let(_, Rhs::Call { args, .. })
-                | St::Do {
-                    rhs: Rhs::Call { args, .. },
-                    ..
-                } => windowed |= args.iter().any(|(a, _)| matches!(a, Arg::Place(_))),
-                _ => {}
-            });
-        }
-        if windowed || self.dest.is_some() && self.checks(&self.ret_ty) && returns {
-            return None;
-        }
-        // A node is an ADDRESS. The row's FORM and the name it binds are
-        // checked against the statement's, so a row is never read as a
-        // statement it did not come from.
-        let named =
-            |n: &vyrn_lower::core::Name, name: &String| &body.names[*n as usize].source == name;
-        let mut annotated = None;
-        // The statement's own binding, and the type the reader annotated it
-        // with: what a made layout is built into (RFC-0125 M7).
-        let mut bound: (Option<vyrn_lower::core::Name>, Option<&Type>) = (None, None);
-        match (s, core_head(run)?) {
-            (Stmt::Let { name, ty, .. }, St::Let(n, rhs)) if named(n, name) => {
-                bound = (Some(*n), ty.as_ref());
-                // The arm binds the ANNOTATION where the reader wrote one and
-                // the recorded type of the initializer otherwise, and the two
-                // walks have to bind the same type or they pick different
-                // instructions for it: `simd.vyrn`'s `a / b` on two `Float32`
-                // widens to `Float64` in the arm and stays single in the row.
-                if let Some(t) = ty {
-                    // A made layout is the one row whose destination is the
-                    // ANNOTATION's layout rather than the value's, and
-                    // [`Fn_::core_stmts`] builds into it (RFC-0125 M7). The
-                    // `where` screen is the same one either way: an
-                    // annotation that checks is a row the core does not state.
-                    // An aggregate call writes through the same destination,
-                    // and the arm converts its result to the annotation after
-                    // the call, which the row does not state.
-                    let call = self.core_agg_call(body, rhs);
-                    if matches!(rhs, Rhs::Make(..)) || self.core_ctor(body, rhs) || call {
-                        if self.checks(t)
-                            || (call && !self.core_as_is(&body.names[*n as usize].ty, t))
-                        {
-                            return None;
-                        }
-                    } else {
-                        // As WRITTEN, not resolved: `let a: Age = 25` is a
-                        // `where` type, and `Age` resolved to `Int64` is the
-                        // flow that does not check (M2d). The row states the
-                        // check where it types the name at the annotation.
-                        let named = &body.names[*n as usize].ty;
-                        if self.cx.resolve(t) != self.cx.resolve(named)
-                            || (self.checks(t) && self.cx.sub(t) != *named)
-                        {
-                            return None;
-                        }
-                        annotated = Some(*n);
-                    }
-                }
-            }
-            (
-                Stmt::Assign { name, .. },
-                St::Store {
-                    place: vyrn_lower::core::Place::Name(n),
-                    ..
-                },
-            ) if named(n, name) => {}
-            // The DECLARED return type, for the same reason: a function
-            // returning `Age` validates at its `return` and the row does not.
-            (Stmt::Return { line, .. }, St::Return { line: at, .. })
-                if line == at
-                    && (core_scalar(&self.ret_ty)
-                        || (matches!(self.ret, Repr::Agg(_)) && !self.checks(&self.ret_ty))) => {}
-            // RFC-0114 Rule N's edge releases are the plan's rows at the JOIN,
-            // and the core states them as drops inside the branch — which the
-            // statement screen refuses. An `if` that owes one is refused.
-            (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
-            // The four forms the site slice took off the floor. Each names its
-            // own node on the row now, so the FORM is the whole of the
-            // agreement: no binding to check and no type to bind.
-            // What each still waits on is the statement screen below — a `for`
-            // reads its element through a place row, an `if let` is a switch,
-            // and the tag on `Arm` is the list's row 6.
-            (Stmt::Expr(_), St::Do { .. }) => {}
-            (Stmt::Break { .. }, St::Break { .. }) => {}
-            (Stmt::Continue { .. }, St::Continue { .. }) => {}
-            (Stmt::While { .. } | Stmt::ForIn { .. }, St::Loop { .. }) => {}
-            (Stmt::IfLet { .. }, St::Switch { .. }) => {}
-            (Stmt::Region { .. }, St::Block { region: true, .. }) => {}
-            (Stmt::Drop { .. }, St::Drop(..)) => {}
-            _ => return None,
-        }
-        // Every OTHER binding of the run: the row types it by its destination
-        // and the arm by what it evaluated, and the two are not always the
-        // same. `simd.vyrn`'s `let neg = 0.0 - o` is `Float32` to the checker
-        // and to the row, and `Float64` to the arm, which reads the literal's
-        // own width and promotes `o` to meet it — so the row divides single
-        // where the arm promotes and divides double. Where the two disagree
-        // the rows do not carry the statement, and the disagreement is a
-        // finding of its own.
-        let mut lets = Vec::new();
-        for st in run {
-            core_lets(st, &mut lets);
-        }
-        // A name the run binds by a made layout or an aggregate call is built
-        // at the layout's type, so the type clause below does not ask it
-        // (RFC-0125 M7). A temporary the run's `return` hands back is built in
-        // the caller's storage.
-        let lands: Vec<_> = (0..run.len())
-            .filter(|&i| self.core_lands(body, run, i, &self.core_w.reads))
-            .filter_map(|i| match &run[i] {
-                St::Let(n, _) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let mut made = Vec::new();
-        for (n, rhs) in &lets {
-            if matches!(rhs, Rhs::Make(..)) || self.core_ctor(body, rhs) {
-                let made_ty = self.core_made_ty(body, *n);
-                let at = match bound {
-                    _ if lands.contains(n) => &self.ret_ty,
-                    (Some(top), Some(t)) if top == *n => t,
-                    _ => &made_ty,
-                };
-                if !self.core_makes(body, at, rhs) {
-                    return None;
-                }
-                made.push(*n);
-            } else if self.core_agg_call(body, rhs) {
-                made.push(*n);
-            }
-        }
-        let rebuilt: Vec<_> = (0..run.len())
-            .filter_map(|i| self.core_rebuilt(body, run, i))
-            .flat_map(|(x, t)| [x, t])
-            .collect();
-        // A made layout other than the statement's own binding lands in a slot
-        // of its own, which the row gives back at its extent's end, and is
-        // built at its name's type. A `let` under the statement that annotates
-        // another type is refused, as it is for the per-body walk.
-        let under = self.annotations(|fs| {
-            hoist_stmt(
-                s,
-                &mut std::collections::HashSet::new(),
-                &mut Hoist {
-                    fe: &mut |_| {},
-                    fs,
-                },
-            )
-        });
-        if made.iter().any(|n| {
-            Some(*n) != bound.0
-                && !lands.contains(n)
-                && self.annotated_apart(&under, &body.names[*n as usize])
-        }) {
-            return None;
-        }
-        for (n, rhs) in &lets {
-            if Some(*n) == annotated || made.contains(n) || rebuilt.contains(n) {
-                continue;
-            }
-            let info = &body.names[*n as usize];
-            let want = self.core_arm_ty(body, rhs)?;
-            let got = self.cx.resolve(&info.ty);
-            // A truth value is the one result an operator states and its
-            // operands do not.
-            if got != self.cx.resolve(&want) && got != Type::Bool {
-                return None;
-            }
-        }
-        let mut names = Vec::new();
-        let mut switched = Vec::new();
-        for st in run {
-            core_switched(st, true, &mut switched);
-            vyrn_lower::core::names_in(st, &mut names);
-        }
-        // A release row names a binding the PLACEMENT holds, and the emitter
-        // reads its place off `rel_slots` rather than off this walk's own
-        // table, at any depth of the run. So the name is not one this walk has
-        // to read, and the place clause below is not asked about it.
-        for r in &released {
-            if let Some(i) = names.iter().position(|n| n == r) {
-                names.swap_remove(i);
-            }
-        }
-        // Every name the run READS has to have a place before the first
-        // instruction is written: one this walk bound, one the arm below bound
-        // (a local of the scope), or a parameter. What the run binds is the
-        // same walk the type clause above already did, branches and loop bodies
-        // included — a top-level reading of it left every name a `while` binds
-        // inside its own body with no place, which is why that form stood at
-        // zero until the site slice asked the question once.
-        for n in &names {
-            if lets.iter().any(|(b, _)| b == n) || switched.contains(n) {
-                continue;
-            }
-            let (_, ty) = self.core_place(&self.core_w, body, *n)?;
-            // And the row and the frame have to agree about the type of a
-            // name: `stringops.vyrn` compared two bytes at byte width from the
-            // row and at `Int64` from the frame, for the same source. The
-            // frame's answer is as DECLARED, so a `where` type is refused here
-            // as it is at a `let`.
-            let named = &body.names[*n as usize].ty;
-            if !self.core_as_is(&ty, named)
-                || ((self.checks(&ty) || self.checks(named)) && self.cx.sub(&ty) != *named)
-            {
-                return None;
-            }
-        }
-        self.core_readable(body, run, &self.core_w.reads, &[])
-            .then(|| run.clone())
-    }
-
     /// Where one of the core's names lives: the place this walk bound it at, or
     /// the scope's.
     fn core_place(
@@ -13048,7 +12511,7 @@ impl<'p> Fn_<'_, 'p> {
                     let ty = body.names[*n as usize].ty.clone();
                     let r = self.cx.repr(&ty, *line)?;
                     let off = self.core_slot(b, w, *n, &r, *line)?;
-                    self.core_bind(b, body, w, *n, Place::Slot(off), ty)?;
+                    self.core_bind(body, w, *n, Place::Slot(off), ty)?;
                 }
             }
             match s {
@@ -13163,7 +12626,7 @@ impl<'p> Fn_<'_, 'p> {
                     let place = self.place_for(b, &r, line)?;
                     let has = self.stream_next(m, b, src, place, &elem, line)?;
                     w.pulled[*n as usize] = Some((place, elem));
-                    self.core_bind(b, body, w, *n, Place::Local(has), Type::Bool)?;
+                    self.core_bind(body, w, *n, Place::Local(has), Type::Bool)?;
                 }
                 St::Let(n, Rhs::Read(vyrn_lower::core::Place::Elem(s, c)))
                     if self.core_pulls(body, s) =>
@@ -13175,7 +12638,7 @@ impl<'p> Fn_<'_, 'p> {
                     }) else {
                         return unsupported("an element read of a stream no pull wrote", line);
                     };
-                    self.core_bind(b, body, w, *n, place, ty)?;
+                    self.core_bind(body, w, *n, place, ty)?;
                 }
                 // The store that puts the rebuilt receiver back, which the
                 // rebuild already wrote.
@@ -13188,13 +12651,7 @@ impl<'p> Fn_<'_, 'p> {
                 // exist before the parts are written: the arm below evaluates
                 // and then binds, and a record or an array is never on the
                 // operand stack to be bound.
-                St::Let(n, rhs)
-                    if self.core_makes(body, &self.core_made_ty(body, *n), rhs)
-                        || self
-                            .core_bound
-                            .as_ref()
-                            .is_some_and(|(top, t)| top == n && self.core_makes(body, t, rhs)) =>
-                {
+                St::Let(n, rhs) if self.core_makes(body, &self.core_made_ty(body, *n), rhs) => {
                     let info = &body.names[*n as usize];
                     let line = info.line;
                     let taken = w.bufs[*n as usize].take();
@@ -13216,13 +12673,7 @@ impl<'p> Fn_<'_, 'p> {
                         w.landed = Some(*n);
                         continue;
                     }
-                    // The DESTINATION's type, which is the annotation where the
-                    // reader wrote one: the arm takes the slot and writes the
-                    // hint from it, and the row states the value's type instead.
-                    let ty = match self.core_bound.take_if(|(top, _)| top == n) {
-                        Some((_, t)) => t,
-                        None => self.core_made_ty(body, *n),
-                    };
+                    let ty = self.core_made_ty(body, *n);
                     let r = self.cx.repr(&ty, line)?;
                     if !matches!(r, Repr::Agg(_)) {
                         return unsupported("a made layout with no layout", line);
@@ -13233,7 +12684,7 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let dest = Dest::of(place).expect("a slot is a destination");
                     self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
-                    self.core_bind(b, body, w, *n, place, ty)?;
+                    self.core_bind(body, w, *n, place, ty)?;
                 }
                 // A LAYOUT TAKEN OUT OF A FIELD in part position: the header
                 // moves to the part's offset, as `consume t.d` in a literal
@@ -13280,7 +12731,7 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("an address with no local", line);
                     };
                     b.ins(&Instruction::LocalSet(l));
-                    self.core_bind(b, body, w, *n, Place::Local(l), ty)?;
+                    self.core_bind(body, w, *n, Place::Local(l), ty)?;
                 }
                 // A MOVE of a layout: the name takes the place the moved name
                 // held, and its slot's extent with it.
@@ -13301,7 +12752,7 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("a list of a literal with no place", info.line);
                     };
                     w.slot[*n as usize] = w.slot[x as usize].take();
-                    self.core_bind(b, body, w, *n, place, info.ty.clone())?;
+                    self.core_bind(body, w, *n, place, info.ty.clone())?;
                 }
                 St::Let(n, Rhs::Val(Val::Name(x))) if self.core_renames(body, *n).is_some() => {
                     let info = &body.names[*n as usize];
@@ -13309,7 +12760,7 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("a move of a name with no place", info.line);
                     };
                     w.slot[*n as usize] = w.slot[*x as usize].take();
-                    self.core_bind(b, body, w, *n, place, info.ty.clone())?;
+                    self.core_bind(body, w, *n, place, info.ty.clone())?;
                 }
                 St::Let(n, _) if self.core_copies(body, *n).is_some() => {
                     let line = body.names[*n as usize].line;
@@ -13326,7 +12777,7 @@ impl<'p> Fn_<'_, 'p> {
                     let (_, off) = self.core_addr(m, b, body, w, &p, line)?;
                     self.core_step(b, off);
                     agg_landed(b, l.size, false);
-                    self.core_bind(b, body, w, *n, Place::Slot(slot), ty)?;
+                    self.core_bind(body, w, *n, Place::Slot(slot), ty)?;
                 }
                 // An AGGREGATE CALL RESULT, written through the out-pointer
                 // into the binding's own slot, or into the caller's storage
@@ -13342,11 +12793,10 @@ impl<'p> Fn_<'_, 'p> {
                 ) if self.core_agg_call(body, rhs) => {
                     let line = body.names[*n as usize].line;
                     let lands = self.core_lands(body, ss, i, &w.reads);
-                    let bound = self.core_bound.take_if(|(top, _)| top == n);
-                    let ty = match bound {
-                        _ if lands => self.ret_ty.clone(),
-                        Some((_, t)) => t,
-                        None => body.names[*n as usize].ty.clone(),
+                    let ty = if lands {
+                        self.ret_ty.clone()
+                    } else {
+                        body.names[*n as usize].ty.clone()
                     };
                     let r = self.cx.repr(&ty, line)?;
                     let Repr::Agg(l) = &r else {
@@ -13419,12 +12869,12 @@ impl<'p> Fn_<'_, 'p> {
                             w.slot[*n as usize] = Some((from, b.mark()));
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalSet(a));
-                            self.core_bind(b, body, w, *n, Place::Local(a), ty)?;
+                            self.core_bind(body, w, *n, Place::Local(a), ty)?;
                         }
                         (Some(_), place) => {
                             agg_landed(b, l.size, used);
                             match place {
-                                Some(place) => self.core_bind(b, body, w, *n, place, ty)?,
+                                Some(place) => self.core_bind(body, w, *n, place, ty)?,
                                 None if part.is_some() => {}
                                 None => w.landed = Some(*n),
                             }
@@ -13473,7 +12923,7 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("a core `let` of an aggregate", line);
                     };
                     b.ins(&Instruction::LocalSet(l));
-                    self.core_bind(b, body, w, *n, place, info.ty.clone())?;
+                    self.core_bind(body, w, *n, place, info.ty.clone())?;
                     if let (true, Some(site)) = (info.grows, info.binding) {
                         let literal = matches!(rhs, Rhs::Val(Val::Lit(Lit::Str(_))));
                         self.core_word(b, w, *n, l, site, literal);
@@ -13508,7 +12958,7 @@ impl<'p> Fn_<'_, 'p> {
                             let Place::Local(l) = self.place_for(b, &r, *line)? else {
                                 return unsupported("a core store of an aggregate", *line);
                             };
-                            self.core_bind(b, body, w, *n, Place::Local(l), ty.clone())?;
+                            self.core_bind(body, w, *n, Place::Local(l), ty.clone())?;
                             (l, ty)
                         }
                     };
@@ -13742,10 +13192,8 @@ impl<'p> Fn_<'_, 'p> {
                 // the operand stack and a
                 // release does not disturb it. The row states the release and
                 // not its place among the reads, so the two commute.
-                St::Row {
-                    name, holes, exit, ..
-                } => {
-                    self.core_rows.push((*name, holes.clone(), *exit));
+                St::Row { name, holes, .. } => {
+                    self.core_rows.push((*name, holes.clone()));
                     if !matches!(
                         ss.get(i + 1),
                         Some(St::Row { .. } | St::Return { value: Some(_), .. })
@@ -15708,10 +15156,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Bind the core name `n` at `place`. A name a `Stmt::Let` wrote goes on
-    /// the scope too, so a later statement walked on its own finds it
-    /// (RFC-0125 §3 M3, the interleave slice), with the release it owes,
-    /// keyed by the node: the plan names the `Stmt::Let` and the row carries
-    /// the same node.
+    /// the scope too, with the release it owes, keyed by the `Stmt::Let` the
+    /// plan names and the row carries.
     ///
     /// The question is the ROW's: [`vyrn_lower::core::NameInfo::binding`] is
     /// the node the plan keys the binding by, and a temporary this pass minted
@@ -15720,7 +15166,6 @@ impl<'p> Fn_<'_, 'p> {
     /// statements after them still name them.
     fn core_bind(
         &mut self,
-        b: &mut Frame,
         body: &vyrn_lower::core::Body,
         w: &mut Walked,
         n: vyrn_lower::core::Name,
@@ -15735,7 +15180,7 @@ impl<'p> Fn_<'_, 'p> {
         self.scope.push((info.source.clone(), place, ty.clone()));
         if self.releases_whole(key) {
             if let Some(r) = self.rel_owed(key, &ty, info.line)? {
-                self.register_rel(b, key, place, r);
+                self.register_rel(key, place, r);
             }
         }
         Ok(())
@@ -16161,32 +15606,6 @@ impl<'p> Fn_<'_, 'p> {
         (params.len() == args).then_some(ret)
     }
 
-    /// The type a row binds — the screen's type clause.
-    ///
-    /// It is not the operator table stated twice: what it asks is which VALUE
-    /// the row computes, whose type is the binding's. An
-    /// operator's is its first operand's, because that is the one the width
-    /// rule ([`Fn_::op_width`]) adopts from. A call and a closure bind what
-    /// the checker typed at the site, which the row carries as its producer
-    /// type, so the clause reads it there and asks no callee.
-    fn core_arm_ty(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> Option<Type> {
-        Some(match rhs {
-            Rhs::Val(Val::Lit(l)) => match l {
-                Lit::Int(_) | Lit::Byte(_) => Type::Int,
-                Lit::Float(_) => Type::Float,
-                Lit::Bool(_) => Type::Bool,
-                Lit::Str(_) => Type::Str,
-                Lit::Opaque(_) => return None,
-            },
-            Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
-            Rhs::Call { ret, .. } | Rhs::Prim(Op::Closure(_), _, ret) => ret.clone()?,
-            Rhs::Prim(Op::Conv(to), ..) => to.clone(),
-            Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
-            Rhs::Read(p) | Rhs::Take(p) => self.core_place_ty(body, p)?,
-            _ => return None,
-        })
-    }
-
     /// The type of one value: the checker's, off the name the row carries.
     fn core_ty(&self, body: &vyrn_lower::core::Body, v: &Val, lit: &Type) -> Type {
         match v {
@@ -16264,7 +15683,8 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_walked`]).
             //
             // Or a layout bound by a move, which holds the place the moved
-            // name held ([`Fn_::core_renames`]).
+            // name held ([`Fn_::core_renames`]), or by `blackBox` of a name,
+            // which takes over that name's slot ([`Fn_::core_stmts`]'s `let`).
             //
             // Or a payload binder, whose place the switch gives it
             // ([`Fn_::core_payload`]).
@@ -16290,7 +15710,10 @@ impl<'p> Fn_<'_, 'p> {
                             && (self.core_makes(body, &self.core_made_ty(body, *b), rhs)
                                 || self.core_agg_call(body, rhs)
                                 || self.core_take_part(body, rhs)
-                                || self.core_rebuild(body, rhs))
+                                || self.core_rebuild(body, rhs)
+                                || matches!(rhs, Rhs::Call { callee, kind, args, .. }
+                                    if matches!(core_builtin(callee, *kind), Some(Spec::Barrier))
+                                        && matches!(args.as_slice(), [(Arg::Val(Val::Name(_)), _)])))
                     }))
                 && self.core_alias(body, n as vyrn_lower::core::Name).is_none()
                 && self
@@ -16311,7 +15734,6 @@ impl<'p> Fn_<'_, 'p> {
         // core names a `let` by the type of its VALUE (`core::Builder`'s `let`
         // arm) except where it states the annotation's check, so a check the
         // rows do not state is a binding whose type is not the annotation's.
-        // [`Fn_::core_run`] asks the same question per statement.
         if stmts.is_some_and(|blk| self.annotates_a_check(body, blk)) {
             return false;
         }
@@ -17480,33 +16902,7 @@ fn around(rel: Rel, holes: &[String]) -> Rel {
     }
 }
 
-/// The exits this walk gives back at itself — RFC-0125 §3 M3, the release
-/// slice. A `break`, a `continue` and a `return` each carry the node the plan
-/// keys their releases by, so the walk asks [`Fn_::emit_releases`] for the
-/// group there. A scrutinee's joins them with the tag family (RFC-0125 M7):
-/// the core states it as a [`St::Row`] after the switch, keyed by the
-/// construct, and [`Fn_::core_release`] emits it where the row stands. A
-/// block's fall-through release is keyed by the block, which no statement of
-/// a run names.
-const CORE_EXITS: [ExitKind; 4] = [
-    ExitKind::Break,
-    ExitKind::Continue,
-    ExitKind::Return,
-    ExitKind::Scrutinee,
-];
-
-/// The row a run states its statement with: the last one, but for the
-/// releases of its temporaries after it ([`vyrn_lower::core::Body::rows_by_statement`]).
-/// A release this pass placed has line 0; a `drop` the reader wrote is its
-/// statement's own row.
-fn core_head(run: &[St]) -> Option<&St> {
-    run.iter()
-        .rev()
-        .find(|r| !matches!(r, St::Drop(_, _, 0, _)))
-}
-
-/// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
-/// [`Fn_::core_run`]'s screen, which a subtree carries for every branch.
+/// Whether a run leaves the FUNCTION anywhere under it.
 fn core_returns(s: &St) -> bool {
     let mut out = false;
     core_leaf_rows(s, &mut |r| out |= matches!(r, St::Return { .. }));

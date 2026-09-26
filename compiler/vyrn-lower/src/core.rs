@@ -1105,102 +1105,6 @@ impl Body {
         out
     }
 
-    /// Which rows each SOURCE statement produced, by the node the row names —
-    /// RFC-0125 §3 M3, the interleave slice.
-    ///
-    /// The unit this answers for is the statement: an emitter walking a body
-    /// one statement at a time reads the rows of each source statement here.
-    ///
-    /// The correspondence is already stated. A `let`'s row carries the node
-    /// the plan keys the binding by ([`NameInfo::binding`]), and `St::Store`,
-    /// `St::If`, `St::Return`, `St::Break`, `St::Continue`, `St::Loop`,
-    /// `St::Do` and `St::Switch` each carry the statement's own node — the
-    /// last three since the site slice, which is what took a `while`, a `for`,
-    /// an expression statement and an `if let` off the floor. What this adds is the run BEFORE that row: the
-    /// temporaries the statement computes first, which are the `let`s of
-    /// minted names it reads, walked back until a row that is not one. A
-    /// statement whose row names no node is not in the map, and the reader
-    /// falls back — which is what a `for`, a `match` and an expression
-    /// statement each do today.
-    pub fn rows_by_statement(&self) -> HashMap<usize, Vec<St>> {
-        let mut out = HashMap::new();
-        let mut twice = Vec::new();
-        self.rows_in(&self.stmts, &mut out, &mut twice);
-        // One statement, two runs: a `return` the pass copied into every arm
-        // of a `match` it was the operand of ([`Builder::return_through`]).
-        // Which run is that statement's is not a question this map answers, so
-        // it answers neither.
-        for at in twice {
-            out.remove(&at);
-        }
-        out
-    }
-
-    fn rows_in(&self, ss: &[St], out: &mut HashMap<usize, Vec<St>>, twice: &mut Vec<usize>) {
-        for (i, s) in ss.iter().enumerate() {
-            match s {
-                St::If { then, els, .. } => {
-                    self.rows_in(then, out, twice);
-                    self.rows_in(els, out, twice);
-                }
-                St::Loop { body: b, .. } | St::Block { body: b, .. } => self.rows_in(b, out, twice),
-                St::Switch { arms, .. } => {
-                    for a in arms {
-                        self.rows_in(&a.body, out, twice);
-                    }
-                }
-                _ => {}
-            }
-            let Some(node) = self.node_of(s) else {
-                continue;
-            };
-            let mut need: Vec<Name> = Vec::new();
-            names_in(s, &mut need);
-            // A temporary's release names no node, so it is the run's that
-            // binds the temporary: before the statement, where the builder
-            // frees an argument before the row that reads the result, and
-            // after it. Without it a temporary that owns heap is never freed
-            // where the rows emit the statement.
-            let temp = |n: &Name, run: &[St]| {
-                !self.names[*n as usize].bound_by_let
-                    && run.iter().any(|r| matches!(r, St::Let(m, _) if m == n))
-            };
-            let mut start = i;
-            while start > 0 {
-                match &ss[start - 1] {
-                    // The releases an exit runs are the exit's own rows: the
-                    // row names the node the plan keys the exit by, which is
-                    // this statement's (RFC-0125 M7).
-                    St::Row { site, .. } if *site == node => {}
-                    // The only loop this pass makes up: the elements an
-                    // exit leaves unreached ([`Builder::release_unreached`]).
-                    St::Loop { site: 0, .. } => {}
-                    St::Let(n, rhs)
-                        if !self.names[*n as usize].bound_by_let && need.contains(n) =>
-                    {
-                        names_in_rhs(rhs, &mut need);
-                    }
-                    St::Drop(n, ..) if !self.names[*n as usize].bound_by_let => {}
-                    _ => break,
-                }
-                start -= 1;
-            }
-            while let Some(d) = (start..i)
-                .rev()
-                .find(|&d| matches!(&ss[d], St::Drop(n, ..) if !temp(n, &ss[start..=i])))
-            {
-                start = d + 1;
-            }
-            let mut end = i;
-            while matches!(ss.get(end + 1), Some(St::Drop(n, ..)) if temp(n, &ss[start..=i])) {
-                end += 1;
-            }
-            if out.insert(node, ss[start..=end].to_vec()).is_some() {
-                twice.push(node);
-            }
-        }
-    }
-
     /// The holes a release row of `n` walks around: the row's own set, else
     /// the name's.
     pub fn drop_holes<'b>(&'b self, n: Name, row: &'b Option<Vec<String>>) -> &'b [String] {
@@ -1227,42 +1131,6 @@ impl Body {
             out[n as usize] += 1;
         }
         out
-    }
-
-    /// The source statement a row names, where it names one. `0` is this
-    /// pass's own word for "a row I made up", so it is no statement's node.
-    fn node_of(&self, s: &St) -> Option<usize> {
-        match s {
-            St::Let(n, _) if self.names[*n as usize].bound_by_let => {
-                self.names[*n as usize].binding
-            }
-            St::Store {
-                site: Site::Node(at),
-                ..
-            } => Some(*at),
-            // A `?` states its exit as a `return` whose site is the EXPRESSION,
-            // so it names no statement of the source.
-            St::Return {
-                site,
-                is_try: false,
-                ..
-            } => (*site != 0).then_some(*site),
-            St::If { site, .. }
-            | St::Break { site, .. }
-            | St::Continue { site, .. }
-            | St::Loop { site, .. }
-            | St::Do { site, .. }
-            | St::Switch { site, .. } => (*site != 0).then_some(*site),
-            // A `drop` the reader wrote; a placed release has no line.
-            St::Drop(_, Site::Node(at), line, _) if *line != 0 => Some(*at),
-            // A `region` names its block, which is the node its statement's
-            // reader asks by: the site is the block's scope, and no other
-            // statement's run is keyed there.
-            St::Block {
-                site, region: true, ..
-            } => Some(*site),
-            _ => None,
-        }
     }
 
     /// The body as text, one statement per line, for reading a refusal.
@@ -9089,10 +8957,6 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
 
 /// Every name a statement names, itself and everything under it: what it binds
 /// and what it reads.
-///
-/// One walk for two readers — [`Body::rows_by_statement`]'s backward walk over
-/// the temporaries a statement computes, and the emitter's own screen over the
-/// types a run names (RFC-0125 §3 M3, the interleave slice).
 pub fn names_in(s: &St, out: &mut Vec<Name>) {
     match s {
         St::Let(n, rhs) => {
