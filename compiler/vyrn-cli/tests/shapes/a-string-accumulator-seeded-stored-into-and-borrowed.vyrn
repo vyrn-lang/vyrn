@@ -1,5 +1,4 @@
 // a String accumulator seeded, stored into and borrowed
-// pin: 0 break, 0 continue
 // An accumulator's append is one `@strAppend` row, and its ownership word
 // is the `let`'s (RFC-0125 M7). `examples/` seeds every accumulator it
 // grows from a literal or a call and never stores into one between

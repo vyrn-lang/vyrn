@@ -1,5 +1,4 @@
 // a field read beside a `modify` of its root
-// pin: 0 break, 0 continue
 // A field read out of a root handed to `modify` holds the field's address
 // where no `modify` of the root falls in the read's extent: after the call,
 // or before it in the same turn.

@@ -1,5 +1,4 @@
 // a `while` over module state, and one whose call replaces it
-// pin: 0 break, 0 continue
 // A `while` hoists the header of module state no call of the loop stores
 // into, and not one a call replaces: the second is built again once the
 // effect judgment is held (RFC-0125 M7, `m7-statehoist`).

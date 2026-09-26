@@ -145,7 +145,7 @@ const fn sec(at: &'static str, kind: Kind, reads: Reads, what: &'static str) -> 
 fn sections() -> Vec<Section> {
     use Kind::*;
     #[allow(clippy::enum_glob_use)]
-    use Reads::{Both, Core, Neither, Source, Twice};
+    use Reads::{Both, Core, Neither, Source};
     vec![
         sec(
             "fn unsupported<T>(what: &str, line: usize) -> Result<T, String> {",
@@ -203,11 +203,10 @@ fn sections() -> Vec<Section> {
             "the whole-module context every lowering reads",
         ),
         sec(
-            "fn receiver_row(&self, node: usize) -> Option<Vec<String>> {",
+            "fn loop_buffer_only(&self, node: usize) -> bool {",
             Mapping, Core,
-            "the nine readers of the core's rows — the receiver, the store, the \
-             discard, the argument drop, the edges, the `match` consume, the arm \
-             bindings. This IS \"the emitter reads the core\"",
+            "the readers of the core's rows on `Cx`: the loop buffer, the edges \
+             and the argument drop. This IS \"the emitter reads the core\"",
         ),
         sec(
             "fn sub(&self, ty: &Type) -> Type {",
@@ -249,15 +248,15 @@ fn sections() -> Vec<Section> {
             "fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {",
             Shared, Both,
             "RFC-0013's module state: the initializer, walked from the core's \
-             module-state body where that carries it, the teardown, and the \
-             one-line entry to a function body",
+             module-state body or refused, the teardown, and the one-line entry \
+             to a function body",
         ),
         sec(
             "fn lower_body(",
             Mapping, Core,
             "a function body: the parameters into locals, the prologue, the \
-             epilogue, the return — and which of the two walks emits the \
-             statements, which is the core's answer (`body_of`)",
+             epilogue, the return — and whether the core's rows take the body \
+             whole or statement by statement (`body_of`)",
         ),
         sec(
             "fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {",
@@ -288,21 +287,6 @@ fn sections() -> Vec<Section> {
              brace",
         ),
         sec(
-            "fn elem_field_store(",
-            Mapping, Source,
-            "`a[i].f = v` — the address, then the typed store",
-        ),
-        sec(
-            "fn cached_walk(&self, e: &Expr) -> Option<Walk> {",
-            Decision, Source,
-            "THE OPTIMIZER. A loop whose header proves an array's base and count \
-             invariant has its walk hoisted out of the body and cached. §2.3: \
-             \"The emitter carries no optimizer, ever\" — and M1 measured this \
-             one and kept it (nbody under V8, 2.97 s to 2.16 s). It is filed \
-             here because the sentence is the sentence; what moves it is the \
-             core making a loop-invariant header a named place, not a deletion",
-        ),
-        sec(
             "fn emit_releases(",
             Mapping, Neither,
             "the core's drop rows at an exit become calls, in the order the core \
@@ -331,21 +315,14 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {",
-            Mapping, Both,
-            "one arm per statement form — `let`, assignment, `if`, `while`, \
-             `for`, `break`, `continue`, `return`, `defer`. The control flow of \
-             §2.3, plus the surface forms that reach the emitter unrewritten",
+            Mapping, Neither,
+            "one statement from the core's rows, or the refusal of one the core \
+             does not state",
         ),
         sec(
-            "fn cond(&mut self, m: &mut Module, b: &mut Frame, e: &Expr, line: usize) -> Result<(), String> {",
+            "fn place_for(&mut self, b: &mut Frame, r: &Repr, line: usize) -> Result<Place, String> {",
             Mapping, Neither,
-            "a condition, a place for a representation, the string append, and \
-             the two stores an aggregate takes",
-        ),
-        sec(
-            "fn expr_as(",
-            Mapping, Neither,
-            "an expression lowered at a wanted type",
+            "a place for a representation, the string append, and a field's offset",
         ),
         sec(
             "fn coerce(",
@@ -361,11 +338,6 @@ fn sections() -> Vec<Section> {
             "fn emit_validation(",
             Mapping, Neither,
             "the check itself, which is a CALL: the value is parked in a local and \n             handed to the program's own generated constructor or predicate \n             (`vyrn_frontend::ctor`). This emitter lowered the `where` clause \n             itself until RFC-0125 §3 M6's fourth slice",
-        ),
-        sec(
-            "fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {",
-            Mapping, Both,
-            "one arm per expression form",
         ),
         sec(
             "fn applied_record(",
@@ -388,37 +360,36 @@ fn sections() -> Vec<Section> {
             "the regex builtin's table",
         ),
         sec(
-            "fn binary(",
+            "fn free_arg_temp(",
             Mapping, Neither,
-            "an operator, and the releases the core placed on its edges",
+            "the release of an argument temporary",
         ),
         sec(
-            "fn binary_inner(",
-            Mapping, Both,
-            "one arm per operator — the `prim` rows of §2.3, at their widths",
+            "fn str_bin(&mut self, b: &mut Frame, op: BinOp, line: usize) -> Result<Type, String> {",
+            Mapping, Neither,
+            "the `prim` rows of §2.3 at their widths: the string operators, the \
+             unary operators, and the binary opcode table",
         ),
         sec(
-            "fn user_claims(&self, name: &str) -> bool {",
-            Builtin, Core,
+            "fn host(",
+            Builtin, Neither,
             "RFC-0076 M7's generation-time builtins: the `Code` handle \
              operations and the atom stream, one block each, plus the two string \
              renderings they share with `print`",
         ),
         sec(
-            "fn call(",
+            "fn is_extern(&self, name: &str) -> bool {",
             Mapping, Neither,
-            "a call: the argument temporaries it drains afterwards, and which \
-             names lend their result",
+            "which names lend their result, and RFC-0012's `extern` call",
         ),
         sec(
-            "fn call_inner(",
-            Builtin, Both,
-            "ONE HAND-WRITTEN BLOCK PER BUILTIN NAME — 84 names in one `match`. \
-             The shape `Checker::call` had before RFC-0125 §3 M6 emptied it, and \
-             the largest single item in the file",
+            "fn print_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {",
+            Builtin, Neither,
+            "`print` and the string rendering of a value, which the core's call \
+             rows reach",
         ),
         sec(
-            "fn mem_prim(",
+            "fn core_mem(",
             Mapping, Neither,
             "`std/mem`'s primitives, one wasm instruction each \
              (`PLAN-0125-runtime.md` §2.1) — the clearest `prim` row in the file",
@@ -429,13 +400,13 @@ fn sections() -> Vec<Section> {
             "RFC-0008's log write",
         ),
         sec(
-            "fn reflected(&self, which: &str, target: &Type, line: usize) -> Result<Expr, String> {",
-            Builtin, Both,
-            "RFC-0094 M3's reflection: which `show` a type renders itself with, \
-             and the variant a `value` box carries",
+            "fn out_ptr(",
+            Builtin, Neither,
+            "the out-pointer a call with an aggregate result writes through, and \
+             the signature of a generic instance",
         ),
         sec(
-            "fn emit_call(",
+            "fn emit_call_with(",
             Mapping, Both,
             "the call itself: a direct call, a higher-order call, and RFC-0037's \
              stored function values with their capture blocks and dispatchers",
@@ -476,10 +447,10 @@ fn sections() -> Vec<Section> {
             "the typed load of an element",
         ),
         sec(
-            "fn array_lit(",
-            Builtin, Both,
+            "fn fixed_elems(",
+            Builtin, Neither,
             "the `Array` family, one hand-written block per operation: the \
-             literal, the heap literal, `push`, `pop`, `at`, `swapRemove`, \
+             literal's elements, the heap literal, `push`, `pop`, `at`, `swapRemove`, \
              `@reserve`, `@append`, `@copyFrom`, `@clear`",
         ),
         sec(
@@ -496,26 +467,8 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn copy_word(",
-            Mapping, Both,
+            Mapping, Neither,
             "sums: build a variant, box a payload, name a constructor's types",
-        ),
-        sec(
-            "fn match_expr(",
-            Mapping, Both,
-            "`match`: the scrutinee, the tag test, the arms, the join — control \
-             flow to wasm's blocks",
-        ),
-        sec(
-            "fn try_(",
-            Decision, Both,
-            "the emitter states the `?` rewrite a second time — the tag test, \
-             the whole sum copied out through the function's own destination, \
-             and the payload read on the fall-through — for the built-in sums \
-             and for `Fallible` (RFC-0080 M3) beside it. `core.rs`'s `Expr::Try` \
-             arm states the same rewrite, as a two-arm switch and a `return` \
-             row; RFC-0127 §4 refuses the parser for it, because an \
-             expression-position `?` has no statement to put a `return` in. It \
-             leaves when the emitter reads the core",
         ),
         sec(
             "fn try_construct(",
@@ -527,26 +480,15 @@ fn sections() -> Vec<Section> {
              refuses folding the node into `Expr::Call`",
         ),
         sec(
-            "fn optional_if_let(",
-            Decision, Both,
-            "an OPTIONAL projection tested by `if let` (RFC-0122). The expansion \
-             is `project::optional_site`'s and is shared with the checker and \
-             the lowering, but the binding is this file's: a synthetic `let` \
-             with no analysis row, and the guard that a declared function of the \
-             name wins over a projection. `core.rs`'s `Stmt::IfLet` arm lowers \
-             the ordinary switch and knows nothing of this form, so there is no \
-             row to read yet",
-        ),
-        sec(
             "fn tag_test(",
-            Mapping, Core,
+            Mapping, Neither,
             "a tag test and the binders a pattern's payload opens",
         ),
         sec(
-            "fn map_lit(",
-            Builtin, Core,
+            "fn map_into(",
+            Builtin, Neither,
             "RFC-0028 and RFC-0117's `Map`, one hand-written block per operation: \
-             the literal, `@tally`, `@tallyBytes`, set, scan, put, reserve, the \
+             the literal's entries, `@tally`, `@tallyBytes`, set, scan, put, reserve, the \
              key pack, `@at`, and the method table",
         ),
         sec(
@@ -573,13 +515,10 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);",
-            Decision, Source,
-            "the AST walks the hoist above needs, and the header-invariance \
-             proof it runs: does the loop body write the name, rebind it, or \
-             call anything that could. An optimizer's analysis, in the emitter. \
-             The walks READ `ast::body_scope_descent!` since RFC-0125 §3 M6's \
-             second body slice; what is left is the one line this reader writes \
-             at a node — hand it over, and stop at a lambda",
+            Shared, Source,
+            "the source descent the statement screen reads for a `let` that \
+             annotates a type, through `ast::body_scope_descent!`: the one line \
+             this reader writes at a node — hand it over, and stop at a lambda",
         ),
         sec(
             "fn store_of(ll: &str) -> Instruction<'static> {",
@@ -618,17 +557,12 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "const RIGHT_FD_WRITE: i64 = 1 << 6;",
-            Shared, Source,
+            Shared, Neither,
             "the two WASI constants `_start` opens a log sink with, and the \
              small type helpers the I/O builtins ask for their result type",
         ),
         sec(
-            "/// The forms of the AST dispatch whose arm the per-statement unit could retire",
-            Shared, Source,
-            "the count the interleave slice is judged by: per form of the AST              dispatch, how many occurrences the arm emitted and how many the              core's rows did",
-        ),
-        sec(
-            "/// Whether the AST walk is asked for even where the core's rows carry the body",
+            "fn builtin_spec(",
             Mapping, Both,
             "RFC-0125 §2.3's own walk: the core's statements to wasm, its              operators through the one table `Expr::Binary` reaches, the callee              row read against the emitter's own function table, and the screen              that says which bodies the rows carry",
         ),

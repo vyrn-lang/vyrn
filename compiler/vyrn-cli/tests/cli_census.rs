@@ -770,7 +770,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 5114, 167),
+        ("a command's own path", 5120, 167),
         ("a rule another pass also states", 165, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
@@ -823,8 +823,8 @@ fn the_per_command_census_is_what_the_rfc_records() {
         ("why", 566, 19),
         ("serve, dev", 501, 7),
         ("doc", 391, 13),
-        ("routes", 359, 4),
-        ("fmt", 289, 13),
+        ("routes", 364, 4),
+        ("fmt", 290, 13),
         ("build", 285, 17),
         ("deps", 263, 5),
         ("(dispatch)", 258, 12),
@@ -845,7 +845,7 @@ fn the_per_command_census_is_what_the_rfc_records() {
     assert_eq!(per_command(), want, "the per-command census has moved");
     let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
     assert_eq!(
-        total, 5114,
+        total, 5120,
         "the per-command tile does not add up to its kind"
     );
 }

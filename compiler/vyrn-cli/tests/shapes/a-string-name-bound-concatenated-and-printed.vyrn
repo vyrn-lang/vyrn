@@ -1,5 +1,4 @@
 // a String name bound, concatenated and printed
-// pin: 0 break, 0 continue
 // A String name is its address in one wasm local on both walks, and its
 // release is a row, so the screen asks its place and type as it asks a
 // scalar's. The lambda keeps the body off the per-body walk (RFC-0125 M7,

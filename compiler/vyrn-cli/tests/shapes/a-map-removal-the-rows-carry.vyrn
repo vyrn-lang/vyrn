@@ -1,5 +1,4 @@
 // a map removal the rows carry, on a hit and on a miss
-// pin: 0 break, 0 continue
 // (RFC-0125 M7, `m7-mapcall`). Every `remove` of `examples/` sits in a
 // body the rows do not take for another reason.
 type P = { x: Int64, s: String }          fn names() -> Map<String, String> { let mut m: Map<String, String> = [:] return m }          fn counts() -> Map<Int64, Int64> { let mut m: Map<Int64, Int64> = [:] return m }          fn recs() -> Map<String, P> { let mut m: Map<String, P> = [:] return m }          fn vyrnTestMain() -> Int64 { let mut m = names() let mut c = counts() let mut r = recs()          let mut i = 0 while i < 4 { m[i.toString()] = i.toString() + "v" c[i] = i r[i.toString()] = P { x: i, s: "p" + i.toString() } i = i + 1 }          let a = m.remove("1") let b = m.remove("1") let d = c.remove(2) let e = r.remove("3") r.remove("9")          let t = if a { 1 } else { 0 } + if b { 10 } else { 0 } + if d { 100 } else { 0 } + if e { 1000 } else { 0 }          return t + m.length * 10000 + c.length * 100000 + r.length * 1000000 }

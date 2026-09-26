@@ -1,0 +1,14 @@
+// a capturing lambda handed to a call as a value
+// pin: 0 break, 0 continue
+// A literal no target names is a closure value, and the call's temporary owns
+// its snapshot: at a read parameter the caller frees it after the call, and
+// at a `consume fn` parameter the callee does (RFC-0125 M7, `m7-lamval`).
+type Bump = fn(Int64) -> Int64
+fn callN(f: Bump, n: Int64) -> Int64 { return f(n) }
+fn keep(run: consume fn() -> Int64) -> Int64 { return run() }
+fn vyrnTestMain() -> Int64 {
+    let k = 3
+    let a = callN(x -> x * k, 5)
+    let b = keep(() -> k + 1)
+    return a + b * 100
+}

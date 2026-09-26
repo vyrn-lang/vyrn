@@ -1,5 +1,4 @@
 // a payload binder that is a layout
-// pin: 0 break, 0 continue
 // A payload binder of a layout the construct does not own holds the
 // payload's address in the scrutinee's storage: a box for the array, the
 // sum itself for a two-word record (RFC-0125 M7).

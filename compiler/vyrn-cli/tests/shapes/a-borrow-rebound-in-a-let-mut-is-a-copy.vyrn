@@ -1,5 +1,4 @@
 // a borrow rebound in a let mut is a copy
-// pin: 0 break, 0 continue
 // A `let mut` bound to a `read` parameter or a field read, then stored into
 // whole, names a value of its own (#501): the core states the `let` as a copy,
 // so each store releases the value it replaces and the exit releases the last,

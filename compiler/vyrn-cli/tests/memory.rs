@@ -671,7 +671,7 @@ const ROWS: &[Row] = &[
         why: "RFC-0093 M2: a take moves a field out of a record and leaves a hole, and the \
               release walk is the TYPE — which does not know the field left. M1 left the whole \
               binding unreclaimed, because a leak is a task and a double free is a bug; M2 \
-              carries the hole set from `movecheck` to `own` to both walks, so the record is \
+              carries the hole set from `movecheck` to `own` to the emitter, so the record is \
               reclaimed MINUS the place it gave away. The row is the arithmetic: N turns \
               allocate two Strings and free two — N, not 2N and not 0. Where the walk cannot be \
               told, the binding still leaks whole: a declared `release` is a user function, a \
@@ -2202,7 +2202,7 @@ fn a_store_runs_the_declared_release_of_what_it_displaces() {
 // A payload binder read out of a scrutinee the frame owns, handed to a
 // `consume` parameter, leaves a hole in the scrutinee, and the scrutinee's
 // release walks around it (RFC-0125 M7, `vyxProcessElem` in `std/vyx.vyrn`).
-// Each program exited 134, "double or foreign free", under both walks.
+// Each program exited 134, "double or foreign free".
 const PAYLOAD_DECLS: &str = r#"type Node =
     | Elem(String, Array<Int64>, Int64)
     | Text(String)
@@ -2223,30 +2223,23 @@ fn size(n: consume Node) -> Int64 {
 }
 "#;
 
-/// Runs `body` after the declarations under the free audit, on the core's
-/// rows and on the AST walk, and returns each walk's exit code and output.
-fn payload_run(stem: &str, body: &str) -> Vec<(Option<i32>, String)> {
+/// Runs `body` after the declarations under the free audit, and returns the
+/// exit code and output.
+fn payload_run(stem: &str, body: &str) -> (Option<i32>, String) {
     let dir = std::env::temp_dir().join(format!("vyrn-hole-{stem}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("m.vyrn");
     std::fs::write(&file, format!("{PAYLOAD_DECLS}\n{body}")).unwrap();
-    let out = [false, true]
-        .into_iter()
-        .map(|arm| {
-            let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
-            c.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
-            if arm {
-                c.env("VYRN_NO_CORE_WALK", "1");
-            }
-            let o = c.output().expect("vyrn run");
-            let text = String::from_utf8_lossy(&o.stdout).to_string()
-                + &String::from_utf8_lossy(&o.stderr);
-            (o.status.code(), text)
-        })
-        .collect();
+    let o = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
     let _ = std::fs::remove_dir_all(&dir);
-    out
+    let text = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+    (o.status.code(), text)
 }
 
 #[test]
@@ -2266,9 +2259,7 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("ret", body) {
-        assert_eq!(got, (Some(0), "10\n0\n".to_string()));
-    }
+    assert_eq!(payload_run("ret", body), (Some(0), "10\n0\n".to_string()));
 }
 
 #[test]
@@ -2286,9 +2277,7 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("iflet", body) {
-        assert_eq!(got, (Some(0), "10\n2\n".to_string()));
-    }
+    assert_eq!(payload_run("iflet", body), (Some(0), "10\n2\n".to_string()));
 }
 
 #[test]
@@ -2312,9 +2301,7 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("join", body) {
-        assert_eq!(got, (Some(0), "10\n2\n".to_string()));
-    }
+    assert_eq!(payload_run("join", body), (Some(0), "10\n2\n".to_string()));
 }
 
 #[test]
@@ -2341,14 +2328,15 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("edge", body) {
-        assert_eq!(got, (Some(0), "10\n0\n2\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("edge", body),
+        (Some(0), "10\n0\n2\n".to_string())
+    );
 }
 
 // A `for` whose elements each leave through the loop variable frees its
 // buffer alone; a `return` or a `break` out of it releases the elements no
-// turn reached first. Each exit leaked those elements under both walks.
+// turn reached first. Each exit leaked those elements.
 #[test]
 fn a_for_that_leaves_early_releases_the_elements_it_never_reached() {
     let body = r#"type Rec = { name: String, k: Int64 }
@@ -2391,13 +2379,14 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("forexit", body) {
-        assert_eq!(got, (Some(0), "r0\n1\n2\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("forexit", body),
+        (Some(0), "r0\n1\n2\n".to_string())
+    );
 }
 
 // A removal hands back what it took out, and a statement that discards it is
-// no site that reads it. A popped record's box leaked under both walks.
+// no site that reads it. A popped record's box leaked.
 #[test]
 fn a_discarded_removal_releases_what_it_took_out() {
     let body = r#"type Q = { k: Int64 }
@@ -2413,31 +2402,32 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("discardpop", body) {
-        assert_eq!(got, (Some(0), "1\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("discardpop", body),
+        (Some(0), "1\n".to_string())
+    );
 }
 
 // A generic release that takes a field of a generic declared release type and
 // never drops it: the kernel places that release inside the body, and the
-// placer lowers a second time to build it (record `m7-slotrel`). Both walks
-// free the field.
+// placer lowers a second time to build it (record `m7-slotrel`). The field
+// is freed.
 #[test]
-fn a_generic_release_placed_inside_a_generic_release_is_freed_on_both_walks() {
+fn a_generic_release_placed_inside_a_generic_release_is_freed() {
     shape_runs_clean("a-generic-release-placed-inside-a-generic-release", "6\n");
 }
 
 // A map literal whose values are layouts: a repeated key, a record with a
 // String field, and a nested array (record `m7-fieldmap`).
 #[test]
-fn a_map_literal_of_layout_values_is_freed_on_both_walks() {
+fn a_map_literal_of_layout_values_is_freed() {
     shape_runs_clean("a-map-literal-of-layout-values-the-rows-carry", "720323\n");
 }
 
 // A record and an enum as a map's key, stored over and looked up
 // (record `m7-mapkey2`).
 #[test]
-fn a_map_keyed_by_a_record_or_an_enum_is_freed_on_both_walks() {
+fn a_map_keyed_by_a_record_or_an_enum_is_freed() {
     shape_runs_clean(
         "a-map-keyed-by-a-record-or-an-enum-the-rows-carry",
         "622327\n",
@@ -2447,23 +2437,36 @@ fn a_map_keyed_by_a_record_or_an_enum_is_freed_on_both_walks() {
 // A record and an enum key with String values, released and copied. The
 // release freed the packed key bytes as String pointers and trapped (#508).
 #[test]
-fn a_map_of_a_packed_key_and_a_string_value_is_freed_on_both_walks() {
+fn a_map_of_a_packed_key_and_a_string_value_is_freed() {
     shape_runs_clean("a-map-of-a-packed-key-and-a-string-value", "22321\n");
+}
+
+// A capturing lambda literal handed to an alias `fn` parameter and to a
+// `consume fn` parameter (record `m7-lamval`).
+#[test]
+fn a_capturing_lambda_handed_on_as_a_value_is_freed() {
+    shape_runs_clean("a-capturing-lambda-handed-to-a-call-as-a-value", "415\n");
+}
+
+// A `consume` parameter of a generic instance and of a higher-order instance,
+// a stored value at a `consume fn` parameter among them (record `m7-lamval`).
+#[test]
+fn a_consume_parameter_of_an_instance_is_freed() {
+    shape_runs_clean("a-consume-parameter-of-an-instance", "462\n");
 }
 
 // A stored function value passed to a higher-order function, and passed on
 // (record `m7-fnval2`).
 #[test]
-fn a_stored_function_value_passed_on_is_freed_on_both_walks() {
+fn a_stored_function_value_passed_on_is_freed() {
     shape_runs_clean(
         "a-stored-function-value-passed-to-a-higher-order-function",
         "0\n4\n321353\n",
     );
 }
 
-/// Runs the shape `stem` of `tests/shapes/` under the free audit, on the
-/// core's rows and on the AST walk, and asserts each prints `want`, exits 0
-/// and prints nothing on stderr.
+/// Runs the shape `stem` of `tests/shapes/` under the free audit, and asserts
+/// it prints `want`, exits 0 and prints nothing on stderr.
 fn shape_runs_clean(stem: &str, want: &str) {
     let shape = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/shapes/{stem}.vyrn"));
     let src = std::fs::read_to_string(shape).unwrap()
@@ -2475,24 +2478,15 @@ fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("m.vyrn");
     std::fs::write(&file, src).unwrap();
-    for ast in [false, true] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vyrn"));
-        cmd.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
-        if ast {
-            cmd.env("VYRN_NO_CORE_WALK", "1");
-        }
-        let run = cmd.output().expect("vyrn run");
-        let got = (
-            run.status.code(),
-            String::from_utf8_lossy(&run.stdout).to_string(),
-            String::from_utf8_lossy(&run.stderr).to_string(),
-        );
-        assert_eq!(
-            got,
-            (Some(0), want.to_string(), String::new()),
-            "ast walk: {ast}"
-        );
-    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+    cmd.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
+    let run = cmd.output().expect("vyrn run");
+    let got = (
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout).to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+    );
+    assert_eq!(got, (Some(0), want.to_string(), String::new()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2519,7 +2513,8 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    for got in payload_run("mapfield", body) {
-        assert_eq!(got, (Some(0), "true\n1\n".to_string()));
-    }
+    assert_eq!(
+        payload_run("mapfield", body),
+        (Some(0), "true\n1\n".to_string())
+    );
 }

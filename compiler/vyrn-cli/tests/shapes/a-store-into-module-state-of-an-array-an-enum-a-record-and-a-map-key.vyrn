@@ -1,5 +1,4 @@
 // a store into module state of an array, an enum, a record and a map key
-// pin: 0 break, 0 continue
 // A store into module state is a store into a place with an address: the
 // static's bytes take the value's and what they held is released where the
 // row says so, as a name's would (RFC-0125 M7, `m7-stores`).

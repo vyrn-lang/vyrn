@@ -1,5 +1,4 @@
 // a store into a nested place
-// pin: 0 break, 0 continue
 // A store into a nested place is one store into its path: a field of an
 // element that holds heap, an element of a field, and a field of an
 // element of a field (RFC-0125 M7, `m7-move`), and a String stored into

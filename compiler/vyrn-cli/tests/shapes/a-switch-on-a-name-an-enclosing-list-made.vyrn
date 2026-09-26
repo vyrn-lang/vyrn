@@ -1,5 +1,4 @@
 // a switch on a name an enclosing list made
-// pin: 0 break, 0 continue
 // An optional projection's `if let` nests the rest of the body in an arm, so
 // the second `tryField` switches on `doc` from a list inside the one that
 // made it. The screen passes the names an enclosing list made down the path

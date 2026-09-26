@@ -1,5 +1,4 @@
 // a record printed, interpolated and rendered through its impl
-// pin: 0 break, 0 continue
 // A render of a type the language does not render is a call to its
 // `impl Show`, at a concrete type and at a `<T: Show>` instance
 // (RFC-0125 M7, `m7-render`).

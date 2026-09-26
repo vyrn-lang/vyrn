@@ -1,5 +1,4 @@
 // a float literal left of a `Float32` operand
-// pin: 0 break, 0 continue
 // A float literal takes its sibling's type: the core walk ran `0.0 - o`
 // at `Float64` into a `Float32` local, which no engine loads.
 fn neg(o: Float32) -> Float32 { return 0.0 - o }          fn vyrnTestMain() -> Int64 { let x: Float32 = 1.5 if neg(x) < 0.0 { return 1 } return 0 }

@@ -1,5 +1,4 @@
 // a scalar `modify` argument
-// pin: 0 break, 0 continue
 // A scalar handed to `modify` lives in a local, which has no address, so
 // the call spills it to a slot and reloads it after (RFC-0125 M7).
 // `examples/` hands `modify` only layouts.

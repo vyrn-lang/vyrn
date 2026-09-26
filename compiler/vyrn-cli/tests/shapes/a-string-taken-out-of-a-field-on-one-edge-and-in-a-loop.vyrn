@@ -1,5 +1,4 @@
 // a String taken out of a field, on one edge and in a loop
-// pin: 0 break, 0 continue
 // A String taken out of a field is the pointer the field held, and the
 // release of the record it left walks around the hole (RFC-0125 M7).
 type F = { key: String, value: String, n: Int64 }          fn mk(k: Int64) -> F { return F { key: k.toString(), value: "vv".copy(), n: k } }          fn fields(k: Int64) -> Array<F> { return [mk(k), mk(k + 1), mk(1)] }          fn one(k: Int64) -> Int64 { let mut out: Array<String> = [] let f = mk(k)          if f.n > 1 { out.push(consume f.key) } return out.length * 100 + f.value.byteLength }          fn all(k: Int64) -> Int64 { let mut keys: Array<String> = []          for f in fields(k) { if f.n != 1 { keys.push(consume f.key) } } return keys.length * 10 + keys[1].byteLength }          fn vyrnTestMain() -> Int64 { return one(5) + one(0) * 1000 + all(99) * 1000000 }

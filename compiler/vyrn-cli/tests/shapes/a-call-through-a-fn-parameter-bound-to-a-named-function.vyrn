@@ -1,5 +1,4 @@
 // a call through a `fn` parameter bound to a named function
-// pin: 0 break, 0 continue
 // A specialization is one instance per target (RFC-0023): a call through
 // a parameter bound to a named function is a call to it, a pass-through
 // names the same instance, and a generic callee is solved by the checker.

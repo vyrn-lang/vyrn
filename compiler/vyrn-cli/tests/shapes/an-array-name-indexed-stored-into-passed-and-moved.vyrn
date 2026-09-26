@@ -1,4 +1,3 @@
 // an Array name indexed, stored into, passed and moved
-// pin: 0 break, 0 continue
 // An array name is its header's slot on both walks, read at its address.
 fn total(xs: Array<Int64>) -> Int64 { let mut t = 0 for x in xs { t = t + x } return t }          fn vyrnTestMain() -> Int64 { let twice: fn(Int64) -> Int64 = x -> x * 2          let mut xs: Array<Int64> = [1, 2, 3] let mut i = 0          while i < xs.length { if xs[i] > 2 { xs[0] = xs[0] % 10 + twice(i) } i = i + 1 }          let n = total(xs) let ys = xs return n * 10 + ys.length }

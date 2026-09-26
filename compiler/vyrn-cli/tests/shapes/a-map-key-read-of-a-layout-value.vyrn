@@ -1,5 +1,4 @@
 // a map key read of a layout value
-// pin: 0 break, 0 continue
 // A key read of a layout value is the same lookup as a scalar one: both
 // walks copy the payload into the Option's slot through `map_at`, two words
 // inline or a boxed copy, and a `match` releases it (RFC-0125 M7, `m7-mapkey`).

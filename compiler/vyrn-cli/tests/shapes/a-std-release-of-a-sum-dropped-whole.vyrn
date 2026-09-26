@@ -1,5 +1,4 @@
 // a std release of a sum dropped whole
-// pin: 0 break, 0 continue
 // A declared release takes its receiver apart with `match consume self`, and
 // the caller frees the payload boxes after it returns (RFC-0125 M7,
 // `m7-release`). No program of `examples/` drops a `Von` or a `VyxNode`

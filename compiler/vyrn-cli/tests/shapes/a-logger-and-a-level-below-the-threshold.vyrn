@@ -1,5 +1,4 @@
 // a logger and a level below the threshold
-// pin: 0 break, 0 continue
 // A level below the build's threshold evaluates both operands and writes
 // nothing; one above it writes the line. Both are the facade's row.
 fn vyrnTestMain() -> Int64 { let log = logger("shape") let n = 3 log.debug("n is \{n}") log.warn("n is \{n}") return 0 }

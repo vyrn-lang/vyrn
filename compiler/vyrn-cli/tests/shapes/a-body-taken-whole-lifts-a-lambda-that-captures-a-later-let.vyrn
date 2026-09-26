@@ -1,5 +1,4 @@
 // a body taken whole lifts a lambda that captures a later let
-// pin: 0 break, 0 continue
 // The body lifts its lambda targets before its first statement, where `k`
 // is not yet in scope; the capture list and its types are the row's. 1008.
 fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x) }          fn vyrnTestMain() -> Int64 { let a = apply(x -> x * 2, 5) let k = 7 return a * 100 + apply(x -> x + k, 1) }

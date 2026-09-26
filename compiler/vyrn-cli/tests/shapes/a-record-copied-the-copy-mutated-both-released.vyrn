@@ -1,5 +1,4 @@
 // a record copied, the copy mutated, both released
-// pin: 0 break, 0 continue
 // `.copy()` of a record that owns a String and an Array, and of a generic
 // `impl<T> Copy` type. The core states the second as a call to the
 // declaration's function, and each copy is a fresh owner released at block

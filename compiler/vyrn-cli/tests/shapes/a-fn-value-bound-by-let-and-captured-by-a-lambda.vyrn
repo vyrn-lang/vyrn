@@ -1,5 +1,4 @@
 // a `fn` value bound by `let` and captured by a lambda
-// pin: 0 break, 0 continue
 // A `let` of a function's name binds a closure enum's value, and the screen
 // used to refuse the name by its type (the m7-names2 record). The lambda
 // keeps the body off the whole-body walk.

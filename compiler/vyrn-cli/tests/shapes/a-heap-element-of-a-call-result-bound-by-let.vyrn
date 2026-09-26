@@ -1,5 +1,4 @@
 // a heap element of a call result bound by let
-// pin: 0 break, 0 continue
 // `let a = pieces()[0]` copies the element out of the temporary, and the
 // temporary is released whole when the statement ends, as `.copy()` spelled
 // it (site/app/hl.vyrn). A scalar element is read out with no copy.

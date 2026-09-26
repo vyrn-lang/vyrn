@@ -1,5 +1,4 @@
 // a layout joined by an `if` and a `match`, and renamed
-// pin: 0 break, 0 continue
 // A layout `if` or `match` expression stores each branch into a join
 // temporary its first store slots, and the `let` after it renames the slot
 // (RFC-0125 M7, `m7-join`): an array, a record and an enum. In `grow` the

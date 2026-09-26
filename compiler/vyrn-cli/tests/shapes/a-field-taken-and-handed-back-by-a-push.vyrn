@@ -1,5 +1,4 @@
 // a field taken and handed back by a push
-// pin: 0 break, 0 continue
 // `b.xs.push(v)` takes `b.xs` and stores the result back. The take is the
 // place a rebuild hands back, not a part of a literal (the m7-slotsfield
 // record).

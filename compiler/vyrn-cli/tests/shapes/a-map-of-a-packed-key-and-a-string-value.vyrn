@@ -1,5 +1,4 @@
 // a map of a packed key and a String value, released and copied
-// pin: 0 break, 0 continue
 // A record or fieldless enum key is packed bytes, so the map's deep release
 // and deep copy walk only the values; a String key column alone is walked
 // per entry (#508).

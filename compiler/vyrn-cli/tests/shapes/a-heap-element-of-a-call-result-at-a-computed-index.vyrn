@@ -1,5 +1,4 @@
 // a heap element of a call result at a computed index
-// pin: 0 break, 0 continue
 // `radarRings()[belowBase() - 1]` on every turn of a loop: each turn copies
 // the element out and releases the temporary array whole at the statement's
 // end, so nothing a turn made outlives it (site/app/bench.vyrn).

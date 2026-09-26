@@ -255,6 +255,8 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("jsonSchema", Compiler, "renders a declaration as JSON Schema at compile time"),
     ("value", Compiler, "boxes a scalar by its type; RFC-0094 M3 routes anything else to `impl Show`"),
     ("blackBox", Compiler, "RFC-0055: an optimizer barrier is a backend property"),
+    ("@pull", Compiler, "the core's callee for a stream `for` head; no program spells it"),
+    ("@strAppend", Compiler, "the core's callee for a String accumulator; no program spells it"),
     ("raw", Compiler, "RFC-0054: builds a code-quote value"),
     ("rawAt", Compiler, "RFC-0054: a code quote carrying an origin directive"),
     ("render", Compiler, "RFC-0054: a code quote back to text"),
@@ -397,9 +399,16 @@ fn the_direct_backend_carries_the_census_too() {
         "@at" => Some("project::AT"),
         "@slot" => Some("ELEM"),
         "contractOf" | "toJson" | "fromJson" => Some("routed_callee"),
+        "schemaOf" => Some("schema_at"),
         _ => None,
     };
-    let direct = include_str!("../../vyrn-codegen/src/direct.rs");
+    // The core states a builtin and the emitter answers its row, so the
+    // backend is the two files together (RFC-0125 M7).
+    let direct = [
+        include_str!("../../vyrn-codegen/src/direct.rs"),
+        include_str!("../../vyrn-lower/src/core.rs"),
+    ]
+    .concat();
     let covers = |n: &str| {
         direct.contains(&format!("{n:?}")) || alias(n).is_some_and(|a| direct.contains(a))
     };
@@ -445,14 +454,17 @@ fn dispatched(region: &str) -> BTreeSet<&str> {
         }
     }
     // `("x", 1)` — a `match (name, args.len())` arm, whose second element is
-    // a literal arity, which is what tells it from every other tuple.
+    // a literal arity, which is what tells it from every other tuple — and
+    // `("x", Spec::..)` or `one("x", &p, &r)`, a row of the core's
+    // `builtin_rows`.
     for (i, _) in region.match_indices("(\"") {
         let Some((name, after)) = region[i + 2..].split_once('"') else {
             continue;
         };
         let arity = after.trim_start_matches([',', ' ']);
         let close = arity.trim_start_matches(|c: char| c.is_ascii_digit());
-        if !name.is_empty() && close.len() < arity.len() && close.starts_with(')') {
+        let row = arity.starts_with("Spec::") || arity.starts_with('&');
+        if !name.is_empty() && (row || close.len() < arity.len() && close.starts_with(')')) {
             out.insert(name);
         }
     }
@@ -472,22 +484,20 @@ fn dispatched(region: &str) -> BTreeSet<&str> {
 
 /// The anti-rot direction: a builtin an emitter branches on with no census row.
 ///
-/// `interp.rs` carried this and RFC-0125 §3 M5 deleted it, naming the anchor a
-/// later slice would scan — `direct.rs`'s own `match name {` in the
-/// call-emission path, with the guards above it. This is that scan, and two
-/// regions the anchor did not name: the builtins that exist only while a
-/// generator runs, and the three whose lowering is a synthesized Vyrn entry. A
-/// fourth region was the TEXTUAL backend's chain, which no census ever read, and
-/// it went with the route (RFC-0125 §3 M4). Three regions, one census, and the
-/// emitter agrees with it or the suite fails.
+/// The emitter answers every builtin from the core's specification row
+/// (RFC-0125 M7), so the regions are that table, `core::builtin_rows`, and
+/// the emitter's methods that branch on a row's name within its kind. The
+/// TEXTUAL backend's chain went with the route (RFC-0125 §3 M4), and the AST
+/// walk's `call_inner`, `gen_builtin` and `gen_entry` went with the walk.
 ///
 /// There is no list of permitted exceptions, and that is a finding rather than
-/// a convenience: every name the three regions dispatch on is censused today.
-/// One name the scan cannot see, and the forward direction already aliases it:
-/// `@panicAt` is spelled `ast::PANIC_AT`, the constant rather than the literal.
+/// a convenience: every name the regions dispatch on is censused today. The
+/// scan cannot see a name spelled by a constant (`ast::PANIC_AT`,
+/// `checker::GEN_REFLECT`), and the forward direction aliases `@panicAt`.
 #[test]
 fn the_backends_dispatch_on_nothing_the_census_omits() {
     let direct = include_str!("../../vyrn-codegen/src/direct.rs");
+    let core = include_str!("../../vyrn-lower/src/core.rs");
     // Located by content, so an emitter that is reorganised fails here loudly
     // rather than scanning nothing and passing.
     let cut = |src: &'static str, from: &str, to: &str| -> &'static str {
@@ -499,15 +509,10 @@ fn the_backends_dispatch_on_nothing_the_census_omits() {
             .unwrap_or_else(|| panic!("the region closing `{to}`"));
         &src[i..i + from.len() + j]
     };
-    let regions = [
-        // The guards, and the table under them: `call_inner` down to the
-        // fall-through arm that ends its `match name`.
-        cut(direct, "    fn call_inner(", "\n            _ => {}\n"),
-        // The builtins that exist only while a generator runs (RFC-0076 M7),
-        // and the three whose lowering is a synthesized Vyrn entry (M3b).
-        cut(direct, "    fn gen_builtin(", "\n    fn "),
-        cut(direct, "    fn gen_entry(", "\n    fn "),
-    ];
+    let mut regions = vec![cut(core, "pub fn builtin_rows(", "\n}\n")];
+    for f in ["slot_call", "asserts", "effect", "logs", "lanes"] {
+        regions.push(cut(direct, &format!("    fn {f}("), "\n    fn "));
+    }
     let censused: BTreeSet<&str> = CENSUS.iter().map(|(n, ..)| *n).collect();
     let uncensused: BTreeSet<&str> = regions
         .iter()

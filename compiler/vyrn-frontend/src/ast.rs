@@ -198,8 +198,8 @@ pub fn is_surface_builtin(name: &str) -> bool {
 /// TWO SITES DELIBERATELY STILL SPELL THE FIVE OUT, and they are not
 /// duplication:
 ///
-/// - `vyrn-codegen/src/direct.rs`'s arm is READ AS DATA by
-///   `vyrn-frontend/tests/primitives.rs`, which scans that file for literals to
+/// - `vyrn-lower/src/core.rs`'s `builtin_rows` is READ AS DATA by
+///   `vyrn-frontend/tests/primitives.rs`, which scans it for literals to
 ///   enumerate what the backend implements and compares that to RFC-0078's
 ///   census. A predicate is invisible to a text scan.
 /// - `parser.rs`'s [`crate::parser::METHOD_BUILTINS`] pairs each level with the

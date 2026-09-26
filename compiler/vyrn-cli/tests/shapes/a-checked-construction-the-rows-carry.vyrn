@@ -1,5 +1,4 @@
 // a checked construction the rows carry
-// pin: 0 break, 0 continue
 // `T?(v)` is a `Ctor::Try` row, and both walks call one check (RFC-0003,
 // RFC-0125 M7): a scalar base, a String base, no `where` clause, and a part.
 type Age = Int64 where value >= 18          type Root = String where value.byteLength > 0          type Any = Int64          fn age(n: Int64) -> Int64 { return match Age?(n) { Some(a) => a, None => 0 - 1 } }          fn root(s: consume String) -> Int64 { if let Some(r) = Root?(s) { return r.byteLength } return 0 - 1 }          fn any(n: Int64) -> Int64 { let o = Any?(n) return match o { Some(a) => a, None => 0 } }          fn some(k: Int64) -> Int64 { let xs = [Age?(k), Age?(k + 10)] let mut t = 0 for x in xs { if let Some(a) = x { t = t + a } } return t }          fn vyrnTestMain() -> Int64 { return age(30) + age(3) * 100 + root("abc".copy()) * 10000 + root("") * 100000 + any(7) * 1000000 + some(12) * 100000000 }

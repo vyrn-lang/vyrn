@@ -2963,8 +2963,8 @@ fn a_modify_of_the_place_a_read_binding_reads_is_refused() {
 /// A call through a `fn` value READS the value (RFC-0125 M7, `m7-fnval-b`):
 /// a `modify` of the root the value was read out of ends that borrow, and the
 /// call after it is refused. Before the call counted as a read the program was
-/// accepted and the two walks ran apart: the core's rows call through the
-/// field's address and printed 10, the arm called its copy and printed 6.
+/// accepted, and the core's rows called through the field's address and
+/// printed 10 where the program's copy says 6.
 #[test]
 fn a_call_through_a_fn_value_after_a_modify_of_its_root_is_refused() {
     let src = "type H = { f: fn(Int64) -> Int64, n: Int64 }

@@ -1,5 +1,4 @@
 // a for over a stream, its parameter and an early return
-// pin: 0 break, 0 continue
 // A `for` over a stream pulls: one call answers whether an element came,
 // and the read at its name is the element. The loop closes the stream it
 // walks, a parameter too, and a `return` inside it closes it first.

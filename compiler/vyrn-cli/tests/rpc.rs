@@ -14,12 +14,13 @@
 //! the default `cargo test`. Generation runs with the cache disabled so a stale
 //! entry from another run can never mask a regression.
 
+mod serving;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 fn repo_file(rel: &str) -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root
@@ -44,67 +45,9 @@ fn vyrn() -> Command {
 // moment the OS assigns it, so no other process can take the port in between —
 // the harness must never pick a port itself.
 
-struct Serve {
-    child: Child,
-    port: u16,
-    stderr: Arc<Mutex<String>>,
-}
-impl Drop for Serve {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn drain<R: Read + Send + 'static>(mut r: R) -> Arc<Mutex<String>> {
-    let acc = Arc::new(Mutex::new(String::new()));
-    let a = acc.clone();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 1024];
-        loop {
-            match r.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => a
-                    .lock()
-                    .unwrap()
-                    .push_str(&String::from_utf8_lossy(&buf[..n])),
-            }
-        }
-    });
-    acc
-}
-
-/// Read the port out of the startup banner (`serving <file> on
-/// http://localhost:<port>`), or panic after `timeout`. The whole number must
-/// have arrived — a digit run that reaches the end of what was captured could
-/// still be half a port — so the wait ends on the character after it.
-fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
-    let start = Instant::now();
-    loop {
-        {
-            let s = acc.lock().unwrap();
-            if let Some((_, rest)) = s.split_once("http://localhost:") {
-                if let Some((digits, _)) = rest.split_once(|c: char| !c.is_ascii_digit()) {
-                    if let Ok(port) = digits.parse() {
-                        return port;
-                    }
-                }
-            }
-        }
-        if start.elapsed() > timeout {
-            let s = acc.lock().unwrap();
-            panic!(
-                "timed out waiting for the serving banner; captured so far:\n{}",
-                *s
-            );
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// Spawn `vyrn serve examples/fullstack/server.vyrn` and wait for the startup
 /// line — which names the port the OS gave it — before returning.
-fn start_server() -> Serve {
+fn start_server() -> serving::Server {
     let server = repo_file("examples/fullstack/server.vyrn");
     let mut child = vyrn()
         .arg("serve")
@@ -115,18 +58,14 @@ fn start_server() -> Serve {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn vyrn serve");
-    let _ = drain(child.stdout.take().unwrap());
-    let stderr = drain(child.stderr.take().unwrap());
-    let mut s = Serve {
-        child,
-        port: 0,
-        stderr,
-    };
+    let stdout = serving::drain(child.stdout.take().unwrap());
+    let stderr = serving::drain(child.stderr.take().unwrap());
     // The accept loop is live once the banner prints. The wait is long because a
     // saturated machine (several checkouts building at once) starts the child
     // slowly; it is not a race, so a generous limit costs a green run nothing.
-    s.port = wait_for_port(&s.stderr, Duration::from_secs(60));
-    s
+    let port = serving::wait_for_port(&mut child, stdout, stderr, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("{e}"));
+    serving::Server { child, port }
 }
 
 /// Send a raw request, read the whole `Connection: close` response, split into

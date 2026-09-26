@@ -1,0 +1,6 @@
+// a layout returned at an alias of its type
+// `fromJson<Id>` of a plain alias `type Id = Int64` generates a decoder that
+// returns `Array<Int64>` at its declared `Array<Id>`. The bits are the same, so
+// the core's return copies them out as they are: the shape of every route
+// decoder std/ui generates (the m7-pages record).
+type Id = Int64          fn read(s: String) -> Int64 { return match fromJson<Id>(s) { Valid(v) => v, Invalid(issues) => 0 - 1 } }          fn vyrnTestMain() -> Int64 { return read("42") * 100 + read("x") + 1 }

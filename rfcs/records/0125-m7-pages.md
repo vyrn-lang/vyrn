@@ -1,0 +1,21 @@
+#### A layout handed back under another spelling of its type, and a second name for a borrowed parameter, are the core's (2026-09-26, `m7-stream`)
+RFC-0125, milestone M7.
+Decision: the lead's assignment of the pages/fullstack/JSON class from `sites-final.md`. The fix in each case is a screen of the core walk, with no new row.
+Went:
+- The `return` of a layout whose type spells the declared result another way. The screen compared the two types resolved one level deep, so `Array<Int64>` returned as `Array<UiRouteInt>`, the route decoder `json$dad3ff2835e8dbe76` std/ui generates, went to the AST walk. `Fn_::core_returns_as_is` asks the coercion plan the arm asks (`Identity` or `FnRetag`), and both the return screen and `core_lands` read it. So the value is still built in the caller's storage.
+- `let data = d` of a `read` layout parameter, in the `head` and `headTitle` bodies std/ui generates for a vyx page. `core_renames` took a borrowed parameter's second name only for a temporary the naming pass minted; it takes a reader's second name too, while neither name is written.
+Stayed: `takeCursor`, `srcOf`, `cursorGet` and `cursorSet` (std/stream), which m7-where takes: rows for a `Slots` element read over module state (`cells[h].pos`), a place-argument window (`remove(cells, h)`), and inlined `at` prologue statements with no rows. `uiPgData__from0`, a lambda made as a value, which m7-mapleak takes. `uiPageBody__from0/1`, which #540 takes.
+Lines: `direct.rs` +15 (22,650 to 22,665 on 95d9a531). Refusals: 0 lost / 0 gained. Manifest: untouched.
+Licence:
+- `VYRN_FORM_TALLY` over `vyrn run pagesdemo.vyrn`, `emit-wat` of examples/fullstack/server.vyrn, `routes` of examples/bin/server.vyrn and `run` of the vyxpage fixture, cold generator caches, main's binary (06e42e2c) against the tip's: `json$dad3ff2835e8dbe76` 9 arm forms to 0, `head__from0` 2 to 0, `headTitle__from0` 4 to 0, a bin `@lambda` 2 to 0. The other owners are unchanged.
+- shapes `a-layout-returned-at-an-alias-of-its-type` (4200) and `a-second-name-for-a-borrowed-layout-parameter` (2062): main's binary emits 3 and 2 arm forms, the tip none. Both print the same with the core walk on and off, and neither leaks under `VYRN_LEAK_CHECK=1`.
+- `VYRN_WASM_MANIFEST=check` green. A first cut compared by `Identity` alone. It moved 4 rows: `closures2`, `fnvalarg` and `fnvalstore` built a returned closure in a 16-byte slot and copied it out, and pagesdemo built the decoder's result in its own slot and copied 24 bytes, because `core_lands` still compared shallowly. With `FnRetag` accepted and `core_lands` asking the same predicate, all four are byte-identical to main.
+- `coredrive --ignored`, alone, unsharded: 21,171 of 21,172 on 05fa618d, as on main; 347 s. `kernel` 27,061 / 0 / 0; `effects` 29,619 judged; `residue --ignored` passes; CLI nextest 681 passed.
+- `vyrn check` over 547 roots, main's binary against the tip's: equal, 464 accepted.
+- on the deletion branch (`m7-delete-draft` c4bafda4 with these commits on top): the CLI suite fails 10 of 682, from 25. The 15 that pass are 10 in `rpc` and 5 in `pages`, whose decoders and `head` bodies reach "no lowering for a statement ... the core did not state" on c4bafda4. `vyrn test` of examples/bin/client passes (it stops at `json$dd26b40f9d46f6953` on c4bafda4). examples/shelf/client, whose `vyrnRpcDone*` bodies the tally named on aa63e0e1, already passes on c4bafda4.
+- pins by `VYRN_PIN=write` on c4bafda4: `emitter-census` the mapping 10,018 to 10,033 lines; `emitter-reads` both 5,999 to 6,014.
+Time: 150 minutes: 55 tracing (the probe patch no longer applies to main, so a local trace of `core_run` stood in), 40 work, 55 gates.
+Findings:
+- `coerce_plan` puts `FnRetag` ahead of `Identity`, so a function value under its own type is `FnRetag`, never `Identity`.
+- Four other screens compare two types resolved one level deep, and would refuse a type argument's alias the same way: `core_alias` and `core_copies` (the place's type against the name's), `core_renames` (the moved name's type), and `core_run`'s clause over every other name of the run (the frame's type against the row's). `core_run`'s `let` annotation clause compares as written on purpose, for a `where` type. None was changed.
+Left: nothing in this class.

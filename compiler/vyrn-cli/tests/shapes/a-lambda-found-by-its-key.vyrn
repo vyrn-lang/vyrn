@@ -1,5 +1,4 @@
 // a lambda found by its key
-// pin: 0 break, 0 continue
 // The core keys a lifted lambda by its enclosing body and line
 // (`core::lambda_spelling`), and the emitter asks by the same key (the
 // m7-keys record).

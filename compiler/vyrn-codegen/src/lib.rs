@@ -25,45 +25,6 @@ use vyrn_frontend::ast::*;
 /// engines so the placement and the walks are compared without a translation.
 use vyrn_frontend::types::solve_param;
 
-/// One arm of a switch, borrowed (RFC-0125 §3 M5, the one-emission slice).
-///
-/// Both emitters lower ONE switch, and an `if let` reaches it as the two-arm
-/// switch the core says it is ([`vyrn_lower::core::St::Switch`]) — its pattern
-/// arm, and its `else` under [`Pattern::Other`], the arm a user cannot spell.
-/// The halves are borrowed rather than cloned because an expression's ADDRESS
-/// is the key every side table this backend reads is written under, and a
-/// clone has a different one.
-pub(crate) struct ArmRef<'a> {
-    pub pattern: &'a Pattern,
-    pub body: BodyRef<'a>,
-}
-
-/// [`ArmBody`], borrowed.
-pub(crate) enum BodyRef<'a> {
-    Expr(&'a Expr),
-    Block(&'a Block),
-}
-
-impl<'a> ArmRef<'a> {
-    /// The arms a `match` wrote, as the switch reads them.
-    pub(crate) fn of(arms: &'a [MatchArm]) -> Vec<ArmRef<'a>> {
-        arms.iter()
-            .map(|a| ArmRef {
-                pattern: &a.pattern,
-                body: match &a.body {
-                    ArmBody::Expr(e) => BodyRef::Expr(e),
-                    ArmBody::Block(b) => BodyRef::Block(b),
-                },
-            })
-            .collect()
-    }
-
-    /// A block arm yields nothing, which is what makes a switch a statement.
-    pub(crate) fn is_block(&self) -> bool {
-        matches!(self.body, BodyRef::Block(_))
-    }
-}
-
 /// The `if let` shape, keyed on the switch and not on the source form: two
 /// arms, one of which names a tag and the other of which is the default.
 ///
@@ -168,7 +129,7 @@ pub mod observe {
     /// Which engine, and which of its derivations, produced a row.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum Site {
-        /// `Fn_::expr` — the wasm emitter's emitting walk.
+        /// The wasm emitter: the instances it emits and the rungs it takes.
         Wasm,
         /// `Fn_::peek` — the direct wasm backend's second expression typer.
         Peek,

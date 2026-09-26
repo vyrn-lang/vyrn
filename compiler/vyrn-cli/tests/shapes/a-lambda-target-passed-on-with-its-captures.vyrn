@@ -1,5 +1,4 @@
 // a lambda target passed on with its captures
-// pin: 0 break, 0 continue
 // A parameter bound to a lambda and passed on hands its captures to the
 // inner instance where the `fn` parameter stands, before `x` and `y`:
 // 1013, and 1115 with the captures swapped.

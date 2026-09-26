@@ -1,5 +1,4 @@
 // a map keyed by a record or an enum the rows carry
-// pin: 0 break, 0 continue
 // A record or a fieldless enum key is a layout name, which the store and
 // the lookup read as a call reads a layout argument: by its address, packed
 // by `pack_key` (RFC-0117 M2, RFC-0125 M7, `m7-mapkey2`).

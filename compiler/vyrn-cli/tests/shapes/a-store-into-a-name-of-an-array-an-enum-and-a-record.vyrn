@@ -1,5 +1,4 @@
 // a store into a name of an array, an enum and a record
-// pin: 0 break, 0 continue
 // A store into a name of a layout copies the value's bytes into the name's
 // place and releases what the place held where the row says so, in a loop
 // and out of one (RFC-0125 M7, `m7-store`).

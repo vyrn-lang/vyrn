@@ -252,8 +252,8 @@ mod std_modules {
 ///
 /// THE LOWERING IS INSTALLED HERE, and this is the one place both entry points
 /// pass through. Without it the placer never runs, `core::BODIES` stays empty
-/// and the emitter's AST dispatch is the whole compiler — a second, weaker
-/// compiler on a shipping surface. A program `vyrn run` refuses, the page
+/// and the emitter refuses every body — a second compiler on a shipping
+/// surface. A program `vyrn run` refuses, the page
 /// refuses, in the same sentence. The call writes five slots and is idempotent,
 /// so it costs a load nothing worth measuring.
 fn load(
@@ -297,6 +297,10 @@ fn check_json(src: &str) -> String {
 /// `check` reports warnings continuously, and a run does not change what the
 /// checker said.
 fn compile_result(src: &str) -> Vec<u8> {
+    // The load and the backend must walk one expansion of each desugared site
+    // (`schemaOf<T>()`, a user container's `a[i]`), or the core's rows, keyed
+    // by the load's nodes, miss the backend's.
+    let _memo = vyrn_frontend::project::Memo::open();
     let (result, _warnings) = load(src);
     let program = match result {
         Ok(p) => p,

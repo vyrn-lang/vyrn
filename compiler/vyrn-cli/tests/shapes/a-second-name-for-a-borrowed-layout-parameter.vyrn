@@ -1,0 +1,5 @@
+// a second name for a borrowed layout parameter
+// `let data = d` of a `read` record parameter names the caller's address, in a
+// loop and as an argument, and releases nothing (vyxpage's `head`, the
+// m7-pages record).
+type D = { title: String, xs: Array<Int64> }          fn size(d: D) -> Int64 { return d.xs.length }          fn walk(d: D, k: Int64) -> Int64 { let data = d let mut i = 0 let mut t = 0 while i < k { t = t + data.title.byteLength i = i + size(data) } return t * 10 + data.xs[1] }          fn vyrnTestMain() -> Int64 { let d = D { title: "t" + "u", xs: [1, 2] } return walk(d, 5) + d.title.byteLength * 1000 }

@@ -1,5 +1,5 @@
 file	kind	lines	diagnostics
-loader.rs	the file's own job	4098	9
+loader.rs	the file's own job	4103	9
 loader.rs	a rule stated a second time	0	0
 loader.rs	a path only a deleted route reached	0	0
 loader.rs	a copy of a table another module carries	0	0

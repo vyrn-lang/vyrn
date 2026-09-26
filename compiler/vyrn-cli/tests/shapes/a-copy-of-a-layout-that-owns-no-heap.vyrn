@@ -1,5 +1,4 @@
 // a copy of a layout that owns no heap
-// pin: 0 break, 0 continue
 // A layout that owns no heap is a value, so a `let` of a read of one
 // copies its bytes into the binding's slot (RFC-0125 M7).
 type P = { x: Int64, y: Int64 } type S = { a: P, n: Int64 }          fn pick(xs: Array<P>, i: Int64) -> Int64 { let e = xs[i] return e.x + e.y * 100 }          fn inner(s: S) -> Int64 { let p = s.a return p.x + p.y * 10 + s.n }          fn vyrnTestMain() -> Int64 { let xs: Array<P> = [P { x: 1, y: 2 }, P { x: 3, y: 4 }]          let s = S { a: P { x: 5, y: 6 }, n: 7 } return pick(xs, 1) + inner(s) * 1000 }

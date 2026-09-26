@@ -1053,11 +1053,16 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     }
     // The hand-written channel. A failure here is reported and survived: the
     // derived rows above are still true, and a table that is short and says so
-    // beats one that needs the program to start.
+    // beats one that needs the program to start. The projection memo opens
+    // before the load and the ownership memo spans the compile, as [`loaded`]
+    // and [`shared_desugars`] do for every other command.
+    let _dsg = vyrn_frontend::project::Memo::open();
     match vyrn_frontend::load(&source, &root_key, &opts, &resolver)
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
-        .and_then(|p| mounted_routes_wasm(&root_key, &p))
-    {
+        .and_then(|p| {
+            let _memo = shared_desugars(&p);
+            mounted_routes_wasm(&root_key, &p)
+        }) {
         Ok(mounted) => {
             for (method, path, procedure) in mounted {
                 let row = (method, path, procedure, "explicit".to_string());
@@ -2343,10 +2348,11 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
         Some(i) => format!("{}/from-json.vyrn", &norm[..i]),
         None => "from-json.vyrn".to_string(),
     };
-    let program = match load_program(&key, FROM_JSON_SRC) {
+    let (program, _dsg) = match loaded(&key, FROM_JSON_SRC) {
         Ok(p) => p,
         Err(code) => return code,
     };
+    let _memo = shared_desugars(&program);
     // The compiled route (RFC-0125 §3 M5, the `from-json` row): the converter is
     // one constant program, so it compiles once per invocation through the direct
     // backend and runs in the embedded wasmtime. Nothing about it is a user's

@@ -1,5 +1,4 @@
 // a generic instance found by its spelling
-// pin: 0 break, 0 continue
 // The core keys an instance by `vyrn_lower::spell`, `outside<String>`, and
 // the emitter asks by the same key, so the body is the core walk's (the
 // m7-keys record).

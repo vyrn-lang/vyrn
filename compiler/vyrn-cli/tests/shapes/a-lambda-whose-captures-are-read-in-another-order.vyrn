@@ -1,5 +1,4 @@
 // a lambda whose captures are read in another order than they were bound
-// pin: 0 break, 0 continue
 // The row lists a closure's captures in the order the body first reads
 // them, which is the order the lifted signature takes them
 // (`core::lambda_captures`), a String capture among them (RFC-0125 M7,

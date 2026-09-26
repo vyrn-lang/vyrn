@@ -3,8 +3,7 @@
 //! `a[i].f = v` reaches every engine as the parser's idiom: the element copied
 //! out into an unspellable temp, the field stored on the temp, the temp copied
 //! back. The core's rows state it as one store into the element's field
-//! (RFC-0125 M7), and the AST arm recognises the idiom on a HEAPLESS element
-//! (`elem_field_store`). These tests pin the rule by counting `memory.copy` in
+//! (RFC-0125 M7). These tests pin the rule by counting `memory.copy` in
 //! the emitted function: none, for a heapless element and for one that holds
 //! heap.
 //!

@@ -1,5 +1,4 @@
 // a lane-wise operator on vectors
-// pin: 0 break, 0 continue
 // A vector is one wasm `v128`, and its lane-wise operators are rows the
 // walk writes.
 fn mix(a: F32x4, b: F32x4) -> F32x4 { return -(a * b + a - b / a) }          fn vyrnTestMain() -> Int64 { let v = mix(F32x4.splat(2.0), F32x4.splat(0.5))          if v.lane(0) < 0.0 { return 1 } return 0 }

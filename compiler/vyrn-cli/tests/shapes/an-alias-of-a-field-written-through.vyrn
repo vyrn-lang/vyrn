@@ -1,5 +1,4 @@
 // an alias of a field written through
-// pin: 0 break, 0 continue
 // A name read out of a field of an Array type is that field's place, and a
 // store into one of its elements lands in the buffer the name and the field
 // share (RFC-0125 M7, `m7-falias`): `std/num`'s `toFloat` doubles its

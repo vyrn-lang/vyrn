@@ -1,5 +1,4 @@
 // a made layout the statement does not bind
-// pin: 0 break, 0 continue
 // A layout a statement makes and does not bind, a call result read by
 // the statement's call and an `if let`'s scrutinee, lands in a slot of its
 // own, and the run carries its release. The lambda keeps the body off the

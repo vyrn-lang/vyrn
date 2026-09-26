@@ -1,5 +1,4 @@
 // a SmallArray literal of owned elements the core makes
-// pin: 0 break, 0 continue
 // The two Strings are written into the inline buffer, and the release of
 // `s` frees them where it runs. Both walks print 22 with no leak line
 // (RFC-0125 M7, `m7-smallarray`).

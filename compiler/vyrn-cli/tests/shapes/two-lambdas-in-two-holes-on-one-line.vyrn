@@ -1,5 +1,4 @@
 // two lambdas in two interpolation holes on one line
-// pin: 0 break, 0 continue
 // Each hole's nodes sit where the hole stands, so the two lambdas are two
 // keys by column (#471); counted from the hole's own line 1, they shared one. 4.
 fn ap(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x) }          fn vyrnTestMain() -> Int64 { let k = 5 let s = "\{ap(x -> x + k, 1)} \{ap(x -> x * k, 2)}" return s.byteLength }

@@ -1,5 +1,4 @@
 // module state handed to a modify parameter
-// pin: 0 break, 0 continue
 // A global handed to `modify` is its place, `Arg::Place(Place::Global)`,
 // and crosses as its address (the m7-reads record). `examples/` writes it
 // only through `std/slots` `insert`.

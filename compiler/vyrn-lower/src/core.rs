@@ -178,10 +178,6 @@ pub struct NameInfo {
     /// `modify` parameter. The typed judgment refuses a store into any other
     /// name the reader wrote ([`crate::typed::stores`]).
     pub mutable: bool,
-    /// Whether the `let` binding this name states a copy the source does not
-    /// write ([`Builder::copies`]), which the AST walk reads as
-    /// [`Facts::copies`].
-    pub copied: bool,
     /// For a name a LAMBDA literal binds: the captures the closure reads as
     /// VALUES, where the closure may outlive the call it is written at
     /// (RFC-0037, RFC-0125 §3 M3, row 24). `None` where it may not, and for
@@ -1063,10 +1059,6 @@ pub struct Body {
     /// goes back, and an emitter reads it at the loop rather than reading a
     /// plan row's KIND.
     pub(crate) loop_buffers: Vec<usize>,
-    /// `(exit, loop)`: the `return`, `?` or `break` node that releases the
-    /// elements no turn of that `for` reached, innermost loop first
-    /// ([`Facts::unreached`]).
-    pub(crate) unreached: Vec<(usize, usize)>,
     /// A `drop` whose name no binding in scope answers: the name and the
     /// line. The core has no row for it; [`crate::typed::drops`] refuses it.
     pub unbound_drops: Vec<(String, usize)>,
@@ -1116,11 +1108,8 @@ impl Body {
     /// Which rows each SOURCE statement produced, by the node the row names —
     /// RFC-0125 §3 M3, the interleave slice.
     ///
-    /// A driver that picks its walk per FUNCTION can only delete an AST arm
-    /// when every body of the corpus goes through the core. The unit this
-    /// answers for is the statement: a reader hands one source statement to
-    /// the walk that carries it and the other statement to the other walk, and
-    /// an arm goes when no occurrence of its form reaches it any more.
+    /// The unit this answers for is the statement: an emitter walking a body
+    /// one statement at a time reads the rows of each source statement here.
     ///
     /// The correspondence is already stated. A `let`'s row carries the node
     /// the plan keys the binding by ([`NameInfo::binding`]), and `St::Store`,
@@ -1842,6 +1831,10 @@ pub enum Spec {
     /// One operand, at whatever type the row put on the name it reads, and a
     /// result of that same type.
     OwnType,
+    /// One operand at its own type, handed back as it is: the same value,
+    /// not a copy, behind a barrier the optimizer cannot see through
+    /// (RFC-0055's `blackBox`). [`Spec::OwnType`] builds a copy.
+    Barrier,
     /// One operand, at whatever type the row put on the name it reads, and a
     /// result at the stated type. The checker types the operand over a union
     /// (`print`, `@str`), and the emitter chooses the rendering by the
@@ -1974,6 +1967,7 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
             // heap of its own, so its result is the receiver's type and the
             // row states it by naming the operand.
             ("@copy", Spec::OwnType),
+            ("blackBox", Spec::Barrier),
             ("print", Spec::Renders(Type::Unit)),
             ("@str", Spec::Renders(Type::Str)),
             ("panic", Spec::Traps),
@@ -2573,7 +2567,6 @@ fn build_seeded(
             lambdas: Vec::new(),
             cands: Vec::new(),
             loop_buffers: Vec::new(),
-            unreached: Vec::new(),
             unbound_drops: Vec::new(),
             refused: Vec::new(),
             mistyped,
@@ -2680,7 +2673,16 @@ pub fn build_module_state<'a>(
     );
     let mut out = Vec::new();
     for g in &program.globals {
-        let v = b.val(&g.init, &mut out)?;
+        // A crossing into a validated declared type is its constructor, as a
+        // store to a name's is.
+        let check = match &g.ty {
+            Some(to) => b.checked(&b.ty_of(&g.init)?, to, &g.init),
+            None => None,
+        };
+        let v = match check {
+            Some(to) => Val::Name(b.checked_temp(&to, &g.init, g.line, &mut out)?),
+            None => b.val(&g.init, &mut out)?,
+        };
         out.push(St::Store {
             place: Place::Global(g.name.clone()),
             value: v,
@@ -2761,7 +2763,6 @@ struct Unreached {
     i: Name,
     elem: Type,
     line: usize,
-    site: usize,
 }
 
 /// A module-state initializer or a `where` predicate as a body of its own,
@@ -2928,7 +2929,6 @@ impl<'a> Builder<'a> {
                 lambdas: Vec::new(),
                 cands: Vec::new(),
                 loop_buffers: Vec::new(),
-                unreached: Vec::new(),
                 unbound_drops: Vec::new(),
                 refused: Vec::new(),
                 mistyped,
@@ -2992,7 +2992,6 @@ impl<'a> Builder<'a> {
             linear,
             bound_by_let: false,
             mutable: false,
-            copied: false,
             closure_reads: None,
             not_owned: None,
         });
@@ -3089,7 +3088,7 @@ impl<'a> Builder<'a> {
     /// too, whether or not it is rebound: the temporary is released whole
     /// when the statement ends, and the binding must outlive it. A scalar
     /// element is read out and needs no copy. A type that declares
-    /// `impl Copy` keeps the borrow: the AST walk states no call for it.
+    /// `impl Copy` keeps the borrow, and no copy is stated for it.
     fn copies(&self, s: &Stmt, ty: &Type) -> bool {
         let Stmt::Let {
             name,
@@ -3300,8 +3299,7 @@ impl<'a> Builder<'a> {
     /// switch: it is the two-way branch the emitters emit, on the miss test,
     /// with the source's `else` block on the TRUE edge. Stating it as a
     /// [`St::Switch`] on a call result left every statement of the four parts
-    /// with no row at all, which is what `tryplace.vyrn`'s three `break`
-    /// occurrences on the AST arm were.
+    /// with no row at all (`tryplace.vyrn`'s three `break`s).
     ///
     /// Answers whether this site is one. The conditions are
     /// [`Builder::inlined`]'s, and the reasons with them.
@@ -3700,7 +3698,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
-        self.leave_loops(sid, out);
+        self.leave_loops(out);
         self.drops_at_but(Exit::Return, sid, self.reads_out_of(&v), out)?;
         out.push(St::Return {
             value: v,
@@ -4402,7 +4400,6 @@ impl<'a> Builder<'a> {
                 // name for a borrow are.
                 let borrow = !owned && (lends || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
                 let n = self.name(name, ty, owned, *line);
-                self.body.names[n as usize].copied = copied;
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
                 self.body.names[n as usize].not_owned = reason;
                 self.record_fields(n, value);
@@ -4439,18 +4436,17 @@ impl<'a> Builder<'a> {
                     Some(n) => Some(self.body.names[n as usize].ty.clone()),
                     None => self.named_place(name, *line).ok().map(|(_, t)| t),
                 };
-                if let (Some(to), Some(vty)) = (to, node_ty(value as *const Expr as usize)) {
-                    if !vyrn_frontend::types::coercible(&vty, &to, self.proto.types()) {
+                if let (Some(to), Some(vty)) = (&to, node_ty(value as *const Expr as usize)) {
+                    if !vyrn_frontend::types::coercible(&vty, to, self.proto.types()) {
                         let refusal = format!("`{name}` is {to} but assigned {vty}");
                         self.body.mistyped.push((*line, refusal));
                     }
                 }
                 let n = self.lookup(name);
-                let check = match n {
-                    Some(n) => {
-                        let to = self.body.names[n as usize].ty.clone();
-                        self.checked(&self.ty_of(value)?, &to, value)
-                    }
+                // A binding's type or module state's declared one: a crossing
+                // into a validated type is its constructor at either.
+                let check = match &to {
+                    Some(to) => self.checked(&self.ty_of(value)?, to, value),
                     None => None,
                 };
                 let grown = match (n, &check) {
@@ -4459,7 +4455,7 @@ impl<'a> Builder<'a> {
                     }
                     // Module state grows through a read of it, which the row
                     // names as its receiver.
-                    (None, _)
+                    (None, None)
                         if self.region == 0
                             && crate::append::global_grows(name)
                             && vyrn_frontend::types::resolve(
@@ -4615,7 +4611,7 @@ impl<'a> Builder<'a> {
             }
             Stmt::Break { line } => {
                 if let Some(Some(u)) = self.walks.last().cloned() {
-                    self.release_unreached(&u, sid, out);
+                    self.release_unreached(&u, out);
                 }
                 self.drops_at(Exit::Break, sid, out)?;
                 out.push(St::Break {
@@ -4955,7 +4951,6 @@ impl<'a> Builder<'a> {
                         n,
                         elem: ety.clone(),
                         line: *line,
-                        site: sid,
                     });
                 }
                 // In front of the variable: each turn binds its own element,
@@ -5242,9 +5237,9 @@ impl<'a> Builder<'a> {
 
     /// The rows a `return` or a `?` runs for every enclosing `for`, innermost
     /// first: the elements no turn reached, then the stream it walks, closed.
-    fn leave_loops(&mut self, exit: usize, out: &mut Vec<St>) {
+    fn leave_loops(&mut self, out: &mut Vec<St>) {
         for u in self.walks.clone().iter().rev().flatten() {
-            self.release_unreached(u, exit, out);
+            self.release_unreached(u, out);
         }
         for it in self.stream_loops.iter().rev() {
             if self.stream_owed(*it) {
@@ -5256,8 +5251,7 @@ impl<'a> Builder<'a> {
     /// Releases the elements of `u`'s container from its counter to its
     /// length, which no turn bound: the rows a `return`, a `?` or a `break`
     /// runs before its own. The element the turn bound is the body's.
-    fn release_unreached(&mut self, u: &Unreached, exit: usize, out: &mut Vec<St>) {
-        self.body.unreached.push((exit, u.site));
+    fn release_unreached(&mut self, u: &Unreached, out: &mut Vec<St>) {
         let c = self.temp(Type::Bool, u.line);
         let mut l = vec![
             St::Let(
@@ -6581,8 +6575,8 @@ impl<'a> Builder<'a> {
             return;
         }
         let _ = node;
-        // An element's receiver is `@at`'s argument, and the AST walk frees
-        // it by the key an argument temporary has.
+        // An element's receiver is `@at`'s argument, and its release is keyed
+        // as an argument temporary's.
         if let (false, Expr::Call { name, args, .. }) = (took, e) {
             if self.arg_released(&args[0], r, name, 0) {
                 self.body.names[r as usize].arg_drop = Some(producer);
@@ -6767,15 +6761,15 @@ impl<'a> Builder<'a> {
 
     /// A lambda literal (RFC-0023). Its captures are reads of the enclosing
     /// names — a capture is by read, and a stored closure snapshots what it
-    /// captured (RFC-0037), so the enclosing frame still owns its value. In an
-    /// argument position the literal is monomorphized away and owns nothing;
-    /// as a `let`'s initializer the plan's note says whether the closure
-    /// value is this frame's. The lambda's own body is a separate frame,
-    /// built by [`Builder::lambda_frame`].
+    /// captured (RFC-0037), so the enclosing frame still owns its value. A
+    /// literal a call's target names is monomorphized away and never reaches
+    /// here ([`Builder::targets_of`]); one that does is a closure value, and
+    /// it owns its snapshot like any other temporary. The lambda's own body is
+    /// a separate frame, built by [`Builder::lambda_frame`].
     fn lambda(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let caps = self.captures(e);
         let ty = self.ty_of(e).unwrap_or(Type::Unit);
-        let t = self.name("@lambda", ty.clone(), false, e.line());
+        let t = self.name("@lambda", ty.clone(), self.owns(&ty), e.line());
         // Where the literal is written ([`NameInfo::closure_reads`]). The cell
         // is taken, so a lambda in the BODY of this one — and a sibling lambda
         // in a later argument of the same call — asks the position it is
@@ -6853,7 +6847,6 @@ impl<'a> Builder<'a> {
                 lambdas: Vec::new(),
                 cands: Vec::new(),
                 loop_buffers: Vec::new(),
-                unreached: Vec::new(),
                 unbound_drops: Vec::new(),
                 refused: Vec::new(),
                 mistyped: Vec::new(),
@@ -7653,7 +7646,7 @@ impl<'a> Builder<'a> {
                     borrow_root(&sv, owns),
                     &mut fail,
                 )?;
-                self.leave_loops(tid, &mut fail);
+                self.leave_loops(&mut fail);
                 self.drops_at(Exit::Try, tid, &mut fail)?;
                 // An `Option` fails with no binder, and the value it returns
                 // is `None` of the frame's result. A `Result` fails with its
@@ -7798,7 +7791,7 @@ impl<'a> Builder<'a> {
             Rhs::Prim(Op::Un(UnOp::Not), vec![Val::Name(held)], Some(Type::Bool)),
         ));
         let mut fail = Vec::new();
-        self.leave_loops(tid, &mut fail);
+        self.leave_loops(&mut fail);
         self.drops_at(Exit::Try, tid, &mut fail)?;
         fail.push(St::Return {
             value: Some(sv.clone()),
@@ -8336,9 +8329,9 @@ impl<'a> Builder<'a> {
     /// parameter is bound to: a function the program declares, a parameter
     /// of this body that is itself bound, a lambda literal written there,
     /// with its captures, or a stored value (RFC-0037), which the row
-    /// forwards as its one capture. Empty where the callee takes no
-    /// function, and where a lambda literal goes to a `consume` position, so
-    /// the call keeps every argument as a value.
+    /// forwards as its one capture. A lambda literal at a `consume` position
+    /// is a stored value: the call may keep the closure. Empty where the
+    /// callee takes no function, so the call keeps every argument as a value.
     ///
     /// A parameter is `fn`-typed as written: one of an alias type takes the
     /// stored value (RFC-0037), which is a value like any other.
@@ -8355,7 +8348,8 @@ impl<'a> Builder<'a> {
             let value = Target::Value(p.name.clone());
             let t = match a {
                 // A `consume` position may keep the closure, so the literal
-                // is a value the kernel judges ([`NameInfo::closure_reads`]).
+                // is a value the kernel judges ([`NameInfo::closure_reads`]),
+                // and the last arm makes it one.
                 Expr::Lambda { line, col, .. } if p.capability != Capability::Consume => {
                     let caps = (self.captures(a).into_iter())
                         .filter_map(|c| match c {
@@ -8370,7 +8364,6 @@ impl<'a> Builder<'a> {
                     let key = lambda_spelling(&self.body.name, *line, *col);
                     Target::Lambda(key, caps)
                 }
-                Expr::Lambda { .. } => return Vec::new(),
                 Expr::Var { name: v, .. } => match self.lookup(v) {
                     Some(n)
                         if self.body.params.contains(&n)
@@ -8698,9 +8691,6 @@ pub struct Facts {
     /// is one this pass states no answer for, and a reader falls back to the
     /// plan there.
     pub stores: std::collections::HashMap<usize, bool>,
-    /// The `let` nodes whose binding is a copy the source does not write
-    /// ([`NameInfo::copied`]): the AST walk copies the value it binds.
-    pub copies: std::collections::HashSet<usize>,
     /// The stores of that map the core STANDS DOWN at, whatever the judgment
     /// would say — the two reasons a store releases nothing that the
     /// statement itself carries (RFC-0125 §3 M3, the store slice):
@@ -8740,11 +8730,6 @@ pub struct Facts {
     /// emitter read the KIND of the plan's own row for it until RFC-0125 §3
     /// M3's container slice, which is the last thing that table was asked.
     pub loop_buffer_only: std::collections::HashSet<usize>,
-    /// Per `return`, `?` or `break` node inside such a `for`: the loops, by
-    /// node and innermost first, whose elements from the counter to the end
-    /// the exit releases before its own rows. The core states them as rows
-    /// ([`Builder::release_unreached`]); the AST walk reads this.
-    pub unreached: std::collections::HashMap<usize, Vec<usize>>,
     /// RFC-0114 M1: the call-argument nodes whose temporary the caller
     /// releases after the call — [`NameInfo::arg_drop`], which the core sets
     /// wherever it lowers such an argument.
@@ -9372,9 +9357,6 @@ fn plan_holes(holes: &[String]) -> Vec<String> {
 fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
     for s in stmts {
         match s {
-            St::Let(n, _) if body.names[*n as usize].copied => {
-                out.copies.extend(body.names[*n as usize].binding);
-            }
             St::If { then, els, .. } => {
                 fold_facts(body, proto, then, out);
                 fold_facts(body, proto, els, out);
@@ -9465,12 +9447,6 @@ fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
     fold_facts(body, proto, &body.stmts, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
-    for (exit, walk) in &body.unreached {
-        let loops = out.unreached.entry(*exit).or_default();
-        if !loops.contains(walk) {
-            loops.push(*walk);
-        }
-    }
     let mut released = std::collections::HashSet::new();
     collect_drops(&body.stmts, &mut released);
     for (i, info) in body.names.iter().enumerate() {

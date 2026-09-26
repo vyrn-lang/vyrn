@@ -30,9 +30,8 @@
 //!
 //! **Destination-first at joins** (M0). wasm has no aggregate values, so an
 //! aggregate `if`-expression has nothing to leave on the stack: the slot is
-//! allocated BEFORE the branch and each arm copies into it. [`Fn_::join`] is that
-//! rule, and it is indifferent to how many arms there are — which is what M2a's
-//! pre-flight said mattered, 46 of the 149 joins having four to seven edges.
+//! allocated BEFORE the branch and each arm copies into it, however many arms
+//! there are.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -53,7 +52,6 @@ use vyrn_lower::core::{Arg, Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 use crate::layout::{self, Layout};
 use crate::llt_of;
 use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE};
-use crate::{ArmRef, BodyRef};
 
 /// What the direct backend cannot lower yet: the construct, and where.
 ///
@@ -337,6 +335,10 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
 }
 
 fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
+    // Every body is the core's, and the core is built through the lowering's
+    // slots, so a host that installed none (a generator run inside a load, a
+    // test) gets them here. Idempotent.
+    vyrn_lower::install();
     // RFC-0125 §3 M5: this emitter reads every expression's type off the
     // checker's record rather than deriving one. `vyrn build` has already
     // asked for it, through the lowering; a host that compiles a program the
@@ -345,7 +347,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // else. The guard lives as long as the emit, so a record made here is not
     // left behind for whatever `Program` next lands at this address.
     let _decided = vyrn_lower::core::decide(program);
-    let _tally = Tally;
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -388,18 +389,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         .iter()
         .map(|t| (t.name.clone(), t.clone()))
         .collect();
-    let mut variants: HashMap<String, Vec<(String, u64, Vec<Type>)>> = HashMap::new();
-    for d in &program.type_decls {
-        if let Some(vs) = vyrn_frontend::types::declared_variants(&d.base) {
-            for (i, v) in vs.iter().enumerate() {
-                variants.entry(v.name.clone()).or_default().push((
-                    d.name.clone(),
-                    i as u64,
-                    v.payload.clone(),
-                ));
-            }
-        }
-    }
     // Three kinds of function define nothing, and are skipped exactly as the
     // textual driver skips them (`lib.rs`, step 1). Lowering an unspecializable
     // shell would fail the whole build over a function nothing calls. The
@@ -408,6 +397,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut generics: HashMap<String, &Function> = HashMap::new();
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
+    let mut skipped = std::collections::HashSet::new();
     for f in &program.functions {
         // An `extern` is an import (declared above); a `gen fn` (RFC-0021) runs
         // only in the compiler's own interpreter and may use builtins with no
@@ -422,6 +412,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // a function no run-time entry can reach.
         let entry = f.name == "main" || f.exported || f.is_export_extern;
         if gen_reach.contains(&f.name) && !entry {
+            skipped.insert(f.name.clone());
             continue;
         }
         // PLAN-0125-runtime §3.2: a `std/mem` declaration has no body this
@@ -443,25 +434,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         }
         user.push(f);
     }
-    let protocol_methods: HashMap<String, String> = program
-        .protocols
-        .iter()
-        .flat_map(|p| {
-            // Projection requirements (RFC-0123 M2) dispatch by receiver type
-            // through the places table, never as mangled methods.
-            p.methods
-                .iter()
-                .filter(|m| m.result_cap.is_none())
-                .map(|m| (m.name.clone(), p.name.clone()))
-        })
-        .collect();
 
     let ownership = vyrn_frontend::own::analyze(program);
-    // RFC-0114 §25's instrument, and never on the GENERATOR path (RFC-0076
-    // M7): a generator module runs inside the compiler and its exit code is a
-    // protocol between the host and the module, so a residue report there
-    // would fail the build instead of measuring the program.
-    let audited = gen.is_none() && vyrn_frontend::loader::audit_build();
+    // RFC-0114 §25's instrument, which a generator host never carries
+    // ([`vyrn_frontend::loader::audit_build`]).
+    let audited = vyrn_frontend::loader::audit_build();
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
@@ -470,10 +447,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         sigs: HashMap::new(),
         rt,
         gen,
-        variants,
         generics,
         higher_order,
-        protocol_methods,
+        skipped,
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
         fnvals: RefCell::new(Vec::new()),
@@ -1123,8 +1099,8 @@ enum Body<'a> {
     Block(&'a Block),
     /// A `|x| e` literal's expression. The block form's `return e` is a
     /// STATEMENT, and writing one here would mean owning a copy of `e` — which
-    /// is exactly the clone this milestone deleted — so the value and the branch
-    /// are emitted directly (see [`Fn_::lambda_value`]).
+    /// is exactly the clone this milestone deleted — so the core's rows state
+    /// the body, and [`lower_body`] refuses one they do not carry.
     Value(&'a Expr),
     /// The shell's own statements: a lifted lambda whose literal is not one of
     /// the program's nodes, so [`Cx::lambdas`] cannot hand back a borrow of it
@@ -1258,7 +1234,7 @@ type ShapeKey = (bool, Type, Vec<String>);
 ///
 /// Captures first, then the `fn` type's own parameters — a lifted lambda's shape,
 /// and the shape a bare named function already has with zero captures. So calling
-/// a target is [`Fn_::emit_call`] with the captures prepended to the argument
+/// a target is [`Fn_::emit_call_with`] with the captures prepended to the argument
 /// list, and no second call path exists to disagree with the first about the
 /// aggregate convention, `modify`, or coercion.
 ///
@@ -1316,10 +1292,6 @@ struct Cx<'a> {
     /// `None` is an ordinary `vyrn build --target wasm`, where every one of those
     /// builtins is refused by name exactly as it was.
     gen: Option<Gen>,
-    /// Variant name → every enum that declares it, with the variant's tag and
-    /// payload types. A name may belong to two enums, which is why the
-    /// expectation decides and an ambiguous one is a gap rather than a guess.
-    variants: HashMap<String, Vec<(String, u64, Vec<Type>)>>,
     /// Generic functions by name. They have no index and no body of their own —
     /// only specializations do — so a call to one is a discovery.
     generics: HashMap<String, &'a Function>,
@@ -1328,9 +1300,6 @@ struct Cx<'a> {
     /// one is a discovery, and the shell is skipped exactly as the textual driver
     /// skips it.
     higher_order: HashMap<String, &'a Function>,
-    /// Protocol method name → its protocol (RFC-0002 §5). A bounded generic is
-    /// what protocols are for, so `x.show()` inside one has to resolve.
-    protocol_methods: HashMap<String, String>,
     /// The monomorphization whose body is being lowered; empty for an ordinary
     /// function.
     subst: HashMap<String, Type>,
@@ -1368,6 +1337,9 @@ struct Cx<'a> {
     /// rather than this file's, which is also how RFC-0043's host boundary is
     /// reached by name.
     externs: HashMap<String, Ext>,
+    /// The functions [`gen_reach`] leaves out of the module. A call to one
+    /// refuses at its own site, naming it.
+    skipped: std::collections::HashSet<String>,
     /// Per function: every release step PLACED — at the exit that runs it, in
     /// the order it runs (RFC-0101 M4). One order for three engines, read at
     /// the exit instead of derived from a frame stack.
@@ -1409,84 +1381,6 @@ struct Cx<'a> {
 /// fifth hook needs no edit here.
 
 impl<'a> Cx<'a> {
-    /// RFC-0114 R1′ read off the core (RFC-0125 §3 M3, the
-    /// deletion-preparation slice): does this frame release the unnamed
-    /// receiver of the field read at `node`, and around which holes?
-    ///
-    /// The core states it as a `St::Drop` of the name whose
-    /// `NameInfo::receiver` is this node, with the name's own hole set.
-    ///
-    /// There is no second answer to fall back to: `own.rs` states no
-    /// receiver table any more (RFC-0125 §3 M3, the emitter-reads-the-core-
-    /// alone slice).
-    fn receiver_row(&self, node: usize) -> Option<Vec<String>> {
-        let f = self.facts.as_ref()?;
-        f.receivers.get(&self.plan.key_of(node)).cloned()
-    }
-
-    /// RFC-0114 M2 and exit-residue round eighteen read off the core
-    /// (RFC-0125 §3 M3, the emitter-reads-the-core slice): does the store at
-    /// `node` release the value it displaces?
-    ///
-    /// The core states the plan's two tables as ONE answer (`St::Store`'s
-    /// `releases`), because both compiled backends read them as one — the row, the
-    /// `mentions_place` guard, and round eighteen's `fresh_str` exception,
-    /// all of which the core now spells (`core::Builder::stmt`). What stays
-    /// the emitter's is the region gate, which is a property of where the
-    /// code stands and not of the store.
-    ///
-    /// A site the core states nothing for falls back to the plan: RFC-0091
-    /// M2's `place at` rewrite BUILDS the store statements a user
-    /// container's `c[h] = v` becomes, the checker walks those, and this
-    /// pass walks the source statement. `compiler/vyrn-cli/tests/coretables.rs`
-    /// pins that residue at twelve rows over the corpus.
-    fn store_row(&self, node: usize) -> bool {
-        self.store_fact(node).unwrap_or(false)
-    }
-
-    /// The core's answer alone, or `None` where it states none — a body this
-    /// pass could not lower, or a statement RFC-0091 M2's rewrite built. A
-    /// store to a NAME asks for it this way, because the answer it falls
-    /// back to is the plan's row AND the guards around it, not the row
-    /// alone.
-    fn store_fact(&self, node: usize) -> Option<bool> {
-        let f = self.facts.as_ref()?;
-        f.stores.get(&self.plan.key_of(node)).copied()
-    }
-
-    /// Round twenty-eight read off the core (RFC-0125 §3 M3, the
-    /// emitter-reads-the-core slice): does this statement discard an owned
-    /// result the emission frees rather than drops? The core states it as a
-    /// `St::Drop` of the temporary the statement's value bound, keyed by the
-    /// `Stmt::Expr` node.
-    ///
-    /// There is no second answer to fall back to: `own.rs` states no
-    /// discarded table any more (RFC-0125 §3 M3, the
-    /// emitter-reads-the-core-alone slice).
-    fn discarded_row(&self, node: usize) -> bool {
-        self.facts
-            .as_ref()
-            .is_some_and(|f| f.discarded.contains(&self.plan.key_of(node)))
-    }
-
-    /// Is the `let` at `node` a copy the source does not write? The core
-    /// states it ([`vyrn_lower::core::Facts::copies`]).
-    fn copies_at_let(&self, node: usize) -> bool {
-        self.facts
-            .as_ref()
-            .is_some_and(|f| f.copies.contains(&self.plan.key_of(node)))
-    }
-
-    /// Does this `for` give its container back where it ends? The core states
-    /// it at the loop ([`vyrn_lower::core::Facts::loop_gives_back`]); this
-    /// emitter read the word `consume` off the source until RFC-0125 §3 M3's
-    /// event-stream slice.
-    fn loop_gives_back(&self, node: usize) -> bool {
-        self.facts
-            .as_ref()
-            .is_some_and(|f| f.loop_gives_back.contains(&self.plan.key_of(node)))
-    }
-
     /// Does the container's release at this `for` walk the BUFFER alone? The
     /// core states it at the loop
     /// ([`vyrn_lower::core::Facts::loop_buffer_only`]), out of the same
@@ -1495,29 +1389,6 @@ impl<'a> Cx<'a> {
         self.facts
             .as_ref()
             .is_some_and(|f| f.loop_buffer_only.contains(&self.plan.key_of(node)))
-    }
-
-    /// The loops whose unreached elements the exit at `node` releases,
-    /// innermost first ([`vyrn_lower::core::Facts::unreached`]).
-    fn unreached(&self, node: usize) -> Vec<usize> {
-        self.facts
-            .as_ref()
-            .and_then(|f| f.unreached.get(&self.plan.key_of(node)).cloned())
-            .unwrap_or_default()
-    }
-
-    /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
-    /// slice): does the caller free this argument's value after the call or
-    /// operator above it? The core carries the key on the name the argument
-    /// bound ([`vyrn_lower::core::NameInfo`]'s `arg_drop`), which is where an
-    /// operator's operand gets one too — `a + b` is `@concat(a, b)` here.
-    ///
-    /// There is no second answer to fall back to, exactly as [`Cx::store_row`]
-    /// has none: `own.rs` states no argument table any more.
-    fn arg_drop_row(&self, node: usize) -> bool {
-        self.facts
-            .as_ref()
-            .is_some_and(|f| f.arg_drops.contains(&self.plan.key_of(node)))
     }
 
     /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the derivation
@@ -1534,44 +1405,6 @@ impl<'a> Cx<'a> {
             .get(&self.plan.key_of(node))
             .cloned()
             .unwrap_or_default()
-    }
-
-    /// Whether the construct at `node` switches on a value the frame MADE
-    /// ([`vyrn_lower::core::Facts::owns_scrutinee`]), so the boxes its
-    /// binders came out of are its own to give back.
-    ///
-    /// A wider question than [`Cx::match_consumes`] and it contains it: a
-    /// take is one way to own the scrutinee, and a `consume`, a call's
-    /// result, a literal and a `Map` lookup are the others. Each compiled
-    /// backend read those four off the SOURCE, beside the table that answered
-    /// the take; the core states all of them as one row (RFC-0125 §3 M3, the
-    /// box slice). A site the core has no answer for is a body no core was
-    /// built for.
-    fn owns_scrutinee(&self, node: usize) -> bool {
-        self.facts
-            .as_ref()
-            .is_some_and(|f| f.owns_scrutinee.contains(&self.plan.key_of(node)))
-    }
-
-    /// Round forty's table read off the core (RFC-0125 §3 M3, the
-    /// deletion-preparation slice): the payload binders the arm at
-    /// `(key, arm)` releases at its end, each with the holes the arm left in
-    /// it. The core states them as the trailing run of `St::Drop` in
-    /// `Arm::body`, with `NameInfo::holes` on each binder;
-    /// Since RFC-0125 §3 M3's derivation slice the rows are the kernel's own
-    /// answer over the core, and `own.rs` states none: the core answers at
-    /// every switch it lowers — a `match`, an `if let` and a `?` alike — and
-    /// a site with no answer is a body no core was built for.
-    fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
-        let f = self.facts.as_ref()?;
-        let rows = f.arms.get(&(self.plan.key_of(key), arm))?;
-        // The kind the core carries beside each binder is the interpreter's
-        // reader; this backend reads the release off the type itself.
-        (!rows.is_empty()).then(|| {
-            rows.iter()
-                .map(|(n, h, _)| (n.clone(), h.clone()))
-                .collect()
-        })
     }
 
     /// Substitute the monomorphization this lowering is inside.
@@ -1680,6 +1513,22 @@ impl<'a> Cx<'a> {
         Ok(sig)
     }
 
+    /// Whether the function at `index` is a signature's dispatcher (RFC-0037).
+    fn is_dispatcher(&self, index: u32) -> bool {
+        (self.dispatch.borrow().sigs.iter()).any(|(_, s)| s.index == index)
+    }
+
+    /// The parameter `name` of `f`'s declaration, which `p` stands for, or `p`
+    /// itself. An instance's shell holds copies ([`instance_shell`],
+    /// [`ho_shell`]), and the plan keys a `consume` parameter's release by the
+    /// declaration's node.
+    fn declared_param<'f>(&'f self, f: &Function, name: &str, p: &'f Param) -> &'f Param {
+        (self.generics.get(&f.name))
+            .or_else(|| self.higher_order.get(&f.name))
+            .and_then(|d| d.params.iter().find(|q| q.name == name))
+            .unwrap_or(p)
+    }
+
     /// The function this module defines that `t` calls with no captures, by
     /// the name [`Cx::sigs`] holds it under.
     fn named(&self, t: &FnTarget) -> Option<String> {
@@ -1715,7 +1564,7 @@ impl<'a> Cx<'a> {
         subst: HashMap<String, Type>,
         targets: Vec<FnTarget>,
     ) -> Result<Sig, String> {
-        let (sf, binds) = ho_shell(f, &subst, &targets);
+        let (sf, binds) = ho_shell(self, f, &subst, &targets);
         let core_key = vyrn_lower::spell(&f.name, &type_args);
         self.enqueue(
             m,
@@ -2075,7 +1924,7 @@ fn mem_pre(b: &mut Frame, prim: &str) {
 
 /// The end of an aggregate store, with the destination's address and the
 /// value's on the stack: two drops when the value was built `in_place`, and
-/// the copy of `size` bytes otherwise. Both walks end a store with it.
+/// the copy of `size` bytes otherwise.
 fn agg_landed(b: &mut Frame, size: u32, in_place: bool) {
     if in_place {
         b.ins(&Instruction::Drop);
@@ -2128,23 +1977,15 @@ impl Dest {
 /// family.
 ///
 /// A record literal, an array literal and a map literal each write their parts
-/// at offsets the layout decides, and the offsets are the same whichever walk
-/// is emitting: the AST arm has an expression per part and the core's row has a
-/// [`Val`]. The builders below take this rather than a slice of expressions, so
-/// the placement is stated once and the two walks cannot drift on it.
+/// at offsets the layout decides. The core's row names each part as a [`Val`],
+/// and the builders below take this, so the placement is stated once.
 enum Parts<'a, 'c> {
-    Ast(Vec<&'a Expr>),
     Core(&'a vyrn_lower::core::Body, &'a [Val], &'c mut Walked),
 }
 
 impl<'a> Parts<'a, '_> {
-    fn of(es: &'a [Expr]) -> Self {
-        Parts::Ast(es.iter().collect())
-    }
-
     fn len(&self) -> usize {
         match self {
-            Parts::Ast(es) => es.len(),
             Parts::Core(_, vs, ..) => vs.len(),
         }
     }
@@ -2152,7 +1993,6 @@ impl<'a> Parts<'a, '_> {
     /// Where the `i`th part's own row wrote it ([`Fn_::core_part_at`]).
     fn built(&mut self, i: usize) -> Option<Dest> {
         match self {
-            Parts::Ast(_) => None,
             Parts::Core(_, vs, w) => match vs[i] {
                 Val::Name(n) => w.built[n as usize].take(),
                 Val::Lit(_) => None,
@@ -2229,9 +2069,6 @@ struct Fn_<'a, 'p> {
     /// (RFC-0101 M4): a `break` reads the steps the placement put at that
     /// `break`, so no engine derives an index into its own frames any more.
     loops: Vec<(u32, u32, u32)>,
-    /// RFC-0125 M1: the header parts of every binding a `while` hoisted
-    /// (`hoist_walks`), keyed by name, live for the loop's extent.
-    walks: HashMap<String, Walk>,
     /// RFC-0125 M1: the two locals a failed bounds check parks its message
     /// and index in before branching to the function's one trap site — see
     /// `bounds_check`. `None` for a frame that has no site (the globals
@@ -2301,10 +2138,6 @@ struct Fn_<'a, 'p> {
     /// such a walk is still frame structure, so a step registered before the
     /// cursor is a frame outside the loop and the cursor runs first.
     cursors: Vec<(Place, Type, u32)>,
-    /// The `for` loops the body is inside whose unreached elements an exit
-    /// releases ([`vyrn_lower::core::Facts::unreached`]): the loop's key, its
-    /// walk and its index local, innermost last.
-    walking: Vec<(usize, Walk, u32)>,
     /// Lexical `region` nesting depth within this body, so an exit edge knows how
     /// many arena scopes it is leaving. The runtime counter is dynamic (a callee's
     /// region nests inside its caller's); this is only the part one body can see,
@@ -2317,7 +2150,7 @@ struct Fn_<'a, 'p> {
     region_marks: Vec<u32>,
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
-    /// call ends — see [`Fn_::call`].
+    /// call ends.
     arg_frees: Vec<(u32, Type)>,
     /// The holes the walk in progress must skip, relative to the place it is
     /// looking at (RFC-0093 M2). Taken at the top of [`Fn_::rel_at`], so a walk
@@ -2335,26 +2168,12 @@ struct Fn_<'a, 'p> {
     /// calling a `fn` parameter a lookup here rather than a value on the stack,
     /// and why no function table exists.
     fn_binds: HashMap<String, FnBinding>,
-    /// The local `String` accumulators `s = s + …` may grow in place, from
-    /// [`vyrn_lower::append::append_candidates`] — the SAME whitelist the core's
-    /// builder asks, not a second one. Two copies of that rule would be two answers to
-    /// "may this buffer move", and one of them a use-after-free.
-    append_ok: std::collections::HashSet<String>,
     /// wasm local holding the accumulator's pointer → the frame slot holding its
     /// ownership flag. Keyed by local index rather than by name because the
     /// local IS the binding: two `let out`s in one body are two accumulators, and
     /// a global (a `Place::Static`) never gets an entry at all.
     str_append: HashMap<u32, u32>,
-    /// RFC-0125 M1: the storage the NEXT expression may build itself into, and
-    /// the type that storage holds. Set by a consumer that owns fresh storage
-    /// ([`Fn_::agg_into`]), taken at the top of [`Fn_::expr_inner`] so only the
-    /// immediate expression sees it; a literal or a call that uses it says so
-    /// through `dest_used`, and the consumer skips its copy.
-    dest_hint: Option<(Dest, Type)>,
     dest_used: bool,
-    /// The hint an `Expr::Call` carried into [`Fn_::call_inner`], which takes it
-    /// before any argument is lowered so a nested call cannot claim it.
-    call_dest: Option<(Dest, Type)>,
     /// The declared function this frame's plan rows are under: the function
     /// itself, or for a lifted lambda the function that holds the literal
     /// (RFC-0125 M3, third slice).
@@ -2365,11 +2184,10 @@ struct Fn_<'a, 'p> {
     /// This frame's own core body, and where each of its names lives — RFC-0125
     /// §3 M3, the interleave slice.
     ///
-    /// The driver used to pick its walk per FUNCTION, so an AST arm could only
-    /// go when every body of the corpus went through the core. The unit is the
-    /// STATEMENT now: the two walks share this frame — its locals, its scope
-    /// and the places below — and each statement goes to whichever walk carries
-    /// it. `None` for a frame the core states no body for.
+    /// A body the rows carry whole is walked by [`Fn_::core_body`]; any other
+    /// is walked a statement at a time by [`Fn_::core_took`], into this one
+    /// frame with its locals, its scope and the places below. `None` for a
+    /// frame the core states no body for.
     core: Option<std::rc::Rc<vyrn_lower::core::Body>>,
     /// The core's rows for each source statement of this body
     /// ([`vyrn_lower::core::Body::rows_by_statement`]).
@@ -2378,8 +2196,8 @@ struct Fn_<'a, 'p> {
     /// [`Fn_::core_releases`].
     core_rows: Vec<(vyrn_lower::core::Name, Vec<String>, ExitKind)>,
     /// Where the core's names live, and what the operand stack is holding.
-    /// Shared by the two walks: a name the AST arm bound is found through
-    /// [`Fn_::scope`], and one this walk bound is pushed onto it.
+    /// A name a parameter or a `let` bound is found through [`Fn_::scope`], and
+    /// one this walk bound is pushed onto it.
     core_w: Walked,
     /// The type the reader ANNOTATED the statement this walk is emitting with,
     /// for the one row that needs it — a made layout (RFC-0125 M7).
@@ -2403,7 +2221,6 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
-        walks: HashMap::new(),
         trap_site: None,
         ret: Repr::Unit,
         ret_ty: Type::Unit,
@@ -2414,18 +2231,14 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         rel_pending: Vec::new(),
         placed: HashMap::new(),
         cursors: Vec::new(),
-        walking: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
-        append_ok: std::collections::HashSet::new(),
         str_append: HashMap::new(),
-        dest_hint: None,
         dest_used: false,
-        call_dest: None,
         owner: String::new(),
         core_key: String::new(),
         core: None,
@@ -2440,37 +2253,25 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
 /// into its fixed address, in declaration order, in one function `_start` calls
 /// before `main`.
 ///
-/// It is a body like any other — the initializers go through [`Fn_::store_into`]
-/// and therefore through the M2d coercion seam, so a `let n: Age = f()` at the top
-/// level validates exactly as one inside a function does. That is why this is not
-/// a data segment of constants: an initializer may be a string, an array literal
-/// that has to reach the heap, or a call.
-///
-/// No wrapping `block`, because there is no `return` to route: an initializer is
-/// an expression.
+/// The core's module-state body is what is walked. A program whose
+/// initializers it does not carry is refused at its first global.
 fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
-    // The core's module-state body ([`vyrn_lower::core::build_module_state`])
-    // stores each initializer's value and states no check, so a global whose
-    // type validates stays on the arm, where the store checks it.
-    let from_core = vyrn_lower::core::body_of("")
-        .filter(|_| !core_walk_off())
-        .filter(|_| (program.globals.iter()).all(|g| !f.checks(&cx.globals[&g.name].1)))
-        .filter(|core| {
-            f.core_enter(core);
-            f.core = Some(std::rc::Rc::new(core.clone()));
-            f.core_walkable(core, None)
-        });
-    if let Some(core) = &from_core {
-        f.core_body(m, &mut b, core)?;
+    let from_core = vyrn_lower::core::body_of("").filter(|core| {
+        f.core_enter(core);
+        f.core = Some(std::rc::Rc::new(core.clone()));
+        f.core_walkable(core, None)
+    });
+    match &from_core {
+        Some(core) => f.core_body(m, &mut b, core)?,
+        None => {
+            if let Some(g) = program.globals.first() {
+                return unsupported("a module-state initializer the core did not state", g.line);
+            }
+        }
     }
     for g in &program.globals {
-        let (place, ty) = cx.globals[&g.name].clone();
-        let r = cx.repr(&ty, g.line)?;
-        if from_core.is_none() {
-            f.store_into(m, &mut b, place, &r, &g.init, &ty, false)?;
-        }
         // The accumulator's ownership word starts true for every initializer but a
         // literal, which is data-segment storage nothing allocated. Getting this
         // wrong one way abandons the initializer's buffer at the first append; the
@@ -2574,7 +2375,6 @@ fn lower_body(
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
-        walks: HashMap::new(),
         trap_site: None,
         ret: sig.ret.clone(),
         // As DECLARED, not resolved. A function returning `Age` has to validate
@@ -2594,23 +2394,14 @@ fn lower_body(
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
         cursors: Vec::new(),
-        walking: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: binds,
-        // A lambda's bare expression cannot qualify a name: the whitelist is
-        // grown by `x = x + ..`, which is a STATEMENT, and there is one
-        // expression here.
-        append_ok: stmts
-            .map(vyrn_lower::append::append_candidates)
-            .unwrap_or_default(),
         str_append: HashMap::new(),
-        dest_hint: None,
         dest_used: false,
-        call_dest: None,
         owner,
         core_key: key.to_string(),
         core,
@@ -2687,7 +2478,11 @@ fn lower_body(
         // drops is released at exit — same row, same placement, same key as
         // the textual backend.
         if p.capability == Capability::Consume {
-            let key = p as *const vyrn_frontend::ast::Param as usize;
+            // A stored value's capture stands for the `fn` parameter it binds.
+            let name = (cx_fn.fn_binds.iter())
+                .find(|(_, bnd)| bnd.cap_srcs == [p.name.as_str()])
+                .map_or(&p.name, |(n, _)| n);
+            let key = cx.declared_param(f, name, p) as *const vyrn_frontend::ast::Param as usize;
             if cx_fn.releases_whole(key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
                     cx_fn.register_rel(&b, key, place, r);
@@ -2697,8 +2492,7 @@ fn lower_body(
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
     // The core's parameters are the declaration's in order, and the prologue
-    // has just put each one where it lives, so the two walks agree about them
-    // before either runs.
+    // has just put each one where it lives.
     if let Some(core) = cx_fn.core.clone() {
         for (i, n) in core.params.iter().enumerate() {
             if let Some((_, place, ty)) = cx_fn.scope.get(i) {
@@ -2745,15 +2539,14 @@ fn lower_body(
     cx_fn.depth += 1;
     // RFC-0125 §2.3: "the emitter reads the core and writes wasm". Where the
     // core's rows carry the whole body, its statements are what this walks;
-    // everywhere else the AST dispatch below is what it always was, and it
-    // asks the core again at every statement ([`Fn_::core_took`]).
-    if let Some(core) = cx_fn.core.clone().filter(|_| !core_walk_off()) {
+    // everywhere else the core is asked at every statement
+    // ([`Fn_::core_took`]), and a statement it does not carry is refused.
+    if let Some(core) = cx_fn.core.clone() {
         cx_fn.core_lift_targets(m, &core.stmts);
     }
     let from_core = cx_fn
         .core
         .clone()
-        .filter(|_| !core_walk_off())
         .filter(|core| cx_fn.core_walkable(core, stmts));
     WALKS.with(|w| {
         let (from, all) = w.get();
@@ -2763,7 +2556,13 @@ fn lower_body(
         (Some(core), _) => cx_fn.core_body(m, &mut b, &core)?,
         (None, Some(blk)) => cx_fn.block(m, &mut b, blk)?,
         (None, None) => match body {
-            Body::Value(e) => cx_fn.lambda_value(m, &mut b, e)?,
+            Body::Value(e) => {
+                let what = format!(
+                    "the lambda body in `{}` the core did not state",
+                    cx_fn.owner
+                );
+                return unsupported(&what, e.line());
+            }
             _ => unreachable!("only a lambda's expression has no statements"),
         },
     }
@@ -2845,14 +2644,7 @@ fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
     if let Some(f) = cx.named(&b.target) {
         return Some(Target::Fn(f));
     }
-    let index = b.target.sig.index;
-    if cx
-        .dispatch
-        .borrow()
-        .sigs
-        .iter()
-        .any(|(_, s)| s.index == index)
-    {
+    if cx.is_dispatcher(b.target.sig.index) {
         return match b.cap_srcs.as_slice() {
             [value] => Some(Target::Value(value.clone())),
             _ => None,
@@ -3025,7 +2817,7 @@ fn call_depth_bump(b: &mut Frame, cx: &Cx<'_>, by: i32) {
 /// of tag tests, then one `malloc` and one `memory.copy`.
 ///
 /// The copy is **deep**, because the CONSTRUCTION is
-/// ([`Fn_::build_fnval`]): a heap capture is duplicated into the block, so the
+/// ([`Fn_::fnval_into`]): a heap capture is duplicated into the block, so the
 /// block owns what its captures point at and a copy of the block owes a second
 /// copy of that. The release twin below walks the same captures, so the two
 /// stay mirrors.
@@ -3361,74 +3153,6 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.free));
     }
 
-    /// The VALUE half of a `return`: the expression, coerced to the DECLARED
-    /// return type, written through `dest` when the function returns an
-    /// aggregate. The unwinding half stays at the statement, which is the only
-    /// place that has a node to look a placement up by.
-    ///
-    /// Split out because a `|x| e` lambda returns `e` without there being a
-    /// `Stmt::Return` anywhere to say so — writing one would mean owning a copy
-    /// of `e` (see [`Body::Value`]).
-    fn ret_value(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        e: &Expr,
-        line: usize,
-    ) -> Result<(), String> {
-        match self.ret.clone() {
-            Repr::Scalar(_) => {
-                let want = self.ret_ty.clone();
-                self.expr_as(m, b, e, &want)?;
-            }
-            Repr::Agg(l) => {
-                // Destination-first, at the function's own boundary: the
-                // caller's slot address is already in `dest`. The caller
-                // handed over storage nothing names (its own fresh slot, or
-                // storage IT was handed under the same rule), so a literal
-                // is built in it directly (RFC-0125 M1).
-                let want = self.ret_ty.clone();
-                let dest = Dest::Addr(self.dest.unwrap(), 0);
-                self.agg_into(m, b, dest, l.size, e, &want, true)?;
-            }
-            Repr::Unit => {
-                return unsupported("a return whose value does not match the signature", line);
-            }
-        }
-        Ok(())
-    }
-
-    /// A `|x| e` literal's whole body: the `return e` the block form writes by
-    /// hand, emitted without a statement to write it with (RFC-0101 M6).
-    ///
-    /// A Unit-returning signature is the exception, and not a cosmetic one:
-    /// `each(xs, |x| print(x))` has an expression body whose value the signature
-    /// does not carry, so it is a statement rather than a return. The textual
-    /// emitter reaches the same split by testing `llt(ret) == "void"`.
-    ///
-    /// What [`Stmt::Return`]'s arm does between the value and the branch is
-    /// nothing here, twice over: `own` places no release step inside a lambda
-    /// body (M4's phase-1 finding, still counted by the corpus gate) and the
-    /// shell has no name in [`Cx::releases`] to look one up under; and a body
-    /// starts outside every region.
-    fn lambda_value(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<(), String> {
-        if matches!(self.ret, Repr::Unit) {
-            // A call for its effect leaves its result on the stack; drop it, or
-            // the block's type will not check — [`Stmt::Expr`]'s arm.
-            if !matches!(
-                self.cx.repr(&self.expr(m, b, e)?, Expr::line(e))?,
-                Repr::Unit
-            ) {
-                b.ins(&Instruction::Drop);
-            }
-            return Ok(());
-        }
-        self.ret_value(m, b, e, Expr::line(e))?;
-        self.exit_regions_above(b, 0, false);
-        b.ins(&Instruction::Br(self.depth));
-        Ok(())
-    }
-
     fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
         let mark = self.scope.len();
         let mut k = 0;
@@ -3443,11 +3167,6 @@ impl<'p> Fn_<'_, 'p> {
             // [`Fn_::rel_pending`] is the floor the release rows that still
             // name a slot raise, and the reset stops there.
             let (frame, scope) = (b.mark(), self.scope.len());
-            if let Some(n) = self.elem_field_store(m, b, &blk.stmts[k..])? {
-                k += n;
-                b.reset(frame.max(self.rel_floor()));
-                continue;
-            }
             self.stmt(m, b, &blk.stmts[k])?;
             if self.scope.len() == scope {
                 b.reset(frame.max(self.rel_floor()));
@@ -3460,191 +3179,6 @@ impl<'p> Fn_<'_, 'p> {
         self.emit_releases(m, b, ExitKind::Block, blk as *const Block as usize)?;
         self.scope.truncate(mark);
         Ok(())
-    }
-
-    /// `a[i].f = v` as ONE store through the element's address — RFC-0125 M1.
-    ///
-    /// The parser hands every engine the RFC-0082 idiom for this statement:
-    /// `let mut a[] = @at(a, a[]idx)`, then `a[].f = v`, then `a[a[]idx] = a[]`.
-    /// That is a copy of the whole element out, one field store, and a copy
-    /// back — two `memory.copy` per field write for a store of one scalar. In
-    /// nbody's inner loop it is 21 copies per iteration, and it is why the same
-    /// program runs 13x slower under Cranelift than under LLVM: LLVM's scalar
-    /// replacement deletes the copies and a wasm engine keeps them (§1.4).
-    ///
-    /// The three statements are recognised here by the unspellable temp and
-    /// lowered as a bounds check, an address and a store — exactly what
-    /// `Stmt::IndexSet` does for `a[i] = v`, plus a field offset. HEAPLESS
-    /// elements only: with nothing to release, the skipped `let` has no placed
-    /// release to leave behind, and the old field value owes none either. An
-    /// element that holds heap keeps the idiom, whose releases the placement
-    /// already accounted for.
-    ///
-    /// Returns how many statements were consumed, or `None` when the window is
-    /// not the idiom and the caller lowers the statement as it always did.
-    fn elem_field_store(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        stmts: &[Stmt],
-    ) -> Result<Option<usize>, String> {
-        let [Stmt::Let {
-            name: tmp,
-            mutable: true,
-            value: load,
-            ..
-        }, Stmt::SetField {
-            name: t2,
-            field,
-            value,
-            line,
-        }, Stmt::IndexSet {
-            name: parent,
-            index: Expr::Var { name: idx2, .. },
-            value: Expr::Var { name: t3, .. },
-            ..
-        }, ..] = stmts
-        else {
-            return Ok(None);
-        };
-        if !vyrn_frontend::ast::is_place_temp(tmp) || t2 != tmp || t3 != tmp {
-            return Ok(None);
-        }
-        let Expr::Call { name: at, args, .. } = load else {
-            return Ok(None);
-        };
-        if at != "@at" || args.len() != 2 {
-            return Ok(None);
-        }
-        let (Expr::Var { name: p2, .. }, Expr::Var { name: idx, .. }) = (&args[0], &args[1]) else {
-            return Ok(None);
-        };
-        if p2 != parent || idx != idx2 {
-            return Ok(None);
-        }
-        let (place, ty) = self.lookup(parent, *line)?;
-        let elem = match self.cx.resolve(&ty) {
-            Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
-            _ => return Ok(None),
-        };
-        if self.rel_for(&elem, *line)?.is_some() {
-            return Ok(None);
-        }
-        let (foff, fty) = self.field_of(&elem, field, *line)?;
-        let fr = self.cx.repr(&fty, *line)?;
-        if matches!(fr, Repr::Unit) || matches!(place, Place::Local(_)) {
-            return Ok(None);
-        }
-        // A heapless element owes no release, so nothing is emitted for the
-        // store decision on the idiom's own statements.
-        // From here on, code is emitted: the same prefix as `Stmt::IndexSet`.
-        let w = match self.walks.get(parent.as_str()).cloned() {
-            Some(w) => w,
-            None => {
-                place.addr(b, 0);
-                self.walk(b, &ty, *line)?
-            }
-        };
-        self.expr_as(m, b, &args[1], &Type::Int)?;
-        let i = b.local(ValType::I64);
-        b.ins(&Instruction::LocalSet(i));
-        self.bounds_check(b, &w, i, false);
-        self.elem_addr(b, &w, i);
-        if foff != 0 {
-            b.ins(&Instruction::I32Const(foff as i32));
-            b.ins(&Instruction::I32Add);
-        }
-        match &fr {
-            Repr::Scalar(_) => {
-                self.expr_as(m, b, value, &fty)?;
-                b.ins(&store_of(&self.cx.ll(&fty)));
-            }
-            Repr::Agg(l) => {
-                self.expr_as(m, b, value, &fty)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
-            Repr::Unit => unreachable!("refused above"),
-        }
-        Ok(Some(3))
-    }
-
-    /// The hoisted header of `e`, when `e` names a binding a `while` hoisted.
-    fn cached_walk(&self, e: &Expr) -> Option<Walk> {
-        match e {
-            Expr::Var { name, .. } => self.walks.get(name.as_str()).cloned(),
-            _ => None,
-        }
-    }
-
-    /// The read half of RFC-0125 M1. Before a `while`, take apart every
-    /// array, fixed array, small array or String this frame binds that the
-    /// loop indexes and never moves, so the body reads `data` and `len` from
-    /// locals instead of reloading the header at every access.
-    ///
-    /// `walk` reloads because a store into linear memory may alias the
-    /// header's slot and no wasm engine can prove it does not — nbody's inner
-    /// loop paid 29 reloads per iteration for that (§1.4). The proof is made
-    /// here instead, on the syntax, and it is conservative: `header_invariant`
-    /// refuses the hoist on anything that could move the header. Module state
-    /// is never hoisted, because a callee can grow it. An element store moves
-    /// no header, so `a[i] = v` and the field-store idiom keep the hoist.
-    ///
-    /// Returns what each hoisted name held before, for `While` to put back.
-    fn hoist_walks(
-        &mut self,
-        b: &mut Frame,
-        cond: &Expr,
-        body: &Block,
-        line: usize,
-    ) -> Result<Vec<(String, Option<Walk>)>, String> {
-        let mut out = Vec::new();
-        for name in indexed_names(cond, body) {
-            if self.walks.contains_key(&name) {
-                continue;
-            }
-            let Some((place, ty)) = self
-                .scope
-                .iter()
-                .rev()
-                .find(|(n, _, _)| *n == name)
-                .map(|(_, p, t)| (*p, t.clone()))
-            else {
-                continue;
-            };
-            if matches!(place, Place::Static(_)) {
-                continue;
-            }
-            if !matches!(
-                self.cx.resolve(&ty),
-                Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
-            ) {
-                continue;
-            }
-            if !header_invariant(cond, body, &name) {
-                continue;
-            }
-            // The binding's value, the way `Expr::Var` leaves it — a local's
-            // value or a slot's address — emitted here rather than through a
-            // synthesized `Var` node: the lowered-form gate counts backend
-            // answers about nodes no instantiation holds, and a node made up
-            // here would be one.
-            match place {
-                Place::Local(l) => {
-                    b.ins(&Instruction::LocalGet(l));
-                }
-                Place::Slot(off) => {
-                    b.slot(off);
-                }
-                Place::Static(_) => continue,
-            }
-            let w = self.walk(b, &ty, line)?;
-            out.push((name.clone(), self.walks.insert(name, w)));
-        }
-        Ok(out)
     }
 
     /// Emit the releases the lowering PLACED at one exit — RFC-0101 M4.
@@ -3706,37 +3240,6 @@ impl<'p> Fn_<'_, 'p> {
         }
         for (p, k) in run {
             self.emit_rel(m, b, p, &k, 0)?;
-        }
-        Ok(())
-    }
-
-    /// Release the elements after the one the turn bound, to the end, of
-    /// every loop the core says the exit at `at` leaves early
-    /// ([`Cx::unreached`]). The element the turn bound is the body's.
-    fn release_unreached(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        at: usize,
-        line: usize,
-    ) -> Result<(), String> {
-        for k in self.cx.unreached(at) {
-            let Some((_, w, i)) = self.walking.iter().rev().find(|(l, ..)| *l == k).cloned() else {
-                continue;
-            };
-            let (buf, count) = (b.local(ValType::I32), b.local(ValType::I32));
-            self.elem_addr(b, &w, i);
-            b.ins(&Instruction::I32Const(w.stride as i32));
-            b.ins(&Instruction::I32Add);
-            b.ins(&Instruction::LocalSet(buf));
-            b.ins(&Instruction::LocalGet(w.len));
-            b.ins(&Instruction::LocalGet(i));
-            b.ins(&Instruction::I64Sub);
-            b.ins(&Instruction::I32WrapI64);
-            b.ins(&Instruction::I32Const(1));
-            b.ins(&Instruction::I32Sub);
-            b.ins(&Instruction::LocalSet(count));
-            self.each(m, b, true, buf, count, w.stride, &w.elem, line)?;
         }
         Ok(())
     }
@@ -4670,8 +4173,7 @@ impl<'p> Fn_<'_, 'p> {
     /// read mode after the path and read through the loader's resolver rather
     /// than `path_open` (RFC-0076 M7).
     ///
-    /// `operand` writes argument `i` at the type asked for. The arm over the
-    /// source and [`Fn_::core_call`] over the rows both call this.
+    /// `operand` writes argument `i` at the type asked for.
     fn slot_call(
         &mut self,
         m: &mut Module,
@@ -5075,775 +4577,13 @@ impl<'p> Fn_<'_, 'p> {
 
     // -- statements ---------------------------------------------------------
 
-    /// Lower one statement.
-    ///
-    /// Exhaustive over `Stmt`, and deliberately without a catch-all: `region` was
-    /// the last unlowered kind, so the gap reporter that used to sit here (and the
-    /// `stmt_name`/`stmt_line` pair feeding it) was dead code claiming to cover
-    /// something. A statement kind added to the AST is now a compile error naming
-    /// this match. Expressions keep theirs — `expr_name` still has work.
+    /// Lower one statement from the core's rows (RFC-0125 §2.3).
     fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {
-        // RFC-0125 §2.3, per STATEMENT: where the core's rows carry this one,
-        // they are what is emitted and no arm below runs. The unit was the
-        // function until the interleave slice, which is why an arm could not go
-        // while one body of the corpus still needed it.
         if self.core_took(m, b, s)? {
             return Ok(());
         }
-        count_in(stmt_form(s), &self.owner);
-        match s {
-            Stmt::Let {
-                name,
-                ty,
-                value,
-                line,
-                ..
-            } => {
-                let mark = self.arg_frees.len();
-                let want = match ty {
-                    Some(t) => {
-                        self.cx.repr(t, *line)?;
-                        // The annotation as written: `let mut m: Age = 21`
-                        // re-validates on every later assignment, and it can only
-                        // do that if the binding remembers it is an `Age`.
-                        Some(t.clone())
-                    }
-                    None => None,
-                };
-                let (place, bound) = match &want {
-                    // Annotated: the slot's shape is known before the
-                    // initializer runs, so it can be written into directly.
-                    Some(t) => {
-                        let r = self.cx.repr(t, *line)?;
-                        let place = self.place_for(b, &r, *line)?;
-                        self.store_into(m, b, place, &r, value, t, true)?;
-                        (place, t.clone())
-                    }
-                    // Unannotated, and the initializer is a literal or a call
-                    // whose type the typer knows before it runs: the slot is
-                    // taken first and the value is built in it (RFC-0125 M1).
-                    None if matches!(
-                        value,
-                        Expr::StructLit { .. } | Expr::ArrayLit { .. } | Expr::Call { .. }
-                    ) && self
-                        .peek(value, *line)
-                        .ok()
-                        .is_some_and(|t| matches!(self.cx.repr(&t, *line), Ok(Repr::Agg(_)))) =>
-                    {
-                        let t = self.peek(value, *line)?;
-                        let Repr::Agg(l) = self.cx.repr(&t, *line)? else {
-                            unreachable!("the guard above checked the shape")
-                        };
-                        let off = b.alloc(l.size, l.align);
-                        self.agg_into(m, b, Dest::Slot(off), l.size, value, &t, true)?;
-                        (Place::Slot(off), t)
-                    }
-                    None => {
-                        // Unannotated: the type is whatever the initializer
-                        // produced, so evaluate first and bind after.
-                        let got = self.expr(m, b, value)?;
-                        let r = self.cx.repr(&got, *line)?;
-                        let place = self.place_for(b, &r, *line)?;
-                        match (place, &r) {
-                            (Place::Local(l), _) => {
-                                b.ins(&Instruction::LocalSet(l));
-                            }
-                            (Place::Slot(off), Repr::Agg(l)) => {
-                                // The value is already in a slot; this one is
-                                // the binding's own, so the copy is what makes
-                                // `let a = b` two independent records.
-                                let src = self.scratch(b, ValType::I32, 0);
-                                b.ins(&Instruction::LocalSet(src));
-                                b.slot(off);
-                                b.ins(&Instruction::LocalGet(src));
-                                b.ins(&Instruction::I32Const(l.size as i32));
-                                b.ins(&Instruction::MemoryCopy {
-                                    src_mem: 0,
-                                    dst_mem: 0,
-                                });
-                            }
-                            _ => return unsupported("a `let` of a Unit value", *line),
-                        }
-                        (place, got)
-                    }
-                };
-                // A copy the core states (#501, `Builder::copies`): the
-                // binding holds the owner's bytes, duplicated in place, and
-                // the temporary it read them out of is released after.
-                if self.cx.copies_at_let(s as *const Stmt as usize) {
-                    match place {
-                        Place::Local(l) => {
-                            b.ins(&Instruction::LocalGet(l));
-                            self.copy_stack(m, b, &bound, *line)?;
-                            b.ins(&Instruction::LocalSet(l));
-                        }
-                        Place::Slot(off) => {
-                            let a = b.local(ValType::I32);
-                            b.slot(off);
-                            b.ins(&Instruction::LocalSet(a));
-                            self.copy_at(m, b, a, &bound, *line)?;
-                        }
-                        Place::Static(_) => return unsupported("a copy into module state", *line),
-                    }
-                    for (l, t) in self.arg_frees.split_off(mark) {
-                        self.free_arg_temp(m, b, l, &t, *line)?;
-                    }
-                }
-                // A String accumulator gets its ownership word at its one
-                // declaration site, under the whitelist the core's builder asks.
-                let owns = self.releases_whole(s as *const Stmt as usize);
-                if let Place::Local(l) = place {
-                    if self.cx.resolve(&bound) == Type::Str
-                        && self.append_ok.contains(name.as_str())
-                    {
-                        let (at, site) = (b.alloc(4, 4), s as *const Stmt as usize);
-                        self.str_append_shadow(b, l, at, site, matches!(value, Expr::Str(_)));
-                    }
-                }
-                // A `let` that owns a heap value is reclaimed when this block
-                // exits. The key is the statement's node address, which is `own`'s
-                // own identity for it — the textual backend reads the same map with
-                // the same key, so the two cannot disagree about which `let` owns
-                // what.
-                self.scope.push((name.clone(), place, bound.clone()));
-                if owns {
-                    if let Some(r) = self.rel_for(&bound, *line)? {
-                        self.register_rel(b, s as *const Stmt as usize, place, r);
-                    }
-                }
-            }
-            Stmt::Assign { name, value, line } => {
-                let (place, ty) = self.lookup(name, *line)?;
-                let r = self.cx.repr(&ty, *line)?;
-                // `s = s + a + b` on an eligible local String: grow the buffer
-                // instead of building a new one. `concat` allocates and copies
-                // both halves every time, which makes the shape every writer is
-                // written in quadratic — `toJson` of 40k `Int64` did not merely
-                // take 1.4 s here, it exhausted linear memory and trapped.
-                //
-                // Only outside a `region` (arena memory is not the bump heap the
-                // helper grows out of) and only for a local that owns a shadow,
-                // which is exactly a `let`-declared one the whitelist cleared. The
-                // spine is [`vyrn_lower::append::self_append_spine`], which the
-                // core's builder reads too: what counts as a self-append is one
-                // rule, so the two walks cannot recognize different sets of
-                // writers and diverge on which one still copies.
-                //
-                // Module state qualifies too since Phase 5: `Cx::gappend` is the
-                // same whitelist read over every body, and census P1 measured what
-                // the global's exclusion cost — 4.92 s and 12.2 GB against the
-                // local's 0.095 s, for the same eight lines.
-                let shadow = match place {
-                    Place::Local(l) => self.str_append.get(&l).copied().map(Place::Slot),
-                    Place::Static(_) => self.cx.gappend.get(name).copied().map(Place::Static),
-                    Place::Slot(_) => None,
-                };
-                // The ONE thing a `region` is still asked, and it is not a
-                // question about ownership: the arena is a bump with no
-                // `realloc`, so a `String` it handed out cannot GROW in place.
-                // The take-ownership append stays refused inside a region on
-                // both backends, which is what `Fn_::arena_route`'s site table
-                // records for `Gen::emit_str_append`, and the general store
-                // below copies instead.
-                if self.region_depth == 0 {
-                    if let Some(own) = shadow {
-                        if let Some(parts) = vyrn_lower::append::self_append_spine(name, value) {
-                            let owned_here = self.cx.store_row(s as *const Stmt as usize);
-                            let mut operand =
-                                |f: &mut Self, m: &mut Module, b: &mut Frame, i: usize| {
-                                    f.expr_as(m, b, parts[i], &Type::Str)?;
-                                    Ok(f.tee_str_temp(b, parts[i]))
-                                };
-                            let n = parts.len();
-                            self.append_in_place(
-                                m,
-                                b,
-                                place,
-                                own,
-                                owned_here,
-                                n,
-                                &mut operand,
-                                *line,
-                            )?;
-                            return Ok(());
-                        }
-                    }
-                }
-                // RFC-0089 rule 4: the store releases what the place held. Not
-                // when the new value names the place — `a = @push(a, i)` grows the
-                // old buffer and hands it back, so freeing it would be a double
-                // free.
-                //
-                // RFC-0125 §3 M3: the rule above, the row, and round
-                // eighteen's `store_fresh` are ONE answer, and the core
-                // states it at the store's own node (`Cx::store_fact`). What
-                // is left here is the region gate: arena memory is not this
-                // path's to free, whatever the store displaces. Where the
-                // core states nothing — a body it could not lower — the
-                // three read as they always did. The answer is taken FIRST
-                // so a region-gated site still counts as considered (§26's
-                // finish check).
-                let owned_here = self
-                    .cx
-                    .store_fact(s as *const Stmt as usize)
-                    .unwrap_or(false);
-                let snap = if owned_here {
-                    match (place, &r) {
-                        (Place::Local(l), Repr::Scalar(v)) => {
-                            self.snap_word(b, l, *v, &ty, *line)?
-                        }
-                        _ => {
-                            let a = self.addr_local(b, place, 0);
-                            self.snap_at(b, a, &ty, *line)?
-                        }
-                    }
-                } else {
-                    None
-                };
-                self.store_into(m, b, place, &r, value, &ty.clone(), false)?;
-                self.free_snap(m, b, snap, *line)?;
-                // The place now holds a pointer this path did not allocate, so the
-                // next append copies rather than grows. Claiming ownership here
-                // instead would free a borrowed buffer wherever rule 2 still lets
-                // one through — so the flag stays honest and the APPEND recovers
-                // the buffer, freeing what its take copied out of when the fold
-                // proves the store that put it there was owned (round sixteen;
-                // the spine branch above).
-                if let Some(own) = shadow {
-                    disown(b, own);
-                }
-            }
-            Stmt::SetField {
-                name,
-                field,
-                value,
-                line,
-            } => {
-                let (place, ty) = self.lookup(name, *line)?;
-                let (foff, fty) = self.field_of(&ty, field, *line)?;
-                let fr = self.cx.repr(&fty, *line)?;
-                // Rule 4 through a field: the record owns what its field holds, so
-                // storing over it releases the old one. Census §4's second row.
-                // §26 steps 3–4: the plan's per-statement answer replaces the
-                // per-binding registry guess (`place_owns`), queried before
-                // the region gate so an arena-owned site still counts as
-                // considered. The value-alias guard folded with it.
-                let snap = if self.cx.store_row(s as *const Stmt as usize) {
-                    let a = self.addr_local(b, place, foff);
-                    self.snap_at(b, a, &fty, *line)?
-                } else {
-                    None
-                };
-                match &fr {
-                    Repr::Scalar(_) => {
-                        place
-                            .addr(b, foff)
-                            .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
-                        self.expr_as(m, b, value, &fty)?;
-                        b.ins(&store_of(&self.cx.ll(&fty)));
-                    }
-                    // RFC-0125 M1: built in the field when the value cannot
-                    // see the binding while it is made; module state is
-                    // never built in place (see `Dest`).
-                    Repr::Agg(l) => match Dest::of(place) {
-                        Some(d) => {
-                            let fresh = !observes(value, name);
-                            self.agg_into(m, b, d.at(foff), l.size, value, &fty, fresh)?;
-                        }
-                        None => {
-                            place
-                                .addr(b, foff)
-                                .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
-                            self.expr_as(m, b, value, &fty)?;
-                            b.ins(&Instruction::I32Const(l.size as i32));
-                            b.ins(&Instruction::MemoryCopy {
-                                src_mem: 0,
-                                dst_mem: 0,
-                            });
-                        }
-                    },
-                    Repr::Unit => return unsupported("a Unit field", *line),
-                }
-                self.free_snap(m, b, snap, *line)?;
-            }
-            Stmt::Return { value, line } => {
-                match value {
-                    Some(e) => self.ret_value(m, b, e, *line)?,
-                    None if matches!(self.ret, Repr::Unit) => {}
-                    None => {
-                        return unsupported(
-                            "a return whose value does not match the signature",
-                            *line,
-                        );
-                    }
-                }
-                // Every open frame, before the branch. The value is already on the
-                // operand stack (or written through `dest`), and a release does not
-                // disturb it — M2d's note that a value may sit under a block.
-                // Ownership analysis has un-tracked anything the return escapes, so
-                // this cannot release what is being handed back.
-                self.release_unreached(m, b, s as *const Stmt as usize, *line)?;
-                self.emit_releases(m, b, ExitKind::Return, s as *const Stmt as usize)?;
-                // And every region scope, for the same reason the interpreter
-                // decrements its counter on this path: a `return` out of a region
-                // leaves it. It POPS rather than frees, because a returned
-                // `a + b` built inside the region points into the arena and its
-                // caller owns it now — the same split the textual backend makes
-                // between `__vyrn_region_pop` and `__vyrn_region_exit`.
-                self.exit_regions_above(b, 0, false);
-                b.ins(&Instruction::Br(self.depth));
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                line,
-            } => {
-                self.cond(m, b, cond, *line)?;
-                // RFC-0114 Rule N: the analysis says one branch consumed a
-                // binding the other still holds at the join, where nothing may
-                // read it again — so the still-owning edge releases it here.
-                // An `if` with no else-arm grows one when the implicit edge is
-                // the one that owes a release. After a diverged arm the
-                // releases are dead code, which wasm validates.
-                let ers = self.cx.edge_rows(s as *const Stmt as usize);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.block(m, b, then_block)?;
-                self.emit_edge_releases(m, b, &ers, 0, *line)?;
-                if let Some(e) = else_block {
-                    b.ins(&Instruction::Else);
-                    self.block(m, b, e)?;
-                    self.emit_edge_releases(m, b, &ers, 1, *line)?;
-                } else if ers.iter().any(|(_, t, _)| *t == 1) {
-                    b.ins(&Instruction::Else);
-                    self.emit_edge_releases(m, b, &ers, 1, *line)?;
-                }
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-            }
-            // `if let PAT = e { .. } else { .. }` (RFC-0060). Not sugar the parser
-            // removed — it survives to every backend as its own node — but it IS
-            // sugar in shape: one tag test, the payload bound on the taken side,
-            // and no join at all, since the statement form carries no value. So it
-            // is `match_expr` with the arm chain replaced by a single `if`, reusing
-            // the same `tag_test` and `bind_payload`.
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                line,
-            } => {
-                // An OPTIONAL projection as the scrutinee (RFC-0122): no
-                // `Option` is built — prologue, one branch on the miss, and
-                // the hit arm's binder bound to the place by an ordinary
-                // (synthetic, row-less, so never drop-tracked) `let`.
-                if self.optional_if_let(m, b, pattern, scrutinee, then_block, else_block, *line)? {
-                    return Ok(());
-                }
-                // The two-arm switch the core lowers this to (RFC-0125 §3 M5):
-                // the pattern's arm, and the `else` under the default arm a
-                // user cannot spell. `match_expr` reads that shape and writes
-                // the `if`/`else` this arm used to write itself.
-                let empty = Block { stmts: Vec::new() };
-                let other = Pattern::Other;
-                let arms = [
-                    ArmRef {
-                        pattern,
-                        body: BodyRef::Block(then_block),
-                    },
-                    ArmRef {
-                        pattern: &other,
-                        body: BodyRef::Block(else_block.as_ref().unwrap_or(&empty)),
-                    },
-                ];
-                let key = s as *const Stmt as usize;
-                self.match_expr(m, b, key, scrutinee, &arms, "`if let`", *line)?;
-            }
-            Stmt::While { cond, body, line } => {
-                // RFC-0125 M1: the headers this loop reads and never moves,
-                // taken apart once, before the loop.
-                let hoisted = self.hoist_walks(b, cond, body, *line)?;
-                // `block { loop { br_if 1 (!cond); body; br 0 } }` — the block is
-                // where `break` goes, the loop is where `continue` goes, and
-                // neither needs a relooper because both are in the AST already.
-                let brk = self.depth;
-                b.ins(&Instruction::Block(BlockType::Empty));
-                self.depth += 1;
-                let cont = self.depth;
-                b.ins(&Instruction::Loop(BlockType::Empty));
-                self.depth += 1;
-                self.cond(m, b, cond, *line)?;
-                b.ins(&Instruction::I32Eqz);
-                let out = self.br_to(brk);
-                b.ins(&Instruction::BrIf(out));
-                self.loops.push((brk, cont, self.region_depth));
-                self.block(m, b, body)?;
-                self.loops.pop();
-                let back = self.br_to(cont);
-                b.ins(&Instruction::Br(back));
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                for (name, prev) in hoisted {
-                    match prev {
-                        Some(w) => {
-                            self.walks.insert(name, w);
-                        }
-                        None => {
-                            self.walks.remove(&name);
-                        }
-                    }
-                }
-            }
-            Stmt::ForIn {
-                var,
-                iter,
-                body,
-                line,
-                ..
-            } => {
-                // RFC-0091 M3: a user container declares how it is iterated. The
-                // probe is `&mut self`, so a program that declares no `Iterate`
-                // row never reaches it — the same shape of guard `project_at`
-                // uses, narrowed to the one protocol this site can dispatch.
-                if self.cx.impls.iter().any(|i| i.protocol == ftypes::ITERATE) {
-                    if let Some((size_fn, nth)) = self
-                        .peek(iter, *line)
-                        .ok()
-                        .and_then(|t| ftypes::iterate_impl(&self.cx.impls, &t))
-                    {
-                        let blk = vyrn_frontend::project::iterate_loop(
-                            &size_fn, nth, var, iter, body, *line,
-                        )?;
-                        // RFC-0114 §26: resolve plan queries through the
-                        // clone — the textual driver's twin comment.
-                        self.cx
-                            .plan
-                            .alias_clones(vyrn_frontend::project::iterate_aliases(blk));
-                        return self.block(m, b, blk);
-                    }
-                }
-                // `block { loop { br_if 1 (i >= len); bind; block { body }; i++;
-                // br 0 } }`. The INNER block is what makes `continue` correct:
-                // branching to it leaves the body and lands on the increment, so
-                // a `continue` steps the index exactly like falling off the end
-                // does. Branching to the loop instead would spin on one element.
-                let it = self.expr(m, b, iter)?;
-                // RFC-0075 M2b: a stream is pulled, not indexed.
-                if let Type::Stream(inner) = self.cx.resolve(&it) {
-                    return self.for_stream(m, b, var, body, &inner, *line);
-                }
-                // RFC-0092 M5, census "U4's price": an iterable that is a
-                // TEMPORARY owns what it holds and has no name, so `own` gives
-                // the STATEMENT the reclamation row — the same row Phase 10a
-                // gives an `if let`'s scrutinee. A release frame of its own is
-                // what makes the release survive a `return` out of the body, and
-                // it is pushed BEFORE the loop's boundary so `break` and
-                // `continue` leave it to the fall-through below.
-                let key = s as *const Stmt as usize;
-                // Is the container this frame's to give back here? A placed
-                // row names it at an exit, or — for a consuming loop, whose
-                // release is the core's own statement and no row's — the
-                // core says so at the loop. Both are the core's answers;
-                // this emitter asked the plan's droppable table until
-                // RFC-0125 §3 M3's container slice.
-                if self.releases_whole(key) || self.cx.loop_gives_back(key) {
-                    if let Some(r) = self.rel_owed(key, &it, *line)? {
-                        // `expr` leaves one I32 — an aggregate's address or a
-                        // String's pointer — and `walk` wants it back, so it is
-                        // stashed rather than teed into two shapes.
-                        let src = b.local(ValType::I32);
-                        b.ins(&Instruction::LocalSet(src));
-                        let rr = self.cx.repr(&it, *line)?;
-                        let place = self.place_for(b, &rr, *line)?;
-                        match (place, &rr) {
-                            // A copy of its own, and it has to be one: `expr`
-                            // left the aggregate wherever it built it, and the
-                            // body can build over that. The copy is by value, so
-                            // it holds the same buffer pointers the walk reads
-                            // and releasing it releases exactly those.
-                            (Place::Slot(own), Repr::Agg(l)) => {
-                                b.slot(own);
-                                b.ins(&Instruction::LocalGet(src));
-                                b.ins(&Instruction::I32Const(l.size as i32));
-                                b.ins(&Instruction::MemoryCopy {
-                                    src_mem: 0,
-                                    dst_mem: 0,
-                                });
-                            }
-                            (Place::Local(l), _) => {
-                                b.ins(&Instruction::LocalGet(src));
-                                b.ins(&Instruction::LocalSet(l));
-                            }
-                            _ => return unsupported("a `for` over a Unit value", *line),
-                        }
-                        self.register_rel(b, key, place, r);
-                        b.ins(&Instruction::LocalGet(src));
-                    }
-                }
-                let w = self.walk(b, &it, *line)?;
-                let i = b.local(ValType::I64);
-                b.ins(&Instruction::I64Const(0));
-                b.ins(&Instruction::LocalSet(i));
-
-                let brk = self.depth;
-                b.ins(&Instruction::Block(BlockType::Empty));
-                self.depth += 1;
-                let top = self.depth;
-                b.ins(&Instruction::Loop(BlockType::Empty));
-                self.depth += 1;
-                b.ins(&Instruction::LocalGet(i));
-                b.ins(&Instruction::LocalGet(w.len));
-                b.ins(&Instruction::I64GeU);
-                let out = self.br_to(brk);
-                b.ins(&Instruction::BrIf(out));
-
-                // The loop variable is a COPY, so a body that grows the array
-                // cannot leave it pointing into a buffer that was abandoned.
-                let r = self.cx.repr(&w.elem, *line)?;
-                let place = self.place_for(b, &r, *line)?;
-                match (place, &r) {
-                    (Place::Local(l), _) => {
-                        self.elem_addr(b, &w, i);
-                        self.load_elem(b, &w, *line)?;
-                        b.ins(&Instruction::LocalSet(l));
-                    }
-                    (Place::Slot(off), Repr::Agg(el)) => {
-                        b.slot(off);
-                        self.elem_addr(b, &w, i);
-                        b.ins(&Instruction::I32Const(el.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                    }
-                    _ => return unsupported("an array of Unit", *line),
-                }
-                let mark = self.scope.len();
-                self.scope.push((var.clone(), place, w.elem.clone()));
-                // RFC-0125 M3: a variable the body drains a field of keeps
-                // the rest of its element, and the placer's rows for it —
-                // keyed by the variable's spelling, since it has no `let` —
-                // release that rest at every exit of the body.
-                let vkey = vyrn_frontend::own::for_var_key(var);
-                if self.releases_whole(vkey) {
-                    if let Some(r) = self.rel_for(&w.elem, *line)? {
-                        self.register_rel(b, vkey, place, r);
-                    }
-                }
-
-                let cont = self.depth;
-                b.ins(&Instruction::Block(BlockType::Empty));
-                self.depth += 1;
-                self.loops.push((brk, cont, self.region_depth));
-                self.walking.push((self.cx.plan.key_of(key), w, i));
-                self.block(m, b, body)?;
-                self.walking.pop();
-                self.loops.pop();
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                self.scope.truncate(mark);
-
-                b.ins(&Instruction::LocalGet(i));
-                b.ins(&Instruction::I64Const(1));
-                b.ins(&Instruction::I64Add);
-                b.ins(&Instruction::LocalSet(i));
-                let back = self.br_to(top);
-                b.ins(&Instruction::Br(back));
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                // The fall-through release (RFC-0092 M5), after every exit path
-                // has rejoined. A body that returned already ran it and branched.
-                self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
-                // `for x in consume xs` — the loop TOOK the container, so the
-                // loop gives it back, and the core says so with a release of
-                // its own rather than a row (RFC-0125 §3 M3, the walk's
-                // deletion). The take is what the kernel judges at the loop:
-                // it is where a consuming loop over a `read` parameter's field
-                // or over module state is refused (the census, rows 10, 11 and
-                // 29), so the core cannot leave it to an exit row — and a
-                // release only the core states is one no row names, which is
-                // why the two are exclusive here. The core says WHICH loop
-                // gives one back; this pass no longer reads `consume` off the
-                // statement to guess (RFC-0125 §3 M3, the event stream's
-                // slice).
-                if self.cx.loop_gives_back(key) && !self.releases_whole(key) {
-                    if let Some(r) = self.rel_slots.get(&key).cloned() {
-                        self.emit_rel(m, b, r.place, &r.rel, *line)?;
-                        self.rel_slots.remove(&key);
-                        self.rel_pending.retain(|(k, _)| *k != key);
-                    }
-                }
-            }
-            Stmt::IndexSet {
-                name,
-                index,
-                value,
-                line,
-            } => {
-                let (place, ty) = self.lookup(name, *line)?;
-                // The store dispatches exactly as the read does (RFC-0091 M2):
-                // `a[i] = v` asks the receiver's type for `place atSet`, and
-                // the seeded row yields this binding's own element.
-                // A user container's store is its own statement group, lowered
-                // by the statements this backend already has.
-                if let Some(blk) =
-                    vyrn_frontend::project::store_index(&self.cx.impls, name, index, value, &ty)?
-                {
-                    // The projection's own statements decide the release.
-                    // RFC-0125 §3 M3, the store slice: the core judged THIS
-                    // statement and this pass walks the expansion, so the
-                    // store inside it is pointed back at the node the answer
-                    // is filed under. The expansion is memoized and leaked,
-                    // so the pair outlives every walk that reads it.
-                    if let Some(st) = vyrn_frontend::project::store_node(blk) {
-                        self.cx.plan.alias_clones(&[(
-                            st as *const Stmt as usize,
-                            s as *const Stmt as usize,
-                        )]);
-                    }
-                    return self.block(m, b, blk);
-                }
-                // RFC-0125 M1: a header a `while` hoisted is already in
-                // locals, and an element store moves no header.
-                let cached = self.walks.get(name.as_str()).cloned();
-                if cached.is_none() {
-                    place
-                        .addr(b, 0)
-                        .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
-                }
-                // `m[k] = v` (RFC-0028) inserts or updates; it is not a bounded
-                // element store and has no index to check.
-                if let Type::Map(key_t, val) = self.cx.resolve(&ty) {
-                    let l = self.layout_of(&ty, *line)?;
-                    let hdr = b.local(ValType::I32);
-                    b.ins(&Instruction::LocalSet(hdr));
-                    // Rule 4 through an entry. Two questions, not the element
-                    // store's three, for the reason [`crate::Gen::gen_stmt`]
-                    // states at its own map arm: a map owns its values outright,
-                    // so who owns the MAP does not change who owns the value this
-                    // store displaces. The arena and aliasing are what is asked.
-                    let drop_old = !vyrn_frontend::ast::mentions_place(value, name)
-                        && !vyrn_frontend::ast::mentions_place(index, name);
-                    // The entry's release is `map_set`'s own two questions.
-                    let mut parts = Parts::Ast(vec![index, value]);
-                    return self
-                        .map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, drop_old, *line);
-                }
-                let w = match cached {
-                    Some(w) => w,
-                    None => self.walk(b, &ty, *line)?,
-                };
-                if w.byte {
-                    return unsupported("an element assignment into a String", *line);
-                }
-                self.expr_as(m, b, index, &Type::Int)?;
-                let i = b.local(ValType::I64);
-                b.ins(&Instruction::LocalSet(i));
-                self.bounds_check(b, &w, i, false);
-                self.elem_addr(b, &w, i);
-                let elem = w.elem.clone();
-                // Rule 4 through an element. The element address is already on the
-                // stack, so it is teed rather than recomputed; the snapshot is
-                // stack-neutral and the store finds its address where it left it.
-                let snap = if self.cx.store_row(s as *const Stmt as usize) {
-                    let ea = b.local(ValType::I32);
-                    b.ins(&Instruction::LocalTee(ea));
-                    self.snap_at(b, ea, &elem, *line)?
-                } else {
-                    None
-                };
-                match self.cx.repr(&elem, *line)? {
-                    Repr::Scalar(_) => {
-                        self.expr_as(m, b, value, &elem)?;
-                        b.ins(&store_of(&self.cx.ll(&elem)));
-                    }
-                    // RFC-0125 M1: built in the element when the value cannot
-                    // see the binding while it is made. The element address
-                    // moves off the stack into a local so the fields can be
-                    // addressed from it.
-                    Repr::Agg(el) => {
-                        let a = b.local(ValType::I32);
-                        b.ins(&Instruction::LocalSet(a));
-                        let fresh = !observes(value, name);
-                        self.agg_into(m, b, Dest::Addr(a, 0), el.size, value, &elem, fresh)?;
-                    }
-                    Repr::Unit => return unsupported("an array of Unit", *line),
-                }
-                self.free_snap(m, b, snap, *line)?;
-            }
-            Stmt::Break { line } => {
-                let &(brk, _, regions) = self
-                    .loops
-                    .last()
-                    .ok_or_else(|| gap("`break` outside a loop", *line))?;
-                self.release_unreached(m, b, s as *const Stmt as usize, *line)?;
-                self.emit_releases(m, b, ExitKind::Break, s as *const Stmt as usize)?;
-                self.exit_regions_above(b, regions, true);
-                let d = self.br_to(brk);
-                b.ins(&Instruction::Br(d));
-            }
-            // Retired, and their flags in `FORMS` say so: the core states every
-            // `continue` and every `drop`, and these arms read zero over the
-            // corpus and every gated suite. The match is exhaustive, so what
-            // stands here is the answer for a statement the core did not state,
-            // which is a defect there.
-            Stmt::Continue { line } | Stmt::Drop { line, .. } => {
-                return unsupported("a statement the core did not state", *line)
-            }
-            // `region { .. }` (RFC-0004 §4). An arena scope, and in this backend
-            // that is a counter and its trap — see `region_exit` for why the arena
-            // itself is the allocator's ceiling rather than a region-shaped hole.
-            //
-            // The body is an ordinary block, so its scope and its release frame
-            // come free; a region is one more frame the exit edges close, the
-            // same shape M2l gave the inferred release. No `if !terminated` guard
-            // like the textual backend's: a fall-through exit after a `br` is code
-            // wasm has already marked unreachable, which is the same argument
-            // `Fn_::block` makes about its own releases.
-            Stmt::Region { body, .. } => {
-                self.region_enter(b);
-                self.region_depth += 1;
-                let r = self.block(m, b, body);
-                self.region_depth -= 1;
-                let mark = self.region_marks.pop().expect("one mark per open region");
-                r?;
-                self.region_exit(b, mark);
-            }
-            Stmt::Expr(e) => {
-                // A call for its effect leaves its result on the stack; drop it,
-                // or the block's type will not check. Round twenty-eight: an
-                // OWNED result nothing binds is freed rather than dropped.
-                let ty = self.expr(m, b, e)?;
-                let line = Expr::line(e);
-                match self.cx.repr(&ty, line)? {
-                    Repr::Unit => {}
-                    _ if self.cx.discarded_row(s as *const Stmt as usize) => {
-                        let l = b.local(ValType::I32);
-                        b.ins(&Instruction::LocalSet(l));
-                        self.free_arg_temp(m, b, l, &ty, line)?;
-                    }
-                    _ => {
-                        b.ins(&Instruction::Drop);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// A boolean in an `if`/`while` position.
-    fn cond(&mut self, m: &mut Module, b: &mut Frame, e: &Expr, line: usize) -> Result<(), String> {
-        let t = self.expr(m, b, e)?;
-        match self.cx.resolve(&t) {
-            Type::Bool => Ok(()),
-            _ => unsupported("a non-boolean condition", line),
-        }
+        let what = format!("a statement of `{}` the core did not state", self.owner);
+        unsupported(&what, s.line())
     }
 
     /// Where a new binding of representation `r` lives.
@@ -5872,8 +4612,8 @@ impl<'p> Fn_<'_, 'p> {
     /// `emit`) gets its own without anything being said about recursion.
     ///
     /// Emitted at the `let`, so the second trip through an enclosing loop starts
-    /// unowned again. Both walks call it at the accumulator's `let`, keyed by
-    /// its node `site`.
+    /// unowned again. The core walk calls it at the accumulator's `let`, keyed
+    /// by its node `site`.
     ///
     /// It starts OWNED when this `let` owns its initializer, which is the fact
     /// `own` already decided. Starting it unowned abandoned the initializer's
@@ -5894,7 +4634,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// `s = s + a + b` grown in place: one runtime `strAppend` per part into
     /// `place`, whose ownership word is at `own` (RFC-0125 M7, the `@strAppend`
-    /// row; the AST arm's spine calls it too). `operand` pushes part `i` and
+    /// row). `operand` pushes part `i` and
     /// hands back a String temporary to free once the part is copied.
     ///
     /// When the word says the buffer is not this path's, the first append
@@ -6002,83 +4742,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Evaluate `value` into an existing place of known type. `fresh` says the
-    /// place is storage nothing can name yet (a `let`'s slot), so an aggregate
-    /// may be built in it directly — see [`Dest`].
-    #[allow(clippy::too_many_arguments)]
-    fn store_into(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        place: Place,
-        r: &Repr,
-        value: &Expr,
-        ty: &Type,
-        fresh: bool,
-    ) -> Result<(), String> {
-        match (place, r) {
-            (Place::Local(l), _) => {
-                self.expr_as(m, b, value, ty)?;
-                b.ins(&Instruction::LocalSet(l));
-            }
-            // Destination-first, exactly as at a join: the address goes down
-            // before the value is built, so an aggregate has somewhere to be
-            // copied to. A `Static` destination is the same shape with a constant
-            // address, which is why module state needed no new store path.
-            (Place::Slot(_) | Place::Static(_), Repr::Agg(l)) => match Dest::of(place) {
-                Some(d) => self.agg_into(m, b, d, l.size, value, ty, fresh)?,
-                None => {
-                    place.addr(b, 0);
-                    self.expr_as(m, b, value, ty)?;
-                    b.ins(&Instruction::I32Const(l.size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
-                }
-            },
-            (Place::Static(_), Repr::Scalar(_)) => {
-                place.addr(b, 0);
-                self.expr_as(m, b, value, ty)?;
-                b.ins(&store_of(&self.cx.ll(ty)));
-            }
-            _ => return unsupported("a store of a Unit value", Expr::line(value)),
-        }
-        Ok(())
-    }
-
-    /// Evaluate the aggregate `value`, of type `ty` and `size` bytes, and leave
-    /// it at `dest` (RFC-0125 M1). With `in_place`, a literal or a call whose
-    /// type is `ty` writes there directly and the copy is skipped; anything
-    /// else — a variable, a field read, a coercion — is built where it is built
-    /// and copied. Without it, only the copy: the caller could not show the
-    /// destination is unnamed while the value is made (see [`Dest`]).
-    ///
-    /// The destination's address goes down before the value either way, the
-    /// order every other store in this file uses; when the value landed in
-    /// place, the two addresses on the stack are dropped instead of copied.
-    #[allow(clippy::too_many_arguments)]
-    fn agg_into(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        dest: Dest,
-        size: u32,
-        value: &Expr,
-        ty: &Type,
-        in_place: bool,
-    ) -> Result<(), String> {
-        dest.addr(b, 0);
-        self.dest_hint = in_place.then(|| (dest, ty.clone()));
-        self.dest_used = false;
-        let r = self.expr_as(m, b, value, ty);
-        self.dest_hint = None;
-        let used = std::mem::take(&mut self.dest_used);
-        r?;
-        agg_landed(b, size, used);
-        Ok(())
-    }
-
     /// The offset and type of `field` within `ty`.
     fn field_of(&self, ty: &Type, field: &str, line: usize) -> Result<(u32, Type), String> {
         let fs = self
@@ -6095,42 +4758,6 @@ impl<'p> Fn_<'_, 'p> {
 
     // -- expressions --------------------------------------------------------
 
-    /// Evaluate `e`, leaving a value of type `want` on the stack.
-    fn expr_as(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        e: &Expr,
-        want: &Type,
-    ) -> Result<(), String> {
-        self.expect.push(want.clone());
-        let mark = self.arg_frees.len();
-        let got = self.expr(m, b, e);
-        self.expect.pop();
-        let got = got?;
-        self.coerce(m, b, Some(e), &got, want, Expr::line(e))?;
-        // RFC-0114 §25 round three: a `[..]` argument's recorded temporary
-        // (`@heapify`) is teed by `expr` on the FIXED value, before the
-        // conversion above builds the heap triple the record is actually
-        // about. Freeing the fixed one walks frame memory whose element
-        // pointers the triple now shares — so the pending free is retargeted
-        // at the triple, exactly as the textual backend's call loops do.
-        if self.arg_frees.len() > mark {
-            let want_r = self.cx.resolve(want);
-            if matches!(self.cx.resolve(&got), Type::ArrayN(..))
-                && matches!(want_r, Type::Array(_))
-                && self.arg_frees.last().is_some_and(|(_, t)| *t == got)
-            {
-                let l = b.local(ValType::I32);
-                b.ins(&Instruction::LocalTee(l));
-                if let Some(last) = self.arg_frees.last_mut() {
-                    *last = (l, want_r);
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Reconcile the value on the stack, of type `from`, into `to`, by the rung
     /// [`crate::coerce_plan`] places for the pair.
     ///
@@ -6139,9 +4766,9 @@ impl<'p> Fn_<'_, 'p> {
     /// [`Cx::ty_gap`] refused everything needing reconciliation — which is why a
     /// validated type, a `modify` parameter, a `SmallArray`, a `Map` index and a
     /// two-word `Option` payload were five gaps rather than one absence wearing
-    /// five hats. Every flow site reaches here through [`Fn_::expr_as`]: a typed
-    /// `let`, an assignment, a field or element store, a call argument, a return,
-    /// a join arm, an enum payload. A reconciliation added here is added at all
+    /// five hats. Every flow site reaches here: a typed `let`, an assignment, a
+    /// field or element store, a call argument, a return, a join arm, an enum
+    /// payload. A reconciliation added here is added at all
     /// of them at once, which is the property the five separate refusals lacked.
     ///
     /// **The decision is not here** — RFC-0125 §2.3, and §3 M6's coercion
@@ -6504,7 +5131,7 @@ impl<'p> Fn_<'_, 'p> {
     /// it and the flow can carry on with it afterwards.
     ///
     /// An aggregate base is on the stack as its ADDRESS, which is what a `read`
-    /// parameter of that type is passed as ([`Fn_::emit_call`]), so one local
+    /// parameter of that type is passed as ([`Fn_::emit_call_with`]), so one local
     /// holds either shape.
     fn park_for_predicate(
         &mut self,
@@ -6525,339 +5152,6 @@ impl<'p> Fn_<'_, 'p> {
         let held = b.local(v);
         b.ins(&Instruction::LocalSet(held));
         Ok(held)
-    }
-
-    /// Evaluate `e`, leaving its value (a scalar) or its address (an aggregate)
-    /// on the stack, and giving the Vyrn type of what it left.
-    ///
-    /// The wrapper keeps one fact: whether this expression is a call argument
-    /// whose value the CALLER releases once the call is done with it
-    /// (`rfcs/census-call-arguments.md`). `own` decided that, per argument node;
-    /// this tees the pointer into a local so [`Fn_::call`] can hand it back after
-    /// the call. The tee is HERE — where the argument is evaluated — rather than
-    /// at the call, so the evaluation order stays the one the program wrote.
-    ///
-    /// It asks nothing about a `region`. It used to stand down inside one, on
-    /// the argument that the arena was the single owner there; the arena owns
-    /// what [`Fn_::arena_route`] routes into it and nothing else, and `free`
-    /// refuses one of its blocks by the class word in its header. So the
-    /// temporary is handed back at whatever depth it was made.
-    fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
-        if let Some(f) = expr_form(e) {
-            count_in(f, &self.owner);
-        }
-        let t = self.expr_inner(m, b, e)?;
-        if self.cx.arg_drop_row(e as *const Expr as usize) {
-            let l = b.local(ValType::I32);
-            b.ins(&Instruction::LocalTee(l));
-            self.arg_frees.push((l, t.clone()));
-        }
-        if crate::observe::on() {
-            crate::observe::record(
-                crate::observe::Site::Wasm,
-                crate::observe::kind_of(e),
-                e as *const Expr as usize,
-                &self.cx.subst,
-                &t,
-            );
-        }
-        Ok(t)
-    }
-
-    /// The walk itself. Every arm leaves exactly one value (or none, for
-    /// `Unit`) on the stack, which is what lets the wrapper above tee it.
-    fn expr_inner(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
-        // RFC-0125 M1: the consumer's storage, for THIS node only. Taken here so
-        // that a literal or a call nested anywhere below cannot claim it.
-        let hint = self.dest_hint.take();
-        Ok(match e {
-            // RFC-0093: a take is the load the read already emits. The `.copy()`
-            // that used to follow it is what the take removes, so the emitted
-            // output is strictly smaller and never a new shape.
-            Expr::Consume { place, .. } => self.expr(m, b, place)?,
-            Expr::Int(v) => {
-                b.ins(&Instruction::I64Const(*v));
-                Type::Int
-            }
-            Expr::Byte(v) => {
-                b.ins(&Instruction::I64Const(*v as i64));
-                Type::Int
-            }
-            Expr::Bool(v) => {
-                b.ins(&Instruction::I32Const(*v as i32));
-                Type::Bool
-            }
-            // A float literal is `Float64`; a `Float32` position demotes it, which
-            // is what the interpreter's `f as f32` does to the same parsed double.
-            Expr::Float(v) => {
-                b.ins(&Instruction::F64Const((*v).into()));
-                Type::Float
-            }
-            Expr::Str(s) => {
-                let at = self.cx.rt.intern(m, s);
-                b.ins(&Instruction::I32Const(at as i32));
-                Type::Str
-            }
-            // A lambda in a value position (RFC-0037): the slot's declared
-            // signature types it, and there is nothing else that could.
-            Expr::Lambda { line, .. } => {
-                let Some(sig) = self.expected_fn_sig() else {
-                    return unsupported("a lambda with no expected function type", *line);
-                };
-                self.fnval_lambda(m, b, e, &sig)?
-            }
-            // A `fn`-typed parameter used as a VALUE rather than called
-            // (RFC-0037 × RFC-0023) — stored into a Map, an Array, a record field,
-            // or captured. Its target and captures are statically known here, so it
-            // materializes the same aggregate a lambda source would.
-            Expr::Var { name, line } if self.fn_binds.contains_key(name) => {
-                let bnd = self.fn_binds[name].clone();
-                self.fnval_binding(m, b, &bnd, *line)?
-            }
-            // A nullary constructor (`None`, or an enum's `Empty`) parses as a
-            // bare name, so it is only distinguishable from a local by failing
-            // to be one.
-            Expr::Var { name, line }
-                if self.lookup(name, *line).is_err()
-                    && (name == "None" || self.cx.variants.contains_key(name)) =>
-            {
-                match self.sum_ctor(m, b, name, &[], *line, hint)? {
-                    Some(t) => t,
-                    None => return unsupported(&format!("the name `{name}`"), *line),
-                }
-            }
-            // A bare function name as a value (RFC-0037): the empty-payload
-            // variant, which is the whole of `let f = double`.
-            Expr::Var { name, line }
-                if self.lookup(name, *line).is_err() && self.cx.sigs.contains_key(name) =>
-            {
-                self.fnval_named(m, b, name, *line)?
-            }
-            Expr::Var { name, line } => {
-                let (place, t) = self.lookup(name, *line)?;
-                self.push_place(b, place, &t, *line)?;
-                t
-            }
-            Expr::Field { expr, field, line } => {
-                let base = self.expr(m, b, expr)?;
-                // RFC-0114 R1′: an unnamed String receiver this frame owns is
-                // freed right after the header read — the pointer is teed to a
-                // local before `length_of` consumes it.
-                let row = self.cx.receiver_row(e as *const Expr as usize);
-                let rfree = row.is_some();
-                let tee = if rfree {
-                    let l = b.local(ValType::I32);
-                    b.ins(&Instruction::LocalTee(l));
-                    Some(l)
-                } else {
-                    None
-                };
-                if let Some(t) = self.length_of(b, &base, field, *line)? {
-                    // `own` admits only silent kinds into the set, so this
-                    // never meets a declared release.
-                    if let Some(l) = tee {
-                        self.free_arg_temp(m, b, l, &base, *line)?;
-                    }
-                    return Ok(t);
-                }
-                let (off, fty) = self.field_of(&base, field, *line)?;
-                let frepr = self.cx.repr(&fty, *line)?;
-                match &frepr {
-                    Repr::Scalar(_) => {
-                        b.ins(&load_of(&self.cx.ll(&fty), off, self.cx.signed(&fty)))
-                    }
-                    Repr::Agg(_) => b
-                        .ins(&Instruction::I32Const(off as i32))
-                        .ins(&Instruction::I32Add),
-                    Repr::Unit => return unsupported("a Unit field", *line),
-                };
-                // RFC-0114 R1′: a SCALAR field read off an unnamed record this
-                // frame owns is the record's last observer — free it whole
-                // from the teed address. An aggregate field is an address INTO
-                // the record; a heap or `lazy` one is read again later. All
-                // three stay out.
-                if let Some(l) = tee {
-                    // RFC-0125 M3: the read TOOK a heap field (`let sels =
-                    // parse(q).sels`), and the placer's row frees the rest of
-                    // the receiver around that hole.
-                    let rh = row.unwrap_or_default();
-                    if !rh.is_empty() {
-                        if let Some(Rel::Deep(t, _)) = self.rel_for(&base, *line)? {
-                            self.emit_rel(m, b, Place::Local(l), &Rel::Deep(t, rh), *line)?;
-                        }
-                    } else if matches!(frepr, Repr::Scalar(_))
-                        && self.rel_for(&fty, *line)?.is_none()
-                        && vyrn_frontend::types::deferred(&fty).is_none()
-                    {
-                        self.free_arg_temp(m, b, l, &base, *line)?;
-                    }
-                }
-                // RFC-0085 M4a: reading a `lazy T` field FORCES it. The address
-                // now on the stack IS a stored nullary closure (`lazy T` lowers
-                // as `fn() -> T`), so the force is one call through that
-                // signature's dispatcher — no new machinery, which is the whole
-                // reason the deferral was given RFC-0037's representation.
-                //
-                // The copy-into-a-slot-and-name-it dance is `?`'s (RFC-0080 M3)
-                // verbatim, and for its reason: a dispatcher argument is emitted
-                // from an `Expr`, and an address sitting in a wasm local is the
-                // one thing a `Place` cannot name.
-                match vyrn_frontend::types::deferred(&fty) {
-                    None => fty,
-                    Some(inner) => {
-                        let sig = crate::normalize_fn_sig(
-                            &Type::Fn(Vec::new(), Box::new(inner.clone())),
-                            &self.cx.types,
-                        );
-                        let fl = self.layout_of(&sig, *line)?;
-                        let addr = b.local(ValType::I32);
-                        b.ins(&Instruction::LocalSet(addr));
-                        let slot = b.alloc(fl.size, fl.align);
-                        b.slot(slot);
-                        b.ins(&Instruction::LocalGet(addr));
-                        b.ins(&Instruction::I32Const(fl.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                        let mark = self.scope.len();
-                        self.scope
-                            .push(("@lazy".to_string(), Place::Slot(slot), sig.clone()));
-                        let recv = Expr::Var {
-                            name: "@lazy".to_string(),
-                            line: *line,
-                        };
-                        let t = self.fnval_call(m, b, &recv, &sig, &[], *line);
-                        self.scope.truncate(mark);
-                        t?
-                    }
-                }
-            }
-            Expr::StructLit { name, fields, line } => {
-                let ty = self.applied_record(name, fields, *line)?;
-                let decl = self
-                    .cx
-                    .fields(&ty)
-                    .ok_or_else(|| gap(&format!("the record literal `{name}`"), *line))?;
-                let Repr::Agg(l) = self.cx.repr(&ty, *line)? else {
-                    return unsupported(&format!("the record literal `{name}`"), *line);
-                };
-                // RFC-0125 M1: the consumer's storage when it holds this very
-                // type, a slot of our own otherwise.
-                let (dest, used) = match hint {
-                    Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&ty) => (d, true),
-                    _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
-                };
-                let mut parts = Vec::new();
-                let mut order = Vec::new();
-                for f in &decl {
-                    let init = fields
-                        .iter()
-                        .find(|(n, _)| *n == f.name)
-                        .map(|(_, e)| e)
-                        .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), *line))?;
-                    order.push(parts.len());
-                    parts.push(init);
-                }
-                self.record_into(m, b, dest, &decl, &l, &order, &mut Parts::Ast(parts), *line)?;
-                self.dest_used = used;
-                // A predicated record's cross-field `where` runs on the finished
-                // literal. There is no coercion to hang it on — the literal
-                // already IS the named type, so `from == to` and
-                // `validation_required` correctly says no. A literal the
-                // checker proved runs no check.
-                if let Some(d) = self
-                    .cx
-                    .types
-                    .get(name)
-                    .filter(|d| d.predicate.is_some())
-                    .cloned()
-                {
-                    if !self.proven(e, &Type::Named(name.clone())) {
-                        self.emit_validation(b, &d, *line)?;
-                    }
-                }
-                ty
-            }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                line,
-            } => {
-                let els = else_branch
-                    .as_deref()
-                    .ok_or_else(|| gap("an `if` expression with no `else`", *line))?;
-                self.join(
-                    m,
-                    b,
-                    e as *const Expr as usize,
-                    cond,
-                    then_branch,
-                    els,
-                    *line,
-                )?
-            }
-            Expr::Unary { op, expr, line } => {
-                let t = self.expr(m, b, expr)?;
-                self.un_ins(b, *op, &t, *line)?
-            }
-            Expr::ArrayLit { elems, line } => self.array_lit(m, b, hint, elems, *line)?,
-            Expr::MapLit { entries, line } => self.map_lit(m, b, entries, *line)?,
-            Expr::Match {
-                scrutinee,
-                arms,
-                line,
-                ..
-            } => self.match_expr(
-                m,
-                b,
-                e as *const Expr as usize,
-                scrutinee,
-                &ArmRef::of(arms),
-                "`match`",
-                *line,
-            )?,
-            Expr::Try {
-                expr: operand,
-                line,
-            } => self.try_(m, b, operand, *line, e as *const Expr as usize)?,
-            Expr::TryConstruct { name, args, line } => {
-                let [arg] = args.as_slice() else {
-                    return unsupported(&format!("`{name}?` at this arity"), *line);
-                };
-                self.try_construct(
-                    m,
-                    b,
-                    name,
-                    *line,
-                    |s, m, b, base| s.expr_as(m, b, arg, base).map(|_| ()),
-                    |b, l| Dest::Slot(b.alloc(l.size, l.align)),
-                )?
-            }
-            Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
-            Expr::Call {
-                name,
-                args,
-                type_args,
-                line,
-            } => {
-                self.call_dest = hint;
-                self.call(m, b, name, args, type_args, *line)?
-            } // No catch-all. The arms above cover `Expr` exhaustively, and the
-              // `other => unsupported(..)` that used to sit here was dead — it
-              // printed an `unreachable_patterns` warning on every build of the
-              // workspace, which is the kind that teaches a reader to stop reading
-              // warnings.
-              //
-              // Deleting it also moves the obligation to where it belongs: a new
-              // `Expr` variant now fails to COMPILE here, instead of silently
-              // reaching a runtime "unsupported" that says the backend is missing a
-              // lowering. RFC-0077's ladder reached 87 of 87 with exactly one such
-              // hole (`extern`, excluded from the run comparison so nothing ever
-              // built it), and a non-exhaustive match is the cheapest way to not
-              // repeat that. `expr_name` keeps its three other callers.
-        })
     }
 
     /// The concrete type a record literal produces.
@@ -6929,175 +5223,6 @@ impl<'p> Fn_<'_, 'p> {
                 .map(|f| vyrn_frontend::types::substitute(&f.ty, &solved))
                 .collect::<Vec<_>>(),
         ))
-    }
-
-    /// The fully-applied type an enum-variant construction produces.
-    ///
-    /// [`Fn_::applied_record`] for a variant instead of a record's fields, and the
-    /// same shared [`crate::applied_type`] — a generic enum's arguments come from
-    /// its PAYLOAD, because a bare constructor's use site is its payload (M2e).
-    /// `Ok(None)` when the name is not a variant, or is one two enums declare: an
-    /// ambiguity is the caller's to refuse, and both callers do.
-    ///
-    /// Naming only the enum, as `peek` used to, leaves the variant's payload the
-    /// declaration's own `Type::Param` — which is where "a conversion from `Cargo`
-    /// to `T`" came from. It is not solvable at the payload's own coercion, either:
-    /// by then the destination slot exists and its type is fixed.
-    fn applied_variant(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Option<Type>, String> {
-        let cands = match self.cx.variants.get(name) {
-            Some(c) if c.len() == 1 => c.clone(),
-            _ => return Ok(None),
-        };
-        let (e, _, declared) = cands.into_iter().next().unwrap();
-        let actual = self.arg_types(&declared, args, line)?;
-        let decl = self.cx.types.get(&e).cloned();
-        Ok(Some(crate::applied_type(
-            decl.as_ref(),
-            &e,
-            &declared,
-            &actual,
-        )))
-    }
-
-    /// Two arms meeting at one value — M0's destination-first rule.
-    ///
-    /// A scalar join is a `block (result T)` and needs nothing special. An
-    /// aggregate one has no value to leave on the stack at all, so the slot is
-    /// allocated here, BEFORE the branch, and each arm copies into it. The arms
-    /// therefore have to agree on a type before either is emitted, which is what
-    /// [`Fn_::peek`] is for.
-    fn join(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        key: usize,
-        cond: &Expr,
-        then_e: &Expr,
-        else_e: &Expr,
-        line: usize,
-    ) -> Result<Type, String> {
-        let want = self.join_ty(key, line)?;
-        let r = self.cx.repr(&want, line)?;
-        // RFC-0114 Rule N at an `if`-expression join. The releases are
-        // stack-neutral, so in the scalar case they sit under the branch value
-        // exactly as `match_expr`'s do.
-        let ers = self.cx.edge_rows(key);
-        self.cond(m, b, cond, line)?;
-        match &r {
-            Repr::Agg(l) => {
-                let off = b.alloc(l.size, l.align);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                b.slot(off);
-                self.expr_as(m, b, then_e, &want)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-                self.emit_edge_releases(m, b, &ers, 0, line)?;
-                b.ins(&Instruction::Else);
-                b.slot(off);
-                self.expr_as(m, b, else_e, &want)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-                self.emit_edge_releases(m, b, &ers, 1, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                b.slot(off);
-            }
-            Repr::Scalar(v) => {
-                b.ins(&Instruction::If(BlockType::Result(*v)));
-                self.depth += 1;
-                self.expr_as(m, b, then_e, &want)?;
-                self.emit_edge_releases(m, b, &ers, 0, line)?;
-                b.ins(&Instruction::Else);
-                self.expr_as(m, b, else_e, &want)?;
-                self.emit_edge_releases(m, b, &ers, 1, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-            }
-            // Both branches diverge (RFC-0079): there is no value to join, no
-            // destination to allocate, and nothing for the enclosing block to
-            // read — so the branches are emitted as statements and the stack is
-            // taken polymorphic afterwards, which is the shape `panic` itself
-            // takes. A plain Unit `if` in value position is still a gap.
-            Repr::Unit if matches!(want, Type::Never) => {
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.expr_as(m, b, then_e, &want)?;
-                b.ins(&Instruction::Else);
-                self.expr_as(m, b, else_e, &want)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-            }
-            Repr::Unit => return unsupported("an `if` expression yielding Unit", line),
-        }
-        self.diverged(b, &want);
-        Ok(want)
-    }
-
-    /// A join whose every arm diverged (RFC-0079) leaves the enclosing stack with
-    /// nothing on it, and unlike a bare `panic` the `end` of its own block has
-    /// already restored a non-polymorphic stack. One `unreachable` says so.
-    ///
-    /// M1 pinned every join shape with the panic NOT taken, which is the case
-    /// where the surviving arm supplies the value. `std/strings`'s `substring` is
-    /// the other one — a nested `match` with a `panic` in BOTH arms, in value
-    /// position — and it read as "expected i32 but nothing on stack" in wasmtime
-    /// and as an empty `phi` operand on the textual path.
-    fn diverged(&self, b: &mut Frame, want: &Type) {
-        if matches!(want, Type::Never) {
-            b.ins(&Instruction::Unreachable);
-        }
-    }
-
-    /// The type a join carries — the checker's, at the node, once.
-    ///
-    /// RFC-0125 §3 M5: a merge holds ONE value and the checker states which
-    /// type it has. This backend used to reconcile one from the ARMS, and an
-    /// arm can only report the type it happens to have PRODUCED: the same
-    /// type in whichever shape that arm built it. The textual backend fed its
-    /// `phi` the other shape for exactly that reason.
-    ///
-    /// A join whose type the record does not carry is a gap, not a guess:
-    /// `compile` asks `vyrn_lower::core::decide` for the record before it
-    /// emits a byte, so every program this reaches has one.
-    ///
-    /// A REFINED type decays to its base here, and only here, because a join is
-    /// not a value boundary. The checker unifies `Some(a) => a` (an `Age`) with
-    /// `None => 0 - 1` (an `Int64`) at the base and asks nothing of the second
-    /// arm; a lowering that made `Age` the arms' target instead would send that
-    /// arm through M2d's seam and validate it against a refinement the language
-    /// never required, which is `error: validation failed for `Age`` here and
-    /// `-1` on the other two engines. The checker's own answer is already the
-    /// base, so this only holds the base where a substitution reintroduces a
-    /// refined alias.
-    ///
-    /// Found by `validate.vyrn` becoming compilable in M2k, but the hole is
-    /// M2b's: a plain `match` on an `Option<Age>` had it all along, and no
-    /// example held one. The boundary the value really crosses — the `let`, the
-    /// `return`, the field — still validates, because that coercion is a
-    /// separate one outside the join.
-    fn join_ty(&self, key: usize, line: usize) -> Result<Type, String> {
-        let Some(t) = vyrn_lower::core::join_ty(key) else {
-            return unsupported("a join the checker did not type", line);
-        };
-        let t = self.cx.sub(&t);
-        Ok(match &t {
-            Type::Named(n) if self.cx.types.get(n).is_some_and(|d| d.predicate.is_some()) => {
-                self.cx.resolve(&t)
-            }
-            _ => t,
-        })
     }
 
     /// The type an expression has — the checker's, read by node.
@@ -7269,97 +5394,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok((m.data(&table, 4), m.data(&accept, 1), dfa.start))
     }
 
-    /// `a + b` on Strings is `@concat` written as an operator, so its operands
-    /// are call arguments and take the call-argument rule
-    /// (`rfcs/census-call-arguments.md` §9, finding 3): `"n" + label(i)` reaches
-    /// this lowering rather than [`Fn_::call`], so it was in neither that
-    /// census's count nor RFC-0096 M3's operand class, and leaked the same 48
-    /// bytes a turn.
-    ///
-    /// The mark is [`Fn_::call`]'s, for its reason: an operand that is itself a
-    /// call takes back only what was teed after its own mark. Every other
-    /// operator reaches the drain with nothing teed — `own` records a row only
-    /// where the `+` builds a String. The concatenation's own result stays on
-    /// the stack while the frees run, exactly as it does at a call.
-    fn binary(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        op: BinOp,
-        lhs: &Expr,
-        rhs: &Expr,
-        line: usize,
-    ) -> Result<Type, String> {
-        let mark = self.arg_frees.len();
-        let r = self.binary_inner(m, b, op, lhs, rhs, line);
-        for (l, ty) in self.arg_frees.split_off(mark) {
-            self.free_arg_temp(m, b, l, &ty, line)?;
-        }
-        r
-    }
-
-    /// Release one argument temporary, by its TYPE (RFC-0114 M1).
-    ///
-    /// The String case is the historical fast path: the local holds the char
-    /// pointer and [`Fn_::free_str_temp`] adjusts to the block start. Every
-    /// other owning kind's local holds the ADDRESS of the value's storage —
-    /// aggregates travel by pointer in this backend — which is exactly what
-    /// [`Fn_::emit_rel`] takes as a `Place::Local`, so the release is the same
-    /// walk block exit uses and this adapter adds none. The kind comes off the
-    /// type through [`Fn_::rel_for`], the same table the analysis consulted
-    /// when it recorded the temporary.
-    /// RFC-0114 Rule N: release the bindings the OTHER branch of this `if`
-    /// consumed, on the edge where they are still this frame's. A declared
-    /// `impl Owned` release runs here as at a scope's end: a value that reaches
-    /// its end without it leaks (RFC-0125 M7, `m7-hole`). A `region` is not
-    /// asked: the arena refuses its own blocks at `free`, and an `Array` or a
-    /// `Map` bound inside one was never the arena's — this edge used to hand
-    /// both to nobody.
-    fn emit_edge_releases(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        ers: &[vyrn_lower::core::EdgeRow],
-        edge: u32,
-        line: usize,
-    ) -> Result<(), String> {
-        for (name, t, holes) in ers {
-            if *t != edge {
-                continue;
-            }
-            // `d.line` (RFC-0125 M3): the sub-place the other edge took,
-            // released here from its address inside the binding.
-            let mut parts = name.split('.');
-            let root = parts.next().unwrap_or_default();
-            let Ok((place, mut ty)) = self.lookup(root, line) else {
-                continue;
-            };
-            let mut off = 0u32;
-            let mut sub = false;
-            for f in parts {
-                let (o, fty) = self.field_of(&ty, f, line)?;
-                off += o;
-                ty = fty;
-                sub = true;
-            }
-            if sub {
-                if self.rel_for(&ty, line)?.is_some() {
-                    let a = self.addr_local(b, place, off);
-                    self.rel_at(m, b, a, &ty, line)?;
-                }
-                continue;
-            }
-            match self.rel_for(&ty, line)? {
-                None => {}
-                Some(Rel::Deep(ty, _)) => {
-                    self.emit_rel(m, b, place, &Rel::Deep(ty, holes.clone()), line)?
-                }
-                Some(rel) => self.emit_rel(m, b, place, &rel, line)?,
-            }
-        }
-        Ok(())
-    }
-
     fn free_arg_temp(
         &mut self,
         m: &mut Module,
@@ -7378,140 +5412,9 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn binary_inner(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        op: BinOp,
-        lhs: &Expr,
-        rhs: &Expr,
-        line: usize,
-    ) -> Result<Type, String> {
-        // `&&` and `||` are control flow, not arithmetic: the right operand must
-        // not run when the left decides the answer.
-        if matches!(op, BinOp::And | BinOp::Or) {
-            self.cond(m, b, lhs, line)?;
-            b.ins(&Instruction::If(BlockType::Result(ValType::I32)));
-            self.depth += 1;
-            if op == BinOp::And {
-                self.cond(m, b, rhs, line)?;
-                b.ins(&Instruction::Else);
-                b.ins(&Instruction::I32Const(0));
-            } else {
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::Else);
-                self.cond(m, b, rhs, line)?;
-            }
-            self.depth -= 1;
-            b.ins(&Instruction::End);
-            return Ok(Type::Bool);
-        }
-
-        // `s =~ "pat"` (RFC-0046): the pattern is a compile-time DFA, so the right
-        // operand is not a value and must not be evaluated. Handled before the
-        // operands for that reason alone.
-        if op == BinOp::Match {
-            let Expr::Str(pat) = rhs else {
-                // The checker requires a literal; this says so rather than
-                // evaluating a `String` no DFA was compiled for.
-                return unsupported("a `=~` pattern that is not a string literal", line);
-            };
-            let s = self.expr(m, b, lhs)?;
-            if self.cx.resolve(&s) != Type::Str {
-                return unsupported(&format!("`=~` on `{s}`"), line);
-            }
-            // An allocated left operand is this operator's to free (round
-            // thirty), through the same tee the comparisons use.
-            let k = self.tee_str_temp(b, lhs);
-            self.str_match(m, b, pat, line)?;
-            let flag = b.local(ValType::I32);
-            b.ins(&Instruction::LocalSet(flag));
-            self.free_str_temp(b, k);
-            b.ins(&Instruction::LocalGet(flag));
-            return Ok(Type::Bool);
-        }
-
-        let l = self.expr(m, b, lhs)?;
-        let lt = self.cx.resolve(&l);
-        // A string `+` is a concatenation and a string comparison is a byte
-        // compare; both are calls, so they are handled before the numeric table.
-        if lt == Type::Str {
-            // The concatenation copies both halves, so a half this expression
-            // allocated is released once it has (RFC-0096 M3). The left one is
-            // kept BEFORE the right is lowered, because lowering the right can
-            // be a whole nested concatenation of its own.
-            // Comparisons read both halves and keep neither, so their
-            // operand temporaries are this site's to free too (RFC-0096 M3,
-            // exit-residue round twelve) — the textual backend's strcmp arm
-            // is the twin.
-            let kl = match op {
-                BinOp::Add
-                | BinOp::Eq
-                | BinOp::NotEq
-                | BinOp::Lt
-                | BinOp::LtEq
-                | BinOp::Gt
-                | BinOp::GtEq => self.tee_str_temp(b, lhs),
-                _ => None,
-            };
-            let r = self.expr(m, b, rhs)?;
-            if self.cx.resolve(&r) != Type::Str {
-                return unsupported("a string operator with a non-string operand", line);
-            }
-            let kr = self.tee_str_temp(b, rhs);
-            let t = self.str_bin(b, op, line)?;
-            self.free_str_temp(b, kl);
-            self.free_str_temp(b, kr);
-            return Ok(t);
-        }
-        // `Code + Code` concatenates fragments with their origins carried
-        // (RFC-0054). Both sides are handles, so the concatenation happens in the
-        // HOST's arena and this is one import call (RFC-0076 M3a). Equality needs no
-        // import: the checker permits only `+`.
-        if self.cx.gen.is_some() && matches!(&lt, Type::Named(n) if n == "Code") {
-            if op != BinOp::Add {
-                return unsupported(&format!("`{op:?}` on a code quote"), line);
-            }
-            // The left operand is on the stack already.
-            let mut ty = |_: &mut Self, _: usize| unsupported("a concatenation's type", line);
-            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                if i == 0 {
-                    return Ok(());
-                }
-                s.expr_as(m, b, rhs, t).map(|_| ())
-            };
-            return self
-                .host(m, b, "+", 2, &mut ty, &mut operand, line)
-                .map(|_| l);
-        }
-        // The width the operator RUNS at, which may be the right operand's
-        // (`op_width`), and the left operand already on the stack moving to it
-        // through the M2d seam like any other flow.
-        let opty = match Num::of(&lt) {
-            // A LITERAL is not the sibling the rule means, and `peek` is the
-            // checker's answer for every other right operand.
-            Some(n) if n == Num::PLAIN && !matches!(rhs, Expr::Int(_) | Expr::Byte(_)) => {
-                let rt = self.peek(rhs, line).ok();
-                self.op_width(&lt, rt.as_ref())
-            }
-            _ => lt.clone(),
-        };
-        if opty != lt {
-            self.coerce(m, b, None, &lt, &opty, line)?;
-        }
-        // The RESOLVED operand type — arithmetic runs on the base
-        // representation, so `age + 1` must not validate `1` against `Age`'s
-        // predicate. It is the *assignment* that re-validates the sum, which is
-        // why the LLVM emitter returns its `numty` rather than `lty`.
-        self.expr_as(m, b, rhs, &opty)?;
-        self.bin_ins(b, op, &opty, &l, line)
-    }
-
     /// A String operator, both operands on the stack: `+` concatenates into
     /// the arena a `region` routes to, and a comparison is the sign of a byte
-    /// compare. [`Fn_::binary_inner`] and [`Fn_::core_prim`] read it; each
-    /// frees its operand temporaries its own way.
+    /// compare. [`Fn_::core_prim`] reads it.
     fn str_bin(&mut self, b: &mut Frame, op: BinOp, line: usize) -> Result<Type, String> {
         if op == BinOp::Add {
             self.arena_route(b, true);
@@ -7545,9 +5448,8 @@ impl<'p> Fn_<'_, 'p> {
     /// The instruction a unary operator IS, once its operand stands on the
     /// stack — RFC-0125 §2.3's "maps `prim` rows to wasm instructions".
     ///
-    /// Stated once, for the two walks that reach it: [`Fn_::expr`], which
-    /// reads an `Expr::Unary`, and [`Fn_::core_prim`], which reads the
-    /// operator off [`vyrn_lower::core::Op`]. Nothing here interleaves the
+    /// [`Fn_::core_prim`] reads the operator off [`vyrn_lower::core::Op`].
+    /// Nothing here interleaves the
     /// operand with anything, so unlike the binary table this one has no
     /// family left behind at its caller.
     fn un_ins(&mut self, b: &mut Frame, op: UnOp, t: &Type, line: usize) -> Result<Type, String> {
@@ -7626,9 +5528,8 @@ impl<'p> Fn_<'_, 'p> {
     /// is true of `b >= 'a'`, a signed 64-bit comparison in all three engines
     /// that would become an unsigned byte one here.
     ///
-    /// Stated once for the two walks that ask it (RFC-0125 §3 M3, the driver
-    /// slice): the AST walk peeks the right operand's node, and the core walk
-    /// reads the type off the name the row carries.
+    /// The core walk reads each operand's type off the name the row carries
+    /// (RFC-0125 §3 M3, the driver slice).
     fn op_width(&self, lt: &Type, rt: Option<&Type>) -> Type {
         let Some(rt) = rt else { return lt.clone() };
         let rt = self.cx.resolve(rt);
@@ -7642,9 +5543,7 @@ impl<'p> Fn_<'_, 'p> {
     /// stack at `opty` — RFC-0125 §2.3's "maps `prim` rows to wasm
     /// instructions".
     ///
-    /// Stated once, for the two walks that reach it: [`Fn_::binary_inner`],
-    /// which reads an `Expr::Binary`, and [`Fn_::core_prim`], which reads the
-    /// operator off [`vyrn_lower::core::Op`] and never looks at the source.
+    /// [`Fn_::core_prim`] reads the operator off [`vyrn_lower::core::Op`].
     /// The families NOT here are the ones that interleave the operands with
     /// something else, so an operand-first seam cannot hold them: `&&` and
     /// `||` branch, `=~` compiles its right operand to a DFA rather than
@@ -7893,86 +5792,8 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
-    /// Whether a user function claims `name`, so a builtin spelled the same way
-    /// must NOT be lowered as one.
-    ///
-    /// `render`, `raw`, `rawAt` and `lex` are ordinary words, and the checker's rule
-    /// (RFC-0054, RFC-0076 M3b) is that a user function of the same name wins —
-    /// `examples/templates.vyrn` has a `render`. The three lists are the three
-    /// places a definition can be: an ordinary body, a generic, an RFC-0023 shell.
-    fn user_claims(&self, name: &str) -> bool {
-        self.cx.sigs.contains_key(name)
-            || self.cx.generics.contains_key(name)
-            || self.cx.higher_order.contains_key(name)
-    }
-
-    /// The M3b entry the engine synthesized for a structured builtin, if it did.
-    ///
-    /// `lex` and `moduleInterface` each return a value of a known named type,
-    /// and the engine appends an ordinary Vyrn function that asks the host for
-    /// it and DECODES it by walking that type; `contractOf`'s entry is
-    /// [`vyrn_frontend::loader::routed_callee`]'s. So there is nothing to lower
-    /// here: the call site is redirected, and the decode is compiled by the same
-    /// emitter every other Vyrn function gets — which is what makes the two walks
-    /// unable to disagree about a record's field order.
-    ///
-    /// Conditional on the entry existing, which is how the shadowing rule survives
-    /// without being restated: the engine emits one for `lex` only when no user
-    /// function claims the name.
-    fn gen_entry(&self, name: &str) -> Option<String> {
-        let e = match name {
-            "moduleInterface" => crate::GEN_ENTRY_MODULE_INTERFACE.to_string(),
-            "lex" => crate::GEN_ENTRY_LEX.to_string(),
-            _ => return None,
-        };
-        self.cx.sigs.contains_key(&e).then_some(e)
-    }
-
-    /// The builtins that exist only while a generator runs (RFC-0076 M7), or `None`
-    /// if `name` is not one of them.
-    ///
-    /// Everything here is a `vyrn_gen` import or a redirect to one. The RFC-0054
-    /// piece arena, the lexer, the linker and the contract table all stay in the
-    /// HOST — the interpreter's own code — so the splice rules, the identifier
-    /// validation and the shortest-roundtrip float formatting are byte-identical by
-    /// construction rather than by testing. Nothing guest-side knows what a piece
-    /// is: a `Code` is an `i64` index into that arena, which `llt_of` says and this
-    /// file therefore does not.
-    ///
-    /// `readFile` and `readFileBytes` are NOT here. They have a row in the table
-    /// below on every path; what differs is the runtime function behind it, and
-    /// `std/runtime`'s `readFileGen` and `readFileBytesGen` are that difference
-    /// — one mediated import (`std/mem`'s `genRead`) in place of `path_open`.
-    fn gen_builtin(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Option<Type>, String> {
-        if let Some(e) = self.gen_entry(name) {
-            return self.call(m, b, &e, args, &[], line).map(Some);
-        }
-        // A surface name a user function claims is that function's call; the
-        // `@`-spelled two are unspellable.
-        if matches!(vyrn_lower::core::builtin_row(name), Some(Spec::Host))
-            && (name.starts_with('@') || !self.user_claims(name))
-        {
-            let mut ty = |s: &mut Self, i: usize| Ok(s.cx.resolve(&s.peek(&args[i], line)?));
-            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                s.expr_as(m, b, &args[i], t).map(|_| ())
-            };
-            return self
-                .host(m, b, name, args.len(), &mut ty, &mut operand, line)
-                .map(Some);
-        }
-        Ok(None)
-    }
-
     /// A generator host import ([`Spec::Host`]): the operands at the types
-    /// the import takes, and the call. The arm over the source and
-    /// [`Fn_::core_call`] over the rows both call this.
+    /// the import takes, and the call, for [`Fn_::core_call`].
     ///
     /// `ty` answers operand `i`'s own type without writing it, and `operand`
     /// writes operand `i` at the type given.
@@ -8145,7 +5966,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// A `Float32` promotes first, because the interpreter formats `*f as f64`.
     ///
-    /// A call by INDEX rather than by name through [`Fn_::call`]: the value is
+    /// A call by INDEX rather than by name: the value is
     /// already on the stack, which is the whole of a wasm call's argument passing,
     /// and `f64Str` takes one scalar and returns one. The 511 hand-written lines
     /// this replaced are the reason — they were the largest single thing in this
@@ -8165,81 +5986,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// A call, then the release of every argument temporary it is finished with.
-    ///
-    /// The census's rule (`rfcs/census-call-arguments.md` §8): a heap-owning
-    /// value the ARGUMENT EXPRESSION built has no binding, so `own` — which keys
-    /// every release on a `let` — has nothing to write a row against, and
-    /// `width(label(i))` leaked 48 bytes a turn where `let s = label(i)` on the
-    /// line above did not. Which arguments those are is `own`'s answer and not
-    /// this backend's: it stands aside at a `consume` position, at a
-    /// constructor, at a position `movecheck::note_retention` recorded, and
-    /// wherever no signature is visible.
-    ///
-    /// The mark is what makes it nest. `f(g(h(x)))` frees `h`'s result at `g`
-    /// and `g`'s at `f`, because the inner call takes back only what was teed
-    /// after its own mark. The call's own result stays on the stack: a local
-    /// read and a call push and pop above it, which is what
-    /// [`Fn_::free_str_temp`] already relies on.
-    fn call(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        args: &[Expr],
-        // The type arguments the caller WROTE (RFC-0125 §3 M6). Empty for
-        // every call this emitter reaches by rewriting one, and for every call
-        // whose type arguments the arguments themselves answer — which is all
-        // of them but the three reflection builtins, whose target is the whole
-        // of what they compile to.
-        type_args: &[Type],
-        line: usize,
-    ) -> Result<Type, String> {
-        if self.audit_dropped(name) {
-            return Ok(Type::Unit);
-        }
-        let mark = self.arg_frees.len();
-        let r = self.call_inner(m, b, name, args, type_args, line);
-        // RFC-0125 M3, third slice: a lending call's result points into an
-        // argument (`a[i]`, a projection). A temporary its arguments teed —
-        // the receiver `weekdayLetters()[1]` reads its element out of — must
-        // outlive the call when the result owns heap, so the call or operator
-        // that consumes the result drains it instead.
-        if let Ok(t) = &r {
-            if self.lends(name) && self.rel_for(t, line)?.is_some() {
-                return r;
-            }
-        }
-        for (l, ty) in self.arg_frees.split_off(mark) {
-            self.free_arg_temp(m, b, l, &ty, line)?;
-        }
-        r
-    }
-
-    /// Whether a call by this name lends: `a[i]` and the seeded element row
-    /// it dispatches to, a lending prelude row, a projection.
-    fn lends(&self, name: &str) -> bool {
-        name == vyrn_frontend::project::AT
-            || name == vyrn_frontend::project::ELEM
-            || vyrn_frontend::prelude::lends(name)
-            || self
-                .cx
-                .impls
-                .iter()
-                .any(|i| i.places.iter().any(|p| p.name == name))
-    }
-
-    /// Whether this build drops the call to `name` rather than emitting it.
-    ///
-    /// RFC-0114 §25: the residue instrument's hooks are calls only in an
-    /// audited build. The arm drops the whole expression, operand included,
-    /// and an unaudited core states no row for either (RFC-0125 M7). A
-    /// generator's build is never audited, so its core can still state a
-    /// hook, and [`Fn_::core_sig`] refuses that row.
-    fn audit_dropped(&self, name: &str) -> bool {
-        !self.cx.audit && vyrn_frontend::loader::audit_hook(name)
-    }
-
     /// Whether `name` is an `extern fn` (RFC-0012) or one of RFC-0043's
     /// host-boundary names, which [`Fn_::extern_call`] writes.
     fn is_extern(&self, name: &str) -> bool {
@@ -8247,9 +5993,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// One call to an `extern fn` or a host-boundary name, `argc` operands
-    /// written by `operand` at each parameter's type. Both walks call it:
-    /// [`Fn_::call_inner`] over the source and [`Fn_::core_call`] over the
-    /// rows.
+    /// written by `operand` at each parameter's type. [`Fn_::core_call`]
+    /// calls it over the rows.
     fn extern_call(
         &mut self,
         m: &mut Module,
@@ -8348,604 +6093,8 @@ impl<'p> Fn_<'_, 'p> {
         unsupported(&format!("the call `{name}`"), line)
     }
 
-    fn call_inner(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        args: &[Expr],
-        type_args: &[Type],
-        line: usize,
-    ) -> Result<Type, String> {
-        // RFC-0125 M1: the consumer's storage for THIS call's result, taken
-        // before any argument is lowered.
-        let hint = self.call_dest.take();
-        // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction,
-        // never a call. Before every other resolution, because the loader's
-        // prefix is the whole of the identity and no table below has a row.
-        if let Some(prim) = name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
-            return self.mem_prim(m, b, prim, args, line);
-        }
-        // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function needs no
-        // lowering here at all — it is a call to the reserved spelling the loader
-        // injected. This backend had no lowering for any of the ten (the six
-        // codecs, `chars`, and the three string predicates), so routing them is the
-        // RFC-0077 relationship in its cleanest form: ten rows that would each have
-        // to be hand-emitted become a library this backend already compiles.
-        if let Some(rt) = vyrn_frontend::loader::routed_builtin(name) {
-            if self.cx.sigs.contains_key(rt) {
-                return self.call(m, b, rt, args, &[], line);
-            }
-            // Otherwise fall through to `unsupported("the call \`{name}\`")` below,
-            // which is this backend's own wording for something it cannot reach.
-        }
-        // RFC-0125 M7: a builtin whose argument names its callee is a call to
-        // that function, where this module defines it.
-        if let Some((f, fwd)) =
-            vyrn_frontend::loader::routed_callee(name, type_args, args, |a| self.peek(a, line).ok())
-        {
-            if self.cx.sigs.contains_key(&f) {
-                return self.call(m, b, &f, fwd, &[], line);
-            }
-        }
-        // RFC-0094 M3: a type the language cannot render renders itself. `@str`
-        // BECOMES the `show` call; `print` and `value` take the String it hands
-        // back, so each keeps the one lowering below. Dispatched on `peek`
-        // rather than on an emitted type, exactly as `@copy` is, because the
-        // choice has to be made before anything reaches the stack.
-        if matches!(name, "print" | "@str" | "value") && args.len() == 1 {
-            if let Some(f) = self
-                .peek(&args[0], line)
-                .ok()
-                .and_then(|t| self.show_dispatch(&t))
-            {
-                if name == "@str" {
-                    return self.call(m, b, &f, args, &[], line);
-                }
-                // The textual backend's twin (round thirty-five): a printed
-                // render is freed at the print, because the synthesized call
-                // node has no plan row.
-                if name == "print" {
-                    self.call(m, b, &f, args, &[], line)?;
-                    let sv = b.local(ValType::I32);
-                    b.ins(&Instruction::LocalTee(sv));
-                    b.ins(&Instruction::Call(self.cx.rt.print_str));
-                    b.ins(&Instruction::LocalGet(sv));
-                    str_hdr(b);
-                    b.ins(&Instruction::Call(self.cx.rt.free));
-                    return Ok(Type::Unit);
-                }
-                let rendered = [Expr::Call {
-                    type_args: Vec::new(),
-                    name: f,
-                    args: args.to_vec(),
-                    line,
-                }];
-                // The render is a fresh String the box takes whole.
-                if name == "value" {
-                    let variant = self.value_variant(&args[0], line)?;
-                    return match self.sum_ctor(m, b, variant, &rendered, line, None)? {
-                        Some(t) => Ok(t),
-                        None => unsupported("the built-in `Value` enum", line),
-                    };
-                }
-                return self.call(m, b, name, &rendered, &[], line);
-            }
-        }
-        // RFC-0076 M7: the builtins that exist only while a generator runs — the
-        // `Code` handle operations and M3b's atom stream, none of which has a
-        // row in the table below because none of them has a runtime meaning
-        // outside generation.
-        if self.cx.gen.is_some() {
-            if let Some(t) = self.gen_builtin(m, b, name, args, line)? {
-                return Ok(t);
-            }
-        }
-        // RFC-0125 M7, the builtin family: a builtin the core's row specifies
-        // is its operands at the row's types and one instruction, and
-        // [`Fn_::core_call`] reads the same pair off a call row. A name with
-        // no row falls to the arms below, which read the SITE for what a row
-        // cannot state.
-        if let Some((params, ins, ret)) = builtin_spec(name, args.len()) {
-            for (a, p) in args.iter().zip(params) {
-                self.expr_as(m, b, a, p)?;
-            }
-            b.ins(&ins);
-            return Ok(ret.clone());
-        }
-        match name {
-            // RFC-0079: `panic(msg)` — `error: `, the caller's message, a
-            // newline, exit 1, in three `write_all`s for the reason `log_write`
-            // takes five (the pieces are already where they need to be, and
-            // concatenating first would cost a `malloc` out of an allocator that
-            // never frees). The LAST piece is handed to `trap`, which writes its
-            // argument and `proc_exit(1)`s — so the exit path is the one every
-            // trap already takes, and this lowering adds no runtime function.
-            //
-            // Census U5 costs this site NOTHING. The site the loader stamped is
-            // fused into the constant `trap` already receives — `"\n"` becomes
-            // `" (std/slots.vyrn:189)\n"` — so the code is the same three calls
-            // with one different immediate, and only the data segment grows.
-            // `blackBox(v)` (RFC-0055): the value, round-tripped through a slot
-            // of linear memory that nothing else names.
-            //
-            // It WAS the identity, and the comment said why — this backend never
-            // optimizes (RFC-0125 §2.3), so there was nothing to hide the value
-            // from. That stopped being true when the native route became this
-            // module through wasm2c and clang at `-O2` (RFC-0125 §2.5): the
-            // optimizer is downstream of the emitter now. With the identity in
-            // place `examples/benching.vyrn`'s "hash to 1000" read 1 ns against
-            // the textual route's 1.35 µs, because clang folded a data-dependent
-            // loop the barrier existed to keep.
-            //
-            // A store and a load rather than a global, and a `reserve` rather
-            // than `data`: a global becomes an instance field wasm2c's C forwards
-            // through in one step, and `data` SHARES identical contents, so two
-            // barriers would be one address. Each site takes its own sixteen
-            // bytes, which is enough for a `v128` and is reserved only by a
-            // program that has a `blackBox` — every other module's bytes are
-            // unchanged.
-            "blackBox" if args.len() == 1 => {
-                let r = self.expr(m, b, &args[0])?;
-                let Some(t) = self.cx.repr(&r, line)?.val() else {
-                    return Ok(r);
-                };
-                let addr = m.reserve(16, 16) as i32;
-                let tmp = self.scratch(b, t, 9);
-                let at = |align: u32| MemArg {
-                    offset: 0,
-                    align,
-                    memory_index: 0,
-                };
-                b.ins(&Instruction::LocalSet(tmp))
-                    .ins(&Instruction::I32Const(addr))
-                    .ins(&Instruction::LocalGet(tmp));
-                match t {
-                    ValType::I32 => b.ins(&Instruction::I32Store(at(2))),
-                    ValType::I64 => b.ins(&Instruction::I64Store(at(3))),
-                    ValType::F32 => b.ins(&Instruction::F32Store(at(2))),
-                    ValType::F64 => b.ins(&Instruction::F64Store(at(3))),
-                    _ => b.ins(&Instruction::V128Store(at(4))),
-                };
-                b.ins(&Instruction::I32Const(addr));
-                match t {
-                    ValType::I32 => b.ins(&Instruction::I32Load(at(2))),
-                    ValType::I64 => b.ins(&Instruction::I64Load(at(3))),
-                    ValType::F32 => b.ins(&Instruction::F32Load(at(2))),
-                    ValType::F64 => b.ins(&Instruction::F64Load(at(3))),
-                    _ => b.ins(&Instruction::V128Load(at(4))),
-                };
-                return Ok(r);
-            }
-            "assert" | "assertEq" if args.len() == assert_arity(name) => {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: Option<&Type>| {
-                        match t {
-                            Some(t) => s.expr_as(m, b, &args[i], t).map(|_| t.clone()),
-                            None => s.expr(m, b, &args[i]),
-                        }
-                    };
-                return self.asserts(m, b, name, &mut operand, line);
-            }
-            "panic" | vyrn_frontend::ast::PANIC_AT => {
-                if args.is_empty() || args.len() > 2 {
-                    return unsupported("`panic` with other than one argument", line);
-                }
-                let at = match args.get(1) {
-                    Some(Expr::Str(at)) => Some(at.as_str()),
-                    _ => None,
-                };
-                self.panic_line(m, b, at, |s, m, b| s.expr_as(m, b, &args[0], &Type::Str))?;
-                // The stack goes polymorphic here, which is what lets a `panic`
-                // arm sit inside a `block (result T)` owing no value.
-                b.ins(&Instruction::Unreachable);
-                return Ok(Type::Never);
-            }
-            // RFC-0074 M3a: a compiled wasm module is not `vyrn serve`, and
-            // `std/http`'s `mount` reaches this arm whether or not the program
-            // mounts a live route. The line is the one the core's `Spec::Traps`
-            // row writes. The argument is not emitted: the producer it names has
-            // nobody to pull it here.
-            "serveStream" => {
-                self.panic_line(m, b, None, |s, m, b| {
-                    let at = s.cx.rt.intern(m, vyrn_frontend::trap::SERVE_STREAM);
-                    b.ins(&Instruction::I32Const(at as i32));
-                    Ok(())
-                })?;
-                b.ins(&Instruction::Unreachable);
-                return Ok(Type::Never);
-            }
-            "print" => {
-                if args.len() != 1 {
-                    return unsupported("`print` with other than one argument", line);
-                }
-                let t = self.expr(m, b, &args[0])?;
-                self.print_value(b, &t, line)?;
-                return Ok(Type::Unit);
-            }
-            // RFC-0008's facade, written subject-first, so a level's `args` is
-            // the logger then the message (the parser's method sugar). (The five
-            // spellings are the parser's own, so no user function can reach this
-            // arm: `log.info(m)` carries `@info` and a module that declares
-            // `info` gets the surface word back before this.)
-            // Literal rather than [`vyrn_frontend::ast::log_internal`]:
-            // `primitives.rs` greps THIS FILE for each census name to decide
-            // whether the direct backend covers it, and a predicate is
-            // invisible to a text scan.
-            "logger" | "@trace" | "@debug" | "@info" | "@warn" | "@error"
-                if args.len() == logs_arity(name) =>
-            {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                        s.expr_as(m, b, &args[i], t)
-                    };
-                return self.logs(m, b, name, &mut operand, line);
-            }
-            // String interpolation desugars to these two (parser), so they are
-            // the whole of `"a \{b}"`.
-            "@str" => {
-                if args.len() != 1 {
-                    return unsupported("`toString` with other than one argument", line);
-                }
-                let t = self.expr(m, b, &args[0])?;
-                self.str_value(b, &t, Some(&args[0]), line)?;
-                return Ok(Type::Str);
-            }
-            "@concat" => {
-                if args.len() != 2 {
-                    return unsupported("`@concat` with other than two arguments", line);
-                }
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let ka = self.tee_str_temp(b, &args[0]);
-                self.expr_as(m, b, &args[1], &Type::Str)?;
-                let kb = self.tee_str_temp(b, &args[1]);
-                self.arena_route(b, true);
-                b.ins(&Instruction::Call(self.cx.rt.concat));
-                self.arena_route(b, false);
-                // The interpolation spine (RFC-0096 M3): `"a\{x}b\{y}"` folds
-                // left into nested `@concat`s, so every hole's `@str` and every
-                // inner join is released by the `@concat` above it.
-                self.free_str_temp(b, ka);
-                self.free_str_temp(b, kb);
-                return Ok(Type::Str);
-            }
-            // Not calls at all: RFC-0021-family COMPILE-TIME reflection, which the
-            // textual emitter rewrites into an ordinary expression built from the
-            // type declaration. Same rewrite, from the same two frontend functions,
-            // so neither backend has a runtime lowering to get wrong and the bytes
-            // cannot disagree. `jsonSchema` is one string; `schemaOf` is a `Schema`
-            // record literal that then lowers like any other.
-            "jsonSchema" | "schemaOf" if type_args.len() == 1 => {
-                let e = self.reflected(name, &type_args[0], line)?;
-                return self.expr(m, b, &e);
-            }
-            // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
-            // is picked by the argument's type and built by the ordinary enum path,
-            // so the tag and the payload encoding are the same ones a user's
-            // `IntVal(3)` would get. A String read out of a place is boxed as a
-            // copy, because the box owns its payload (#512).
-            "value" if args.len() == 1 => {
-                let variant = self.value_variant(&args[0], line)?;
-                let copied = [Expr::Call {
-                    type_args: Vec::new(),
-                    name: "@copy".to_string(),
-                    args: args.to_vec(),
-                    line,
-                }];
-                let string = variant == "StrVal";
-                let args = if vyrn_frontend::prelude::boxes_a_copy(&args[0], string) {
-                    &copied[..]
-                } else {
-                    args
-                };
-                return match self.sum_ctor(m, b, variant, args, line, hint)? {
-                    Some(t) => Ok(t),
-                    None => unsupported("the built-in `Value` enum", line),
-                };
-            }
-            "stringFromBytes" | "bytes"
-                if args.len() == 1 || (name == "bytes" && args.len() == 3) =>
-            {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                        s.expr_as(m, b, &args[i], t).map(|_| ())
-                    };
-                return match name {
-                    "bytes" => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
-                    _ => self.string_from_bytes(m, b, &mut operand, line),
-                };
-            }
-            // (`slice` was here, three `expr_as` and a call into `rt.slice`. The
-            // arm was cheap; the RUNTIME FUNCTION behind it was a third copy of the
-            // range check, and RFC-0079 M3 deleted both — `slice` routes into
-            // `std/strpred`'s `sliceV` at the top of this dispatch now.)
-            // RFC-0014 and RFC-0044's I/O and `parse`, one runtime function
-            // each ([`Fn_::slot_call`]).
-            n if slot_ty(n, args.len()).is_some() => {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                        s.expr_as(m, b, &args[i], t).map(|_| ())
-                    };
-                return self.slot_call(m, b, n, &mut operand, line);
-            }
-            "writeStdout" | "close" if args.len() == 1 => {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, want: Option<&Type>| match want {
-                        Some(t) => s.expr_as(m, b, &args[0], t).map(|_| t.clone()),
-                        None => s.expr(m, b, &args[0]),
-                    };
-                return self.effect(m, b, name, &mut operand, line);
-            }
-            n if matches!(vyrn_lower::core::builtin_row(n), Some(Spec::Lanes)) => {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
-                        match want {
-                            Some(t) => s.expr_as(m, b, &args[i], t).map(|_| t.clone()),
-                            None => s.expr(m, b, &args[i]),
-                        }
-                    };
-                let lane_at =
-                    |i: usize, lanes: i64| args.get(i).and_then(|a| ftypes::const_lane(a, lanes));
-                return self.lanes(m, b, n, args.len(), &mut operand, &lane_at, line);
-            }
-            // `Int64(x)` / `UInt16(x)` — a conversion, not a call. Which names are
-            // conversions is the frontend's answer (`numeric_conv_target`), so the
-            // two backends cannot disagree about whether `Int64` is a cast, and the
-            // conversion itself is the M2d seam rather than a second truncation
-            // rule: an out-of-range width is refused there, once, for every flow.
-            _ if args.len() == 1 && ftypes::numeric_conv_target(name).is_some() => {
-                let to = ftypes::numeric_conv_target(name).unwrap();
-                self.expr_as(m, b, &args[0], &to)?;
-                return Ok(to);
-            }
-            "@has" | "@remove" if args.len() == 2 => {
-                return self.map_method(m, b, name, args, line)
-            }
-            "@keys" if args.len() == 1 => return self.map_method(m, b, name, args, line),
-            // `a[i]` dispatches (RFC-0091 M2): it asks the receiver's type for a
-            // `place at` projection and inlines its body here. A builtin
-            // container takes the seeded row, whose body is `yield @slot(self,
-            // i)`, so the element lowering below is reached through the same
-            // table a user container reaches its own through.
-            "@at" if args.len() == 2 => return self.project_at(m, b, args, line),
-            n if n == vyrn_frontend::project::ELEM && args.len() == 2 => {
-                return self.at(m, b, args, line)
-            }
-            // `x.copy()` (RFC-0089 M1b) — the receiver's value, with heap of its
-            // own. The reported type is the receiver's own.
-            "@copy" if args.len() == 1 => {
-                // RFC-0091 M1: a type that declares `impl Copy for T` says what
-                // duplicating it means, so the call goes there instead. The
-                // receiver is named by `peek` rather than emitted first, because
-                // the dispatch has to choose before anything is emitted.
-                if let Some(f) = self
-                    .peek(&args[0], line)
-                    .ok()
-                    .and_then(|t| ftypes::copy_impl(&self.cx.impls, &t))
-                {
-                    return self.call(m, b, &f, args, &[], line);
-                }
-                let ty = self.expr(m, b, &args[0])?;
-                self.copy_stack(m, b, &ty, line)?;
-                return Ok(ty);
-            }
-            "@push" | "@reserve" | "@append" | "@copyFrom" if args.len() == 2 => {
-                return self.rebuild(m, b, name, args, line)
-            }
-            "@clear" if args.len() == 1 => return self.rebuild(m, b, name, args, line),
-            "@tally" | "@tallyBytes" if args.len() == 3 => {
-                let mty = self.expr(m, b, &args[0])?;
-                let hdr = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(hdr));
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                        s.expr_as(m, b, &args[i + 1], t).map(|_| ())
-                    };
-                return match name {
-                    "@tally" => self.map_tally(m, b, hdr, &mty, &mut operand, line),
-                    _ => self.map_tally_bytes(m, b, hdr, &mty, &mut operand, line),
-                };
-            }
-            "@toArray" if args.len() == 1 => {
-                let aty = self.expr(m, b, &args[0])?;
-                let hdr = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(hdr));
-                return self.sa_to_array(m, b, hdr, &aty, line);
-            }
-            // RFC-0075 M2b. `fromArray` is no longer a retype: a stream is a
-            // six-word header now and the array's three words go into it, with
-            // the read cursor at 0 and the producer tag at -1.
-            "fromArray" if args.len() == 1 => {
-                let got = self.expr(m, b, &args[0])?;
-                let inner = match self.cx.resolve(&got) {
-                    Type::Array(i) => *i,
-                    other => return unsupported(&format!("`fromArray` of `{other}`"), line),
-                };
-                return self.stream_from_array(b, &inner, line);
-            }
-            "fromStep" if args.len() == 3 => {
-                let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize| match i {
-                    0 | 1 => s.expr_as(m, b, &args[i], &Type::Int).map(|_| Type::Int),
-                    _ => s.expr(m, b, &args[i]),
-                };
-                return self.stream_from_step(m, b, &mut operand, line);
-            }
-            "boxStream" if args.len() == 1 => {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, _: Option<&Type>| {
-                        s.expr(m, b, &args[0])
-                    };
-                return self.stream_box(m, b, &mut operand, line);
-            }
-            "unboxStream" if args.len() == 1 => {
-                let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
-                    Some(Type::Stream(i)) => *i,
-                    _ => return unsupported("an `unboxStream` with no expected Stream type", line),
-                };
-                let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-                    s.expr_as(m, b, &args[0], &Type::Int).map(|_| ())
-                };
-                return self.stream_unbox(m, b, &elem, &mut addr, line);
-            }
-            "pullAt" if args.len() == 1 => {
-                let want = self.expect.last().map(|t| self.cx.resolve(t));
-                let Some(elem) = want.as_ref().and_then(ftypes::option_payload).cloned() else {
-                    return unsupported("a `pullAt` with no expected Option type", line);
-                };
-                let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-                    s.expr_as(m, b, &args[0], &Type::Int).map(|_| ())
-                };
-                return self.stream_pull_at(m, b, &elem, &mut addr, line);
-            }
-            "@pop" if args.len() == 1 => return self.pop(b, args, line),
-            "@swapRemove" if args.len() == 2 => return self.swap_remove(m, b, args, line),
-            // `list([..])` is the explicit spelling of the contextual literal;
-            // both land on the same `ArrayN → Array` conversion.
-            "@list" if args.len() == 1 => {
-                let got = self.expr(m, b, &args[0])?;
-                return match self.cx.resolve(&got) {
-                    Type::Array(_) => Ok(got),
-                    Type::ArrayN(inner, n) => {
-                        let want = Type::Array(inner.clone());
-                        self.heapify(b, &inner, n, &want, line)?;
-                        Ok(want)
-                    }
-                    other => unsupported(&format!("`list` of `{other}`"), line),
-                };
-            }
-            _ => {}
-        }
-        // Calling a `fn`-typed PARAMETER inside a specialization (RFC-0023): a
-        // direct call to the resolved target with this instance's own capture
-        // parameters prepended. No function pointer exists — the target is an
-        // index the discovering call site handed out, and the captures are values
-        // fixed at that site.
-        if let Some(bnd) = self.fn_binds.get(name).cloned() {
-            return self.target_call(m, b, &bnd, args, line);
-        }
-        // A call through a stored function value (RFC-0037): one direct call to
-        // the signature's dispatcher. The receiver is always a NAME — a `let`, a
-        // `for` variable, a `match` binding, a field read into a local — which is
-        // the surface RFC-0037 defines.
-        if let Ok((_, ty)) = self.lookup(name, line) {
-            let norm = crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types);
-            if matches!(norm, Type::Fn(..)) {
-                let recv = Expr::Var {
-                    name: name.to_string(),
-                    line,
-                };
-                return self.fnval_call(m, b, &recv, &norm, args, line);
-            }
-        }
-        if let Some(t) = self.sum_ctor(m, b, name, args, line, hint.clone())? {
-            return Ok(t);
-        }
-        // `Age(n)` — the explicit spelling of what a boundary now does by itself
-        // (RFC-0003). A value the checker proved pays for no check.
-        if let Some(d) = self
-            .cx
-            .types
-            .get(name)
-            .filter(|d| d.predicate.is_some())
-            .cloned()
-        {
-            if args.len() != 1 {
-                return unsupported(&format!("`{name}` at this arity"), line);
-            }
-            self.expr_as(m, b, &args[0], &d.base)?;
-            if !self.proven(&args[0], &Type::Named(name.to_string())) {
-                self.emit_validation(b, &d, line)?;
-            }
-            return Ok(Type::Named(name.to_string()));
-        }
-        // A protocol method (RFC-0002 §5): `x.show()` parses as `show(x)` and
-        // dispatches statically on the receiver's concrete type — which inside a
-        // bounded generic is concrete only because `subst` says so. The same
-        // mangled impl the textual emitter calls, so there is one naming scheme.
-        if let Some(proto) = self.cx.protocol_methods.get(name).cloned() {
-            let recv = args.first().ok_or_else(|| {
-                gap(
-                    &format!("the protocol method `{name}` with no receiver"),
-                    line,
-                )
-            })?;
-            let rty = self.peek(recv, line)?;
-            let rty = self.cx.sub(&rty);
-            let key = ftypes::type_key(&rty)
-                .ok_or_else(|| gap(&format!("`{name}` dispatched on `{rty}`"), line))?;
-            let mangled = ftypes::impl_method_name(&proto, &key, name);
-            return self.call(m, b, &mangled, args, &[], line);
-        }
-        // A function with `fn`-typed parameters (RFC-0023): resolve each
-        // function-value argument to a direct-call target, specialize the callee
-        // per those targets, and call the specialization with the captures
-        // appended. The shell itself was never emitted.
-        if let Some(f) = self.cx.higher_order.get(name).copied() {
-            if f.params.len() != args.len() {
-                return unsupported(&format!("the call `{name}` at this arity"), line);
-            }
-            return self.ho_call(m, b, f, args, line);
-        }
-        // A generic callee: solve its type arguments, discover the specialization
-        // (which is what hands out its function index), then call it like any
-        // other function.
-        if let Some(f) = self.cx.generics.get(name).copied() {
-            if f.params.len() != args.len() {
-                return unsupported(&format!("the call `{name}` at this arity"), line);
-            }
-            let arg_tys = self.arg_types(
-                &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
-                args,
-                line,
-            )?;
-            let want = self.expect.last().cloned();
-            let sig = self.generic_sig(m, f, &arg_tys, want.as_ref(), line)?;
-            return self.emit_call(m, b, &sig, args, hint);
-        }
-        if self.is_extern(name) {
-            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
-                s.expr_as(m, b, &args[i], p).map(|_| ())
-            };
-            return self.extern_call(m, b, name, args.len(), &mut operand, line);
-        }
-        // RFC-0120: a named projection dispatches here exactly as `a[i]` does —
-        // the same table, its own method name. Last, so every callable of the
-        // same name won above, which is the checker's resolution order too.
-        if !args.is_empty()
-            && self.cx.sigs.get(name).is_none()
-            && self
-                .cx
-                .impls
-                .iter()
-                .any(|i| i.places.iter().any(|p| p.name == *name))
-        {
-            let recv = self.peek(&args[0], line).ok();
-            if let Some(p) = vyrn_frontend::project::site(
-                &self.cx.impls,
-                recv.as_ref(),
-                name,
-                &args[0],
-                &args[1..],
-                line,
-            )? {
-                for s in &p.prologue {
-                    self.stmt(m, b, s)?;
-                }
-                return self.expr(m, b, &p.place);
-            }
-        }
-        let Some(sig) = self.cx.sigs.get(name).cloned() else {
-            return unsupported(&format!("the call `{name}`"), line);
-        };
-        if sig.params.len() != args.len() {
-            return unsupported(&format!("the call `{name}` at this arity"), line);
-        }
-        self.emit_call(m, b, &sig, args, hint)
-    }
-
-    /// `print` of the value on the stack, rendered by its own type `t`. Both
-    /// walks call it: the arm over the source after it evaluates the operand,
-    /// and [`Fn_::core_call`] after it reads the name (RFC-0125 M7).
+    /// `print` of the value on the stack, rendered by its own type `t`.
+    /// [`Fn_::core_call`] calls it after it reads the name (RFC-0125 M7).
     fn print_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
         match self.cx.resolve(t) {
             // Every width goes through one `i64` printer: widened by its
@@ -8988,10 +6137,10 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `toString` of the value on the stack, rendered by its own type `t` into
-    /// a String the caller owns. `arg` is the operand's expression where the
-    /// arm over the source has one: a String temporary is freed once it is
-    /// copied ([`vyrn_frontend::declared::str_temporary`]), and the rows state
-    /// that release as a row of their own.
+    /// a String the caller owns. `arg` is the operand's expression where there
+    /// is one: a String temporary is freed once it is copied
+    /// ([`vyrn_frontend::declared::str_temporary`]), and the rows state that
+    /// release as a row of their own.
     fn str_value(
         &mut self,
         b: &mut Frame,
@@ -9053,33 +6202,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// One `std/mem` primitive (PLAN-0125-runtime §2.1 to §2.3) as its
-    /// instruction, or one host import as its `call`. `std/mem.vyrn` holds the
-    /// signatures and this holds the whole of their lowering; the bodies there
-    /// are never read by this emitter.
-    fn mem_prim(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        prim: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let (how, params, ret) = self.mem_spec(prim, line)?;
-        if args.len() != params.len() {
-            return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
-        }
-        mem_pre(b, prim);
-        for (a, p) in args.iter().zip(&params) {
-            self.expr_as(m, b, a, p)?;
-        }
-        self.mem_ins(b, prim, how);
-        Ok(ret)
-    }
-
-    /// One `std/mem` primitive off the core's row: the same table
-    /// [`Fn_::mem_prim`] reads, its operands read from the row rather than
-    /// walked over the source (RFC-0125 M7).
+    /// One `std/mem` primitive off the core's row: [`Fn_::mem_spec`]'s table,
+    /// its operands read from the row (RFC-0125 M7).
     fn core_mem(
         &mut self,
         m: &mut Module,
@@ -9317,89 +6441,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// The expression `jsonSchema<T>()` / `schemaOf<T>()` stands for.
-    ///
-    /// Both are compile-time reflection over a *declaration*, so the target is a
-    /// type ARGUMENT rather than a value — which is also why this is a rewrite
-    /// rather than a call: there is nothing to evaluate at runtime. The target
-    /// was an `Expr::Var` in argument position until RFC-0125 §3 M6.
-    fn reflected(&self, which: &str, target: &Type, line: usize) -> Result<Expr, String> {
-        let (Type::Named(tn) | Type::App(tn, _)) = target else {
-            return unsupported(
-                &format!("`{which}` of `{target}`, which names no declaration"),
-                line,
-            );
-        };
-        let Some(decl) = self.cx.types.get(tn) else {
-            return unsupported(&format!("`{which}` of the undeclared type `{tn}`"), line);
-        };
-        Ok(if which == "jsonSchema" {
-            Expr::Str(ftypes::json_schema_string(decl, &self.cx.types))
-        } else {
-            ftypes::schema_struct_lit(decl)
-        })
-    }
-
-    /// Which `Value` variant `value(x)` builds. The three the interpreter and the
-    /// textual emitter box, and nothing else.
-    fn value_variant(&mut self, arg: &Expr, line: usize) -> Result<&'static str, String> {
-        let t = self.peek(arg, line)?;
-        let r = self.cx.resolve(&t);
-        match value_scalar(&r) {
-            Some(v) => Ok(v),
-            // RFC-0094 M3: a type that says how it renders boxes as the String
-            // it renders to. The emitting path rewrites the argument into that
-            // `show` call, so both halves name one variant.
-            None if self.show_dispatch(&t).is_some() => Ok("StrVal"),
-            None => unsupported(&format!("`value` of `{r}`"), line),
-        }
-    }
-
-    /// The `impl Show for T` a value of type `ty` renders through (RFC-0094 M3),
-    /// or `None` where the language renders it itself.
-    /// The key is taken from the SUBSTITUTED type, not the written one: inside a
-    /// `<T: Show>` specialization the parameter is still spelled `T` here, and
-    /// `T` names no impl. Substituting is what selects the impl per instance,
-    /// which is what the checker deferred to this point.
-    fn show_dispatch(&self, ty: &Type) -> Option<String> {
-        let t = self.cx.sub(ty);
-        ftypes::show_dispatch(&self.cx.impls, &t, &self.cx.resolve(&t))
-    }
-
-    /// The concrete type of each argument, WITHOUT emitting it.
-    ///
-    /// A generic call needs these before the first argument is lowered: the
-    /// specialization's parameter types are what the arguments get coerced to,
-    /// and an aggregate return's destination is a hidden LEADING argument, so
-    /// nothing can go on the stack until the substitution is solved. Same bind a
-    /// join is in, and the same answer — [`Fn_::peek`] predicts and `expr_as`
-    /// re-checks, so a wrong prediction is a compile error rather than a wrong
-    /// specialization.
-    ///
-    /// `declared` is only consulted where `peek` needs a position to type an
-    /// argument that has none of its own (an empty array literal, a bare `None`).
-    fn arg_types(
-        &mut self,
-        declared: &[Type],
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Vec<Type>, String> {
-        let mut out = Vec::new();
-        for (i, a) in args.iter().enumerate() {
-            if let Some(d) = declared.get(i) {
-                self.expect.push(d.clone());
-            }
-            let t = self.peek(a, line);
-            if declared.get(i).is_some() {
-                self.expect.pop();
-            }
-            out.push(self.cx.sub(&t?));
-        }
-        Ok(out)
-    }
-
-    /// The first half of the aggregate-result convention, which both walks
-    /// read (RFC-0125 M7): the out-pointer a call's result is written
+    /// The first half of the aggregate-result convention (RFC-0125 M7): the
+    /// out-pointer a call's result is written
     /// through, pushed before the arguments.
     ///
     /// The storage is the consumer's own when it holds this very type, so the
@@ -9469,45 +6512,10 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.instantiate(m, f, type_args, subst)
     }
 
-    /// The call itself, once the callee's signature is known.
-    fn emit_call(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        sig: &Sig,
-        args: &[Expr],
-        hint: Option<(Dest, Type)>,
-    ) -> Result<Type, String> {
-        // A `modify` argument is the caller's binding by ADDRESS, and a scalar
-        // in a wasm local has none ([`Fn_::spill`]).
-        let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
-            let a = &args[i];
-            if sig.modify.get(i) != Some(&true) {
-                return s.expr_as(m, b, a, p).map(|_| None);
-            }
-            let line = Expr::line(a);
-            let Expr::Var { name, .. } = a else {
-                return unsupported("a `modify` argument that is not a variable", line);
-            };
-            let (place, ty) = s.lookup(name, line)?;
-            match place {
-                Place::Local(l) => s.spill(b, l, &ty, line).map(Some),
-                // A frame slot or module state: hand over the address itself, so
-                // the callee's copy-out lands in the caller's own storage.
-                _ => {
-                    place
-                        .addr(b, 0)
-                        .ok_or_else(|| gap("a `modify` argument with no address", line))?;
-                    Ok(None)
-                }
-            }
-        };
-        self.emit_call_with(m, b, sig, args.len(), &mut operand, hint)
-    }
-
-    /// [`Fn_::emit_call`] with argument `i` written by `operand` at its
-    /// parameter's type, which answers the slot a `modify` scalar was spilled
-    /// to, if any: the out-pointer, the operands, the call, the reloads.
+    /// A call once the callee's signature is known, with argument `i` written
+    /// by `operand` at its parameter's type, which answers the slot a `modify`
+    /// scalar was spilled to, if any: the out-pointer, the operands, the call,
+    /// the reloads.
     fn emit_call_with(
         &mut self,
         m: &mut Module,
@@ -9558,306 +6566,6 @@ impl<'p> Fn_<'_, 'p> {
 
     // ---- RFC-0023 higher-order specialization -----------------------------
 
-    /// A call to a function taking one or more `fn`-typed parameters.
-    ///
-    /// Every function-value argument is resolved to a **target** — a lifted
-    /// lambda, a named function, or a forwarded `fn` parameter — with its captures
-    /// materialized HERE, at the outer call site, which is RFC-0023's
-    /// capture-timing lock. The callee is then specialized per those targets and
-    /// called directly.
-    ///
-    /// Nothing is emitted until the specialization's signature exists, and that is
-    /// not fastidiousness: an aggregate return crosses as a hidden LEADING
-    /// pointer, so the first thing that goes on the operand stack depends on a
-    /// substitution the arguments have to be typed to solve. So the arguments are
-    /// PEEKED here and emitted once, by [`Fn_::emit_call`], from a synthesized
-    /// argument list — which is also what keeps the aggregate convention,
-    /// `modify`, and the M2d coercion seam from having a second implementation to
-    /// disagree with.
-    fn ho_call(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        f: &'p Function,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        // Every alias this call registers dies with it, the ones
-        // `resolve_fn_arg` registers for its capture sources included: an
-        // alias that outlives its clone resolves a later node at the same
-        // address to the caller's row, and a capture read there was freed
-        // (#526).
-        let mark = self.cx.plan.alias_scope();
-        let generic = !f.type_params.is_empty();
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        // Pass 1: the ordinary arguments, so a `map<T, U>` lambda sees a concrete
-        // `T`. Peek only — see the note above about emission order.
-        for (i, p) in f.params.iter().enumerate() {
-            if matches!(p.ty, Type::Fn(..)) {
-                continue;
-            }
-            self.expect.push(p.ty.clone());
-            let t = self.peek(&args[i], line);
-            self.expect.pop();
-            let aty = self.cx.sub(&t?);
-            if generic {
-                crate::solve_param(&p.ty, &aty, &mut subst);
-            }
-        }
-        // Pass 1.5: a type parameter may occur ONLY inside a `fn` parameter's own
-        // parameter list (`paramQuery(run: fn(P) -> T)` — RFC-0071 M2b), with no
-        // ordinary argument to pin it. Solve those from the target's DECLARED
-        // parameters, or `P` survives into the instance as a `Type::Param` — which
-        // `llt_of` prints as `void`, i.e. a signature with one fewer parameter
-        // rather than a diagnostic. The checker's `check_fn_arg` learned the same
-        // rule; this is its codegen half, and the textual backend's too.
-        if generic {
-            for (i, p) in f.params.iter().enumerate() {
-                let Type::Fn(dptys, _) = &p.ty else { continue };
-                if let Some(tptys) = self.fn_arg_param_types(&args[i], line) {
-                    for (d, t) in dptys.iter().zip(&tptys) {
-                        crate::solve_param(d, t, &mut subst);
-                    }
-                }
-            }
-        }
-        // Pass 2: resolve each `fn`-typed argument to its target, and solve the
-        // outbound parameter (`U` in `map<T, U>`) from the target's own return.
-        let mut targets: Vec<FnTarget> = Vec::new();
-        let mut cap_srcs: Vec<Vec<Expr>> = Vec::new();
-        for (i, p) in f.params.iter().enumerate() {
-            let Type::Fn(dptys, dret) = &p.ty else {
-                continue;
-            };
-            let ptys: Vec<Type> = dptys
-                .iter()
-                .map(|t| ftypes::substitute(t, &subst))
-                .collect();
-            let dret_sub = ftypes::substitute(dret, &subst);
-            let (target, srcs, _) = self.resolve_fn_arg(m, &args[i], &ptys, &dret_sub, line)?;
-            if generic {
-                crate::solve_param(dret, &target.sig.ret_ty, &mut subst);
-            }
-            targets.push(target);
-            cap_srcs.push(srcs);
-        }
-        let mut type_args = Vec::new();
-        for tp in &f.type_params {
-            match subst.get(tp) {
-                Some(t) => type_args.push(t.clone()),
-                None => {
-                    return unsupported(
-                        &format!(
-                            "a generic type parameter `{tp}` the call `{}` does not fix",
-                            f.name
-                        ),
-                        line,
-                    )
-                }
-            }
-        }
-        // The argument list, in the order [`ho_shell`] lays the parameters
-        // out: an ordinary argument keeps its place, and a `fn` argument
-        // becomes its captures, read from the caller's own scope — which is
-        // what fixes them at this site.
-        let mut call_args: Vec<Expr> = Vec::new();
-        let mut srcs = cap_srcs.iter();
-        // RFC-0114 §26: `call_args` holds CLONES of the caller's argument
-        // expressions, so plan rows on the originals would go undischarged —
-        // each element remembers its source's node addresses, and the pairs
-        // are registered once the vector stops growing (elements only sit
-        // still after the last push).
-        let mut src_lists: Vec<Vec<usize>> = Vec::new();
-        for (i, p) in f.params.iter().enumerate() {
-            let from: &[Expr] = match p.ty {
-                Type::Fn(..) => srcs.next().map_or(&[], Vec::as_slice),
-                _ => std::slice::from_ref(&args[i]),
-            };
-            for src in from {
-                call_args.push(src.clone());
-                let mut v = Vec::new();
-                vyrn_frontend::ast::node_addrs_val(src, &mut v);
-                src_lists.push(v);
-            }
-        }
-        {
-            let mut pairs: Vec<(usize, usize)> = Vec::new();
-            for (e, srcs) in call_args.iter().zip(&src_lists) {
-                let mut c = Vec::new();
-                vyrn_frontend::ast::node_addrs_val(e, &mut c);
-                pairs.extend(c.into_iter().zip(srcs.iter().copied()));
-            }
-            self.cx.plan.alias_clones_scoped(&pairs);
-        }
-        let sig = self.cx.specialize(m, f, type_args, subst, targets)?;
-        let r = self.emit_call(m, b, &sig, &call_args, None);
-        // The clones die with this frame; their aliases must die first, or a
-        // later node at a recycled address would resolve to somebody's row.
-        self.cx.plan.alias_unwind(mark);
-        r
-    }
-
-    /// A call through a `fn`-typed parameter: the target, with this instance's
-    /// capture parameters prepended to the argument list.
-    ///
-    /// The prepend is why there is one call path: a target's signature is
-    /// captures-then-parameters, so `emit_call` sees an ordinary call to an
-    /// ordinary function and every convention it already implements applies. The
-    /// arguments coerce into the TARGET's declared parameter types, not the `fn`
-    /// type's — a named target declaring `Age` where the signature says `Int64`
-    /// re-validates, which is what the textual backend's dispatcher does at the
-    /// same boundary.
-    fn target_call(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        bnd: &FnBinding,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let mut all: Vec<Expr> = bnd
-            .cap_srcs
-            .iter()
-            .map(|s| Expr::Var {
-                name: s.clone(),
-                line,
-            })
-            .collect();
-        all.extend(args.iter().cloned());
-        if all.len() != bnd.target.sig.params.len() {
-            return unsupported("a call through a `fn` parameter at another arity", line);
-        }
-        // RFC-0114 §26: the tail is a clone of the caller's arguments — pair
-        // it with the originals so their plan rows discharge (the capture
-        // reads ahead of it are synthesized and carry no rows).
-        let mark = self.cx.plan.alias_scope();
-        {
-            let mut pairs: Vec<(usize, usize)> = Vec::new();
-            for (e, src) in all[bnd.cap_srcs.len()..].iter().zip(args) {
-                let (mut c, mut o) = (Vec::new(), Vec::new());
-                vyrn_frontend::ast::node_addrs_val(e, &mut c);
-                vyrn_frontend::ast::node_addrs_val(src, &mut o);
-                pairs.extend(c.into_iter().zip(o));
-            }
-            self.cx.plan.alias_clones_scoped(&pairs);
-        }
-        let r = self.emit_call(m, b, &bnd.target.sig, &all, None);
-        self.cx.plan.alias_unwind(mark);
-        r
-    }
-
-    /// Resolve one `fn`-typed argument to a call target, giving the EXPRESSIONS to
-    /// read its capture values from at THIS site and their types.
-    ///
-    /// Nothing is emitted: the captures are named, not loaded, because the call
-    /// they become arguments to has not started pushing operands yet.
-    fn resolve_fn_arg(
-        &mut self,
-        m: &mut Module,
-        arg: &Expr,
-        ptys: &[Type],
-        expected_ret: &Type,
-        line: usize,
-    ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
-        let var = |n: &String| Expr::Var {
-            name: n.clone(),
-            line,
-        };
-        match arg {
-            Expr::Lambda { line, .. } => self.lift_lambda(m, arg, ptys, expected_ret, None, *line),
-            Expr::Var { name, .. } => {
-                // A pass-through `fn`-typed parameter: forward the target AND the
-                // captures, which are this instance's own capture parameters. The
-                // monomorphization threads through transitively and the inner
-                // instance never learns there was an outer one.
-                if let Some(bnd) = self.fn_binds.get(name) {
-                    let tys = bnd.target.sig.params[..bnd.target.ncaps].to_vec();
-                    let srcs = bnd.cap_srcs.iter().map(&var).collect();
-                    return Ok((bnd.target.clone(), srcs, tys));
-                }
-                // A stored function value (RFC-0037) flowing into a `fn`-typed
-                // parameter: the target is the signature's DISPATCHER and the
-                // "capture" is the enum itself, which is why this needs no third
-                // mechanism — a dispatcher is a target with one capture, and the
-                // specialization dispatches internally. v1's zero-cost path for a
-                // direct lambda or named argument is untouched; those never reach
-                // this arm.
-                if let Ok((_, ty)) = self.lookup(name, line) {
-                    let norm = crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types);
-                    if matches!(norm, Type::Fn(..)) {
-                        let dsig = self.dispatcher(m, &norm, line)?;
-                        return Ok((
-                            FnTarget {
-                                sig: dsig,
-                                ncaps: 1,
-                            },
-                            vec![var(name)],
-                            vec![norm],
-                        ));
-                    }
-                    return unsupported(&format!("`{name}` as a function value"), line);
-                }
-                // A named top-level function: called directly, no captures. A
-                // GENERIC or itself higher-order target is refused — the first has
-                // no index until something fixes its type arguments, and the second
-                // has no first-order definition at all.
-                match self.cx.sigs.get(name) {
-                    Some(sig) if sig.modify.iter().any(|m| *m) => unsupported(
-                        &format!("`{name}` as a function value (it takes a `modify` parameter)"),
-                        line,
-                    ),
-                    Some(sig) => Ok((
-                        FnTarget {
-                            sig: sig.clone(),
-                            ncaps: 0,
-                        },
-                        Vec::new(),
-                        Vec::new(),
-                    )),
-                    None => unsupported(&format!("`{name}` as a function value"), line),
-                }
-            }
-            // Any other expression of `fn` type (RFC-0037): a field read, an
-            // element, a call's result. It produces the same defunctionalized
-            // value a binding holds, so it takes the arm above — the target is
-            // the signature's dispatcher and the "capture" is the value itself,
-            // read at this site by the expression rather than by a name.
-            other => {
-                let ty = self.peek(other, line)?;
-                let norm = crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types);
-                if !matches!(norm, Type::Fn(..)) {
-                    return unsupported(
-                        &format!("a `fn`-typed argument that is {}", expr_name(other)),
-                        Expr::line(other),
-                    );
-                }
-                let dsig = self.dispatcher(m, &norm, line)?;
-                // RFC-0114 §26: the capture source is a clone of the
-                // argument expression — pair it with the original so its
-                // plan rows discharge. A `Vec` never pushed again keeps its
-                // buffer, so the element's addresses are already final.
-                let srcs = vec![other.clone()];
-                {
-                    let (mut c, mut o) = (Vec::new(), Vec::new());
-                    vyrn_frontend::ast::node_addrs_val(&srcs[0], &mut c);
-                    vyrn_frontend::ast::node_addrs_val(other, &mut o);
-                    let pairs: Vec<(usize, usize)> = c.into_iter().zip(o).collect();
-                    // Scoped: the vector lives until the enclosing `ho_call`
-                    // returns, whose unwind removes these with its own.
-                    self.cx.plan.alias_clones_scoped(&pairs);
-                }
-                Ok((
-                    FnTarget {
-                        sig: dsig,
-                        ncaps: 1,
-                    },
-                    srcs,
-                    vec![norm],
-                ))
-            }
-        }
-    }
-
     /// What a lambda literal returns: concrete when the `fn` type named it, and
     /// otherwise what the body produces — which is the outbound `U` a generic
     /// higher-order call solves from. A block body carries no expression to peek, so
@@ -9888,39 +6596,6 @@ impl<'p> Fn_<'_, 'p> {
             (Type::Param(_), LambdaBody::Block(_)) => Type::Unit,
             (t, _) => t.clone(),
         })
-    }
-
-    /// The DECLARED parameter types of a `fn`-typed argument's target, when the
-    /// argument names one or is an expression of `fn` type. `None` for a lambda
-    /// literal, whose parameters take their types from the signature they flow
-    /// into and so can solve nothing.
-    fn fn_arg_param_types(&mut self, arg: &Expr, line: usize) -> Option<Vec<Type>> {
-        let Expr::Var { name, .. } = arg else {
-            return match self.fn_expr_sig(arg, line) {
-                Ok(Type::Fn(ptys, _)) => Some(ptys),
-                _ => None,
-            };
-        };
-        if let Some(bnd) = self.fn_binds.get(name) {
-            return Some(bnd.target.sig.params[bnd.target.ncaps..].to_vec());
-        }
-        if let Ok((_, ty)) = self.lookup(name, 0) {
-            return match self.cx.resolve(&ty) {
-                Type::Fn(ptys, _) => Some(ptys),
-                _ => None,
-            };
-        }
-        self.cx.sigs.get(name).map(|s| s.params.clone())
-    }
-
-    /// The normalized `fn` signature an expression produces — a lambda literal
-    /// excepted, since it has none of its own. Peeked, so nothing is emitted.
-    fn fn_expr_sig(&mut self, arg: &Expr, line: usize) -> Result<Type, String> {
-        if matches!(arg, Expr::Lambda { .. }) {
-            return Ok(Type::Unit);
-        }
-        let ty = self.peek(arg, line)?;
-        Ok(crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types))
     }
 
     /// The PROGRAM's own body for a lambda literal at this address, or `None`
@@ -10151,17 +6826,6 @@ impl<'p> Fn_<'_, 'p> {
 
     // ---- RFC-0037 stored function values ----------------------------------
 
-    /// The `fn` type a value is being built FOR, normalized. `None` when the
-    /// position does not name one, which is what makes a bare `let f = double`
-    /// take the function's own signature instead.
-    fn expected_fn_sig(&self) -> Option<Type> {
-        let top = self.expect.last()?;
-        match crate::normalize_fn_sig(&self.cx.sub(top), &self.cx.types) {
-            t @ Type::Fn(..) => Some(t),
-            _ => None,
-        }
-    }
-
     /// Register a variant (deduped on signature + target) and give its tag.
     ///
     /// The tag is an index into the MODULE-GLOBAL list, matching the textual
@@ -10192,35 +6856,8 @@ impl<'p> Fn_<'_, 'p> {
         layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))
     }
 
-    /// Build a stored function value: `{ i64 tag, i64 payload }` in a frame slot.
-    ///
-    /// The payload is 0 when there are no captures, and otherwise a heap block
-    /// holding them BY VALUE — read here, at the construction site, which is
-    /// RFC-0023's capture-timing lock applied to a value that outlives its scope.
-    /// The block is never freed, the same safe leak every boxed enum payload
-    /// already is.
-    fn build_fnval(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        sig_ty: &Type,
-        target: FnTarget,
-        cap_srcs: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let Repr::Agg(l) = self.cx.repr(sig_ty, line)? else {
-            return unsupported("a function value that is not an aggregate", line);
-        };
-        let off = b.alloc(l.size, l.align);
-        let mut parts = Parts::of(cap_srcs);
-        self.fnval_into(m, b, Dest::Slot(off), sig_ty, target, &mut parts, line)?;
-        b.slot(off);
-        Ok(sig_ty.clone())
-    }
-
-    /// Write a stored function value into `dest`: its tag, and its payload,
-    /// which [`Fn_::build_fnval`] states. `caps` are the captures in the
-    /// target's order.
+    /// Write a stored function value into `dest`: its tag, and its payload.
+    /// `caps` are the captures in the target's order.
     #[allow(clippy::too_many_arguments)]
     fn fnval_into(
         &mut self,
@@ -10265,9 +6902,7 @@ impl<'p> Fn_<'_, 'p> {
                 // source: a `fn`-typed parameter inside a specialization has no
                 // slot, so reading its name BUILDS the aggregate (RFC-0023 ×
                 // RFC-0037, [`Fn_::fnval_binding`]) rather than reading one.
-                let dup = self.owns_heap(ty)
-                    && !matches!(caps, Parts::Ast(es)
-                        if matches!(es[i], Expr::Var { name, .. } if self.fn_binds.contains_key(name)));
+                let dup = self.owns_heap(ty);
                 b.ins(&Instruction::LocalGet(p));
                 if bl.fields[i] != 0 {
                     b.ins(&Instruction::I32Const(bl.fields[i] as i32));
@@ -10320,24 +6955,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// A stored value from a lambda literal: lift the body through the SAME
-    /// [`Fn_::lift_lambda`] the RFC-0023 argument path uses, typed exactly by the
-    /// slot's signature. One lifting rule, so storing a lambda and passing one
-    /// cannot disagree about its captures or its parameter types.
-    fn fnval_lambda(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        e: &Expr,
-        sig_ty: &Type,
-    ) -> Result<Type, String> {
-        let (target, srcs) = self.lift_stored(m, e, sig_ty)?;
-        self.build_fnval(m, b, sig_ty, target, &srcs, Expr::line(e))
-    }
-
     /// The target a stored lambda calls, and its captures in the target's
-    /// order: [`Fn_::fnval_lambda`]'s lift, which the core walk's
-    /// [`Fn_::core_make`] shares.
+    /// order, for [`Fn_::core_make`].
     fn lift_stored(
         &mut self,
         m: &mut Module,
@@ -10356,64 +6975,6 @@ impl<'p> Fn_<'_, 'p> {
         let r = self.lift_lambda(m, e, ptys, ret, None, *line);
         self.expect = saved;
         r.map(|(target, srcs, _)| (target, srcs))
-    }
-
-    /// A stored value from a bare function name: the empty-payload variant. The
-    /// signature is the slot's when a position names one, else the function's own.
-    fn fnval_named(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        line: usize,
-    ) -> Result<Type, String> {
-        let Some(sig) = self.cx.sigs.get(name).cloned() else {
-            return unsupported(&format!("`{name}` as a function value"), line);
-        };
-        if sig.modify.iter().any(|x| *x) {
-            return unsupported(
-                &format!("`{name}` as a function value (it takes a `modify` parameter)"),
-                line,
-            );
-        }
-        let own = crate::normalize_fn_sig(
-            &Type::Fn(sig.params.clone(), Box::new(sig.ret_ty.clone())),
-            &self.cx.types,
-        );
-        let sig_ty = self.expected_fn_sig().unwrap_or(own);
-        self.build_fnval(m, b, &sig_ty, FnTarget { sig, ncaps: 0 }, &[], line)
-    }
-
-    /// A stored value from a `fn`-typed PARAMETER (RFC-0037 × RFC-0023): inside a
-    /// specialization the parameter's target and captures are both statically
-    /// known, so storing it materializes exactly the aggregate a lambda or named
-    /// source builds. Storing a `fn` parameter therefore behaves exactly as calling
-    /// one — for any signature, scalar or aggregate captures alike.
-    fn fnval_binding(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        bnd: &FnBinding,
-        line: usize,
-    ) -> Result<Type, String> {
-        let t = &bnd.target;
-        let own = crate::normalize_fn_sig(
-            &Type::Fn(
-                t.sig.params[t.ncaps..].to_vec(),
-                Box::new(t.sig.ret_ty.clone()),
-            ),
-            &self.cx.types,
-        );
-        let sig_ty = self.expected_fn_sig().unwrap_or(own);
-        let srcs: Vec<Expr> = bnd
-            .cap_srcs
-            .iter()
-            .map(|n| Expr::Var {
-                name: n.clone(),
-                line,
-            })
-            .collect();
-        self.build_fnval(m, b, &sig_ty, t.clone(), &srcs, line)
     }
 
     /// The dispatcher for one signature, reserving its index the first time
@@ -10459,31 +7020,6 @@ impl<'p> Fn_<'_, 'p> {
             .sigs
             .push((sig_ty.clone(), sig.clone()));
         Ok(sig)
-    }
-
-    /// A call through a stored function value: ONE direct call to the signature's
-    /// dispatcher, with the value as its leading argument. The switch and the
-    /// direct calls live inside it, so the RFC-0037 invariant holds verbatim — no
-    /// function pointer exists anywhere in the module.
-    fn fnval_call(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        recv: &Expr,
-        sig_ty: &Type,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let Type::Fn(ptys, _) = sig_ty else {
-            return unsupported("a call through a non-function value", line);
-        };
-        if args.len() != ptys.len() {
-            return unsupported("a call through a stored `fn` value at another arity", line);
-        }
-        let dsig = self.dispatcher(m, sig_ty, line)?;
-        let mut all = vec![recv.clone()];
-        all.extend(args.iter().cloned());
-        self.emit_call(m, b, &dsig, &all, None)
     }
 
     /// `.length` / `.byteLength`, neither of which is a field: the receiver's
@@ -10874,8 +7410,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Write a value of type `t`, held in `place`, into a sum's payload words at
-    /// `w0` (RFC-0075 M2c). The encoding is [`Fn_::build_sum2`]'s, from a place
-    /// rather than from an expression — which is what `pull` has.
+    /// `w0` (RFC-0075 M2c), from a place, which is what `pull` has.
     fn store_payload(
         &mut self,
         b: &mut Frame,
@@ -11194,71 +7729,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(has)
     }
 
-    /// `for x in <stream>` — the pull loop.
-    ///
-    /// One iteration asks the stream for an element and gets a yes/no back in
-    /// `has`; the two producers answer differently and nothing after the join
-    /// knows which one did. Neither arm branches OUT of itself, which is what
-    /// keeps `self.depth` — and therefore every `break` in the body — honest.
-    fn for_stream(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        var: &str,
-        body: &Block,
-        elem: &Type,
-        line: usize,
-    ) -> Result<(), String> {
-        let s = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(s));
-        let r = self.cx.repr(elem, line)?;
-        let place = self.place_for(b, &r, line)?;
-
-        let brk = self.depth;
-        b.ins(&Instruction::Block(BlockType::Empty));
-        self.depth += 1;
-        let top = self.depth;
-        b.ins(&Instruction::Loop(BlockType::Empty));
-        self.depth += 1;
-
-        let has = self.stream_next(m, b, s, place, elem, line)?;
-
-        // The join: no element means the loop is over, and the release below is
-        // the one path out that still owns the stream.
-        b.ins(&Instruction::LocalGet(has));
-        b.ins(&Instruction::I32Eqz);
-        let out = self.br_to(brk);
-        b.ins(&Instruction::BrIf(out));
-
-        let mark = self.scope.len();
-        self.scope.push((var.to_string(), place, elem.clone()));
-        // The one entry the placement has nothing for — see [`Fn_::cursors`].
-        // A `break` leaves the loop through `fend`, which releases it, so only
-        // an early `return` or `?` reaches this one.
-        self.cursors
-            .push((Place::Local(s), elem.clone(), self.rel_seq));
-        let cont = self.depth;
-        b.ins(&Instruction::Block(BlockType::Empty));
-        self.depth += 1;
-        self.loops.push((brk, cont, self.region_depth));
-        self.block(m, b, body)?;
-        self.loops.pop();
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        self.cursors.pop();
-        self.scope.truncate(mark);
-
-        let back = self.br_to(top);
-        b.ins(&Instruction::Br(back));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-
-        // Normal end and `break` both land here.
-        self.stream_release_at(m, b, s, elem, line)
-    }
-
     /// Take the indexable value on the stack apart into locals.
     ///
     /// Fresh locals rather than scratch: a [`Walk`] outlives the expression that
@@ -11355,12 +7825,11 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The line a `panic` writes, and the call that traps after it: `error: `,
     /// the message `msg` pushes, and the site where the call names one
-    /// (RFC-0125 M7). The arm over the source and [`Fn_::core_call`] both
-    /// write it, and the `unreachable` after it is the arm's own and the
-    /// core's [`St::Trap`].
+    /// (RFC-0125 M7). [`Fn_::core_call`] writes it, and the `unreachable` after
+    /// it is the core's [`St::Trap`].
     ///
     /// Both wordings are interned, and the local taken, before the message is
-    /// pushed, so the two walks lay out the same data and the same locals. The
+    /// pushed, so every site lays out the same data and the same locals. The
     /// message waits in the local because `write_all` consumes three operands,
     /// and it is pushed first because the other engines evaluate the argument
     /// before they write any byte of the line.
@@ -11513,116 +7982,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `[a, b, c]`, and the empty `[]`.
-    ///
-    /// A literal is always the FIXED `[N x T]` shape, exactly as the LLVM
-    /// backend builds it; the growable triple is reached from there through the
-    /// same `ArrayN → Array` conversion, so there is one heap-wrapping path
-    /// rather than one per literal position. The empty literal is the exception,
-    /// because there is no element to take a type from — it can only be the
-    /// empty triple its expected type names.
-    fn array_lit(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        hint: Option<(Dest, Type)>,
-        elems: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let want = self.expect.last().map(|t| self.cx.resolve(t));
-        let elem_want = match &want {
-            Some(Type::Array(i)) | Some(Type::ArrayN(i, _)) | Some(Type::SmallArray(i, _)) => {
-                Some((**i).clone())
-            }
-            _ => None,
-        };
-        // RFC-0125 M1: in an `Array<T>` position the elements are built straight
-        // into the heap buffer and the triple is written where the consumer
-        // wants it — its own storage when it handed one over, a slot the size
-        // of the triple otherwise — so the fixed form, a frame extent the size
-        // of the whole literal copied once more by `heapify`, never exists. In
-        // a fixed position of the literal's own length the elements land in
-        // the consumer's storage.
-        if let Some((dest, hty)) = hint {
-            match self.cx.resolve(&hty) {
-                Type::Array(inner) if !matches!(*inner, Type::Param(_)) => {
-                    return self.array_lit_heap(
-                        m,
-                        b,
-                        dest,
-                        &inner,
-                        &mut Parts::of(elems),
-                        None,
-                        line,
-                        true,
-                    );
-                }
-                Type::ArrayN(inner, n)
-                    if n == elems.len() && n > 0 && !matches!(*inner, Type::Param(_)) =>
-                {
-                    self.fixed_elems(m, b, dest, &inner, &mut Parts::of(elems), line)?;
-                    dest.addr(b, 0);
-                    self.dest_used = true;
-                    return Ok(Type::ArrayN(inner, n));
-                }
-                _ => {}
-            }
-        }
-        if let Some(Type::Array(inner)) = &want {
-            if !matches!(**inner, Type::Param(_)) {
-                let l = self.layout_of(&Type::Array(inner.clone()), line)?;
-                let dest = Dest::Slot(b.alloc(l.size, l.align));
-                let parts = &mut Parts::of(elems);
-                return self.array_lit_heap(m, b, dest, inner, parts, None, line, false);
-            }
-        }
-        // An empty `[]` in a `SmallArray<T, N>` position is the inline empty state,
-        // not the empty triple: `len` 0, `cap` N, `data` null (RFC-0056). Built here
-        // rather than through the `ArrayN` conversion because there is no fixed
-        // literal to convert — `[N x T]` with N = 0 is not a shape `llt` prints.
-        if elems.is_empty() {
-            if let Some(Type::SmallArray(inner, n)) = want.clone() {
-                let sa = Type::SmallArray(inner.clone(), n);
-                self.sa_from_fixed(b, &inner, 0, &sa, n, line)?;
-                return Ok(sa);
-            }
-            let Some(Type::Array(inner)) = want else {
-                return unsupported(
-                    "an empty array literal with no expected `Array<T>` type",
-                    line,
-                );
-            };
-            let ty = Type::Array(inner);
-            let l = self.layout_of(&ty, line)?;
-            let off = b.alloc(l.size, l.align);
-            b.slot(off + l.fields[0]);
-            b.ins(&Instruction::I32Const(0));
-            b.ins(&Instruction::I32Store(word()));
-            for f in [l.fields[1], l.fields[2]] {
-                b.slot(off + f);
-                b.ins(&Instruction::I64Const(0));
-                b.ins(&Instruction::I64Store(word8()));
-            }
-            b.slot(off);
-            return Ok(ty);
-        }
-        // An element type that IS an unsolved parameter names no type — `Deque {
-        // front: [2, 1] }` reaches here with `Array<T>` expected and `T` open,
-        // and there is no lowering for `T`. The elements answer for it, and the
-        // enclosing literal's `solve_param` reads the parameter back off the
-        // result. Only a BARE parameter, matching the checker and the textual
-        // backend: an `Array<Array<T>>` field is refused in the checker.
-        let elem = match elem_want.filter(|t| !matches!(t, Type::Param(_))) {
-            Some(t) => t,
-            None => self.peek(&elems[0], line)?,
-        };
-        let el = self.layout_of(&elem, line)?;
-        let off = b.alloc(self.extent(&elem, elems.len(), line)?, el.align);
-        self.fixed_elems(m, b, Dest::Slot(off), &elem, &mut Parts::of(elems), line)?;
-        b.slot(off);
-        Ok(Type::ArrayN(Box::new(elem), elems.len()))
-    }
-
     /// The elements of a literal, one after another from `dest` (RFC-0125 M1).
     /// An aggregate element is built in its own place, so a nested literal
     /// costs no frame.
@@ -11656,9 +8015,8 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// `order[i]` is the part that fills the `i`th DECLARED field. The layout's
     /// order is the declaration's and a reader writes the fields in whatever
-    /// order suits, so the join is by name and the caller makes it: the AST arm
-    /// joins its `(name, expr)` pairs and the core's row joins the field names
-    /// on [`vyrn_lower::core::Ctor::Record`].
+    /// order suits, so the join is by name and the caller makes it: the core's
+    /// row joins the field names on [`vyrn_lower::core::Ctor::Record`].
     #[allow(clippy::too_many_arguments)]
     fn record_into(
         &mut self,
@@ -11689,8 +8047,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// One part of a literal, at the type the layout puts it at: the AST arm's
-    /// expression, or the value the core's row names (RFC-0125 M7).
+    /// One part of a literal, at the type the layout puts it at: the value the
+    /// core's row names (RFC-0125 M7).
     fn part(
         &mut self,
         m: &mut Module,
@@ -11701,10 +8059,6 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         match parts {
-            Parts::Ast(es) => {
-                let e = es[i];
-                self.expr_as(m, b, e, want)
-            }
             Parts::Core(body, vs, w) => {
                 let (body, v) = (*body, &vs[i]);
                 self.core_val(m, b, body, w, v, want, line)
@@ -11713,10 +8067,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// One layout part of a literal, left at `dest`, which is the parent's
-    /// storage at the part's offset (RFC-0125 M7). The AST arm builds the
-    /// expression there. The core's row names the part: a part its own row
-    /// wrote there ([`Fn_::core_part_at`]) is left, and any other layout name
-    /// is copied from its place, as the arm copies a variable.
+    /// storage at the part's offset (RFC-0125 M7). The core's row names the
+    /// part: a part its own row wrote there ([`Fn_::core_part_at`]) is left,
+    /// and any other layout name is copied from its place.
     #[allow(clippy::too_many_arguments)]
     fn agg_part(
         &mut self,
@@ -11733,10 +8086,6 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(());
         }
         match parts {
-            Parts::Ast(es) => {
-                let e = es[i];
-                self.agg_into(m, b, dest, size, e, ty, true)
-            }
             Parts::Core(body, vs, w) => {
                 let (body, v) = (*body, &vs[i]);
                 dest.addr(b, 0);
@@ -11874,25 +8223,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok((*elem, l, stride, src))
     }
 
-    /// `xs.push(v)`, `xs.reserve(n)`, `xs.clear()`, `xs.append(ys)` and
-    /// `dst.copyFrom(src)` over the source: the receiver's address, then
-    /// [`Fn_::arr_rebuild`]. A `SmallArray` receiver takes the four-field path.
-    fn rebuild(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match args {
-            [_, a] => s.expr_as(m, b, a, t).map(|_| ()),
-            _ => unsupported(&format!("`{name}` with no operand"), line),
-        };
-        self.arr_rebuild(m, b, name, &aty, &mut operand, line)
-    }
-
     /// One array operation `std/runtime` rebuilds the receiver with, the
     /// receiver's address on the stack (RFC-0115, PLAN-0125-runtime section 6 step
     /// 6). Leaves the same address, which is the result: the runtime wrote the
@@ -12014,119 +8344,7 @@ impl<'p> Fn_<'_, 'p> {
         Some(self.cx.sub(&ftypes::substitute(&f.ret, &subst)))
     }
 
-    /// `xs[i]` — bounds-checked, and a String's `s[i]` with it.
-    /// `a[i]` (RFC-0091 M2): resolve the `place at` projection for the
-    /// receiver's type, inline its body here, and read the place it yields.
-    ///
-    /// A builtin container resolves to the seeded row, which yields
-    /// `@slot(self, i)` with an empty prologue — the substitution is the
-    /// identity, so [`Fn_::at`] below emits exactly the bytes it emitted when
-    /// it was reached by name.
-    fn project_at(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        // Naming the receiver's type here costs a type probe, and the probe is
-        // `&mut self`. A program with no projection at all never needs it.
-        let recv = if vyrn_frontend::project::any(&self.cx.impls) {
-            self.peek(&args[0], line).ok()
-        } else {
-            None
-        };
-        // `None` is the seeded row, whose expansion is the identity: `Fn_::at`
-        // below reads the ORIGINAL nodes. `project::site` decides that once.
-        let Some(p) = vyrn_frontend::project::site(
-            &self.cx.impls,
-            recv.as_ref(),
-            "at",
-            &args[0],
-            &args[1..],
-            line,
-        )?
-        else {
-            return self.at(m, b, args, line);
-        };
-        for s in &p.prologue {
-            self.stmt(m, b, s)?;
-        }
-        self.expr(m, b, &p.place)
-    }
-
-    fn at(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        // RFC-0125 M1: a header a `while` hoisted is already in locals.
-        let (w, string) = match self.cached_walk(&args[0]) {
-            Some(w) => {
-                let string = w.byte;
-                (w, string)
-            }
-            None => {
-                let aty = self.expr(m, b, &args[0])?;
-                // A Map is not walkable and must not be reached as one: its
-                // length is field 2 where an Array's is field 1, so a `Walk`
-                // over it would index off the value pointer (M2c's refusal,
-                // now a branch instead).
-                if let Type::Map(_, val) = self.cx.resolve(&aty) {
-                    let mty = self.cx.resolve(&aty);
-                    let k = &args[1];
-                    return self.map_at(
-                        m,
-                        b,
-                        &mty,
-                        &val,
-                        &mut |s, m, b, t| s.expr_as(m, b, k, t),
-                        line,
-                    );
-                }
-                let string = self.cx.resolve(&aty) == Type::Str;
-                (self.walk(b, &aty, line)?, string)
-            }
-        };
-        self.expr_as(m, b, &args[1], &Type::Int)?;
-        let idx = b.local(ValType::I64);
-        b.ins(&Instruction::LocalSet(idx));
-        self.bounds_check(b, &w, idx, string);
-        self.elem_addr(b, &w, idx);
-        // `s[i]` is a `UInt8` (RFC-0022), not the `Int` a `for` over the same
-        // String yields — the two really do differ, and the LLVM backend has the
-        // same pair.
-        if string {
-            b.ins(&Instruction::I32Load8U(byte()));
-            return Ok(Type::IntN {
-                bits: 8,
-                signed: false,
-            });
-        }
-        self.load_elem(b, &w, line)?;
-        Ok(w.elem)
-    }
-
-    /// `xs.pop()` → `Option<T>`, shrinking the binding in place. Variable-only,
-    /// which is the checker's rule too: it returns a value AND mutates, so there
-    /// is no assignment the parser could have desugared it into.
-    fn pop(&mut self, b: &mut Frame, args: &[Expr], line: usize) -> Result<Type, String> {
-        let (place, aty) = self.receiver(args, "pop", line)?;
-        // The binding's ADDRESS, taken once: `pop` shrinks the triple in place, so
-        // it needs the storage rather than the value — and module state is storage
-        // at a fixed address exactly as a frame slot is at a moving one.
-        let slot = b.local(ValType::I32);
-        place
-            .addr(b, 0)
-            .ok_or_else(|| gap("`pop` on a non-array binding", line))?;
-        b.ins(&Instruction::LocalSet(slot));
-        self.pop_at(b, slot, &aty, line)
-    }
-
-    /// `pop` on the array whose address is in the local `slot`. The arm over
-    /// the source and [`Fn_::core_call`] over the rows both call this.
+    /// `pop` on the array whose address is in the local `slot`.
     fn pop_at(
         &mut self,
         b: &mut Frame,
@@ -12185,30 +8403,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(opt)
     }
 
-    /// `xs.swapRemove(i)` → the element, with the last one moved into its slot.
-    /// O(1) and unordered, which is the whole point of it (RFC-0011).
-    fn swap_remove(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let (place, aty) = self.receiver(args, "swapRemove", line)?;
-        let slot = b.local(ValType::I32);
-        place
-            .addr(b, 0)
-            .ok_or_else(|| gap("`swapRemove` on a non-array binding", line))?;
-        b.ins(&Instruction::LocalSet(slot));
-        let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-            s.expr_as(m, b, &args[1], &Type::Int).map(|_| ())
-        };
-        self.swap_remove_at(m, b, slot, &aty, &mut index, line)
-    }
-
     /// `swapRemove` on the array whose address is in the local `slot`, with
-    /// `index` writing the index. The arm over the source and
-    /// [`Fn_::core_call`] over the rows both call this.
+    /// `index` writing the index.
     fn swap_remove_at(
         &mut self,
         m: &mut Module,
@@ -12278,24 +8474,6 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         Ok(elem)
-    }
-
-    /// The binding a mutating array method is applied to. Anything else is a gap
-    /// rather than a silent no-op: a `pop` whose shrink went nowhere is a wrong
-    /// program.
-    fn receiver(
-        &mut self,
-        args: &[Expr],
-        what: &str,
-        line: usize,
-    ) -> Result<(Place, Type), String> {
-        match args.first() {
-            Some(Expr::Var { name, .. }) => self.lookup(name, line),
-            _ => unsupported(
-                &format!("`{what}` on something that is not a variable"),
-                line,
-            ),
-        }
     }
 
     /// Encode the value on the stack into an `Option`'s first payload word.
@@ -12934,32 +9112,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Build an `Option`/`Result` value: the tag, then the two payload words.
-    #[allow(clippy::too_many_arguments)]
-    fn build_sum2(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        ty: &Type,
-        tag: i32,
-        payload: Option<(&Expr, Type)>,
-        line: usize,
-        hint: Option<(Dest, Type)>,
-    ) -> Result<Type, String> {
-        let args: Vec<&Expr> = payload.iter().map(|(e, _)| *e).collect();
-        let tys: Vec<Type> = payload.iter().map(|(_, t)| t.clone()).collect();
-        self.build_variant(
-            m,
-            b,
-            ty,
-            tag as u64,
-            &mut Parts::Ast(args),
-            &tys,
-            line,
-            hint,
-        )
-    }
-
     /// Build a sum value: the tag, then the live variant's payloads in the slots
     /// they occupy. ONE builder since M2 — a built-in sum and a declared enum
     /// have one tag width and one payload encoding (RFC-0126 §8.4), so the two
@@ -13030,636 +9182,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty.clone())
     }
 
-    /// The sum type an expectation names, if it names one.
-    fn expected_sum(&self) -> Option<Type> {
-        self.expect
-            .last()
-            .filter(|t| self.sum_of(t).is_some())
-            .cloned()
-    }
-
-    /// The sum type a `Some`/`Ok`/`Err` is built at, with the payload's own type.
-    /// `None` when the position names no sum and the constructor cannot type
-    /// itself.
-    ///
-    /// The position decides both — a `Some(0)` in an `Option<UInt8>` slot is a
-    /// UInt8. Except where the position has not solved its own parameter yet:
-    /// `Bag { one: Some(5) }` reaches here with `Option<T>` expected, `T` has no
-    /// lowering, and the payload is the only thing that knows. Solving the
-    /// parameter from the payload rebuilds the whole sum, so an `Ok(5)` under
-    /// `Result<T, String>` keeps the error half the position named.
-    ///
-    /// Shared by `peek` and by `sum_ctor` for `expected_type_args`'s reason: the
-    /// two must report one type for one constructor, or the field is built at
-    /// one and read at the other.
-    fn sum_ctor_types(
-        &mut self,
-        name: &str,
-        arg: &Expr,
-        line: usize,
-    ) -> Result<Option<(Type, Type)>, String> {
-        let want = self.expected_sum();
-        let picked = want
-            .as_ref()
-            .and_then(|t| self.sum_of(t).map(|s| (t.clone(), s)));
-        let (ty, payload) = match picked {
-            // The position's sum names the payload the constructor carries: the
-            // variant with that name, in the variant list `sum_of` answers for
-            // every sum since RFC-0126 §8.11's M4b.
-            Some((t, vs)) if vs.iter().any(|v| v.name == name && v.payload.len() == 1) => {
-                let p = vs
-                    .iter()
-                    .find(|v| v.name == name)
-                    .expect("the guard just found it")
-                    .payload[0]
-                    .clone();
-                (t, p)
-            }
-            // An unexpected `Some` still types itself from its payload;
-            // `Ok`/`Err` cannot, because the other half is unknowable.
-            _ if name == "Some" => {
-                let p = self.peek(arg, line)?;
-                return Ok(Some((Type::option(p.clone()), p)));
-            }
-            _ => return Ok(None),
-        };
-        if !matches!(payload, Type::Param(_)) {
-            return Ok(Some((ty, payload)));
-        }
-        let p = self.peek(arg, line)?;
-        let mut sub = HashMap::new();
-        crate::solve_param(&payload, &p, &mut sub);
-        Ok(Some((
-            ftypes::substitute(&ty, &sub),
-            ftypes::substitute(&payload, &sub),
-        )))
-    }
-
-    /// `Some(x)` / `Ok(x)` / `Err(e)` / `Circle(r)` / `None`, or `Ok(None)` if
-    /// `name` is not a constructor at all.
-    fn sum_ctor(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-        hint: Option<(Dest, Type)>,
-    ) -> Result<Option<Type>, String> {
-        let want = self.expected_sum();
-        match name {
-            "None" => {
-                let ty = want.ok_or_else(|| gap("a `None` with no expected Option type", line))?;
-                return self.build_sum2(m, b, &ty, 0, None, line, hint).map(Some);
-            }
-            "Some" | "Ok" | "Err" => {
-                if args.len() != 1 {
-                    return unsupported(&format!("`{name}` at this arity"), line);
-                }
-                // The payload's type is the position's, not the argument's — a
-                // `Some(0)` in an `Option<UInt8>` slot is a UInt8.
-                let Some((ty, payload)) = self.sum_ctor_types(name, &args[0], line)? else {
-                    return unsupported(&format!("`{name}` with no expected Result type"), line);
-                };
-                let tag = i32::from(name != "Err");
-                return self
-                    .build_sum2(m, b, &ty, tag, Some((&args[0], payload)), line, hint)
-                    .map(Some);
-            }
-            _ => {}
-        }
-        if !self.cx.variants.contains_key(name) {
-            return Ok(None);
-        }
-        // Two enums may declare the same variant name; the expectation decides,
-        // and an ambiguity with nothing to decide it is a gap, not a coin toss.
-        let pick = want.as_ref().and_then(|t| match self.cx.resolve(t) {
-            Type::Enum(vs) => vs
-                .iter()
-                .position(|v| v.name == name)
-                .map(|i| (t.clone(), i as u64, vs[i].payload.clone())),
-            _ => None,
-        });
-        let (ty, tag, payload) = match pick {
-            Some(p) => p,
-            None => {
-                let tag = match self.cx.variants.get(name) {
-                    Some(c) if c.len() == 1 => c[0].1,
-                    _ => return unsupported(&format!("the ambiguous variant `{name}`"), line),
-                };
-                // A generic enum has no type until a use site fixes it, and a
-                // bare constructor's use site is its PAYLOAD — the rule
-                // `Gen::applied_enum_type` gives the textual emitter, shared.
-                let Some(ty) = self.applied_variant(name, args, line)? else {
-                    return unsupported(&format!("the ambiguous variant `{name}`"), line);
-                };
-                // The payloads the APPLIED type declares, which for a generic
-                // enum are the solved ones rather than its parameters.
-                let payload = match self.cx.resolve(&ty) {
-                    Type::Enum(vs) => vs
-                        .iter()
-                        .find(|v| v.name == name)
-                        .map(|v| v.payload.clone())
-                        .unwrap_or_default(),
-                    _ => return unsupported(&format!("the variant `{name}` of `{ty}`"), line),
-                };
-                (ty, tag, payload)
-            }
-        };
-        let refs: Vec<&Expr> = args.iter().collect();
-        self.build_variant(m, b, &ty, tag, &mut Parts::Ast(refs), &payload, line, hint)
-            .map(Some)
-    }
-
-    /// What a pattern binds, and to what — without emitting anything, because a
-    /// join needs the arm's type before the arm exists.
-    fn pattern_binds(
-        &self,
-        sum: &Sum,
-        pat: &Pattern,
-        line: usize,
-    ) -> Result<Vec<(String, Type)>, String> {
-        // The variant the pattern names, in the list `sum_of` answers for every
-        // sum since RFC-0126 §8.11's M4b. `??`'s pair (RFC-0079) names a TAG
-        // rather than a variant — variant 1 succeeds, variant 0 fails — which is
-        // the one thing the parser could not do; a sum wider than two has no
-        // success side as a pattern.
-        let (at, binds): (usize, &[Binder]) = match pat {
-            // The refutable-`let` desugar's default arm (RFC-0121): any
-            // variant, nothing bound.
-            Pattern::Other => return Ok(Vec::new()),
-            Pattern::Variant(name, binds) => (
-                sum.iter()
-                    .position(|v| v.name == *name)
-                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
-                binds,
-            ),
-            Pattern::Success(n) | Pattern::Failure(n) if sum.len() == 2 => (
-                usize::from(matches!(pat, Pattern::Success(_))),
-                std::slice::from_ref(n),
-            ),
-            _ => return unsupported("a pattern of the wrong shape for its scrutinee", line),
-        };
-        let v = &sum[at];
-        // A `Failure` over a nullary variant binds nothing — an `Option`'s tag 0
-        // has no payload, and that is exactly what this per-arm seam is for.
-        if matches!(pat, Pattern::Success(_) | Pattern::Failure(_)) {
-            return Ok(v
-                .payload
-                .first()
-                .map(|t| vec![(binds[0].name.clone(), t.clone())])
-                .unwrap_or_default());
-        }
-        if v.payload.len() != binds.len() {
-            return unsupported(&format!("the variant `{}` at this arity", v.name), line);
-        }
-        Ok(binds
-            .iter()
-            .map(|b| b.name.clone())
-            .zip(v.payload.iter().cloned())
-            .collect())
-    }
-
-    /// `match` — the n-way join M0 warned about, lowered destination-first.
-    ///
-    /// The arms are a chain of `if`s inside one `block`, and each arm leaves by
-    /// branching to it: a scalar result rides the branch, an aggregate one is
-    /// copied into a slot allocated BEFORE the first test. Nothing here counts
-    /// arms, which is the property that makes 46 four-to-seven-way joins cost
-    /// exactly what 103 diamonds cost.
-    #[allow(clippy::too_many_arguments)]
-    fn match_expr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        key: usize,
-        scrutinee: &Expr,
-        arms: &[ArmRef],
-        form: &str,
-        line: usize,
-    ) -> Result<Type, String> {
-        let st = self.expr(m, b, scrutinee)?;
-        let sum = self
-            .sum_of(&st)
-            .ok_or_else(|| gap(&format!("a {form} on `{st}`"), line))?;
-        // The shape, asked once, before anything is emitted: two arms, one
-        // tag and a default is a two-way branch, and every other shape is the
-        // chain (RFC-0125 §3 M5, and [`crate::two_way`]).
-        let tags: Vec<Option<usize>> = arms
-            .iter()
-            .map(|a| tag_of(&sum, a.pattern, line))
-            .collect::<Result<_, _>>()?;
-        // One scratch slot for every switch. `if let` took a local of its
-        // own, on the argument that "an inner one's scrutinee would take the
-        // same scratch slot back" — which the emitted order says is not so:
-        // nothing reads the address after the arm's binds, and an inner
-        // construct is inside an arm. So the two forms share the slot, and a
-        // function that writes both now declares one local where it declared
-        // two.
-        let addr = self.scratch(b, ValType::I32, 3);
-        b.ins(&Instruction::LocalSet(addr));
-        let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
-            return unsupported(&format!("a {form} on a non-aggregate"), line);
-        };
-        // The scrutinee's release, where `own` says this match is its last owner
-        // — the `if let` release above, at the construct that also carries a
-        // value out. A row exists only where no arm handed the payload on, so
-        // the copy released here holds nothing anything else still names.
-        //
-        // A frame of its own, and a slot of its own, for the two reasons the
-        // `if let` states: an arm that returns walks the frames, and an arm may
-        // build over the scratch the scrutinee was left in.
-
-        // A ROW, and no per-binding table: a construct that TOOK its scrutinee
-        // has no row, and a slot registered for a release nobody emits is a
-        // slot no later statement can reuse — the frame then grows once per
-        // construct, and one generated `main` of 316 matches went past the
-        // 8 KB limit (RFC-0125 §3 M3, the walk's deletion).
-        if self.releases_whole(key) {
-            if let Some(r) = self.rel_for(&st, line)? {
-                let own = b.alloc(sl.size, sl.align);
-                b.slot(own);
-                b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::I32Const(sl.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-                self.register_rel(b, key, Place::Slot(own), r);
-            }
-        }
-        // A block arm (RFC-0118) makes this a STATEMENT match: the merge
-        // carries nothing, whatever the expression arms beside it compute is
-        // dropped, and the checker's answer for the node is about a value the
-        // construct does not hand out. Every other match is one value, and the
-        // checker said which type it has — `expr_as` then coerces each arm's
-        // own shape into it.
-        let want = if arms.iter().any(ArmRef::is_block) {
-            Type::Unit
-        } else {
-            self.join_ty(key, line)?
-        };
-        let r = self.cx.repr(&want, line)?;
-
-        let dest = match &r {
-            Repr::Agg(l) => Some((b.alloc(l.size, l.align), l.size)),
-            _ => None,
-        };
-        let bt = match &r {
-            Repr::Scalar(v) => BlockType::Result(*v),
-            _ => BlockType::Empty,
-        };
-        let mut chain = self.chain_open(b, &tags, bt);
-
-        // RFC-0114 Rule N at a match join, keyed by this expression's address.
-        let ers = self.cx.edge_rows(key);
-        let free_box = self.frees_boxes(key);
-        for (slot, arm_ix) in Self::chain_order(&chain, arms.len())
-            .into_iter()
-            .enumerate()
-        {
-            let arm = &arms[arm_ix];
-            self.chain_enter(b, &mut chain, slot, |b| {
-                Self::tag_is(b, addr, tags[arm_ix].map(|t| t as u64))
-            });
-
-            let mark = self.scope.len();
-            let binds = self.pattern_binds(&sum, arm.pattern, line)?;
-            let ptys: Vec<Type> = binds.iter().map(|(_, t)| t.clone()).collect();
-            let mut bound: Vec<(String, Place, Type)> = Vec::new();
-            // The binders' own plan keys, taken off the pattern the reader
-            // wrote — the same address the core keys them by
-            // ([`vyrn_frontend::own::binder_key`]). A synthetic pattern this
-            // backend builds has none in the plan and registers nothing.
-            let keys: Vec<usize> = match arm.pattern {
-                Pattern::Variant(_, ns) => ns
-                    .iter()
-                    .map(|n| vyrn_frontend::own::binder_key(n))
-                    .collect(),
-                Pattern::Success(n) | Pattern::Failure(n) => {
-                    vec![vyrn_frontend::own::binder_key(n)]
-                }
-                Pattern::Other => Vec::new(),
-            };
-            for (i, (n, t)) in binds.into_iter().enumerate() {
-                let place = self.bind_payload(b, addr, &sl, &ptys, i, &t, line, free_box)?;
-                // A binder the arm owns is released at every exit INSIDE the
-                // arm, and the placer's row names it there (RFC-0125 §3 M3,
-                // the walk's deletion). The arm's END is the other half and
-                // `arm_row` below states it; the two are exclusive, since a
-                // binder handed out or already freed is held at neither.
-                if let Some(key) = keys.get(i).copied() {
-                    if self.releases_whole(key) {
-                        if let Some(rel) = self.rel_for(&t, line)? {
-                            self.register_rel(b, key, place.clone(), rel);
-                        }
-                    }
-                }
-                bound.push((n.clone(), place.clone(), t.clone()));
-                self.scope.push((n, place, t));
-            }
-            match (&arm.body, dest) {
-                (BodyRef::Expr(body), Some((off, size))) => {
-                    b.slot(off);
-                    self.expr_as(m, b, body, &want)?;
-                    b.ins(&Instruction::I32Const(size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
-                }
-                // A statement match (RFC-0118): a block arm is its statements;
-                // an expression arm beside one computes and drops — `want` is
-                // Unit whenever any arm is a block, so a dest never exists on
-                // this path.
-                (BodyRef::Expr(body), None) if matches!(want, Type::Unit) => {
-                    let got = self.expr(m, b, body)?;
-                    if !matches!(self.cx.repr(&got, line)?, Repr::Unit) {
-                        b.ins(&Instruction::Drop);
-                    }
-                }
-                (BodyRef::Expr(body), None) => self.expr_as(m, b, body, &want)?,
-                (BodyRef::Block(blk), _) => self.block(m, b, blk)?,
-            }
-            // Round forty: the unmoved payload binders the row names — the
-            // textual backend's `gen_arm_body` twin.
-            let owed = self.cx.arm_row(key, arm_ix as u32);
-            if let Some(rows) = owed {
-                for (n, place, ty) in &bound {
-                    let Some((_, holes)) = rows.iter().find(|(r, _)| r == n) else {
-                        continue;
-                    };
-                    let (place, ty) = (place.clone(), ty.clone());
-                    if let Some(mut rel) = self.rel_for(&ty, line)? {
-                        // RFC-0125 M3: the arm handed part of the binder out.
-                        if let Rel::Deep(t, _) = rel {
-                            rel = Rel::Deep(t, holes.clone());
-                        }
-                        self.emit_rel(m, b, place, &rel, line)?;
-                    }
-                }
-            }
-            // A binder's scope is its arm, and so is the row that names it:
-            // no exit past this point can reach one. Un-pinning the slot here
-            // is what keeps the frame the size it was — a row held to the
-            // function's `return` would hold its slot with it, and one
-            // generated `main` grew past the 8 KB frame limit
-            // (`numbers.rs`'s differential parser).
-            for key in &keys {
-                self.rel_slots.remove(key);
-                self.rel_pending.retain(|(k, _)| k != key);
-            }
-            self.scope.truncate(mark);
-            self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;
-            self.chain_leave(b, &chain, slot);
-        }
-        self.chain_close(b, &chain);
-        // The fall-through release, after the arms have rejoined and before the
-        // aggregate result's address is pushed. A scalar result is already on
-        // the stack here and the release is stack-neutral, so it sits under it.
-        self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
-
-        if let Some((off, _)) = dest {
-            b.slot(off);
-        }
-        self.diverged(b, &want);
-        Ok(want)
-    }
-
-    /// `e?` — unwrap `Some`/`Ok`, or carry the whole sum out of the function
-    /// (RFC-0005).
-    ///
-    /// The propagation is a `return` in everything but the instruction, and M1's
-    /// rule is that a body must not emit one: the epilogue that releases the
-    /// shadow-stack frame, and since M2f copies `modify` parameters back, sits
-    /// AFTER the block every exit branches to. So this writes the sum through
-    /// `dest` exactly as [`Stmt::Return`] does and takes the same `br` to the same
-    /// block — which is why `?` needs no reclamation of its own and cannot leak a
-    /// frame or skip a copy-back.
-    ///
-    /// The success path is the FALL-THROUGH, not an arm: the failing side branches
-    /// away, so there is nothing to join and no `peek` to get wrong. The `if` is
-    /// stack-neutral, so a destination address already sitting under the operand
-    /// stack — `let r: Rec = f(g()?)` puts one there — survives it, the same
-    /// property M2d needed for a validation.
-    fn try_(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        e: &Expr,
-        line: usize,
-        at: usize,
-    ) -> Result<Type, String> {
-        let st = self.expr(m, b, e)?;
-        // Tag 1 is the success side of the two BUILT-IN sums (§8.1); every other
-        // sum asks `Fallible` (RFC-0080 M3) instead of the tag. The test is the
-        // variant NAMES, not the arity: a declared `| Full(T) | Gone(String)`
-        // has two variants and is not a `Result` (RFC-0126 §8.16).
-        let (sum, ok_ty) = match self.sum_of(&st) {
-            Some(vs) if ftypes::is_builtin_sum(&vs) && vs[1].payload.len() == 1 => {
-                let ok_ty = vs[1].payload[0].clone();
-                (vs, ok_ty)
-            }
-            _ => return self.try_fallible(m, b, &st, line, at),
-        };
-        // "Tag 1 succeeds" is [`Pattern::Success`], which `ast.rs` says was added
-        // for exactly this — "the same trick `Expr::Try` plays for `?`, moved
-        // into `Pattern`". A `Variant` rebuilt here from `vs[1].name` said it a
-        // second time. The binder is unread either way: `tag_test` takes the tag
-        // from the pattern and `bind_payload` the type from the sum.
-        let ok_pat = Pattern::Success(Binder::synthetic(""));
-        let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
-            return unsupported("`?` on a non-aggregate sum", line);
-        };
-        // The propagated value is the WHOLE sum, byte for byte, which is only
-        // sound if the two are the same shape. Since RFC-0126 §8.4 a sum's slot
-        // count follows its widest payload, so the two really can differ, and a
-        // memcpy has a width — so the width is checked rather than assumed.
-        //
-        // The checker's rule does not guarantee it: `check_try`'s `Option` arm
-        // reads the return as `Some(_)` and never compares the payloads, because
-        // only the FAILING variant travels. So `Option<fn(Int64, Int64) -> Int64>`
-        // unwrapped in a function returning `Option<Int64>` types, and arrives
-        // here two words wide against one. A width is a LAYOUT, so it is refused
-        // as a gap rather than diagnosed (RFC-0125 §3 M3, the `?` census).
-        let ret_ty = self.ret_ty.clone();
-        if self.sum_of(&ret_ty).is_none() || self.cx.ll(&ret_ty) != self.cx.ll(&st) {
-            return unsupported(
-                &format!("`?` on `{st}` in a function returning `{}`", self.ret_ty),
-                line,
-            );
-        }
-        let Repr::Agg(rl) = self.ret.clone() else {
-            return unsupported("`?` in a function whose return is not an aggregate", line);
-        };
-        let addr = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(addr));
-        self.tag_test(b, addr, &sum, &ok_pat, line)?;
-        b.ins(&Instruction::I32Eqz);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(
-            self.dest.expect("an aggregate return has a destination"),
-        ));
-        b.ins(&Instruction::LocalGet(addr));
-        b.ins(&Instruction::I32Const(rl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        // `?` is `Stmt::Return` minus the keyword, so it owes the same two
-        // unwinds. It did not pay them: a `?` out of a `region` left the counter
-        // raised, and the 65th such call aborted where the interpreter kept
-        // going. The value is already copied through `dest`, so neither of these
-        // can disturb it — the same reason the `return` arm does them here.
-        self.release_unreached(m, b, at, 0)?;
-        self.emit_releases(m, b, ExitKind::Try, at)?;
-        self.exit_regions_above(b, 0, false);
-        b.ins(&Instruction::Br(self.depth));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        // Reusing `bind_payload` costs one local or slot that nothing else reads,
-        // and buys the four payload shapes (direct, extended, inline pair, boxed)
-        // already being right here because they are right in `match`.
-        //
-        // The box question is `match`'s, so it is asked in `match`'s words: a
-        // `?` IS a switch, the core lowers it as one, and the success arm reads
-        // the payload out of the box exactly as an arm binder does. Passing
-        // `false` here was the whole of the `?` residue — every successful
-        // `parseJson` left the box its `Ok` payload came in.
-        let free_box = self.frees_boxes(at);
-        let place = self.bind_payload(
-            b,
-            addr,
-            &sl,
-            std::slice::from_ref(&ok_ty),
-            0,
-            &ok_ty,
-            line,
-            free_box,
-        )?;
-        match place {
-            Place::Local(l) => {
-                b.ins(&Instruction::LocalGet(l));
-            }
-            Place::Slot(off) => {
-                b.slot(off);
-            }
-            Place::Static(_) => return unsupported("`?` yielding module state", line),
-        }
-        Ok(ok_ty)
-    }
-
-    /// `?` on a type that implements `Fallible` (RFC-0080 M3), with the operand's
-    /// aggregate address already on the stack.
-    ///
-    /// Same three moves as `try_` above — test, propagate the whole value, read
-    /// the success payload — with the first and third answered by impl methods.
-    /// The propagation is still the `memory.copy` of the entire aggregate, which
-    /// is the claim the milestone exists to execute: a failing variant reaches the
-    /// caller intact because nothing looks inside it.
-    ///
-    /// The value is copied into a frame slot and given a reserved name so the two
-    /// calls can be spelled as `Expr::Var` and go through `call` whole, including
-    /// its generic path. Passing the raw address instead would mean a second
-    /// argument-passing convention beside the one `emit_call` already has.
-    fn try_fallible(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        st: &Type,
-        line: usize,
-        at: usize,
-    ) -> Result<Type, String> {
-        let key = ftypes::type_key(&self.cx.sub(st))
-            .ok_or_else(|| gap(&format!("`?` dispatched on `{st}`"), line))?;
-        let Repr::Agg(sl) = self.cx.repr(st, line)? else {
-            return unsupported("`?` on a non-aggregate Fallible value", line);
-        };
-        // Whole-value propagation is only sound if the two sides are the same
-        // shape. The checker requires the same type outright here (there is no
-        // error half to compare separately), so this is the width check the
-        // `memory.copy` below needs rather than a second type rule.
-        let ret_ty = self.ret_ty.clone();
-        if self.cx.ll(&ret_ty) != self.cx.ll(st) {
-            return unsupported(
-                &format!("`?` on `{st}` in a function returning `{ret_ty}`"),
-                line,
-            );
-        }
-        let addr = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(addr));
-        let off = b.alloc(sl.size, sl.align);
-        b.slot(off);
-        b.ins(&Instruction::LocalGet(addr));
-        b.ins(&Instruction::I32Const(sl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        let mark = self.scope.len();
-        self.scope
-            .push(("@try".to_string(), Place::Slot(off), st.clone()));
-        let recv = [Expr::Var {
-            name: "@try".to_string(),
-            line,
-        }];
-
-        self.call(
-            m,
-            b,
-            &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "isSuccess"),
-            &recv,
-            &[],
-            line,
-        )?;
-        b.ins(&Instruction::I32Eqz);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(
-            self.dest.expect("an aggregate return has a destination"),
-        ));
-        b.slot(off);
-        b.ins(&Instruction::I32Const(sl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        // The same two unwinds `?` owes as `return`-minus-the-keyword.
-        self.release_unreached(m, b, at, 0)?;
-        self.emit_releases(m, b, ExitKind::Try, at)?;
-        self.exit_regions_above(b, 0, false);
-        b.ins(&Instruction::Br(self.depth));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-
-        let out = self.call(
-            m,
-            b,
-            &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "success"),
-            &recv,
-            &[],
-            line,
-        )?;
-        // The copy `?` made is still this frame's on the success path: the
-        // protocol declares `success(self)`, a READ, so the callee answers a
-        // value of its own and leaves this one held. The core says whether the
-        // frame made it ([`Cx::owns_scrutinee`]) and states the release as a
-        // drop in that arm; this is where the arm ends. The failing path is
-        // gone by here — it returned the value itself.
-        if self.cx.owns_scrutinee(at) {
-            let a = b.local(ValType::I32);
-            b.slot(off);
-            b.ins(&Instruction::LocalSet(a));
-            self.rel_at(m, b, a, st, line)?;
-        }
-        self.scope.truncate(mark);
-        Ok(out)
-    }
-
     /// `Age?(n)` — a validated construction whose refinement answers with a tag
-    /// instead of a trap, yielding `Option<Age>` (RFC-0003). Both walks call it:
-    /// `operand` pushes the value at the base type it is handed, and `dest`
+    /// instead of a trap, yielding `Option<Age>` (RFC-0003). `operand` pushes the value at the base type it is handed, and `dest`
     /// names the storage the `Option` is written into, whose address is left
     /// on the stack.
     ///
@@ -13737,86 +9261,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
-    /// `if let Some(x) = s.tryAt(h)` (RFC-0122): lower an OPTIONAL projection
-    /// where it is tested. Answers `false` when the scrutinee is not one, and
-    /// the caller keeps the ordinary path.
-    #[allow(clippy::too_many_arguments)]
-    fn optional_if_let(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        pattern: &Pattern,
-        scrutinee: &Expr,
-        then_block: &vyrn_frontend::ast::Block,
-        else_block: &Option<vyrn_frontend::ast::Block>,
-        line: usize,
-    ) -> Result<bool, String> {
-        let Expr::Call { name, args, .. } = scrutinee else {
-            return Ok(false);
-        };
-        if args.is_empty()
-            || self.cx.sigs.contains_key(name.as_str())
-            || !self
-                .cx
-                .impls
-                .iter()
-                .any(|i| i.places.iter().any(|p| p.name == *name))
-        {
-            return Ok(false);
-        }
-        let recv = self.peek(&args[0], line).ok();
-        let Some(p) = vyrn_frontend::project::optional_site(
-            &self.cx.impls,
-            recv.as_ref(),
-            name,
-            &args[0],
-            &args[1..],
-            line,
-        )?
-        else {
-            return Ok(false);
-        };
-        let mark = self.scope.len();
-        for s in &p.prologue {
-            self.stmt(m, b, s)?;
-        }
-        self.cond(m, b, &p.miss, line)?;
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        // miss: the else arm (the wasm `if` takes the true edge).
-        if let Some(eb) = else_block {
-            self.block(m, b, eb)?;
-        }
-        b.ins(&Instruction::Else);
-        // hit: run the hit prologue (RFC-0123 M1), then bind the pattern's
-        // binder to the place by a synthetic `let` — no analysis row exists
-        // for it, so nothing drop-tracks the alias.
-        let inner = self.scope.len();
-        for s in &p.hit {
-            self.stmt(m, b, s)?;
-        }
-        if let Pattern::Variant(_, binds) = pattern {
-            let bind = &binds[0];
-            // Kept, because `stmt` keys a release and an accumulator on the
-            // statement's address.
-            let synth = self.cx.keep(Stmt::Let {
-                name: bind.name.clone(),
-                mutable: false,
-                ty: None,
-                value: p.place.clone(),
-                line,
-                col: bind.col,
-            });
-            self.stmt(m, b, &synth)?;
-        }
-        self.block(m, b, then_block)?;
-        self.scope.truncate(inner);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        self.scope.truncate(mark);
-        Ok(true)
-    }
-
     /// Push whether the sum at `addr` is `pat`'s variant.
     ///
     /// `Option`/`Result` carry a one-byte tag; a user enum carries an i64 one.
@@ -13842,9 +9286,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `if`/`else`, which joins where it ends and needs neither
     /// ([`crate::two_way`]). `bt` is what the join carries.
     ///
-    /// One home for the shape, because both walks write it: [`Fn_::match_expr`]
-    /// over the arms the reader wrote, [`Fn_::core_switch`] over the row's
-    /// (RFC-0125 M7).
+    /// [`Fn_::core_switch`] writes it over the row's arms (RFC-0125 M7).
     fn chain_open(&mut self, b: &mut Frame, tags: &[Option<usize>], bt: BlockType) -> Chain {
         let two = crate::two_way(tags);
         let out = self.depth;
@@ -14057,23 +9499,8 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
-    /// Whether a `match`, an `if let` or a `?` at `key` frees the boxes its
-    /// binders were read out of: the construct owns the boxes, and no drop row
-    /// walks the value whole after it.
-    ///
-    /// The first clause is the CORE's, whole ([`Cx::owns_scrutinee`]). It was
-    /// four clauses here — a `consume`, a scrutinee naming no place, a `Map`
-    /// lookup, and the core's own take — and the first three read the SOURCE
-    /// beside a core row that answered the fourth. The core states all four
-    /// as one row now (`St::Switch`'s `owns`), which is why this backend has
-    /// no `Expr` left to look at (RFC-0125 §3 M3, the box slice).
-    fn frees_boxes(&self, key: usize) -> bool {
-        self.cx.owns_scrutinee(key) && !self.releases_whole(key)
-    }
-
-    /// Whether a placed row releases the value at `key` WHOLE — the question
-    /// [`Fn_::frees_boxes`] used to ask of the plan's own per-binding table
-    /// (RFC-0125 §3 M3, the walk's deletion).
+    /// Whether a placed row releases the value at `key` WHOLE (RFC-0125 §3 M3,
+    /// the walk's deletion).
     ///
     /// The two are not the same question. The table says the type of the
     /// value has a release; a ROW says one runs here. While the walk placed a
@@ -14105,59 +9532,12 @@ impl<'p> Fn_<'_, 'p> {
 /// `Array` is snapshotted to match a `for` that grows what it walks, and a Map has
 /// no iteration form at all (`m.keys()` hands out a copy).
 impl<'p> Fn_<'_, 'p> {
-    /// The value type a map literal builds, and the map type it produces.
-    ///
-    /// The position decides, not the first entry: `["k": [[5], [6, 7]]]` in a
-    /// `Map<String, Array<Array<Int64>>>` slot has to store growable arrays, and
-    /// a nested literal on its own lowers as a fixed `[N x T]`. Storing it at the
-    /// literal's own width and reading it back as a triple is the M2c hazard.
-    fn map_lit(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        entries: &[(Expr, Expr)],
-        line: usize,
-    ) -> Result<Type, String> {
-        let (want_k, want) = match self.expect.last().map(|t| self.cx.resolve(t)) {
-            Some(Type::Map(k, v)) => (Some(*k), Some(*v)),
-            _ => (None, None),
-        };
-        // A value type that IS an unsolved parameter names no type (see
-        // `array_lit`) — the first value answers. The key type comes from the
-        // position too, else from the first key (RFC-0117: `String` or
-        // `Int64` — the checker made every key the same one).
-        let val = match (
-            want.filter(|t| !matches!(t, Type::Param(_))),
-            entries.first(),
-        ) {
-            (Some(v), _) => v,
-            (None, Some((_, ve))) => self.peek(ve, line)?,
-            // An empty literal in no map position at all. `Map<String, Int64>` is
-            // what the textual backend defaults to, and the two have to agree
-            // because the header is the same 32 bytes either way.
-            (None, None) => Type::Int,
-        };
-        let key_t = match (want_k, entries.first()) {
-            (Some(k), _) => k,
-            (None, Some((ke, _))) => self.peek(ke, line)?,
-            (None, None) => Type::Str,
-        };
-        let mty = Type::Map(Box::new(key_t), Box::new(val));
-        let l = self.layout_of(&mty, line)?;
-        let off = b.alloc(l.size, l.align);
-        let mut parts = Parts::Ast(entries.iter().flat_map(|(k, v)| [k, v]).collect());
-        self.map_into(m, b, Dest::Slot(off), &mty, &mut parts, line)?;
-        b.slot(off);
-        Ok(mty)
-    }
-
     /// A map literal of type `mty` built at `dest`: the header zeroed, then
     /// each key and value of `parts`, in pairs, inserted in written order, so
     /// a duplicate key updates in place and keeps its slot —
     /// `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first. The
     /// value a repeated key shadows has no owner left, so the insert releases
-    /// it; inside a `region` the arena owns it. The AST arm and
-    /// [`Fn_::core_make`] both call this.
+    /// it; inside a `region` the arena owns it. [`Fn_::core_make`] calls this.
     fn map_into(
         &mut self,
         m: &mut Module,
@@ -14325,9 +9705,8 @@ impl<'p> Fn_<'_, 'p> {
     /// stores a COPY — so the caller's ownership is the same on both paths.
     ///
     /// The map's header address is in `hdr`. `operand` pushes operand 0, the
-    /// key, or operand 1, `n`, at the type it is handed: the arm over the
-    /// source evaluates expressions and the core's walk reads names off the
-    /// row (RFC-0125 M7).
+    /// key, or operand 1, `n`, at the type it is handed, read off the row
+    /// (RFC-0125 M7).
     fn map_tally(
         &mut self,
         m: &mut Module,
@@ -14776,9 +10155,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `m[k]` — an honest `Option<V>`, never a trap.
     ///
     /// The map's address is already on the stack. `key` pushes the key at the
-    /// type it is handed: the arm over the source evaluates an expression and
-    /// the core's walk reads a name off the row (RFC-0125 M7), and the lookup
-    /// between them is this one sequence.
+    /// type it is handed, read off the row (RFC-0125 M7).
     fn map_at(
         &mut self,
         m: &mut Module,
@@ -15093,8 +10470,6 @@ impl<'p> Fn_<'_, 'p> {
     /// `operand` writes argument `i`, at the type asked for or else at its own,
     /// and answers the type it wrote. `lane_at` answers argument `i` as a lane
     /// index below the count given, or `None` where it is no such constant.
-    /// The arm over the source and [`Fn_::core_call`] over the rows both call
-    /// this.
     fn lanes(
         &mut self,
         m: &mut Module,
@@ -15316,8 +10691,7 @@ impl<'p> Fn_<'_, 'p> {
     /// be mutated afterwards without disturbing it. String keys are then dup'd
     /// per element (RFC-0092 M2 — an array owns its elements, so a snapshot of
     /// the map's own pointers would be freed twice); Int64 keys copy with the
-    /// buffer (RFC-0117). The arm over the source and [`Fn_::core_call`] over
-    /// the rows both call this.
+    /// buffer (RFC-0117).
     fn map_keys(
         &mut self,
         m: &mut Module,
@@ -15361,52 +10735,9 @@ impl<'p> Fn_<'_, 'p> {
         Ok(aty)
     }
 
-    /// `m.has(k)` and `m.keys()`, and `m.remove(k)` through [`Fn_::map_remove`].
-    fn map_method(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Type, String> {
-        let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-            s.expr_as(m, b, &args[1], t).map(|_| ())
-        };
-        // `remove` mutates, so it needs the binding rather than a value; the other
-        // two read, and read through the same address for one code path.
-        if name == "@remove" {
-            let (place, mty) = self.receiver(args, "remove", line)?;
-            let hdr = b.local(ValType::I32);
-            place
-                .addr(b, 0)
-                .ok_or_else(|| gap("`remove` on a non-map binding", line))?;
-            b.ins(&Instruction::LocalSet(hdr));
-            return self.map_remove(m, b, hdr, &mty, &mut key, line);
-        }
-        let mty = self.expr(m, b, &args[0])?;
-        let hdr = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(hdr));
-        if name == "@keys" {
-            return self.map_keys(m, b, hdr, &mty, line);
-        }
-        if !matches!(self.cx.resolve(&mty), Type::Map(..)) {
-            return unsupported(&format!("`{name}` on `{mty}`"), line);
-        }
-        let (idx, ..) = self.map_find(m, b, hdr, &mty, &mut key, line)?;
-        let found = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::I32GeS);
-        b.ins(&Instruction::LocalSet(found));
-        b.ins(&Instruction::LocalGet(found));
-        Ok(Type::Bool)
-    }
-
     /// `m.remove(k)` on the map whose header address is in `hdr`: the entry
     /// of the key `key` pushes released and dropped, and whether there was
-    /// one left on the stack. The arm over the source and the core's walk
-    /// (RFC-0125 M7) differ only in how they push the key.
+    /// one left on the stack (RFC-0125 M7).
     fn map_remove(
         &mut self,
         m: &mut Module,
@@ -15479,7 +10810,7 @@ impl<'p> Fn_<'_, 'p> {
 // ---------------------------------------------------------------------------
 
 /// Write the inline state of a `SmallArray<T, N>` header at `dest`: `len`,
-/// `cap == n` and a null `data` (RFC-0056). Both walks build one through it.
+/// `cap == n` and a null `data` (RFC-0056).
 fn sa_head(b: &mut Frame, dest: Dest, l: &Layout, len: usize, n: usize) {
     dest.addr(b, l.fields[0]);
     b.ins(&Instruction::I64Const(len as i64));
@@ -16159,123 +11490,12 @@ impl HoistVisit<'_> for Hoist<'_, '_> {
     }
 }
 
-/// Every expression under `e`, pre-order, `e` itself first, and every
-/// statement under it through `fs` — `ast::body_scope_descent!`'s descent
-/// since RFC-0125 §3 M6, where this file wrote the arms out itself.
-fn each_expr(e: &Expr, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
-    hoist_expr(e, &std::collections::HashSet::new(), &mut Hoist { fe, fs });
-}
-
 fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
     hoist_block(
         blk,
         &mut std::collections::HashSet::new(),
         &mut Hoist { fe, fs },
     );
-}
-
-/// Could evaluating `e` read the binding `name`, or run code that might
-/// (RFC-0125 M1's rule on [`Dest`])? A mention of the binding, or any call —
-/// a callee can reach module state, and a `modify` argument is the binding
-/// itself. A lambda literal counts as a call: it captures now.
-fn observes(e: &Expr, name: &str) -> bool {
-    let mut hit = vyrn_frontend::ast::mentions_place(e, name);
-    each_expr(
-        e,
-        &mut |x| {
-            if matches!(
-                x,
-                Expr::Call { .. } | Expr::Lambda { .. } | Expr::Try { .. }
-            ) {
-                hit = true;
-            }
-        },
-        &mut |_| {},
-    );
-    hit
-}
-
-fn is_var(e: &Expr, name: &str) -> bool {
-    matches!(e, Expr::Var { name: n, .. } if n == name)
-}
-
-/// Does `p` bind `name`? A binder inside the loop would shadow the hoisted
-/// binding, so the hoist is refused.
-fn binds(p: &Pattern, name: &str) -> bool {
-    p.bindings().contains(&name)
-}
-
-/// The names a `while` indexes: every `@at(name, _)` in its condition or body.
-fn indexed_names(cond: &Expr, body: &Block) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut fe = |e: &Expr| {
-        if let Expr::Call { name, args, .. } = e {
-            if name == "@at" && args.len() == 2 {
-                if let Expr::Var { name: n, .. } = &args[0] {
-                    names.push(n.clone());
-                }
-            }
-        }
-    };
-    each_expr(cond, &mut fe, &mut |_| {});
-    each_block(body, &mut fe, &mut |_| {});
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// Can nothing in `cond` or `body` move `name`'s header? Conservative, on the
-/// syntax alone: an assignment to it, a `let` or a pattern that shadows it, a
-/// `drop`, a `consume`, a `for .. in consume` over it, the binding handed
-/// whole to any call other than `@at` (a `push` is an assignment; a `pop` and
-/// a user method are such calls), or a lambda that mentions it — each refuses.
-/// An `@at` read, a `.length` read and an element store are the only things
-/// the hoist admits.
-fn header_invariant(cond: &Expr, body: &Block, name: &str) -> bool {
-    let ok = std::cell::Cell::new(true);
-    let mut fe = |e: &Expr| {
-        if !ok.get() {
-            return;
-        }
-        let fine = match e {
-            Expr::Call { name: f, args, .. }
-                if f == "@at" && args.len() == 2 && is_var(&args[0], name) =>
-            {
-                true
-            }
-            Expr::Call { args, .. } | Expr::TryConstruct { args, .. } => !args.iter().any(|a| {
-                is_var(a, name) || matches!(a, Expr::Consume { place, .. } if is_var(place, name))
-            }),
-            Expr::Consume { place, .. } => !is_var(place, name),
-            Expr::Lambda { .. } => !vyrn_frontend::ast::mentions_place(e, name),
-            Expr::Match { arms, .. } => !arms.iter().any(|a| binds(&a.pattern, name)),
-            _ => true,
-        };
-        ok.set(fine);
-    };
-    let mut fs = |s: &Stmt| {
-        if !ok.get() {
-            return;
-        }
-        let fine = match s {
-            Stmt::Let { name: n, .. }
-            | Stmt::Assign { name: n, .. }
-            | Stmt::SetField { name: n, .. }
-            | Stmt::Drop { name: n, .. } => n != name,
-            Stmt::IfLet { pattern, .. } => !binds(pattern, name),
-            Stmt::ForIn {
-                var,
-                iter,
-                consuming,
-                ..
-            } => var != name && !(*consuming && is_var(iter, name)),
-            _ => true,
-        };
-        ok.set(fine);
-    };
-    each_expr(cond, &mut fe, &mut fs);
-    each_block(body, &mut fe, &mut fs);
-    ok.get()
 }
 
 fn store_of(ll: &str) -> Instruction<'static> {
@@ -16978,206 +12198,15 @@ fn slot_arity(name: &str) -> Option<usize> {
     }
 }
 
-fn expr_name(e: &Expr) -> String {
-    match e {
-        Expr::Match { .. } => "`match`",
-        Expr::Try { .. } => "`?`",
-        Expr::TryConstruct { .. } => "a fallible construction",
-        Expr::ArrayLit { .. } => "an array literal",
-        Expr::MapLit { .. } => "a map literal",
-        Expr::Lambda { .. } => "a lambda",
-        _ => "this expression",
-    }
-    .to_string()
-}
-
-/// The forms of the AST dispatch whose arm the per-statement unit could retire
-/// — RFC-0125 §3 M3, the interleave slice.
-///
-/// An arm goes when nothing reaches it. Against each name the count below says
-/// how many occurrences the ARM emitted and how many the core's rows did, so a
-/// form whose first number is zero over the whole corpus is one whose arm has
-/// no reader left.
-///
-/// The flag beside each name says whether the AST dispatch still EMITS that
-/// form. It is `false` for a form the core states and the dispatch only
-/// refuses, and it is the retirement schedule's one home: `VYRN_NO_CORE_WALK`
-/// reads it, because the walk that switch takes back is the arms that still
-/// exist and not the emitter before the driver.
-pub const FORMS: [(&str, bool); 20] = [
-    ("Stmt::Let", true),
-    ("Stmt::Assign", true),
-    ("Stmt::Return", true),
-    ("Stmt::If", true),
-    ("Stmt::Expr", true),
-    ("Stmt::While", true),
-    ("Stmt::ForIn", true),
-    ("Stmt::Break", true),
-    ("Stmt::Continue", false),
-    ("Stmt::IfLet", true),
-    ("Stmt::Drop", false),
-    ("a statement of another form", true),
-    ("Expr::Int", true),
-    ("Expr::Byte", true),
-    ("Expr::Bool", true),
-    ("Expr::Float", true),
-    ("Expr::Str", true),
-    ("Expr::Var", true),
-    ("Expr::Unary", true),
-    ("Expr::Binary", true),
-];
-
-thread_local! {
-    /// Per [`FORMS`] entry: how many occurrences the AST arm emitted, and how
-    /// many the core's rows did.
-    static COUNTS: std::cell::RefCell<[(usize, usize); FORMS.len()]> =
-        const { std::cell::RefCell::new([(0, 0); FORMS.len()]) };
-}
-
-/// How many occurrences of each of [`FORMS`] the AST arm emitted, and how many
-/// the core's rows did, since [`forget_walks`].
-pub fn forms() -> [(usize, usize); FORMS.len()] {
-    COUNTS.with(|c| *c.borrow())
-}
-
-fn count(form: usize, carried: bool) {
-    COUNTS.with(|c| {
-        let mut c = c.borrow_mut();
-        if carried {
-            c[form].1 += 1;
-        } else {
-            c[form].0 += 1;
-        }
-    });
-}
-
-/// Which of [`FORMS`] a statement is.
-fn stmt_form(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let { .. } => 0,
-        Stmt::Assign { .. } => 1,
-        Stmt::Return { .. } => 2,
-        Stmt::If { .. } => 3,
-        Stmt::Expr(_) => 4,
-        Stmt::While { .. } => 5,
-        Stmt::ForIn { .. } => 6,
-        Stmt::Break { .. } => 7,
-        Stmt::Continue { .. } => 8,
-        Stmt::IfLet { .. } => 9,
-        Stmt::Drop { .. } => 10,
-        _ => 11,
-    }
-}
-
-/// Which of [`FORMS`] an expression is, for the eight the driver reads.
-fn expr_form(e: &Expr) -> Option<usize> {
-    Some(match e {
-        Expr::Int(_) => 12,
-        Expr::Byte(_) => 13,
-        Expr::Bool(_) => 14,
-        Expr::Float(_) => 15,
-        Expr::Str(_) => 16,
-        Expr::Var { .. } => 17,
-        Expr::Unary { .. } => 18,
-        Expr::Binary { .. } => 19,
-        _ => return None,
-    })
-}
-
-/// Where the arm tally is appended, or `None` when nothing asked for one.
-///
-/// Read once. The AST dispatch asks per statement, and an environment lookup
-/// there is one system call for every statement the process emits.
-fn tally_at() -> Option<&'static std::path::Path> {
-    static AT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    AT.get_or_init(|| std::env::var_os("VYRN_FORM_TALLY").map(std::path::PathBuf::from))
-        .as_deref()
-}
-
-thread_local! {
-    /// Per form and owner, how many occurrences the AST arm emitted since the
-    /// last flush — RFC-0125 §3 M3, the occurrence slice.
-    ///
-    /// [`COUNTS`] is one run of one process. This one names the FUNCTION each
-    /// occurrence is in and goes to a file, so "which gate reaches this arm" is
-    /// answered over the whole gate list and not over one suite.
-    static WHO: std::cell::RefCell<std::collections::BTreeMap<(usize, String), usize>> =
-        std::cell::RefCell::new(std::collections::BTreeMap::new());
-}
-
-/// Count one occurrence of `form` that the AST arm emitted, in `owner`.
-fn count_in(form: usize, owner: &str) {
-    count(form, false);
-    if tally_at().is_some() {
-        let owner = if owner.is_empty() {
-            "(the globals initializer)"
-        } else {
-            owner
-        };
-        WHO.with(|w| *w.borrow_mut().entry((form, owner.to_string())).or_default() += 1);
-    }
-}
-
-/// Appends what the AST arms emitted while it lived: the form, the owner, the
-/// count, and the command that ran, one line each.
-///
-/// A guard rather than a call at the end of [`compile_inner`], because a
-/// compile that fails emits arms too and its `?` leaves by another door.
-struct Tally;
-
-impl Drop for Tally {
-    fn drop(&mut self) {
-        let Some(at) = tally_at() else { return };
-        let who = WHO.with(|w| std::mem::take(&mut *w.borrow_mut()));
-        if who.is_empty() {
-            return;
-        }
-        static ARGV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let argv = ARGV.get_or_init(|| std::env::args().collect::<Vec<_>>().join(" "));
-        // A compile with the core turned off is the licence's own second walk
-        // and not a reader of the arm, so the tally says which it was.
-        let walk = if core_walk_off() {
-            "no-core-walk"
-        } else {
-            "core"
-        };
-        let mut out = String::new();
-        for ((form, owner), n) in who {
-            out.push_str(&format!(
-                "{}\t{owner}\t{n}\t{walk}\t{argv}\n",
-                FORMS[form].0
-            ));
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(at)
-        {
-            use std::io::Write;
-            let _ = f.write_all(out.as_bytes());
-        }
-    }
-}
-
-/// Whether the AST walk is asked for even where the core's rows carry the body
-/// — RFC-0125 §3 M3, the driver slice.
-///
-/// The two walks are compared by emitting the same corpus twice, so the switch
-/// exists for the comparison and for nothing else: a build that sets it gets
-/// the emission it had before the driver landed.
-fn core_walk_off() -> bool {
-    std::env::var_os("VYRN_NO_CORE_WALK").is_some()
-}
-
 /// What a builtin the core's row specifies emits: its operand types, the one
 /// instruction it is, and its result type — RFC-0125 M7, the builtin family.
 ///
 /// `vyrn_lower::core::builtin_row` states the types, because a row is what
 /// makes such a call a `call` with a specification and not a gap; this states
 /// the instruction, because an instruction is the emitter's. `None` where the
-/// name has no row, or where the site's arity is not the row's. Two readers
-/// ask it: [`Fn_::call_inner`] over the source and [`Fn_::core_call`] over the
-/// rows. `builtin_rows_all_emit` refuses a row with no instruction.
+/// name has no row, or where the site's arity is not the row's.
+/// [`Fn_::core_call`] asks it over the rows. `builtin_rows_all_emit` refuses a
+/// row with no instruction.
 fn builtin_spec(
     name: &str,
     argc: usize,
@@ -17300,17 +12329,16 @@ pub fn walks() -> (usize, usize) {
 /// Start the count again.
 pub fn forget_walks() {
     WALKS.with(|w| w.set((0, 0)));
-    COUNTS.with(|c| *c.borrow_mut() = [(0, 0); FORMS.len()]);
 }
 
 /// Where the core's names live while one body is walked, and what the wasm
 /// operand stack is holding — RFC-0125 §3 M3, the driver slice.
 ///
 /// The core names EVERY value (§2.1) and wasm has an operand stack, so a walk
-/// that gave each name a local would emit a `local.set`/`local.get` pair the
-/// AST walk does not. `held` is the one name the stack is carrying: a value
-/// bound by the statement just walked and read by this one. Where a name is
-/// not stack-shaped it gets a local, in the order the AST walk allocates one.
+/// that gave each name a local would emit a `local.set`/`local.get` pair for a
+/// value the stack can carry. `held` is the one name the stack is carrying: a
+/// value bound by the statement just walked and read by this one. Where a name
+/// is not stack-shaped it gets a local.
 #[derive(Default)]
 struct Walked {
     /// The wasm place of each of the core's names, by [`vyrn_lower::core::Name`].
@@ -17365,7 +12393,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The row is the whole of the answer: the name, whose binding is the node
     /// the plan keys the slot by, and the holes the walk goes around.
     /// [`Fn_::emit_releases`] asks `own::placed` the same question by exit and
-    /// node, and its readers are the AST arms alone.
+    /// node.
     ///
     /// A name with no slot releases nothing: the walk registers one for every
     /// layout it makes, and a body it takes holds no other value that owns
@@ -17432,11 +12460,10 @@ impl<'p> Fn_<'_, 'p> {
     /// A tag is read and an arm is chosen, off the row — RFC-0125 M7.
     ///
     /// The arms are a chain of `if`s inside one `block`, each leaving by a
-    /// branch to it: the shape [`Fn_::match_expr`] writes for the same
-    /// construct, tested by the same probe ([`Fn_::tag_is`]). What is not here
+    /// branch to it, tested by [`Fn_::tag_is`]. What is not here
     /// is the join, because the core's switch carries no value — every arm
-    /// stores its own into the name the reader bound, and `match_expr`'s
-    /// destination, result type and two-way collapse are all about a value
+    /// stores its own into the name the reader bound, and a `match`
+    /// expression's destination, result type and two-way collapse are all about a value
     /// this row does not have.
     ///
     /// The payload binder is the PLACE the row names (§2.1): the walk binds it
@@ -17563,18 +12590,12 @@ impl<'p> Fn_<'_, 'p> {
     /// §2.3: "the emitter reads the core and writes wasm ... it decides
     /// nothing".
     ///
-    /// This is the walk the AST dispatch (`Fn_::stmt`, `Fn_::expr`) is beside.
     /// It reads [`vyrn_lower::core::Body`] and nothing else: a statement is a
     /// [`St`], what it computes is the [`Op`], the [`Ctor`] and the [`Lit`] the
     /// operation slice put on the rows, and the type of every operand is the
     /// checker's, carried on [`vyrn_lower::core::NameInfo`].
     ///
-    /// It runs only where [`Fn_::core_walkable`] says the rows carry the whole
-    /// body. What that leaves out is the ranked list in §3 M3 and not a
-    /// judgement of this walk's: each form it stands down at names the row the
-    /// core still lacks.
-    /// Hold `core`'s rows by statement and a place table for its names, so
-    /// either walk may read it.
+    /// Hold `core`'s rows by statement and a place table for its names.
     fn core_enter(&mut self, core: &vyrn_lower::core::Body) {
         self.core_at = core.rows_by_statement();
         self.core_w = Walked {
@@ -17592,6 +12613,19 @@ impl<'p> Fn_<'_, 'p> {
         };
     }
 
+    /// One function body, emitted from the core's own statements — RFC-0125
+    /// §3 M3, the driver slice.
+    ///
+    /// §2.3: "the emitter reads the core and writes wasm ... it decides
+    /// nothing".
+    ///
+    /// It reads [`vyrn_lower::core::Body`] and nothing else: a statement is a
+    /// [`St`], what it computes is the [`Op`], the [`Ctor`] and the [`Lit`] the
+    /// operation slice put on the rows, and the type of every operand is the
+    /// checker's, carried on [`vyrn_lower::core::NameInfo`].
+    ///
+    /// It runs only where [`Fn_::core_walkable`] says the rows carry the whole
+    /// body. Any other body goes a statement at a time ([`Fn_::core_took`]).
     fn core_body(
         &mut self,
         m: &mut Module,
@@ -17607,28 +12641,17 @@ impl<'p> Fn_<'_, 'p> {
     /// One SOURCE statement, emitted from the core's rows where they carry it —
     /// RFC-0125 §3 M3, the interleave slice.
     ///
-    /// [`Fn_::core_body`] picks its walk per FUNCTION, so an arm of the AST
-    /// dispatch could only go when every body of the corpus went through the
-    /// core. This is the same walk asked one statement at a time: where the
-    /// rows carry the statement it is emitted from them, and where they do not
-    /// the arm below emits it, into the same frame with the same locals and
-    /// the same scope. An arm goes when no occurrence of its form reaches it.
+    /// This is [`Fn_::core_body`]'s walk asked one statement at a time, into
+    /// the same frame with the same locals and the same scope, for a body the
+    /// rows do not carry whole.
     ///
     /// Returns whether the statement was emitted. The screen
-    /// ([`Fn_::core_run`]) stands before the first instruction, so a `false`
-    /// costs nothing and the arm emits exactly what it always did.
+    /// ([`Fn_::core_run`]) stands before the first instruction, so on a
+    /// `false` nothing was emitted and [`Fn_::stmt`] refuses the statement.
     fn core_took(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<bool, String> {
         let Some(body) = self.core.clone() else {
             return Ok(false);
         };
-        let form = stmt_form(s);
-        // `VYRN_NO_CORE_WALK=1` takes the AST walk back, and what it can take
-        // back is the arms that still exist: a retired form has none, so the
-        // rows emit it either way and the comparison stays byte for byte over
-        // every program (`compiler/vyrn-cli/tests/coredrive.rs`).
-        if core_walk_off() && FORMS[form].1 {
-            return Ok(false);
-        }
         let Some(run) = self.core_run(&body, s) else {
             return Ok(false);
         };
@@ -17640,7 +12663,6 @@ impl<'p> Fn_<'_, 'p> {
         let r = self.core_stmts(m, b, &body, &mut w, &run);
         self.core_w = w;
         self.core_bound = None;
-        count(form, true);
         r.map(|()| true)
     }
 
@@ -17706,8 +12728,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Three clauses, and each one is a line of the record. The FRAME clause: a
     /// placed release and an aggregate destination are emissions the rows do
     /// not carry. The PLACE clause, per statement rather than per body: a name
-    /// the run reads, or a `let` binds, has a place whose type is its type on
-    /// both walks, whatever that type is. The STATEMENT screen:
+    /// the run reads, or a `let` binds, has a place whose type is its type,
+    /// whatever that type is. The STATEMENT screen:
     /// [`Fn_::core_readable`], unchanged.
     fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
         // A node is an ADDRESS, and `project::iterate_loop`'s copy of a loop
@@ -17726,9 +12748,8 @@ impl<'p> Fn_<'_, 'p> {
         // placement keyed a release AT — 8,362 of them per body, and the `if`s
         // of every frame that placed one. Since the release slice it names the
         // three exits this walk gives back at itself: a `break`, a `continue`
-        // and a `return` each run the same [`Fn_::emit_releases`] the arm runs,
-        // keyed by the row's own site. A block's fall-through release and a
-        // scrutinee's stay the arm's, and their rows are what
+        // and a `return` each run [`Fn_::emit_releases`], keyed by the row's
+        // own site. A block's fall-through release and a scrutinee's are what
         // [`Fn_::core_readable`] refuses, so no run reaches this walk holding
         // one.
         if self
@@ -17753,20 +12774,6 @@ impl<'p> Fn_<'_, 'p> {
             matches!(r, St::Drop(n, ..) if matches!(body.names[*n as usize].ty, Type::Stream(_)))
         }) {
             return None;
-        }
-        // A statement inside a `while` the arm emits that names a binding the
-        // arm's hoist holds in locals, which the rows would walk again.
-        if !self.walks.is_empty() {
-            let mut names = Vec::new();
-            for st in run {
-                vyrn_lower::core::names_in(st, &mut names);
-            }
-            if names.iter().any(|n| {
-                self.walks
-                    .contains_key(body.names[*n as usize].source.as_str())
-            }) {
-                return None;
-            }
         }
         // A result checked where a `return` of the run hands it back, under a
         // branch or at the run's end, is a check the row does not state
@@ -17821,9 +12828,7 @@ impl<'p> Fn_<'_, 'p> {
                     let call = self.core_agg_call(body, rhs);
                     if matches!(rhs, Rhs::Make(..)) || self.core_ctor(body, rhs) || call {
                         if self.checks(t)
-                            || (call
-                                && self.cx.resolve(t)
-                                    != self.cx.resolve(&body.names[*n as usize].ty))
+                            || (call && !self.core_as_is(&body.names[*n as usize].ty, t))
                         {
                             return None;
                         }
@@ -17857,11 +12862,11 @@ impl<'p> Fn_<'_, 'p> {
                         || (matches!(self.ret, Repr::Agg(_)) && !self.checks(&self.ret_ty))) => {}
             // RFC-0114 Rule N's edge releases are the plan's rows at the JOIN,
             // and the core states them as drops inside the branch — which the
-            // statement screen refuses. An `if` that owes one is the arm's.
+            // statement screen refuses. An `if` that owes one is refused.
             (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
             // The four forms the site slice took off the floor. Each names its
             // own node on the row now, so the FORM is the whole of the
-            // agreement: no binding to check and no type the arm would bind.
+            // agreement: no binding to check and no type to bind.
             // What each still waits on is the statement screen below — a `for`
             // reads its element through a place row, an `if let` is a switch,
             // and the tag on `Arm` is the list's row 6.
@@ -17921,7 +12926,7 @@ impl<'p> Fn_<'_, 'p> {
         // A made layout other than the statement's own binding lands in a slot
         // of its own, which the row gives back at its extent's end, and is
         // built at its name's type. A `let` under the statement that annotates
-        // another type is the arm's, as it is for the per-body walk.
+        // another type is refused, as it is for the per-body walk.
         let under = self.annotations(|fs| {
             hoist_stmt(
                 s,
@@ -17979,13 +12984,13 @@ impl<'p> Fn_<'_, 'p> {
                 continue;
             }
             let (_, ty) = self.core_place(&self.core_w, body, *n)?;
-            // And the two walks have to agree about the type of a name they
-            // share: `stringops.vyrn` compared two bytes at byte width from the
+            // And the row and the frame have to agree about the type of a
+            // name: `stringops.vyrn` compared two bytes at byte width from the
             // row and at `Int64` from the frame, for the same source. The
             // frame's answer is as DECLARED, so a `where` type is refused here
             // as it is at a `let`.
             let named = &body.names[*n as usize].ty;
-            if self.cx.resolve(&ty) != self.cx.resolve(named)
+            if !self.core_as_is(&ty, named)
                 || ((self.checks(&ty) || self.checks(named)) && self.cx.sub(&ty) != *named)
             {
                 return None;
@@ -17996,7 +13001,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Where one of the core's names lives: the place this walk bound it at, or
-    /// the one the AST arm bound it at, which is the scope's.
+    /// the scope's.
     fn core_place(
         &self,
         w: &Walked,
@@ -18139,7 +13144,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // The head of a `for` over a stream: the element goes into a
                 // place of its own, which the read at this row's name binds,
-                // and the name is whether one came, as the arm's `for` pulls.
+                // and the name is whether one came.
                 St::Let(
                     n,
                     Rhs::Call {
@@ -18231,8 +13236,8 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_bind(b, body, w, *n, place, ty)?;
                 }
                 // A LAYOUT TAKEN OUT OF A FIELD in part position: the header
-                // moves to the part's offset, as the arm's `consume t.d` in a
-                // literal moves it, and the field is the hole the root's
+                // moves to the part's offset, as `consume t.d` in a literal
+                // moves it, and the field is the hole the root's
                 // release carries.
                 St::Let(n, Rhs::Take(p)) if self.core_part_at(body, ss, i, w).is_some() => {
                     let line = body.names[*n as usize].line;
@@ -18325,12 +13330,11 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // An AGGREGATE CALL RESULT, written through the out-pointer
                 // into the binding's own slot, or into the caller's storage
-                // when the `return` after it hands the temporary back. The
-                // bytes are the AST arm's at `let p = f(a)` and at
-                // `return f(a)`: [`Fn_::agg_into`]'s destination, then the
-                // call's own convention ([`Fn_::out_ptr`]). Any other
+                // when the `return` after it hands the temporary back: the
+                // destination, then the call's own convention
+                // ([`Fn_::out_ptr`]). Any other
                 // temporary is the storage the call wrote, and its name holds
-                // that address, as the arm hands the call's own slot on: to
+                // that address, the call's own slot handed on: to
                 // the reader, or to the `match` or `for` the plan keys it by.
                 St::Let(
                     n,
@@ -18434,6 +13438,21 @@ impl<'p> Fn_<'_, 'p> {
                     if self.core_unit(&info.ty) {
                         continue;
                     }
+                    // `blackBox` of a layout hands back the operand's own
+                    // address, so the name takes over the operand's slot to
+                    // the end of its own extent, as a rename does. Nothing is
+                    // copied.
+                    let barrier = match rhs {
+                        Rhs::Call {
+                            callee, kind, args, ..
+                        } if matches!(core_builtin(callee, *kind), Some(Spec::Barrier)) => {
+                            Some(args.as_slice())
+                        }
+                        _ => None,
+                    };
+                    if let Some([(Arg::Val(Val::Name(x)), _)]) = barrier {
+                        w.slot[*n as usize] = w.slot[*x as usize].take();
+                    }
                     // The slot rule (RFC-0125 M7). A temporary the next
                     // statement reads once, first, and nothing else reads
                     // stays on wasm's operand stack. Every other name takes a
@@ -18446,7 +13465,10 @@ impl<'p> Fn_<'_, 'p> {
                         continue;
                     }
                     let r = self.cx.repr(&info.ty, line)?;
-                    let place = self.place_for(b, &r, line)?;
+                    let place = match r {
+                        Repr::Agg(_) if barrier.is_some() => Place::Local(b.local(ValType::I32)),
+                        _ => self.place_for(b, &r, line)?,
+                    };
                     let Place::Local(l) = place else {
                         return unsupported("a core `let` of an aggregate", line);
                     };
@@ -18491,8 +13513,8 @@ impl<'p> Fn_<'_, 'p> {
                         }
                     };
                     // The store releases what the name held where the row says
-                    // so, in the arm's order: the old value aside, the new one
-                    // in, the old one freed.
+                    // so: the old value aside, the new one in, the old one
+                    // freed.
                     let snap = match (*releases, self.cx.repr(&ty, *line)?) {
                         (false, _) => None,
                         (true, Repr::Scalar(v)) => self.snap_word(b, l, v, &ty, *line)?,
@@ -18531,8 +13553,8 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A place with an address: the address, what the place held
                 // kept aside where the row releases it, the value landed, and
-                // the kept value freed, the arm's order at `x = v`, `r.f = v`
-                // and `a[i] = v`. A layout lands as a copy of its bytes. A
+                // the kept value freed, for `x = v`, `r.f = v` and `a[i] = v`
+                // alike. A layout lands as a copy of its bytes. A
                 // String in module state has its word cleared, as a String
                 // name's.
                 St::Store {
@@ -18708,16 +13730,16 @@ impl<'p> Fn_<'_, 'p> {
                         }
                     }
                     self.core_releases(m, b, body)?;
-                    // Every region scope this return leaves, as the AST arm
-                    // does: a returned value built inside a region points into
+                    // Every region scope this return leaves: a returned value
+                    // built inside a region points into
                     // the arena and its caller owns it, so the scope POPS
                     // rather than frees.
                     self.exit_regions_above(b, 0, false);
                     b.ins(&Instruction::Br(self.depth));
                 }
                 // An exit's releases run AFTER the read it hands back, which
-                // is the order the AST arm writes and the order a reader of
-                // the wasm expects: the value is on the operand stack and a
+                // is the order a reader of the wasm expects: the value is on
+                // the operand stack and a
                 // release does not disturb it. The row states the release and
                 // not its place among the reads, so the two commute.
                 St::Row {
@@ -18743,9 +13765,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::Unreachable);
                 }
                 // An expression for its effect. What it leaves on the stack
-                // is dropped, or the enclosing block's type will not check —
-                // the same sentence the AST walk's statement arm writes, on
-                // the row rather than on the node.
+                // is dropped, or the enclosing block's type will not check.
                 St::Do { rhs, line, .. } if self.core_checks_made(body, rhs).is_some() => {
                     let (decl, n) = self.core_checks_made(body, rhs).expect("the guard's");
                     self.core_val(
@@ -18926,6 +13946,11 @@ impl<'p> Fn_<'_, 'p> {
                     .clone()
                     .ok_or_else(|| gap("a removal the checker did not type", line)),
                 (None, Some(Spec::Finds)) => Ok(Type::Bool),
+                // `blackBox` hands its operand back, at the type the checker
+                // gave the site.
+                (None, Some(Spec::Barrier)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a `blackBox` the checker did not type", line)),
                 // A generator host import answers at the type the checker
                 // gave the site.
                 (None, Some(Spec::Host)) => at
@@ -18954,9 +13979,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The ABI is the DECLARATION's and the emitter reads it there: which
     /// wasm index the callee is, what each parameter's type is, whether one
     /// crosses by address. What the row states is WHO the callee is
-    /// ([`Callee`]), which is the fourteen-rung ladder [`Fn_::call_inner`]
-    /// walks over the source at every site and this walk does not walk at
-    /// all.
+    /// ([`Callee`]), so this walk has no ladder of its own to decide it.
     fn core_call(
         &mut self,
         m: &mut Module,
@@ -19017,7 +14040,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction and
         // never a call, so no signature answers for it. The table is
-        // [`Fn_::mem_spec`]'s, which the arm over the source reads too.
+        // [`Fn_::mem_spec`]'s.
         if let Some(prim) = callee.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
             return self.core_mem(m, b, body, w, prim, args, line);
         }
@@ -19036,8 +14059,8 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(ret.clone());
             }
             // `x.copy()` (RFC-0089 M1b): the operand at its own type, which
-            // the row put on the name, and then the duplication the arm over
-            // the source makes from the type `peek` answers with. A type that
+            // the row put on the name, and then the duplication that type
+            // asks for. A type that
             // declares `impl Copy for T` never reaches here: the core states
             // that call as the declaration's.
             Some(Spec::OwnType) => {
@@ -19049,9 +14072,46 @@ impl<'p> Fn_<'_, 'p> {
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
             }
+            // `blackBox(v)` (RFC-0055): the operand, stored to and loaded from
+            // sixteen bytes that nothing else names, so clang at `-O2` on the
+            // native route cannot fold the work it measures. Not a global,
+            // which wasm2c forwards in one step, and not `data`, which shares
+            // identical contents: each site reserves its own bytes.
+            Some(Spec::Barrier) => {
+                let [(v, _)] = args else {
+                    return unsupported("`blackBox` of other than one value", line);
+                };
+                let Some(ty) = ret else {
+                    return unsupported("a `blackBox` the checker did not type", line);
+                };
+                self.core_val(m, b, body, w, v, ty, line)?;
+                let Some(t) = self.cx.repr(ty, line)?.val() else {
+                    return Ok(ty.clone());
+                };
+                let addr = m.reserve(16, 16) as i32;
+                let tmp = self.scratch(b, t, 9);
+                let at = |align: u32| MemArg {
+                    offset: 0,
+                    align,
+                    memory_index: 0,
+                };
+                let (store, load) = match t {
+                    ValType::I32 => (Instruction::I32Store(at(2)), Instruction::I32Load(at(2))),
+                    ValType::I64 => (Instruction::I64Store(at(3)), Instruction::I64Load(at(3))),
+                    ValType::F32 => (Instruction::F32Store(at(2)), Instruction::F32Load(at(2))),
+                    ValType::F64 => (Instruction::F64Store(at(3)), Instruction::F64Load(at(3))),
+                    _ => (Instruction::V128Store(at(4)), Instruction::V128Load(at(4))),
+                };
+                b.ins(&Instruction::LocalSet(tmp))
+                    .ins(&Instruction::I32Const(addr))
+                    .ins(&Instruction::LocalGet(tmp))
+                    .ins(&store)
+                    .ins(&Instruction::I32Const(addr))
+                    .ins(&load);
+                return Ok(ty.clone());
+            }
             // `print(x)` and `x.toString()`: the operand at its own type, and
-            // the rendering that type chooses, which the arm over the source
-            // calls too.
+            // the rendering that type chooses.
             Some(Spec::Renders(ret)) => {
                 let [(v, _)] = args else {
                     return unsupported("a rendering of other than one value", line);
@@ -19367,6 +14427,9 @@ impl<'p> Fn_<'_, 'p> {
                     (None, Some((f, targs, subst))) => self.cx.instantiate(m, f, targs, subst)?,
                     (None, None) => match self.core_sig(body, callee, kind, solved, targets) {
                         Some(sig) => sig,
+                        None if self.cx.skipped.contains(callee) => {
+                            return unsupported(&format!("the call `{callee}`"), line);
+                        }
                         None => return unsupported("a core call this walk does not read", line),
                     },
                 };
@@ -19668,14 +14731,14 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// `None` where the program can observe the copy. A binding the body
     /// stores into, or hands to `modify`, writes a value of its own; a store
-    /// into an element of an Array writes the buffer ([`core_written`]). A root on
-    /// the chain handed to `consume` anywhere in the body may be freed under
-    /// the name. A row of the name's extent that hands a root on the chain to
-    /// `modify` ([`vyrn_lower::kernel::modifies`]), or rebuilds it as a
-    /// write-back receiver (`out.push(v)`), may replace what the name points
-    /// into. Outside the extent the kernel ends the alias at that call
-    /// and refuses a read after it, as it does at a store into the root; for
-    /// module state, a callee's store too.
+    /// into an element of an Array writes the buffer ([`core_written`]). A row
+    /// of the name's extent that hands a root on the chain to `consume` may
+    /// free it under the name; one that hands it to `modify`
+    /// ([`vyrn_lower::kernel::modifies`]), or rebuilds it as a write-back
+    /// receiver (`out.push(v)`), may replace what the name points into.
+    /// Outside the extent the kernel ends the alias at that call and refuses
+    /// a read after it, as it does at a store into the root; for module
+    /// state, a callee's store too.
     fn core_alias<'b>(
         &self,
         body: &'b vyrn_lower::core::Body,
@@ -19713,6 +14776,30 @@ impl<'p> Fn_<'_, 'p> {
         };
         let place = read(n)?;
         let extent = core_extent(&body.stmts, n, &body.occurrences())?;
+        // The name is read through itself and through what is read out of it
+        // and still points into it. A value copied out of it, a scalar that
+        // owns no heap, holds nothing of it, so the rows the chain test judges
+        // end at the last row that reads a holder: `xs[0] + eat(b)` reads
+        // `xs[0]` into a temporary before the call.
+        let mut holders = vec![n];
+        let mut inner = Vec::new();
+        extent.iter().for_each(|s| core_lets(s, &mut inner));
+        for (m, rhs) in &inner {
+            let Rhs::Read(p) = rhs else { continue };
+            let ty = &body.names[*m as usize].ty;
+            if vyrn_lower::kernel::root_of(p).is_some_and(|(r, _)| holders.contains(&r))
+                && (self.owns_heap(ty)
+                    || !matches!(self.cx.repr(ty, 0), Ok(Repr::Scalar(_) | Repr::Unit)))
+            {
+                holders.push(*m);
+            }
+        }
+        let last = extent.iter().rposition(|s| {
+            let mut ns = Vec::new();
+            vyrn_lower::core::names_in(s, &mut ns);
+            ns.iter().any(|x| holders.contains(x))
+        })?;
+        let extent = &extent[..=last];
         let mut rebuilt = Vec::new();
         extent
             .iter()
@@ -19724,7 +14811,7 @@ impl<'p> Fn_<'_, 'p> {
             || (owned && !matches!(place, vyrn_lower::core::Place::Elem(..)))
             || self
                 .core_place_ty(body, place)
-                .is_none_or(|t| self.cx.resolve(&t) != self.cx.resolve(&info.ty))
+                .is_none_or(|t| !self.core_as_is(&t, &info.ty))
         {
             return None;
         }
@@ -19735,19 +14822,14 @@ impl<'p> Fn_<'_, 'p> {
             let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
                 return Some(place);
             };
-            if written
-                .iter()
-                .any(|(m, c)| *m == root && *c == Some(Capability::Consume))
-                || rebuilt
-                    .iter()
-                    .any(|(m, c)| *m == root && *c == Some(Capability::Modify))
-                || vyrn_lower::kernel::modifies(
-                    extent,
-                    vyrn_lower::kernel::Root::N(root),
-                    &body.names,
-                    &body.name,
-                )
-            {
+            if rebuilt.iter().any(|(m, c)| {
+                *m == root && matches!(c, Some(Capability::Consume | Capability::Modify))
+            }) || vyrn_lower::kernel::modifies(
+                extent,
+                vyrn_lower::kernel::Root::N(root),
+                &body.names,
+                &body.name,
+            ) {
                 return None;
             }
             match read(root) {
@@ -19759,13 +14841,13 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The place the layout name `n` holds a COPY of — RFC-0125 M7, a layout
-    /// that owns no heap, and a take.
+    /// that owns no heap, a take, and a move that is no rename.
     ///
     /// A layout that owns no heap is a value, and the kernel lets its place be
     /// written while the name lives ([`Fn_::core_alias`]). A take leaves a hole
-    /// in its place, and a store may fill the hole while the name lives. So
-    /// the name takes a slot and the bytes, which is what the AST arm's `let`
-    /// writes ([`Fn_::agg_into`]).
+    /// in its place, and a store may fill the hole while the name lives; a
+    /// move leaves the whole place empty, which a store may fill. So the name
+    /// takes a slot and the bytes.
     fn core_copies(
         &self,
         body: &vyrn_lower::core::Body,
@@ -19789,13 +14871,19 @@ impl<'p> Fn_<'_, 'p> {
         let p = match (at.next(), at.next()) {
             (Some((_, Rhs::Take(p))), None) => p.clone(),
             (Some((_, Rhs::Read(p))), None) if value => p.clone(),
-            (Some((_, Rhs::Val(Val::Name(x)))), None) if value => vyrn_lower::core::Place::Name(*x),
+            // A move [`Fn_::core_renames`] refuses takes the bytes, as a take
+            // does: the kernel refuses a read of `x` before its next store.
+            (Some((_, Rhs::Val(Val::Name(x)))), None)
+                if value || (info.heap && !info.borrow && !body.names[*x as usize].borrow) =>
+            {
+                vyrn_lower::core::Place::Name(*x)
+            }
             _ => return None,
         };
         (!matches!(p, vyrn_lower::core::Place::Key(..))
             && self
                 .core_place_ty(body, &p)
-                .is_some_and(|t| self.cx.resolve(&t) == self.cx.resolve(&info.ty)))
+                .is_some_and(|t| self.core_as_is(&t, &info.ty)))
         .then_some(p)
     }
 
@@ -19835,17 +14923,23 @@ impl<'p> Fn_<'_, 'p> {
         let from = &body.names[*x as usize];
         let unwritten = |m: vyrn_lower::core::Name| !written.iter().any(|(w, _)| *w == m);
         // A join's stores are its branches', which run before the rename. A
-        // borrow takes over only a join's place: the join holds the bytes the
-        // borrow reads, and neither name releases them.
+        // borrow takes over a join's place, which holds the bytes the borrow
+        // reads, and neither name releases them; or a borrowed parameter's.
         // A borrowed layout parameter holds the caller's address for the
-        // whole body, so the temporary a scrutinee binds to it is that
-        // address while neither name is written: a declared release's
-        // `match consume self` ([`vyrn_lower::core`]'s `owns_boxes`).
+        // whole body, so a second name for it is that address while neither
+        // name is written: the temporary a scrutinee binds (a declared
+        // release's `match consume self`, [`vyrn_lower::core`]'s
+        // `owns_boxes`), or a reader's `let data = d`.
+        // A bound `fn` parameter [`vyrn_lower::core::specialize`] makes where
+        // it is read is still that borrowed parameter.
         let joins = self.core_joins(body, *x);
-        let param =
-            from.borrow && body.params.contains(x) && info.source.starts_with('@') && unwritten(n);
-        ((joins || (!info.borrow && (param || (self.owns_heap(&info.ty) && !from.borrow))))
-            && self.cx.resolve(&from.ty) == self.cx.resolve(&info.ty)
+        let made = |r: &Rhs| matches!(r, Rhs::Make(Ctor::Closure(_), _));
+        let param = from.borrow
+            && (body.params.contains(x) || lets.iter().any(|(b, r)| b == x && made(r)))
+            && (info.source.starts_with('@') || info.borrow)
+            && unwritten(n);
+        ((joins || param || (!info.borrow && self.owns_heap(&info.ty) && !from.borrow))
+            && self.core_as_is(&from.ty, &info.ty)
             && (joins || unwritten(*x)))
         .then_some(*x)
     }
@@ -19900,12 +14994,10 @@ impl<'p> Fn_<'_, 'p> {
     /// One made layout, built into the binding's own slot — RFC-0125 M7, the
     /// layout-made family.
     ///
-    /// The bytes are [`Fn_::agg_into`]'s at a `let` of a literal: the
-    /// destination's address, the parts at the offsets the layout gives them,
+    /// The bytes are the destination's address, the parts at the offsets the layout gives them,
     /// the address again, and the two drops that stand for the copy an in-place
     /// build does not make. The placement itself is [`Fn_::record_into`]'s,
-    /// [`Fn_::array_lit_heap`]'s and [`Fn_::build_variant`]'s, which the AST arm
-    /// calls with the same destination.
+    /// [`Fn_::array_lit_heap`]'s and [`Fn_::build_variant`]'s.
     #[allow(clippy::too_many_arguments)]
     fn core_make(
         &mut self,
@@ -20023,8 +15115,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => return unsupported("a made layout this walk does not build", line),
         }
-        // `dest_used` is the AST arm's answer to [`Fn_::agg_into`], and this
-        // walk writes the in-place build's bytes itself.
+        // This walk writes the in-place build's bytes itself.
         self.dest_used = false;
         b.ins(&Instruction::Drop);
         b.ins(&Instruction::Drop);
@@ -20040,10 +15131,10 @@ impl<'p> Fn_<'_, 'p> {
         self.core_framed(t)
     }
 
-    /// Whether this walk gives a name of `t` the place the AST walk gives it —
-    /// RFC-0125 M7, the frame.
+    /// Whether this walk gives a name of `t` a place of its own — RFC-0125 M7,
+    /// the frame.
     ///
-    /// The allocation is [`Fn_::place_for`]'s and both walks call it, so what
+    /// The allocation is [`Fn_::place_for`]'s, so what
     /// is asked here is whether the type HAS a place of that kind: a value
     /// that lives in one wasm local, which a `String`, a stream cursor and a
     /// vector are as much as an `Int64` is. A layout is the make arm's, which
@@ -20057,7 +15148,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether `t` is Unit, which is no value (RFC-0125 M7): a name of it
     /// needs no place, a read of it writes nothing, and its `let` or store
-    /// emits only the right-hand side's effects, as the arm's statement does.
+    /// emits only the right-hand side's effects.
     fn core_unit(&self, t: &Type) -> bool {
         self.cx.repr(t, 0) == Ok(Repr::Unit)
     }
@@ -20172,9 +15263,8 @@ impl<'p> Fn_<'_, 'p> {
     /// The tag and the payload types of the variant `name` of the sum `ty` —
     /// RFC-0125 M7. `None` when `ty` is no sum, or names no such variant.
     ///
-    /// The AST arm reads the same pair off the EXPECTATION ([`Fn_::sum_ctor`]'s
-    /// `pick`). The row states the binding's type, which is what the
-    /// expectation was, so the two answer the same variant.
+    /// The row states the binding's type, which is the expectation the
+    /// variant is picked by.
     fn core_variant(&self, ty: &Type, name: &str) -> Option<(u64, Vec<Type>)> {
         let Type::Enum(vs) = self.cx.resolve(ty) else {
             return None;
@@ -20216,7 +15306,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether `v` is a layout name that fills a payload or a part of `t` from
     /// its address: [`Fn_::build_variant`] boxes it or copies its two words,
     /// [`Fn_::agg_part`] copies its bytes, and [`Fn_::core_val`] pushes the
-    /// address, as the arm's `Expr::Var` does.
+    /// address.
     fn core_payload_layout(&self, body: &vyrn_lower::core::Body, v: &Val, t: &Type) -> bool {
         matches!(v, Val::Name(n) if {
             let nt = &body.names[*n as usize].ty;
@@ -20362,8 +15452,8 @@ impl<'p> Fn_<'_, 'p> {
     /// where its row stands. The row is a call, a variant or a literal, and a
     /// variant or a literal is built at the part's type.
     ///
-    /// The row writes the part at its offset, as the arm's [`Fn_::agg_into`]
-    /// lets a call, so the parent's storage is taken before it
+    /// The row writes the part at its offset, so the parent's storage is
+    /// taken before it
     /// ([`Fn_::core_part_dest`]). Every row stays where it stands, so no
     /// effect moves. Nothing names that storage until the parent's
     /// row, and no row between leaves the list, so a part written early is
@@ -20618,10 +15708,10 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Bind the core name `n` at `place`. A name a `Stmt::Let` wrote goes on
-    /// the scope too, so a statement the AST arm emits after this one finds it
-    /// exactly where that arm would have put it (RFC-0125 §3 M3, the
-    /// interleave slice), with the release it owes, keyed as the arm keys it:
-    /// the plan names the `Stmt::Let` and the row carries the same node.
+    /// the scope too, so a later statement walked on its own finds it
+    /// (RFC-0125 §3 M3, the interleave slice), with the release it owes,
+    /// keyed by the node: the plan names the `Stmt::Let` and the row carries
+    /// the same node.
     ///
     /// The question is the ROW's: [`vyrn_lower::core::NameInfo::binding`] is
     /// the node the plan keys the binding by, and a temporary this pass minted
@@ -20717,20 +15807,23 @@ impl<'p> Fn_<'_, 'p> {
         }
         if !targets.is_empty() {
             let (f, _, subst, bound) = self.core_ho(callee, kind, solved, targets)?;
-            return self.cx.signature(&ho_shell(f, &subst, &bound).0).ok();
+            return self
+                .cx
+                .signature(&ho_shell(self.cx, f, &subst, &bound).0)
+                .ok();
         }
         // A routed builtin is a call to the function its row names.
         let (callee, kind) = match core_builtin(callee, kind) {
             Some(Spec::Routes(f)) => (*f, Callee::Fn),
             _ => (callee, kind),
         };
-        if kind != Callee::Fn || self.audit_dropped(callee) {
+        if kind != Callee::Fn {
             return None;
         }
         // A `modify` parameter crosses as the address of the caller's binding,
         // which [`Fn_::core_args_readable`] admits for a layout alone. An
         // aggregate result crosses through the out-pointer, which
-        // [`Fn_::out_ptr`] states for both walks.
+        // [`Fn_::out_ptr`] states.
         match self.core_instance(callee, kind, solved) {
             Some((f, _, subst)) => self.cx.signature(&instance_shell(f, &subst)).ok(),
             None => (self.cx.sigs.get(callee).cloned()).or_else(|| self.cx.lambda_sig(callee)),
@@ -20809,8 +15902,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The target a stored value of the `fn` type `p` is (RFC-0037): its
-    /// signature's dispatcher, with the value as its one capture, as the arm's
-    /// [`Fn_::resolve_fn_arg`] makes it. The index is the registered
+    /// signature's dispatcher, with the value as its one capture. The index is
+    /// the registered
     /// dispatcher's, which [`Fn_::core_call`] registers before it emits;
     /// a screen asks before that and reads 0.
     fn core_dispatch(&self, p: &Type) -> Option<FnTarget> {
@@ -20914,8 +16007,8 @@ impl<'p> Fn_<'_, 'p> {
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
     /// operation slice's own reader.
     ///
-    /// The instruction is [`Fn_::bin_ins`]'s and [`Fn_::un_ins`]'s: the same
-    /// table the AST walk maps to, asked once. What this adds is where the
+    /// The instruction is [`Fn_::bin_ins`]'s and [`Fn_::un_ins`]'s. What this
+    /// adds is where the
     /// operands come from — a name the core carries a type for, or a literal
     /// the row names.
     fn core_prim(
@@ -20935,9 +16028,8 @@ impl<'p> Fn_<'_, 'p> {
                 self.un_ins(b, *u, &t, line)
             }
             // A conversion is the operand at its own type and then the
-            // coercion plan's rungs to the target, which is what the AST arm
-            // writes for `Int32(n)` (`Fn_::call_inner`'s conversion rung).
-            // The plan decides the instructions; this row decides nothing.
+            // coercion plan's rungs to the target, as for `Int32(n)`. The
+            // plan decides the instructions; this row decides nothing.
             (Op::Conv(to), [v]) => {
                 let from = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &from, line)?;
@@ -21013,8 +16105,7 @@ impl<'p> Fn_<'_, 'p> {
                 if self.core_unit(&body.names[*n as usize].ty) {
                     return Ok(());
                 }
-                // The place is this walk's, or — since the interleave slice —
-                // the one the AST arm bound the name at, which is the scope's.
+                // The place is this walk's, or the scope's.
                 let Some((place, ty)) = self.core_place(w, body, *n) else {
                     return unsupported("a core name with no place", line);
                 };
@@ -21030,8 +16121,8 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 ty
             }
-            // A literal is emitted at the type the AST walk gives one and
-            // reconciled by the same seam: an integer literal is an `Int64`
+            // A literal is emitted at its own type and reconciled by the
+            // coercion seam: an integer literal is an `Int64`
             // that its destination narrows (RFC-0058), not a constant this
             // walk sizes itself.
             Val::Lit(l) => match l {
@@ -21070,10 +16161,10 @@ impl<'p> Fn_<'_, 'p> {
         (params.len() == args).then_some(ret)
     }
 
-    /// What the AST arm would bind for one row — the screen's type clause.
+    /// The type a row binds — the screen's type clause.
     ///
     /// It is not the operator table stated twice: what it asks is which VALUE
-    /// the arm evaluates, whose type is the arm's answer for the binding. An
+    /// the row computes, whose type is the binding's. An
     /// operator's is its first operand's, because that is the one the width
     /// rule ([`Fn_::op_width`]) adopts from. A call and a closure bind what
     /// the checker typed at the site, which the row carries as its producer
@@ -21235,14 +16326,14 @@ impl<'p> Fn_<'_, 'p> {
         walk(&mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
                 let at = self.cx.plan.key_of(s as *const Stmt as usize);
-                out.push((at, self.cx.resolve(t)));
+                out.push((at, t.clone()));
             }
         });
         out
     }
 
     /// Whether a name is bound by a `let` of `annotated` whose annotation is
-    /// another type than the name's. The core names a `let` by the type of its
+    /// not the name's type as is ([`Fn_::core_as_is`]). The core names a `let` by the type of its
     /// value, so the row does not state the annotation's layout.
     fn annotated_apart(
         &self,
@@ -21252,7 +16343,7 @@ impl<'p> Fn_<'_, 'p> {
         info.binding.is_some_and(|at| {
             annotated
                 .iter()
-                .any(|(a, t)| *a == at && *t != self.cx.resolve(&info.ty))
+                .any(|(a, t)| *a == at && !self.core_as_is(&info.ty, t))
         })
     }
 
@@ -21424,7 +16515,7 @@ impl<'p> Fn_<'_, 'p> {
                 // The place is the one this walk bound (a layout the run MAKES,
                 // which the `let` arm slots before the switch is reached, or a
                 // payload binder, which the enclosing switch binds when it
-                // enters the arm) or the one the AST arm bound.
+                // enters the arm) or the scope's.
                 let path = path(i);
                 let placed = path.contains(n)
                     || self.core_place(&self.core_w, body, *n).is_some()
@@ -21462,7 +16553,7 @@ impl<'p> Fn_<'_, 'p> {
             St::Return { value, .. } => match value {
                 None => matches!(self.ret, Repr::Unit),
                 Some(Val::Name(n)) if matches!(self.ret, Repr::Agg(_)) => {
-                    self.cx.resolve(&body.names[*n as usize].ty) == self.cx.resolve(&self.ret_ty)
+                    self.core_as_is(&body.names[*n as usize].ty, &self.ret_ty)
                 }
                 Some(v) => self.core_val_readable(body, v),
             },
@@ -21728,13 +16819,23 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
+    /// Whether a value of type `from` is one of `to` with no instruction: its
+    /// bits are `to`'s, as `Array<Int64>` is `Array<UiRouteInt>`'s of an
+    /// alias, and a function value's are under another spelling of its type
+    /// ([`crate::coerce_plan`]).
+    fn core_as_is(&self, from: &Type, to: &Type) -> bool {
+        matches!(
+            crate::coerce_plan(&self.cx.sub(from), &self.cx.sub(to), &self.cx.types),
+            crate::Rung::Identity | crate::Rung::FnRetag
+        )
+    }
+
     /// Whether the `let` at `ss[i]` binds the value the next `return` hands
     /// back, so the value is built in the caller's storage (RFC-0125 M7).
     ///
     /// A temporary, read once, by the `return` after it with nothing but
-    /// releases of other names between, at the declared result's own type:
-    /// the AST arm builds `return f(a)` and `return Some(a)` into `dest` the
-    /// same way ([`Fn_::ret_value`]).
+    /// releases of other names between, at the declared result's own type,
+    /// is built into `dest`.
     fn core_lands(
         &self,
         body: &vyrn_lower::core::Body,
@@ -21749,7 +16850,7 @@ impl<'p> Fn_<'_, 'p> {
         self.dest.is_some()
             && info.binding.is_none()
             && reads[*n as usize] == 1
-            && self.cx.resolve(&info.ty) == self.cx.resolve(&self.ret_ty)
+            && self.core_as_is(&info.ty, &self.ret_ty)
             && matches!(ss[i + 1..].iter().find(|s| {
                     !matches!(s, St::Row { .. }) && !matches!(s, St::Drop(d, ..) if d != n)
                 }),
@@ -21838,7 +16939,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> bool {
         match core_builtin(callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
-            Some(Spec::OwnType) => matches!(args, [(Arg::Val(_), _)]),
+            Some(Spec::OwnType | Spec::Barrier) => matches!(args, [(Arg::Val(_), _)]),
             Some(Spec::Renders(_) | Spec::Effect(_)) => matches!(args, [_]),
             Some(Spec::Logs) => args.len() == logs_arity(callee),
             Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
@@ -21915,6 +17016,7 @@ impl<'p> Fn_<'_, 'p> {
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (self.core_builtin_readable(body, callee, *kind, args)
                             || (*kind == Callee::Fn && self.is_extern(callee))
+                            || (*kind == Callee::Fn && self.cx.skipped.contains(callee))
                             || self.core_named(callee, *kind).is_some()
                             || self.core_mem_ty(callee, args.len()).is_some()
                             || self
@@ -22042,8 +17144,8 @@ fn core_taken(
 
 /// Whether the take `n` moves on at the next row and nowhere else: the value
 /// a store writes, or a `consume` argument no other argument's root shares.
-/// The part moves from its field to its destination, as the arm's
-/// `x = consume r.f` does, so the name needs no slot of its own. The take's
+/// The part moves from its field to its destination, as `x = consume r.f`
+/// moves it, so the name needs no slot of its own. The take's
 /// root is a local that the store does not write, so no row between the take
 /// and the move writes the field.
 fn core_moves_on(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bool {
@@ -22283,6 +17385,7 @@ fn solved_instance(
 /// A capture parameter's name holds an `@`, which no Vyrn identifier can, so
 /// nothing the body names shadows it.
 fn ho_shell(
+    cx: &Cx<'_>,
     f: &Function,
     subst: &HashMap<String, Type>,
     targets: &[FnTarget],
@@ -22302,12 +17405,20 @@ fn ho_shell(
             continue;
         }
         let Some(target) = bound.next() else { break };
+        // A stored value's one capture is the value itself, so at a `consume`
+        // parameter it is consumed, and the prologue releases it as the
+        // parameter's row says ([`Cx::declared_param`]). A lambda's captures
+        // are the caller's names, read.
+        let value = cx.is_dispatcher(target.sig.index);
         let mut cap_srcs = Vec::new();
         for t in &target.sig.params[..target.ncaps] {
             let n = format!("@cap{}", sf.params.len());
             sf.params.push(Param {
                 name: n.clone(),
-                capability: Capability::Read,
+                capability: match p.capability {
+                    Capability::Consume if value => Capability::Consume,
+                    _ => Capability::Read,
+                },
                 ty: t.clone(),
                 line: 0,
                 col: 0,
@@ -22547,10 +17658,9 @@ mod tests {
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,
-            variants: HashMap::new(),
             generics: HashMap::new(),
             higher_order: HashMap::new(),
-            protocol_methods: HashMap::new(),
+            skipped: std::collections::HashSet::new(),
             owned: Default::default(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),

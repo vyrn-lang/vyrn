@@ -1,5 +1,4 @@
 // a `jsonSchema` bound, stored into and concatenated
-// pin: 0 break, 0 continue
 // `jsonSchema<T>()` is the String literal its declaration renders, and a
 // name bound to it owns nothing (RFC-0125 M7).
 type Age = Int64 where value >= 18          type U = { name: String, age: Age }          fn vyrnTestMain() -> Int64 { let s = jsonSchema<U>() let mut t = jsonSchema<Age>() t = t + "!"          let n = (s + jsonSchema<U>()).byteLength return n * 1000 + t.byteLength }
