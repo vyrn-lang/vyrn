@@ -5095,6 +5095,7 @@ impl<'p> Fn_<'_, 'p> {
                 line,
                 ..
             } => {
+                let mark = self.arg_frees.len();
                 let want = match ty {
                     Some(t) => {
                         self.cx.repr(t, *line)?;
@@ -5162,8 +5163,9 @@ impl<'p> Fn_<'_, 'p> {
                         (place, got)
                     }
                 };
-                // A copy the core states for a rebound borrow (#501): the
-                // binding holds the owner's bytes, duplicated in place.
+                // A copy the core states (#501, `Builder::copies`): the
+                // binding holds the owner's bytes, duplicated in place, and
+                // the temporary it read them out of is released after.
                 if self.cx.copies_at_let(s as *const Stmt as usize) {
                     match place {
                         Place::Local(l) => {
@@ -5178,6 +5180,9 @@ impl<'p> Fn_<'_, 'p> {
                             self.copy_at(m, b, a, &bound, *line)?;
                         }
                         Place::Static(_) => return unsupported("a copy into module state", *line),
+                    }
+                    for (l, t) in self.arg_frees.split_off(mark) {
+                        self.free_arg_temp(m, b, l, &t, *line)?;
                     }
                 }
                 // A String accumulator gets its ownership word at its one

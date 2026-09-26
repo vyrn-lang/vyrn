@@ -1,0 +1,6 @@
+// a heap element of a call result at a computed index
+// pin: 0 break, 0 continue
+// `radarRings()[belowBase() - 1]` on every turn of a loop: each turn copies
+// the element out and releases the temporary array whole at the statement's
+// end, so nothing a turn made outlives it (site/app/bench.vyrn).
+type Ring = { label: String, points: String }          fn ring(k: Int64) -> Ring { return Ring { label: k.toString() + "x", points: k.toString() + "," + k.toString() } }          fn radarRings() -> Array<Ring> { let mut out: Array<Ring> = [] let mut k = 1 while k <= 3 { out.push(ring(k)) k = k + 1 } return out }          fn belowBase() -> Int64 { return 2 }          fn vyrnTestMain() -> Int64 { let mut t = 0 let mut i = 0 while i < 3 { let r = radarRings()[i] let base = radarRings()[belowBase() - 1] t = t * 10 + r.points.byteLength + base.label.byteLength i = i + 1 } return t }

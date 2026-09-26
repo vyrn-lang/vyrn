@@ -3082,14 +3082,18 @@ impl<'a> Builder<'a> {
     /// into it and its exit release what it holds on every path, the first
     /// turn of a loop included, where a borrow would release the owner's
     /// value or nothing. A write through the borrow is refused instead
-    /// ([`crate::kernel`]), because it changes what the owner sees. A type
-    /// that declares `impl Copy` keeps the borrow: the AST walk states no
-    /// call for it.
+    /// ([`crate::kernel`]), because it changes what the owner sees.
+    ///
+    /// A `let` of a heap element of a temporary (`pieces()[0]`) is a copy
+    /// too, whether or not it is rebound: the temporary is released whole
+    /// when the statement ends, and the binding must outlive it. A scalar
+    /// element is read out and needs no copy. A type that declares
+    /// `impl Copy` keeps the borrow: the AST walk states no call for it.
     fn copies(&self, s: &Stmt, ty: &Type) -> bool {
         let Stmt::Let {
             name,
             value,
-            mutable: true,
+            mutable,
             ..
         } = s
         else {
@@ -3101,8 +3105,9 @@ impl<'a> Builder<'a> {
                 .is_some_and(|m| self.body.names[m as usize].borrow),
             e => is_place_read(e) && self.deferred_of(e).is_none(),
         };
-        borrow
-            && self.rebound.contains(name)
+        let of_a_temporary = matches!(value, Expr::Call { name: at, args, .. }
+            if at == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]));
+        (of_a_temporary || *mutable && borrow && self.rebound.contains(name))
             && self.owns(ty)
             && vyrn_frontend::types::copy_impl(&self.program.impls, ty).is_none()
     }
@@ -4342,7 +4347,15 @@ impl<'a> Builder<'a> {
                 let (rhs, ty) = match check {
                     Some(to) => (self.check(&to, value, *line, out)?, Type::Named(to)),
                     None if copied => {
-                        let v = self.read_at(value, out, None)?;
+                        // The copy drains its operand as a call does: a
+                        // temporary the read left, `pieces()` of
+                        // `pieces()[0]`, is dropped once the copy is bound.
+                        let outer = std::mem::take(&mut self.after);
+                        self.drain += 1;
+                        let v = self.read_at(value, out, None);
+                        self.drain -= 1;
+                        self.after_of_rhs = std::mem::replace(&mut self.after, outer);
+                        let v = v?;
                         let rhs = Rhs::Call {
                             callee: "@copy".to_string(),
                             args: vec![(Arg::Val(v), Capability::Read)],
@@ -4371,9 +4384,9 @@ impl<'a> Builder<'a> {
                 // A call whose result points into an argument — a lending
                 // prelude row, a projection — binds a borrow whatever its
                 // type says, and that screen is the one thing about the
-                // value the `Rhs` does not carry.
+                // value the `Rhs` does not carry. A copy lends nothing.
                 let mutable = matches!(s, Stmt::Let { mutable: true, .. });
-                let lends = self.lends(value);
+                let lends = !copied && self.lends(value);
                 let owned = !lends && self.owned_binding(&rhs, &ty, static_value, mutable);
                 let reason = self.report_reason(&rhs, &ty, static_value, mutable, lends);
                 // A join inside a loop, one of whose arms handed out a name
@@ -4386,8 +4399,7 @@ impl<'a> Builder<'a> {
                 // = ""`, a literal of literals) and a value whose type owns
                 // no heap are nobody's borrow. A lending call and a second
                 // name for a borrow are.
-                let borrow =
-                    !owned && (self.lends(value) || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
+                let borrow = !owned && (lends || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
                 let n = self.name(name, ty, owned, *line);
                 self.body.names[n as usize].copied = copied;
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
