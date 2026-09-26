@@ -3180,8 +3180,7 @@ impl<'a> Builder<'a> {
 
     /// Whether a call whose result IS its argument (`blackBox`, read off the
     /// signature by `movecheck::hands_back`) hands back a borrow: it does
-    /// when the argument is a place read, a string literal (bytes in the data
-    /// segment, which no release may free) or a call that lends. An owned
+    /// when the argument is a place read or a call that lends. An owned
     /// temporary handed to it is TAKEN instead (`call` marks the position
     /// `consume`), and the result owns what the argument owned. Either way
     /// one release stands for the value: owning the result of `blackBox(s)`
@@ -3191,7 +3190,7 @@ impl<'a> Builder<'a> {
         vyrn_frontend::movecheck::hands_back(name)
             && args
                 .first()
-                .is_some_and(|a| is_place_read(a) || matches!(a, Expr::Str(_)) || self.lends(a))
+                .is_some_and(|a| is_place_read(a) || self.lends(a))
     }
 
     /// Whether a call by this name lends: `a[i]` and the seeded element row
