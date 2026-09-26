@@ -2673,7 +2673,16 @@ pub fn build_module_state<'a>(
     );
     let mut out = Vec::new();
     for g in &program.globals {
-        let v = b.val(&g.init, &mut out)?;
+        // A crossing into a validated declared type is its constructor, as a
+        // store to a name's is.
+        let check = match &g.ty {
+            Some(to) => b.checked(&b.ty_of(&g.init)?, to, &g.init),
+            None => None,
+        };
+        let v = match check {
+            Some(to) => Val::Name(b.checked_temp(&to, &g.init, g.line, &mut out)?),
+            None => b.val(&g.init, &mut out)?,
+        };
         out.push(St::Store {
             place: Place::Global(g.name.clone()),
             value: v,
@@ -4427,18 +4436,17 @@ impl<'a> Builder<'a> {
                     Some(n) => Some(self.body.names[n as usize].ty.clone()),
                     None => self.named_place(name, *line).ok().map(|(_, t)| t),
                 };
-                if let (Some(to), Some(vty)) = (to, node_ty(value as *const Expr as usize)) {
-                    if !vyrn_frontend::types::coercible(&vty, &to, self.proto.types()) {
+                if let (Some(to), Some(vty)) = (&to, node_ty(value as *const Expr as usize)) {
+                    if !vyrn_frontend::types::coercible(&vty, to, self.proto.types()) {
                         let refusal = format!("`{name}` is {to} but assigned {vty}");
                         self.body.mistyped.push((*line, refusal));
                     }
                 }
                 let n = self.lookup(name);
-                let check = match n {
-                    Some(n) => {
-                        let to = self.body.names[n as usize].ty.clone();
-                        self.checked(&self.ty_of(value)?, &to, value)
-                    }
+                // A binding's type or module state's declared one: a crossing
+                // into a validated type is its constructor at either.
+                let check = match &to {
+                    Some(to) => self.checked(&self.ty_of(value)?, to, value),
                     None => None,
                 };
                 let grown = match (n, &check) {
@@ -4447,7 +4455,7 @@ impl<'a> Builder<'a> {
                     }
                     // Module state grows through a read of it, which the row
                     // names as its receiver.
-                    (None, _)
+                    (None, None)
                         if self.region == 0
                             && crate::append::global_grows(name)
                             && vyrn_frontend::types::resolve(
