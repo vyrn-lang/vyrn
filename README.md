@@ -182,6 +182,7 @@ The verification is stable. Every example that is meant to run runs as wasm and 
 
 ## Learn more
 
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) says how to report a bug, propose a change and send a pull request.
 - [`docs/api/`](docs/api/) is the generated reference for the standard library, and CI fails if it drifts from [`std/`](std/).
 - [`ROADMAP.md`](ROADMAP.md) lists the open work and what blocks each item.
 - [`editor/vscode/`](editor/vscode/) is the VS Code extension. Every release publishes it as a `.vsix`.
