@@ -122,8 +122,10 @@ jobs:
         #
         # It CANNOT fail the build. A rate limit, an outage, or a fork whose
         # token cannot read the API leaves the committed file exactly as it is —
-        # the pages still render, with the last tag anyone recorded. The
-        # export itself never touches the network.
+        # the pages still render, with the last tag anyone recorded. An empty
+        # listing is an answer, not an outage: it clears the tag and the date,
+        # and the pages render the nothing-released state. The export itself
+        # never touches the network.
         #
         # The comment header of the file is preserved and the two data lines are
         # replaced, so the file keeps explaining itself.
@@ -131,12 +133,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           fresh=$(gh api "repos/${{ github.repository }}/releases?per_page=1" \
-            --jq 'if length == 0 then "" else "\(.[0].tag_name)\n\(.[0].published_at | split("T")[0])" end') || fresh=''
+            --jq 'if length == 0 then "none" else "\(.[0].tag_name)\n\(.[0].published_at | split("T")[0])" end') || fresh=''
           case "$fresh" in
             v*)
               { grep '^#' site/release.txt; printf '%s\n' "$fresh"; } > site/release.new
               mv site/release.new site/release.txt
               echo "baked release:"; grep -v '^#' site/release.txt ;;
+            none)
+              grep '^#' site/release.txt > site/release.new
+              mv site/release.new site/release.txt
+              echo "no release is published; baked none" ;;
             *)
               echo "no release data from the API; keeping the committed file:"
               grep -v '^#' site/release.txt ;;
