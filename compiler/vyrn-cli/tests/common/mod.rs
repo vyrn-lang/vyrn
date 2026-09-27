@@ -489,3 +489,68 @@ pub fn pin_row(label: &str, counts: &[usize]) -> String {
     let cells: Vec<String> = counts.iter().map(|n| n.to_string()).collect();
     format!("{label}\t{}", cells.join("\t"))
 }
+
+/// Returns a census's sections of `file` as `(index, first line, last line)`,
+/// one-based and inclusive, one per anchor in order.
+///
+/// An anchor names an item by its head: `fn name`, `struct Name`, `impl Parser`,
+/// `crate::m!`. It matches the first line after the previous anchor's that starts
+/// with it, with whitespace runs collapsed and visibility ignored, so a changed
+/// signature leaves the table alone. A section runs from its anchor's doc comment
+/// and attributes to the line before the next section's; an anchor that is itself
+/// a comment starts at that comment. Panics on an anchor no later line matches and
+/// on an empty section, so the sections tile the file.
+pub fn census_spans<'a>(
+    file: &str,
+    lines: &[String],
+    anchors: impl IntoIterator<Item = &'a str>,
+) -> Vec<(usize, usize, usize)> {
+    fn head(l: &str) -> String {
+        let l = l.split_whitespace().collect::<Vec<_>>().join(" ");
+        let rest = l.strip_prefix("pub ").or_else(|| {
+            l.strip_prefix("pub(")
+                .and_then(|r| r.split_once(") ").map(|(_, r)| r))
+        });
+        rest.map_or(l.clone(), str::to_string)
+    }
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let heads: Vec<String> = lines.iter().map(|l| head(l)).collect();
+    let mut starts = Vec::new();
+    let mut from = 0;
+    for at in anchors {
+        let want = head(at);
+        let hit = (from..lines.len())
+            .find(|&i| {
+                heads[i]
+                    .strip_prefix(want.as_str())
+                    .is_some_and(|rest| !(rest.starts_with(ident) && want.ends_with(ident)))
+            })
+            .unwrap_or_else(|| {
+                panic!("the census anchor `{at}` names no line of {file} after the one before it")
+            });
+        let mut start = hit;
+        if !want.starts_with("//") {
+            while start > 0 {
+                let t = lines[start - 1].trim_start();
+                if !(t.starts_with("//") || t.starts_with("#[")) {
+                    break;
+                }
+                start -= 1;
+            }
+        }
+        starts.push((at, start));
+        from = hit + 1;
+    }
+    let mut out = Vec::new();
+    for i in 0..starts.len() {
+        let first = if i == 0 { 0 } else { starts[i].1 };
+        let last = starts.get(i + 1).map_or(lines.len(), |s| s.1);
+        assert!(
+            first < last,
+            "census section `{}` of {file} is empty",
+            starts[i].0
+        );
+        out.push((i, first + 1, last));
+    }
+    out
+}

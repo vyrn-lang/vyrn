@@ -6,6 +6,8 @@
 //! column counts `eprintln!` sites: what the driver says in its own words. All
 //! four files count together, so a rule moving between them is not a deletion.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// What a section of the CLI is.
@@ -52,7 +54,7 @@ impl Kind {
     }
 }
 
-/// One section: the exact source line that starts it and its kind.
+/// One section: the head of the item that starts it, and its kind.
 struct Section {
     at: &'static str,
     kind: Kind,
@@ -76,92 +78,86 @@ fn files() -> Vec<(&'static str, Vec<Section>)> {
 fn main_sections() -> Vec<Section> {
     use Kind::*;
     vec![
-        sec("mod remote;", Shared),
-        sec("fn offline(args: &[String]) -> bool {", Cmd("(global)")),
-        sec("enum NativeTarget {", Cmd("build, bench")),
-        sec("fn main() -> ExitCode {", Shared),
-        sec("fn real_main() -> ExitCode {", Cmd("(dispatch)")),
-        sec("fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {", Cmd("emit-gen")),
-        sec("fn nearest_manifest(start: &Path) -> Option<Manifest> {", Shared),
-        sec("fn scaffold(name: &str) -> ExitCode {", Cmd("new")),
-        sec("fn why_cmd(args: &[String]) -> ExitCode {", Cmd("why")),
-        sec("fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {", Cmd("routes")),
-        sec("fn routes_json(", Cmd("routes")),
-        sec("fn json_str(s: &str) -> String {", Shared),
-        sec("fn why_memory(file: &str) -> ExitCode {", Cmd("why")),
-        sec("fn why_audience(file: &str) -> ExitCode {", Cmd("why")),
-        sec("fn why_capability(cap: &str, name: &str) -> ExitCode {", Cmd("why")),
-        sec("const MAX_CHAINS: usize = 24;", Shared),
-        sec("fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {", Shared),
-        sec("fn rel_to(path: &str, base: &str) -> String {", Shared),
-        sec("fn project_imports(app_dir: &Path) -> Vec<(String, String)> {", Cmd("why")),
-        sec("type ToolRow = (String, String, String, String);", Cmd("deps")),
-        sec("fn deps(name: Option<&str>) -> ExitCode {", Cmd("deps")),
-        sec("fn fmt_cmd(rest: &[String]) -> ExitCode {", Cmd("fmt")),
-        sec("const FROM_JSON_SRC: &str = r#\"import { parseJson } from \"std/jsonread\"", Cmd("fmt")),
-        sec("fn fmt_project_files() -> Result<Vec<String>, ExitCode> {", Cmd("fmt")),
-        sec("struct DocModule {", Cmd("doc")),
-        sec("fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>, ExitCode> {", Cmd("doc")),
-        sec("fn render_doc_index(modules: &[DocModule]) -> String {", Cmd("doc")),
-        sec("fn lock_home(root_key: &str) -> (PathBuf, Option<String>) {", Shared),
-        sec("fn fix_cmd(path: &str, source: &str) -> ExitCode {", Cmd("fix")),
-        sec("fn synth_fn(", Shared),
-        sec("fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {", Shared),
-        sec("fn add(rest: &[String], _offline: bool) -> ExitCode {", Cmd("add")),
-        sec("fn update_tool(name: &str, version: &str, lock: &mut remote::Lock) -> Result<(), String> {", Cmd("update")),
-        sec("fn update(alias: Option<&str>, locked: bool) -> ExitCode {", Cmd("update")),
-        sec("fn vendor(check: bool) -> ExitCode {", Cmd("vendor")),
-        sec("fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {", Shared),
-        sec("fn test_cmd(path: &str, rest: &[String]) -> ExitCode {", Cmd("test")),
-        sec("fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {", Cmd("bench")),
-        sec("fn bench_native(", Cmd("bench")),
-        sec("fn bench_ungate_list(text: &str) -> Vec<String> {", Cmd("bench")),
-        sec("fn bench_compare(", Cmd("bench")),
-        sec("pub struct ServeRequest {", Shared),
-        sec("const SERVE_SHIM: &str = r#\"", Cmd("serve, dev")),
-        sec("fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {", Cmd("serve, dev")),
-        sec("fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {", Cmd("serve")),
-        sec("fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {", Cmd("serve, dev")),
-        sec("fn serve_pool_wasm<W, A>(", Cmd("serve, dev")),
-        sec("fn dev_cmd(rest: &[String]) -> ExitCode {", Cmd("dev")),
-        sec("struct DevAssets {", Cmd("dev")),
-        sec("fn request_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {", Shared),
-        sec("fn serve_one(", Shared),
-        sec("fn reason_phrase(status: i64) -> &'static str {", Shared),
-        sec("fn pump_stream(", Shared),
-        sec("enum WsIn {", Shared),
-        sec("fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &str, body: &[u8]) {", Shared),
-        sec("fn run_wasm(", Cmd("run")),
-        sec("struct Body {", Cmd("test, bench")),
-        sec("fn build(path: &str, rest: &[String]) -> ExitCode {", Cmd("build")),
-        sec("fn build_wasm2c(", Cmd("build")),
-        sec("mod tests {", Tests),
+        sec("mod remote", Shared),
+        sec("fn offline", Cmd("(global)")),
+        sec("enum NativeTarget", Cmd("build, bench")),
+        sec("fn main", Shared),
+        sec("fn real_main", Cmd("(dispatch)")),
+        sec("fn emit_gen", Cmd("emit-gen")),
+        sec("fn nearest_manifest", Shared),
+        sec("fn scaffold", Cmd("new")),
+        sec("fn why_cmd", Cmd("why")),
+        sec("fn routes_cmd", Cmd("routes")),
+        sec("fn routes_json", Cmd("routes")),
+        sec("fn json_str", Shared),
+        sec("fn why_memory", Cmd("why")),
+        sec("fn why_audience", Cmd("why")),
+        sec("fn why_capability", Cmd("why")),
+        sec("const MAX_CHAINS", Shared),
+        sec("fn chains_from", Shared),
+        sec("fn rel_to", Shared),
+        sec("fn project_imports", Cmd("why")),
+        sec("type ToolRow", Cmd("deps")),
+        sec("fn deps", Cmd("deps")),
+        sec("fn fmt_cmd", Cmd("fmt")),
+        sec("const FROM_JSON_SRC", Cmd("fmt")),
+        sec("fn fmt_project_files", Cmd("fmt")),
+        sec("struct DocModule", Cmd("doc")),
+        sec("fn closure_doc_modules", Cmd("doc")),
+        sec("fn render_doc_index", Cmd("doc")),
+        sec("fn lock_home", Shared),
+        sec("fn fix_cmd", Cmd("fix")),
+        sec("fn synth_fn", Shared),
+        sec("fn load_program", Shared),
+        sec("fn add", Cmd("add")),
+        sec("fn update_tool", Cmd("update")),
+        sec("fn update", Cmd("update")),
+        sec("fn vendor", Cmd("vendor")),
+        sec("fn json_pretty", Shared),
+        sec("fn test_cmd", Cmd("test")),
+        sec("fn bench_cmd", Cmd("bench")),
+        sec("fn bench_native", Cmd("bench")),
+        sec("fn bench_ungate_list", Cmd("bench")),
+        sec("fn bench_compare", Cmd("bench")),
+        sec("struct ServeRequest", Shared),
+        sec("const SERVE_SHIM", Cmd("serve, dev")),
+        sec("fn serve_rewrite", Cmd("serve, dev")),
+        sec("fn serve_cmd", Cmd("serve")),
+        sec("fn has_served_handle", Cmd("serve, dev")),
+        sec("fn serve_pool_wasm", Cmd("serve, dev")),
+        sec("fn dev_cmd", Cmd("dev")),
+        sec("struct DevAssets", Cmd("dev")),
+        sec("fn request_header", Shared),
+        sec("fn serve_one", Shared),
+        sec("fn reason_phrase", Shared),
+        sec("fn pump_stream", Shared),
+        sec("enum WsIn", Shared),
+        sec("fn write_response", Shared),
+        sec("fn run_wasm", Cmd("run")),
+        sec("struct Body", Cmd("test, bench")),
+        sec("fn build", Cmd("build")),
+        sec("fn build_wasm2c", Cmd("build")),
+        sec("mod tests", Tests),
     ]
 }
 
 fn wasmrun_sections() -> Vec<Section> {
     use Kind::*;
     vec![
-        sec("pub struct Outcome {", Host),
-        sec("pub struct Run {", Host),
-        sec("pub struct Meter {", Host),
-        sec("const SUCCESS: i32 = 0;", Host),
-        sec("struct Exit(i32);", Host),
-        sec("struct Host {", Host),
-        sec("fn engine(metered: bool) -> &'static Engine {", Host),
-        sec(
-            "pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {",
-            Host,
-        ),
-        sec("fn open(", Host),
-        sec("pub struct Compiled {", Host),
-        sec("pub struct Resident {", Host),
-        sec("fn first_line(s: &str) -> &str {", Host),
-        sec(
-            "fn link_wasi(linker: &mut Linker<Host>) -> wasmtime::Result<()> {",
-            Host,
-        ),
-        sec("mod tests {", Tests),
+        sec("struct Outcome", Host),
+        sec("struct Run", Host),
+        sec("struct Meter", Host),
+        sec("const SUCCESS", Host),
+        sec("struct Exit", Host),
+        sec("struct Host", Host),
+        sec("fn engine", Host),
+        sec("fn run", Host),
+        sec("fn open", Host),
+        sec("struct Compiled", Host),
+        sec("struct Resident", Host),
+        sec("fn first_line", Host),
+        sec("fn link_wasi", Host),
+        sec("mod tests", Tests),
     ]
 }
 
@@ -169,15 +165,15 @@ fn remote_sections() -> Vec<Section> {
     use Kind::*;
     vec![
         sec("pub use vyrn_frontend::hash::sha256_hex;", Shared),
-        sec("pub fn resolve_to_url(spec: &str) -> Result<String, String> {", Shared),
-        sec("pub fn upstream_changed(spec: &str, url: &str, got: &str, pinned: &str, remedy: &str) -> String {", Shared),
-        sec("pub struct RemoteResolver {", Shared),
-        sec("mod tests {", Tests),
+        sec("fn resolve_to_url", Shared),
+        sec("fn upstream_changed", Shared),
+        sec("struct RemoteResolver", Shared),
+        sec("mod tests", Tests),
     ]
 }
 
 fn lib_sections() -> Vec<Section> {
-    vec![sec("pub mod wasmrun;", Kind::Host)]
+    vec![sec("mod wasmrun", Kind::Host)]
 }
 
 fn repo_root() -> PathBuf {
@@ -197,58 +193,8 @@ fn source(rel: &str) -> Vec<String> {
         .collect()
 }
 
-/// Where a section's doc starts: the run of comment and attribute lines above
-/// the anchor.
-fn doc_start(lines: &[String], anchor: usize) -> usize {
-    let mut i = anchor;
-    while i > 0 {
-        let t = lines[i - 1].trim_start();
-        if t.starts_with("//") || t.starts_with("#[") {
-            i -= 1;
-        } else {
-            break;
-        }
-    }
-    i
-}
-
-/// The sections of one file, with the span each holds: `(index, first, last)`,
-/// one-based and inclusive. Every line of the file is in exactly one span.
 fn spans(rel: &str, lines: &[String], secs: &[Section]) -> Vec<(usize, usize, usize)> {
-    let mut anchors = Vec::new();
-    for s in secs {
-        let want: String = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
-        let hits: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.split_whitespace().collect::<Vec<_>>().join(" ") == want)
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(
-            hits.len(),
-            1,
-            "the anchor `{}` names {} lines of {rel}; a section's anchor must name one",
-            s.at,
-            hits.len()
-        );
-        anchors.push(doc_start(lines, hits[0]));
-    }
-    let mut out = Vec::new();
-    for i in 0..secs.len() {
-        let first = if i == 0 { 0 } else { anchors[i] };
-        let last = if i + 1 == secs.len() {
-            lines.len()
-        } else {
-            anchors[i + 1]
-        };
-        assert!(
-            first < last,
-            "section `{}` of {rel} is empty or out of order",
-            secs[i].at
-        );
-        out.push((i, first + 1, last));
-    }
-    out
+    common::census_spans(rel, lines, secs.iter().map(|s| s.at))
 }
 
 /// How many sentences of its own a span states on stderr.
