@@ -1,0 +1,117 @@
+// A tiny Entity-Component-System (ECS), Structure-of-Arrays style — a feasibility
+// probe for "can Vyrn do an efficient ECS today?". Verdict: the DATA LAYOUT is
+// right, and in-place mutation covers the MUTATION side.
+//
+// What an ECS wants: components stored contiguously so a system can stream over
+// them, and cheap spawn/despawn. Here each component is its own `Array<Int64>`
+// (SoA): xs/ys are positions, dxs/dys are velocities, and entity `i` is the same
+// index across all four. A "movement system" integrates every entity per tick;
+// entities that leave the arena despawn; fresh ones spawn — real churn.
+//
+// Three things measured while writing this, and what each means for an ECS
+// written in Vyrn:
+//
+//   (a) In-place element write. `a[i] = v` stores
+//       into an element, `a.pop()` removes the last, and `a.swapRemove(i)` is
+//       the O(1) unordered despawn a real ECS uses. So this file INTEGRATES in
+//       place (`xs[i] = nx`) and DESPAWNS with `swapRemove` — no per-tick
+//       rebuild, no fresh allocation. The movement system mutates the SoA
+//       buffers directly.
+//
+//   (b) Array<Record> — indexing COPIES. `let p = a[i]; p.x = 9` leaves `a[i]`
+//       unchanged; `a[i].field = v` write-through writes
+//       a field back through the array as a load-modify-store. This ECS still
+//       uses parallel scalar arrays (SoA) — a movement system streaming one
+//       component at a time is the cache-friendly layout — but an AoS
+//       `Array<Entity>` with per-field updates is now equally expressible.
+//
+//   (c) Contiguity — YES. A growable `Array<T>` lowers to `{ ptr, len, cap }`
+//       over a single realloc'd buffer; `a[i]` is `getelementptr`+`load` at an
+//       element stride, and `a[i] = v` the matching `store`. So the SoA scalar
+//       stores are genuinely cache-friendly contiguous memory — both halves of
+//       an ECS (iterate AND mutate) are now efficient.
+//
+// Deterministic, so interp == native == wasm byte-for-byte.
+// Expected output:
+//   checksum: 38575
+//   live entities: 18
+
+fn main() -> Int64 {
+    // SoA component stores — one contiguous Array<Int64> per component,
+    // indexed by entity id.
+    let mut xs: Array<Int64> = [] // position x
+    let mut ys: Array<Int64> = [] // position y
+    let mut dxs: Array<Int64> = [] // velocity x
+    let mut dys: Array<Int64> = [] // velocity y
+
+    let bound = 16 // an entity with x >= bound has left the arena
+    let ticks = 15 // frames to simulate
+    let perTick = 3 // spawns per frame (the churn)
+
+    let mut seed = 0 // a plain counter — deterministic, no RNG needed
+    let mut checksum = 0
+
+    // Seed the world with an initial cohort of 5.
+    let mut s = 0
+    while s < 5 {
+        seed = seed + 1
+        xs.push(0) // all start at the left edge
+        ys.push(seed % 7) // spread over rows
+        dxs.push((seed % 3) + 2) // rightward speed 2..4
+        dys.push((seed % 4) + 1) // downward drift 1..4
+        s = s + 1
+    }
+
+    // The simulation loop.
+    let mut t = 0
+    while t < ticks {
+        // --- movement system + despawn, both in place ---
+        // Walk the SoA arrays once. A survivor is integrated in place with an
+        // element store; a departing entity is removed with `swapRemove`, which
+        // moves the LAST entity into the vacated slot across all four arrays in
+        // lockstep (keeping entity `i` aligned). On a swap we do NOT advance `i`,
+        // so the entity just moved into slot `i` is processed this tick too. No
+        // rebuild, no fresh allocation — this is the alive-compaction a real ECS
+        // does, now expressible directly.
+        let mut i = 0
+        while i < xs.length {
+            let nx = xs[i] + dxs[i]
+            let ny = ys[i] + dys[i]
+            if nx < bound { // survives — integrate in place
+                xs[i] = nx
+                ys[i] = ny
+                checksum = checksum + nx * 7 + ny * 13
+                i = i + 1
+            } else { // left the arena — O(1) despawn
+                xs.swapRemove(i)
+                ys.swapRemove(i)
+                dxs.swapRemove(i)
+                dys.swapRemove(i)
+            }
+        }
+
+        // --- spawn system: introduce fresh entities at the left edge ---
+        let mut k = 0
+        while k < perTick {
+            seed = seed + 1
+            xs.push(0)
+            ys.push(seed % 7)
+            dxs.push((seed % 3) + 2)
+            dys.push((seed % 4) + 1)
+            k = k + 1
+        }
+
+        t = t + 1
+    }
+
+    // Final aggregate: a checksum that folds in every entity that was ever alive
+    // during a tick, and the current population.
+    print("checksum: " + checksum.toString())
+    print("live entities: " + xs.length.toString())
+
+    drop xs
+    drop ys
+    drop dxs
+    drop dys
+    return 0
+}

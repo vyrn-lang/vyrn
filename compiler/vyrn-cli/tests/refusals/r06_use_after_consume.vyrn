@@ -1,0 +1,12 @@
+// A `consume` parameter takes ownership.
+type Token = { id: Int64, tag: String }
+
+fn take(t: consume Token) -> Int64 { return t.id }
+
+fn main() -> Int64 {
+    let x = Token { id: 1, tag: "a" }
+    let a = take(x)
+    let b = take(x)
+    print(a + b)
+    return 0
+}

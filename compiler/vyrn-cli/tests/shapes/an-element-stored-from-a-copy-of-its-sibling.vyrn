@@ -1,0 +1,17 @@
+// an element stored from a copy of its sibling
+// `out[0] = out[1].copy()` reads the array it stores into, but the copy hands
+// nothing back, so the store displaces the old element and releases it, at a
+// String instance of a generic and at an Int64
+// one.
+fn sw<T>(xs: Array<T>) -> Array<T> {
+    let mut out: Array<T> = xs.copy()
+    out[0] = out[1].copy()
+    return out
+}
+fn vyrnTestMain() -> Int64 {
+    let words: Array<String> = ["b", "a"]
+    let s = sw(words)
+    let ns: Array<Int64> = [2, 1]
+    let n = sw(ns)
+    return s[0].byteLength * 10 + n[0]
+}

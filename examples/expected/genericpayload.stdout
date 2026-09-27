@@ -1,0 +1,4 @@
+inline: 7 seven
+nested first: 3 three
+nested second: 99 fallback
+ops(10): 19

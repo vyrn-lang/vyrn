@@ -1,0 +1,106 @@
+//! The string tier: `std/strpred` writes `contains`, `startsWith`, `endsWith`,
+//! `slice` and `byteLength` as Vyrn on the byte view.
+//!
+//! The first four route into the module, so the example's rows are literals: a live
+//! oracle would compare a function with itself. `byteLength` stays a builtin because
+//! it folds at compile time inside refinement predicates, so the example checks it
+//! against the Vyrn version. The example's output is in the fixture corpus; this
+//! file runs its `test` blocks, which the fixture corpus does not.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn repo_file(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
+}
+
+fn vyrn() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_vyrn"))
+}
+
+fn norm(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+#[test]
+fn string_predicate_pins_hold() {
+    let module = repo_file("examples/strpredbytes.vyrn");
+    let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
+    let combined = norm(&out.stdout) + &norm(&out.stderr);
+    assert!(
+        out.status.success(),
+        "strpredbytes unit tests failed:\n{combined}"
+    );
+    assert!(
+        combined.contains("4 passed, 0 failed"),
+        "expected 4 green:\n{combined}"
+    );
+}
+
+/// `substring` is the one place in `std/` that turns a `SliceError` into a crash,
+/// so its wording is pinned here rather than in the example: it ends the process.
+///
+/// A `panic` names the line where it is written, so the `(std/strings.vyrn:NN)`
+/// suffix points into the library. Moving `substring` in `std/strings` fails this
+/// test on purpose: a location that drifts silently is worth less than none.
+#[test]
+fn substring_names_the_offset_it_refused() {
+    let dir = std::env::temp_dir().join("vyrn-strpred");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, literal, start, end, expect) in [
+        (
+            "oob_start_gt_end",
+            "hello",
+            "3",
+            "2",
+            "error: substring: byte offset 2 is out of range for a String of 5 bytes (std/strings.vyrn:54)",
+        ),
+        (
+            "oob_end_past_len",
+            "hello",
+            "0",
+            "6",
+            "error: substring: byte offset 6 is out of range for a String of 5 bytes (std/strings.vyrn:54)",
+        ),
+        (
+            "oob_negative_start",
+            "hello",
+            "-1",
+            "2",
+            "error: substring: byte offset -1 is out of range for a String of 5 bytes (std/strings.vyrn:54)",
+        ),
+        (
+            "split_end_in_2byte",
+            "héllo",
+            "0",
+            "2",
+            "error: substring: byte offset 2 is inside a multi-byte UTF-8 character (std/strings.vyrn:57)",
+        ),
+        (
+            "split_both_in_3byte",
+            "日本語",
+            "1",
+            "2",
+            "error: substring: byte offset 1 is inside a multi-byte UTF-8 character (std/strings.vyrn:57)",
+        ),
+    ] {
+        let path = dir.join(format!("{name}.vyrn"));
+        let src = format!(
+            "import {{ substring }} from \"std/strings\"\n\
+             fn main() -> Int64 {{\n\
+             \x20   print(\"before\")\n\
+             \x20   print(substring(\"{literal}\", {start}, {end}))\n\
+             \x20   return 0\n\
+             }}\n"
+        );
+        std::fs::write(&path, src).unwrap();
+        let out = vyrn().arg("run").arg(&path).output().expect("vyrn run");
+        assert_eq!(norm(&out.stdout), "before\n", "{name}: stdout before the panic");
+        assert_eq!(norm(&out.stderr), format!("{expect}\n"), "{name}: panic wording");
+        assert_eq!(out.status.code(), Some(1), "{name}: a panic exits 1");
+    }
+}

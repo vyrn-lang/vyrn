@@ -1,0 +1,867 @@
+// Every refusal `Checker::stmt` and `Checker::expr` state, one body each.
+// The checker stops at a statement's first error and goes on to the next
+// statement, so `vyrn check` prints each sentence
+// once.
+// `checker_census.rs` pins what it prints; a rule that leaves the
+// checker leaves that pin as it is.
+type P = { a: Int64, age: Age }
+type Age = Int64 where value >= 18
+type Span = { lo: Int64, hi: Int64 } where lo < hi
+type E = | A(Int64) | B
+type M<T> = | Nothing | Just(T)
+type Keyed = { data: Array<Int64> }
+impl Index for Keyed {
+    fn at(read self, k: String) -> read Int64 {
+        return self.data[0]
+    }
+    fn atSet(modify self, k: String) -> modify Int64 {
+        return self.data[0]
+    }
+}
+let mut g: Array<Int64> = []
+fn unitFn() -> Unit {
+    return
+}
+fn declaredInit() -> Int64 {
+    let a: Int64 = "s"
+    return 0
+}
+fn bindUnit() -> Int64 {
+    let u = unitFn()
+    return 0
+}
+fn assignUnknown() -> Int64 {
+    zz = 1
+    return 0
+}
+fn assignImmutable() -> Int64 {
+    let x = 1
+    x = 2
+    return x
+}
+fn assignMismatch() -> Int64 {
+    let mut x = 1
+    x = "s"
+    return x
+}
+fn fieldUnknown() -> Int64 {
+    zz.a = 1
+    return 0
+}
+fn fieldImmutable() -> Int64 {
+    let p = P { a: 1, age: Age(20) }
+    p.a = 2
+    return 0
+}
+fn fieldWhere() -> Int64 {
+    let mut s = Span { lo: 1, hi: 2 }
+    s.lo = 0
+    return 0
+}
+fn fieldNotRecord() -> Int64 {
+    let mut n = 1
+    n.f = 2
+    return 0
+}
+fn fieldMissing() -> Int64 {
+    let mut p = P { a: 1, age: Age(20) }
+    p.zz = 2
+    return 0
+}
+fn fieldValidated() -> Int64 {
+    let mut p = P { a: 1, age: Age(20) }
+    let k = 30
+    p.age = k
+    return 0
+}
+fn fieldMismatch() -> Int64 {
+    let mut p = P { a: 1, age: Age(20) }
+    p.a = "s"
+    return 0
+}
+fn indexUnknown() -> Int64 {
+    zz[0] = 1
+    return 0
+}
+fn indexImmutable() -> Int64 {
+    let a = [1]
+    a[0] = 2
+    return 0
+}
+fn mapKey() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    m[1] = 2
+    return 0
+}
+fn mapValue() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    m["a"] = "s"
+    return 0
+}
+fn indexNotContainer() -> Int64 {
+    let mut n = 1
+    n[0] = 2
+    return 0
+}
+fn indexNotInt() -> Int64 {
+    let mut a = [1]
+    a["x"] = 2
+    return 0
+}
+fn indexKeyed() -> Int64 {
+    let mut k = Keyed { data: [1] }
+    k[1] = 2
+    return 0
+}
+fn indexValue() -> Int64 {
+    let mut a = [1]
+    a[0] = "s"
+    return 0
+}
+fn returnMismatch() -> Int64 {
+    return "s"
+}
+fn ifCond() -> Int64 {
+    if 1 {
+        return 0
+    }
+    return 1
+}
+fn breakOutside() -> Int64 {
+    break
+    return 0
+}
+fn continueOutside() -> Int64 {
+    continue
+    return 0
+}
+fn whileCond() -> Int64 {
+    while 1 {
+        return 0
+    }
+    return 1
+}
+fn forNotIterable() -> Int64 {
+    for x in 5 {
+        return x
+    }
+    return 0
+}
+fn dropState() -> Int64 {
+    drop g
+    return 0
+}
+fn dropUnbound() -> Int64 {
+    drop zz
+    return 0
+}
+fn dropParam<T>(x: consume T) -> Int64 {
+    drop x
+    return 0
+}
+fn dropScalar() -> Int64 {
+    let n = 1
+    drop n
+    return 0
+}
+fn intFits() -> Int64 {
+    let b: UInt8 = 300
+    return 0
+}
+fn intMax() -> Int64 {
+    let v = 9223372036854775808
+    return 0
+}
+fn byteFits() -> Int64 {
+    let b: Int8 = '\xff'
+    return 0
+}
+fn inferNone() -> Int64 {
+    let x = None
+    return 0
+}
+fn variantArgs() -> Int64 {
+    let e = A
+    return 0
+}
+fn inferVariant() -> Int64 {
+    let e = Nothing
+    return 0
+}
+fn unknownVariable() -> Int64 {
+    let v = zz
+    return 0
+}
+fn unaryNeg() -> Int64 {
+    let s = -"s"
+    return 0
+}
+fn unaryNot() -> Int64 {
+    let b = !1
+    return 0
+}
+fn unaryBits() -> Int64 {
+    let b = ~"s"
+    return 0
+}
+fn regexInvalid() -> Int64 {
+    let s = "a"
+    let b = s =~ "("
+    return 0
+}
+fn regexNotLiteral() -> Int64 {
+    let s = "a"
+    let p = "a"
+    let b = s =~ p
+    return 0
+}
+fn shiftRange() -> Int64 {
+    let v = 1 << 64
+    return 0
+}
+fn stringLength() -> Int64 {
+    let s = "a"
+    let v = s.length
+    return 0
+}
+fn readMissing() -> Int64 {
+    let p = P { a: 1, age: Age(20) }
+    let v = p.zz
+    return 0
+}
+fn readNotRecord() -> Int64 {
+    let n = 1
+    let v = n.f
+    return 0
+}
+fn tryNotScalar() -> Int64 {
+    let x = P?(1)
+    return 0
+}
+fn tryUnknown() -> Int64 {
+    let x = Zz?(1)
+    return 0
+}
+fn tryArity() -> Int64 {
+    let x = Age?(1, 2)
+    return 0
+}
+fn tryBase() -> Int64 {
+    let x = Age?("s")
+    return 0
+}
+fn arrayNotArray() -> Int64 {
+    let m: Map<String, Int64> = []
+    return 0
+}
+fn inferArray() -> Int64 {
+    let a = []
+    return 0
+}
+fn arrayLimit() -> Int64 {
+    let a = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    return 0
+}
+fn smallArray() -> Int64 {
+    let s: SmallArray<Int64, 2> = [1, 2, 3]
+    return 0
+}
+fn arrayShare() -> Int64 {
+    let a = [1, "s"]
+    return 0
+}
+fn mapNotMap() -> Int64 {
+    let a: Array<Int64> = [:]
+    return 0
+}
+fn inferMap() -> Int64 {
+    let m = [:]
+    return 0
+}
+fn mapKeyed() -> Int64 {
+    let m: Map<String, Int64> = [1: 2]
+    return 0
+}
+fn mapShare() -> Int64 {
+    let m = ["a": 1, "b": "s"]
+    return 0
+}
+fn lambdaContext() -> Int64 {
+    let f = x -> x
+    return 0
+}
+// Two refused statements in one body, from two groups the typed judgment
+// states, so both print. Beside a rule the checker still states, a moved
+// rule does not print: the checker refuses the body, and it
+// has no core. `movedBesideChecker` witnesses that.
+fn twoPasses() -> Int64 {
+    let x = 1
+    x = 2
+    if 1 {
+        return 0
+    }
+    return x
+}
+// A typed body that calls a refused generic function is not lowered either:
+// the build moves out every function that names a refused one. So once the
+// store rule is the judgment's, `callsRefused`'s line goes with it.
+fn refusedGeneric<T>(x: T) -> Int64 {
+    let a = []
+    return 0
+}
+fn callsRefused() -> Int64 {
+    let x = 1
+    x = 2
+    return refusedGeneric(x)
+}
+// "A store needs `mut`" is the typed judgment's.
+// These bodies witness what the checker's three sites reached and the
+// corpus does not: a store through a path, into a projected container,
+// a removal through a path, and into module state with no declared type.
+type Held = { a: Array<Int64> }
+let untyped = [1, 2]
+fn storePath() -> Int64 {
+    let h = Held { a: [1, 2] }
+    let i = 0
+    h.a[i] = 5
+    return 0
+}
+fn storeProjected() -> Int64 {
+    let k = Keyed { data: [1] }
+    k["a"] = 2
+    return 0
+}
+fn removePath() -> Int64 {
+    let h = Held { a: [1, 2] }
+    let p = h.a.pop()
+    return 0
+}
+fn storeUntyped() -> Int64 {
+    untyped[0] = 4
+    return 0
+}
+// A generic function no instance reaches: the judgment reads its body once.
+fn storeUncalled<T>(v: T) -> Int64 {
+    let x = 1
+    x = 2
+    return x
+}
+// Two rules the typed judgment states, on one statement: both print.
+fn storeMismatch() -> Int64 {
+    let x = 1
+    x = "s"
+    return x
+}
+// `break` and `continue` outside a loop are the typed judgment's. A lambda
+// is a frame of its own, so the loop around it does not count.
+fn breakInLambda() -> Int64 {
+    while true {
+        let f: fn(Int64) -> Unit = x -> {
+            break
+        }
+    }
+    return 0
+}
+// The `drop` rules are the typed judgment's. A generic function with an
+// instance is read with its parameters as written, as the checker read it.
+fn dropGiven<T>(x: consume T) -> Int64 {
+    drop x
+    return 0
+}
+fn givesString() -> Int64 {
+    return dropGiven("a" + "b")
+}
+// An unknown name is the typed judgment's. The checker types it `Err` and
+// goes on, so two in one body both print, and a statement that reads a name
+// typed `Err` adds no refusal of its own.
+fn twoUnknowns() -> Int64 {
+    for x in zz {
+    }
+    let v = yy
+    if v {
+    }
+    return 0
+}
+fn poisoned() -> Int64 {
+    let v: Int64 = "s"
+    if v {
+    }
+    return 0
+}
+// Module state and a `where` predicate are roots of the judgment too, and a
+// predicate sees no module state.
+let unknownState = zz
+type Unknowable = Int64 where zz > 0
+let bound = 3
+type Bounded = Int64 where value >= bound
+// A condition and a `for` container are the typed judgment's, judged with
+// the types the checker gave the body: a generic function as written.
+fn ifExprCond() -> Int64 {
+    let a = if 1 { 2 } else { 3 }
+    return a
+}
+fn forMap() -> Int64 {
+    let m: Map<String, Int64> = [:]
+    for x in m {
+    }
+    return 0
+}
+fn condGeneric<T>(x: T) -> Int64 {
+    if x {
+        return 1
+    }
+    return 0
+}
+fn callsCondGeneric() -> Int64 {
+    return condGeneric(1) + condGeneric(true)
+}
+// A `size` alone is not an iterable.
+type SizeOnly = { data: Array<Int64> }
+impl Iterate for SizeOnly {
+    fn size(self) -> Int64 {
+        return 0
+    }
+}
+fn forSizeOnly() -> Int64 {
+    let r = SizeOnly { data: [] }
+    for x in r {
+    }
+    return 0
+}
+fn movedBesideChecker() -> Int64 {
+    let a: Int64 = "s"
+    let n = None
+    return 0
+}
+// A value its slot does not take is the typed judgment's. A name bound to
+// Unit is typed `Err`, so its uses add nothing; a `test` body returns Unit;
+// a generic function is judged as written.
+fn unitThenUse() -> Int64 {
+    let u = unitFn()
+    let v = u + 1
+    return 0
+}
+fn returnGeneric<T>(x: T) -> Int64 {
+    return x
+}
+fn callsReturnGeneric() -> Int64 {
+    return returnGeneric(1)
+}
+test "returns a value" {
+    return 3
+}
+// An `impl` projection's body is judged like a function's.
+type Ringed = { data: Array<Int64> }
+impl Index for Ringed {
+    fn at(read self, i: Int64) -> read String {
+        let x = 1
+        x = 2
+        return self.data[i]
+    }
+}
+// A store into a field or an element is the typed judgment's, through a
+// named root, through a path, into module state and in a generic function
+// as written. A root with no such field refuses its store and no other.
+fn storeThroughElement() -> Int64 {
+    let mut ps = [P { a: 1, age: Age(20) }]
+    ps[0].a = "s"
+    ps[0].zz = 1
+    let mut ns = [1]
+    ns[0].f = 2
+    return 0
+}
+let mut stateArray = [1]
+fn storeIntoState() -> Int64 {
+    stateArray[0] = "s"
+    return 0
+}
+type Boxed<T> = { v: T }
+fn storeGeneric<T>(b: Boxed<T>) -> Int64 {
+    let mut c = b
+    c.v = 1
+    return 0
+}
+fn callsStoreGeneric() -> Int64 {
+    return storeGeneric(Boxed { v: "s" })
+}
+// An operator, a field read, `T?(..)` and a variant read are the typed
+// judgment's, in module state, in a generic function as written and in a
+// lambda. A shift by a constant keeps its operand's type, so the slot it
+// fills judges it as well.
+let stateNeg = -"s"
+fn fieldGeneric<T>(t: T) -> Int64 {
+    return t.a
+}
+fn callsFieldGeneric() -> Int64 {
+    return fieldGeneric(1)
+}
+fn variantInLambda() -> Int64 {
+    let f: fn(Int64) -> Unit = x -> {
+        let e = A
+    }
+    return 0
+}
+fn shiftInto() -> Int64 {
+    let s: String = 1 << 70
+    let n: Int32 = 1
+    let m = n << 32
+    return 0
+}
+// A record literal's type name and field names are the typed judgment's,
+// in a plain body, in module state, in a generic function as written and in
+// a lambda.
+fn litUnknown() -> Int64 {
+    let x = Zz { a: 1 }
+    return 0
+}
+fn litNotRecord() -> Int64 {
+    let x = Age { a: 1 }
+    return 0
+}
+fn litNoField() -> Int64 {
+    let x = Span { lo: 1, hi: 2, zz: 3 }
+    return 0
+}
+fn litTwice() -> Int64 {
+    let x = Span { lo: 1, lo: 2, hi: 3 }
+    return 0
+}
+fn litMissing() -> Int64 {
+    let x = Span { lo: 1 }
+    return 0
+}
+let stateLitUnknown = Zz { a: 1 }
+let stateLitNotRecord = Age { a: 1 }
+let stateLitNoField = Boxed { v: 1, zz: 2 }
+let stateLitTwice = Boxed { v: 1, v: 2 }
+let stateLitMissing = Span { hi: 1 }
+fn litGeneric<T>(t: T) -> Int64 {
+    let a = Zz { v: t }
+    let b = Age { v: t }
+    let c = Boxed { v: t, zz: t }
+    let d = Boxed { v: t, v: t }
+    let e = Span { lo: 1 }
+    return 0
+}
+fn callsLitGeneric() -> Int64 {
+    return litGeneric(1)
+}
+fn litInLambda() -> Int64 {
+    let f: fn(Int64) -> Unit = x -> {
+        let s = Span { lo: x }
+    }
+    return 0
+}
+// `T(..)` of a validated type is the typed judgment's. An alias has no
+// constructor, so the checker names it an unknown function.
+type Label = String
+fn ctorArityWhere() -> Int64 {
+    let a = Age(1, 2)
+    return 0
+}
+fn ctorArityPlain() -> Int64 {
+    let l = Label()
+    return 0
+}
+fn ctorBaseWhere() -> Int64 {
+    let a = Age("s")
+    return 0
+}
+fn ctorBasePlain() -> Int64 {
+    let l = Label(5)
+    return 0
+}
+// A removal through a receiver declared without `mut`, or through a name
+// nothing answers, is the typed judgment's.
+fn popImmutable() -> Int64 {
+    let xs = [1]
+    let v = xs.pop()
+    return 0
+}
+fn swapRemoveImmutable() -> Int64 {
+    let xs = [1]
+    let v = xs.swapRemove(0)
+    return 0
+}
+fn removeImmutable() -> Int64 {
+    let m: Map<String, Int64> = [:]
+    m.remove("a")
+    return 0
+}
+fn popUnknown() -> Int64 {
+    let v = zz.pop()
+    return 0
+}
+// A `match` whose arms take a variant twice or miss one is the core's,
+// where it builds the switch: in a function, with no arm, in a generic
+// function as written, in a lambda, in an impl method and in a test body.
+fn armTwice(e: E) -> Int64 {
+    let r = match e { A(n) => n, B => 1, B => 2 }
+    return r
+}
+fn armMissing(e: E) -> Int64 {
+    let r = match e { A(n) => n }
+    return r
+}
+fn armNone(e: E) -> Int64 {
+    let r = match e { }
+    return 0
+}
+fn armGeneric<T>(m: M<T>) -> Int64 {
+    let r = match m { Nothing => 1 }
+    return r
+}
+fn armInLambda() -> Int64 {
+    let f: fn(E) -> Int64 = e -> match e { B => 1 }
+    return 0
+}
+protocol Arms {
+    fn arms(self) -> Int64
+}
+impl Arms for E {
+    fn arms(self) -> Int64 {
+        let r = match self { A(n) => n, A(m) => m, B => 1 }
+        return r
+    }
+}
+test "arms" {
+    let r = match B { B => 1 }
+    assertEq(r, 1)
+}
+// The `@Heapless` bound is the typed judgment's, at the type argument the
+// call solved: in a plain body, and in the instance of a generic that owns
+// heap and in none other.
+fn clearOwned() -> Int64 {
+    let mut a: Array<String> = ["x"]
+    a.clear()
+    return 0
+}
+fn wipe<T>(xs: modify Array<T>) -> Unit {
+    xs.clear()
+}
+fn callsWipe() -> Int64 {
+    let mut s: Array<String> = ["x"]
+    let mut n: Array<Int64> = [1]
+    wipe(s)
+    wipe(n)
+    return 0
+}
+// `Show` on `print` and `toString` is the typed judgment's too: a record
+// with no `impl Show`, and a type parameter with no `Show` bound. `fromJson`
+// has no witness here: a program the checker refuses that calls it is not
+// built for the judgment.
+type Plain = { x: Int64 }
+fn printPlain() -> Int64 {
+    print(Plain { x: 1 })
+    return 0
+}
+fn labelOf<T>(x: T) -> String {
+    return "[\{x}]"
+}
+// A declared call's arity, type-argument count and argument are the typed
+// judgment's: by name, through an impl, through a bound, in a generic
+// function as written, in a lambda, in module state and in a test body.
+fn declaredOne(a: Int64) -> Int64 {
+    return a
+}
+fn declaredGeneric<T>(a: T) -> T {
+    return a
+}
+fn callArity() -> Int64 {
+    return declaredOne(1, 2)
+}
+fn callNoTypeParams() -> Int64 {
+    return declaredOne<Int64>(1)
+}
+fn callTypeArgCount() -> Int64 {
+    return declaredGeneric<Int64, String>(1)
+}
+fn callArgument() -> Int64 {
+    return declaredOne("s")
+}
+protocol Measured {
+    fn measure(self, k: Int64) -> Int64
+}
+impl Measured for Int64 {
+    fn measure(self, k: Int64) -> Int64 {
+        return self + k
+    }
+}
+fn callThroughImpl() -> Int64 {
+    return 7.measure("s")
+}
+fn callThroughBound<T: Measured>(t: T) -> Int64 {
+    return t.measure(1, 2)
+}
+fn callInGeneric<T>(t: T) -> Int64 {
+    return declaredOne(t)
+}
+fn callInLambda() -> Int64 {
+    let f: fn(Int64) -> Int64 = x -> declaredOne(x, x)
+    return 0
+}
+let stateCall = floatBits(7)
+test "a call in a test body" {
+    assertEq(declaredOne(1, 2), 1)
+}
+// A frame that can end without the value it owes is refused by one walk
+// over the core's rows, for a function and a lambda alike. A `match` whose
+// block arms all return ends every path (#557).
+fn fallsThrough(x: Int64) -> Int64 {
+    if x > 0 {
+        return 1
+    }
+}
+fn lambdaFallsThrough() -> Int64 {
+    let g: fn(Int64) -> Int64 = x -> { if x > 0 { return 1 } }
+    return g(1)
+}
+fn matchArmsReturn(e: E) -> Int64 {
+    match e {
+        A(n) => { return n }
+        B => { return 1 }
+    }
+}
+// A removal's receiver that is no growable array is the typed judgment's,
+// in a generic function as written, in a lambda and in module state.
+fn popFixed() -> Int64 {
+    let mut a: Array<Int64, 2> = [1, 2]
+    let v = a.pop()
+    return 0
+}
+fn swapRemoveString() -> Int64 {
+    let mut s = "ab"
+    let v = s.swapRemove(0)
+    return 0
+}
+fn popGeneric<T>(t: T) -> Int64 {
+    let mut x = t
+    let v = x.pop()
+    return 0
+}
+fn popInLambda() -> Int64 {
+    let f: fn(Int64) -> Int64 = k -> {
+        let mut m: Map<String, Int64> = [:]
+        let v = m.pop()
+        return k
+    }
+    return 0
+}
+type FixedHolder = { xs: Array<Int64, 2> }
+fn popFieldFixed() -> Int64 {
+    let mut h = FixedHolder { xs: [1, 2] }
+    let v = h.xs.pop()
+    return 0
+}
+let mut stateFixed: Array<Int64, 2> = [1, 2]
+let statePopped = stateFixed.pop()
+// A `fn` argument that does not fit its slot is the core's, where it
+// builds the call: a lambda's arity and return type, a function value's
+// arity and parameter, a named function that is generic, of another arity
+// or of another parameter, and an argument of no `fn` type.
+fn applyTo(x: Int64, f: fn(Int64) -> Int64) -> Int64 {
+    return f(x)
+}
+fn addPair(a: Int64, b: Int64) -> Int64 {
+    return a + b
+}
+fn byteCount(s: String) -> Int64 {
+    return s.byteLength
+}
+fn same<T>(t: T) -> T {
+    return t
+}
+fn slotLambdaArity() -> Int64 {
+    let r = applyTo(1, (a, b) -> a + b)
+    return 0
+}
+fn slotLambdaRet() -> Int64 {
+    let r = applyTo(1, x -> "s")
+    return 0
+}
+fn slotValueArity() -> Int64 {
+    let g: fn(Int64, Int64) -> Int64 = (a, b) -> a + b
+    let r = applyTo(1, g)
+    return 0
+}
+fn slotValueParam() -> Int64 {
+    let g: fn(String) -> Int64 = s -> s.byteLength
+    let r = applyTo(1, g)
+    return 0
+}
+fn slotGeneric() -> Int64 {
+    let r = applyTo(1, same)
+    return 0
+}
+fn slotNamedArity() -> Int64 {
+    let r = applyTo(1, addPair)
+    return 0
+}
+fn slotNamedParam() -> Int64 {
+    let r = applyTo(1, byteCount)
+    return 0
+}
+fn slotNotFn() -> Int64 {
+    let r = applyTo(1, 5)
+    return 0
+}
+// The same rule at a stored slot: a lambda's return type, and a named
+// function's arity, parameter and return type.
+fn boolOf(n: Int64) -> Bool {
+    return n > 0
+}
+fn storedLambdaRet() -> Int64 {
+    let g: fn(Int64) -> Int64 = x -> "s"
+    return 0
+}
+fn storedNamedArity() -> Int64 {
+    let g: fn(Int64) -> Int64 = addPair
+    return 0
+}
+fn storedNamedParam() -> Int64 {
+    let g: fn(Int64) -> Int64 = byteCount
+    return 0
+}
+fn storedNamedRet() -> Int64 {
+    let g: fn(Int64) -> Int64 = boolOf
+    return 0
+}
+// A slot typed by the caller's own parameter, judged as written (#566).
+fn passThrough<T>(t: T, f: fn(T) -> Int64) -> Int64 {
+    return f(t)
+}
+fn slotAsWritten<U>(u: U) -> Int64 {
+    let r = passThrough(u, byteCount)
+    return 0
+}
+// A checker refusal in module state, and a program that loads `std/json`,
+// keep the typed judgment in every other body.
+let stateRefused = None
+fn jsonBeside() -> Int64 {
+    let s = toJson(1)
+    let k = 1
+    k = 2
+    return 0
+}
+// A refused impl leaves the judgment's build with every body that dispatches
+// to it (`weighs` prints nothing more); the rest of the program is judged.
+protocol Weighed {
+    fn weight(self) -> Int64
+}
+type Rod = { n: Int64 }
+impl Weighed for Rod {
+    fn weight(self) -> Bool {
+        return true
+    }
+}
+fn weighs(r: Rod) -> Int64 {
+    let k = 1
+    k = 2
+    if r.weight() {
+        return 1
+    }
+    return k
+}
+fn main() -> Int64 {
+    return 0
+}

@@ -1,0 +1,386 @@
+/// std/strings: string helpers in Vyrn, over `slice` and `bytes()`.
+///
+/// Indices and lengths are byte offsets. The case and whitespace helpers are
+/// ASCII-only and pass other bytes through, so multi-byte text is never
+/// corrupted. Every `?? panic(...)` below cuts at an offset the function found
+/// by scanning `s`, at an ASCII byte or at a needle match, so it lies on a
+/// character boundary; `grep -n "?? panic"` lists these claims. `substring`,
+/// `padStart` and `padEnd` can receive a bad range and say so.
+import { SliceError, contains, endsWith, findPlain, findSkipping, skipTable, slice, startsWith, worthPreparing } from "std/strpred"
+
+/// `stringFromBytes(b)` for bytes known to be valid UTF-8, such as an ASCII
+/// transform of valid text. `fallback` exists only to keep the function total.
+/// Decode a fallible byte source with `stringFromBytes` and handle the `Err`.
+export fn fromBytesOr(b: Array<UInt8>, fallback: String) -> String {
+    return match stringFromBytes(b) {
+        Ok(v) => v,
+        Err(e) => fallback.copy(),
+    }
+}
+
+/// `s` repeated `n` times ("" for n <= 0).
+export fn repeat(s: String, n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+/// The elements of `parts` joined with `sep` between them.
+export fn joinWith(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// A byte-range substring. An out-of-range offset or a cut inside a multi-byte
+/// character panics, naming the offset. The one place in `std/` that turns a
+/// `SliceError` into a crash; a caller that can receive a bad range calls
+/// `slice` and matches.
+export fn substring(s: String, start: Int64, end: Int64) -> String {
+    return match slice(s, start, end) {
+        Ok(v) => v,
+        Err(e) => match e {
+            OutOfRange(i) => panic(
+                "substring: byte offset \{i} is out of range for a String of \{s.byteLength} bytes"
+            ),
+            SplitsCharacter(i) => panic(
+                "substring: byte offset \{i} is inside a multi-byte UTF-8 character"
+            ),
+        },
+    }
+}
+
+/// ASCII whitespace: space, tab, LF, CR.
+fn isAsciiSpace(b: UInt8) -> Bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+/// The byte offset of the first occurrence of `needle` in `s`, or `None`. An
+/// empty needle matches at 0.
+export fn indexOf(s: String, needle: String) -> Option<Int64> {
+    let n = s.byteLength
+    if needle.byteLength > n {
+        return None
+    }
+    let at = if worthPreparing(needle, n) {
+        findSkipping(s, needle, 0, skipTable(needle, n))
+    } else {
+        findPlain(s, needle, 0)
+    }
+    if at < 0 {
+        return None
+    }
+    return Some(at)
+}
+
+/// The byte offset of the last occurrence of `needle` in `s`, or `None`. An
+/// empty needle matches at `s.byteLength`.
+export fn lastIndexOf(s: String, needle: String) -> Option<Int64> {
+    let nl = needle.byteLength
+    if nl == 0 {
+        return Some(s.byteLength)
+    }
+    if nl > s.byteLength {
+        return None
+    }
+    let mut i = s.byteLength - nl
+    while i >= 0 {
+        let mut j = 0
+        while j < nl && s[i + j] == needle[j] {
+            j = j + 1
+        }
+        if j == nl {
+            return Some(i)
+        }
+        i = i - 1
+    }
+    return None
+}
+
+/// Splits `s` on every occurrence of `sep`. Adjacent, leading and trailing
+/// separators yield empty segments. An empty `sep` returns `[s]` unsplit, because
+/// per-byte splitting would cut multi-byte characters.
+export fn split(s: String, sep: String) -> Array<String> {
+    let sl = sep.byteLength
+    let mut out: Array<String> = []
+    if sl == 0 {
+        out.push(s.copy())
+        return out
+    }
+    // One skip table for every match.
+    let prepared = worthPreparing(sep, s.byteLength)
+    let skip = if prepared { skipTable(sep, s.byteLength) } else { [] }
+    let mut start = 0
+    let mut i = 0
+    while i + sl <= s.byteLength {
+        let at = if prepared { findSkipping(s, sep, i, skip.copy()) } else { findPlain(s, sep, i) }
+        if at < 0 {
+            i = s.byteLength + 1
+        } else {
+            out.push(slice(s, start, at) ?? panic("split: a cut at a separator match"))
+            start = at + sl
+            i = at + sl
+        }
+    }
+    out.push(slice(s, start, s.byteLength) ?? panic("split: the tail after the last separator"))
+    return out
+}
+
+/// Splits `s` into lines on `\n`, stripping a trailing `\r` from each, as
+/// `readLine()` does. A trailing newline makes no final empty line.
+export fn lines(s: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut start = 0
+    let mut i = 0
+    while i < s.byteLength {
+        if s[i] == 10 {
+            let mut end = i
+            if end > start && s[end - 1] == 13 {
+                end = end - 1
+            }
+            out.push(slice(s, start, end) ?? panic("lines: a cut at an ASCII LF or CR"))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < s.byteLength {
+        out.push(slice(s, start, s.byteLength) ?? panic("lines: the tail after the last newline"))
+    }
+    return out
+}
+
+/// Splits `s` on runs of ASCII whitespace, with no empty segments.
+export fn splitWhitespace(s: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let n = s.byteLength
+    let mut i = 0
+    while i < n {
+        while i < n && isAsciiSpace(s[i]) {
+            i = i + 1
+        }
+        let start = i
+        while i < n && !isAsciiSpace(s[i]) {
+            i = i + 1
+        }
+        if i > start {
+            out.push(slice(s, start, i) ?? panic("splitWhitespace: a run bounded by ASCII spaces"))
+        }
+    }
+    return out
+}
+
+/// `s` with leading ASCII whitespace removed.
+export fn trimStart(s: String) -> String {
+    let mut a = 0
+    while a < s.byteLength && isAsciiSpace(s[a]) {
+        a = a + 1
+    }
+    return slice(s, a, s.byteLength) ?? panic("trimStart: `a` walked past ASCII spaces only")
+}
+
+/// `s` with trailing ASCII whitespace removed.
+export fn trimEnd(s: String) -> String {
+    let mut b = s.byteLength
+    while b > 0 && isAsciiSpace(s[b - 1]) {
+        b = b - 1
+    }
+    return slice(s, 0, b) ?? panic("trimEnd: `b` walked back over ASCII spaces only")
+}
+
+/// `s` with leading and trailing ASCII whitespace removed.
+export fn trim(s: String) -> String {
+    let mut a = 0
+    let mut b = s.byteLength
+    while a < b && isAsciiSpace(s[a]) {
+        a = a + 1
+    }
+    while b > a && isAsciiSpace(s[b - 1]) {
+        b = b - 1
+    }
+    return slice(s, a, b) ?? panic("trim: `a` and `b` walked over ASCII spaces only")
+}
+
+/// `s` lowercased over ASCII `A`-`Z`.
+export fn toLower(s: String) -> String {
+    let b = bytes(s)
+    let mut out: Array<UInt8> = []
+    for c in b {
+        if c >= 65 && c <= 90 {
+            out.push(c + 32)
+        } else {
+            out.push(c)
+        }
+    }
+    return fromBytesOr(out, s)
+}
+
+/// `s` uppercased over ASCII `a`-`z`.
+export fn toUpper(s: String) -> String {
+    let b = bytes(s)
+    let mut out: Array<UInt8> = []
+    for c in b {
+        if c >= 97 && c <= 122 {
+            out.push(c - 32)
+        } else {
+            out.push(c)
+        }
+    }
+    return fromBytesOr(out, s)
+}
+
+/// Every non-overlapping occurrence of `from` in `s` replaced with `to`. An empty
+/// `from` returns `s` unchanged.
+export fn replace(s: String, from: String, to: String) -> String {
+    let fl = from.byteLength
+    if fl == 0 {
+        return s.copy()
+    }
+    let mut out = ""
+    let prepared = worthPreparing(from, s.byteLength)
+    let skip = if prepared { skipTable(from, s.byteLength) } else { [] }
+    let mut start = 0
+    let mut i = 0
+    while i + fl <= s.byteLength {
+        let at = if prepared { findSkipping(s, from, i, skip.copy()) } else { findPlain(s, from, i) }
+        if at < 0 {
+            i = s.byteLength + 1
+        } else {
+            out = out + (slice(s, start, at) ?? panic("replace: a cut at a needle match")) + to
+            start = at + fl
+            i = at + fl
+        }
+    }
+    out = out + (slice(s, start, s.byteLength) ?? panic("replace: the tail after the last match"))
+    return out
+}
+
+/// `s` left-padded with `fill` to at least `len` bytes. Panics when a multi-byte
+/// `fill` does not tile the padding width.
+export fn padStart(s: String, len: Int64, fill: String) -> String {
+    if s.byteLength >= len || fill.byteLength == 0 {
+        return s.copy()
+    }
+    let mut pad = ""
+    while pad.byteLength < len - s.byteLength {
+        pad = pad + fill
+    }
+    return (slice(pad, 0, len - s.byteLength)
+        ?? panic("padStart: `fill` is multi-byte and does not tile the padding width")) + s
+}
+
+/// `s` right-padded with `fill` to at least `len` bytes. Panics when a
+/// multi-byte `fill` does not tile the padding width.
+export fn padEnd(s: String, len: Int64, fill: String) -> String {
+    if s.byteLength >= len || fill.byteLength == 0 {
+        return s.copy()
+    }
+    let mut pad = ""
+    while pad.byteLength < len - s.byteLength {
+        pad = pad + fill
+    }
+    return s + (slice(pad, 0, len - s.byteLength)
+        ?? panic("padEnd: `fill` is multi-byte and does not tile the padding width"))
+}
+
+/// The lowercase 16-digit hex of `n`.
+export fn toHex(n: UInt64) -> String {
+    // Indexed as a String, not built with `bytes()`, which allocates 16 bytes
+    // per call; an ETag is computed per HTTP response.
+    let db = "0123456789abcdef"
+    let mut out: Array<UInt8> = []
+    let mut sh: UInt64 = 60
+    let mut going = true
+    while going {
+        let nib = (n >> sh) & 15
+        out.push(db[Int64(nib)])
+        if sh == 0 {
+            going = false
+        } else {
+            sh = sh - 4
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// The optimal-string-alignment edit distance between `a` and `b`, in bytes:
+/// insertions, deletions, substitutions and adjacent transpositions, each
+/// costing 1.
+export fn editDistance(a: String, b: String) -> Int64 {
+    let x = bytes(a)
+    let y = bytes(b)
+    let n = x.length
+    let m = y.length
+    if n == 0 {
+        return m
+    }
+    if m == 0 {
+        return n
+    }
+    // The (n+1) x (m+1) matrix, row-major with row stride `w`.
+    let w = m + 1
+    let mut d: Array<Int64> = []
+    let mut k = 0
+    while k < (n + 1) * w {
+        d.push(0)
+        k = k + 1
+    }
+    let mut i = 0
+    while i <= n {
+        d[i * w] = i
+        i = i + 1
+    }
+    let mut j = 0
+    while j <= m {
+        d[j] = j
+        j = j + 1
+    }
+    let mut r = 1
+    while r <= n {
+        let mut c = 1
+        while c <= m {
+            let mut cost = 1
+            if x[r - 1] == y[c - 1] {
+                cost = 0
+            }
+            let mut best = d[(r - 1) * w + c] + 1
+            let ins = d[r * w + c - 1] + 1
+            if ins < best {
+                best = ins
+            }
+            let sub = d[(r - 1) * w + c - 1] + cost
+            if sub < best {
+                best = sub
+            }
+            if r > 1 && c > 1 && x[r - 1] == y[c - 2] && x[r - 2] == y[c - 1] {
+                let tr = d[(r - 2) * w + c - 2] + 1
+                if tr < best {
+                    best = tr
+                }
+            }
+            d[r * w + c] = best
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return d[n * w + m]
+}
+
+test "toHex writes sixteen zero-padded nibbles, low byte last" {
+    // An ETag is one of these, so a drift here is a cache key that stops
+    // matching itself.
+    assertEq(toHex(0), "0000000000000000")
+    assertEq(toHex(1), "0000000000000001")
+    assertEq(toHex(255), "00000000000000ff")
+    assertEq(toHex(4886718345), "0000000123456789")
+}

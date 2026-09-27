@@ -1,0 +1,15 @@
+word	lexer	parser	checker	fmt	all
+read	0	5	0	0	5
+modify	0	5	3	0	8
+consume	0	5	0	0	5
+gen	0	3	0	0	3
+test	0	3	1	0	4
+bench	0	3	1	0	4
+panic	0	1	2	0	3
+from	0	2	0	0	2
+as	0	2	0	0	2
+extern	0	3	2	0	5
+lazy	0	1	0	0	1
+logging	0	2	0	0	2
+contract	0	1	0	0	1
+all	0	36	9	0	45

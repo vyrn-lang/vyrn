@@ -1,0 +1,6 @@
+{
+  "name": "listing",
+  "artifacts": {
+    "app": { "entry": "client/boot.vyrn", "target": "browser" }
+  }
+}

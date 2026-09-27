@@ -1,0 +1,3 @@
+33
+21
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string","minLength":3},"age":{"type":"integer","minimum":18}},"required":["name","age"],"$comment":"constrained by: age < 150"}

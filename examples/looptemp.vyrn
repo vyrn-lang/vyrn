@@ -1,0 +1,43 @@
+// A `for` whose iterable is an unnamed TEMPORARY, twice in one body.
+//
+// `[mk("a"), mk("b")]` has no name, so the statement owns it and the core
+// places its release at the exit that still holds it — the function's, for an
+// array literal. The loop variable is an alias into the temporary, so the
+// elements are released once, by that one walk, and the body frees nothing.
+//
+// Two such statements in one body is the shape that pinned this: the direct
+// backend gave the first statement's frame slot back at the end of the
+// statement, the second built its own temporary over it, and the two release
+// rows at the exit walked the same slot twice — a trap in `free` at address
+// -16, and the first array's strings leaked. The rule is on `Frame::alloc`: a
+// slot is a statement's unless something outlives the statement, and a release
+// row is such a thing.
+
+fn mk(t: String) -> Array<String> {
+    return [t.copy(), t.copy()]
+}
+
+// One statement: every element string printed twice, then released once.
+fn one() {
+    for a in [mk("a"), mk("b")] {
+        for s in a {
+            print(s)
+        }
+    }
+}
+
+// Two statements in one body, which is the defect's own shape.
+fn two() {
+    for a in [mk("c"), mk("d")] {
+        print(a[0])
+    }
+    for a in [mk("e"), mk("f")] {
+        print(a[0])
+    }
+}
+
+fn main() -> Int64 {
+    one()
+    two()
+    return 0
+}

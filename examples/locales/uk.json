@@ -1,0 +1,15 @@
+{
+    "home": {
+        "title": "Ласкаво просимо",
+        "subtitle": "Ваша панель"
+    },
+    "nav": {
+        "home": { "label": "Головна" },
+        "settings": { "label": "Налаштування" }
+    },
+    "cart": {
+        "items": "{count, plural, one {# товар} few {# товари} many {# товарів} other {# товару}}"
+    },
+    "greeting": "Привіт, {name}!",
+    "status": "{state, select, active {Активний} paused {Призупинено} other {Невідомо}}"
+}

@@ -1,0 +1,31 @@
+// The two ways a value reaches a `consume` parameter, and both are on the fix
+// menu consume_borrowed.vyrn prints.
+//
+// `owner` declares `consume` on its own parameter, so the array is its to give
+// and the move goes straight through. `lender` keeps its `read` parameter and
+// copies at the call, so the callee gets a value of its own and the caller
+// keeps the one it was lent.
+
+fn take(xs: consume Array<Int64>) -> Int64 {
+    let n = xs.length
+    drop xs
+    return n
+}
+
+fn owner(ys: consume Array<Int64>) -> Int64 {
+    return take(ys)
+}
+
+fn lender(ys: Array<Int64>) -> Int64 {
+    return take(ys.copy())
+}
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2, 3]
+    print(owner(a))
+    let b: Array<Int64> = [4, 5]
+    print(lender(b))
+    // `b` was never given away, so it is still here.
+    print(b.length)
+    return 0
+}

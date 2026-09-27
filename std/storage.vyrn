@@ -1,0 +1,60 @@
+/// std/storage: crash-safe persistence, where a save replaces the whole file or
+/// leaves the old one.
+///
+/// `writeAtomic` writes a sibling temp file and renames it over the target, so
+/// a crash leaves the whole old file or the whole new one; `writeFile` truncates
+/// first and can leave a torn file. The global forms `save`, `load` and
+/// `loadOr` expand at the call site, where the type is concrete: `save(path,
+/// value)` is `writeAtomic(path, toJson(value))`, so a module that calls `save`
+/// imports `writeAtomic`. `load` yields the prelude `LoadResult<T> = Missing |
+/// Corrupt(Array<Issue>) | Loaded(T)`.
+///
+/// `writeAtomic` is crash-consistent but not power-loss-durable: without an
+/// `fsync` the rename may not reach the disk. For durability, call
+/// `fsyncFile` yourself (fsync temp, rename, fsync dir); an fsync per save is a
+/// latency cost most programs do not want.
+import { randomSeed } from "std/random"
+
+/// Writes `content` to `path` atomically, through a temp in the same directory.
+/// A failed write leaves `path` untouched. A host effect, so generators and
+/// comptime code cannot call it.
+///
+/// The temp is `<path>.tmp.<seed>` with a per-call seed, so concurrent writers
+/// never share a temp; the last rename wins. There is no delete primitive, so a
+/// failed rename leaves its temp behind: clean `<path>.tmp.*` out of band.
+export fn writeAtomic(path: String, content: String) -> Result<Bool, String> {
+    let u: UInt64 = UInt64(randomSeed())
+    return writeAtomicTemp("\{path}.tmp.\{u.toString()}", path, content)
+}
+
+/// `writeAtomic` with the temp named by the caller, so a test can reach the
+/// rename failure.
+fn writeAtomicTemp(tmp: String, path: String, content: String) -> Result<Bool, String> {
+    return match writeFile(tmp, content) {
+        Ok(done) => renameFile(tmp, path),
+        Err(why) => Err(why),
+    }
+}
+
+fn tempName(path: String, seed: Int64) -> String {
+    let u: UInt64 = UInt64(seed)
+    return "\{path}.tmp.\{u.toString()}"
+}
+
+test "temp names differ per call, so two writers never share a temp" {
+    assertEq(tempName("state.json", 1), "state.json.tmp.1")
+    assert(tempName("state.json", 2) != tempName("state.json", 1))
+    // A negative seed rides as its UInt64 bit pattern.
+    assertEq(tempName("state.json", 0 - 7), "state.json.tmp.18446744073709551609")
+}
+
+test "a failed save reports why and leaves the target untouched" {
+    // A temp in a missing directory fails at the write; a written temp with a
+    // missing destination directory fails at the rename and leaks its temp into
+    // the suite's working directory. The name is fixed so `.gitignore` can list
+    // it.
+    let w = writeAtomicTemp("no/such/dir/state.json.tmp.9", "no/such/dir/state.json", "{}")
+    assert(match w { Ok(b) => false, Err(e) => true })
+    let r = writeAtomicTemp("wa-rename-failure-leak.tmp", "no/such/dir/state.json", "{}")
+    assert(match r { Ok(b) => false, Err(e) => true })
+}

@@ -1,0 +1,144 @@
+<script>
+// GET /play — the compiler, in the reader's browser.
+//
+// The front end is compiled to WebAssembly (`compiler/vyrn-play`) and answers
+// three questions on this page: where the tokens are, what the diagnostics are,
+// and what the program prints. All three come from the same Rust the `vyrn`
+// binary is built from, so the page cannot disagree with the compiler.
+//
+// THE PAGE IS AN EDITOR, held to a real one until it behaved like it: files are
+// YOURS — created, renamed, deleted, persisted in this browser and reopened on
+// the next visit; the examples are TEMPLATES on the Welcome view that a file is
+// created from; tabs reorder by drag and split into a second live editor group;
+// the explorer and the tabs carry real context menus; the panel's tabs follow
+// the run; and the status bar's numbers are measurements. Nothing here is a
+// picture of a control.
+//
+// EVERYTHING ON THIS PAGE IS MARKUP THE EXPORT WROTE. The examples are Vyrn
+// data rendered into hidden `<pre>` blocks, escaped by the template, and
+// `play.js` reads them back with `textContent`. Every `data-play-*` element is
+// `play.js`'s contract; the shell's own hooks are queried and silently absent
+// on the hero editors.
+import { Head } from "std/ui"
+import { pageHeadOf } from "../nav"
+import { playExamples, Example } from "../play"
+
+export fn head() -> Head {
+    return pageHeadOf("/play")
+}
+
+fn examples() -> Array<Example> {
+    return playExamples()
+}
+</script>
+
+<template>
+<main class="page play ide" data-widget="play">
+    <h1 class="sr-only">Playground</h1>
+
+    <!-- One box, because `main.page` is `display: contents` and the shell grid
+         owns its children: the editor's window is a grid of its own. -->
+    <div class="idewrap">
+        <aside class="ideside" aria-label="Files">
+            <!-- The header names which project is open. A shared link opens
+                 the sender's in a scope of its own — a project like any
+                 other, save that it is not written into the reader's files
+                 until they keep it (user: no bar, and it belongs to the
+                 window, not to one editor group). -->
+            <p class="sidehead"><span data-play-scope>Explorer</span>
+                <span class="sideacts">
+                    <button type="button" class="sideact sharedonly" data-play-keep aria-label="Save this project to my files" title="Save this project to my files" data-ico="download"></button>
+                    <button type="button" class="sideact sharedonly" data-play-discard aria-label="Close the shared project" title="Close the shared project" data-ico="close"></button>
+                    <button type="button" class="sideact" data-play-newfile aria-label="New file (Alt+Insert)" title="New file (Alt+Insert)" data-ico="file-plus"></button>
+                    <button type="button" class="sideact" data-play-newfolder aria-label="New folder" title="New folder" data-ico="folder-plus"></button>
+                    <button type="button" class="sideact" data-play-upload aria-label="Upload files" title="Upload files" data-ico="upload"></button>
+                    <button type="button" class="sideact" data-play-download aria-label="Download project (zip)" title="Download project (zip)" data-ico="download"></button>
+                    <!-- A link to the WHOLE project, beside the project's other
+                         actions — it belonged to no single editor group. -->
+                    <button type="button" class="sideact" data-play-share aria-label="Copy a link to this project" title="Copy a link to this project" data-ico="link"></button>
+                </span>
+            </p>
+            <div class="filetree" data-play-files></div>
+            <input type="file" multiple hidden="hidden" data-play-uploadinput accept=".vyrn,.txt,.md,.json"/>
+        </aside>
+        <div class="sash v" data-play-sash="side" aria-hidden="true"></div>
+
+        <div class="idemain">
+            <div class="idebar">
+                <span class="idetabs" data-play-tabs></span>
+                <span class="spacer"></span>
+                <button type="button" class="btn ib primary" data-play-run disabled="disabled" aria-label="Run (Shift+F10)" title="Run (Shift+F10)" data-ico="play"></button>
+            </div>
+            <div class="idecrumbs" data-play-crumbs aria-hidden="true">files</div>
+
+            <!-- The Welcome view: where the examples live now, as templates a
+                 file is created FROM (user). Shown when no file is open. -->
+            <div class="welcome" data-play-welcome hidden="hidden">
+                <p class="eyebrow">Start</p>
+                <h2>Type Vyrn. Run it here.</h2>
+                <p class="wnote">The compiler front end runs in this tab as WebAssembly. Files live in this browser and are here when you come back.</p>
+                <button type="button" class="tpl new" data-play-newfile><span class="tn">New file</span><span class="d">An empty .vyrn, named by you</span></button>
+                <p class="eyebrow">Templates</p>
+                <div class="tplgrid">
+                    <button type="button" class="tpl" v-for="e in examples()" :key="e.id" :data-play-tpl="e.id"><span class="tn">{{ e.id }}.vyrn</span><span class="d">{{ e.title }}</span></button>
+                </div>
+            </div>
+
+            <div class="editor" data-play-editor>
+                <div class="curline" data-play-curline aria-hidden="true"></div>
+                <div class="gutter" data-play-gutter aria-hidden="true"></div>
+                <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
+                <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>
+                <div class="minimap" data-play-minimap aria-hidden="true">
+                    <pre class="mmtext" data-play-mmtext></pre>
+                    <div class="mmview" data-play-mmview></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="sash h" data-play-sash="panel" aria-hidden="true"></div>
+        <div class="idepanel">
+            <div class="paneltabs" role="tablist" aria-label="Panel">
+                <button type="button" class="ptab" data-play-ptab="problems">Problems<span class="badge" data-play-badge hidden="hidden"></span></button>
+                <button type="button" class="ptab on" data-play-ptab="output">Output</button>
+                <button type="button" class="ptab" data-play-ptab="input">Input</button>
+            </div>
+
+            <div class="pane" data-play-pane="problems" hidden="hidden">
+                <div class="diags" data-play-diags hidden="hidden" aria-live="polite"></div>
+                <p class="cap dim" data-play-noprob>No problems. The compiler will list what it refuses here.</p>
+            </div>
+            <div class="pane" data-play-pane="output">
+                <!-- The run's answer, in a live region: running is a button
+                     press with no page load behind it, and a screen reader is
+                     otherwise told nothing. -->
+                <div class="out" data-play-out aria-live="polite"><span class="dim">Nothing has run yet.</span></div>
+            </div>
+            <div class="pane" data-play-pane="input" hidden="hidden">
+                <textarea data-play-stdin spellcheck="false" aria-label="Standard input"></textarea>
+                <p class="cap">These lines reach <code>readLine()</code>, one per call. After the last one it answers <code>None</code>.</p>
+            </div>
+        </div>
+
+        <div class="idestatus">
+            <!-- The page's four sentences about itself, as REAL markup on
+                 hover or focus — a native title clips and cannot wrap safely
+                 (user). -->
+            <span class="idehelp" tabindex="0" aria-describedby="playtip">?<span class="tipbox" id="playtip" role="tooltip">The compiler runs in this tab as WebAssembly, and so does the program it compiles. Nothing is uploaded. A program is stopped after five seconds, and recursion stops at 1,000 calls — the language's own limit, the same one <code>vyrn run</code> enforces. The tab has no filesystem and no arguments. One file runs, plus <code>std/</code>, which is built in.</span></span>
+            <span class="stat" data-play-status>Loading the compiler…</span>
+            <span class="errs"><span aria-hidden="true">⊗</span> <span data-play-errs>0</span></span>
+            <span class="spacer"></span>
+            <span data-play-lncol>Ln 1, Col 1</span>
+            <span>Spaces: 2</span>
+            <span>UTF-8</span>
+            <span>Vyrn</span>
+            <span>Shift+F10 Run</span>
+        </div>
+    </div>
+
+    <div hidden="hidden" data-play-examples>
+        <pre v-for="e in examples()" :key="e.id" :data-play-example="e.id">{{ e.src }}</pre>
+        <pre v-for="e in examples()" :key="e.id" :data-play-example-stdin="e.id">{{ e.stdin }}</pre>
+    </div>
+</main>
+</template>

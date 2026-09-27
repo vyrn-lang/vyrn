@@ -1,0 +1,3 @@
+a2_capture_escape.vyrn:4:0: `s` may not be captured by a closure that outlives this call — it is a `read` parameter
+  fix: declare the parameter `s: consume ..` if this function should own it
+  fix: `s.copy()` if both sides need a value

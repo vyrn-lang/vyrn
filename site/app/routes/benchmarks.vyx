@@ -1,0 +1,170 @@
+<script>
+// GET /benchmarks — every measured claim the site makes, on one page.
+//
+// It stands where two pages used to: `/compare`'s cross-language chart and a
+// second front's raw dataset. A reader who wants to know whether the language
+// is fast should find the complete numbers on one page. So the cards
+// the index shows six of are all here, the radar and the table are here, and
+// the method is a section rather than a disclosure at the bottom of somewhere
+// else.
+//
+// NOT ONE FIGURE IS TYPED IN. Everything below is computed in `app/bench.vyrn`
+// from the two committed JSON records, which is the rule the dataset arrived
+// with and the reason this page can be a claim at all.
+import { Head } from "std/ui"
+import { pageHeadOf } from "../nav"
+import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, benchMachine, benchRuns, envRows, run1File, run1Href, Series, Ring, Spoke, Line, Mark, Reading, Panel } from "../bench"
+import { TreeGroup, docSubnav } from "../docshell"
+
+export fn head() -> Head {
+    return pageHeadOf("/benchmarks")
+}
+
+/// Which way a cell's ratio points, against each baseline. A template
+/// attribute is delimited by the same quote a String literal is, and `'c'` in
+/// Vyrn is a byte — so the baseline's name is written here.
+fn wayC(program: String, engine: String) -> String {
+    return ratioWay(program, engine, "c")
+}
+
+fn wayRust(program: String, engine: String) -> String {
+    return ratioWay(program, engine, "rust")
+}
+
+/// The width of one engine's bar, as the share of the track the record
+/// measured. A template attribute is delimited by the same quote a String
+/// literal is, so the style string is built here.
+fn barStyle(pct: String) -> String {
+    return "width: " + pct + "%"
+}
+
+/// Whether a bar ran past the end of the track, as the attribute value the
+/// stylesheet serrates on. An attribute is a String, and a Bool is not one.
+fn overFlag(over: Bool) -> String {
+    if over {
+        return "true"
+    }
+    return "false"
+}
+
+/// A program's own block on this page. The radar's axes point at these, which
+/// is what the wedges were for before the panels left the chart's plate: a
+/// name on the rim is a link to the ten rows behind it.
+fn progHref(key: String) -> String {
+    return "#" + key
+}
+</script>
+
+<template>
+<main class="page benchpage">
+    <section class="hero benchhero">
+        <p class="eyebrow">Measured</p>
+        <h1 class="display">How fast Vyrn is, and where it is not</h1>
+        <p class="lede">The ten Benchmarks Game programs, written five ways and run on one machine.</p>
+        <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
+    </section>
+
+    <section class="band" id="programs" data-tabs>
+        <p class="eyebrow">program by program</p>
+        <h2>Every measured column, one program at a time</h2>
+        <p>A row is a deviation when Vyrn's own build is more than ten per cent off Rust — the run-to-run noise of this machine.</p>
+        <div class="tabs axes" aria-label="Choose a program">
+            <button type="button" v-for="p in axisPanels()" :key="p.key" :data-tab="p.key">{{ p.name }}</button>
+        </div>
+        <article class="progrow" v-for="p in axisPanels()" :key="p.key" :id="p.key" :data-pane="p.key">
+            <header>
+                <h3><a :href="p.game" rel="noreferrer">{{ p.name }}</a></h3>
+                <span class="size">N = {{ p.n }}</span>
+                <span class="spacer"></span>
+                <span class="bverdict">{{ nativeVsRust(p.key) }} Rust · {{ p.verdict }}</span>
+            </header>
+            <div class="scroller">
+                <table class="matrix progtable">
+                    <thead>
+                        <tr>
+                            <th scope="col">Engine</th>
+                            <th scope="col" class="trackhead">0 → 4x C</th>
+                            <th scope="col">time</th>
+                            <th scope="col">vs C</th>
+                            <th scope="col">vs Rust</th>
+                            <th scope="col">cpu s</th>
+                            <th scope="col">peak ram</th>
+                            <th scope="col">source gz</th>
+                            <th scope="col">build s</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="c in p.cells" :key="c.key" :data-tone="c.tone">
+                            <th scope="row"><a :href="srcHref(p.key, c.key)" rel="noreferrer">{{ c.name }}</a></th>
+                            <td class="track"><span class="btrack"><span class="fill" :style="barStyle(c.pct)" :data-over="overFlag(c.over)"></span></span></td>
+                            <td class="ms">{{ c.ms }}</td>
+                            <td class="vs" :data-way="wayC(p.key, c.key)">{{ c.vsC }}</td>
+                            <td class="vs" :data-way="wayRust(p.key, c.key)">{{ c.vsRust }}</td>
+                            <td>{{ c.cpu }}</td>
+                            <td>{{ c.mem }}</td>
+                            <td>{{ c.gz }}</td>
+                            <td>{{ c.make }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="bcause" v-if="p.cause.byteLength > 0"><b>{{ p.label }}</b> — {{ p.cause }}</p>
+        </article>
+    </section>
+
+    <section class="band" id="radar">
+        <p class="eyebrow">all of it at once</p>
+        <h2>Further from the centre is slower</h2>
+        <p>One axis per program, one polygon per engine.</p>
+        <div class="plate" data-widget="radar">
+            <div class="plate-head">
+                <a class="eyebrow" :href="run1Href()" rel="noreferrer">{{ run1File() }}</a>
+            </div>
+            <div class="stage">
+                <svg class="chart radar" :viewBox="radarBox()" role="img" aria-label="A radar with one axis per Benchmarks Game program and one polygon per contestant. Every reading it plots is in the table below it.">
+                    <g class="axis">
+                        <polygon v-for="r in radarRings()" :key="r.id" :class="r.tone" :points="r.points"/>
+                        <line v-for="s in radarSpokes()" :key="s.key" :x1="radarCx()" :y1="radarCy()" :x2="s.x" :y2="s.y"/>
+                        <text v-for="r in radarRings()" :key="r.id" :x="radarCx()" :y="r.y" dx="6" dy="-3">{{ r.label }}</text>
+                    </g>
+                    <g class="series" v-for="l in radarLines()" :key="l.key" :data-series="l.key">
+                        <polygon :class="l.tone" :points="l.points"/>
+                        <g class="marks">
+                            <path v-for="m in l.marks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
+                        </g>
+                    </g>
+                    <g class="wedges">
+                        <a v-for="s in radarSpokes()" :key="s.key" :href="progHref(s.key)"><polygon class="wedge" :points="s.wedge"><title>{{ s.name }} — its ten rows</title></polygon></a>
+                    </g>
+                    <g class="names">
+                        <a v-for="s in radarSpokes()" :key="s.key" :href="progHref(s.key)"><text :x="s.lx" :y="s.ly" :text-anchor="s.anchor">{{ s.name }}</text></a>
+                    </g>
+                </svg>
+            </div>
+            <div class="serieskeys" role="group" aria-label="Show or hide a contestant">
+                <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
+            </div>
+            <p class="cap">Every ring out from C is a doubling; the rim is sixteen times C, and a reading past it is drawn at the rim with a stroke continuing outward. An axis name opens that program above.</p>
+        </div>
+    </section>
+
+    <section class="band" id="method">
+        <p class="eyebrow">how this was measured</p>
+        <h2>The method, and what it does not claim</h2>
+        <ul class="docprose">
+            <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node. No hand-written vector instructions and no threads in any of them.</li>
+            <li>All five printed the same bytes before anything was timed.</li>
+            <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine, one afternoon.</li>
+            <li>CI does not run this harness — it needs clang, rustc, node and wasmtime together — so it is run by hand and the committed JSON is the record.</li>
+            <li>Nothing here claims a trend over time. For that there is <a href="/tooling/testing.html">vyrn bench</a>, which times one operation rather than one program.</li>
+        </ul>
+        <div class="scroller">
+            <table class="matrix">
+                <tbody>
+                    <tr v-for="r in envRows()" :key="r[0]"><th scope="row">{{ r[0] }}</th><td>{{ r[1] }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</main>
+</template>

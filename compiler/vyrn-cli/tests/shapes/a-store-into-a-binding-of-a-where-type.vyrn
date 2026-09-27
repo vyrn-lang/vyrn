@@ -1,0 +1,2 @@
+// a store into a binding of a `where` type
+type Age = Int64 where value >= 18 fn vyrnTestMain() -> Int64 { let mut a: Age = 20 a = a - 15 return a }

@@ -1,0 +1,178 @@
+; vyrn lowered v2 -- examples/releaseacrossexit.vyrn
+
+fn Owned__Ring__release(self)
+  {
+    let @borrow = read self.label
+    let @t1! = prim add(lit "release ", @borrow)
+    do builtin print(read @t1!)
+    drop @t1!
+    let @t2! = take self.label
+    let label! = @t2!
+    drop label!
+  }
+
+fn main()
+  {
+    let a = fn overMatch()
+    do builtin print(read lit "after match")
+    let b = fn overHandover()
+    do builtin print(read lit "after handover")
+    let c = fn overIfLet()
+    do builtin print(read lit "after iflet")
+    let g = fn overForIn()
+    do builtin print(read lit "after forin")
+    let d = fn overBreak()
+    do builtin print(read lit "after break")
+    let e = fn overContinue()
+    do builtin print(read lit "after continue")
+    let f = fn overReturn()
+    do builtin print(read lit "after return")
+    return lit 0
+  }
+
+fn maybeRing(yes)
+  {
+    if yes
+      {
+        let @t1! = fn ringOf(read lit "scrutinee")
+        let @t2! = ctor Some(consume @t1!)
+        return @t2!
+      }
+    else
+    let @nullary = ctor None()
+    return @nullary
+  }
+
+fn overBreak()
+  {
+    let i = lit 0
+    loop
+      let @t1 = prim lt(i, lit 3)
+      if @t1
+      else
+        break
+      {
+        let inLoop! = fn ringOf(read lit "break")
+        let @t2 = prim eq(i, lit 0)
+        if @t2
+          {
+            drop inLoop! minus []
+            break
+          }
+        else
+        let @t3 = prim add(i, lit 1)
+        i = @t3  (Transferred)
+        drop inLoop! minus []
+      }
+    return lit 3
+  }
+
+fn overContinue()
+  {
+    let i = lit 0
+    loop
+      let @t1 = prim lt(i, lit 3)
+      if @t1
+      else
+        break
+      {
+        let inLoop! = fn ringOf(read lit "continue")
+        let @t2 = prim add(i, lit 1)
+        i = @t2  (Transferred)
+        drop inLoop! minus []
+        continue
+      }
+    return lit 4
+  }
+
+fn overForIn()
+  {
+    let @t1! = fn ringList()
+    let @t2 = read @t1!.length
+    let @t3 = lit 0
+    loop
+      let @t4 = prim lt(@t3, @t2)
+      if @t4
+      else
+        break
+      {
+        let r = read @t1![@t3]
+        let @t5 = prim add(@t3, lit 1)
+        @t3 = @t5  (Nothing)
+        do builtin print(read lit "seen")
+      }
+    drop @t1! minus []
+    return lit 6
+  }
+
+fn overHandover()
+  {
+    let @t2! = fn maybeRing(read lit true)
+    switch @t2! (taken)
+      arm(r!)
+        @t1! = r!  (Nothing)
+      arm()
+        let @t3! = fn ringOf(read lit "fallback")
+        @t1! = @t3!  (Nothing)
+    let kept! = @t1!
+    do builtin print(read lit "held")
+    drop kept! minus []
+    return lit 1
+  }
+
+fn overIfLet()
+  {
+    let @t1! = fn maybeRing(read lit true)
+    switch @t1! (taken)
+      arm(r!)
+        {
+          do builtin print(read lit "bound")
+        }
+        drop r!
+      arm()
+    return lit 2
+  }
+
+fn overMatch()
+  {
+    let @t2! = fn maybeRing(read lit true)
+    switch @t2! (taken)
+      arm(r!)
+        @t1 = lit 1  (Nothing)
+        drop r!
+      arm()
+        @t1 = lit 0  (Nothing)
+    let n = @t1
+    return n
+  }
+
+fn overReturn()
+  {
+    let outer! = fn ringOf(read lit "outer")
+    if lit true
+      {
+        let inner! = fn ringOf(read lit "inner")
+        drop inner! minus []
+        drop outer! minus []
+        return lit 5
+      }
+    else
+    drop outer! minus []
+    return lit 0
+  }
+
+fn ringList()
+  {
+    let xs! = make array()
+    let @t1! = fn ringOf(read lit "elem")
+    let @t2! = builtin @push(consume xs!, consume @t1!)
+    xs! = @t2!  (Transferred)
+    return xs!
+  }
+
+fn ringOf(label)
+  {
+    let @t1! = reserved @copy(read label)
+    let @t2! = make Ring {label}(@t1!)
+    return @t2!
+  }

@@ -1,0 +1,25 @@
+// a heap element of a call result in a take position
+// `return words()[1]`, `xs.push(words()[0])`, `R { s: words()[0] }` and
+// `s = words()[0]` each take a copy of the element, and the temporary is
+// released whole once the copy is bound (#537). A record element taken into
+// a record destination is copied too.
+type Piece = { id: String, lines: Array<String> }
+type R = { s: String, p: Piece }
+fn words() -> Array<String> { return ["a" + 1.toString(), "bc" + 2.toString()] }
+fn pieces() -> Array<Piece> { return [Piece { id: "h" + 1.toString(), lines: ["a" + 2.toString(), "b"] }, Piece { id: "x" + 3.toString(), lines: ["c" + 4.toString()] }] }
+fn second() -> String { return words()[1] }
+fn first() -> Piece { return pieces()[0] }
+fn vyrnTestMain() -> Int64 {
+    let a = second()
+    let p = first()
+    let mut xs: Array<String> = []
+    xs.push(words()[0])
+    let mut ps: Array<Piece> = []
+    ps.push(pieces()[1])
+    let r = R { s: words()[0], p: pieces()[1] }
+    let mut s = "z" + 9.toString()
+    s = words()[0]
+    let mut q = pieces()[0]
+    q = pieces()[1]
+    return a.byteLength * 1000000 + p.lines.length * 100000 + xs[0].byteLength * 10000 + ps[0].id.byteLength * 1000 + r.s.byteLength * 100 + r.p.lines.length * 10 + s.byteLength + q.lines.length
+}

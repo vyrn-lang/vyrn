@@ -1,0 +1,2 @@
+# Everything run.py compiles or generates. The record is `../results/*.json`.
+build/

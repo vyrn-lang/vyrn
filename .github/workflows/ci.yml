@@ -1,0 +1,980 @@
+# WHERE THIS WORKFLOW'S TIME GOES, measured rather than guessed: median step
+# seconds over the last four main-branch runs (32303455868, 32310445020,
+# 32316020952, 32387445497), from `gh run view --json jobs`. Every job starts at
+# once, so the wall clock is the slowest job and the slowest job is `test`.
+#
+#   step                          ubuntu  arm    windows  macos
+#   Rust cache (restore)              10    6        14      10
+#   Formatting gate                    4    3         4       1
+#   Workspace tests                  306  288       398     244
+#   Browser runtime tests (node)       0    0         1       1
+#   LSP tests (excluded crate)        56   46       124      57
+#   Docs drift gate                    0    0         0       0
+#   install.sh / install.ps1           0    0         4      19
+#   Bench --check                    662  673       746     456
+#   ---------------------------------------------------------------
+#   job total                       1141 1043      1243     692
+#
+#   route (was parity): harness 468, residue 468, build 18, codegen 8,
+#     universal-pages 13                                           -> 1029
+#   gen-engine: the one release test 57                            ->  66
+#   bench: run + compare 114, build 15                             -> 134
+#
+# Two facts the table settles. The caches are already right: `Swatinem/rust-cache`
+# restores in 6-14 s and the builds behind every step above are warm (an 18 s
+# `cargo build -p vyrn-cli` in the route job is the proof), so there is no
+# cargo-caching win left to take here. And the long poles are not builds at all —
+# they are two steps that run work in series on a runner with idle cores:
+# `Bench --check`, thirteen independent processes in a `for` loop, and
+# `Workspace tests`, 65 test binaries that `cargo test` starts one at a time.
+# Both are fixed below, and each step says how.
+#
+# What was measured and left alone: the node step (0-1 s) and the docs drift gate
+# (0 s) run on all four platforms, and moving them to one leg would save nothing
+# a table can see. `install.sh`/`install.ps1` are per-platform scripts and belong
+# on the platform they install for. The bench and gen-engine jobs are 134 s and
+# 66 s against a 1243 s critical path, so nothing they could save is visible.
+#
+# WHAT THE TWO STEPS COST AFTERWARDS, over two runs of this change — 32401431905
+# cold for both new caches, then 32403119413 warm. The WORSE of the two is quoted
+# per cell, because the two runs disagree by up to 40% on identical ubuntu-latest
+# steps (402 s against 261 s for the same bench corpus) and that spread is the
+# fleet spread `BENCH_THRESHOLD` below already documents: one label, several CPU
+# models. A number picked from the kinder run would be a claim about scheduling.
+#
+#   step                          ubuntu  arm    windows  macos
+#   Workspace tests              306→201 288→136 398→286 244→140
+#   Bench --check                662→402 673→294 746→430 456→221
+#   ---------------------------------------------------------------
+#   job total                   1141→704 1043→507 1243→967 692→484
+#
+# The critical path is the Windows leg before and after, so the whole run went
+# 1248 s to 983 s cold and 863 s warm. What the warm run bought is the tool
+# cache: `Pinned test-runner cache` hits in 1-2 s and `Build vyrn, and put the
+# pinned test runner on PATH` drops from 26-44 s to 12-32 s, because it stops
+# paying nextest's fetch.
+#
+# ROUND TWO, because 863 s is still fourteen minutes of Windows and the reason
+# was structural: the three heavyweights were STEPS IN ONE JOB. Windows spent
+# 252 s on the workspace suite, then 412 s on the bench corpus, then 111 s on the
+# LSP crate — 775 s in series between three things that never read each other's
+# output. A step can only wait its turn.
+#
+# Two changes, and the smaller-looking one is the bigger:
+#
+#   1. The old `test` job is now `test` (fmt + the workspace suite) and `checks`
+#      (bench, LSP, genwasm, node, docs, install), which run at the same time.
+#      Two jobs and not three — a third was measured on paper and does not move
+#      the pole, which is now the workspace suite.
+#   2. `checks` builds vyrn `--release`. `bench --check` compiles and runs every
+#      bench body, so the compiler's own speed IS that step, and a debug build
+#      is several times slower per bench. Over the corpus on one machine, when
+#      the body ran under the tree-walker: 323 s serial / 148 s at -P 4 debug,
+#      against 62 s serial / 29 s at -P 4 release. Release+SERIAL beat
+#      debug+parallel by 2.4x, and the optimization level was always the larger
+#      lever.
+#
+# The workspace suite still runs in debug, so every `debug_assert!` still has a
+# job that trips it. Same corpus, same one-run-per-body, same verdict.
+#
+# WHERE IT LANDED, from run 32408641317 (warm; 32407284624 is the cold one):
+#
+#   step                          ubuntu  arm    windows  macos
+#   Bench --check                662→ 45 673→ 36 746→ 59 456→ 28
+#   Workspace tests              306→153 288→129 398→253 244→129
+#   LSP tests (excluded crate)    56→ 63  46→ 47 124→128  57→ 64
+#   Build vyrn (release), new         50     45      87     46
+#   ---------------------------------------------------------------
+#   tests (workspace) job             181    161     319    176
+#   checks job                        179    153     319    195
+#   CRITICAL PATH (the max)      1141→181 1043→161 1243→319 692→195
+#
+# The bench gate went 10-15x, and that is the release binary rather than the
+# `xargs` — one bench dominated the corpus, so no -P could have cut below it.
+# The LSP step costs what it always did; it simply stopped being in series with
+# the two big ones. On Windows the two jobs come out at 319 s each, which is the
+# balance a two-way split is supposed to find and the reason a third job would
+# only have added a checkout.
+#
+# THERE IS NO SINGLE POLE any more — except that the exit-residue ratchet (in
+# the route job) compiles the corpus a second and a third time and roughly
+# doubles that job, which makes `route` the pole again at about 17 minutes. It
+# is a whole-corpus gate that has caught real leaks and it runs in parallel with
+# everything else, so the added WALL time is its own excess over the test job
+# and nothing else waits on it. The Windows test leg sits at ~310-320 s. Cutting
+# further therefore means the two harnesses themselves — a change to them, not
+# to this file.
+
+name: CI
+
+on:
+  # `workflow_dispatch` is the escape hatch release.yml's gate needs: that gate
+  # refuses to publish a tag whose commit has no successful CI run, and a
+  # docs-only commit (see `paths-ignore`) has no run at all. Re-run CI here
+  # against the tagged commit and the release goes through.
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Docs-only commits don't need a build.
+    #
+    # What this makes one-directional, stated rather than left to be discovered:
+    # `docs/api/` is generated Markdown and the "Docs drift gate" step below is
+    # what keeps it honest — but a commit touching ONLY `docs/api/*.md` matches
+    # `**.md` and runs no workflow, so a hand-edit there is not caught until the
+    # next commit that does build. Caught late, not never. The alternative —
+    # dropping `**.md` — puts a full four-platform matrix plus the route behind
+    # docs-only commit, which is a worse trade for a directory nothing reads
+    # (`vyrn doc --verify` regenerates it either way).
+    paths-ignore:
+      - '**.md'
+      - 'editor/**'
+  # No path filter: `main` requires this workflow's checks, and a check that
+  # never reports never passes, so a docs-only pull request runs it too.
+  pull_request:
+
+# Read-only token for every job here: none of them touches releases, packages
+# or Pages, and pull_request runs execute PR-supplied code (build.rs, test
+# binaries). Workflows that do write declare their scopes where they are used
+# — release.yml at the top, site.yml on its deploy job alone.
+permissions:
+  contents: read
+# Stacked pushes cancel the superseded run — only the newest commit's
+# verdict matters on a branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts bloat the cache and don't help clean CI builds.
+  CARGO_INCREMENTAL: 0
+  # A missing external tool must FAIL a job here, never skip quietly. The route
+  # harness drops the wasm column with a `NOTE` when `wasmtime` is absent, and the
+  # memory census skips whole when `node` is, so a restored-but-empty cache or a
+  # renamed release asset reads as green while a third of the gate does not run.
+  # `tests/common/mod.rs` and `tests/memory.rs` read this and panic instead.
+  VYRN_REQUIRE_TOOLS: "1"
+  # THE REGRESSION THRESHOLD, in one place. Two mechanisms keep it meaningful
+  # across a runner fleet that is not one machine, and both are worth knowing
+  # before reading the number:
+  #
+  #   * The HOST CORRECTION. `--compare` divides every factor by the median of
+  #     the matched benches, which is this runner's speed against the one the
+  #     baseline was seeded on. The corpus measures that median drifting 1.2x to
+  #     1.35x between `ubuntu-latest` runners - a third of this threshold spent
+  #     before any Vyrn changes. A real regression lands in one bench and barely
+  #     moves a median of dozens; a slow runner moves them all and cancels.
+  #     Below eight matched benches the correction stands down (the median would
+  #     BE the regression), so a small example compares raw.
+  #
+  #   * The UNGATE LIST, `bench/ungated.txt`: benches recorded but not failed
+  #     on, each with its evidence written beside it. One entry today, an 8 KB
+  #     alloc-copy-free loop that spans 39x across runners on identical code.
+  #
+  # `vyrn bench --compare` calls a bench
+  # regressed when its `min` exceeds `baseline min * BENCH_THRESHOLD`.
+  #
+  # 2.0, chosen against the noise rather than against a wish:
+  #
+  #   * The statistic compared is the MINIMUM of >= 31 samples, each auto-scaled
+  #     to take >= 1 ms. A preempted sample on a shared runner raises the mean and
+  #     the median; it cannot lower the minimum. Most of the noise is already gone
+  #     before the comparison starts.
+  #   * What remains is not run-to-run jitter but FLEET spread: `ubuntu-latest` is
+  #     several CPU models under one label, and a scheduler that hands out a
+  #     different one shifts every row at once. A margin that a fleet change can
+  #     cross turns main red for a reason no commit caused, and a gate that cries
+  #     wolf gets switched off — which is worse than a loose one.
+  #   * The regressions this project has actually had are not marginal. Census P1
+  #     was 52x, the fixed-array element read was 8x, and the module-state append
+  #     spine was unbounded. A 2x margin catches all of them with room to spare.
+  #
+  # Lower it once the `bench-json` artifacts show what the real spread between
+  # consecutive main runs is. Do not raise it without the same evidence.
+  BENCH_THRESHOLD: "2.0"
+
+jobs:
+  test:
+    name: tests (workspace) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # The opposite of the release matrix's setting, for the opposite reason:
+      # there a partial matrix must not publish, so the first failure cancels the
+      # rest. Here the whole point is to learn WHICH platforms are broken. One
+      # red leg cancelling the other three would hide a second bug behind the
+      # first and cost another round trip to find it.
+      fail-fast: false
+      matrix:
+        # The platforms release.yml ships, and only those: every published binary
+        # is now built by a machine whose tests ran. Before this, no test had
+        # ever executed on macOS, and Windows was covered only by the
+        # maintainer's dev machine — informally, and never on a pull request.
+        #
+        # This is the cheap tier on purpose: pure Rust, no clang, no wasi
+        # sysroot, no wasmtime download. The expensive jobs below stay on
+        # ubuntu-latest, where a second architecture buys little: the module
+        # targets wasm32, so the HOST architecture does not change its layout.
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        # Every step below is a POSIX shell script — `set -e`, `$(…)`, `for f
+        # in`. windows-latest defaults to pwsh, which parses none of it. Git Bash
+        # ships on that runner and brings `grep` with it, so one line here keeps
+        # the four legs running byte-identical scripts instead of forking every
+        # step on `runner.os`.
+        shell: bash
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Unlike actions/cache with a lockfile key (which never re-uploads
+        # after the first hit, so every run rebuilt all vyrn-* crates from a
+        # stale target), rust-cache refreshes the saved target dir per run
+        # and prunes stale artifacts.
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          # `compiler` alone now: the LSP crate moved to the `checks` job, and a
+          # workspace listed here that this job never builds is a target tree
+          # saved and restored for nothing — which matters against the 10 GB
+          # repository cache cap the split already pushes on.
+          workspaces: compiler
+      - name: Pinned test-runner cache
+        # `cargo-nextest` is a pinned tool like wasmtime: a row in
+        # `toolpin.rs`, a version in `vyrn.json`, four hash-locked lines in
+        # `vyrn.lock`, and `~/.vyrn/tools/<sha256>/` to unpack into. Same key
+        # shape as the route job's, with two differences that matter:
+        #
+        #   * `${{ matrix.os }}` is in the key, because this is a four-platform
+                #     job is ubuntu-only and needs no such word.
+        #   * a DISTINCT prefix from `vyrn-tools-`, because the two jobs put
+        #     different subsets of the same directory in the cache. Sharing one
+        #     key would let this job's nextest-only save answer the route job's
+        #     restore as a hit — and its populate step is `if: cache-hit !=
+        #     'true'`, so wasmtime would silently never arrive.
+        # actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.vyrn/tools
+          # `-v2-`: the audit added the `.vyrn-sha` certification marker to
+          # unpacked tool directories, and a pre-marker cache restores as a
+          # hit the resolver then treats as absent. The bump makes those
+          # caches miss once, so the populate step lays certified copies.
+          key: vyrn-nextest-v2-${{ matrix.os }}-${{ hashFiles('vyrn.lock') }}
+      - name: Formatting gate
+        # First, because it is seconds and its fix is mechanical — a reader gets
+        # the verdict before the build spends five minutes.
+        #
+        # Three manifests, not one: `vyrn-lsp` and `vyrn-genwasm` are excluded
+        # from the workspace (see compiler/Cargo.toml), so `cargo fmt` at the
+        # root never reaches them. An excluded crate is exactly the kind that
+        # drifts unwatched.
+        #
+        # rustfmt's defaults, with no rustfmt.toml: every crate is edition 2021,
+        # so style_edition is 2021 and the defaults are frozen by rustfmt's own
+        # stability promise. Nothing here needs configuring.
+        working-directory: compiler
+        run: |
+          cargo fmt --check
+          cargo fmt --check --manifest-path vyrn-lsp/Cargo.toml
+          cargo fmt --check --manifest-path vyrn-genwasm/Cargo.toml
+      - name: Build vyrn, and put the pinned test runner on PATH
+        # Two things this job needed anyway, in one step. `vyrn-cli` is built by
+        # the test compile regardless — the suites spawn the binary — so hoisting
+        # it here costs nothing and gives the two steps below something to call
+        # that is not `cargo run`.
+        #
+        # The runner's directory comes from the resolver's own last line
+        # (`<spec> -> <dir>`), not from a `find` over `~/.vyrn/tools`: a stale
+        # directory from an earlier pinned version would answer a `find` just as
+        # happily as the current one, and CI would run a version nothing pins.
+        # `--locked` fetches only what `vyrn.lock` pins FOR THIS PLATFORM (so no
+        # wasmtime and no 150 MB sysroot arrive here), verifies every byte
+        # against the recorded sha256, refuses a mismatch, and never writes the
+        # lock — a cache miss cannot silently re-pin anything.
+        run: |
+          set -eu
+          cargo build --quiet --manifest-path compiler/Cargo.toml -p vyrn-cli
+          line=$(compiler/target/debug/vyrn update --locked cargo-nextest | tail -1)
+          # Forward slashes so the one Windows leg's path works both as a bash
+          # test below and as a PATH entry.
+          dir=$(printf '%s' "${line#*-> }" | tr '\\' '/')
+          [ -x "$dir/cargo-nextest" ] || [ -x "$dir/cargo-nextest.exe" ] || {
+            echo "the pin resolved to a directory with no cargo-nextest in it: $line" >&2
+            exit 1
+          }
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (a project that never pinned behaves as it always
+        # did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          compiler/target/debug/vyrn update --locked wabt >/dev/null
+          compiler/target/debug/vyrn update --locked simde >/dev/null
+          wasm2c=$(compiler/target/debug/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/debug/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
+      - name: Workspace tests
+        working-directory: compiler
+        # `cargo nextest run`, not `cargo test`: cargo runs the workspace's 65
+        # test binaries one after another, and nextest runs every test in its own
+        # process with all of them in flight. Measured warm on one machine over
+        # this workspace: 155 s under `cargo test`, 53 s under nextest, same 1753
+        # passed and 69 skipped.
+        #
+        # It is the WORKSPACE step only. The LSP crate's two binaries were
+        # measured too — 11 s either way, because two binaries have nothing to
+        # interleave — so that step stays on `cargo test` rather than gaining a
+        # tool for no reason.
+        #
+        # `--no-fail-fast` keeps what `cargo test` gave: nextest stops the whole
+        # run at the first failure by default, and this job exists to learn WHICH
+        # tests are broken (`fail-fast: false` on the matrix, for the same
+        # reason). `--status-level fail` is the `--quiet` it replaces — the
+        # failures and the summary, not 1753 lines of PASS.
+        run: cargo nextest run --no-fail-fast --status-level fail
+
+  checks:
+    name: checks (bench, LSP, genwasm, docs, install) — ${{ matrix.os }}
+    # THE OTHER HALF OF THE OLD `test` JOB, and the reason it is a job rather
+    # than more steps: everything here is independent of the workspace suite, and
+    # a step can only wait its turn. The old job ran fmt, the workspace suite,
+    # node, the LSP crate, the docs gate, the install script and the bench corpus
+    # in one line — 855 s on Windows, of which 252 s and 412 s were two steps
+    # that never needed each other's output.
+    #
+    # Two jobs and not three. A third (LSP and the small gates on their own)
+    # was measured on paper against the numbers below and buys nothing: it would
+    # be ~160 s against `tests (workspace)`'s ~290 s, so the critical path does
+    # not move and it costs another checkout, another cache slot and another
+    # release build. The split stops where the pole stops moving.
+    #
+    # The cost this pays, stated: a second job per platform is a second checkout
+    # (2-9 s), a second cache restore (4-42 s) and its own build. It is worth it
+    # only because the two halves are each hundreds of seconds. The ceiling to
+    # watch is the repository's 10 GB cache cap — this takes the Rust cache slots
+    # from 7 to 11, and if eviction starts making runs partially cold, merging
+    # this job's `compiler` slot with the test job's via rust-cache's
+    # `shared-key` is the first thing to try.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: |
+            compiler
+            compiler/vyrn-lsp
+            compiler/vyrn-genwasm
+          # Its own slot: this job builds vyrn-cli in RELEASE and the test job
+          # builds it in debug, and one slot holding both target trees would be
+          # twice the size for two jobs that never read each other's half.
+          prefix-key: checks
+      - name: Build vyrn (release)
+        working-directory: compiler
+        # `--release`, and the bench step below is why. `vyrn bench --check`
+        # runs every bench body once, compiling it first (the compiled route is
+        # the default), so this binary's own speed is the whole cost of that
+        # step — and a debug one is 4-7x slower per bench than an optimized one.
+        # Measured over the corpus on one machine: 323 s serial and 148 s at
+        # -P 4 with a debug binary, against 62 s serial and 29 s at -P 4 with a
+        # release one. Release+serial beats debug+parallel by 2.4x, so this is
+        # the larger of the two levers and it is not parallelism.
+        #
+        # `gen-engine` below already made this trade and wrote down the same
+        # shape of number ("20 s release against 98 s debug"), so this is the
+        # established answer here rather than a new idea.
+        #
+        # WHAT THE GATE LOSES BY NOT BEING DEBUG: nothing it could have caught.
+        # `--check` compiles no NATIVE code and runs no clang, and the whole
+        # workspace carries four first-party `debug_assert!`s — two in
+        # vyrn-codegen, one in vyrn-lower, one in vyrn-genwasm. The 1753-test
+        # workspace suite still
+        # runs in debug, so every `debug_assert` that exists still has a job that
+        # trips it. What the gate verifies — that each bench body still compiles
+        # and still runs, deterministically — is unchanged, and so is the corpus.
+        run: cargo build --quiet --release -p vyrn-cli
+      - name: Bench --check (deterministic)
+        # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
+        # body ONCE on the compiled route — deterministic, no clang, no timing —
+        # so a bench that stops compiling/running fails the build. The corpus is
+        # every example carrying `bench "` (benching, smallarray, and any future
+        # one).
+        #
+        # It was the longest step in CI: 662 s on ubuntu and 746 s on Windows,
+        # thirteen independent processes run one after another with a debug
+        # binary. Two things fixed it, and the ORDER of their sizes is the
+        # finding — the release binary above is worth more than the parallelism,
+        # because one bench dominates the corpus (spectralnorm is 95 s of the
+        # 323 s debug total, so no -P can cut below it, while release takes that
+        # same bench to 16 s).
+        #
+        # `-P 4` and not `$(nproc)`: `nproc` is not on macOS, every runner in
+        # this matrix has at least three cores, and slight oversubscription on a
+        # three-core box costs far less than the serial loop did.
+        #
+        # The built binary rather than `cargo run` per file, for the reason the
+        # bench job below already uses it: four concurrent `cargo run`s would
+        # queue on cargo's build lock and undo the parallelism.
+        #
+        # Output is collected per file and printed in corpus order after the
+        # run — interleaved stdout from four processes is not a log anyone can
+        # read, and the order a failure appears in must not depend on scheduling.
+        working-directory: compiler
+        run: |
+          set -eu
+          corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
+          [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
+          echo "bench corpus:"; echo "$corpus"
+          logs=$(mktemp -d)
+          status=0
+          printf '%s\n' $corpus | xargs -P 4 -I@ sh -c \
+            '"$1" bench "@" --check > "$2/$(basename @ .vyrn).log" 2>&1' \
+            sh target/release/vyrn "$logs" || status=1
+          for f in $corpus; do
+            echo "== vyrn bench --check $f =="
+            cat "$logs/$(basename "$f" .vyrn).log" 2>/dev/null \
+              || echo "(no output: this bench never ran)"
+          done
+          exit $status
+      - name: LSP tests (excluded crate)
+        working-directory: compiler
+        # Stays on `cargo test`: measured 11 s either way against nextest, warm,
+        # 83 passed and 4 ignored under both, because two test binaries have
+        # nothing to interleave. Its 47-141 s here is compiling that excluded
+        # crate, not running it — which is also why it belongs in the job that is
+        # not the critical path.
+        run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
+      - name: genwasm tests (excluded crate)
+        working-directory: compiler
+        # The same shape as the LSP step above, for the same reason:
+        # `vyrn-genwasm` is excluded from the workspace (its embedded wasmtime
+        # is heavy), so no other job compiles it as a test target — `gen-engine`
+        # drives the generation engine end-to-end through `vyrn-cli`, but the
+        # crate's own `#[cfg(test)]` unit tests compiled and ran nowhere. They
+        # belong beside the crate they sit next to in the exclude list, on all
+        # four platforms; the wasmtime tree they drag in is why their target
+        # dir joined this job's `workspaces` above rather than paying a cold
+        # build on every run.
+        run: cargo test --quiet --manifest-path vyrn-genwasm/Cargo.toml
+      - name: Browser runtime tests (web/) and the extension's own
+        # The zero-dependency JavaScript beside the compiler gets the same gate.
+        # node:test is in the runner's Node already, so this adds no install.
+        #
+        # `editor/vscode/test/` needs no install either: `extension.js` requires
+        # `vscode-languageclient` inside `activate()`, so the module loads with
+        # nothing in `node_modules`, and the test imports the real
+        # server-resolution helpers rather than a copy of them.
+        run: node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"
+      - name: Docs drift gate
+        # The committed std API docs (docs/api/) must match what `vyrn doc`
+        # generates from std/ — regenerated in the same commit as any std doc
+        # change. Cheap (no clang): --verify writes nothing and exits 1 on drift.
+        #
+        # The release binary built above, not `cargo run`: same program, same
+        # answer, and it is already sitting there.
+        working-directory: compiler
+        run: target/release/vyrn doc --std -o ../docs/api --verify
+      - name: The install script installs, and refuses what it cannot verify
+        if: runner.os != 'Windows'
+        # `install.sh` and `install.ps1` were executed by NOTHING — including the
+        # checksum refusal the README advertises and the release notes point at.
+        # The harness serves a fake release over a local python `http.server`
+        # (the `VYRN_REPO`/`VYRN_DOWNLOAD` hooks the script's own header says are
+        # "used by the test harness"), so it needs no network and no release.
+        run: sh install-test.sh
+      - name: The install script installs, and refuses what it cannot verify
+        if: runner.os == 'Windows'
+        # Windows PowerShell rather than the job's bash default: `install.ps1` is
+        # what the documented `irm | iex` line runs, so it is what gets executed.
+        shell: powershell
+        run: |
+          & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  judgments:
+    name: the judgments over the corpus (kernel, effects, typed, core tables)
+    # These four suites build the named core for every instance of every corpus
+    # program and walk it: about eleven minutes together. They used to run
+    # inside `tests (workspace)`, where they tripled that job — 8 minutes to 27
+    # on the Windows leg — for no gain, because CI wall time is the slowest job
+    # and not the sum. They are `#[ignore]`d for the same reason the route
+    # harness is, and they gate here instead, in parallel (each carries its
+    # own RATCHET).
+    # The test sweep runs here too: it checks every program a test writes with
+    # the kernel and without it, and it is ignored for the same reason.
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: The linear judgment over the corpus
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test kernel -- --ignored --nocapture
+      - name: The plan's tables against the core's
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test coretables -- --ignored --nocapture
+      - name: The effect judgment beside the audience and the floor
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test effects -- --ignored --nocapture
+      - name: Typed by construction over the corpus
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test typed -- --ignored --nocapture
+      - name: No program a test writes is refused by the kernel alone
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test testsweep -- --ignored --nocapture
+
+  route:
+    name: the native route (wasm2c == wasm)
+    # x86-64 only, on purpose, and here is the case for the ARM leg that is NOT
+    # here so the next reader does not have to rebuild it.
+    #
+    # There is one native route — the module `--target wasm` writes, through
+    # wasm2c and clang — so this job compares that binary with the same
+    # module under the `wasmtime` CLI (`tests/route.rs`). It needs wabt, and
+    # `vyrn.lock` pins one wabt asset per platform: the Windows one hashed from
+    # its bytes, the three others by the sha256 the release publishes beside
+    # each asset, which `vyrn update --locked` checks against what it downloads
+    # `VYRN_REQUIRE_TOOLS=1` is what makes a missing tool fail
+    # here instead of skipping the corpus quietly.
+    #
+    # What an `ubuntu-24.04-arm` copy of this job would NOT add: a second layout
+    # ABI. The module targets wasm32 whatever the host, and the layout engine is
+    # the one emitter's; the SIMD types are the same story.
+    #
+    # What it WOULD add: the route's own column on aarch64 — the same module
+    # through wasm2c and a different clang to a different machine code, compared
+    # byte for byte against the engine. That is a genuine second target for
+    # everything the C compiler decides.
+    #
+    # What it would cost, measured against run 31724777591 (warm caches): this
+    # job takes about 8 minutes and runs in parallel with the others, so the
+    # added WALL time is zero and the added runner minutes are free — the repo
+    # is public. The one-time work is a second cache slot and one more wabt row
+    # in the lock. clang is preinstalled on the ARM image.
+    #
+    # A cheap, real addition — deliberately left as its own change, because a
+    # matrix leg nobody has watched go green is a claim, not a gate.
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+          # Separate cache from the test job — different build graph (only
+          # vyrn-cli's route test) and keeps both under the size cap.
+          prefix-key: route
+      - name: Pinned tool cache
+        id: wasm-tools
+        # The ONLY job that needs these now. It was shared with gen-engine,
+        # which exported WASI_SYSROOT/WASI_BUILTINS that nothing in its build
+        # read: the shim lives in the direct backend.
+        #
+        # Every piece is live HERE, and each for a different step: the route
+        # harness needs wasmtime for the column it compares against and wabt and
+        # simde for the route itself, and the codegen integration tests below
+        # need wasmtime.
+        #
+        # Which versions those are is `vyrn.json`'s answer and which
+        # BYTES are `vyrn.lock`'s, so the key is the lock's hash — a version bump
+        # invalidates this cache by editing the file that names the version. The
+        # hand-written key this replaces spelled two versions in YAML and could
+        # not go stale against a pin it never read. `~/.vyrn/tools/<sha256>/` is
+        # what the resolver looks in, so a hit needs no fetch and no unpack.
+        # actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.vyrn/tools
+          # `-v2-` for the same marker reason as the nextest cache above.
+          key: vyrn-tools-v2-${{ hashFiles('vyrn.lock') }}
+      - name: Build vyrn
+        working-directory: compiler
+        run: cargo build --quiet -p vyrn-cli
+      - name: Populate ~/.vyrn/tools from vyrn.lock
+        if: steps.wasm-tools.outputs.cache-hit != 'true'
+        # The three `curl`s this replaces named their URLs and their versions in
+        # shell, and checked nothing that arrived. `--locked` fetches only what
+        # the lock already pins for this platform, verifies every byte against
+        # the recorded sha256, refuses a mismatch, and never writes the lock —
+        # so a CI cache miss cannot silently re-pin anything.
+        run: compiler/target/debug/vyrn update --locked
+      - name: Run the route harness
+        working-directory: compiler
+        # Every corpus program built with `vyrn build` — the module through
+        # wasm2c and clang — and compared byte for byte on stdout, stderr and
+        # exit code against the same module under the `wasmtime` CLI. This is
+        # what the parity harness was, with the textual route it compared
+        # against replaced by the engine.
+        #
+        # Nothing is exported. Each of wasmtime, wabt and simde resolves through
+        # the same three steps every other consumer takes — the environment
+        # variable, the pin, the `tools/` walk — and the pin is what answers
+        # here. clang stays discovered.
+        run: cargo test --quiet --release -p vyrn-cli --test route -- --ignored --nocapture
+      - name: The exit-residue ratchet
+        working-directory: compiler
+        # Every corpus program compiled with `VYRN_LEAK_CHECK=1` in the
+        # compiler's environment, which selects `std/runtime`'s accounting
+        # allocator, and run once — under `vyrn run` and under the route's own
+        # executable, which are two engines over one module. The verdicts are
+        # compared against `tests/pins/residue-baseline.tsv`: a double free
+        # fails outright, a clean row that leaks or stops exiting 0 fails, a
+        # leak row may only shrink.
+        #
+        # It is here rather than in the test job for the reason the route
+        # harness is: the route leg needs clang, wabt and simde, and this is
+        # the job that has them. The leg SKIPS where they are missing and the
+        # engine leg still measures the same module, so the ratchet is not
+        # hostage to a platform nobody has pinned wabt for.
+        run: cargo test --quiet --release -p vyrn-cli --test residue -- --ignored --nocapture
+      - name: Keep fnvalarg's route build and any refused module when the job fails (#444)
+        # fnvalarg flakes on Linux only; the residue scratch survives a failure.
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/i444" && cp /tmp/vyrn-residue-*/fnvalarg* "$RUNNER_TEMP/i444/" || true
+          cd examples && "$RUNNER_TEMP/i444/fnvalarg.exe" > /dev/null 2> "$RUNNER_TEMP/i444/fnvalarg.stderr" || true
+          cp /tmp/vyrn-invalid-*.wasm "$RUNNER_TEMP/i444/" 2> /dev/null || true
+      - name: Upload fnvalarg's route build (#444)
+        if: failure()
+        # actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fnvalarg-route
+          path: ${{ runner.temp }}/i444
+          if-no-files-found: ignore
+      - name: The codegen integration tests that need a toolchain
+        working-directory: compiler
+        # `wasm_runs`' five tests need wasmtime. They are `#[ignore]`d, so the
+        # four-platform test job counts them `ignored` instead of green, and
+        # they run here, beside the pinned wasmtime.
+        # `VYRN_REQUIRE_TOOLS=1` from `env:` above is what makes a missing tool a
+        # panic rather than a skip, so a broken cache fails this step. It answers
+        # a different question from the pin (may a check skip?) and survives it:
+        # a pinned tool that cannot be resolved is already loud, but a tool
+        # nothing pins is still a quiet `None`.
+        run: cargo test --quiet -p vyrn-codegen -- --ignored --nocapture
+      - name: Universal-pages integration
+        # Ignored-tier like the route harness: spawning the bin server generates the whole
+        # app cold (minutes in a debug build) — too slow for the test job.
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test universal_pages -- --ignored
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (a project that never pinned behaves as it always
+        # did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          wasm2c=$(compiler/target/debug/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/debug/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
+      - name: The native bench harness
+        # Ignored-tier because it compiles the route, which this job has the
+        # tools for and the test job does not.
+        #
+        # `bench --check`, the face the blocking gate runs, never loads the
+        # harness at all — it runs each body against the program as written. So nothing in CI exercised the merge that pulls
+        # `std/bench` in, and a defect lived there: a root program declaring a
+        # name that a module the harness injects uses privately either failed to
+        # compile, naming a type it had never imported, or compiled and called
+        # the wrong body. A program with its own `twoDecimals` printed
+        # `min XX µs` and exited 0.
+        #
+        # The `benchmarks` job below DOES run the native path, over the whole
+        # corpus. It saw none of this, because no example under `examples/`
+        # picks a colliding name — a corpus of the project's own files cannot
+        # catch a defect triggered by the name a user chooses. These tests pick
+        # the names on purpose, and read them off `std/`.
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test benching -- --ignored
+
+  wasmhash:
+    name: wasm bytes identical across the matrix — ${{ matrix.os }}
+    # The same source must produce the same wasm on every host.
+    # `tests/wasmhash.rs` builds every example `vyrn check` accepts with
+    # `--target wasm` and compares one sha256 per example against the committed
+    # `tests/pins/wasm-sha256.tsv`. The committed file is the platform that
+    # "writes"; each leg here only checks, so no artifact moves between jobs
+    # and a red leg names the example whose bytes differ.
+    #
+    # Its own job, not a step in `test`: that job builds nothing to wasm, and
+    # this one needs no wasmtime, no clang and no sysroot — the direct backend
+    # emits the module itself. The debug `vyrn` is the one the test spawns; the
+    # manifest was written by a release build, so a leg that differs also
+    # catches a compiler whose output depends on its optimization level.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: Every example's wasm hashes to the recorded manifest
+        working-directory: compiler
+        env:
+          VYRN_WASM_MANIFEST: check
+        run: cargo test --quiet -p vyrn-cli --test wasmhash -- --ignored
+
+  fixtures:
+    name: compiled run prints the recorded output — ${{ matrix.os }}
+    # `tests/fixtures.rs` runs every example with
+    # `vyrn run` — the direct backend's module, in the wasmtime
+    # the CLI embeds — and compares stdout, stderr and the exit code byte for
+    # byte against `examples/expected/`, which the same route records
+    # (`VYRN_FIXTURES=write`) and a human reviews in the diff. With `wasmhash`
+    # (the same bytes everywhere) it says on four platforms what the route job
+    # says on one; what the route says and these two cannot is that a SECOND
+    # backend, written from the same frontend, agrees. It is not a required
+    # check, and a red leg names the example and the first line that differs.
+    #
+    # Its own job for the reason `wasmhash` is one: no clang, no sysroot, no
+    # external wasmtime, and the whole matrix, since the host it runs under is
+    # hand-written and each platform's file and stream calls are its own.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: Every example prints what was recorded, as compiled wasm
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test fixtures -- --ignored --nocapture
+      - name: Keep fnvalarg's audited wasm, its stderr and any refused module when the job fails (#444)
+        # fnvalarg flakes on Linux only; this leg has no wasm2c, so no C output.
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/i444" && cd examples
+          VYRN_LEAK_CHECK=1 ../compiler/target/debug/vyrn build fnvalarg.vyrn --target wasm -o "$RUNNER_TEMP/i444/fnvalarg.wasm" || true
+          ../compiler/target/debug/vyrn run fnvalarg.vyrn > /dev/null 2> "$RUNNER_TEMP/i444/fnvalarg.stderr" || true
+          cp /tmp/vyrn-invalid-*.wasm "$TEMP"/vyrn-invalid-*.wasm "$RUNNER_TEMP/i444/" 2> /dev/null || true
+      - name: Upload fnvalarg's wasm (#444)
+        if: failure()
+        # actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fnvalarg-${{ matrix.os }}
+          path: ${{ runner.temp }}/i444
+          if-no-files-found: ignore
+
+  gen-engine:
+    name: generation is deterministic over the corpus
+    # Its own job rather than a step in `test`: it is the only thing in CI that
+    # builds wasmtime + cranelift, which is minutes of compile the other jobs
+    # must not wait on or share a cache with. Parallel to `route`, and for the
+    # same reason — both are the expensive tier that proves an invariant.
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+          # Distinct build graph (vyrn-genwasm and its wasmtime tree) — its own
+          # slot, like the route job's.
+          prefix-key: genwasm
+      # No wasm toolchain here, deliberately. This job used to restore the same
+      # tool cache as the route job and export WASI_SYSROOT/WASI_BUILTINS into
+      # the test — three tarballs (~150 MB unpacked) for two variables NOTHING
+      # in this build reads. The generation engine's shim lives in the direct
+      # backend (`vyrn-genwasm/src/lib.rs`), which needs no clang and no
+      # sysroot, and its wasmtime is a crate rather than a spawned binary.
+      - name: Every generator emits the same source twice
+        # The second column is the SAME engine on a second cold run, which
+        # catches a generator whose answer depends on anything but its declared
+        # inputs. What the
+        # emitted source MEANS is the `fixtures` job's, which runs every one of
+        # these examples against its recorded output.
+        #
+        # `--release` because cranelift compiles the guest: measured over this
+        # corpus with an empty artifact cache, 20 s release against 98 s debug.
+        working-directory: compiler
+        run: |
+          cargo test --quiet -p vyrn-cli --release \
+            --test genwasm -- --ignored --nocapture
+
+  bench:
+    name: benchmarks (regression gate)
+    # Push-to-main only: timing on shared PR runners is noise, and the trend
+    # record only makes sense against the main line. So this is a tripwire on the
+    # main line, not a pre-merge check — a regression is reported after the merge
+    # that caused it, against the one hardware line the baseline was taken from.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The test job sets this and this one did not, so its corpus discovery
+        # (`corpus=$(grep -rl ...)`) degraded to an empty loop where the test
+        # job's identical line fails — one shell contract, two answers. The
+        # explicit `set -eu` plus the non-empty check below is the belt; this is
+        # the braces.
+        shell: bash
+    # The gate compares this push against the commit it replaced, both timed on
+    # this runner in this run, program by program, base and head interleaved.
+    # A regression is a bench whose min exceeds the base's min by the threshold
+    # on the same host. The recorded `bench/baseline.json` is still measured and
+    # printed as the trend, and reseeded from the artifact below, but it no
+    # longer fails the job: the fleet's spread between runners was failing four
+    # rows a run that no commit had touched.
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+          # Separate cache slot (only vyrn-cli, and a distinct build graph).
+          prefix-key: bench
+      - name: Build vyrn
+        working-directory: compiler
+        # clang is preinstalled on ubuntu-latest (the route job relies on it
+        # too); `vyrn bench` finds it on PATH. It also needs wabt and simde now
+        # that `vyrn bench` times the route's binary, and reaches them through
+        # the same pin — so this job is red until wabt's linux row is recorded,
+        # the way the route job is.
+        run: cargo build --quiet -p vyrn-cli
+      - name: Pinned tool cache
+        id: wasm-tools
+        # actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.vyrn/tools
+          key: vyrn-tools-v2-${{ hashFiles('vyrn.lock') }}
+      - name: Populate ~/.vyrn/tools from vyrn.lock
+        if: steps.wasm-tools.outputs.cache-hit != 'true'
+        run: compiler/target/debug/vyrn update --locked
+      # `github.event.before` is the main head this push replaced; on a merge
+      # commit that is the line before the merge. The baseline is measured
+      # HERE, on the same runner in the same run, so the fleet's spread (one
+      # label, several CPU generations, a 39x range on one row) cancels
+      # instead of failing the gate.
+      - name: Check out the commit before this push, for a same-host baseline
+        # actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.before }}
+          path: base
+      - name: Build the base vyrn
+        working-directory: base/compiler
+        run: cargo build --quiet -p vyrn-cli
+      - name: Run benches, base and head interleaved, and compare on this host
+        working-directory: compiler
+        run: |
+          set -eu
+          head=target/debug/vyrn
+          base=../base/compiler/target/debug/vyrn
+          corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
+          [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
+          echo "bench corpus:"; echo "$corpus"
+          mkdir -p ../bench/out ../bench/base
+          # Base and head alternate per program, so both see the same thermal
+          # and neighbour state; a program the base cannot bench (new, or one it
+          # refused) is reported and skipped, not a regression.
+          for f in $corpus; do
+            stem=$(basename "$f" .vyrn)
+            echo "== $stem =="
+            if [ -f "../base/${f#../}" ]; then
+              "$base" bench "../base/${f#../}" --json > "../bench/base/$stem.json" || { echo "base could not bench $stem; skipped"; rm -f "../bench/base/$stem.json"; }
+            else
+              echo "$stem is new since the base; nothing to compare"
+            fi
+            "$head" bench "$f" --json > "../bench/out/$stem.json"
+          done
+          # One baseline document over the base run, the same merge the
+          # seedable baseline gets below.
+          python3 - <<'PY'
+          import glob, json
+          rs = [json.load(open(p)) for p in sorted(glob.glob('../bench/base/*.json'))]
+          doc = {'backend': rs[0]['backend'], 'opt': rs[0]['opt'], 'benches': [b for r in rs for b in r['benches']]} if rs else {'backend': 'native', 'opt': 'O2', 'benches': []}
+          json.dump(doc, open('../bench/base/baseline.json', 'w'), indent=2)
+          print('same-host baseline:', len(doc['benches']), 'benches')
+          PY
+          regressed=0
+          for f in $corpus; do
+            stem=$(basename "$f" .vyrn)
+            echo "== $stem, against the same host =="
+            "$head" bench "$f" --compare ../bench/base/baseline.json --threshold "$BENCH_THRESHOLD" --ungate ../bench/ungated.txt || regressed=1
+          done
+          echo
+          echo "== against the recorded baseline (the trend; informational, never fails) =="
+          for f in $corpus; do
+            "$head" bench "$f" --compare ../bench/baseline.json --threshold "$BENCH_THRESHOLD" --ungate ../bench/ungated.txt || true
+          done
+          exit $regressed
+      - name: Assemble a seedable baseline
+        # Seeding must be a download-and-commit, never a hand edit. `--json` is
+        # per-example, and `bench/baseline.json` is one document over the whole
+        # corpus, so the merge happens HERE — where the numbers were measured —
+        # rather than in a maintainer's editor. The output is byte-for-byte what
+        # `bench/baseline.json` should contain.
+        #
+        # `backend` and `opt` come from the first report; every report in a run
+        # carries the same pair (`native` / `O2`). Bench names are unique across
+        # the corpus, which `no_two_benches_in_the_corpus_share_a_name` pins —
+        # `--compare` matches on the name alone, so a clash would silently compare
+        # one bench against another's timing.
+        #
+        # Written through a temp file: the glob must not pick up its own output.
+        if: always()
+        run: |
+          python3 -c "import glob, json; rs = [json.load(open(p)) for p in sorted(glob.glob('bench/out/*.json'))]; json.dump({'backend': rs[0]['backend'], 'opt': rs[0]['opt'], 'benches': [b for r in rs for b in r['benches']]}, open('bench/merged.tmp', 'w'), indent=2)"
+          mv bench/merged.tmp bench/out/baseline.json
+          python3 -c "import json; print('seedable baseline:', len(json.load(open('bench/out/baseline.json'))['benches']), 'benches')"
+      - name: Upload bench reports + the seedable baseline
+        # `bench-json` holds the per-example trend record AND `baseline.json`.
+        # To seed the real baseline: open this run, download `bench-json`, and
+        #   cp baseline.json bench/baseline.json && git commit
+        # That is the whole procedure — see the `_readme` in the placeholder.
+        if: always()
+        # actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bench-json
+          path: bench/out/*.json

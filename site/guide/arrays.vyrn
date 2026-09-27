@@ -1,0 +1,21 @@
+// An array is subject-first: `xs.push(x)`, `xs[i]`, `xs.length`, `xs.pop()`.
+// `pop` answers `Option`, because an empty array has nothing to give.
+import { joinWith } from "std/strings"
+
+export fn demo() -> String {
+    let mut xs: Array<Int64> = [1, 2, 3]
+    xs.push(4)
+    xs[0] = 10
+
+    let mut total = 0
+    for x in xs {
+        total = total + x
+    }
+
+    let last = match xs.pop() {
+        Some(v) => v.toString(),
+        None => "nothing",
+    }
+
+    return joinWith(["length \{xs.length}", "total \{total}", "popped \{last}"], "\n")
+}

@@ -1,0 +1,226 @@
+// k-nucleotide, from the Computer Language Benchmarks Game.
+//
+// Count every DNA fragment of a given length in the third sequence of a FASTA
+// file on stdin. It measures the hash map, and it measures it the way the C
+// reference does: a k-mer over four bases is two bits a base,
+// so the key is an Int64 maintained ROLLING — one multiply, one add, one
+// modulo per position, whatever the width — and the table is Map<Int64, Int64>.
+// No window buffer, no byte hash, no String anywhere in the counting loop; a
+// fragment becomes text once, when a table row is printed.
+//
+//   $ vyrn run examples/fasta.vyrn | vyrn run examples/knucleotide.vyrn
+//   $ vyrn bench examples/knucleotide.vyrn
+//
+// `examples/knucleotide.stdin` is that same fasta at N = 1000, so the parity
+// corpus feeds it automatically.
+//
+// Packing bounds the width at 31 (4^k must fit an Int64); the game's largest is
+// 18. `sortWith` (a comparator) orders by count descending with ties by
+// fragment in one stable pass — and a tie compares the PACKED keys, because
+// A=0 < C=1 < G=2 < T=3 matches the bytes' own order ('A' < 'C' < 'G' < 'T'),
+// so numeric order on equal-width keys IS lexicographic order on fragments.
+
+import { toUpper } from "std/strings"
+import { startsWith } from "std/strpred"
+import { sortWith } from "std/arrays"
+
+/// The bench N — bases in the synthetic sequence the bench block builds. The
+/// census N comes from stdin instead, so there is no `order` beside it.
+let benchOrder = 200000
+
+/// The five fragments the game asks for by name, after the two frequency
+/// tables.
+fn namedFragments() -> Array<String> {
+    return ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"]
+}
+
+type Entry = { key: Int64, count: Int64 }
+
+/// The 2-bit code of one base.
+fn code(b: UInt8) -> Int64 {
+    return if b == 'A' { 0 } else if b == 'C' { 1 } else if b == 'G' { 2 } else { 3 }
+}
+
+/// `4^k` — the modulus that ages the oldest base out of a rolling key.
+fn modulusOf(k: Int64) -> Int64 {
+    let mut m = 1
+    let mut j = 0
+    while j < k {
+        m = m * 4
+        j = j + 1
+    }
+    return m
+}
+
+/// The THREE sequence from FASTA on stdin: uppercased, with the newlines and
+/// the other two sequences left out.
+///
+/// It reads a line at a time and keeps only what it needs, so the whole input is
+/// never in memory — at the game's N that input is 250 MB.
+fn thirdSequence() -> Array<UInt8> {
+    let mut out: Array<UInt8> = []
+    let mut inThird = false
+    while let Some(l) = readLine() {
+        if l.startsWith(">") {
+            inThird = l.startsWith(">THREE")
+        } else if inThird {
+            for b in bytes(toUpper(l)) {
+                out.push(b)
+            }
+        }
+    }
+    return out
+}
+
+/// Every window of width `k`, counted. A window costs one multiply, one add,
+/// one modulo and one `tally` probe — nothing is allocated, hit or miss.
+fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64> {
+    let mut m: Map<Int64, Int64> = [:]
+    if seq.length < k {
+        return m
+    }
+    let modulus = modulusOf(k)
+    let mut key = 0
+    let mut i = 0
+    while i < seq.length {
+        key = (key * 4 + code(seq[i])) % modulus
+        if i >= k - 1 {
+            m.tally(key, 1)
+        }
+        i = i + 1
+    }
+    return m
+}
+
+/// The fragment a packed key spells at width `k` — highest two bits first.
+fn unpack(key: Int64, k: Int64) -> String {
+    let alphabet = bytes("ACGT")
+    let mut w: Array<UInt8> = []
+    w.reserve(k)
+    let mut d = modulusOf(k) / 4
+    while d >= 1 {
+        w.push(alphabet[(key / d) % 4])
+        d = d / 4
+    }
+    return match stringFromBytes(w) {
+        Ok(s) => s,
+        Err(_) => "",
+    }
+}
+
+/// The packed key a fragment spells — `unpack`'s inverse.
+fn pack(frag: String) -> Int64 {
+    let mut key = 0
+    for b in bytes(frag) {
+        key = key * 4 + code(b)
+    }
+    return key
+}
+
+/// `x` at three decimal places — `print` gives six and the game asks for three.
+fn fixed3(x: Float64) -> String {
+    let scaled = Int64(x * 1000.0 + 0.5)
+    let whole = scaled / 1000
+    let mut frac = "\{scaled % 1000}"
+    while frac.byteLength < 3 {
+        frac = "0\{frac}"
+    }
+    return "\{whole}.\{frac}"
+}
+
+/// Count descending, ties by fragment ascending — one comparator, one stable
+/// pass. The tie compares packed keys: same width, and the 2-bit codes are in
+/// the bytes' own order, so the numbers sort exactly as the strings would.
+fn byCountThenFrag(a: Entry, b: Entry) -> Int64 {
+    if a.count > b.count {
+        return 0 - 1
+    }
+    if a.count < b.count {
+        return 1
+    }
+    if a.key < b.key {
+        return 0 - 1
+    }
+    if a.key > b.key {
+        return 1
+    }
+    return 0
+}
+
+fn ranked(m: Map<Int64, Int64>) -> Array<Entry> {
+    let mut es: Array<Entry> = []
+    for key in m.keys() {
+        let c = match m[key] {
+            Some(v) => v,
+            None => 0,
+        }
+        es.push(Entry { key: key, count: c })
+    }
+    return sortWith(es, byCountThenFrag)
+}
+
+/// One frequency table: every fragment of width `k` as a percentage of the
+/// windows there are, then a blank line. The unpack runs once per printed row
+/// — 4 rows at width 1, 16 at width 2 — not once per window.
+fn report(seq: Array<UInt8>, k: Int64) {
+    let m = countKmers(seq, k)
+    let total = seq.length - k + 1
+    for e in ranked(m) {
+        print("\{unpack(e.key, k)} \{fixed3(100.0 * Float64(e.count) / Float64(total))}")
+    }
+    print("")
+}
+
+/// The count of one named fragment.
+///
+/// It builds the whole table for that width and looks the fragment up, rather
+/// than scanning for the one string — because the table IS the benchmark, and a
+/// scan would measure something the other languages are not doing.
+fn countOf(seq: Array<UInt8>, frag: String) -> Int64 {
+    let m = countKmers(seq, Int64(frag.byteLength))
+    return match m[pack(frag)] {
+        Some(c) => c,
+        None => 0,
+    }
+}
+
+/// A sequence that repeats with a long period, so the 18-mer table has many
+/// distinct keys rather than four. The bench blocks build their own input
+/// because `vyrn bench` has no stdin to read one from.
+///
+/// The base comes from the LCG's HIGH bits, the way the game's own fasta reads
+/// it. `state % 4` looks equivalent and is not: 3877 and 29573 are both 1 mod
+/// 4, so the low bits just count and the "long period" sequence is ACGT tiled —
+/// this bench spent its first weeks measuring a four-key table of pure hits.
+fn syntheticSequence(n: Int64) -> Array<UInt8> {
+    let alphabet = bytes("ACGT")
+    let mut out: Array<UInt8> = []
+    let mut state = 42
+    let mut i = 0
+    while i < n {
+        state = (state * 3877 + 29573) % 139968
+        out.push(alphabet[(state * 4) / 139968])
+        i = i + 1
+    }
+    return out
+}
+
+bench "k-nucleotide, 2-mers over 200000 bases" {
+    let seq = syntheticSequence(blackBox(benchOrder))
+    blackBox(countKmers(blackBox(seq), blackBox(2)).length)
+}
+
+bench "k-nucleotide, 18-mers over 200000 bases" {
+    let seq = syntheticSequence(blackBox(benchOrder))
+    blackBox(countKmers(blackBox(seq), blackBox(18)).length)
+}
+
+fn main() -> Int64 {
+    let seq = thirdSequence()
+    report(seq, 1)
+    report(seq, 2)
+    for frag in namedFragments() {
+        print("\{countOf(seq, frag)}\t\{frag}")
+    }
+    return 0
+}

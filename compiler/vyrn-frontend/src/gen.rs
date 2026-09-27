@@ -1,0 +1,475 @@
+//! Generation machinery: the splice rule, the
+//! `Code` piece list and its renderer, the `lex` token literal, the sandbox's
+//! path rule, `moduleInterface`'s reflection, and the seam the driver installs
+//! the generation engine through. Nothing here walks a tree: each function
+//! takes a resolver, a path or a source, and returns an `Expr` or a `String`.
+
+use crate::ast::{Expr, Program};
+use std::collections::HashMap;
+
+/// One piece of a `Code` fragment: plain rendered text (from a
+/// quote skeleton, a splice or `raw`), or a region from `rawAt` that `render`
+/// wraps in `//@origin path:line:col` ... `//@origin end`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodePiece {
+    /// Verbatim source text with no origin.
+    Text(String),
+    /// A region derived from input at `path:line:col`, bracketed with the
+    /// `//@origin` directives so a diagnostic inside it maps back.
+    Origin {
+        path: String,
+        line: i64,
+        col: i64,
+        text: String,
+    },
+}
+
+/// Renders a `Code` piece list to source text (`render`). Each origin
+/// directive sits on its own line, because it governs the lines that follow.
+pub fn render_code(pieces: &[CodePiece]) -> String {
+    let mut out = String::new();
+    let ensure_nl = |out: &mut String| {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+    };
+    for p in pieces {
+        match p {
+            CodePiece::Text(t) => out.push_str(t),
+            CodePiece::Origin {
+                path,
+                line,
+                col,
+                text,
+            } => {
+                ensure_nl(&mut out);
+                out.push_str(&format!("//@origin {path}:{line}:{col}\n"));
+                out.push_str(text);
+                ensure_nl(&mut out);
+                out.push_str("//@origin end\n");
+            }
+        }
+    }
+    out
+}
+
+/// A value in a code-quote hole, as the splice rule reads it.
+///
+/// The six cases are the six `vyrn_codegen::TAG_*` values, because a compiled
+/// generator names them across the wall: a seventh on either side would be a
+/// tag the other cannot handle.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Spliced {
+    Str(String),
+    Code(Vec<CodePiece>),
+    Bool(bool),
+    /// Any integer width, sign-extended to 64 bits; `signed` picks the decimal
+    /// rendering.
+    Int {
+        v: i64,
+        signed: bool,
+    },
+    F64(f64),
+    F32(f32),
+}
+
+impl Spliced {
+    /// A short kind name for splice diagnostics, in the vocabulary
+    /// [`no_splice_rule`] uses.
+    fn kind(&self) -> &'static str {
+        match self {
+            Spliced::Int { .. } | Spliced::F64(_) | Spliced::F32(_) => "a number",
+            Spliced::Bool(_) => "a Bool",
+            Spliced::Str(_) => "a String",
+            Spliced::Code(_) => "Code",
+        }
+    }
+}
+
+/// Returns the refusal for a value the splice rule has no case for, in context
+/// `ctx`. Public because a value with no [`Spliced`] case (an array, a map) is
+/// refused by the engine before conversion, in the same words.
+pub fn no_splice_rule(kind: &str, ctx: i64) -> String {
+    if ctx == 0 {
+        format!("cannot splice {kind} into a code quote (expected String, number, Bool, or Code)")
+    } else {
+        format!("cannot splice {kind} in identifier position (only String or Code)")
+    }
+}
+
+/// Applies the splice rule to a value in a hole of context `ctx` (`0`
+/// expression, `1` identifier fragment, `2` standalone identifier or type).
+/// A `String` is data, never code: an escaped string literal in expression
+/// position, a validated identifier elsewhere.
+///
+/// The wasm generation engine applies it host-side, so the
+/// escaping, identifier validation and float formatting have one
+/// implementation.
+pub fn gen_code_splice(val: &Spliced, ctx: i64) -> Result<Vec<CodePiece>, String> {
+    // A `Code` value is already valid code and splices verbatim everywhere.
+    if let Spliced::Code(pieces) = val {
+        return Ok(pieces.clone());
+    }
+    let text = |s: String| Ok(vec![CodePiece::Text(s)]);
+    match ctx {
+        0 => match val {
+            Spliced::Str(s) => text(escape_string_literal(s)),
+            Spliced::Int { v, signed } => text(if *signed {
+                v.to_string()
+            } else {
+                (*v as u64).to_string()
+            }),
+            // `NaN` and `inf` have no Vyrn literal, so a non-finite value fails here,
+            // not later as a module that cannot parse.
+            Spliced::F64(f) if f.is_finite() => text(splice_float(format!("{f}"))),
+            Spliced::F32(f) if f.is_finite() => text(splice_float(format!("{f}"))),
+            Spliced::F64(f) => Err(format!(
+                "cannot splice non-finite float {f} into a code quote"
+            )),
+            Spliced::F32(f) => Err(format!(
+                "cannot splice non-finite float {f} into a code quote"
+            )),
+            Spliced::Bool(b) => text(b.to_string()),
+            Spliced::Code(_) => unreachable!("answered above"),
+        },
+        // Identifier fragment: non-empty `[A-Za-z0-9_]+`. It merges with adjacent
+        // word characters, so a leading digit is fine.
+        1 => match val {
+            Spliced::Str(s) => {
+                if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    text(s.to_string())
+                } else {
+                    Err(format!(
+                        "cannot splice {s:?} as an identifier fragment: not `[A-Za-z0-9_]+`"
+                    ))
+                }
+            }
+            other => Err(no_splice_rule(other.kind(), ctx)),
+        },
+        // Standalone identifier or type: a valid non-keyword identifier.
+        _ => match val {
+            Spliced::Str(s) => {
+                if is_bare_identifier(s) {
+                    text(s.to_string())
+                } else {
+                    Err(format!(
+                        "cannot splice {s:?} as an identifier: not a valid non-keyword identifier"
+                    ))
+                }
+            }
+            other => Err(no_splice_rule(other.kind(), ctx)),
+        },
+    }
+}
+
+/// Returns shortest-roundtrip float digits as plain decimal text. `Display`
+/// never uses an exponent, which the lexer cannot read, and an integral value
+/// gets `.0` so it lexes as a float.
+fn splice_float(digits: String) -> String {
+    if digits.contains('.') {
+        digits
+    } else {
+        format!("{digits}.0")
+    }
+}
+
+/// Escapes a `String` into a Vyrn string literal, quotes included, with the
+/// escapes the lexer decodes (`\n \t \r \" \\`).
+fn escape_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            // `{` is an ordinary character: a backslash before it is already doubled,
+            // so it cannot open a hole.
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Returns whether `s` is one non-keyword Vyrn identifier, decided by the
+/// lexer.
+fn is_bare_identifier(s: &str) -> bool {
+    match crate::lexer::lex(s) {
+        Ok(toks) => {
+            matches!(toks.first().map(|t| &t.tok), Some(crate::lexer::Tok::Ident(n)) if n == s)
+                && toks.len() == 2 // the identifier, then EOF
+        }
+        Err(_) => false,
+    }
+}
+
+/// Returns the `lex` token list as an `Array<Token>` record literal, which the
+/// wasm generation engine encodes for the guest.
+pub fn gen_lex_tokens_lit(source: &str) -> Expr {
+    Expr::ArrayLit {
+        elems: lexed(source)
+            .into_iter()
+            .map(|(kind, text, line, col)| Expr::StructLit {
+                name: "Token".to_string(),
+                fields: vec![
+                    ("kind".to_string(), Expr::Str(kind)),
+                    ("text".to_string(), Expr::Str(text)),
+                    ("line".to_string(), Expr::Int(line)),
+                    ("col".to_string(), Expr::Int(col)),
+                ],
+                line: 0,
+            })
+            .collect(),
+        line: 0,
+    }
+}
+
+/// Runs the lexer over `source` as `(kind, text, line, col)` rows: the one
+/// place the `lex` builtin's token list is decided.
+pub(crate) fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {
+    match crate::lexer::lex(source) {
+        Ok(toks) => toks
+            .iter()
+            .filter(|t| !matches!(t.tok, crate::lexer::Tok::Eof))
+            .map(|t| {
+                let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
+                (kind, text, t.line as i64, t.col as i64)
+            })
+            .collect(),
+        Err(d) => {
+            // Unlexable input is one `error` token at the diagnostic's position.
+            vec![("error".to_string(), d.message, d.line as i64, d.col as i64)]
+        }
+    }
+}
+
+/// One generation read: the resolved key (a file, or a directory with a
+/// trailing `/`) and its content, `None` when the read failed. A failure is
+/// recorded too: "0 examples" stops being right when `examples/` appears.
+pub type GenRead = (String, Option<Vec<u8>>);
+
+/// A generator's result: the module source, and the inputs it read,
+/// which the loader folds into the cache key.
+pub struct GenOutput {
+    pub source: String,
+    pub reads: Vec<GenRead>,
+}
+
+/// Everything a generation run needs from the loader.
+pub struct GenInputs<'a> {
+    pub resolver: &'a dyn crate::loader::ModuleResolver,
+    /// The load options (std root, manifest aliases), so `moduleInterface` can
+    /// link the reflected module's imports.
+    pub opts: &'a crate::loader::LoadOptions,
+    /// The importing module's directory: the base for relative paths.
+    pub importer_dir: String,
+    /// Resolved path prefixes the generator may read under: its constant path
+    /// arguments. Empty means no filesystem access.
+    pub allowed: Vec<String>,
+    /// The constant path arguments that name a manifest dependency, with the
+    /// module key the import map resolves each to, so a read reaches
+    /// the pinned bytes. Each key is also in `allowed`, so an alias is a second
+    /// spelling of a declared root, not a new root.
+    pub aliased: Vec<(String, String)>,
+    /// Step budget and output-size cap.
+    pub fuel: u64,
+    pub max_output: usize,
+    /// A fingerprint of the generator's module closure (its keys and content
+    /// hashes), or `None` when the closure holds a generated module no resolver
+    /// can re-read. An engine that caches compiled generators keys on it instead
+    /// of hashing the whole program.
+    pub sources_fingerprint: Option<String>,
+}
+
+/// Resolves a mediated path argument against the importer's directory and
+/// checks that it stays under one of the generator's declared input roots.
+/// Returns the resolver key, or the scoping trap message.
+///
+/// An argument in `aliased` resolves to the key the loader gave
+/// that manifest dependency: a lock-pinned remote key or a path under the
+/// manifest's directory, which path arithmetic cannot reach. The input-root
+/// check still decides on the resolved key. The wasm generation engine
+/// mediates its host imports with this same rule.
+pub fn gen_scoped_path(
+    importer_dir: &str,
+    allowed: &[String],
+    aliased: &[(String, String)],
+    arg: &str,
+) -> Result<String, String> {
+    let resolved = match aliased.iter().find(|(spelling, _)| spelling == arg) {
+        Some((_, key)) => key.clone(),
+        None => {
+            let joined = if importer_dir.is_empty() {
+                arg.to_string()
+            } else {
+                format!("{importer_dir}/{arg}")
+            };
+            crate::loader::normalize(&joined)
+        }
+    };
+    let ok = allowed
+        .iter()
+        .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
+    if !ok {
+        return Err(format!(
+            "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
+             read under its constant path arguments",
+            allowed.join(", ")
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Serves `moduleInterface(path)`: reads the module, links it to
+/// follow its type closure, and builds its `ModuleInterface`
+/// literal. Every module the link touched is appended to `reads`, so editing
+/// a closure type's defining file misses the generator cache. The wasm
+/// generation engine serves its `moduleInterface` import from here.
+pub fn gen_module_interface_lit(
+    resolver: &dyn crate::loader::ModuleResolver,
+    opts: &crate::loader::LoadOptions,
+    importer_dir: &str,
+    allowed: &[String],
+    aliased: &[(String, String)],
+    reads: &mut Vec<GenRead>,
+    path: &str,
+) -> Result<Expr, String> {
+    // Resolve like a module specifier (`.vyrn` appended), scoped like
+    // `readFile`. A manifest dependency keeps its spelling: its target already
+    // carries the extension.
+    let spec = if path.ends_with(".vyrn")
+        || path.ends_with(".json")
+        || aliased.iter().any(|(spelling, _)| spelling == path)
+    {
+        path.to_string()
+    } else {
+        format!("{path}.vyrn")
+    };
+    let resolved = gen_scoped_path(importer_dir, allowed, aliased, &spec)?;
+    let source = resolver.read(&resolved).map_err(|e| {
+        format!(
+            "moduleInterface {}: {e}",
+            crate::trap::io_at("readerr", &path)
+        )
+    })?;
+    reads.push((resolved.clone(), Some(source.clone().into_bytes())));
+
+    // Link the module so the closure walk sees types declared in its imports.
+    // A recording resolver adds every file the link reads to the cache inputs.
+    let rec = crate::loader::RecordingResolver::new(resolver);
+    let program = crate::loader::load(&source, &resolved, opts, &rec).map_err(|diags| {
+        let d = diags.first();
+        let where_ = d
+            .and_then(|d| d.file.clone())
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default();
+        let msg = d
+            .map(|d| d.message.clone())
+            .unwrap_or_else(|| "load failed".to_string());
+        format!("moduleInterface `{path}`{where_}: {msg}")
+    })?;
+    // The link's reads, kept as text for the origin index: the AST has no name
+    // columns, so the lexer supplies them (see `Origins`).
+    let mut origin_src: Vec<(Option<String>, String, String)> =
+        vec![(None, resolved.clone(), source.clone())];
+    for (p, s) in rec.into_reads() {
+        // The root module was recorded above.
+        if p != resolved {
+            origin_src.push((Some(p.clone()), p.clone(), s.clone()));
+            reads.push((p, Some(s.into_bytes())));
+        }
+    }
+
+    // One import specifier per declaring module, so a generator can
+    // import a closure type from the module that declares it. The reflected
+    // module's own types keep the generator's argument spelling.
+    let mut specifiers: HashMap<Option<String>, String> = HashMap::new();
+    specifiers.insert(None, path.to_string());
+    for t in &program.type_decls {
+        if let Some(key) = &t.module {
+            specifiers.entry(Some(key.clone())).or_insert_with(|| {
+                crate::loader::import_specifier(importer_dir, key, opts.std_root.as_deref())
+            });
+        }
+    }
+    let origins = crate::schema_reflect::Origins::new(
+        origin_src
+            .iter()
+            .map(|(k, f, s)| (k.clone(), f.as_str(), s.as_str())),
+    );
+    Ok(crate::schema_reflect::module_interface_lit(
+        &program,
+        &specifiers,
+        &origins,
+    ))
+}
+
+/// The generation engine. Compiling a generator to wasm needs
+/// codegen, which only the driver has, so the driver installs the engine
+/// here. `None` means the engine declined the generator.
+pub type GenEngine = dyn Fn(
+        &Program,
+        &str,
+        &[crate::consteval::ConstVal],
+        &GenInputs<'_>,
+    ) -> Option<Result<GenOutput, String>>
+    + Send
+    + Sync;
+
+static GEN_ENGINE: std::sync::OnceLock<Box<GenEngine>> = std::sync::OnceLock::new();
+
+/// Identifies the running compiler build: the crate version, then the
+/// executable's size and mtime. A persisted generator output or artifact is
+/// reused only by the same build.
+pub fn compiler_identity() -> String {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let m = std::env::current_exe().and_then(std::fs::metadata);
+        let exe = match m {
+            Ok(m) => format!(
+                "{}:{:?}",
+                m.len(),
+                m.modified().ok().and_then(|t| t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_nanos()))
+            ),
+            // A build that cannot be identified must not reuse outputs across
+            // processes.
+            Err(_) => format!("unknown-{}", std::process::id()),
+        };
+        format!("{}:{exe}", env!("CARGO_PKG_VERSION"))
+    })
+    .clone()
+}
+
+/// Installs the generation engine. The driver calls it once, before any load;
+/// a second call is ignored.
+pub fn set_gen_engine(engine: Box<GenEngine>) {
+    let _ = GEN_ENGINE.set(engine);
+}
+
+/// Runs `fn_name` in `program` as a generation target under the
+/// sandbox in `inputs`, with the compile-time constants `args`. Returns the
+/// module source and the recorded reads, or a trap message.
+pub fn generate(
+    program: &Program,
+    fn_name: &str,
+    args: &[crate::consteval::ConstVal],
+    inputs: GenInputs<'_>,
+) -> Result<GenOutput, String> {
+    // Without an installed engine no `gen fn` can run, and the error says so.
+    let Some(engine) = GEN_ENGINE.get() else {
+        return Err(format!(
+            "cannot run the generator `{fn_name}`: no generation engine is installed"
+        ));
+    };
+    engine(program, fn_name, args, &inputs).unwrap_or_else(|| {
+        Err(format!(
+            "cannot run the generator `{fn_name}`: the installed generation engine declined it"
+        ))
+    })
+}

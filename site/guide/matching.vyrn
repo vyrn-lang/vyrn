@@ -1,0 +1,23 @@
+// `match` is an expression: it answers with a value, so a binding can take it
+// directly. `if let` reads one variant when the others need no arm of their own.
+import { joinWith, indexOf } from "std/strings"
+
+type Level =
+    | Info
+    | Warn(String)
+
+fn found(haystack: String, needle: String) -> String {
+    if let Some(at) = indexOf(haystack, needle) {
+        return "\{needle} at byte \{at}"
+    }
+    return "\{needle} is not there"
+}
+
+export fn demo() -> String {
+    let l: Level = Warn("disk is filling")
+    let line = match l {
+        Info => "nothing to say",
+        Warn(what) => "warning: \{what}",
+    }
+    return joinWith([line, found("hello, world", "world"), found("hello, world", "zebra")], "\n")
+}

@@ -1,0 +1,5 @@
+// a `for` over a String whose byte leaves a byte's range
+// A `for` over a String yields each byte as an `Int64` and `s[i]` is a
+// `UInt8`. The corpus only compares the loop's byte, which
+// runs the same at either type.
+fn sum(s: String) -> Int64 { let mut t = 0 for c in s { t = t + c * 1000 }          return t + Int64(s[1]) } fn vyrnTestMain() -> Int64 { return sum("ab") }

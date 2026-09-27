@@ -1,0 +1,11 @@
+// An import names what it takes. A namespace import takes the whole module
+// under one name, which is how two modules that export the same name coexist.
+import { joinWith, padStart } from "std/strings"
+import * as math from "std/math"
+
+export fn demo() -> String {
+    let padded = padStart("7", 4, "0")
+    let clamped = math.clamp(42, 0, 10)
+
+    return joinWith(["padded  \{padded}", "clamped \{clamped}", "min     \{math.min(3, 9)}"], "\n")
+}

@@ -1,0 +1,28 @@
+<script>
+// GET /docs/editors — a stub, for a bookmark and a search result.
+//
+// An editor is a tool, so the page lives on the Tooling shelf.
+// `site/export.vyrn` stamps the refresh and the canonical off `redirects()`,
+// which names this pair beside the two moved chapters.
+import { Head } from "std/ui"
+import { pageHead, hrefOf } from "../../nav"
+
+export fn head() -> Head {
+    return pageHead("Moved to Tooling — Vyrn")
+}
+
+/// Where this stub sends a reader.
+fn target() -> String {
+    return hrefOf("/tooling/editors")
+}
+</script>
+
+<template>
+<main class="page">
+    <section class="hero">
+        <p class="eyebrow">Moved</p>
+        <h1 class="display">Editors is a Tooling page now</h1>
+        <p class="lede">Nothing was deleted. <a :href="target()">Read the editors page</a>.</p>
+    </section>
+</main>
+</template>

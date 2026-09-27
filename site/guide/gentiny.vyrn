@@ -1,0 +1,13 @@
+// A `gen fn` is ordinary Vyrn that runs while the program compiles and returns
+// Vyrn SOURCE. The compiler links what it returns as a module. This one writes a
+// lookup table nobody has to keep up to date.
+export gen fn squares() -> String {
+    let mut out = "/// Written by the `squares` generator while the program compiled.\n"
+    out = out + "export fn squareOf(n: Int64) -> Int64 {\n"
+    let mut i = 1
+    while i <= 9 {
+        out = out + "    if n == \{i} { return \{i * i} }\n"
+        i = i + 1
+    }
+    return out + "    return 0\n}\n"
+}

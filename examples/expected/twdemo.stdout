@@ -1,0 +1,6 @@
+css bytes: 27319
+has base rule: true
+has hover rule: true
+has media block: true
+has responsive+state: true
+<span class="px-2 rounded bg-brand-500 text-white md:hover:bg-brand-600">new</span>

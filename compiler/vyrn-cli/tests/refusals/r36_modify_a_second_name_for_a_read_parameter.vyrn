@@ -1,0 +1,17 @@
+// A `modify` argument may replace any part of the value it is handed.
+type R = { name: String, n: Int64 }
+
+fn lengthen(r: modify R) -> Unit {
+    r.name = r.name + "!"
+}
+
+fn bump(r: R) -> Int64 {
+    let mut c = r
+    lengthen(c)
+    return c.n
+}
+
+fn main() -> Int64 {
+    let r = R { name: "ab" + "c", n: 3 }
+    return bump(r)
+}

@@ -1,0 +1,5 @@
+// a name of a `where` type read beside a statement the arm emits
+// A name of a `where` type over Int64 is read at its resolved type on both
+// walks; both walks emit the same bytes for it. The
+// store into module state keeps the body off the whole-body walk.
+let mut seen: Map<String, Int64> = [:]          type Age = Int64 where value >= 0          fn next(a: Age) -> Age { return a + 1 }          fn older(a: Age) -> Int64 { seen["a"] = 1 let b = next(a) return b * 2 }          fn vyrnTestMain() -> Int64 { return older(7) + seen.length }

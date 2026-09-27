@@ -1,0 +1,32 @@
+104,105
+233
+8364
+128512
+97,8364,128512,233
+
+65535,65536
+1114111
+accept 104,233,108,108,111 | accept 104,233,108,108,111
+accept  | accept 
+reject | reject: bytes are not valid UTF-8
+reject | reject: bytes are not valid UTF-8
+reject | reject: bytes are not valid UTF-8
+reject | reject: bytes are not valid UTF-8
+reject | reject: bytes are not valid UTF-8
+accept 1114111 | accept 1114111
+reject | reject: bytes are not valid UTF-8
+reject | reject: bytes are not valid UTF-8
+reject | reject: bytes are not valid UTF-8
+accept 104,0,105 | reject: bytes contain a NUL byte
+1:1 | 1:1
+1:3 | 1:3
+2:1 | 2:1
+3:1 | 3:1
+4:1 | 4:1
+4:2 | 4:2
+1:4 | 1:4
+1:3 | 1:3
+1:4 | 1:4
+2:1 | 2:1
+1:2 | 1:2
+1:3 | 1:3

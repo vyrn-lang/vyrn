@@ -1,0 +1,10 @@
+<script>
+import { Item } from "./models"
+props { items: Array<Item> }
+</script>
+
+<template>
+<ul class="listing">
+    <Row v-for="it in items" :key="it.id" :item="it"/>
+</ul>
+</template>

@@ -1,0 +1,95 @@
+/// std/diag: a generator reports a diagnostic.
+///
+/// A line of a `gen fn`'s output may be a report: a severity, an anchor in a
+/// file the generator read, and a message. The loader lifts it out, and every
+/// tool shows it like any other diagnostic.
+///
+/// ```vyrn
+/// import { report, Severity } from "std/diag"
+///
+/// export gen fn table(path: String) -> String {
+///     let mut out = ""
+///     out = out + report(Warning, path, 9, 3, "column `email` has no length limit")
+///     out = out + "export fn columnCount() -> Int64 { return 3 }\n"
+///     return out
+/// }
+/// ```
+///
+/// A `Warning` changes no exit code and no output byte, unless the build passes
+/// `--deny-warnings`. An `Error` fails the load at the anchor. The anchor is a
+/// 1-based line and column, in `//@origin` notation, resolved
+/// against the module that imported the generator.
+
+import { replace } from "std/strings"
+
+/// `Warning`: this compiled, but. `Error`: this does not compile.
+export type Severity = | Warning | Error
+
+/// A report anchored in an input file, at a 1-based `line` and `col`.
+export fn report(
+    severity: Severity,
+    file: String,
+    line: Int64,
+    col: Int64,
+    message: String,
+) -> String {
+    let at = "\{file}:\{atLeastOne(line).toString()}:\{atLeastOne(col).toString()}"
+    return "//@diag \{word(severity)} \{at} \{oneLine(message)}\n"
+}
+
+/// A report with no position, shown at the generated line it sits on: for a
+/// fault in the generator's inputs as a whole, such as a missing file.
+export fn reportHere(severity: Severity, message: String) -> String {
+    return "//@diag \{word(severity)} - \{oneLine(message)}\n"
+}
+
+fn word(severity: Severity) -> String {
+    return match severity {
+        Warning => "warning",
+        Error => "error",
+    }
+}
+
+/// A newline in a message would end the directive and hand the rest to the
+/// parser as source, so it becomes a space.
+fn oneLine(message: String) -> String {
+    return replace(replace(message, "\n", " "), "\r", " ")
+}
+
+/// A position below 1 would make the anchor unparseable and lose it, so it is
+/// clamped to 1.
+fn atLeastOne(n: Int64) -> Int64 {
+    if n < 1 {
+        return 1
+    }
+    return n
+}
+
+test "a report is one directive line" {
+    let line = report(Warning, "./users.tbl", 9, 3, "column `email` has no length limit")
+    assertEq(
+        line,
+        "//@diag warning ./users.tbl:9:3 column `email` has no length limit\n",
+    )
+}
+
+test "an error says error" {
+    assertEq(
+        report(Error, "./users.tbl", 14, 1, "column `id` is declared twice"),
+        "//@diag error ./users.tbl:14:1 column `id` is declared twice\n",
+    )
+}
+
+test "a message never breaks out of its line" {
+    assertEq(
+        reportHere(Warning, "two\nlines"),
+        "//@diag warning - two lines\n",
+    )
+}
+
+test "a zero position is clamped, not lost" {
+    assertEq(
+        report(Warning, "./a.tbl", 0, 0, "x"),
+        "//@diag warning ./a.tbl:1:1 x\n",
+    )
+}

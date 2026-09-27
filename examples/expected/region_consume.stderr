@@ -1,0 +1,2 @@
+region_consume.vyrn:44:0: cannot hand a heap value to argument 1 of `keep`, which is `consume`, inside a `region`. The region frees the value at its closing brace, so the callee cannot own it. Move the call out of the region, or pass a value that holds no heap.
+region_consume.vyrn:52:0: cannot hand a heap value to argument 1 of `wrap`, which is `consume`, inside a `region`. The region frees the value at its closing brace, so the callee cannot own it. Move the call out of the region, or pass a value that holds no heap.

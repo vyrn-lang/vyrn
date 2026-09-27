@@ -1,0 +1,1 @@
+floatkey.vyrn:5:0: `Float64` holds a float, and a `Map` key must hash and compare by equality: `NaN != NaN`, and `+0.0 == -0.0` would hash apart

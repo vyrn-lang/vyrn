@@ -1,0 +1,12 @@
+/// Worse: the capturing lambda ESCAPES by return — the bracket would outlive
+/// the call that opened it. Lemma 3's real counterexample if accepted.
+fn hold(s: String) -> fn() -> Int64 {
+    let g: fn() -> Int64 = () -> s.byteLength
+    return g
+}
+
+fn main() -> Int64 {
+    let f = hold("hello")
+    print("\{f()}")
+    return 0
+}

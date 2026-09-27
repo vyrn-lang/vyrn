@@ -1,0 +1,36 @@
+// A map takes its key, so a key must be a value the map may own. `mapBuild`
+// hands it `ks[i]` — an element of the CALLER's array, which the array still
+// owns. This file is that refusal on purpose: it does not build, and
+// `vyrn check` names the parameter and the two ways out.
+//
+// Before the rule, this program compiled. The map wrote the array's own buffer
+// into its key slot, and the two released it one after the other: the
+// interpreter printed `8` and `key0` because its values are shared, and the
+// native binary printed nothing and exited 127. No example in the corpus keyed
+// a map from an array element, so three-way parity never looked at it — the
+// defect came out of writing a benchmark. See mapkeyowned.vyrn for the shape
+// that runs.
+//
+// The map literal one arm over already refused the same borrow (`[ks[0]: 1]`),
+// which is what made this one spelling, one fact, two verdicts.
+
+fn mapBuild(ks: Array<String>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    while i < ks.length {
+        m[ks[i]] = i
+        i = i + 1
+    }
+    return m
+}
+
+fn main() -> Int64 {
+    let mut ks: Array<String> = []
+    ks.push("key" + "0")
+    let m = mapBuild(ks)
+    print(m.length.toString())
+    print(ks[0])
+    drop m
+    drop ks
+    return 0
+}

@@ -1,0 +1,10 @@
+/// A6: parameters are not reassignable. Claimed as "a parser rule today".
+fn f(x: Int64) -> Int64 {
+    x = 3
+    return x
+}
+
+fn main() -> Int64 {
+    print("\{f(1)}")
+    return 0
+}

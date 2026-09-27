@@ -1,0 +1,256 @@
+/// std/mem: raw memory, the host imports and the trap, which `std/runtime`
+/// stands on.
+///
+/// Every function is a declaration: the emitter maps each call to one wasm
+/// instruction or one host-import `call` and never reads a body. The bodies let
+/// the module parse and check; an engine that reaches one stops with the
+/// message. The loader limits the audience to `std/runtime`, so a user import is
+/// refused. An address is an `Int32` because the route is wasm32.
+
+fn noBody() {
+    panic("std/mem: a primitive has no body; the emitter lowers it to one instruction")
+}
+
+/// `i32.load8_u`: the byte at `addr`.
+export fn load8(addr: Int32) -> UInt8 {
+    noBody()
+    return 0
+}
+
+/// `i32.load16_u`.
+export fn load16(addr: Int32) -> UInt16 {
+    noBody()
+    return 0
+}
+
+/// `i32.load`.
+export fn load32(addr: Int32) -> UInt32 {
+    noBody()
+    return 0
+}
+
+/// `i64.load`.
+export fn load64(addr: Int32) -> UInt64 {
+    noBody()
+    return 0
+}
+
+/// `f32.load`.
+export fn loadF32(addr: Int32) -> Float32 {
+    noBody()
+    return 0.0
+}
+
+/// `f64.load`.
+export fn loadF64(addr: Int32) -> Float64 {
+    noBody()
+    return 0.0
+}
+
+/// `i32.store8`.
+export fn store8(addr: Int32, v: UInt8) {
+    noBody()
+}
+
+/// `i32.store16`.
+export fn store16(addr: Int32, v: UInt16) {
+    noBody()
+}
+
+/// `i32.store`.
+export fn store32(addr: Int32, v: UInt32) {
+    noBody()
+}
+
+/// `i64.store`.
+export fn store64(addr: Int32, v: UInt64) {
+    noBody()
+}
+
+/// `f32.store`.
+export fn storeF32(addr: Int32, v: Float32) {
+    noBody()
+}
+
+/// `f64.store`.
+export fn storeF64(addr: Int32, v: Float64) {
+    noBody()
+}
+
+/// `memory.copy`: `n` bytes from `src` to `dst`. The ranges may overlap.
+export fn copy(dst: Int32, src: Int32, n: Int32) {
+    noBody()
+}
+
+/// `memory.fill`: `n` bytes of `byte` at `dst`.
+export fn fill(dst: Int32, byte: UInt8, n: Int32) {
+    noBody()
+}
+
+/// `memory.size`: the memory's size in 64 KiB pages.
+export fn memorySize() -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `memory.grow`: add `delta` pages. The old size in pages, or -1 when the
+/// engine refuses.
+export fn grow(delta: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// The `HEAP_BASE` global: where the data segment ends and the heap begins.
+export fn heapBase() -> Int32 {
+    noBody()
+    return 0
+}
+
+/// No instruction: the address `x` is held at. A `String` is the address of
+/// its bytes; an aggregate is the address of its layout.
+export fn addr<T>(x: T) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// No instruction: `x` read at the type the caller names. The runtime builds
+/// a value in the words the emitter reads for `T`, and this hands it on as
+/// one; both types must have one wasm representation.
+export fn adopt<T, U>(x: U) -> T {
+    noBody()
+    return adopt(x)
+}
+
+/// The address of `trap.rs`'s `IO` table: for each wording with a `%s`, in
+/// the table's order, the interned text before it and after it, two `Int32`s.
+export fn ioTable() -> Int32 {
+    noBody()
+    return 0
+}
+
+/// The address of the UTF-8 DFA table `utf8Valid` walks.
+export fn utf8Table() -> Int32 {
+    noBody()
+    return 0
+}
+
+/// The trap primitive: `len` bytes at `msg` to
+/// descriptor 2, then `proc_exit(1)`. It does not return.
+export fn trap(msg: Int32, len: Int32) {
+    noBody()
+}
+
+// Each host import is one `wasi_snapshot_preview1` import with the witx
+// signature: `Int32` for `i32`, `Int64` for `i64`, a pointer as an `Int32`
+// address in this module's memory. `Module::sweep` drops the imports no export
+// reaches.
+//
+// The `vyrn_gen` imports are the generator host's: a generator reads
+// through the loader's resolver, not `path_open`. An ordinary build lowers a
+// call to either as `unreachable`, and the sweep removes their callers
+// (`readFileGen`, `listDirGen`).
+
+/// `fd_write(fd, iovs, iovsLen, nwritten) -> errno`.
+export fn fdWrite(fd: Int32, iovs: Int32, iovsLen: Int32, nwritten: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_read(fd, iovs, iovsLen, nread) -> errno`.
+export fn fdRead(fd: Int32, iovs: Int32, iovsLen: Int32, nread: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_close(fd) -> errno`.
+export fn fdClose(fd: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `proc_exit(code)`. It does not return; `trap` above is the one caller.
+export fn procExit(code: Int32) {
+    noBody()
+}
+
+/// `path_open(dirFd, dirFlags, path, pathLen, oflags, rightsBase,
+/// rightsInheriting, fdFlags, out) -> errno`, the descriptor written at `out`.
+export fn pathOpen(dirFd: Int32, dirFlags: Int32, path: Int32, pathLen: Int32, oflags: Int32, rightsBase: Int64, rightsInheriting: Int64, fdFlags: Int32, out: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `path_rename(fd, from, fromLen, toFd, to, toLen) -> errno`.
+export fn pathRename(fd: Int32, from: Int32, fromLen: Int32, toFd: Int32, to: Int32, toLen: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_sync(fd) -> errno`.
+export fn fdSync(fd: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_prestat_get(fd, out) -> errno`: `BADF` past the last preopen.
+export fn fdPrestatGet(fd: Int32, out: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `args_sizes_get(count, size) -> errno`.
+export fn argsSizesGet(count: Int32, size: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `args_get(argv, buf) -> errno`.
+export fn argsGet(argv: Int32, buf: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `environ_sizes_get(count, size) -> errno`.
+export fn environSizesGet(count: Int32, size: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `environ_get(environ, buf) -> errno`.
+export fn environGet(environ: Int32, buf: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `clock_time_get(id, precision, out) -> errno`: 0 is the realtime clock, 1
+/// the monotonic one; nanoseconds as an `i64` at `out`.
+export fn clockTimeGet(id: Int32, precision: Int64, out: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `random_get(buf, len) -> errno`.
+export fn randomGet(buf: Int32, len: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_readdir(fd, buf, len, cookie, used) -> errno`.
+export fn fdReaddir(fd: Int32, buf: Int32, len: Int32, cookie: Int64, used: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `vyrn_gen.read(path, mode) -> (status << 32) | len`: the resource at
+/// `path` resolved, mediated, recorded and stashed by the generator host.
+/// The status is 0 ok, 1 io, 3 an embedded NUL.
+export fn genRead(path: Int32, mode: Int32) -> Int64 {
+    noBody()
+    return 0
+}
+
+/// `vyrn_gen.fetch(buf)`: the stash of the last `genRead` copied into `buf`,
+/// which the module allocated itself; the host never allocates in it.
+export fn genFetch(buf: Int32) {
+    noBody()
+}

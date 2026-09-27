@@ -1,0 +1,216 @@
+/// std/slots: a generational slab over `Array`, in Vyrn.
+///
+/// A `Handle<T>` is a plain value: a slot, the generation live when it was
+/// issued, and the identity of the container that issued it. It owns no heap, so
+/// it copies freely and is never released.
+///
+///     import { Slots, Handle, newSlots, insert, remove, get } from "std/slots"
+///
+///     let mut people: Slots<Person> = newSlots()
+///     let h = insert(people, Person { name: "ada" })
+///     people[h].name = "lovelace"       // traps on a dead handle, like a[i] on OOB
+///     match get(people, h) { Some(p) => .., None => .. }     // liveness as a value
+///     remove(people, h)                 // the slot's generation bumps
+///
+/// A handle from another container of the same element type is dead, not
+/// plausible: every container takes an identity and every handle carries it.
+/// `remove` does not clear the payload, because the language has no
+/// uninitialized place; the dead payload is released when the slot is reused or
+/// the container drops. `remove` moves the last live element into the hole, so
+/// iteration order is not insertion order; iterate `handles` if the order
+/// matters.
+
+/// A handle into a `Slots<T>`. `T` only brands it, so the compiler refuses a
+/// `Handle<Order>` where a `Handle<Person>` belongs.
+export type Handle<T> = { slot: Int64, gen: Int64, owner: Int64 }
+
+/// A generational slab.
+///
+/// `vals` and `gens` are parallel and indexed by slot; `free` holds the unused
+/// slots. `dense` holds the live slots in iteration order and `denseAt` maps a
+/// slot back to its position in `dense` (-1 when free), so `remove` is O(1) and
+/// iteration skips free slots.
+export type Slots<T> = {
+    vals: Array<T>,
+    gens: Array<Int64>,
+    free: Array<Int64>,
+    dense: Array<Int64>,
+    denseAt: Array<Int64>,
+    owner: Int64,
+}
+
+/// The last identity issued. Module state, so no two containers share one.
+let mut issued = 0
+
+fn takeIdentity() -> Int64 {
+    issued = issued + 1
+    return issued
+}
+
+/// An empty slab. The element type comes from the context:
+/// `let mut people: Slots<Person> = newSlots()`.
+export fn newSlots<T>() -> Slots<T> {
+    return Slots {
+        vals: [],
+        gens: [],
+        free: [],
+        dense: [],
+        denseAt: [],
+        owner: takeIdentity(),
+    }
+}
+
+/// Puts `v` in the slab and returns a handle to it. Reuses a free slot when there
+/// is one, and the store releases the dead payload it held.
+export fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T> {
+    if s.free.length > 0 {
+        let i = s.free[s.free.length - 1]
+        s.free.pop()
+        s.vals[i] = v
+        s.denseAt[i] = s.dense.length
+        s.dense.push(i)
+        return Handle { slot: i, gen: s.gens[i], owner: s.owner }
+    }
+    let i = s.vals.length
+    s.vals.push(v)
+    s.gens.push(1)
+    s.denseAt.push(s.dense.length)
+    s.dense.push(i)
+    return Handle { slot: i, gen: 1, owner: s.owner }
+}
+
+/// Whether `h` still names a live element of `s`. False for a handle from
+/// another container, an out-of-range slot, and a slot whose generation has
+/// moved on.
+export fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool {
+    if h.owner != s.owner || h.slot < 0 || h.slot >= s.gens.length {
+        return false
+    }
+    return s.gens[h.slot] == h.gen
+}
+
+/// The element `h` names, copied out, or `None` when `h` is not alive.
+///
+/// Use `s[h]` to read in place, or `if let Some(v) = s.tryAt(h)` when the value
+/// does not outlive the test; neither copies.
+export fn get<T>(s: Slots<T>, h: Handle<T>) -> Option<T> {
+    if !alive(s, h) {
+        return None
+    }
+    return Some(s.vals[h.slot].copy())
+}
+
+/// Releases the element `h` names: bumps the slot's generation, so every handle
+/// to it is dead, and returns the slot to the free list. Answers whether `h` was
+/// alive, so removing twice is a no-op.
+export fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Bool {
+    if !alive(s, h) {
+        return false
+    }
+    // Move the last live element into this one's place in `dense`, so the walk
+    // stays contiguous.
+    let d = s.denseAt[h.slot]
+    let last = s.dense[s.dense.length - 1]
+    s.dense[d] = last
+    s.denseAt[last] = d
+    s.dense.pop()
+    s.gens[h.slot] = h.gen + 1
+    s.denseAt[h.slot] = 0 - 1
+    s.free.push(h.slot)
+    return true
+}
+
+/// How many elements are live.
+export fn count<T>(s: Slots<T>) -> Int64 {
+    return s.dense.length
+}
+
+/// How many slots the table holds, live and free together.
+export fn capacity<T>(s: Slots<T>) -> Int64 {
+    return s.vals.length
+}
+
+/// A handle to every live element, in iteration order.
+export fn handles<T>(s: Slots<T>) -> Array<Handle<T>> {
+    let mut out: Array<Handle<T>> = []
+    for slot in s.dense {
+        out.push(Handle { slot: slot, gen: s.gens[slot], owner: s.owner })
+    }
+    return out
+}
+
+/// `s[h]` and `s[h] = v` yield the element's place, so `s[h].field = v` writes
+/// where it lives. A dead handle traps, as `a[i]` out of range does.
+impl<T> Index for Slots<T> {
+    /// A live handle's element as a place, a dead one as `None`; nothing is
+    /// copied.
+    fn tryAt(read self, h: Handle<T>) -> read Option<T> {
+        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
+        || self.gens[h.slot] != h.gen
+        {
+            return None
+        }
+        return Some(self.vals[h.slot])
+    }
+
+    fn at(read self, h: Handle<T>) -> read T {
+        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
+        || self.gens[h.slot] != h.gen
+        {
+            panic("slots: handle is not alive")
+        }
+        return self.vals[h.slot]
+    }
+    fn atSet(modify self, h: Handle<T>) -> modify T {
+        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
+        || self.gens[h.slot] != h.gen
+        {
+            panic("slots: handle is not alive")
+        }
+        return self.vals[h.slot]
+    }
+}
+
+/// `for x in s` walks the live elements in `dense` order.
+impl<T> Iterate for Slots<T> {
+    fn size(self) -> Int64 {
+        return self.dense.length
+    }
+    fn nth(read self, i: Int64) -> read T {
+        return self.vals[self.dense[i]]
+    }
+}
+
+/// Releases the five buffers. `drop vals` also releases every payload in `vals`,
+/// removed ones included: every slot below `vals.length` holds exactly one
+/// payload this slab owns, because `insert` consumes and a store releases what it
+/// replaces. Do not add a loop over `vals` as well: it frees each payload twice.
+impl<T> Owned for Slots<T> {
+    fn release(consume self) {
+        let vals = consume self.vals
+        drop vals
+        let gens = consume self.gens
+        drop gens
+        let free = consume self.free
+        drop free
+        let dense = consume self.dense
+        drop dense
+        let denseAt = consume self.denseAt
+        drop denseAt
+    }
+}
+
+/// A copy is a second container with its own identity, so a handle from the
+/// original is dead in the copy.
+impl<T> Copy for Slots<T> {
+    fn copy(self) -> Slots<T> {
+        return Slots {
+            vals: self.vals.copy(),
+            gens: self.gens.copy(),
+            free: self.free.copy(),
+            dense: self.dense.copy(),
+            denseAt: self.denseAt.copy(),
+            owner: takeIdentity(),
+        }
+    }
+}

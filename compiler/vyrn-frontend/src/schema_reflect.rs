@@ -1,0 +1,789 @@
+//! Module reflection for generator imports.
+//!
+//! `moduleInterface(path)` hands a generator the structured shape of a
+//! module's exported surface, as `schemaOf` does for one type. The compiler
+//! builds a record literal (an [`Expr`]) here, so the ordinary record, array
+//! and coercion machinery evaluates it. The shapes are injected by the parser:
+//! ```text
+//! ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
+//! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema, retUncodable: String, mutates: Bool, origin: Origin }
+//! ParamInfo{ name: String, spelling: String, schema: Schema, uncodable: String }
+//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin }
+//! Origin   { file: String, line: Int64, col: Int64, name: String }
+//! ```
+//! `ret` and `spelling` are type spellings; `TypeInfo.source` is the canonical
+//! `type` declaration text; `uncodable` and `retUncodable` are
+//! [`crate::codec`]'s verdict on crossing a JSON wire; `mutates` is the
+//! author's `mut fn` marker; `origin` is where the declaration is written.
+//!
+//! `contractOf(Name)` reflects a `contract` declaration the same
+//! way, so `std/contract:checkContract` compares expectation against reality
+//! in Vyrn:
+//! ```text
+//! MemberInfo   { name, kind, spelling, params: Array<String>, ret, optional, doc }
+//! ContractInfo { name, module, doc, open, members: Array<MemberInfo> }
+//! ```
+
+use std::collections::{HashMap, HashSet};
+
+use crate::ast::*;
+
+/// Name columns per module, for the `Origin` of every reflected declaration.
+///
+/// The AST carries only a line, so the column comes from the lexer, once per
+/// module: the first identifier token spelled like the declaration, on its
+/// line, is its name. Lexing, not a text search, keeps a comment or string
+/// that contains the name from matching. Keys are the loader's module
+/// attribution, `None` for the reflected module. An unplaced name gets column
+/// 0, as in [`crate::symbols::Symbol`].
+#[derive(Default)]
+pub struct Origins {
+    files: HashMap<Option<String>, String>,
+    cols: HashMap<Option<String>, HashMap<(usize, String), usize>>,
+}
+
+impl Origins {
+    /// Indexes `sources`: module key (`None` for the root), file name and source
+    /// text.
+    pub fn new<'a>(sources: impl IntoIterator<Item = (Option<String>, &'a str, &'a str)>) -> Self {
+        let mut out = Origins::default();
+        for (key, file, src) in sources {
+            out.files.insert(key.clone(), file.to_string());
+            let mut cols: HashMap<(usize, String), usize> = HashMap::new();
+            if let Ok(tokens) = crate::lexer::lex(src) {
+                for t in tokens {
+                    if let crate::lexer::Tok::Ident(s) = &t.tok {
+                        cols.entry((t.line, s.clone())).or_insert(t.col);
+                    }
+                }
+            }
+            out.cols.insert(key, cols);
+        }
+        out
+    }
+
+    /// Returns the `Origin` literal for `name`, declared on `line` of `module`.
+    fn lit(&self, module: &Option<String>, name: &str, line: usize) -> Expr {
+        let file = self
+            .files
+            .get(module)
+            .cloned()
+            .or_else(|| module.clone())
+            .unwrap_or_default();
+        let col = self
+            .cols
+            .get(module)
+            .and_then(|m| m.get(&(line, name.to_string())))
+            .copied()
+            .unwrap_or(0);
+        struct_lit(
+            "Origin",
+            vec![
+                ("file", Expr::Str(file)),
+                ("line", Expr::Int(line as i64)),
+                ("col", Expr::Int(col as i64)),
+                ("name", Expr::Str(name.to_string())),
+            ],
+        )
+    }
+}
+
+/// Builds the `ModuleInterface` literal for the reflected module's reachable
+/// type closure.
+///
+/// `program` is linked and rooted at the reflected module, whose declarations
+/// have `module == None`. `functions` holds the root's own exported functions;
+/// `types` holds every named type reachable from their signatures through
+/// fields, payloads, bases and generic arguments, whichever module declares
+/// it, plus the root's own exported types. Own declarations come first in
+/// source order, then foreign ones in linker order; `load` refuses a name
+/// declared twice. `specifiers` maps a declaration's module to the import
+/// specifier a generator uses to reach it; a missing entry gives `""`.
+pub fn module_interface_lit(
+    program: &Program,
+    specifiers: &HashMap<Option<String>, String>,
+    origins: &Origins,
+) -> Expr {
+    let types: HashMap<String, TypeDecl> = program
+        .type_decls
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect();
+
+    // Roots: the reflected module's own exported functions. A body-less `extern`
+    // has no surface.
+    let is_root_fn = |f: &Function| f.exported && !f.is_extern && f.module.is_none();
+
+    let mut fn_infos = Vec::new();
+    for f in &program.functions {
+        if is_root_fn(f) {
+            fn_infos.push(fn_info_lit(f, &types, origins));
+        }
+    }
+
+    // Seed the closure from the roots' signatures, then walk declarations.
+    let mut reachable: HashSet<String> = HashSet::new();
+    let mut work: Vec<String> = Vec::new();
+    for f in &program.functions {
+        if is_root_fn(f) {
+            for p in &f.params {
+                collect_type_names(&p.ty, &mut work);
+            }
+            collect_type_names(&f.ret, &mut work);
+        }
+    }
+    while let Some(n) = work.pop() {
+        if !reachable.insert(n.clone()) {
+            continue;
+        }
+        if let Some(decl) = types.get(&n) {
+            // A predicate references `value`, never a type, so only the base adds names.
+            collect_type_names(&decl.base, &mut work);
+        }
+    }
+
+    let mut type_infos = Vec::new();
+    for t in &program.type_decls {
+        // Skip injected (line 0) and synthetic (`Name.field`) declarations.
+        if !t.exported || t.line == 0 || t.name.contains('.') {
+            continue;
+        }
+        // Own declarations always; foreign ones when the closure reaches them.
+        if t.module.is_none() || reachable.contains(&t.name) {
+            let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
+            type_infos.push(type_info_lit(t, spec, &types, origins));
+        }
+    }
+
+    struct_lit(
+        "ModuleInterface",
+        vec![
+            ("functions", array_lit(fn_infos)),
+            ("types", array_lit(type_infos)),
+        ],
+    )
+}
+
+/// Builds the `ContractInfo` literal for a contract declaration.
+///
+/// This is all the compiler knows of contracts: which exports a contract
+/// demands and how a mismatch is reported is `std/contract:checkContract`'s
+/// policy, in Vyrn, so a third-party generator can replace it. A default
+/// expression is not reflected: a generator needs to know a default exists
+/// (`optional`), not its value.
+pub fn contract_info_lit(c: &ContractDecl) -> Expr {
+    let members: Vec<Expr> = c
+        .members
+        .iter()
+        .map(|m| {
+            let (kind, params, ret, variadic) = match &m.kind {
+                ContractMemberKind::Value { ty, .. } => ("let", Vec::new(), ty.to_string(), false),
+                ContractMemberKind::Fn {
+                    params,
+                    ret,
+                    variadic,
+                    ..
+                } => (
+                    "fn",
+                    params.iter().map(|p| p.to_string()).collect(),
+                    // A `Unit` return spells as `""`, as in `FnInfo.ret`.
+                    if *ret == Type::Unit {
+                        String::new()
+                    } else {
+                        ret.to_string()
+                    },
+                    *variadic,
+                ),
+            };
+            struct_lit(
+                "MemberInfo",
+                vec![
+                    ("name", Expr::Str(m.name.clone())),
+                    ("kind", Expr::Str(kind.to_string())),
+                    ("spelling", Expr::Str(m.spelling())),
+                    (
+                        "params",
+                        array_lit(params.into_iter().map(Expr::Str).collect()),
+                    ),
+                    ("ret", Expr::Str(ret)),
+                    ("optional", Expr::Bool(m.optional())),
+                    ("variadic", Expr::Bool(variadic)),
+                    ("doc", opt_str(m.doc.as_deref())),
+                ],
+            )
+        })
+        .collect();
+    struct_lit(
+        "ContractInfo",
+        vec![
+            ("name", Expr::Str(c.name.clone())),
+            ("module", Expr::Str(c.module.clone().unwrap_or_default())),
+            ("doc", opt_str(c.doc.as_deref())),
+            ("open", Expr::Bool(c.open_rule().is_some())),
+            ("members", array_lit(members)),
+        ],
+    )
+}
+
+/// Pushes every named type referenced in `ty` onto `out`: the closure walk's
+/// edges.
+fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
+    match ty {
+        Type::Named(n) => out.push(n.clone()),
+        Type::App(n, args) => {
+            out.push(n.clone());
+            for a in args {
+                collect_type_names(a, out);
+            }
+        }
+        Type::Array(a)
+        | Type::Stream(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _)
+        // A `lazy T` field reaches `T`: deferral changes when the value is
+        // computed, not which declarations the closure carries.
+        | Type::Lazy(a) => collect_type_names(a, out),
+        Type::Merge(a, b) | Type::Map(a, b) => {
+            collect_type_names(a, out);
+            collect_type_names(b, out);
+        }
+        Type::Record(fields) => {
+            for f in fields {
+                collect_type_names(&f.ty, out);
+            }
+        }
+        Type::Enum(variants) => {
+            for v in variants {
+                for p in &v.payload {
+                    collect_type_names(p, out);
+                }
+            }
+        }
+        Type::Fn(params, ret) => {
+            for p in params {
+                collect_type_names(p, out);
+            }
+            collect_type_names(ret, out);
+        }
+        // Primitives, type parameters, loggers and the error sentinel name no
+        // declaration.
+        _ => {}
+    }
+}
+
+fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origins) -> Expr {
+    let params: Vec<Expr> = f
+        .params
+        .iter()
+        .map(|p| {
+            struct_lit(
+                "ParamInfo",
+                vec![
+                    ("name", Expr::Str(p.name.clone())),
+                    ("spelling", Expr::Str(p.ty.to_string())),
+                    ("schema", schema_lit_for_type(&p.ty, types)),
+                    ("uncodable", Expr::Str(uncodable_of(&p.ty, types, true))),
+                ],
+            )
+        })
+        .collect();
+    // A `Unit` return spells as `""`.
+    let ret_spelling = if f.ret == Type::Unit {
+        String::new()
+    } else {
+        f.ret.to_string()
+    };
+    struct_lit(
+        "FnInfo",
+        vec![
+            ("name", Expr::Str(f.name.clone())),
+            ("params", array_lit(params)),
+            ("ret", Expr::Str(ret_spelling)),
+            ("retSchema", schema_lit_for_type(&f.ret, types)),
+            (
+                "retUncodable",
+                Expr::Str(uncodable_of(&f.ret, types, false)),
+            ),
+            ("mutates", Expr::Bool(f.is_mut)),
+            ("origin", origins.lit(&f.module, &f.name, f.line)),
+        ],
+    )
+}
+
+/// Returns the first part of `ty` that cannot cross the wire, or `""`:
+/// [`crate::codec`]'s verdict, the rule `toJson` and `fromJson` use, so a
+/// generator need not scan spellings for `fn(`.
+///
+/// `decode` picks the direction: a parameter is decoded, a return encoded, and
+/// the two differ (a fixed `Array<T, N>` encodes but cannot be decoded).
+fn uncodable_of(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> String {
+    let r = if decode {
+        crate::codec::decodable(ty, types)
+    } else {
+        crate::codec::encodable(ty, types)
+    };
+    r.err().unwrap_or_default()
+}
+
+fn type_info_lit(
+    t: &TypeDecl,
+    module_spec: &str,
+    types: &HashMap<String, TypeDecl>,
+    origins: &Origins,
+) -> Expr {
+    struct_lit(
+        "TypeInfo",
+        vec![
+            ("name", Expr::Str(t.name.clone())),
+            ("source", Expr::Str(render_type_decl(t, types))),
+            ("module", Expr::Str(module_spec.to_string())),
+            ("schema", crate::types::schema_struct_lit(t)),
+            ("origin", origins.lit(&t.module, &t.name, t.line)),
+        ],
+    )
+}
+
+/// Returns a `Schema` literal for any type: a declared type reflects through
+/// [`crate::types::schema_struct_lit`], any other gets its spelling alone.
+fn schema_lit_for_type(ty: &Type, types: &HashMap<String, TypeDecl>) -> Expr {
+    if let Type::Named(n) = ty {
+        if let Some(decl) = types.get(n) {
+            return crate::types::schema_struct_lit(decl);
+        }
+    }
+    let spelling = ty.to_string();
+    struct_lit(
+        "Schema",
+        vec![
+            ("name", Expr::Str(spelling.clone())),
+            ("base", Expr::Str(spelling)),
+            ("doc", none()),
+            ("min", none()),
+            ("max", none()),
+            ("multipleOf", none()),
+            ("minLength", none()),
+            ("maxLength", none()),
+            ("pattern", none()),
+        ],
+    )
+}
+
+/// Renders a type declaration as canonical Vyrn source, so a generator can
+/// re-emit it. Synthetic `Parent.field` refinements fold back into the record.
+pub fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
+    let mut out = String::new();
+    if t.exported {
+        out.push_str("export ");
+    }
+    out.push_str("type ");
+    out.push_str(&t.name);
+    if !t.type_params.is_empty() {
+        out.push('<');
+        out.push_str(&t.type_params.join(", "));
+        out.push('>');
+    }
+    out.push_str(" = ");
+    match &t.base {
+        Type::Record(fields) => {
+            out.push_str("{ ");
+            for (i, fld) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&fld.name);
+                out.push_str(": ");
+                out.push_str(&render_field_type(&t.name, &fld.name, &fld.ty, types));
+            }
+            out.push_str(" }");
+            // A cross-field `where` stays on the record declaration; dropping it would
+            // lose the validation on re-emission.
+            if let Some(pred) = &t.predicate {
+                out.push_str(" where ");
+                out.push_str(&crate::checker::pred_summary(pred));
+            }
+        }
+        // A declared variant list. An alias of a built-in sum spells itself
+        // `Result<T, E>` in the arm below, as the module wrote it.
+        Type::Enum(variants) if !crate::types::is_sum_alias(&t.base) => {
+            let rendered: Vec<String> = variants
+                .iter()
+                .map(|v| {
+                    if v.payload.is_empty() {
+                        v.name.clone()
+                    } else {
+                        let ps: Vec<String> = v.payload.iter().map(|p| p.to_string()).collect();
+                        format!("{}({})", v.name, ps.join(", "))
+                    }
+                })
+                .collect();
+            out.push_str("| ");
+            out.push_str(&rendered.join(" | "));
+        }
+        base => {
+            out.push_str(&base.to_string());
+            if let Some(pred) = &t.predicate {
+                out.push_str(" where ");
+                out.push_str(&crate::checker::pred_summary(pred));
+            }
+        }
+    }
+    out
+}
+
+/// Renders a record field's type, folding a synthetic `Parent.field`
+/// refinement back into `Base where <pred>`.
+fn render_field_type(
+    parent: &str,
+    field: &str,
+    ty: &Type,
+    types: &HashMap<String, TypeDecl>,
+) -> String {
+    if let Type::Named(n) = ty {
+        if n == &format!("{parent}.{field}") {
+            if let Some(decl) = types.get(n) {
+                let base = decl.base.to_string();
+                return match &decl.predicate {
+                    Some(p) => format!("{base} where {}", crate::checker::pred_summary(p)),
+                    None => base,
+                };
+            }
+        }
+    }
+    ty.to_string()
+}
+
+fn struct_lit(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
+    Expr::StructLit {
+        name: name.to_string(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+        line: 0,
+    }
+}
+
+fn array_lit(elems: Vec<Expr>) -> Expr {
+    Expr::ArrayLit { elems, line: 0 }
+}
+
+fn none() -> Expr {
+    Expr::Var {
+        name: "None".to_string(),
+        line: 0,
+    }
+}
+
+fn opt_str(s: Option<&str>) -> Expr {
+    match s {
+        Some(v) => Expr::Call {
+            dot: false,
+            type_args: Vec::new(),
+            name: "Some".to_string(),
+            args: vec![Expr::Str(v.to_string())],
+            line: 0,
+        },
+        None => none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn types_of(src: &str) -> HashMap<String, TypeDecl> {
+        let (p, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
+        p.type_decls
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect()
+    }
+    fn decl(src: &str, name: &str) -> (TypeDecl, HashMap<String, TypeDecl>) {
+        let types = types_of(src);
+        (types[name].clone(), types)
+    }
+
+    #[test]
+    fn renders_validated_scalar_with_predicate() {
+        let (d, t) = decl("export type Id = Int64 where value >= 1\n", "Id");
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type Id = Int64 where value >= 1"
+        );
+    }
+
+    #[test]
+    fn renders_record_folding_inline_refinements() {
+        let (d, t) = decl(
+            "export type User = { name: String where value.byteLength >= 3, age: Int64 }\n",
+            "User",
+        );
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type User = { name: String where value.byteLength >= 3, age: Int64 }"
+        );
+    }
+
+    /// A cross-field `where` survives rendering.
+    #[test]
+    fn renders_record_cross_field_where() {
+        let (d, t) = decl(
+            "export type R = { lo: Int64, hi: Int64 } where value.lo < value.hi\n",
+            "R",
+        );
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type R = { lo: Int64, hi: Int64 } where value.lo < value.hi"
+        );
+    }
+
+    #[test]
+    fn renders_enum() {
+        let (d, t) = decl("export type Shape = | Circle(Int64) | Dot\n", "Shape");
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type Shape = | Circle(Int64) | Dot"
+        );
+    }
+
+    fn field<'a>(e: &'a Expr, name: &str) -> &'a Expr {
+        match e {
+            Expr::StructLit { fields, .. } => {
+                &fields.iter().find(|(k, _)| k == name).expect("field").1
+            }
+            other => panic!("expected a struct literal, got {other:?}"),
+        }
+    }
+    fn str_of(e: &Expr) -> &str {
+        match e {
+            Expr::Str(s) => s,
+            other => panic!("expected a string, got {other:?}"),
+        }
+    }
+    fn elems(e: &Expr) -> &[Expr] {
+        match e {
+            Expr::ArrayLit { elems, .. } => elems,
+            other => panic!("expected an array literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_interface_captures_exported_surface() {
+        let src = "export type Id = Int64 where value >= 1 \
+                   export fn ping(id: Id, times: Int64) -> String { return \"pong\" } \
+                   fn hidden() -> Int64 { return 0 }";
+        let (program, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
+        let origins = Origins::new([(None, "m.vyrn", src)]);
+        let iface = module_interface_lit(&program, &HashMap::new(), &origins);
+
+        let fns = elems(field(&iface, "functions"));
+        assert_eq!(fns.len(), 1);
+        assert_eq!(str_of(field(&fns[0], "name")), "ping");
+        assert_eq!(str_of(field(&fns[0], "ret")), "String");
+        let params = elems(field(&fns[0], "params"));
+        assert_eq!(params.len(), 2);
+        assert_eq!(str_of(field(&params[0], "name")), "id");
+        assert_eq!(str_of(field(&params[0], "spelling")), "Id");
+        let sch = field(&params[0], "schema");
+        assert_eq!(str_of(field(sch, "name")), "Id");
+
+        let tys = elems(field(&iface, "types"));
+        assert_eq!(tys.len(), 1);
+        assert_eq!(str_of(field(&tys[0], "name")), "Id");
+        assert_eq!(
+            str_of(field(&tys[0], "source")),
+            "export type Id = Int64 where value >= 1"
+        );
+    }
+
+    /// Checks an origin by reading the source at it: `file:line:col` must be where
+    /// its name is written.
+    fn assert_points_at(src: &str, origin: &Expr) {
+        let line: usize = match field(origin, "line") {
+            Expr::Int(n) => *n as usize,
+            other => panic!("line is not an int: {other:?}"),
+        };
+        let col: usize = match field(origin, "col") {
+            Expr::Int(n) => *n as usize,
+            other => panic!("col is not an int: {other:?}"),
+        };
+        let name = str_of(field(origin, "name"));
+        let text = src.lines().nth(line - 1).expect("line in range");
+        let at: String = text
+            .chars()
+            .skip(col - 1)
+            .take(name.chars().count())
+            .collect();
+        assert_eq!(at, name, "origin {line}:{col} does not point at `{name}`");
+    }
+
+    #[test]
+    fn origins_point_at_the_declarations_they_name() {
+        // A comment mentioning `ping` defeats a substring search, a doc comment moves
+        // the declaration line, and a type follows the function.
+        let src = "// ping is declared below, not here\n\
+                   \n\
+                   /// Pong.\n\
+                   export fn ping(id: Id) -> String { return \"pong\" }\n\
+                   export type Id = Int64 where value >= 1\n";
+        let (program, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
+        let origins = Origins::new([(None, "m.vyrn", src)]);
+        let iface = module_interface_lit(&program, &HashMap::new(), &origins);
+
+        let f = &elems(field(&iface, "functions"))[0];
+        let o = field(f, "origin");
+        assert_eq!(str_of(field(o, "file")), "m.vyrn");
+        assert_points_at(src, o);
+
+        let t = &elems(field(&iface, "types"))[0];
+        assert_points_at(src, field(t, "origin"));
+    }
+
+    #[test]
+    fn a_renamed_declaration_moves_its_origin() {
+        let one = "export fn ping() -> String { return \"\" }\n";
+        let two = "\n\nexport fn pong() -> String { return \"\" }\n";
+        let origin_of = |src: &str| {
+            let (p, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
+            let iface =
+                module_interface_lit(&p, &HashMap::new(), &Origins::new([(None, "m.vyrn", src)]));
+            field(&elems(field(&iface, "functions"))[0], "origin").clone()
+        };
+        let a = origin_of(one);
+        let b = origin_of(two);
+        assert_points_at(one, &a);
+        assert_points_at(two, &b);
+        assert_ne!(str_of(field(&a, "name")), str_of(field(&b, "name")));
+        assert_ne!(field(&a, "line"), field(&b, "line"));
+    }
+
+    /// Links `files` (keyed by module path) and reflects `root`.
+    fn reflect_linked(files: &[(&str, &str)], root: &str) -> Expr {
+        let map: std::collections::HashMap<String, String> = files
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let resolver = crate::loader::MapResolver(map.clone());
+        let program =
+            crate::loader::load(&map[root], root, &Default::default(), &resolver).expect("link");
+        let mut specs: HashMap<Option<String>, String> = HashMap::new();
+        specs.insert(None, format!("./{root}"));
+        for t in &program.type_decls {
+            if let Some(k) = &t.module {
+                specs
+                    .entry(Some(k.clone()))
+                    .or_insert_with(|| format!("./{}", k.strip_suffix(".vyrn").unwrap_or(k)));
+            }
+        }
+        let mut srcs: Vec<(Option<String>, &str, &str)> = Vec::new();
+        for (k, v) in files {
+            let key = if *k == root {
+                None
+            } else {
+                Some(k.to_string())
+            };
+            srcs.push((key, k, v));
+        }
+        let origins = Origins::new(srcs);
+        module_interface_lit(&program, &specs, &origins)
+    }
+
+    fn type_names_of(iface: &Expr) -> Vec<String> {
+        elems(field(iface, "types"))
+            .iter()
+            .map(|t| str_of(field(t, "name")).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn closure_walks_records_enums_aliases_and_generics_across_modules() {
+        // Signatures name only `Req` and `Wrap`; the walk must reach `Book` (field),
+        // `Id` (a field's base), `Shape` (payload) and `Inner` (generic argument).
+        let wire = "\
+            export type Id = Int64 where value >= 1\n\
+            export type Inner = { n: Int64 }\n\
+            export type Shape = | Circle(Id) | Dot\n\
+            export type Book = { id: Id, shape: Shape }\n\
+            export type Req = { book: Book }\n\
+            export type Wrap = Array<Inner>\n\
+            export type Unused = { x: Int64 }\n";
+        let contract = "\
+            import { Req, Wrap } from \"./wire\"\n\
+            export fn make(r: Req) -> Wrap { return [] }\n";
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
+        let names = type_names_of(&iface);
+        for want in ["Req", "Wrap", "Book", "Id", "Shape", "Inner"] {
+            assert!(
+                names.contains(&want.to_string()),
+                "closure missing {want}: {names:?}"
+            );
+        }
+        assert!(
+            !names.contains(&"Unused".to_string()),
+            "dragged in Unused: {names:?}"
+        );
+    }
+
+    #[test]
+    fn own_decls_come_first_then_foreign_in_source_order() {
+        // Own `Local` is unreferenced but leads; foreign `A` and `B` follow in wire
+        // order.
+        let wire = "export type A = { x: Int64 }\nexport type B = { y: Int64 }\n";
+        let contract = "\
+            import { A, B } from \"./wire\"\n\
+            export type Local = { z: Int64 }\n\
+            export fn f(a: A) -> B { return B { y: 0 } }\n";
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
+        assert_eq!(type_names_of(&iface), vec!["Local", "A", "B"]);
+    }
+
+    #[test]
+    fn foreign_types_carry_their_declaring_module_specifier() {
+        let wire = "export type A = { x: Int64 }\n";
+        let contract = "\
+            import { A } from \"./wire\"\n\
+            export type Own = { z: Int64 }\n\
+            export fn f(a: A) -> Own { return Own { z: 0 } }\n";
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
+        let tys = elems(field(&iface, "types"));
+        let own = tys
+            .iter()
+            .find(|t| str_of(field(t, "name")) == "Own")
+            .unwrap();
+        assert_eq!(str_of(field(own, "module")), "./contract.vyrn");
+        let a = tys
+            .iter()
+            .find(|t| str_of(field(t, "name")) == "A")
+            .unwrap();
+        assert_eq!(str_of(field(a, "module")), "./wire");
+    }
+
+    #[test]
+    fn only_the_reflected_modules_functions_are_reflected() {
+        let wire = "\
+            export type A = { x: Int64 }\n\
+            export fn helper() -> A { return A { x: 0 } }\n";
+        let contract = "\
+            import { A } from \"./wire\"\n\
+            export fn f(a: A) -> A { return a }\n";
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
+        let fns = elems(field(&iface, "functions"));
+        let fn_names: Vec<&str> = fns.iter().map(|f| str_of(field(f, "name"))).collect();
+        assert_eq!(fn_names, vec!["f"]);
+    }
+}

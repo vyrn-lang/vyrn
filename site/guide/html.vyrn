@@ -1,0 +1,16 @@
+// A view is a function that returns a tree. `toHtmlString` renders it on the
+// server; the same tree crosses to the browser for the client differ. Text is
+// escaped, and a tag name is checked rather than escaped.
+import { el, text, cls, toHtmlString, Html } from "std/html"
+
+fn row(label: consume String) -> Html {
+    return el("li", [cls("row")], [text(label)])
+}
+
+fn view() -> Html {
+    return el("ul", [cls("items")], [row("Widget"), row("Gadget & Co")])
+}
+
+export fn demo() -> String {
+    return toHtmlString(view())
+}

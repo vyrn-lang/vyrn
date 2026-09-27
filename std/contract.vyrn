@@ -1,0 +1,516 @@
+/// std/contract -- check a module against a module contract.
+///
+/// `checkContract` compares a `contract` declaration with a module's
+/// `moduleInterface` and returns `Issue`s:
+///
+///     import { checkContract } from "std/contract"
+///
+///     gen fn pages(dir: String) -> String {
+///         let iface = moduleInterface(pageFile)
+///         let issues = checkContract(iface, contractOf(Page))
+///         ...
+///     }
+///
+/// The compiler knows only the declaration form, so a third-party generator can
+/// declare its own contract. Every condition is reported:
+///
+///   - required member absent            -> `contract.missing`
+///   - member type mismatch              -> `contract.type`
+///   - unknown export, close to a member -> `contract.unknown.didYouMean`
+///   - unknown export, not close         -> `contract.unknown`
+///   - open-rule shape mismatch          -> `contract.open`
+///
+/// A module exports only functions (every top-level `let` is
+/// private), so a `let` member is satisfied by an accessor
+/// (`export fn head() -> Head`). A member with a default (`fn head() -> Head =
+/// noHead()`) is optional. A `fn` member name declared more than once has
+/// alternative signatures; the module matches any one, the name is optional when
+/// any alternative has a default, and `matchedMember` says which one matched:
+///
+///     fn head() -> Head = noHead()
+///     fn head(d: T) -> Head
+///     fn head(p: P) -> Head
+///     fn head(p: P, d: T) -> Head
+
+import { editDistance } from "std/strings"
+import { includes } from "std/arrays"
+import { slice } from "std/strpred"
+
+/// The Damerau-Levenshtein distance within which an unknown export gets a "did you mean".
+fn nearThreshold() -> Int64 {
+    return 2
+}
+
+fn trimSpaces(s: String) -> String {
+    let b = bytes(s)
+    let mut start = 0
+    while start < b.length && b[start] == ' ' {
+        start = start + 1
+    }
+    let mut end = b.length
+    while end > start && b[end - 1] == ' ' {
+        end = end - 1
+    }
+    return slice(s, start, end) ?? panic("trimSpaces: both offsets came from scanning `s` for ASCII spaces")
+}
+
+/// Whether `name` is a contract member's implicit type parameter: one uppercase
+/// ASCII letter, then optional digits (`T`, `R`, `T1`). Mirrors
+/// `parser::is_member_type_param`; a multi-letter name stays a real type, so a
+/// misspelling is still an error.
+fn isTypeParam(name: String) -> Bool {
+    let b = bytes(name)
+    if b.length == 0 {
+        return false
+    }
+    if b[0] < 'A' || b[0] > 'Z' {
+        return false
+    }
+    let mut i = 1
+    while i < b.length {
+        if b[i] < '0' || b[i] > '9' {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// The head name of a type spelling: `Query<T>` => `Query`, `Int64` => `Int64`.
+fn headOf(spelling: String) -> String {
+    let b = bytes(spelling)
+    let mut i = 0
+    while i < b.length {
+        if b[i] == '<' {
+            return trimSpaces(slice(spelling, 0, i) ?? panic("headOf: the cut is at an ASCII `<`"))
+        }
+        i = i + 1
+    }
+    return trimSpaces(spelling)
+}
+
+/// The top-level generic arguments: `Map<String, Array<T>>` => `["String", "Array<T>"]`; `Int64` => `[]`.
+fn argsOf(spelling: String) -> Array<String> {
+    let b = bytes(spelling)
+    let mut out: Array<String> = []
+    let mut open = -1
+    let mut i = 0
+    while i < b.length {
+        if b[i] == '<' {
+            open = i
+            break
+        }
+        i = i + 1
+    }
+    if open < 0 {
+        return out
+    }
+    let mut depth = 1
+    let mut start = open + 1
+    let mut j = open + 1
+    while j < b.length && depth > 0 {
+        if b[j] == '<' {
+            depth = depth + 1
+        } else if b[j] == '>' {
+            depth = depth - 1
+            if depth == 0 {
+                out.push(trimSpaces(slice(spelling, start, j) ?? panic("argsOf: the cut is at an ASCII `<`, `>` or `,`")))
+            }
+        } else if b[j] == ',' && depth == 1 {
+            out.push(trimSpaces(slice(spelling, start, j) ?? panic("argsOf: the cut is at an ASCII `<`, `>` or `,`")))
+            start = j + 1
+        }
+        j = j + 1
+    }
+    return out
+}
+
+/// Whether type spelling `actual` satisfies `pattern`: equality, except that a
+/// pattern head that is a member type parameter matches any type. A Unit return
+/// spells `""` on both sides.
+fn typeMatches(pattern: String, actual: String) -> Bool {
+    let ph = headOf(pattern)
+    if isTypeParam(ph) {
+        return true
+    }
+    if ph != headOf(actual) {
+        return false
+    }
+    let pa = argsOf(pattern)
+    let aa = argsOf(actual)
+    if pa.length != aa.length {
+        return false
+    }
+    let mut i = 0
+    while i < pa.length {
+        if typeMatches(pa[i], aa[i]) == false {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// A signature in the compiler's `Type::Fn` notation, `fn(A, B) -> R`, with a
+/// Unit return omitted. Both sides of every comparison use it.
+fn sigSpelling(params: Array<String>, ret: String) -> String {
+    let mut out = "fn("
+    let mut i = 0
+    while i < params.length {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + params[i]
+        i = i + 1
+    }
+    out = out + ")"
+    if ret != "" {
+        out = out + " -> " + ret
+    }
+    return out
+}
+
+/// One export of the reflected module; `kind` is `"fn"` or `"let"`.
+type Export = {
+    name: String,
+    kind: String,
+    params: Array<String>,
+    ret: String,
+}
+
+/// The reflected module's exports: its exported functions.
+fn moduleExports(iface: ModuleInterface) -> Array<Export> {
+    let mut out: Array<Export> = []
+    for f in iface.functions {
+        let mut ps: Array<String> = []
+        for p in f.params {
+            ps.push(p.spelling.copy())
+        }
+        out.push(Export { name: f.name.copy(), kind: "fn", params: ps, ret: f.ret.copy() })
+    }
+    return out
+}
+
+fn exportSpelling(e: Export) -> String {
+    if e.kind == "fn" {
+        return sigSpelling(e.params, e.ret)
+    }
+    return e.ret.copy()
+}
+
+fn memberSpelling(m: MemberInfo) -> String {
+    if m.kind == "fn" {
+        if m.variadic {
+            return m.spelling.copy()
+        }
+        return sigSpelling(m.params, m.ret)
+    }
+    return m.spelling.copy()
+}
+
+/// The message tail naming the contract, and its module when it is declared elsewhere.
+fn contractSite(c: ContractInfo) -> String {
+    if c.module == "" {
+        return "contract `\{c.name}`"
+    }
+    return "contract `\{c.name}`, \{c.module}"
+}
+
+fn issue(key: String, path: String, message: String) -> Issue {
+    return Issue { key: key.copy(), path: path.copy(), message: message.copy() }
+}
+
+/// The member name closest to `name` within `nearThreshold()`; a tie goes to the first declared.
+fn didYouMean(c: ContractInfo, name: String) -> Option<String> {
+    let mut best = ""
+    let mut bestD = nearThreshold() + 1
+    for m in c.members {
+        if m.name != "*" {
+            let d = editDistance(name, m.name)
+            if d < bestD {
+                bestD = d
+                best = m.name
+            }
+        }
+    }
+    if bestD <= nearThreshold() {
+        return Some(best.copy())
+    }
+    return None
+}
+
+fn hasMember(c: ContractInfo, name: String) -> Bool {
+    for m in c.members {
+        if m.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// Every alternative signature declared for `name`, in declaration order.
+fn alternatives(c: ContractInfo, name: String) -> Array<MemberInfo> {
+    let mut out: Array<MemberInfo> = []
+    for m in c.members {
+        if m.name == name {
+            out.push(m.copy())
+        }
+    }
+    return out
+}
+
+/// The distinct named members in order of first declaration, so each name yields
+/// at most one issue however many alternatives it has.
+fn memberNames(c: ContractInfo) -> Array<String> {
+    let mut out: Array<String> = []
+    for m in c.members {
+        if m.name != "*" && includes(out, m.name) == false {
+            out.push(m.name.copy())
+        }
+    }
+    return out
+}
+
+/// Whether the module may omit `name`: true when any alternative has a default.
+fn nameOptional(alts: Array<MemberInfo>) -> Bool {
+    for m in alts {
+        if m.optional {
+            return true
+        }
+    }
+    return false
+}
+
+/// The alternatives joined as `` `a` or `b` ``; one alternative is its spelling alone.
+fn altSpelling(alts: Array<MemberInfo>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < alts.length {
+        if i > 0 {
+            out = out + if i == alts.length - 1 { "` or `" } else { "`, `" }
+        }
+        out = out + memberSpelling(alts[i])
+        i = i + 1
+    }
+    return out
+}
+
+/// The index of the alternative `e` satisfies, or `0 - 1` for none.
+fn matchIndex(alts: Array<MemberInfo>, e: Export) -> Int64 {
+    let mut i = 0
+    while i < alts.length {
+        let m = alts[i]
+        let ok = if m.kind == "fn" {
+            matchesSignature(m, e)
+        } else {
+            // A `let` member is satisfied by its accessor: an arity-0 fn
+            // returning the member's type.
+            e.kind == "fn" && e.params.length == 0 && typeMatches(m.spelling, e.ret)
+        }
+        if ok {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// The index of the export named `name`, or `0 - 1` when the module has none.
+/// An index, because every caller branches and then uses the value.
+fn exportIndex(exports: Array<Export>, name: String) -> Int64 {
+    let mut i = 0
+    while i < exports.length {
+        if exports[i].name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn openRule(c: ContractInfo) -> Option<MemberInfo> {
+    for m in c.members {
+        if m.name == "*" {
+            return Some(m.copy())
+        }
+    }
+    return None
+}
+
+/// Whether export `e` satisfies function member `m`: same arity, and every
+/// parameter and the return matching. The open rule uses it too; its name is
+/// free, and a variadic rule (`fn *(..) -> R`) checks the return type only.
+fn matchesSignature(m: MemberInfo, e: Export) -> Bool {
+    if e.kind != "fn" {
+        return false
+    }
+    if m.variadic {
+        return typeMatches(m.ret, e.ret)
+    }
+    if m.params.length != e.params.length {
+        return false
+    }
+    let mut i = 0
+    while i < m.params.length {
+        if typeMatches(m.params[i], e.params[i]) == false {
+            return false
+        }
+        i = i + 1
+    }
+    return typeMatches(m.ret, e.ret)
+}
+
+/// One `Issue` per problem, in a fixed order: the contract's members in
+/// declaration order, then the module's unrecognized exports in reflection order.
+/// Empty when the module satisfies the contract.
+export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue> {
+    let mut issues: Array<Issue> = []
+    let exports = moduleExports(iface)
+    let site = contractSite(c)
+
+    // Every named member, present at one of its shapes or legitimately absent.
+    // One issue per name, not one per alternative.
+    for name in memberNames(c) {
+        let alts = alternatives(c, name)
+        let want = altSpelling(alts)
+        let at = exportIndex(exports, name)
+        if at < 0 {
+            if nameOptional(alts) == false {
+                issues.push(issue(
+                    "contract.missing",
+                    name,
+                    "module must export `\{name}`: `\{want}` (\{site})",
+                ))
+            }
+        } else {
+            let e = exports[at]
+            if matchIndex(alts, e) < 0 {
+                let got = exportSpelling(e)
+                let verb = if alts.length > 1 { "must be one of" } else { "must be" }
+                issues.push(issue(
+                    "contract.type",
+                    name,
+                    "`\{name}` \{verb} `\{want}`, found `\{got}` (\{site})",
+                ))
+            }
+        }
+    }
+
+    // Every export the contract does not name: a closed contract reports it, an
+    // open one checks it against the open rule's shape.
+    for e in exports {
+        if hasMember(c, e.name) == false {
+            if let Some(rule) = openRule(c) {
+                if matchesSignature(rule, e) == false {
+                    let want = memberSpelling(rule)
+                    let got = exportSpelling(e)
+                    issues.push(issue(
+                        "contract.open",
+                        e.name,
+                        "`\{e.name}` must match the open rule `\{want}`, found `\{got}` (\{site})",
+                    ))
+                }
+            } else {
+                if let Some(near) = didYouMean(c, e.name) {
+                    issues.push(issue(
+                        "contract.unknown.didYouMean",
+                        e.name,
+                        "unknown export `\{e.name}` — did you mean `\{near}`? (\{site})",
+                    ))
+                } else {
+                    issues.push(issue(
+                        "contract.unknown",
+                        e.name,
+                        "unknown export `\{e.name}` (\{site} is closed)",
+                    ))
+                }
+            }
+        }
+    }
+    return issues
+}
+
+/// Whether `iface` exports member `name` at one of its declared shapes.
+export fn suppliesMember(iface: ModuleInterface, c: ContractInfo, name: String) -> Bool {
+    return matchedMember(iface, c, name) >= 0
+}
+
+/// The 0-based index of the alternative of member `name` the module supplies, in
+/// declaration order, or `0 - 1` when it supplies none. Compares in place, with
+/// no `Export` list built.
+export fn matchedMember(iface: ModuleInterface, c: ContractInfo, name: String) -> Int64 {
+    let mut at = 0 - 1
+    let mut k = 0
+    while k < iface.functions.length {
+        if iface.functions[k].name == name {
+            at = k
+            break
+        }
+        k = k + 1
+    }
+    let mut alt = 0
+    for m in c.members {
+        if m.name == name {
+            if at >= 0 {
+                if fnSatisfies(m, iface.functions[at]) {
+                    return alt
+                }
+            }
+            alt = alt + 1
+        }
+    }
+    return 0 - 1
+}
+
+/// [`matchesSignature`] and `matchIndex`'s `let` arm, asked directly of an `FnInfo`.
+fn fnSatisfies(m: MemberInfo, f: FnInfo) -> Bool {
+    if m.kind != "fn" {
+        return f.params.length == 0 && typeMatches(m.spelling, f.ret)
+    }
+    if m.variadic {
+        return typeMatches(m.ret, f.ret)
+    }
+    if m.params.length != f.params.length {
+        return false
+    }
+    let mut i = 0
+    while i < m.params.length {
+        if typeMatches(m.params[i], f.params[i].spelling) == false {
+            return false
+        }
+        i = i + 1
+    }
+    return typeMatches(m.ret, f.ret)
+}
+
+test "type parameters are open, concrete types are not" {
+    assertEq(typeMatches("Query<T>", "Query<Paste>"), true)
+    assertEq(typeMatches("Query<T>", "Query<Array<Book>>"), true)
+    assertEq(typeMatches("Query<Paste>", "Query<Book>"), false)
+    assertEq(typeMatches("T", "anything at all"), true)
+    assertEq(typeMatches("Map<String, T>", "Map<String, Int64>"), true)
+    assertEq(typeMatches("Map<String, T>", "Map<Int64, Int64>"), false)
+    assertEq(typeMatches("Head", "Head"), true)
+    assertEq(typeMatches("Head", "String"), false)
+    assertEq(typeMatches("", ""), true)
+}
+
+test "spelling helpers agree with the compiler's notation" {
+    assertEq(headOf("Query<T>"), "Query")
+    assertEq(headOf("Int64"), "Int64")
+    assertEq(argsOf("Map<String, Array<T>>").length, 2)
+    assertEq(argsOf("Map<String, Array<T>>")[1], "Array<T>")
+    assertEq(argsOf("Int64").length, 0)
+    assertEq(sigSpelling(["Int64", "String"], "Bool"), "fn(Int64, String) -> Bool")
+    assertEq(sigSpelling([], ""), "fn()")
+}
+
+test "the type-parameter rule matches the frontend's" {
+    assertEq(isTypeParam("T"), true)
+    assertEq(isTypeParam("T1"), true)
+    assertEq(isTypeParam("R"), true)
+    assertEq(isTypeParam("Head"), false)
+    assertEq(isTypeParam("Ta"), false)
+    assertEq(isTypeParam("t"), false)
+    assertEq(isTypeParam(""), false)
+}

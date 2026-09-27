@@ -1,0 +1,299 @@
+/// The repository's own history, and the two pictures of velocity it draws.
+///
+/// WHERE THIS COMES FROM, and why it is the one file the site is handed rather
+/// than reads. Every other number on this site is read off the working tree
+/// while the pages build — `listDir`, `readFile`, and a generator over `std/`.
+/// A commit is not in the working tree. Vyrn has no git and is not going to
+/// grow one for a chart, so `scripts/site-history.py` walks the history once,
+/// before the export, and writes `site/data/history.json`:
+///
+///     python scripts/site-history.py > site/data/history.json
+///
+/// The site workflow runs exactly that line, from a checkout with
+/// `fetch-depth: 0` — a shallow clone has no history to walk. The file is not
+/// committed: it is derived, and a derived file in the tree is a file that goes
+/// stale between the day it was written and the day somebody reads it.
+///
+/// AND IF IT IS NOT THERE — OR IS THERE AND BROKEN. The export REFUSES
+/// (`site/export.vyrn` checks before it renders anything, and prints the
+/// command above; a file that exists but does not parse refuses the same way,
+/// through `historyError`, because a truncated write is the same silence).
+/// What it does NOT do is draw an empty chart, which is the failure mode this
+/// whole site is built against. The fixture below is for the tests only:
+/// `site/data/history.fixture.json` is five days of made-up history,
+/// committed, so `vyrn test site/export.vyrn` runs on a clone that has never
+/// run the script — and the export's own preflight is what stops that fixture
+/// from ever reaching a published page.
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
+import { joinWith, substring } from "std/strings"
+
+/// One day of work: the commits made, and how many of them were merged pull
+/// requests.
+export type Day = { date: String, commits: Int64, prs: Int64 }
+
+/// One published release, and the day it was tagged.
+export type Release = { tag: String, date: String }
+
+// ---------------------------------------------------------------------------
+// The file
+// ---------------------------------------------------------------------------
+
+/// Where the workflow writes it, relative to the directory the export runs in.
+export fn historyPath() -> String {
+    return "site/data/history.json"
+}
+
+/// What to type when it is not there.
+export fn historyCommand() -> String {
+    return "python scripts/site-history.py > " + historyPath()
+}
+
+/// The five made-up days the tests run on.
+fn fixturePath() -> String {
+    return "site/data/history.fixture.json"
+}
+
+/// Whether the numbers on the page are the fixture's rather than the
+/// repository's. The export asks this before it renders anything.
+export fn historyIsFixture() -> Bool {
+    loadHistory()
+    return fromFixture
+}
+
+let mut loaded = false
+let mut fromFixture = false
+let mut corrupt = ""
+let mut dayRows: Array<Day> = []
+let mut releases: Array<Release> = []
+let mut testBlocks = 0
+let mut testFiles = 0
+
+/// Read the file, once.
+fn loadHistory() {
+    if loaded {
+        return
+    }
+    loaded = true
+    let real = match readFile(historyPath()) {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+    let src = if real.byteLength > 0 { real.copy() } else { fixtureText() }
+    fromFixture = real.byteLength == 0
+    let parsed = parseJson(src)
+    // A source that has bytes but does not parse is named, not swallowed: the
+    // export stops on `historyError` rather than drawing charts from nothing.
+    // Only a source with no bytes at all — no real file and no fixture — is
+    // the documented "nothing yet" state, and passes through silently.
+    corrupt = match parsed {
+        Ok(j) => "",
+        Err(why) => why.copy(),
+    }
+    if src.byteLength == 0 {
+        corrupt = ""
+    }
+    let fields = match parsed {
+        Ok(j) => fieldsOf(j),
+        Err(why) => [],
+    }
+    for d in arrayAt(fields, "days") {
+        let f = fieldsOf(copyJson(d))
+        dayRows.push(Day { date: stringAt(f, "d"), commits: numberAt(f, "c"), prs: numberAt(f, "p") })
+    }
+    for r in arrayAt(fields, "releases") {
+        let f = fieldsOf(copyJson(r))
+        releases.push(Release { tag: stringAt(f, "t"), date: stringAt(f, "d") })
+    }
+    let tests = objectAt(fields, "tests")
+    testBlocks = numberAt(tests, "blocks")
+    testFiles = numberAt(tests, "files")
+}
+
+/// Why the charts cannot be drawn, or "" when they can. A source that is
+/// there but does not parse is named here, and the export refuses on it —
+/// an empty chart is the one thing this module must never publish.
+export fn historyError() -> String {
+    loadHistory()
+    return corrupt.copy()
+}
+
+/// The fixture's text, or nothing at all — which is a page with empty charts,
+/// and only ever reachable from a test that has deleted its own fixture.
+fn fixtureText() -> String {
+    return match readFile(fixturePath()) {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+}
+
+/// The fields of a JSON object, or `[]` for any other value.
+fn fieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => copyFields(fs),
+        JArr(xs) => [],
+        JStr(s) => [],
+        JNum(s) => [],
+        JBool(b) => [],
+        JNull => [],
+    }
+}
+
+/// One field list, copied out of the value that owns it.
+fn copyFields(fs: Array<JsonField>) -> Array<JsonField> {
+    let mut out: Array<JsonField> = []
+    for f in fs {
+        out.push(JsonField { key: f.key.copy(), value: copyJson(f.value) })
+    }
+    return out
+}
+
+/// One value, copied out of the value that owns it.
+fn copyJson(j: Json) -> Json {
+    return j.copy()
+}
+
+/// The array member `key` holds, or `[]`.
+fn arrayAt(fields: Array<JsonField>, key: String) -> Array<Json> {
+    for f in fields {
+        if f.key == key {
+            return match copyJson(f.value) {
+                JArr(xs) => copyList(xs),
+                JObj(fs) => [],
+                JStr(s) => [],
+                JNum(s) => [],
+                JBool(b) => [],
+                JNull => [],
+            }
+        }
+    }
+    return []
+}
+
+/// One value list, copied out of the value that owns it.
+fn copyList(xs: Array<Json>) -> Array<Json> {
+    let mut out: Array<Json> = []
+    for x in xs {
+        out.push(copyJson(x))
+    }
+    return out
+}
+
+/// The object member `key` holds, as its fields.
+fn objectAt(fields: Array<JsonField>, key: String) -> Array<JsonField> {
+    for f in fields {
+        if f.key == key {
+            return fieldsOf(copyJson(f.value))
+        }
+    }
+    return []
+}
+
+/// The string member `key` holds, or `""`.
+fn stringAt(fields: Array<JsonField>, key: String) -> String {
+    for f in fields {
+        if f.key == key {
+            return match copyJson(f.value) {
+                JStr(s) => s.copy(),
+                JObj(fs) => "",
+                JArr(xs) => "",
+                JNum(s) => "",
+                JBool(b) => "",
+                JNull => "",
+            }
+        }
+    }
+    return ""
+}
+
+/// The whole number `key` holds, or 0. `JNum` carries the raw text, which for
+/// this file is always a count.
+fn numberAt(fields: Array<JsonField>, key: String) -> Int64 {
+    for f in fields {
+        if f.key == key {
+            return wholeOf(match copyJson(f.value) {
+                JNum(s) => s.copy(),
+                JObj(fs) => "",
+                JArr(xs) => "",
+                JStr(s) => "",
+                JBool(b) => "",
+                JNull => "",
+            })
+        }
+    }
+    return 0
+}
+
+/// A whole number written out, back as a number.
+fn wholeOf(s: String) -> Int64 {
+    let mut n = 0
+    for b in bytes(s) {
+        if b < '0' || b > '9' {
+            return n
+        }
+        n = n * 10 + Int64(b) - 48
+    }
+    return n
+}
+
+// ---------------------------------------------------------------------------
+// What the page states in words
+// ---------------------------------------------------------------------------
+
+/// Every day from the first commit to the last, quiet days included.
+export fn days() -> Array<Day> {
+    loadHistory()
+    return dayRows.copy()
+}
+
+/// Every release, oldest first.
+export fn releaseRows() -> Array<Release> {
+    loadHistory()
+    return releases.copy()
+}
+
+export fn testBlockCount() -> Int64 {
+    loadHistory()
+    return testBlocks
+}
+
+export fn testFileCount() -> Int64 {
+    loadHistory()
+    return testFiles
+}
+
+test "the history is read, and it is a run of days with work in it" {
+    // What `/releases` depends on: a run of days, each a real date, and pull
+    // requests that never outnumber the commits they are part of.
+    assert(days().length > 4)
+    for d in days() {
+        assert(d.date.byteLength == 10)
+        assert(d.commits >= 0)
+        assert(d.prs >= 0)
+        // A merged pull request is a commit, so it can never outnumber them.
+        assert(d.prs <= d.commits)
+    }
+    assert(testBlockCount() > 0)
+    assert(testFileCount() > 0)
+}
+
+test "a source that does not parse is refused, never drawn empty" {
+    // The contract has three states, and only two of them draw: a real file
+    // draws the repository, a missing one draws the fixture, and a BROKEN one
+    // draws nothing — `historyError` names it and the export stops. Only a
+    // source with no bytes at all passes through silently, as the documented
+    // "nothing yet" page.
+    assert(parses("{\"days\":[],\"commits\":0,\"prs\":0}"))
+    assert(!parses("{\"days\":["))
+    assert(!parses(""))
+    // And whatever this tree loaded, it was one of the two drawing states.
+    assertEq(historyError(), "")
+}
+
+/// Whether `src` parses as JSON at all — the check behind `historyError`.
+fn parses(src: String) -> Bool {
+    return match parseJson(src) {
+        Ok(j) => true,
+        Err(why) => false,
+    }
+}

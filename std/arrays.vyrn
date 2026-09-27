@@ -1,0 +1,123 @@
+/// std/arrays: higher-order array helpers, in Vyrn.
+
+/// Applies `f` to every element, collecting the results into a new array.
+export fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {
+    let mut out: Array<U> = []
+    for x in xs {
+        out.push(f(x))
+    }
+    return out
+}
+
+/// Keeps only the elements for which `pred` returns `true`.
+export fn filter<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Array<T> {
+    let mut out: Array<T> = []
+    for x in xs {
+        if pred(x) {
+            out.push(x.copy())
+        }
+    }
+    return out
+}
+
+/// Left fold: threads `acc` through `f` for every element, starting from `init`.
+export fn fold<T, A>(xs: Array<T>, init: A, f: fn(A, T) -> A) -> A {
+    let mut acc = init
+    for x in xs {
+        acc = f(acc, x)
+    }
+    return acc
+}
+
+/// Whether `pred` holds for at least one element.
+export fn any<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Bool {
+    for x in xs {
+        if pred(x) {
+            return true
+        }
+    }
+    return false
+}
+
+/// Whether `pred` holds for every element; true when empty.
+export fn all<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Bool {
+    for x in xs {
+        if !pred(x) {
+            return false
+        }
+    }
+    return true
+}
+
+/// Whether `xs` contains the string `x`. The parameter is `Array<String>`, not
+/// generic, because a generic `Array<T>` parameter does not accept a fixed-size
+/// array literal.
+export fn includes(xs: Array<String>, x: String) -> Bool {
+    for e in xs {
+        if e == x {
+            return true
+        }
+    }
+    return false
+}
+
+/// A stable sorted copy, ordered by a comparator: negative puts `a` before `b`,
+/// positive after, zero keeps arrival order. Insertion sort.
+export fn sortWith<T>(xs: Array<T>, cmp: fn(T, T) -> Int64) -> Array<T> {
+    let mut out: Array<T> = []
+    for x in xs {
+        out.push(x.copy())
+    }
+    let mut i = 1
+    while i < out.length {
+        let mut j = i
+        while j > 0 {
+            if cmp(out[j - 1], out[j]) > 0 {
+                let tmp = out[j - 1].copy()
+                out[j - 1] = out[j].copy()
+                out[j] = tmp
+                j = j - 1
+            } else {
+                j = 0
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+test "sortWith orders by the comparator, stably" {
+    let xs: Array<Int64> = [3, 1, 2, 1]
+    let up = sortWith(xs, (a, b) -> a - b)
+    assertEq(up[0], 1)
+    assertEq(up[1], 1)
+    assertEq(up[2], 2)
+    assertEq(up[3], 3)
+    let down = sortWith(xs, (a, b) -> b - a)
+    assertEq(down[0], 3)
+    assertEq(down[3], 1)
+}
+
+/// A stable sorted copy, ascending by an `Int64` key. Insertion sort.
+export fn sortBy<T>(xs: Array<T>, key: fn(T) -> Int64) -> Array<T> {
+    let mut out: Array<T> = []
+    for x in xs {
+        out.push(x.copy())
+    }
+    let mut i = 1
+    while i < out.length {
+        let mut j = i
+        while j > 0 {
+            if key(out[j - 1]) > key(out[j]) {
+                let tmp = out[j - 1].copy()
+                out[j - 1] = out[j].copy()
+                out[j] = tmp
+                j = j - 1
+            } else {
+                j = 0
+            }
+        }
+        i = i + 1
+    }
+    return out
+}

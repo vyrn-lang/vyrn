@@ -1,0 +1,868 @@
+/// std/num: text -> number, correctly rounded, and `Float64` -> `%f` text.
+///
+/// A library, not a builtin: the direct wasm backend has no `strtod`, so one
+/// Vyrn implementation serves every engine. The only primitives are the
+/// IEEE-754 bit views `floatBits` and `floatFromBits`.
+///
+/// The conversion is exact. The decimal stays a digit array, scaled by powers
+/// of two into `[1/2, 1)`; repeated doubling yields the mantissa bits, and the
+/// leftover fraction rounds half to even. A subnormal asks for fewer bits and
+/// rounds the same way; overflow is an exponent field past its maximum. At
+/// most 800 significant digits are kept; a dropped nonzero digit sets a sticky
+/// flag that turns an exact tie into a round-up.
+
+/// A decimal significand and exponent: the value is
+/// `0.d[0]d[1]...d[n-1] * 10^dp`, sign carried separately. `trunc` means nonzero digits were dropped,
+/// so the true value is strictly greater.
+type Dec = { d: Array<Int64>, dp: Int64, trunc: Bool }
+
+/// A scanned literal; `ok` is false when the text is not a number.
+type Scanned = { ok: Bool, neg: Bool, d: Array<Int64>, dp: Int64, trunc: Bool }
+
+/// Significant digits kept. Past this a digit can only matter at an exact tie,
+/// which the `trunc` flag resolves.
+fn maxDigits() -> Int64 {
+    return 800
+}
+
+/// Drops trailing zeros, then enforces the digit cap. Sets `trunc` only when a
+/// nonzero digit is dropped: a false flag would round a real tie wrong.
+fn tidy(d: Array<Int64>, dp: Int64, trunc: Bool) -> Dec {
+    let mut t = trunc
+    let mut keep = d.length
+    if keep > maxDigits() {
+        let mut i = maxDigits()
+        while i < keep {
+            if d[i] != 0 {
+                t = true
+            }
+            i = i + 1
+        }
+        keep = maxDigits()
+    }
+    while keep > 0 && d[keep - 1] == 0 {
+        keep = keep - 1
+    }
+    let mut out: Array<Int64> = []
+    let mut j = 0
+    while j < keep {
+        out.push(d[j])
+        j = j + 1
+    }
+    return Dec { d: out, dp: dp, trunc: t }
+}
+
+/// Divides a decimal by `m`, a power of two no larger than 2^32.
+///
+/// Long division with the remainder below `m`, so `r * 10 + digit` stays below
+/// `10 * m` and inside an `Int64`. Dividing 32 bits at a time, not one, took
+/// 10^308 from 0.8 s to 0.05 s on the interpreter. Leading zeros of the
+/// quotient move into the exponent.
+fn halveBy(x: Dec, m: Int64) -> Dec {
+    let mut out: Array<Int64> = []
+    let mut r = 0
+    let mut i = 0
+    while i < x.d.length {
+        let t = r * 10 + x.d[i]
+        out.push(t / m)
+        r = t % m
+        i = i + 1
+    }
+    // The remainder becomes further fractional digits, up to the digit cap.
+    while r > 0 && out.length <= maxDigits() {
+        let t = r * 10
+        out.push(t / m)
+        r = t % m
+    }
+    let mut tr = x.trunc
+    if r > 0 {
+        tr = true
+    }
+    let mut lead = 0
+    while lead < out.length && out[lead] == 0 {
+        lead = lead + 1
+    }
+    let mut o2: Array<Int64> = []
+    let mut j = lead
+    while j < out.length {
+        o2.push(out[j])
+        j = j + 1
+    }
+    return tidy(o2, x.dp - lead, tr)
+}
+
+/// Multiplies a decimal by `m`, a power of two no larger than 2^32. The carry
+/// can exceed a digit; what it leaves over becomes new leading digits and moves
+/// the exponent.
+fn twiceBy(x: Dec, m: Int64) -> Dec {
+    let mut rev: Array<Int64> = []
+    let mut carry = 0
+    let mut j = x.d.length - 1
+    while j >= 0 {
+        let t = x.d[j] * m + carry
+        rev.push(t % 10)
+        carry = t / 10
+        j = j - 1
+    }
+    let mut extra = 0
+    while carry > 0 {
+        rev.push(carry % 10)
+        carry = carry / 10
+        extra = extra + 1
+    }
+    let mut out: Array<Int64> = []
+    let mut i = rev.length - 1
+    while i >= 0 {
+        out.push(rev[i])
+        i = i - 1
+    }
+    return tidy(out, x.dp + extra, x.trunc)
+}
+
+/// Scans `[+-]? digits [. digits] [(e|E) [+-]? digits]`, a superset of JSON's
+/// number grammar. The whole text must match, so `"1 "`, `"1x"` and `""` are
+/// refused.
+fn scan(s: String) -> Scanned {
+    let b = bytes(s)
+    let n = b.length
+    let empty: Array<Int64> = []
+    let mut i = 0
+    let mut neg = false
+    if i < n && (b[i] == '+' || b[i] == '-') {
+        neg = b[i] == '-'
+        i = i + 1
+    }
+    let mut d: Array<Int64> = []
+    let mut dp = 0
+    let mut sawDigit = false
+    let mut sawDot = false
+    let mut leading = true
+    let mut trunc = false
+    while i < n && (b[i] == '.' || (b[i] >= '0' && b[i] <= '9')) {
+        if b[i] == '.' {
+            if sawDot {
+                return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+            }
+            sawDot = true
+        } else {
+            sawDigit = true
+            if b[i] == '0' && leading {
+                // A zero after the point, before any significant digit, moves
+                // the exponent.
+                if sawDot {
+                    dp = dp - 1
+                }
+            } else {
+                leading = false
+                if d.length < maxDigits() {
+                    d.push(Int64(b[i]) - 48)
+                } else {
+                    if b[i] != '0' {
+                        trunc = true
+                    }
+                }
+                if !sawDot {
+                    dp = dp + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    if !sawDigit {
+        return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+    }
+    if i < n && (b[i] == 'e' || b[i] == 'E') {
+        i = i + 1
+        let mut esign = 1
+        if i < n && (b[i] == '+' || b[i] == '-') {
+            if b[i] == '-' {
+                esign = 0 - 1
+            }
+            i = i + 1
+        }
+        if i >= n || b[i] < '0' || b[i] > '9' {
+            return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+        }
+        let mut ev = 0
+        while i < n && b[i] >= '0' && b[i] <= '9' {
+            // Clamp: past this the answer is already infinity or zero, and an
+            // unclamped sum could overflow into a plausible exponent.
+            if ev < 100000 {
+                ev = ev * 10 + (Int64(b[i]) - 48)
+            }
+            i = i + 1
+        }
+        dp = dp + esign * ev
+    }
+    if i != n {
+        return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+    }
+    let t = tidy(d, dp, trunc)
+    return Scanned { ok: true, neg: neg, d: consume t.d, dp: t.dp, trunc: t.trunc }
+}
+
+/// `m * 2^ex` as a `Float64`, exactly, for `m < 2^53` and `ex >= -1074`. The
+/// only place a `Float64` is built: from its bits, with the mantissa normalized
+/// until bit 52 is set or the exponent bottoms out (a subnormal).
+fn ldexp(neg: Bool, mIn: Int64, exIn: Int64) -> Float64 {
+    let mut m = mIn
+    let mut ex = exIn
+    if m == 0 {
+        if neg {
+            return floatFromBits(9223372036854775808)
+        }
+        return 0.0
+    }
+    // A rounding carry can leave `m` at 2^53, one bit wider than the field. The
+    // encoding below joins fields with `|`, which would drop that carry for an
+    // odd exponent, so normalize here; a carry cannot take `m` past 2^53.
+    if m >= 9007199254740992 {
+        m = m / 2
+        ex = ex + 1
+    }
+    while m < 4503599627370496 && ex > 0 - 1074 {
+        m = m * 2
+        ex = ex - 1
+    }
+    let mut e = 0
+    let mut frac = m
+    if m >= 4503599627370496 {
+        e = ex + 1075
+        frac = m - 4503599627370496
+    }
+    if e > 2046 {
+        // Past the largest finite double: this is the encoding of infinity.
+        e = 2047
+        frac = 0
+    }
+    let mut bits: UInt64 = (UInt64(e) << 52) | UInt64(frac)
+    if neg {
+        bits = bits | (UInt64(1) << 63)
+    }
+    return floatFromBits(bits)
+}
+
+/// `10^k` as an exact `Float64`, for `k` up to 22. Every partial product's odd
+/// part is below `2^53`, so every multiply is exact.
+fn pow10Exact(k: Int64) -> Float64 {
+    let mut v = 1.0
+    let mut i = 0
+    while i < k {
+        v = v * 10.0
+        i = i + 1
+    }
+    return v
+}
+
+/// A scanned decimal, correctly rounded to a binary format with `mantBits`
+/// significand bits and smallest exponent `minExp`: `Float64` is `(53, -1074)`,
+/// `Float32` is `(24, -149)`. A `Float32` result is exact as a `Float64`, so
+/// the caller narrows without a second rounding.
+fn toFloat(sc: Scanned, mantBits: Int64, minExp: Int64) -> Float64 {
+    if sc.d.length == 0 {
+        return ldexp(sc.neg, 0, 0)
+    }
+    // Clinger's fast path. With at most 15 significant digits the significand
+    // is an exact `Float64`, and with the exponent within 22 so is the power of
+    // ten; one IEEE-754 multiply or divide of two exact values rounds correctly.
+    // Anything else takes the exact path below. `Float64` only: a `Float32`
+    // needs its one rounding at 24 bits.
+    if mantBits == 53 && !sc.trunc && sc.d.length <= 15 {
+        let e10 = sc.dp - sc.d.length
+        if e10 >= 0 - 22 && e10 <= 22 {
+            let mut whole = 0
+            let mut di = 0
+            while di < sc.d.length {
+                whole = whole * 10 + sc.d[di]
+                di = di + 1
+            }
+            let mut v = Float64(whole)
+            if e10 > 0 {
+                v = v * pow10Exact(e10)
+            }
+            if e10 < 0 {
+                v = v / pow10Exact(0 - e10)
+            }
+            if sc.neg {
+                return 0.0 - v
+            }
+            return v
+        }
+    }
+    // Coarse guards, far outside every format's range, so the scaling loop
+    // never runs a million steps to reach a known answer.
+    if sc.dp > 400 {
+        return ldexp(sc.neg, 9007199254740991, 4000)
+    }
+    if sc.dp < 0 - 400 {
+        return ldexp(sc.neg, 0, 0)
+    }
+    // Scale into [1/2, 1). `dp > 0` means the value is at least 1; `dp < 0`, or
+    // `dp == 0` with a leading digit below 5, means it is below a half.
+    let mut x = Dec { d: sc.d.copy(), dp: sc.dp, trunc: sc.trunc }
+    let mut e2 = 0
+    // 32 bits at a time first: each pass moves the decimal exponent by 9 or 10,
+    // so it cannot overshoot. Then one bit at a time, at most about 35 steps.
+    let wide: Int64 = 4294967296
+    while x.dp > 10 {
+        x = halveBy(x, wide)
+        e2 = e2 + 32
+    }
+    while x.dp < 0 - 10 {
+        x = twiceBy(x, wide)
+        e2 = e2 - 32
+    }
+    while x.dp > 0 {
+        x = halveBy(x, 2)
+        e2 = e2 + 1
+    }
+    while x.dp < 0 || (x.dp == 0 && x.d.length > 0 && x.d[0] < 5) {
+        x = twiceBy(x, 2)
+        e2 = e2 - 1
+    }
+    // The bits this format holds at this exponent. Fewer than the full width
+    // is a subnormal; fewer than none is below half the smallest one.
+    let mut nbits = mantBits
+    if e2 - mantBits < minExp {
+        nbits = e2 - minExp
+    }
+    if nbits < 0 {
+        return ldexp(sc.neg, 0, 0)
+    }
+    // Doubling a pure fraction: the carry out of the leading digit is the next
+    // mantissa bit, and the digits left are the residual.
+    let mut f = x.d
+    let mut m = 0
+    let mut i = 0
+    while i < nbits {
+        let mut carry = 0
+        let mut j = f.length - 1
+        while j >= 0 {
+            let t = f[j] * 2 + carry
+            f[j] = t % 10
+            carry = t / 10
+            j = j - 1
+        }
+        m = m * 2 + carry
+        i = i + 1
+    }
+    // The residual against a half: above rounds up, below rounds down, a tie
+    // goes to even. If digits were dropped the residual is above a half.
+    let mut cmp = 0 - 1
+    if f.length > 0 {
+        if f[0] > 5 {
+            cmp = 1
+        } else if f[0] == 5 {
+            let mut j = 1
+            while j < f.length {
+                if f[j] != 0 {
+                    cmp = 1
+                    j = f.length
+                } else {
+                    j = j + 1
+                }
+            }
+            if cmp < 0 {
+                cmp = 0
+            }
+        }
+    }
+    if cmp == 0 && x.trunc {
+        cmp = 1
+    }
+    if cmp > 0 || (cmp == 0 && m % 2 == 1) {
+        m = m + 1
+    }
+    return ldexp(sc.neg, m, e2 - nbits)
+}
+
+/// Decimal text as a correctly rounded `Float64`, or `None` if the text is not
+/// a number. The whole string must match. Too large is `inf` and too small is a
+/// signed zero, as in every IEEE-754 text conversion.
+export fn parseFloat64(s: String) -> Option<Float64> {
+    let sc = scan(s)
+    if !sc.ok {
+        return None
+    }
+    return Some(toFloat(sc, 53, 0 - 1074))
+}
+
+/// Decimal text as a `Float32`, rounded once: decimal -> `Float64` ->
+/// `Float32` rounds twice and is wrong near a `Float32` tie.
+export fn parseFloat32(s: String) -> Option<Float32> {
+    let sc = scan(s)
+    if !sc.ok {
+        return None
+    }
+    return Some(Float32(toFloat(sc, 24, 0 - 149)))
+}
+
+/// Decimal text as an exact `Int64`, or `None` if it is not an integer or does
+/// not fit. `"9223372036854775808"` is `None`; the `parse` builtin wraps it.
+export fn parseInt64(s: String) -> Option<Int64> {
+    let b = bytes(s)
+    if b.length == 0 {
+        return None
+    }
+    let mut i = 0
+    let mut neg = false
+    if b[0] == '-' || b[0] == '+' {
+        neg = b[0] == '-'
+        i = 1
+    }
+    if i >= b.length {
+        return None
+    }
+    // Accumulate in `UInt64`, so the check compares magnitudes before any
+    // overflow. `Int64.min`'s magnitude is one more than `Int64.max`'s.
+    let mut acc: UInt64 = 0
+    let limit: UInt64 = if neg { 9223372036854775808 } else { 9223372036854775807 }
+    while i < b.length {
+        if b[i] < '0' || b[i] > '9' {
+            return None
+        }
+        let dig: UInt64 = UInt64(Int64(b[i]) - 48)
+        if acc > 1844674407370955161 {
+            return None
+        }
+        acc = acc * 10
+        if acc > limit - dig {
+            return None
+        }
+        acc = acc + dig
+        i = i + 1
+    }
+    if neg {
+        // `Int64.min` has no positive counterpart: negate through the bits.
+        return Some(0 - Int64(acc - 1) - 1)
+    }
+    return Some(Int64(acc))
+}
+
+/// Decimal text as an exact `UInt64`, or `None`. No sign is accepted, not
+/// even `+`.
+export fn parseUInt64(s: String) -> Option<UInt64> {
+    let b = bytes(s)
+    if b.length == 0 {
+        return None
+    }
+    let umax: UInt64 = 18446744073709551615
+    let mut acc: UInt64 = 0
+    let mut i = 0
+    while i < b.length {
+        if b[i] < '0' || b[i] > '9' {
+            return None
+        }
+        let dig: UInt64 = UInt64(Int64(b[i]) - 48)
+        if acc > 1844674407370955161 {
+            return None
+        }
+        acc = acc * 10
+        if acc > umax - dig {
+            return None
+        }
+        acc = acc + dig
+        i = i + 1
+    }
+    return Some(acc)
+}
+
+/// A `Float64` as exactly `%f`'s six decimal places. `@str` and `print` on a
+/// float lower to this on both compiled backends; the interpreter's `{:.6}` is
+/// the oracle `tests/numbers.rs` compares it against.
+///
+/// The value is `M * 2^E` with `M < 2^53`, so `x * 10^6` is the exact integer
+/// `M * 10^6 * 2^E` when `E >= 0`, and `M * 10^6 * 5^k / 10^k` with `k = -E`
+/// otherwise, whose last `k` digits are the fraction to round away. Limbs are
+/// base 10^6, so the `* 10^6` is a zero limb. Each pass multiplies by the
+/// largest chunk of the power that fits an `Int64`, so the cost follows the
+/// size of the answer, not the exponent.
+///
+/// Every answer is a fresh allocation, the non-finite words included: the
+/// ownership analysis frees an `@str` result, so a `.rodata` literal must never
+/// reach it.
+export fn f64Str(x: Float64) -> String {
+    let bits = floatBits(x)
+    let neg = (bits >> 63) != 0
+    let mut mant = Int64(bits & 4503599627370495) // 2^52 - 1: the fraction field
+    let ef = Int64((bits >> 52) & 2047)
+    if ef == 2047 {
+        // Spelled out here: UCRT's `%f` prints `-nan(ind)`.
+        let mut w: Array<UInt8> = []
+        if mant != 0 {
+            w.push('N')
+            w.push('a')
+            w.push('N')
+        } else {
+            if neg {
+                w.push('-')
+            }
+            w.push('i')
+            w.push('n')
+            w.push('f')
+        }
+        return asciiStr(w)
+    }
+    // `M * 2^E`: a subnormal has no implicit bit and a fixed exponent.
+    let mut e = -1074
+    if ef != 0 {
+        mant = mant + 4503599627370496
+        e = ef - 1075
+    }
+    if mant == 0 {
+        // Zero would otherwise multiply nothing by five a thousand times. Its
+        // sign survives: `%f` of `-0.0` is `-0.000000`.
+        e = 0
+    }
+    let mut k = 0
+    let mut mul = 2
+    let mut reps = e
+    if e < 0 {
+        reps = 0 - e
+        k = reps
+        mul = 5
+    }
+    let m6 = 1000000
+    // Least significant limb first; the zero limb at the bottom is the `* 10^6`.
+    let mut limbs: Array<Int64> = [0]
+    let mut v = mant
+    while v > 0 {
+        limbs.push(v % m6)
+        v = v / m6
+    }
+    // The largest power of the multiplier that keeps a limb product in an
+    // `Int64`: `999999 * 5^18` is 3.8e18 and `999999 * 2^40` is 1.1e18.
+    let mut per = 40
+    if mul == 5 {
+        per = 18
+    }
+    while reps > 0 {
+        let mut take = per
+        if take > reps {
+            take = reps
+        }
+        let mut m = 1
+        let mut i = 0
+        while i < take {
+            m = m * mul
+            i = i + 1
+        }
+        let mut carry = 0
+        let mut j = 0
+        // Hoisted: one bounds check per limb instead of two.
+        let n = limbs.length
+        while j < n {
+            let t = limbs[j] * m + carry
+            limbs[j] = t % m6
+            carry = t / m6
+            j = j + 1
+        }
+        // A chunk's carry is wider than one limb, unlike a single doubling's.
+        while carry > 0 {
+            limbs.push(carry % m6)
+            carry = carry / m6
+        }
+        reps = reps - take
+    }
+    // Six digits per limb, most significant first, behind a pad of zeros. The
+    // pad removes the edge cases: there is always a digit before the one
+    // examined, a seventh kept digit before the point, and a spare zero for a
+    // rounding carry. Leading zeros are stripped at the end.
+    let mut pad = k + 7 - limbs.length * 6
+    if pad < 0 {
+        pad = 0
+    }
+    pad = pad + 1
+    let mut d: Array<Int64> = []
+    let mut i = 0
+    while i < pad {
+        d.push(0)
+        i = i + 1
+    }
+    let mut j = limbs.length - 1
+    while j >= 0 {
+        let limb = limbs[j]
+        let mut p = 100000
+        while p > 0 {
+            d.push((limb / p) % 10)
+            p = p / 10
+        }
+        j = j - 1
+    }
+    // Digits left of `ke` are kept; the `k` digits from it are the fraction.
+    let ke = d.length - k
+    // Half to even, as all three references round. `0.0078125` separates it
+    // from half up.
+    let mut up = false
+    if k > 0 {
+        if d[ke] > 5 {
+            up = true
+        } else if d[ke] == 5 {
+            let mut q = ke + 1
+            while q < d.length {
+                if d[q] != 0 {
+                    up = true
+                    break
+                }
+                q = q + 1
+            }
+            if !up {
+                up = d[ke - 1] % 2 == 1
+            }
+        }
+    }
+    if up {
+        let mut q = ke - 1
+        while q >= 0 {
+            if d[q] == 9 {
+                d[q] = 0
+                q = q - 1
+            } else {
+                d[q] = d[q] + 1
+                break
+            }
+        }
+    }
+    // At least seven digits, so the point always has an integer digit.
+    let mut st = 0
+    while st < ke - 7 && d[st] == 0 {
+        st = st + 1
+    }
+    let mut out: Array<UInt8> = []
+    if neg {
+        out.push('-')
+    }
+    let mut c = st
+    while c < ke - 6 {
+        out.push(UInt8(48 + d[c]))
+        c = c + 1
+    }
+    out.push('.')
+    while c < ke {
+        out.push(UInt8(48 + d[c]))
+        c = c + 1
+    }
+    return asciiStr(out)
+}
+
+/// The ASCII bytes as a String. The `Err` arm panics rather than returning a
+/// `.rodata` empty literal, which `f64Str`'s callers would free.
+fn asciiStr(out: Array<UInt8>) -> String {
+    return match stringFromBytes(out) {
+        Ok(s) => s,
+        Err(e) => panic("f64Str: the bytes it builds are ASCII digits and punctuation"),
+    }
+}
+
+test "integers round-trip exactly, and refuse what does not fit" {
+    assertEq(match parseInt64("0") { Some(v) => v.toString(), None => "None" }, "0")
+    assertEq(match parseInt64("-42") { Some(v) => v.toString(), None => "None" }, "-42")
+    assertEq(
+        match parseInt64("9223372036854775807") { Some(v) => v.toString(), None => "None" },
+        "9223372036854775807",
+    )
+    assertEq(
+        match parseInt64("-9223372036854775808") { Some(v) => v.toString(), None => "None" },
+        "-9223372036854775808",
+    )
+    // The `parse` builtin wraps these to `Some(..)`.
+    assertEq(
+        match parseInt64("9223372036854775808") { Some(v) => v.toString(), None => "None" },
+        "None",
+    )
+    assertEq(
+        match parseInt64("18446744073709551615") { Some(v) => v.toString(), None => "None" },
+        "None",
+    )
+    assertEq(match parseInt64("") { Some(v) => v.toString(), None => "None" }, "None")
+    assertEq(match parseInt64("-") { Some(v) => v.toString(), None => "None" }, "None")
+    assertEq(match parseInt64("1.5") { Some(v) => v.toString(), None => "None" }, "None")
+    assertEq(match parseInt64(" 1") { Some(v) => v.toString(), None => "None" }, "None")
+}
+
+test "the exact UInt64 above Int64.max comes back whole" {
+    assertEq(
+        match parseUInt64("18446744073709551615") { Some(v) => v.toString(), None => "None" },
+        "18446744073709551615",
+    )
+    assertEq(
+        match parseUInt64("9223372036854775808") { Some(v) => v.toString(), None => "None" },
+        "9223372036854775808",
+    )
+    assertEq(
+        match parseUInt64("18446744073709551616") { Some(v) => v.toString(), None => "None" },
+        "None",
+    )
+    assertEq(match parseUInt64("-1") { Some(v) => v.toString(), None => "None" }, "None")
+}
+
+test "floats round to the nearest double, ties to even" {
+    assertEq(match parseFloat64("1.5") { Some(v) => v.toString(), None => "None" }, "1.500000")
+    assertEq(match parseFloat64("-0.5") { Some(v) => v.toString(), None => "None" }, "-0.500000")
+    assertEq(match parseFloat64("0") { Some(v) => v.toString(), None => "None" }, "0.000000")
+    assertEq(match parseFloat64("-0") { Some(v) => v.toString(), None => "None" }, "-0.000000")
+    // Neither is exact in binary, so `%f` shows the rounded double.
+    assertEq(match parseFloat64("0.1") { Some(v) => v.toString(), None => "None" }, "0.100000")
+    assertEq(
+        match parseFloat64("123456789.123456789") { Some(v) => v.toString(), None => "None" },
+        "123456789.123457",
+    )
+    assertEq(
+        match parseFloat64("1e3") { Some(v) => v.toString(), None => "None" },
+        "1000.000000",
+    )
+    assertEq(
+        match parseFloat64("-2.5E-1") { Some(v) => v.toString(), None => "None" },
+        "-0.250000",
+    )
+    assertEq(match parseFloat64("1e400") { Some(v) => v.toString(), None => "None" }, "inf")
+    assertEq(match parseFloat64("-1e400") { Some(v) => v.toString(), None => "None" }, "-inf")
+    assertEq(match parseFloat64("1e-400") { Some(v) => v.toString(), None => "None" }, "0.000000")
+    assertEq(match parseFloat64("x") { Some(v) => v.toString(), None => "None" }, "None")
+    assertEq(match parseFloat64("") { Some(v) => v.toString(), None => "None" }, "None")
+    assertEq(match parseFloat64("1.2.3") { Some(v) => v.toString(), None => "None" }, "None")
+    assertEq(match parseFloat64("1e") { Some(v) => v.toString(), None => "None" }, "None")
+}
+
+/// The bit patterns: `%f` hides everything below the sixth decimal, and a
+/// rounding bug shows in the last mantissa bit.
+test "the mantissa bits are the correctly rounded ones" {
+    assertEq(
+        match parseFloat64("0.1") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4591870180066957722",
+    )
+    // A tie between two doubles: ties-to-even decides it, and round-half-up
+    // gets the last bit wrong.
+    assertEq(
+        match parseFloat64("9007199254740993") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4845873199050653696",
+    )
+    assertEq(
+        match parseFloat64("9007199254740995") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4845873199050653698",
+    )
+    // The smallest subnormal, and half of it, which rounds to zero (to even).
+    assertEq(
+        match parseFloat64("5e-324") { Some(v) => floatBits(v).toString(), None => "None" },
+        "1",
+    )
+    assertEq(
+        match parseFloat64("2.4703282292062327e-324") {
+            Some(v) => floatBits(v).toString(),
+            None => "None",
+        },
+        "0",
+    )
+    // The largest finite double, and the first value that rounds past it.
+    assertEq(
+        match parseFloat64("1.7976931348623157e308") {
+            Some(v) => floatBits(v).toString(),
+            None => "None",
+        },
+        "9218868437227405311",
+    )
+    assertEq(
+        match parseFloat64("1.8e308") { Some(v) => floatBits(v).toString(), None => "None" },
+        "9218868437227405312",
+    )
+}
+
+/// The fast path against the slow one at its borders (15 against 16 digits,
+/// `e22` against `e23`). The expected patterns are CPython's `strtod`, so a
+/// case on the wrong path still fails if its answer is wrong.
+test "the fast path is the correctly rounded one, at its borders" {
+    assertEq(
+        match parseFloat64("12345.678") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4668012722585352536",
+    )
+    assertEq(
+        match parseFloat64("0.3") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4599075939470750515",
+    )
+    // 22 is the last exact power of ten, 23 the first inexact one.
+    assertEq(
+        match parseFloat64("1e22") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4936209963552724370",
+    )
+    assertEq(
+        match parseFloat64("1e23") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4950912855330343670",
+    )
+    assertEq(
+        match parseFloat64("1e-22") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4277919505920253670",
+    )
+    assertEq(
+        match parseFloat64("1e-23") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4262707295203537489",
+    )
+    assertEq(
+        match parseFloat64("123456789012345e-22") {
+            Some(v) => floatBits(v).toString(),
+            None => "None",
+        },
+        "4488544134225830496",
+    )
+    assertEq(
+        match parseFloat64("999999999999999e22") {
+            Some(v) => floatBits(v).toString(),
+            None => "None",
+        },
+        "5160588303184390419",
+    )
+    // Negation is exact: the bit pattern is the positive one with the sign bit.
+    assertEq(
+        match parseFloat64("-12345.678") { Some(v) => floatBits(v).toString(), None => "None" },
+        "13891384759440128344",
+    )
+}
+
+/// `f64Str` against the builtin's output. The randomized comparison lives in
+/// `tests/numbers.rs`.
+test "the six places are the exact ones, rounded half to even" {
+    assertEq(f64Str(0.0), "0.000000")
+    assertEq(f64Str(1.5), "1.500000")
+    assertEq(f64Str(-1.5), "-1.500000")
+    assertEq(f64Str(0.1), "0.100000")
+    assertEq(f64Str(123456789.123456789), "123456789.123457")
+    // The two exact ties: half-to-even keeps the even `2` and rounds the odd `7`
+    // up.
+    assertEq(f64Str(0.0078125), "0.007812")
+    assertEq(f64Str(0.0234375), "0.023438")
+    // A carry that runs the whole way out of the number.
+    assertEq(f64Str(0.9999999), "1.000000")
+    assertEq(f64Str(-0.9999999), "-1.000000")
+    // The sign of a zero survives.
+    assertEq(f64Str(floatFromBits(9223372036854775808)), "-0.000000")
+}
+
+test "the extremes print as the backends spell them" {
+    // 301 integer digits, the exact expansion of the double. Pinned whole: a
+    // carry bug in the multiply loop is a wrong digit in the middle.
+    let big = match parseFloat64("1e300") { Some(v) => f64Str(v), None => "None" }
+    assertEq(big.charCount(), 308)
+    assertEq(
+        big,
+        "1000000000000000052504760255204420248704468581108159154915854115511802457988"
+        + "9081957863713750804478640437044438328838781769425232353604305756447921847867"
+        + "0698284838720092657580373783023379478809005936895323497079994508111903896764"
+        + "0880074652742780142494579258788820056842838115669472196386865459400540160"
+        + ".000000",
+    )
+    // The smallest positive double: 1074 halvings, all below the sixth place.
+    assertEq(match parseFloat64("5e-324") { Some(v) => f64Str(v), None => "None" }, "0.000000")
+    assertEq(match parseFloat64("1e400") { Some(v) => f64Str(v), None => "None" }, "inf")
+    assertEq(match parseFloat64("-1e400") { Some(v) => f64Str(v), None => "None" }, "-inf")
+    // A runtime division, so `consteval` cannot fold the NaN.
+    let zero = 0.0
+    assertEq(f64Str(zero / zero), "NaN")
+    // A `Float32` widens: its six places are the double's.
+    let small: Float32 = 0.1
+    assertEq(f64Str(Float64(small)), small.toString())
+}
+
+test "single precision rounds once, not twice" {
+    assertEq(match parseFloat32("0.1") { Some(v) => v.toString(), None => "None" }, "0.100000")
+    assertEq(match parseFloat32("1e40") { Some(v) => v.toString(), None => "None" }, "inf")
+    assertEq(match parseFloat32("1e-50") { Some(v) => v.toString(), None => "None" }, "0.000000")
+}

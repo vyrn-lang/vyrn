@@ -1,0 +1,47 @@
+// Proof that a slab reuses what it reclaims.
+//
+// A `Slots<T>` grows, so "it finished" proves nothing. The claim: after
+// 100,000 inserts the table holds FIVE slots. Every removal puts
+// its slot back and every insert takes one, so the high-water mark is the size
+// of one list and not the number of lists. That is a number, it is printed, and
+// all three engines are held to it.
+//
+// The list itself is unchanged in shape. `Handle<Node>` is a plain value of
+// three words, so `Node` can hold one without becoming infinite — the property
+// `Ref<Node>` used to supply, with no runtime behind it.
+
+import { Slots, Handle, newSlots, insert, remove, capacity } from "std/slots"
+
+type Node = { value: Int64, next: Option<Handle<Node>> }
+
+fn sum(s: Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o { Some(h) => s[h].value + sum(s, s[h].next), None => 0 }
+}
+fn freeList(s: modify Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o { Some(h) => freeNode(s, h), None => 0 }
+}
+fn freeNode(s: modify Slots<Node>, h: Handle<Node>) -> Int64 {
+    let tail = s[h].next.copy()
+    remove(s, h)
+    return freeList(s, tail)
+}
+
+fn main() -> Int64 {
+    let mut nodes: Slots<Node> = newSlots()
+    let mut i = 0
+    let mut last = 0
+    while i < 20000 {
+        let mut head: Option<Handle<Node>> = None
+        let mut j = 5
+        while j > 0 {
+            head = Some(insert(nodes, Node { value: j, next: head }))
+            j = j - 1
+        }
+        last = sum(nodes, head)
+        freeList(nodes, head) // every slot goes back; the next turn takes them
+        i = i + 1
+    }
+    print(last) // 15
+    print(capacity(nodes)) // 5 — 100,000 inserts, five slots
+    return last
+}

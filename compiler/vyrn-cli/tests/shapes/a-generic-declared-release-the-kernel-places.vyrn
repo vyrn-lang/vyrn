@@ -1,0 +1,5 @@
+// a generic declared release the kernel places
+// The kernel places `Owned__Pair__release` at two instances. The lowering
+// reads those rows on its second turn and the core builds each
+// body.
+type Pair<T> = { a: Array<T>, n: Int64 }          impl<T> Owned for Pair<T> { fn release(consume self) { let a = consume self.a drop a } }          fn vyrnTestMain() -> Int64 { let p = Pair { a: ["x", "y"], n: 4 } let q = Pair { a: [1, 2, 3], n: 5 } return p.n + q.n }

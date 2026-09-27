@@ -1,0 +1,205 @@
+/// std/hash: non-cryptographic byte hashing, and SHA-1 for the
+/// WebSocket handshake.
+///
+/// FNV-1a-64 mixes in `UInt64` with wrapping multiply and xor, so every engine
+/// agrees bit for bit. It is not collision-resistant against an adversary: use
+/// it for hash tables, content-addressed ids and checksums, not for security.
+
+/// The FNV-1a-64 hash of a byte array.
+export fn fnv1a(data: Array<UInt8>) -> UInt64 {
+    let offset: UInt64 = 14695981039346656037 // 0xCBF29CE484222325
+    let prime: UInt64 = 1099511628211 // 0x100000001B3
+    let mut h: UInt64 = offset
+    for b in data {
+        h = (h ^ UInt64(b)) * prime
+    }
+    return h
+}
+
+/// The FNV-1a-64 hash of a String's UTF-8 bytes.
+export fn fnv1aStr(s: String) -> UInt64 {
+    return fnv1a(bytes(s))
+}
+
+/// A key is anything that hashes. Equal values return equal hashes;
+/// the value decides nothing observable, because a `Map` iterates in insertion
+/// order.
+///
+/// A heapless user type (a record of sized integers, `Bool`, nested records and
+/// fieldless enums, or a fieldless enum) keys a `Map` once it declares
+/// `impl Hashable`. The builtin `Map` hashes the key's canonical field bytes
+/// itself, without calling the impl, and compares keys field-wise, never
+/// padding.
+export protocol Hashable {
+    fn hash(self) -> UInt64
+}
+
+/// SplitMix64's finalizer: the constants `std/random` mixes with, and the
+/// function the map runtime applies to an `Int64` key.
+impl Hashable for Int64 {
+    fn hash(self) -> UInt64 {
+        let c1: UInt64 = 13787848793156543929 // 0xBF58476D1CE4E5B9
+        let c2: UInt64 = 10723151780598845931 // 0x94D049BB133111EB
+        let mut z: UInt64 = UInt64(self)
+        z = (z ^ (z >> 30)) * c1
+        z = (z ^ (z >> 27)) * c2
+        return z ^ (z >> 31)
+    }
+}
+
+/// FNV-1a over the UTF-8 bytes, as the String-keyed map runs it.
+impl Hashable for String {
+    fn hash(self) -> UInt64 {
+        return fnv1aStr(self)
+    }
+}
+
+test "equal values hash equal, and the mix spreads" {
+    let a = 7
+    let b = 7
+    assertEq(a.hash(), b.hash())
+    let c = 8
+    assert(a.hash() != c.hash())
+    assertEq("key".hash(), "key".hash())
+    assert("key".hash() != "keys".hash())
+}
+
+/// SHA-1 (RFC 3174), for the WebSocket handshake only: RFC 6455 section 4.2.2
+/// has the server echo `base64(SHA-1(key + GUID))`, and nothing in that step is
+/// secret. SHA-1 is collision-broken: never use it to sign, hash a password,
+/// authenticate a message or content-address attacker-influenced data.
+///
+/// The digest is twenty bytes, big-endian, pinned against RFC 3174 section 7.3
+/// in `examples/sha1.vyrn`. The mixing runs in `UInt64` masked to 32 bits, so
+/// no engine depends on a narrower type's overflow rule.
+export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
+    let m: UInt64 = 4294967295
+    let mut h0: UInt64 = 1732584193 // 0x67452301
+    let mut h1: UInt64 = 4023233417 // 0xEFCDAB89
+    let mut h2: UInt64 = 2562383102 // 0x98BADCFE
+    let mut h3: UInt64 = 271733878 // 0x10325476
+    let mut h4: UInt64 = 3285377520 // 0xC3D2E1F0
+
+    // The padding of section 4: one `1` bit, zeros up to 56 mod 64, then the
+    // message length in bits as a 64-bit big-endian integer.
+    let mut msg: Array<UInt8> = []
+    for b in data {
+        msg.push(b)
+    }
+    msg.push(128)
+    while msg.length % 64 != 56 {
+        msg.push(0)
+    }
+    let bits: UInt64 = UInt64(data.length) * 8
+    msg.push(UInt8((bits >> 56) & 255))
+    msg.push(UInt8((bits >> 48) & 255))
+    msg.push(UInt8((bits >> 40) & 255))
+    msg.push(UInt8((bits >> 32) & 255))
+    msg.push(UInt8((bits >> 24) & 255))
+    msg.push(UInt8((bits >> 16) & 255))
+    msg.push(UInt8((bits >> 8) & 255))
+    msg.push(UInt8(bits & 255))
+
+    // One schedule buffer for every block: each word is written before it is
+    // read.
+    let mut w: Array<UInt64> = []
+    w.reserve(80)
+    let mut z = 0
+    while z < 80 {
+        w.push(0)
+        z = z + 1
+    }
+    let mut off = 0
+    while off < msg.length {
+        // Sixteen big-endian words, extended to eighty.
+        let mut t = 0
+        while t < 16 {
+            let p = off + t * 4
+            w[t] = (UInt64(msg[p]) << 24) | (UInt64(msg[p + 1]) << 16) | (UInt64(msg[p + 2]) << 8) | UInt64(msg[p + 3])
+            t = t + 1
+        }
+        while t < 80 {
+            w[t] = sha1Rotl1(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16])
+            t = t + 1
+        }
+
+        let mut a = h0
+        let mut b = h1
+        let mut c = h2
+        let mut d = h3
+        let mut e = h4
+        t = 0
+        while t < 80 {
+            // `b ^ m` is the 32-bit complement of a masked word.
+            let mut f: UInt64 = b ^ c ^ d
+            let mut k: UInt64 = 1859775393 // 0x6ED9EBA1
+            if t < 20 {
+                f = (b & c) | ((b ^ m) & d)
+                k = 1518500249 // 0x5A827999
+            } else if t >= 40 && t < 60 {
+                f = (b & c) | (b & d) | (c & d)
+                k = 2400959708 // 0x8F1BBCDC
+            } else if t >= 60 {
+                k = 3395469782 // 0xCA62C1D6
+            }
+            let tmp = (sha1Rotl5(a) + f + e + k + w[t]) & m
+            e = d
+            d = c
+            c = sha1Rotl30(b)
+            b = a
+            a = tmp
+            t = t + 1
+        }
+        h0 = (h0 + a) & m
+        h1 = (h1 + b) & m
+        h2 = (h2 + c) & m
+        h3 = (h3 + d) & m
+        h4 = (h4 + e) & m
+        off = off + 64
+    }
+
+    let words: Array<UInt64> = [h0, h1, h2, h3, h4]
+    let mut out: Array<UInt8> = []
+    for w in words {
+        out.push(UInt8((w >> 24) & 255))
+        out.push(UInt8((w >> 16) & 255))
+        out.push(UInt8((w >> 8) & 255))
+        out.push(UInt8(w & 255))
+    }
+    return out
+}
+
+/// The SHA-1 digest of a String's UTF-8 bytes as lowercase hex. Read `sha1`'s
+/// warning first.
+export fn sha1Hex(s: String) -> String {
+    let digits = "0123456789abcdef"
+    let mut out: Array<UInt8> = []
+    for b in sha1(bytes(s)) {
+        out.push(digits[Int64(b) / 16])
+        out.push(digits[Int64(b) % 16])
+    }
+    return match stringFromBytes(out) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+}
+
+// The three SHA-1 rotations. Every argument is masked to 32 bits, so only the
+// result needs the mask.
+fn sha1Rotl1(x: UInt64) -> UInt64 {
+    return ((x << 1) | (x >> 31)) & 4294967295
+}
+
+fn sha1Rotl5(x: UInt64) -> UInt64 {
+    return ((x << 5) | (x >> 27)) & 4294967295
+}
+
+fn sha1Rotl30(x: UInt64) -> UInt64 {
+    return ((x << 30) | (x >> 2)) & 4294967295
+}
+
+test "sha1Hex matches the published vectors" {
+    // RFC 3174 section 7.3 publishes these.
+    assertEq(sha1Hex("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+    assertEq(sha1Hex(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+}

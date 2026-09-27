@@ -1,0 +1,188 @@
+/// std/args: command-line argument parsing over `args()`, in Vyrn.
+///
+/// Four probes: `flag`, `opt` (`--name value` or `--name=value`),
+/// `positionals` and `rest` (a `--` passthrough tail). There is no spec, no
+/// generated `--help` and no unknown-flag refusal; `std/cli` has those. Names
+/// match verbatim, dashes included, and `-abc` is one token. A token that
+/// starts with `-` before the first `--` is a flag or option token; every token
+/// after `--` is positional.
+
+import { indexOf, substring } from "std/strings"
+import { contains, startsWith } from "std/strpred"
+
+/// The command-line arguments after the program name.
+export type Args = { argv: Array<String> }
+
+export fn cli() -> Args {
+    return Args { argv: args() }
+}
+
+/// An `Args` over an explicit token list.
+export fn cliOf(list: Array<String>) -> Args {
+    return Args { argv: list.copy() }
+}
+
+/// The index of the first `--` in `a.argv`, or the argv length when there is
+/// none.
+fn terminatorAt(a: Args) -> Int64 {
+    let mut i = 0
+    while i < a.argv.length {
+        if a.argv[i] == "--" {
+            return i
+        }
+        i = i + 1
+    }
+    return a.argv.length
+}
+
+/// Whether `name` appears, spelled exactly, before the `--` terminator.
+export fn flag(a: Args, name: String) -> Bool {
+    let end = terminatorAt(a)
+    let mut i = 0
+    while i < end {
+        if a.argv[i] == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// The value of option `name` before the `--` terminator, or `None`. The first
+/// occurrence wins. `--name=value` gives everything after the first `=`, which
+/// may be empty. `--name value` gives the next token unless it starts with `-`;
+/// then the option has no value and the answer is `None`.
+export fn opt(a: Args, name: String) -> Option<String> {
+    let end = terminatorAt(a)
+    let mut i = 0
+    while i < end {
+        let tok = a.argv[i]
+        if let Some(eq) = indexOf(tok, "=") {
+            if substring(tok, 0, eq) == name {
+                return Some(substring(tok, eq + 1, tok.byteLength))
+            }
+        } else {
+            if tok == name {
+                if i + 1 < end {
+                    let next = a.argv[i + 1]
+                    if !next.startsWith("-") {
+                        return Some(next.copy())
+                    }
+                }
+                return None
+            }
+        }
+        i = i + 1
+    }
+    return None
+}
+
+/// Every token that is neither a flag or option token nor an option's value, in
+/// order, then every token after `--`. A non-`-` token after an option token
+/// without `=` counts as its value, so put free positionals before flags or
+/// after `--`.
+export fn positionals(a: Args) -> Array<String> {
+    let end = terminatorAt(a)
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < end {
+        let tok = a.argv[i]
+        if tok.startsWith("-") {
+            if !tok.contains("=") && i + 1 < end && !a.argv[i + 1].startsWith("-") {
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+        } else {
+            out.push(tok.copy())
+            i = i + 1
+        }
+    }
+    let mut j = end + 1
+    while j < a.argv.length {
+        out.push(a.argv[j].copy())
+        j = j + 1
+    }
+    return out
+}
+
+/// The tokens after the first `terminator`; empty when it is absent.
+export fn rest(a: Args, terminator: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut seen = false
+    let mut i = 0
+    while i < a.argv.length {
+        if seen {
+            out.push(a.argv[i].copy())
+        } else {
+            if a.argv[i] == terminator {
+                seen = true
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+test "flag is exact-name presence before the terminator" {
+    let a = cliOf(["--verbose", "build", "-v"])
+    assert(flag(a, "--verbose"))
+    assert(flag(a, "-v"))
+    assert(!flag(a, "--quiet"))
+    // A flag after `--` is not seen (it is positional there).
+    let b = cliOf(["--", "--verbose"])
+    assert(!flag(b, "--verbose"))
+}
+
+test "opt reads the space form and the equals form" {
+    let a = cliOf(["--name", "app", "--tag=rc1", "--empty="])
+    assert(match opt(a, "--name") { Some(v) => v == "app", None => false })
+    assert(match opt(a, "--tag") { Some(v) => v == "rc1", None => false })
+    assert(match opt(a, "--empty") { Some(v) => v == "", None => false })
+    assert(match opt(a, "--missing") { Some(v) => false, None => true })
+}
+
+test "opt does NOT consume a following option-looking token" {
+    let a = cliOf(["--name", "-x", "positional"])
+    assert(match opt(a, "--name") { Some(v) => false, None => true })
+    let b = cliOf(["--name=-x"])
+    assert(match opt(b, "--name") { Some(v) => v == "-x", None => false })
+}
+
+test "opt first occurrence wins, later duplicates ignored" {
+    let a = cliOf(["--name", "first", "--name", "second"])
+    assert(match opt(a, "--name") { Some(v) => v == "first", None => false })
+    // A valueless first occurrence wins even over a later valued one.
+    let b = cliOf(["--name", "--name=later"])
+    assert(match opt(b, "--name") { Some(v) => false, None => true })
+}
+
+test "positionals skip flags, option values, and honor the terminator" {
+    let a = cliOf(["build", "--name", "app", "src", "--", "-x", "y"])
+    let p = positionals(a)
+    // "app" is --name's value.
+    assertEq(p.length, 4)
+    assertEq(p[0], "build")
+    assertEq(p[1], "src")
+    assertEq(p[2], "-x")
+    assertEq(p[3], "y")
+}
+
+test "positionals over an empty argv is empty" {
+    let p = positionals(cliOf([]))
+    assertEq(p.length, 0)
+}
+
+test "rest returns only the tokens after the terminator" {
+    let a = cliOf(["run", "--flag", "--", "passthrough", "-x"])
+    let r = rest(a, "--")
+    assertEq(r.length, 2)
+    assertEq(r[0], "passthrough")
+    assertEq(r[1], "-x")
+    assertEq(rest(cliOf(["a", "b"]), "--").length, 0)
+}
+
+test "cliOf and cli agree in shape" {
+    let a = cliOf(["-n", "5"])
+    assert(match opt(a, "-n") { Some(v) => v == "5", None => false })
+}

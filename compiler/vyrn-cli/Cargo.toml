@@ -1,0 +1,44 @@
+[package]
+name = "vyrn-cli"
+# What `vyrn --version` prints, and what the release workflow checks its tag
+# against. The other workspace crates stay 0.0.0: they are not published and
+# nothing reads their version. Bump this WITH the tag, or the release fails
+# before it builds.
+version = "0.1.0-alpha.3"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The vyrn driver: check, run, build and test a .vyrn program."
+
+[dependencies]
+vyrn-frontend = { path = "../vyrn-frontend" }
+vyrn-lower = { path = "../vyrn-lower" }
+vyrn-codegen = { path = "../vyrn-codegen" }
+# The embedded wasm engine that runs generators. An EXCLUDED crate, because
+# nothing needs its own test suite to build or test the language — but not an
+# optional DEPENDENCY: it is the one generation engine, and the same crate also
+# serves the `vyrn_gen` imports a `test` block's generator is compiled against,
+# so a driver without it cannot run a generator at all. What the workspace
+# defends is "builds and tests with no LLVM, clang or sysroot" (../Cargo.toml),
+# and its dependencies are `vyrn-frontend`, `vyrn-codegen` and `wasmtime`.
+vyrn-genwasm = { path = "../vyrn-genwasm" }
+# `vyrn run --engine wasm` runs the program's wasm in this process.
+# The same crate, version and features `vyrn-genwasm` embeds, so one build
+# compiles it once. What the workspace defends is "builds and
+# tests with no LLVM, clang or sysroot" (../Cargo.toml), and this is pure Rust.
+wasmtime = { version = "47", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    "parallel-compilation",
+] }
+
+# The host the compiled route runs in, and nothing else (see src/lib.rs).
+# `vyrn-frontend` dev-depends on it so its tests run a program the way the
+# driver does.
+[lib]
+name = "vyrn_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vyrn"
+path = "src/main.rs"

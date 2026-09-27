@@ -1,0 +1,10 @@
+// A `fn` value can own its captures, so a literal part takes it like any value.
+type Op = fn(Int64) -> Int64
+
+fn main() -> Int64 {
+    let f: Op = x -> x * 10
+    let ops: Array<Op> = [f]
+    print(f(4))
+    print(ops.length)
+    return 0
+}

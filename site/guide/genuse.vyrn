@@ -1,0 +1,10 @@
+// An import target can be a call to a generator. `squares()` runs at compile
+// time and `squareOf` arrives from the source it returned — an ordinary
+// function, in an ordinary module.
+import { squares } from "./gentiny"
+import { squareOf } from squares()
+import { joinWith } from "std/strings"
+
+export fn demo() -> String {
+    return joinWith(["squareOf(3) is \{squareOf(3)}", "squareOf(9) is \{squareOf(9)}"], "\n")
+}

@@ -1,0 +1,895 @@
+/// Theme-derived utility classes as a checked type. `tw(theme)` reads
+/// a flat `theme.json` at generation time and returns a module with `TwClass`
+/// (one class; finite, so the LSP completes it), `Tw` (space-separated
+/// classes), `cls(c: Tw) -> Attr`, and `css() -> String`, the baked stylesheet.
+/// A literal passed to `cls` is checked against `Tw` at compile time.
+///
+///   import { tw } from "std/tw"
+///   import * as theme from tw("./theme.json")
+///
+/// theme.json:
+///   {
+///     "colors":      { "brand": { "500": "#4f46e5" }, "white": "#ffffff" },
+///     "spacing":     { "0": "0", "1": "0.25rem" },
+///     "radius":      { "DEFAULT": "0.5rem", "full": "9999px" },
+///     "fontSize":    { "sm": "0.875rem" },
+///     "breakpoints": { "sm": "640px", "md": "768px" },
+///     "safelist":    ["book-card"]
+///   }
+/// `radius.DEFAULT` drives the bare `rounded`. Safelisted names join the type
+/// but get no CSS rule. An unknown top-level key, a non-string leaf, an unsafe
+/// class name or an unsafe CSS value fails generation, naming the offender.
+
+import { Scanner, cssScanner, skipWs, peek, atEnd, advance, looksAt } from "std/scan"
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
+import { joinWith, substring, fromBytesOr } from "std/strings"
+import { includes } from "std/arrays"
+import { contains, startsWith } from "std/strpred"
+
+// `reportHere` throughout: the flattened theme has no line to point at.
+import { reportHere, Severity } from "std/diag"
+
+/// A class name must be `[a-z][a-z0-9-]*`.
+fn twClassSafe(name: String) -> Bool {
+    let ba = bytes(name)
+    if ba.length == 0 {
+        return false
+    }
+    if (ba[0] >= 'a' && ba[0] <= 'z') == false {
+        return false
+    }
+    let mut i = 1
+    while i < ba.length {
+        let b = ba[i]
+        let ok = (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-'
+        if ok == false {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// A theme value is baked verbatim into a rule body and a `@media` query, so it
+/// must be a hex colour (`#` and 3, 4, 6 or 8 hex digits), a length (a digit or
+/// `.`, then digits, `.`, letters or `%`), or an ident (`[a-zA-Z][a-zA-Z0-9-]*`).
+/// Anything else, `rgb(...)` included, is refused.
+fn twValueSafe(v: String) -> Bool {
+    let ba = bytes(v)
+    if ba.length == 0 {
+        return false
+    }
+    let first = ba[0]
+    if first == '#' {
+        let n = ba.length - 1
+        if n != 3 && n != 4 && n != 6 && n != 8 {
+            return false
+        }
+        let mut i = 1
+        while i < ba.length {
+            let b = ba[i]
+            let hex = (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+            if hex == false {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    let digitStart = (first >= '0' && first <= '9') || first == '.'
+    if digitStart {
+        let mut i = 0
+        while i < ba.length {
+            let b = ba[i]
+            let ok = (b >= '0' && b <= '9') || b == '.' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '%'
+            if ok == false {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    let alphaStart = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')
+    if alphaStart {
+        let mut i = 0
+        while i < ba.length {
+            let b = ba[i]
+            let ok = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-'
+            if ok == false {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    return false
+}
+
+/// Whether `v` is one CSS token with no whitespace and no `/* */` comment, read
+/// by the `std/scan` CSS cursor. This makes "no comment, no second token" hold
+/// apart from the character grammar in `twValueSafe`.
+fn twCssSingleToken(v: String) -> Bool {
+    let mut sc = cssScanner(v)
+    skipWs(sc)
+    if sc.pos != 0 {
+        return false
+    }
+    while atEnd(sc) == false {
+        let b = peek(sc)
+        if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+            return twCssNothingAfter(sc)
+        }
+        if looksAt(sc, "/*") {
+            return false
+        }
+        advance(sc)
+    }
+    return true
+}
+
+fn twCssNothingAfter(sc: Scanner) -> Bool {
+    let mut s = sc.copy()
+    skipWs(s)
+    return atEnd(s)
+}
+
+/// Every value that reaches a rule body or a `@media` query passes here.
+fn twCssValueSafe(v: String) -> Bool {
+    return twCssSingleToken(v) && twValueSafe(v)
+}
+
+/// One flattened theme entry: `colors.brand.500` -> `#4f46e5`.
+type TwEntry = { key: String, value: String }
+
+/// A flattened theme in source order, or `ok = false` and a reason.
+type TwTheme = { ok: Bool, error: String, entries: Array<TwEntry> }
+
+fn twThemeError(msg: String) -> TwTheme {
+    return TwTheme { ok: false, error: msg.copy(), entries: [] }
+}
+
+fn twUnsupported() -> String {
+    return "unsupported value (only strings, arrays of strings, and nested objects are allowed)"
+}
+
+/// Returns `""` so a `match` arm stays one expression.
+fn twAddEntry(entries: modify Array<TwEntry>, key: String, value: String) -> String {
+    entries.push(TwEntry { key: key.copy(), value: value.copy() })
+    return ""
+}
+
+/// A scalar directly under a top-level key (`{"colors": "brand"}`) is refused:
+/// it would flatten to a dotless entry that no axis reads.
+fn twAddLeaf(prefix: String, s: String, entries: modify Array<TwEntry>) -> String {
+    if contains(prefix, ".") == false {
+        return "the top-level key `\{prefix}` must map to an object (or, for `safelist`, an array of strings), not a single value"
+    }
+    return twAddEntry(entries, prefix, s)
+}
+
+fn twFlattenElem(prefix: String, idx: Int64, it: Json, entries: modify Array<TwEntry>) -> String {
+    return match it {
+        JStr(s) => twAddEntry(entries, prefix + "." + idx.toString(), s),
+        JNull => "array elements must be strings",
+        JBool(b) => "array elements must be strings",
+        JNum(n) => "array elements must be strings",
+        JArr(a) => "array elements must be strings",
+        JObj(o) => "array elements must be strings",
+    }
+}
+
+/// `safelist` elements flatten to `<key>.<index>`. Returns `""` or the first error.
+fn twFlattenArr(prefix: String, items: Array<Json>, entries: modify Array<TwEntry>) -> String {
+    let mut idx = 0
+    for it in items {
+        let e = twFlattenElem(prefix, idx, it, entries)
+        if e != "" {
+            return e
+        }
+        idx = idx + 1
+    }
+    return ""
+}
+
+/// Returns `""` or the first leaf error.
+fn twFlattenObj(prefix: String, fields: Array<JsonField>, entries: modify Array<TwEntry>) -> String {
+    for f in fields {
+        let key = if prefix == "" { f.key.copy() } else { prefix + "." + f.key }
+        let e = twFlatten(key, f.value, entries)
+        if e != "" {
+            return e
+        }
+    }
+    return ""
+}
+
+/// Returns `""` or an error.
+fn twFlatten(prefix: String, j: Json, entries: modify Array<TwEntry>) -> String {
+    return match j {
+        JObj(fields) => twFlattenObj(prefix, fields, entries),
+        JArr(items) => twFlattenArr(prefix, items, entries),
+        JStr(s) => twAddLeaf(prefix, s, entries),
+        JNull => twUnsupported(),
+        JBool(b) => twUnsupported(),
+        JNum(n) => twUnsupported(),
+    }
+}
+
+fn twThemeFromObj(fields: Array<JsonField>) -> TwTheme {
+    let mut entries: Array<TwEntry> = []
+    let e = twFlattenObj("", fields, entries)
+    if e != "" {
+        return twThemeError(e)
+    }
+    return TwTheme { ok: true, error: "", entries: entries }
+}
+
+fn twThemeFromJson(j: Json) -> TwTheme {
+    return match j {
+        JObj(fields) => twThemeFromObj(fields),
+        JNull => twThemeError("expected a JSON object at the top level"),
+        JBool(b) => twThemeError("expected a JSON object at the top level"),
+        JNum(n) => twThemeError("expected a JSON object at the top level"),
+        JStr(s) => twThemeError("expected a JSON object at the top level"),
+        JArr(a) => twThemeError("expected a JSON object at the top level"),
+    }
+}
+
+fn twParseTheme(src: String) -> TwTheme {
+    return match parseJson(src) {
+        Ok(j) => twThemeFromJson(j),
+        Err(e) => twThemeError(e),
+    }
+}
+
+/// `token` is the class-name fragment: `brand-500` or `white` for colours, else
+/// the leaf name.
+type TwPair = { token: String, value: String }
+
+/// `colors.brand.500` -> `brand.500`.
+fn twDropHead(key: String) -> String {
+    let ba = bytes(key)
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '.' {
+            return substring(key, i + 1, key.byteLength)
+        }
+        i = i + 1
+    }
+    return key.copy()
+}
+
+/// `brand.500` -> `brand-500`.
+fn twDashDots(key: String) -> String {
+    let ba = bytes(key)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b == '.' {
+            out.push('-')
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, key)
+}
+
+/// The entries under `family.`, in theme order.
+fn twAxisOf(theme: TwTheme, family: String) -> Array<TwPair> {
+    let mut out: Array<TwPair> = []
+    let prefix = family + "."
+    for e in theme.entries {
+        if e.key.startsWith(prefix) {
+            let rest = twDropHead(e.key)
+            out.push(TwPair { token: twDashDots(rest), value: e.value.copy() })
+        }
+    }
+    return out
+}
+
+/// The vocabulary families, in vocabulary order.
+fn twKnownFamilies() -> Array<String> {
+    return ["colors", "spacing", "radius", "fontSize", "breakpoints"]
+}
+
+fn twKnownTopLevel() -> Array<String> {
+    let mut out = twKnownFamilies()
+    out.push("safelist")
+    return out
+}
+
+fn twUnknownKeyErrors(theme: TwTheme) -> String {
+    let known = twKnownTopLevel()
+    let mut seen: Array<String> = []
+    let mut out = ""
+    for e in theme.entries {
+        let head = twHeadOf(e.key)
+        if includes(known, head) == false && includes(seen, head) == false {
+            out = out
+            + reportHere(
+                Error,
+                "the theme has a top-level key `\{head}`, which names no utility family — the families are \{joinWith(twKnownTopLevel(), ", ")}",
+            )
+            seen.push(head)
+        }
+    }
+    return out
+}
+
+fn twHeadOf(key: String) -> String {
+    let ba = bytes(key)
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '.' {
+            return substring(key, 0, i)
+        }
+        i = i + 1
+    }
+    return key.copy()
+}
+
+/// One base class and its CSS declaration body (`p-2` -> `padding:0.5rem`).
+type TwClassDef = { name: String, decl: String }
+
+/// `bg-`, `text-`, `border-` over the colours, family by family.
+fn twColorClasses(v: modify Array<TwClassDef>, colors: Array<TwPair>) -> Unit {
+    for c in colors {
+        v.push(TwClassDef { name: "bg-" + c.token, decl: "background-color:" + c.value })
+    }
+    for c in colors {
+        v.push(TwClassDef { name: "text-" + c.token, decl: "color:" + c.value })
+    }
+    for c in colors {
+        v.push(TwClassDef { name: "border-" + c.token, decl: "border-color:" + c.value })
+    }
+}
+
+/// `side` is `""` (all), `x`, `y`, or one of `t`, `r`, `b`, `l`.
+fn twBoxDecl(prop: String, side: String, val: String) -> String {
+    if side == "" {
+        return prop + ":" + val
+    }
+    if side == "x" {
+        return prop + "-left:" + val + ";" + prop + "-right:" + val
+    }
+    if side == "y" {
+        return prop + "-top:" + val + ";" + prop + "-bottom:" + val
+    }
+    if side == "t" {
+        return prop + "-top:" + val
+    }
+    if side == "r" {
+        return prop + "-right:" + val
+    }
+    if side == "b" {
+        return prop + "-bottom:" + val
+    }
+    return prop + "-left:" + val
+}
+
+/// All sides of one property over the spacing scale.
+fn twBoxClasses(v: modify Array<TwClassDef>, letter: String, prop: String, spacing: Array<TwPair>) -> Unit {
+    let sides = ["", "x", "y", "t", "r", "b", "l"]
+    for side in sides {
+        for s in spacing {
+            v.push(TwClassDef { name: letter + side + "-" + s.token, decl: twBoxDecl(prop, side, s.value) })
+        }
+    }
+}
+
+fn twGapClasses(v: modify Array<TwClassDef>, spacing: Array<TwPair>) -> Unit {
+    for s in spacing {
+        v.push(TwClassDef { name: "gap-" + s.token, decl: "gap:" + s.value })
+    }
+}
+
+fn twRoundedClasses(v: modify Array<TwClassDef>, radius: Array<TwPair>) -> Unit {
+    for r in radius {
+        if r.token == "DEFAULT" {
+            v.push(TwClassDef { name: "rounded", decl: "border-radius:" + r.value })
+        } else {
+            v.push(TwClassDef { name: "rounded-" + r.token, decl: "border-radius:" + r.value })
+        }
+    }
+}
+
+fn twTextSizeClasses(v: modify Array<TwClassDef>, fontSize: Array<TwPair>) -> Unit {
+    for f in fontSize {
+        v.push(TwClassDef { name: "text-" + f.token, decl: "font-size:" + f.value })
+    }
+}
+
+fn twSizeClasses(v: modify Array<TwClassDef>, spacing: Array<TwPair>) -> Unit {
+    for s in spacing {
+        v.push(TwClassDef { name: "w-" + s.token, decl: "width:" + s.value })
+    }
+    for s in spacing {
+        v.push(TwClassDef { name: "h-" + s.token, decl: "height:" + s.value })
+    }
+}
+
+/// The theme-independent utilities, emitted after the theme's families.
+fn twStaticClasses(v: modify Array<TwClassDef>) -> Unit {
+    v.push(TwClassDef { name: "flex", decl: "display:flex" })
+    v.push(TwClassDef { name: "grid", decl: "display:grid" })
+    v.push(TwClassDef { name: "block", decl: "display:block" })
+    v.push(TwClassDef { name: "inline", decl: "display:inline" })
+    v.push(TwClassDef { name: "hidden", decl: "display:none" })
+    v.push(TwClassDef { name: "items-start", decl: "align-items:flex-start" })
+    v.push(TwClassDef { name: "items-center", decl: "align-items:center" })
+    v.push(TwClassDef { name: "items-end", decl: "align-items:flex-end" })
+    v.push(TwClassDef { name: "justify-start", decl: "justify-content:flex-start" })
+    v.push(TwClassDef { name: "justify-center", decl: "justify-content:center" })
+    v.push(TwClassDef { name: "justify-end", decl: "justify-content:flex-end" })
+    v.push(TwClassDef { name: "justify-between", decl: "justify-content:space-between" })
+    v.push(TwClassDef { name: "flex-col", decl: "flex-direction:column" })
+    v.push(TwClassDef { name: "flex-wrap", decl: "flex-wrap:wrap" })
+    v.push(TwClassDef { name: "font-normal", decl: "font-weight:400" })
+    v.push(TwClassDef { name: "font-bold", decl: "font-weight:700" })
+    v.push(TwClassDef { name: "italic", decl: "font-style:italic" })
+    v.push(TwClassDef { name: "underline", decl: "text-decoration:underline" })
+    v.push(TwClassDef { name: "border", decl: "border-width:1px;border-style:solid" })
+    v.push(TwClassDef { name: "cursor-pointer", decl: "cursor:pointer" })
+    v.push(TwClassDef { name: "select-none", decl: "user-select:none" })
+    v.push(TwClassDef { name: "overflow-auto", decl: "overflow:auto" })
+    v.push(TwClassDef { name: "overflow-hidden", decl: "overflow:hidden" })
+    v.push(TwClassDef { name: "text-left", decl: "text-align:left" })
+    v.push(TwClassDef { name: "text-center", decl: "text-align:center" })
+    v.push(TwClassDef { name: "text-right", decl: "text-align:right" })
+}
+
+/// The base vocabulary, in its fixed order.
+fn twBuildVocab(theme: TwTheme) -> Array<TwClassDef> {
+    let colors = twAxisOf(theme, "colors")
+    let spacing = twAxisOf(theme, "spacing")
+    let radius = twAxisOf(theme, "radius")
+    let fontSize = twAxisOf(theme, "fontSize")
+    let mut v: Array<TwClassDef> = []
+    twColorClasses(v, colors)
+    twBoxClasses(v, "p", "padding", spacing)
+    twBoxClasses(v, "m", "margin", spacing)
+    twGapClasses(v, spacing)
+    twRoundedClasses(v, radius)
+    twTextSizeClasses(v, fontSize)
+    twSizeClasses(v, spacing)
+    twStaticClasses(v)
+    return v
+}
+
+/// Safelisted names join the `TwClass` grammar but get no CSS rule; the app
+/// styles them.
+fn twSafelist(theme: TwTheme) -> Array<String> {
+    let mut out: Array<String> = []
+    for p in twAxisOf(theme, "safelist") {
+        out.push(consume p.value)
+    }
+    return out
+}
+
+fn twUnsafeSafelistErrors(safelist: Array<String>) -> String {
+    let mut out = ""
+    for name in safelist {
+        if twClassSafe(name) == false {
+            out = out
+            + reportHere(
+                Error,
+                "safelisted class `\{name}` is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`",
+            )
+        }
+    }
+    return out
+}
+
+fn twUnsafeNameErrors(vocab: Array<TwClassDef>) -> String {
+    let mut out = ""
+    for c in vocab {
+        if twClassSafe(c.name) == false {
+            out = out
+            + reportHere(
+                Error,
+                "the theme derives the class `\{c.name}`, which is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`, so rename the theme key it came from",
+            )
+        }
+    }
+    return out
+}
+
+/// A breakpoint key becomes a regex prefix and a selector prefix, so a key
+/// like `ev|xhack` would forge the type (`evbg-white` would compile).
+fn twUnsafeBreakpointErrors(breakpoints: Array<TwPair>) -> String {
+    let mut out = ""
+    for bp in breakpoints {
+        if twClassSafe(bp.token) == false {
+            out = out
+            + reportHere(
+                Error,
+                "breakpoint `\{bp.token}` is not a CSS-safe class name — a breakpoint key becomes both a `\{bp.token}:` class prefix and a CSS selector prefix, so it must match `[a-z][a-z0-9-]*`",
+            )
+        }
+    }
+    return out
+}
+
+/// `safelist` is exempt: its leaves are class names, checked elsewhere.
+fn twUnsafeValueErrors(theme: TwTheme) -> String {
+    let families = twKnownFamilies()
+    let mut out = ""
+    for e in theme.entries {
+        if includes(families, twHeadOf(e.key)) {
+            if twCssValueSafe(e.value) == false {
+                out = out
+                + reportHere(
+                    Error,
+                    "theme key `\{e.key}` has the value `\{e.value}`, which is not safe to bake into CSS — a value is written into a rule body or a `@media` query, so it may not carry `{`, `}`, `;` or a comment",
+                )
+            }
+        }
+    }
+    return out
+}
+
+/// Escapes each `:` as `\:`, so `hover:bg-x` is a legal selector.
+fn twCssEscape(name: String) -> String {
+    let ba = bytes(name)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b == ':' {
+            out.push('\\')
+            out.push(':')
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, name)
+}
+
+/// Layer 0 is the base, 1 `hover:`, 2 `focus:`: the class prefix and the pseudo-class.
+fn twStateLayer(k: Int64) -> Array<String> {
+    if k == 0 {
+        return ["", ""]
+    }
+    if k == 1 {
+        return ["hover:", ":hover"]
+    }
+    return ["focus:", ":focus"]
+}
+
+/// Rule `j` of a block over `[0, 3 * M)`, `M` the vocabulary size: the state
+/// layer is `j / M` and the class `j % M`.
+fn twRuleFlat(vocab: Array<TwClassDef>, prefix: String, j: Int64) -> String {
+    let m = vocab.length
+    let layer = twStateLayer(j / m)
+    let idx = j % m
+    return "." + twCssEscape(prefix + layer[0] + vocab[idx].name) + layer[1] + " {" + vocab[idx].decl + "}\n"
+}
+
+/// The rules over `[lo, hi)`, concatenated as a balanced tree: generation-time
+/// `+` copies its operands, so a linear fold would be quadratic. An empty range
+/// yields `""`, which guards `twRuleFlat` against division by zero.
+fn twBlockLit(vocab: Array<TwClassDef>, prefix: String, lo: Int64, hi: Int64) -> String {
+    if hi <= lo {
+        return ""
+    }
+    if hi - lo <= 1 {
+        return twRuleFlat(vocab, prefix, lo)
+    }
+    let mid = lo + (hi - lo) / 2
+    return twBlockLit(vocab, prefix, lo, mid) + twBlockLit(vocab, prefix, mid, hi)
+}
+
+/// The base block, then one `@media (min-width: ...)` block per breakpoint.
+fn twCssBody(vocab: Array<TwClassDef>, breakpoints: Array<TwPair>) -> String {
+    let n = vocab.length * 3
+    let mut body = twBlockLit(vocab, "", 0, n)
+    for bp in breakpoints {
+        body = body + "@media (min-width:" + bp.value + ") {\n"
+        body = body + twBlockLit(vocab, bp.token + ":", 0, n)
+        body = body + "}\n"
+    }
+    return body
+}
+
+fn twBuildCss(vocab: Array<TwClassDef>, breakpoints: Array<TwPair>) -> String {
+    return twCssBody(vocab, breakpoints)
+}
+
+/// `(bp:)?(hover:|focus:)?(base|...)`. Names are validated `[a-z0-9-]`, so
+/// none needs regex escaping. Safelisted names follow the derived ones.
+fn twTokenRegex(vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: Array<String>) -> String {
+    let mut out = ""
+    if breakpoints.length > 0 {
+        let mut bps: Array<String> = []
+        for bp in breakpoints {
+            bps.push(bp.token + ":")
+        }
+        out = out + "(" + joinWith(bps, "|") + ")?"
+    }
+    out = out + "(hover:|focus:)?"
+    let mut bases: Array<String> = []
+    for c in vocab {
+        bases.push(c.name.copy())
+    }
+    for s in safelist {
+        bases.push(s.copy())
+    }
+    out = out + "(" + joinWith(bases, "|") + ")"
+    return out
+}
+
+/// Every check on a value, class name, safelisted name and breakpoint key.
+/// `twBuildModule`, the only producer of CSS and the token types, runs it first.
+fn twSheetSafetyErrors(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: Array<String>) -> String {
+    let mut out = ""
+    out = out + twUnsafeValueErrors(theme)
+    out = out + twUnsafeNameErrors(vocab)
+    out = out + twUnsafeSafelistErrors(safelist)
+    out = out + twUnsafeBreakpointErrors(breakpoints)
+    return out
+}
+
+/// A `gen fn` because `twEmitCss` renders a code quote.
+gen fn twBuildModule(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: Array<String>) -> String {
+    let gate = twSheetSafetyErrors(theme, vocab, breakpoints, safelist)
+    if gate != "" {
+        return gate
+    }
+    let token = twTokenRegex(vocab, breakpoints, safelist)
+    let rawCss = twCssBody(vocab, breakpoints)
+    let mut out = "/// Generated by std/tw `tw` — do not edit.\n"
+    out = out + "import { Attr } from \"std/html\"\n"
+
+    // Finite, so the LSP enumerates it for completion.
+    out = out + "export type TwClass = String where value =~ \"(" + token + ")\"\n"
+
+    out = out + "export type Tw = String where value =~ \"(" + token + "( " + token + ")*)\"\n"
+
+    out = out + "/// A checked `class=\"…\"` attribute: `c` is validated against the theme's\n"
+    out = out + "/// utility vocabulary at compile time (for a literal) or the boundary (dynamic).\n"
+    // `.copy()`, not `consume`: the `Attr` outlives the call, and `.vyx`
+    // callers pass a prop, which is a `read` parameter.
+    out = out + "export fn cls(c: Tw) -> Attr {\n    return Cls(c.copy())\n}\n"
+
+    // The `\{}` splice sits in expression position, so the compiler escapes
+    // the stylesheet as a string literal.
+    out = out + twEmitCss(rawCss)
+    return out
+}
+
+gen fn twEmitCss(rawCss: String) -> String {
+    return render(vyrn"""/// The theme's full utility stylesheet (deterministic, byte-stable).
+export fn css() -> String {
+    return \{rawCss}
+}
+""")
+}
+
+/// Reads the flat `theme.json` and returns the typed module. A malformed theme
+/// fails the load with a report naming the offending key.
+export gen fn tw(theme: String) -> String {
+    return twLoaded(theme, readFile(theme))
+}
+
+/// A match arm is one expression, so the read result crosses as a record.
+type TwRead = {
+    data: String,
+    err: String,
+}
+
+/// [`tw`] with the read handed in, so a test reaches the cannot-read report.
+gen fn twLoaded(theme: String, read: Result<String, String>) -> String {
+    // A failed read is refused before parsing; the parser would mislabel it
+    // as a theme fault.
+    let got = match read {
+        Ok(v) => TwRead { data: v.copy(), err: "" },
+        Err(e) => TwRead { data: "", err: e.copy() },
+    }
+    if got.err != "" {
+        return reportHere(Error, cannotReadTheme(theme, got.err))
+    }
+    let parsed = twParseTheme(got.data)
+    if parsed.ok == false {
+        return reportHere(Error, "`\{theme}` is not a usable theme — \{parsed.error}")
+    }
+    let unknown = twUnknownKeyErrors(parsed)
+    if unknown != "" {
+        return unknown
+    }
+    let vocab = twBuildVocab(parsed)
+    if vocab.length == 0 {
+        return reportHere(
+            Error,
+            "`\{theme}` yields no utility classes — give it at least one entry under \{joinWith(twKnownFamilies(), ", ")}",
+        )
+    }
+    return twBuildModule(parsed, vocab, twAxisOf(parsed, "breakpoints"), twSafelist(parsed))
+}
+
+fn cannotReadTheme(theme: String, why: String) -> String {
+    return "std/tw cannot read the theme `\{theme}`: \{why} — a theme is a flat theme.json of design tokens"
+}
+
+test "twParseTheme flattens nested keys with dots" {
+    let src = "{ \"colors\": { \"brand\": { \"500\": \"#abc\" }, \"white\": \"#fff\" }, \"spacing\": { \"2\": \"0.5rem\" } }"
+    let t = twParseTheme(src)
+    assert(t.ok)
+    assertEq(t.entries[0].key, "colors.brand.500")
+    assertEq(t.entries[0].value, "#abc")
+    assertEq(t.entries[1].key, "colors.white")
+    assertEq(t.entries[2].key, "spacing.2")
+}
+
+test "twParseTheme rejects a non-string leaf" {
+    let t = twParseTheme("{ \"spacing\": { \"2\": 8 } }")
+    assertEq(t.ok, false)
+}
+
+test "a scalar directly under a top-level family is refused, not silently ignored" {
+    let t = twParseTheme("{ \"colors\": \"#fff\", \"spacing\": { \"2\": \"0.5rem\" } }")
+    assertEq(t.ok, false)
+    assert(contains(t.error, "`colors`"))
+    let s = twParseTheme("{ \"safelist\": \"row\" }")
+    assertEq(s.ok, false)
+}
+
+test "twAxisOf dashes color shade paths and keeps theme order" {
+    let t = twParseTheme("{ \"colors\": { \"brand\": { \"500\": \"#abc\", \"600\": \"#def\" }, \"white\": \"#fff\" } }")
+    let ax = twAxisOf(t, "colors")
+    assertEq(ax.length, 3)
+    assertEq(ax[0].token, "brand-500")
+    assertEq(ax[1].token, "brand-600")
+    assertEq(ax[2].token, "white")
+}
+
+test "a theme that cannot be read is its own diagnostic, not a parse error" {
+    let out = twLoaded("./missing/theme.json", Err("No such file or directory"))
+    assert(
+        contains(out, "//@diag error - std/tw cannot read the theme `./missing/theme.json`: No such file or directory"),
+    )
+    assert(contains(out, "not a usable theme") == false)
+}
+
+test "twClassSafe accepts utility names and rejects unsafe segments" {
+    assert(twClassSafe("bg-brand-500"))
+    assert(twClassSafe("rounded"))
+    assertEq(twClassSafe("bg-Brand"), false)
+    assertEq(twClassSafe("bg_brand"), false)
+    assertEq(twClassSafe("500"), false)
+}
+
+test "twBuildVocab emits families in the locked order" {
+    let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"spacing\": { \"2\": \"0.5rem\" } }")
+    let v = twBuildVocab(t)
+    assertEq(v[0].name, "bg-white")
+    assertEq(v[1].name, "text-white")
+    assertEq(v[2].name, "border-white")
+    assertEq(v[0].decl, "background-color:#fff")
+    assertEq(v[3].name, "p-2")
+    assertEq(v[3].decl, "padding:0.5rem")
+}
+
+test "twBoxDecl expands the shorthand sides" {
+    assertEq(twBoxDecl("padding", "", "1rem"), "padding:1rem")
+    assertEq(twBoxDecl("padding", "x", "1rem"), "padding-left:1rem;padding-right:1rem")
+    assertEq(twBoxDecl("margin", "t", "1rem"), "margin-top:1rem")
+}
+
+test "twRoundedClasses maps DEFAULT to bare rounded" {
+    let t = twParseTheme("{ \"radius\": { \"DEFAULT\": \"0.5rem\", \"full\": \"9999px\" } }")
+    let mut v: Array<TwClassDef> = []
+    twRoundedClasses(v, twAxisOf(t, "radius"))
+    assertEq(v[0].name, "rounded")
+    assertEq(v[1].name, "rounded-full")
+}
+
+test "twRuleFlat escapes the colon in a variant selector" {
+    // base (j=0), hover (j=1), focus (j=2).
+    let mut v: Array<TwClassDef> = []
+    v.push(TwClassDef { name: "bg-x", decl: "color:red" })
+    assertEq(twRuleFlat(v, "", 0), ".bg-x {color:red}\n")
+    assertEq(twRuleFlat(v, "", 1), ".hover\\:bg-x:hover {color:red}\n")
+    assertEq(twRuleFlat(v, "md:", 2), ".md\\:focus\\:bg-x:focus {color:red}\n")
+}
+
+test "twBuildCss is deterministic and puts media queries last" {
+    let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"breakpoints\": { \"md\": \"768px\" } }")
+    let v = twBuildVocab(t)
+    let css = twBuildCss(v, twAxisOf(t, "breakpoints"))
+    assert(css.startsWith(".bg-white {background-color:#fff}\n"))
+    assert(css.contains("@media (min-width:768px) {\n"))
+    assert(css.contains(".md\\:bg-white {background-color:#fff}\n"))
+    assertEq(twBuildCss(v, twAxisOf(t, "breakpoints")), css)
+}
+
+test "twTokenRegex factors the prefixes over the base alternation" {
+    let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"breakpoints\": { \"md\": \"768px\" } }")
+    let v = twBuildVocab(t)
+    let r = twTokenRegex(v, twAxisOf(t, "breakpoints"), [])
+    assert(r.startsWith("(md:)?(hover:|focus:)?("))
+    assert(r.contains("bg-white"))
+}
+
+test "safelist folds names into the token grammar after the derived vocabulary" {
+    let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"safelist\": [\"book-card\", \"row\"] }")
+    assert(t.ok)
+    let sl = twSafelist(t)
+    assertEq(sl.length, 2)
+    assertEq(sl[0], "book-card")
+    assertEq(sl[1], "row")
+    let v = twBuildVocab(t)
+    let r = twTokenRegex(v, twAxisOf(t, "breakpoints"), sl)
+    assert(r.contains("book-card"))
+    assert(r.contains("row"))
+    // Safelisted names get no CSS rule.
+    let css = twBuildCss(v, twAxisOf(t, "breakpoints"))
+    assertEq(css.contains(".book-card"), false)
+    assertEq(css.contains(".row "), false)
+    assert(css.contains(".bg-white"))
+}
+
+test "safelist rejects a name that is not CSS-safe" {
+    let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"safelist\": [\"Book_Card\"] }")
+    assert(t.ok)
+    let e = twUnsafeSafelistErrors(twSafelist(t))
+    assert(e.contains("safelisted class `Book_Card` is not a CSS-safe class name"))
+}
+
+test "safelist is a recognised top-level key (not an unknown-key error)" {
+    let t = twParseTheme("{ \"safelist\": [\"prose\"] }")
+    assert(t.ok)
+    assertEq(twUnknownKeyErrors(t), "")
+}
+
+test "twUnknownKeyErrors names an unrecognised top-level key" {
+    let t = twParseTheme("{ \"shadows\": { \"lg\": \"x\" } }")
+    let e = twUnknownKeyErrors(t)
+    assert(e.contains("top-level key `shadows`, which names no utility family"))
+}
+
+test "twValueSafe accepts hex/length/ident and rejects injection" {
+    assert(twValueSafe("#fff"))
+    assert(twValueSafe("#4f46e5"))
+    assert(twValueSafe("0"))
+    assert(twValueSafe("0.25rem"))
+    assert(twValueSafe("9999px"))
+    assert(twValueSafe("100%"))
+    assert(twValueSafe("white"))
+    assert(twValueSafe("currentColor"))
+    assertEq(twValueSafe("red} body{display:none"), false)
+    assertEq(twValueSafe("#ggg"), false)
+    assertEq(twValueSafe("#12345"), false)
+    assertEq(twValueSafe("rgb(0,0,0)"), false)
+    assertEq(twValueSafe("0 1px 2px"), false)
+    assertEq(twValueSafe(""), false)
+}
+
+test "twCssValueSafe routes values through the std/scan single-token gate" {
+    assert(twCssSingleToken("#4f46e5"))
+    assert(twCssSingleToken("0.25rem"))
+    assertEq(twCssSingleToken("red/*}*/blue"), false)
+    assertEq(twCssSingleToken("url(/*x*/)"), false)
+    // Comments are trivia; a second real token is still refused.
+    assertEq(twCssSingleToken("red /* } */ blue"), false)
+    assertEq(twCssSingleToken("0 1px 2px"), false)
+    assert(twCssValueSafe("#fff"))
+    assert(twCssValueSafe("100%"))
+    assertEq(twCssValueSafe("red} body{display:none"), false)
+    assertEq(twCssValueSafe("url(/*x*/)"), false)
+}
+
+test "twUnsafeValueErrors names a CSS-injecting leaf value by key" {
+    let t = twParseTheme("{ \"colors\": { \"evil\": \"red} body{display:none\" } }")
+    assert(t.ok)
+    let e = twUnsafeValueErrors(t)
+    assert(e.contains("theme key `colors.evil` has the value"))
+    let ok = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"spacing\": { \"2\": \"0.5rem\" } }")
+    assertEq(twUnsafeValueErrors(ok), "")
+}
+
+test "twUnsafeBreakpointErrors names a forging breakpoint key" {
+    let t = twParseTheme("{ \"breakpoints\": { \"ev|xhack\": \"1px\" } }")
+    assert(t.ok)
+    let e = twUnsafeBreakpointErrors(twAxisOf(t, "breakpoints"))
+    assert(e.contains("breakpoint `ev|xhack` is not a CSS-safe class name"))
+    let good = twParseTheme("{ \"breakpoints\": { \"md\": \"768px\" } }")
+    assertEq(twUnsafeBreakpointErrors(twAxisOf(good, "breakpoints")), "")
+}

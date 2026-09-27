@@ -1,0 +1,8 @@
+// A `Map` key is `String`, `Int64`, or a heapless user type that
+// declares `impl Hashable`. An `Array` key is none of these — a key is
+// stored, compared and freed by the map, and a heap key other than `String`
+// earns its machinery when something real demands it.
+fn main() -> Int64 {
+    let mut m: Map<Array<UInt8>, Int64> = [:]
+    return m.length
+}

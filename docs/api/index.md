@@ -1,0 +1,42 @@
+# API Reference
+
+- [std/args](std/args.md) — std/args: command-line argument parsing over `args()`, in Vyrn.
+- [std/arrays](std/arrays.md) — std/arrays: higher-order array helpers, in Vyrn.
+- [std/bench](std/bench.md) — std/bench: the runtime the `vyrn bench` transform links against.
+- [std/cli](std/cli.md) — std/cli: the command line is a record type.
+- [std/codecs](std/codecs.md) — std/codecs -- hex, base64 and percent encoding over UTF-8 bytes. These are the
+- [std/connect](std/connect.md) — std/connect -- Connect wire compatibility as a library, built on
+- [std/contract](std/contract.md) — std/contract -- check a module against a module contract.
+- [std/diag](std/diag.md) — std/diag: a generator reports a diagnostic.
+- [std/fallible](std/fallible.md) — `Fallible`: the protocol `?` resolves through for a type that is not
+- [std/graphql](std/graphql.md) — std/graphql -- the contract as a GraphQL SDL document, built on
+- [std/hash](std/hash.md) — std/hash: non-cryptographic byte hashing, and SHA-1 for the
+- [std/hints](std/hints.md) — Policy for checking libraries: per-project rule levels and per-line waivers.
+- [std/html](std/html.md) — The view tree and its string renderer. A view is a pure function
+- [std/http](std/http.md) — std/http -- the REST projection: hand-written routes over the same
+- [std/i18n](std/i18n.md) — std/i18n: typed translations as a generator library.
+- [std/icons](std/icons.md) — Inline SVG icons generated from a pinned Iconify collection, one function
+- [std/json](std/json.md) — std/json: the JSON value tree and its canonical writer.
+- [std/json5](std/json5.md) — std/json5: a JSON5 reader that builds the `Json` tree of `std/json`.
+- [std/jsondec](std/jsondec.md) — std/jsondec: the untyped half of `fromJson`.
+- [std/jsonread](std/jsonread.md) — std/jsonread: the strict JSON reader over the `Json` tree of `std/json`.
+- [std/math](std/math.md) — std/math: integer helpers (min, max, abs, clamp) and float ones (pi, floor,
+- [std/num](std/num.md) — std/num: text -> number, correctly rounded, and `Float64` -> `%f` text.
+- [std/openapi](std/openapi.md) — std/openapi -- the contract as an OpenAPI 3.1 document, built from
+- [std/random](std/random.md) — std/random: deterministic pseudo-randomness with a host-seeded escape.
+- [std/regex](std/regex.md) — std/regex: a regular expression that searches, counts and replaces.
+- [std/rpc](std/rpc.md) — std/rpc -- typed RPC as a library, built on generator imports.
+- [std/scan](std/scan.md) — std/scan: one comment- and string-aware cursor over foreign text (CSS, ICU
+- [std/slots](std/slots.md) — std/slots: a generational slab over `Array`, in Vyrn.
+- [std/storage](std/storage.md)
+- [std/stream](std/stream.md) — std/stream: the `Stream<T>` combinators, in Vyrn.
+- [std/strings](std/strings.md)
+- [std/strpred](std/strpred.md) — std/strpred: the string predicates and `slice`, written on the byte view
+- [std/symbolmap](std/symbolmap.md) — std/symbolmap: the symbol map of a generated module. For each
+- [std/text](std/text.md) — std/text: UTF-8 decoding and byte-offset line and column, in Vyrn.
+- [std/time](std/time.md) — std/time: wall-clock time at the host boundary.
+- [std/tw](std/tw.md) — Theme-derived utility classes as a checked type. `tw(theme)` reads
+- [std/ui](std/ui.md) — std/ui: file-based routing as a generator. `pages(dir)` scans a
+- [std/von](std/von.md) — std/von: VON, Vyrn Object Notation, Vyrn's literal grammar saved to a file.
+- [std/vyx](std/vyx.md) — The `.vyx` single-file component compiler, in comptime-pure Vyrn.
+- [std/vyx-hints](std/vyx-hints.md) — Accessibility, security and performance rules for `.vyx` components.

@@ -1,0 +1,18 @@
+// A `where` clause is part of the type. The compiler proves a constant or
+// refuses it, and `Age?(n)` is the total form for input nobody controls.
+import { joinWith } from "std/strings"
+
+type Age = Int64 where value >= 18
+
+fn admit(n: Int64) -> String {
+    return match Age?(n) {
+        Some(a) => "admitted at \{a}",
+        None => "refused at \{n}",
+    }
+}
+
+export fn demo() -> String {
+    let ok = Age(30) // proven while it compiles, so no check is emitted
+    // let bad = Age(5) // the compiler refuses this line
+    return joinWith(["ok \{ok}", admit(25), admit(5)], "\n")
+}

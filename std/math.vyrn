@@ -1,0 +1,112 @@
+/// std/math: integer helpers (min, max, abs, clamp) and float ones (pi, floor,
+/// sine, cosine), written in Vyrn.
+
+export fn min(a: Int64, b: Int64) -> Int64 {
+    if a < b { return a }
+    return b
+}
+
+export fn max(a: Int64, b: Int64) -> Int64 {
+    if a > b { return a }
+    return b
+}
+
+/// Absolute value. `abs(Int64.min)` saturates to `Int64.max`: the language
+/// wraps, so `0 - x` would return the minimum itself.
+export fn abs(x: Int64) -> Int64 {
+    // The bit pattern of `Int64.min`. 2^63 is one past what an `Int64` literal
+    // can name, so the literal needs a `UInt64` binding.
+    let minBits: UInt64 = 9223372036854775808
+    if x == Int64(minBits) {
+        return 9223372036854775807
+    }
+    if x < 0 {
+        return 0 - x
+    }
+    return x
+}
+
+/// Clamp `x` into the inclusive range [lo, hi].
+export fn clamp(x: Int64, lo: Int64, hi: Int64) -> Int64 {
+    return max(lo, min(x, hi))
+}
+
+/// Pi, to the last bit a `Float64` holds.
+export fn pi() -> Float64 {
+    return 3.141592653589793
+}
+
+/// The greatest whole number at or below `x`, as a `Float64`.
+export fn floorF(x: Float64) -> Float64 {
+    // 2^53: past it every `Float64` is already whole.
+    if x > 9007199254740992.0 || x < 0.0 - 9007199254740992.0 {
+        return x
+    }
+    let t = Float64(Int64(x))
+    if t > x {
+        return t - 1.0
+    }
+    return t
+}
+
+/// Sine of `x` radians.
+///
+/// Reduces `x` to [-pi/2, pi/2] with `sin(x) = sin(pi - x)` and a period of 2pi,
+/// then evaluates the odd Taylor polynomial through `x^13` in Horner form; the
+/// error stays under 1e-13. Every step is one rounded operation and native code
+/// compiles with `-ffp-contract=off`, so every engine returns the
+/// same bits.
+export fn sin(x: Float64) -> Float64 {
+    let twoPi = 6.283185307179586
+    let halfPi = 1.5707963267948966
+    let mut r = x - twoPi * floorF(x / twoPi + 0.5)
+    if r > halfPi {
+        r = pi() - r
+    }
+    if r < 0.0 - halfPi {
+        r = 0.0 - pi() - r
+    }
+    let s = r * r
+    let p = 0.00000000016059043836821613 * s - 0.000000025052108385441718
+    let q = p * s + 0.0000027557319223985893
+    let u = q * s - 0.0001984126984126984
+    let v = u * s + 0.008333333333333333
+    let w = v * s - 0.16666666666666666
+    return r + r * s * w
+}
+
+/// Cosine of `x` radians, as the sine a quarter turn ahead.
+export fn cos(x: Float64) -> Float64 {
+    return sin(x + 1.5707963267948966)
+}
+
+test "sine hits the values the unit circle fixes" {
+    assertEq(sin(0.0), 0.0)
+    assert(sin(pi() / 6.0) > 0.4999999 && sin(pi() / 6.0) < 0.5000001)
+    assert(sin(pi() / 2.0) > 0.9999999)
+    assert(cos(0.0) > 0.9999999)
+}
+
+test "sine stays in range far from the origin" {
+    // 100 turns out.
+    let far = sin(628.3185307179587 + 0.5)
+    assert(far > 0.4794 && far < 0.4795)
+    assert(sin(0.0 - 1.0) > 0.0 - 0.8415 && sin(0.0 - 1.0) < 0.0 - 0.8414)
+}
+
+test "floorF steps down on the negative side" {
+    assertEq(floorF(2.7), 2.0)
+    assertEq(floorF(0.0 - 2.7), 0.0 - 3.0)
+    assertEq(floorF(0.0 - 3.0), 0.0 - 3.0)
+}
+
+test "abs saturates at the minimum instead of wrapping negative" {
+    assertEq(abs(5), 5)
+    assertEq(abs(0 - 5), 5)
+    assertEq(abs(0), 0)
+    // 0 - Int64.min wraps back to Int64.min.
+    let minBits: UInt64 = 9223372036854775808
+    let least = Int64(minBits)
+    assertEq(abs(least), 9223372036854775807)
+    assert(abs(least) > 0)
+}

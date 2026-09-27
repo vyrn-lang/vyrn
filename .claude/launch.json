@@ -1,0 +1,35 @@
+{
+    "version": "0.0.1",
+    "configurations": [
+        {
+            "name": "site",
+            "runtimeExecutable": "python",
+            "runtimeArgs": ["scripts/devserve.py", "8811", "out"],
+            "port": 8811
+        },
+        {
+            "name": "vyrn-web-demo",
+            "runtimeExecutable": "python",
+            "runtimeArgs": ["-m", "http.server", "8734", "--directory", "web"],
+            "port": 8734
+        },
+        {
+            "name": "bin-dev",
+            "runtimeExecutable": "cmd",
+            "runtimeArgs": ["/c", "cd /d N:\\lang\\examples\\bin && N:\\lang\\compiler\\target\\release\\vyrn.exe dev --port 8080"],
+            "port": 8080
+        },
+        {
+            "name": "shelf-dev",
+            "runtimeExecutable": "cmd",
+            "runtimeArgs": ["/c", "cd /d N:\\lang\\examples\\shelf && N:\\lang\\compiler\\target\\release\\vyrn.exe dev --port 8081"],
+            "port": 8081
+        },
+        {
+            "name": "fullstack-dev",
+            "runtimeExecutable": "cmd",
+            "runtimeArgs": ["/c", "cd /d N:\\lang\\examples\\fullstack && N:\\lang\\compiler\\target\\release\\vyrn.exe dev --port 8082"],
+            "port": 8082
+        }
+    ]
+}

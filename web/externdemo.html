@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vyrn × JS interop (extern)</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a; --bg: #fdfdfd; --dim: #6b6b6b;
+    --card: #f3f3f3; --accent: #7c5cff; --err: #c0392b; --ok: #2e9e5b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #131316; --dim: #9a9aa2; --card: #1e1e24; --err: #ff7b6b; --ok: #5ad18a; }
+  }
+  body {
+    margin: 0 auto; max-width: 46rem; padding: 2rem 1.25rem 4rem;
+    font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); margin: 0 0 1.5rem; }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  button {
+    font: inherit; padding: .4rem .8rem; border-radius: 8px; border: 1px solid var(--dim);
+    background: var(--card); color: var(--fg); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  pre {
+    background: var(--card); border-radius: 10px; padding: .9rem 1rem;
+    overflow-x: auto; min-height: 2.4rem; white-space: pre-wrap; margin: 0;
+  }
+  .label { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 1.1rem 0 .3rem; }
+  #jslog:empty::before, #stdout:empty::before { content: "(empty)"; color: var(--dim); }
+  #status { color: var(--dim); }
+  .ok { color: var(--ok); }
+  code { background: var(--card); padding: .1rem .35rem; border-radius: 5px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<h1>Vyrn × JS interop</h1>
+<p class="sub">
+  <code>examples/externdemo.vyrn</code> declares three <code>extern fn</code>
+  imports and calls them. The host page below supplies them in the
+  <code>vyrn</code> import namespace: <code>jsLog</code> (a <code>String</code>
+  decoded from linear memory), <code>jsNow</code> (returns a
+  <code>Float64</code>), and <code>jsAdd</code> (two <code>Int64</code>s round-
+  tripped through JS). The same module traps under the interpreter and the
+  native binary — only wasm has a host. <a href="./index.html">← plain demo</a>
+</p>
+
+<div class="row">
+  <button class="primary" id="run">Run externdemo.wasm</button>
+  <span id="status"></span>
+</div>
+
+<div class="label">jsLog (Vyrn → JS, string glue)</div>
+<pre id="jslog"></pre>
+<div class="label">the externs, as this page implements them</div>
+<pre id="which"></pre>
+<div class="label">program stdout</div>
+<pre id="stdout"></pre>
+<div class="label">program stderr</div>
+<pre id="stderr" style="color: var(--err)"></pre>
+
+<hr style="margin: 2.5rem 0; border: none; border-top: 1px solid var(--card);">
+
+<h1>Vyrn → JS exports</h1>
+<p class="sub">
+  <code>examples/externdemo2.vyrn</code> declares two <code>export extern fn</code>s
+  — a Vyrn function is a normal, fully-checked function that is <em>additionally</em>
+  exported to JS on the wasm target. After <code>_start</code> runs
+  <code>main</code> once, this page calls them on the live module instance:
+  <code>vyrnAdd(Int64, Int64) -> Int64</code> (BigInts round-trip) and
+  <code>greet(String) -> String</code> (a string crosses <em>into</em> Vyrn — the
+  page allocates the buffer via the module's <code>__vyrn_malloc</code>, copies
+  UTF-8 + a NUL — and a built string comes back, NUL-decoded from linear memory).
+</p>
+
+<div class="row">
+  <button class="primary" id="load2">Load externdemo2.wasm</button>
+  <span id="status2"></span>
+</div>
+<div class="label">program stdout (from main, on load)</div>
+<pre id="stdout2"></pre>
+
+<div class="row" id="callrow" style="display:none">
+  <label>vyrnAdd(<input id="addA" type="number" value="40" style="width:4rem">,
+  <input id="addB" type="number" value="2" style="width:4rem">)</label>
+  <button id="callAdd">call</button>
+  <span id="addOut" class="ok"></span>
+</div>
+<div class="row" id="greetrow" style="display:none">
+  <label>greet(<input id="greetName" type="text" value="world" style="width:9rem">)</label>
+  <button id="callGreet">call</button>
+  <span id="greetOut" class="ok"></span>
+</div>
+
+<script type="module">
+import { runVyrn } from "./wasi-min.js";
+
+const status = document.getElementById("status");
+const jslog = document.getElementById("jslog");
+const out = document.getElementById("stdout");
+const err = document.getElementById("stderr");
+
+// Track the values that cross the boundary so the round-trip is observable.
+let lastNow = null;
+let addCalls = [];
+
+const extern = {
+  // String param: wasi-min.js decodes (ptr, len) from memory before we see it.
+  jsLog: (msg) => { jslog.textContent += msg + "\n"; },
+  // Float64 return: a fixed value keeps the demo deterministic (a real clock
+  // would be Date.now() / 1000). The value flows back into Vyrn and is logged.
+  jsNow: () => 1721000000.5,
+  // Int64 params arrive as BigInt; returning a BigInt keeps it an i64.
+  jsAdd: (a, b) => { const r = a + b; addCalls.push(`${a} + ${b} = ${r}`); return r; },
+};
+
+document.getElementById("which").textContent =
+  "jsLog(String)      -> appended above\n" +
+  "jsNow() -> Float64 -> 1721000000.5\n" +
+  "jsAdd(Int64,Int64) -> a + b (BigInt)";
+
+document.getElementById("run").addEventListener("click", async () => {
+  jslog.textContent = ""; out.textContent = ""; err.textContent = "";
+  lastNow = null; addCalls = [];
+  status.textContent = "running…";
+  try {
+    const resp = await fetch("./externdemo.wasm");
+    if (!resp.ok) {
+      status.textContent = "externdemo.wasm not built — run web/build.ps1 first";
+      return;
+    }
+    const bytes = await resp.arrayBuffer();
+    const r = await runVyrn(bytes, {
+      extern,
+      onStdout: (s) => (out.textContent += s),
+      onStderr: (s) => (err.textContent += s),
+    });
+    // Round-trip evidence, on the page for the reader (and the verifier).
+    const roundtrip = addCalls.length ? ` · jsAdd: ${addCalls.join("; ")}` : "";
+    status.innerHTML =
+      `<span class="ok">exit ${r.exitCode}</span> · jsNow → 1721000000.5` + roundtrip;
+  } catch (e) {
+    status.textContent = "trap";
+    err.textContent += `\n${e}`;
+  }
+});
+
+// --- Exports. Run the module once (main), then call its exports live. -----
+const status2 = document.getElementById("status2");
+const out2 = document.getElementById("stdout2");
+let vyrnExports = null;
+
+document.getElementById("load2").addEventListener("click", async () => {
+  out2.textContent = "";
+  status2.textContent = "loading…";
+  try {
+    const resp = await fetch("./externdemo2.wasm");
+    if (!resp.ok) {
+      status2.textContent = "externdemo2.wasm not built — run web/build.ps1 first";
+      return;
+    }
+    const bytes = await resp.arrayBuffer();
+    // `greet` returns a String. An i32 result is ambiguous in wasm, and the
+    // module's own `vyrn:exports` section says which, so this
+    // page names nothing.
+    const r = await runVyrn(bytes, {
+      onStdout: (s) => (out2.textContent += s),
+    });
+    vyrnExports = r.exports;
+    // Export names come out of the wasm's own ABI section, so they reach the
+    // page as text nodes, never as markup.
+    status2.textContent = "";
+    const ok = document.createElement("span");
+    ok.className = "ok";
+    ok.textContent = `exit ${r.exitCode}`;
+    status2.append(ok, ` · exports: ${Object.keys(vyrnExports).join(", ")}`);
+    document.getElementById("callrow").style.display = "flex";
+    document.getElementById("greetrow").style.display = "flex";
+  } catch (e) {
+    status2.textContent = "trap";
+    out2.textContent += `\n${e}`;
+  }
+});
+
+document.getElementById("callAdd").addEventListener("click", () => {
+  if (!vyrnExports) return;
+  const a = Number(document.getElementById("addA").value);
+  const b = Number(document.getElementById("addB").value);
+  // Int64 args cross as BigInt; the result is a BigInt too.
+  const r = vyrnExports.vyrnAdd(a, b);
+  document.getElementById("addOut").textContent = `= ${r}  (BigInt: ${typeof r === "bigint"})`;
+});
+
+document.getElementById("callGreet").addEventListener("click", () => {
+  if (!vyrnExports) return;
+  const name = document.getElementById("greetName").value;
+  // A JS string in, a decoded Vyrn-built string back.
+  const r = vyrnExports.greet(name);
+  document.getElementById("greetOut").textContent = JSON.stringify(r);
+});
+</script>
+</body>
+</html>

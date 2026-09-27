@@ -1,0 +1,6 @@
+// a SmallArray literal the core makes
+// The row makes `[7, 8]` into the binding's own slot: the inline header of
+// `sa_head` and the elements written straight into the inline buffer, with
+// no fixed literal to copy from. Both walks print 28 with no leak
+// line.
+fn vyrnTestMain() -> Int64 { let s: SmallArray<Int64, 4> = [7, 8] return s.length * 10 + s[1] }

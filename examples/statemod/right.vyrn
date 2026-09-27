@@ -1,0 +1,13 @@
+/// The other arm of the diamond. It imports the SAME `store` as `left`; the
+/// loader resolves both to one module identity, so both arms mutate the one
+/// shared `count` instance (diamond imports share the single instance).
+import { bump } from "./store"
+import { mark } from "./trace"
+
+/// Init-order marker for this arm.
+let rightInit: Int64 = mark("init right")
+
+/// Bump the shared store from the right arm.
+export fn bumpFromRight() {
+    bump()
+}

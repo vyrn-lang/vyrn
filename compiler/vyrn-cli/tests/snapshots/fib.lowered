@@ -1,0 +1,24 @@
+; vyrn lowered v2 -- examples/fib.vyrn
+
+fn fib(n)
+  {
+    let @t1 = prim lt(n, lit 2)
+    if @t1
+      {
+        return n
+      }
+    else
+    let @t2 = prim sub(n, lit 1)
+    let @t3 = fn fib(read @t2)
+    let @t4 = prim sub(n, lit 2)
+    let @t5 = fn fib(read @t4)
+    let @t6 = prim add(@t3, @t5)
+    return @t6
+  }
+
+fn main()
+  {
+    let result = fn fib(read lit 10)
+    do builtin print(read result)
+    return result
+  }

@@ -1,0 +1,6 @@
+<template>
+<main>
+    <h2>{{ error.status }} — {{ error.message }}</h2>
+    <p><a href="/" class="mr-2 hover:text-brand-600">← new paste</a></p>
+</main>
+</template>

@@ -1,0 +1,144 @@
+/// The recorded demo's output, coloured by the compiler's own lexer.
+///
+///     import { demoCode } from "./demohl"
+///     import { demoHl } from demoCode("../data/demo.json")
+///
+/// Two of the seven steps in `A minute with Vyrn` print a FILE — the project
+/// the first step wrote, and the same file after a rule is added — so their
+/// "output" is Vyrn source, and on the page it was one grey wall (user: "no
+/// colors in window"). Source is coloured by `lex()`, and `lex()` is callable
+/// only from a generator's own body, which is why this file exists at all:
+/// the demo's data is read here, at compile time, and each step's output
+/// arrives on the page already marked up.
+///
+/// A step whose output is a TRANSCRIPT is left to `shellOutHtml` in
+/// `code.vyrn`, which speaks the shell's three voices. The two are told apart
+/// by asking the lexer: source that lexes into something with a declaration
+/// keyword in it is source, and everything else is what a command printed.
+import { highlightSrc } from "./hl"
+import { substring, split, joinWith, indexOf } from "std/strings"
+import { startsWith, contains } from "std/strpred"
+
+/// The generated module: `demoHl(id)` answers with one step's coloured
+/// output, or "" for a step whose output is not source.
+export gen fn demoCode(path: String) -> String {
+    let raw = match readFile(path) {
+        Ok(text) => text,
+        Err(_) => "",
+    }
+    let mut out = "/// Coloured by the compiler's own lexer while the site compiled. Do not edit.\n"
+    out = out + "/// One step's output as source, or \"\" when it is a transcript.\n"
+    out = out + "export fn demoHl(id: String) -> String {\n"
+    for step in stepsOf(raw) {
+        if looksLikeSource(step[1]) {
+            out = out + "    if id == " + quoted(step[0]) + " { return " + quoted(highlightSrc(step[1], lex(step[1]))) + " }\n"
+        }
+    }
+    out = out + "    return \"\"\n}\n"
+    return out
+}
+
+/// Every `{ "id": …, "out": … }` in the recorder's file, as `[id, out]`.
+///
+/// A hand walk rather than the JSON reader: this runs inside a generator,
+/// where the whole standard library is not reachable, and the file is written
+/// by `scripts/site-demo.py` in one shape — two string fields, escaped the way
+/// JSON escapes them.
+fn stepsOf(raw: String) -> Array<Array<String>> {
+    let mut out: Array<Array<String>> = []
+    let mut rest = raw.copy()
+    while true {
+        let id = fieldAfter(rest, "\"id\"")
+        if id[0].byteLength == 0 && id[1].byteLength == 0 {
+            return out
+        }
+        rest = id[1].copy()
+        let body = fieldAfter(rest, "\"out\"")
+        if body[0].byteLength == 0 && body[1].byteLength == 0 {
+            return out
+        }
+        rest = body[1].copy()
+        let mut pair: Array<String> = []
+        pair.push(id[0].copy())
+        pair.push(unescapeJson(body[0]))
+        out.push(pair.copy())
+    }
+    return out
+}
+
+/// The string value of the next `key` in `s`, and what is left after it.
+fn fieldAfter(s: String, key: String) -> Array<String> {
+    let mut none: Array<String> = []
+    none.push("")
+    none.push("")
+    // `return` is a statement, so the two lookups are if-lets rather than
+    // match arms.
+    let mut at = 0
+    if let Some(i) = indexOf(s, key) {
+        at = i
+    } else {
+        return none
+    }
+    let after = substring(s, at + key.byteLength, s.byteLength)
+    let mut open = 0
+    if let Some(i) = indexOf(after, "\"") {
+        open = i
+    } else {
+        return none
+    }
+    let body = substring(after, open + 1, after.byteLength)
+    // The closing quote is the first one no backslash escapes.
+    let raw = bytes(body)
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == '\\' {
+            i = i + 2
+        } else if raw[i] == '"' {
+            let mut got: Array<String> = []
+            got.push(substring(body, 0, i))
+            got.push(substring(body, i + 1, body.byteLength))
+            return got
+        } else {
+            i = i + 1
+        }
+    }
+    return none
+}
+
+/// The two escapes this file's strings hold, undone.
+fn unescapeJson(s: String) -> String {
+    return joinWith(split(joinWith(split(s, "\\n"), "\n"), "\\\""), "\"")
+}
+
+/// Whether an output is a program rather than a transcript. A recorded
+/// listing of files or a test report has no declaration in it; a file does.
+fn looksLikeSource(text: String) -> Bool {
+    return contains(text, "fn ") || startsWith(text, "type ") || contains(text, "\ntype ")
+}
+
+/// `s` as a Vyrn string literal — the same escaping the other generators use.
+fn quoted(s: String) -> String {
+    let mut out = "\""
+    for b in bytes(s) {
+        if b == '"' {
+            out = out + "\\\""
+        } else if b == '\\' {
+            out = out + "\\\\"
+        } else if b == '\n' {
+            out = out + "\\n"
+        } else {
+            out = out + fromByte(b)
+        }
+    }
+    return out + "\""
+}
+
+/// One byte as a one-byte string.
+fn fromByte(b: UInt8) -> String {
+    let mut one: Array<UInt8> = []
+    one.push(b)
+    return match stringFromBytes(one) {
+        Ok(text) => text,
+        Err(_) => "",
+    }
+}

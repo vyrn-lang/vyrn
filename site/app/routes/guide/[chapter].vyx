@@ -1,0 +1,139 @@
+<script>
+// GET /guide/[chapter] — one chapter of the book.
+//
+// The prose is in `site/app/guide.vyrn`; the programs are files in
+// `site/guide/`, imported and CALLED by that module while this page renders. So
+// a block on this page is a program that ran, and its output is what it printed.
+//
+// A String segment binds the slug, and the query returns
+// `Result<ChapterPage, PageError>`, so a slug that is not a chapter renders the
+// themed error page at 404 rather than an empty book.
+import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
+import { pageHeadWith } from "../../nav"
+import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
+import { mdUrl, askClaudeUrl } from "../../pagemd"
+// The one chapter that compares languages draws its plates from here; every
+// other section's illustration is a program this site ran.
+import { Snippet, specSet } from "../../snippets"
+import { inlineCode } from "../../code"
+// THE DOCS SHELL. The same three panes the reference wears: the
+// book's contents on the left, this chapter's sections on the right, the chapter
+// before and after at the foot.
+import { TreeGroup, guideTree } from "../../docshell"
+import { Icon } from "../../icons"
+params { chapter: String }
+
+/// One chapter, with the number the rail prints beside it.
+type ChapterPage = { n: Int64, chapter: Chapter }
+
+export fn head(d: ChapterPage) -> Head {
+    return pageHeadWith(d.chapter.title + " — the Vyrn guide", chapterBlurb(d.chapter.slug))
+}
+
+export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {
+    return paramQuery(fetchChapter)
+}
+
+fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
+    // A slug from another shelf is not this route's page: `/guide/testing` is
+    // a static stub beside this file, and `/tooling/testing` is the page.
+    if !chapterKnown(p.chapter) || chapterArea(p.chapter) != "guide" {
+        return Err(notFound(p.chapter + " is not a chapter of the guide"))
+    }
+    return Ok(ChapterPage { n: chapterNumber(p.chapter), chapter: chapterOf(p.chapter) })
+}
+
+/// The sidebar for this page: the book's contents, with this chapter marked.
+fn tree(here: String) -> Array<TreeGroup> {
+    return guideTree(here)
+}
+
+/// The link to one section of this chapter. A function rather than `"#" + …` in
+/// the template, because a template attribute is delimited by the same quote a
+/// String literal is and `'#'` in Vyrn is a byte.
+fn sectionHref(s: Section) -> String {
+    return "#" + s.anchor
+}
+
+/// The Open-in-Claude link for this chapter.
+fn claudeHref(slug: String, title: String) -> String {
+    return askClaudeUrl(chapterHref(slug), title)
+}
+</script>
+
+<template>
+<main class="page docs">
+    <aside class="docstree">
+        <details class="treebox">
+            <summary>The guide</summary>
+            <div class="treegroup" v-for="g in tree(data.chapter.slug)" :key="g.name">
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
+                <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
+            </div>
+        </details>
+    </aside>
+
+    <div class="crumbrow">
+        <nav class="crumbs" aria-label="Breadcrumb">
+            <a href="/guide.html">Guide</a>
+            <span>Chapter {{ data.n }} of {{ chapterCount("guide") }}</span>
+        </nav>
+        <div class="docutils">
+            <!-- A LINK to the file the export writes beside this page;
+                 `widgets.js` turns a press into a clipboard write when the
+                 browser has a clipboard. Without script it is the file. -->
+            <a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy page</a>
+            <details class="pagemenu">
+                <summary aria-label="More page actions"><span class="gl">▾</span></summary>
+                <div class="acts">
+                    <a :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md><span class="ic"><Icon name="bytesize:clipboard"/></span><span class="t"><span>Copy page</span><span class="d">Markdown, ready to paste into an LLM</span></span></a>
+                    <a :href="mdUrl(chapterHref(data.chapter.slug))"><span class="ic"><Icon name="bytesize:file"/></span><span class="t"><span>View as Markdown</span><span class="d">This page as plain text</span></span></a>
+                    <a :href="claudeHref(data.chapter.slug, data.chapter.title)" rel="noopener"><span class="ic"><Icon name="bytesize:external"/></span><span class="t"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></span></a>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <section class="hero">
+        <h1 class="display">{{ data.chapter.title }}</h1>
+        <p class="lede" v-html="inlineCode(data.chapter.lede)"></p>
+    </section>
+
+    <section class="band" v-for="s in data.chapter.sections" :key="s.anchor" :id="s.anchor">
+        <p class="eyebrow">{{ sectionEyebrow(data.chapter, s) }}</p>
+        <h2>{{ s.heading }}</h2>
+        <div v-html="sectionBody(s)"></div>
+        <!-- The same task in four languages, for the chapter a reader opens
+             before they have written any Vyrn. The three others are QUOTED —
+             this site runs Vyrn and does not pretend to run the rest. -->
+        <!-- TABS, not a grid of four. Retiring `/compare` moved these plates
+             here as a two-column grid, and at 1440px that gives each language
+             375px to hold lines 461px long: every comparison was clipped
+             mid-word, which is the one thing a comparison may not be. One
+             language at a time takes the whole measure and the lines fit.
+             `tabsWidget` pairs the ids, roves the tabindex and answers the
+             arrow keys; without script the panes stack and all four read. -->
+        <div class="plate specplate" data-tabs v-if="s.specs.byteLength > 0">
+            <div class="tabs">
+                <button type="button" v-for="n in specSet(s.specs)" :key="n.id" :data-tab="n.id">{{ n.label }}</button>
+            </div>
+            <div class="panes">
+                <div v-for="n in specSet(s.specs)" :key="n.id" :data-pane="n.id">
+                    <pre class="code" v-html="n.html"></pre>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <nav class="pager" aria-label="Chapters" v-html="chapterNavHtml(data.chapter.slug)"></nav>
+
+    <!-- THE RIGHT PANE: this chapter's own sections, from the same array the
+         `<h2>`s above are rendered from, so the two cannot disagree. Every
+         fragment here is checked against the ids the page carries by the link
+         gate in `site/export.vyrn`. -->
+    <aside class="onpage" v-if="data.chapter.sections.length >= 3">
+        <p class="eyebrow">On this page</p>
+        <a v-for="s in data.chapter.sections" :key="s.anchor" :href="sectionHref(s)">{{ s.heading }}</a>
+    </aside>
+</main>
+</template>

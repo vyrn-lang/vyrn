@@ -1,0 +1,164 @@
+<script>
+// The site shell: every page body renders into the <slot/>.
+//
+// The navigation is built from the typed URL helpers the router generates, so a
+// link cannot name a route that does not exist — the compiler rejects it. The
+// two reserved sockets were filled that way: `/guide` and `/explore` arrived as
+// a directory of routes plus one row each in `navRows`, and nothing else here
+// changed.
+import { navRows, NavRow, themeControl, installCta } from "../nav"
+// The glyph provider. `<Icon>` is a tag here because this `<script>`
+// imports a `gen fn` of that name and for no other reason — `std/vyx` names no
+// component. Each tag becomes its own generation, reading a hash-locked Iconify
+// collection at build time and splicing one inline `<svg>` where the tag stood.
+import { Icon } from "../icons"
+import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "../repo"
+// The stylesheet and the one script module, for every page.
+//
+// The `head { … }` block takes `title`, `stylesheet`, `module` and `script`, and
+// has no entry for a `<meta>`. Each page therefore carries the viewport and
+// description meta in its own `head()` — one call to `pageHead`, which builds
+// them from a `Head` value where `withMeta` does exist.
+// `theme.js` WAS a classic script, so that it blocked rendering and set the
+// root attribute before the first paint. It blocked on a request to do it, and
+// nothing is painted while that request is in flight — which is the flash it was
+// there to prevent, moved rather than removed (B3 defect 5). The four lines that
+// read the choice are inline in the head now, written by `withThemeBoot` in
+// `site/export.vyrn`, and they need no request at all. What is left in the file
+// is the toggle and its listeners, which run after the paint by definition, so
+// it is a module like every other script here.
+head {
+    stylesheet "/style.css"
+    module "/theme.js"
+    module "/widgets.js"
+}
+
+/// The footer's standing line: the newest release, baked while the site built,
+/// and the honest sentence before there was one.
+fn standing() -> String {
+    if !hasRelease() {
+        return "Early. No versioned release yet."
+    }
+    if releasePre() {
+        return "Early. " + releaseTag() + " is the newest release, and it is a pre-release."
+    }
+    return "Early. " + releaseTag() + " is the newest release."
+}
+</script>
+
+<template>
+<!-- One root, no box: the layout language wants a single root element, and
+     `display: contents` keeps the masthead a viewport-level bar. -->
+<div class="shell">
+<!-- THE HEADER IS THE VIEWPORT'S: the
+     masthead and its border-bottom span the whole window, the reference
+     site's own shape, and the framed 1232px plate begins under it. -->
+<a class="skip" href="#main">Skip to content</a>
+<header class="masthead">
+        <a href="/index.html" class="wordmark">vyrn</a>
+        <!-- THE FIVE GROUPS, AND THE DISCLOSURE THAT IS ONE ONLY ON A PHONE.
+             `<details>` and not a script: at 375px there is 343px of usable
+             row, and the wordmark, the Install button and the theme control
+             take 178px of it. Five nav groups do not fit in the 165px left, and
+             a strip that scrolls with a hidden scrollbar is what the census
+             measured and called unusable. A summary the reader presses is the
+             platform's own answer, it works with no JavaScript at all, and it
+             keeps the header at one height.
+             Above 640px this element is not a disclosure: the stylesheet hides
+             the summary and forces the panel open, so the same markup is a row
+             of five links. One nav, rendered once. -->
+        <details class="menu">
+            <summary>Menu</summary>
+            <nav class="nav" aria-label="Site">
+                <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
+            </nav>
+        </details>
+        <!-- The one call to action and the theme control, pushed to the end of
+             the row together. Both are strings from `../nav` rather than markup
+             here: the theme control because a page that builds its masthead as
+             one string has no host element, and the CTA because the export's
+             `aria-current` marker matches on `href` and `data-key` being the
+             first two attributes, which a template cannot promise. `.slot` is
+             `display: contents`, so `v-html` costs no box either time. -->
+        <div class="tools">
+            <!-- The overlay's own opener. `/` opens it from anywhere, and a
+                 keystroke is not an affordance on a phone: a reader with a
+                 finger needs something to press. It is `[data-js]`-gated like
+                 the theme button, because without script it would take focus
+                 and do nothing — the `<noscript>` below says where to go
+                 instead. -->
+            <!-- THREE FORMS OF ONE CONTROL, and the two narrow ones are what
+                 they were. `.word` is the word that
+                 goes at phone widths; `.hint` is the rest of the placeholder and
+                 the `/` chip, which the sheet only shows above 1024px, where the
+                 row has room. The accessible name is the `aria-label` either
+                 way, so none of this text is announced twice. -->
+            <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> <span class="word">Search<span class="hint"> docs, reference…</span></span> <kbd class="key">/</kbd></button>
+            <span class="slot" v-html="installCta()"></span>
+            <span class="slot" v-html="themeControl()"></span>
+        </div>
+    </header>
+    <!-- THE SEARCH OVERLAY.
+         Empty in the document, on purpose: the index is 42 KB and is fetched on
+         the first open, never inlined — a page that carried it would pay for a
+         search nobody ran. `hidden` until then, so nothing here is in the tab
+         order and no reader meets an empty dialog.
+         WITHOUT SCRIPT there is no overlay at all, and the `<noscript>` says
+         what the site does instead: the reference landing filters its own module
+         list with `data-q` and works with no script, which is the fallback. -->
+    <div class="findbox" data-find hidden>
+        <div class="findpanel" role="dialog" aria-modal="true" aria-label="Search">
+            <div class="findrow">
+                <Icon name="bytesize:search"/>
+                <input type="search" data-find-input placeholder="Search the docs, the reference, packages" autocomplete="off" spellcheck="false" aria-controls="find-results"/>
+                <kbd class="key">esc</kbd>
+            </div>
+            <div class="findtabs" data-find-tabs>
+                <button type="button" class="on" data-sect="">All</button>
+                <button type="button" data-sect="Docs">Docs</button>
+                <button type="button" data-sect="Reference">Reference</button>
+                <button type="button" data-sect="Packages">Packages</button>
+                <button type="button" data-sect="Releases">Releases</button>
+                <span class="keys"><kbd class="key">tab</kbd> section <kbd class="key">↑</kbd><kbd class="key">↓</kbd> move <kbd class="key">↵</kbd> open</span>
+            </div>
+            <div id="find-results" data-find-results role="listbox" aria-label="Results"></div>
+            <p class="cap" data-find-note>Type to search — try <button type="button" data-try>Map</button>, <button type="button" data-try>readLine</button> or <button type="button" data-try>panic</button>.</p>
+        </div>
+    </div>
+    <noscript>
+        <p class="notice">Search needs JavaScript. <a href="/docs.html">The reference landing</a> filters its own module list without it.</p>
+    </noscript>
+    <!-- Where the skip link lands, and why it is not the `<main>` itself: every
+         route's `<main class="page">` is `display: contents`, so its children
+         can be the grid items of this shell. An element with no box cannot take
+         focus — measured: `main.focus()` left the focus where it was, so the
+         next Tab went back to the masthead the reader had just skipped. This
+         anchor has a box, has no size, and sits out of the grid flow, so focus
+         lands here and the next Tab is the first link in the content. -->
+<div id="root">
+    <div id="main" class="skip-target" tabindex="-1"></div>
+    <slot/>
+    <footer class="foot">
+        <!-- The two counts are generated; `0 divergences` was not. It was a
+             string literal on every page, asserting the result of a harness this
+             build never ran — exactly the number-by-hand the site's own data
+             rule forbids. The parity claim is made where it can be shown: on the
+             landing page, by a check that runs. -->
+        <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
+        <!-- The changelog. It is not a masthead row: four nav names beat five,
+             and a reader who wants to know what changed is looking down the
+             page and not up at it. The index's `Latest release` section and the
+             install page are the other two doors. -->
+        <a href="/releases.html"><Icon name="bytesize:tag"/> Releases</a>
+        <!-- Two glyphs, one of each kind, and the difference is the whole a11y
+             rule. The mark beside the words is DECORATION: it
+             renders `aria-hidden`, because a screen reader that announced it
+             would say the link twice. The arrow after them is CONTENT: it says
+             the link leaves this site, which no word here says, so it carries a
+             `label` and renders as `role="img"` with that name. -->
+        <a href="https://github.com/vyrn-lang/vyrn"><Icon name="bytesize:github"/> Source on GitHub <Icon name="bytesize:external" label="opens on github.com"/></a>
+        <span>{{ standing() }}</span>
+    </footer>
+</div>
+</div>
+</template>

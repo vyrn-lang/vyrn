@@ -1,0 +1,31 @@
+// A protocol names methods a type can implement. A generic bounded by it calls
+// those methods, and the compiler picks the implementation while it compiles —
+// one function per concrete type, no table lookup at run time.
+import { joinWith } from "std/strings"
+
+protocol Show {
+    fn show(self) -> String
+}
+
+impl Show for Int64 {
+    fn show(self) -> String {
+        return self.toString()
+    }
+}
+
+impl Show for Bool {
+    fn show(self) -> String {
+        if self {
+            return "yes"
+        }
+        return "no"
+    }
+}
+
+fn label<T: Show>(x: T) -> String {
+    return "[" + x.show() + "]"
+}
+
+export fn demo() -> String {
+    return joinWith([label(41), label(true)], "\n")
+}

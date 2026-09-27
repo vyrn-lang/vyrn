@@ -1,0 +1,66 @@
+/// String templates: interpolation, multi-line strings, and the
+/// first-class `Template` record. (See tagged.vyrn for tagged templates.)
+///
+/// A `\{ expr }` hole inside a normal `"..."` string interpolates the
+/// expression, rendered exactly as `print` renders it (Int64, sized ints,
+/// floats, Bool, String). The escape is on the *interpolation*, so `{` and `}`
+/// stay ordinary characters — pleasant for brace-heavy text (LaTeX, JSON).
+/// A raw newline is allowed inside `"..."`, so strings span lines. And
+/// `template"..\{}"` yields a `Template` record
+/// `{ parts: Array<String>, values: Array<Value> }` — the structured form of
+/// an interpolated string — that any code can consume generically.
+
+fn greet(name: String, count: Int64) -> String {
+    return "hi \{name}, you have \{count} messages"
+}
+
+fn showValue(v: Value) -> String {
+    return match v {
+        IntVal(n) => n.toString(),
+        BoolVal(b) => b.toString(),
+        StrVal(s) => s.copy(),
+    }
+}
+
+// Render a Template by walking its parts and values — generic over any template.
+fn render(t: Template) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in t.parts {
+        out = out + p
+        if i < t.values.length {
+            out = out + showValue(t.values[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    let name = "Vyrn"
+    let n = 3
+    let done = n > 2
+
+    // ---- interpolation ---------------------------------------------------
+    print(greet(name, n)) // hi Vyrn, you have 3 messages
+    print("n=\{n}, doubled=\{n + n}") // n=3, doubled=6
+    print("done? \{done}") // done? true
+    print("literal braces { } stay put") // literal braces { } stay put
+
+    // Sized ints and floats interpolate too, rendering exactly as `print`.
+    let port: UInt16 = 8080
+    let ratio = 0.5
+    print("port=\{port}, ratio=\{ratio}") // port=8080, ratio=0.500000
+
+    // ---- multi-line strings ----------------------------------------------
+    let banner = "== \{name} ==
+messages: \{n}"
+    print(banner)
+
+    // ---- first-class Template: inspect and re-render ----------------------
+    let t = template"x = \{n}, name = \{name}"
+    print(t.parts.length) // 3
+    print(t.values.length) // 2
+    print(render(t)) // x = 3, name = Vyrn
+    return 0
+}

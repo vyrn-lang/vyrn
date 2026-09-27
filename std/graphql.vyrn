@@ -1,0 +1,2126 @@
+/// std/graphql -- the contract as a GraphQL SDL document, built on
+/// generator imports. `sdl(contract)` returns a module exporting
+/// `sdlText() -> String`, baked at generation time from the reflected type
+/// sources and procedure signatures.
+///
+///   import { sdl } from "std/graphql"
+///   import { sdlText } from sdl("./contract")
+///
+/// Mapping rules:
+///   - a record becomes a `type` and an `input` twin (`Book`, `BookInput`); a
+///     non-`Option` field is non-null (`!`).
+///   - `Int64` and the sized ints => `Int`, `Float64`/`Float32` => `Float`,
+///     `String` => `String`, `Bool` => `Boolean`.
+///   - a validated scalar (`BookId = Int64 where value >= 0`) becomes a named
+///     `scalar` whose description carries its base and constraint.
+///   - `Map<String, V>` becomes `scalar JSON`; a named map alias its own `scalar`.
+///   - a payload enum (including `Result<A, B>`) becomes an object with one
+///     nullable field per variant (nullary => `Boolean`, one payload => its type,
+///     more => `JSON`); a nullary-only enum is a GraphQL `enum`.
+///   - a `mut fn` is a `Mutation` field, any other procedure a `Query` field
+///     (`FnInfo.mutates`). A procedure with a parameter takes
+///     `(input: <Req>Input)`. An empty `Mutation` is omitted.
+///   - an object with no fields gets `_placeholder: Boolean`, since GraphQL
+///     requires one field; the executor answers it too.
+///   - a name the document would define twice (`Query`, `Mutation`, `JSON`, or
+///     `Foo` beside `FooInput`), or one starting with `__`, is reported, not
+///     renamed.
+///   - `///` docs on types become descriptions. Reflection carries no procedure
+///     docs, so operations have none.
+///
+/// `graphqlServer` emits `graphqlHandle(req) -> Option<Response>` answering
+/// `POST /graphql`. It walks the same `iface.functions` and bakes its
+/// type graph from the same `gqlMembers`, so schema and executor agree by
+/// construction. The graph keeps each field's `!` markers, which decide how far
+/// a `null` propagates.
+
+import { fromBytesOr } from "std/strings"
+import { Json, JsonField, copyJson, copyJsonArray, emit } from "std/json"
+import { parseJson } from "std/jsonread"
+import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } from "std/scan"
+
+// The executor encodes with `toJson`, so it applies `std/rpc`'s serializability rule.
+import { validateContract } from "std/rpc"
+import { contains, endsWith, slice, startsWith } from "std/strpred"
+import { reportHere, Severity } from "std/diag"
+
+/// The bytes `ba[s..e)` as a String.
+fn gqlSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut out: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        out.push(ba[i])
+        i = i + 1
+    }
+    return fromBytesOr(out, "")
+}
+
+fn gqlIsWs(b: UInt8) -> Bool {
+    return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+fn gqlTrim(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = 0
+    let mut hi = ba.length
+    while lo < hi && gqlIsWs(ba[lo]) {
+        lo = lo + 1
+    }
+    while hi > lo && gqlIsWs(ba[hi - 1]) {
+        hi = hi - 1
+    }
+    return gqlSlice(ba, lo, hi)
+}
+
+/// `s` without a trailing non-null `!`.
+fn gqlStripBang(s: String) -> String {
+    if s.endsWith("!") {
+        let ba = bytes(s)
+        return gqlSlice(ba, 0, ba.length - 1)
+    }
+    return s.copy()
+}
+
+/// The text between the first `<` and the last `>` (`Array<Tag>` => `Tag`); ""
+/// when there is none.
+fn gqlBetweenAngles(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = -1
+    let mut hi = -1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '<' && lo < 0 {
+            lo = i
+        }
+        if ba[i] == '>' {
+            hi = i
+        }
+        i = i + 1
+    }
+    if lo < 0 || hi < 0 || hi <= lo {
+        return ""
+    }
+    return gqlSlice(ba, lo + 1, hi)
+}
+
+/// `s` split at the top-level `sep` bytes, trimmed, empty parts dropped. Brackets
+/// nest, and a `"..."` literal (with `\"` escapes) is opaque, so a separator in
+/// `Map<String, V>` or a `where` regex does not split. Depth clamps at 0 on a
+/// stray closer.
+fn gqlSplitTop(s: String, sep: UInt8) -> Array<String> {
+    let ba = bytes(s)
+    let mut out: Array<String> = []
+    let mut depth = 0
+    let mut start = 0
+    let mut inStr = false
+    let mut i = 0
+    while i < ba.length {
+        let b = ba[i]
+        if inStr {
+            if b == '\\' {
+                i = i + 2
+            } else {
+                if b == '"' {
+                    inStr = false
+                }
+                i = i + 1
+            }
+        } else if b == '"' {
+            inStr = true
+            i = i + 1
+        } else if b == '<' || b == '(' || b == '[' || b == '{' {
+            depth = depth + 1
+            i = i + 1
+        } else if b == '>' || b == ')' || b == ']' || b == '}' {
+            if depth > 0 {
+                depth = depth - 1
+            }
+            i = i + 1
+        } else if b == sep && depth == 0 {
+            let part = gqlTrim(gqlSlice(ba, start, i))
+            if part.byteLength > 0 {
+                out.push(part)
+            }
+            start = i + 1
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    let last = gqlTrim(gqlSlice(ba, start, ba.length))
+    if last.byteLength > 0 {
+        out.push(last)
+    }
+    return out
+}
+
+/// The index of the first `needle` at or after `from`, or -1.
+fn gqlIndexOf(ba: Array<UInt8>, needle: UInt8, from: Int64) -> Int64 {
+    let mut i = from
+    while i < ba.length {
+        if ba[i] == needle {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Type declarations. `TypeInfo.source` is canonical: `export type Name = <rhs>`.
+
+type GqlDecl = { name: String, rhs: String }
+
+/// `export type Name = RHS` split into name and RHS. A generic `Name<..>` keeps
+/// only `Name`; downstream it maps to a scalar.
+fn gqlSplitDecl(source: String) -> GqlDecl {
+    let s = gqlTrim(source)
+    let ba = bytes(s)
+    let mut i = 0
+    if s.startsWith("export ") {
+        i = 7
+    }
+    i = i + 5
+    let eq = gqlIndexOf(ba, '=', i)
+    if eq < 0 {
+        return GqlDecl { name: gqlTrim(gqlSlice(ba, i, ba.length)), rhs: "" }
+    }
+    let head = gqlTrim(gqlSlice(ba, i, eq))
+    let lt = gqlIndexOf(bytes(head), '<', 0)
+    let name = if lt < 0 { head } else { gqlSlice(bytes(head), 0, lt) }
+    let rhs = gqlTrim(gqlSlice(ba, eq + 1, ba.length))
+    return GqlDecl { name: name, rhs: rhs }
+}
+
+fn gqlSourceOf(name: String, iface: ModuleInterface) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return t.source.copy()
+        }
+    }
+    return ""
+}
+
+/// Whether the named type is a record, which needs an `Input` twin in input position.
+fn gqlIsRecord(name: String, iface: ModuleInterface) -> Bool {
+    let src = gqlSourceOf(name, iface)
+    if src == "" {
+        return false
+    }
+    return gqlSplitDecl(src).rhs.startsWith("{")
+}
+
+/// The GraphQL scalar for a Vyrn primitive, or "".
+fn gqlPrim(spelling: String) -> String {
+    let s = gqlTrim(spelling)
+    if s == "Int64" || s == "Int8" || s == "Int16" || s == "Int32" || s == "UInt8" || s == "UInt16" || s == "UInt32" || s == "UInt64" {
+        return "Int"
+    }
+    if s == "Float64" || s == "Float32" || s == "Float" {
+        return "Float"
+    }
+    if s == "String" {
+        return "String"
+    }
+    if s == "Bool" {
+        return "Boolean"
+    }
+    return ""
+}
+
+/// A GraphQL type reference, with `!` markers, in output or input position.
+/// `Option<T>` is the one nullable form.
+fn gqlRef(spelling: String, inputCtx: Bool, iface: ModuleInterface) -> String {
+    let s = gqlTrim(spelling)
+    if s.startsWith("Option<") {
+        return gqlStripBang(gqlRef(gqlBetweenAngles(s), inputCtx, iface))
+    }
+    if s.startsWith("Array<") {
+        return "[" + gqlRef(gqlBetweenAngles(s), inputCtx, iface) + "]!"
+    }
+    if s.startsWith("Map<") {
+        return "JSON!"
+    }
+    if s.startsWith("Result<") {
+        return "JSON!"
+    }
+    let p = gqlPrim(s)
+    if p != "" {
+        return p + "!"
+    }
+    if inputCtx && gqlIsRecord(s, iface) {
+        return s + "Input!"
+    }
+    return s + "!"
+}
+
+/// A type's `///` doc with whitespace folded, or "".
+fn gqlRawDoc(name: String, iface: ModuleInterface) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return match t.schema.doc {
+                Some(d) => gqlFoldWs(d),
+                None => "",
+            }
+        }
+    }
+    return ""
+}
+
+/// A type's doc as an SDL description, or "".
+fn gqlDocOf(name: String, iface: ModuleInterface) -> String {
+    let raw = gqlRawDoc(name, iface)
+    if raw == "" {
+        return ""
+    }
+    return gqlDescBlock(raw)
+}
+
+/// `body` as a GraphQL block-string description, with a newline. An interior
+/// `"""` is escaped as `\"""`. A body ending in `"` or `\` would fuse with the
+/// closing delimiter, so it goes on its own line; any other body stays on one line.
+fn gqlDescBlock(body: String) -> String {
+    let esc = gqlEscTripleQuote(body)
+    if esc.endsWith("\"") || esc.endsWith("\\") {
+        return "\"\"\"\n" + esc + "\n\"\"\"\n"
+    }
+    return "\"\"\"" + esc + "\"\"\"\n"
+}
+
+/// `s` with every `"""` escaped as `\"""`, the one block-string escape.
+fn gqlEscTripleQuote(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < ba.length {
+        if i + 2 < ba.length && ba[i] == '"' && ba[i + 1] == '"' && ba[i + 2] == '"' {
+            out.push('\\')
+            out.push('"')
+            out.push('"')
+            out.push('"')
+            i = i + 3
+        } else {
+            out.push(ba[i])
+            i = i + 1
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// `s` with whitespace runs folded to one space, trimmed.
+fn gqlFoldWs(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut prevWs = false
+    for b in ba {
+        if gqlIsWs(b) {
+            if prevWs == false {
+                out.push(' ')
+            }
+            prevWs = true
+        } else {
+            out.push(b)
+            prevWs = false
+        }
+    }
+    return gqlTrim(fromBytesOr(out, ""))
+}
+
+type GqlMember = { name: String, ref: String, inputRef: String }
+
+/// The object members of a declaration; none for a leaf (a scalar, a validated
+/// alias, a `Map`, a nullary `enum`). The SDL and the executor's type graph both
+/// read members only here: a record's fields, a payload enum's variants, or a
+/// `Result<A, B>` alias's `Ok` and `Err`.
+fn gqlMembers(decl: GqlDecl, iface: ModuleInterface) -> Array<GqlMember> {
+    let rhs = gqlTrim(decl.rhs)
+    if rhs.startsWith("{") {
+        return gqlRecordMembers(rhs, iface)
+    }
+    if rhs.startsWith("|") {
+        return gqlVariantMembers(rhs, iface)
+    }
+    if rhs.startsWith("Result<") {
+        let parts = gqlSplitTop(gqlBetweenAngles(rhs), 44)
+        let okT = if parts.length >= 1 { parts[0] } else { "Bool" }
+        let errT = if parts.length >= 2 { parts[1] } else { "String" }
+        return [gqlNullableMember("Ok", okT, iface), gqlNullableMember("Err", errT, iface)]
+    }
+    return []
+}
+
+/// A tagged union's arm: nullable, since one arm is non-null at a time.
+fn gqlNullableMember(name: String, spelling: String, iface: ModuleInterface) -> GqlMember {
+    return GqlMember {
+        name: name.copy(),
+        ref: gqlStripBang(gqlRef(spelling, false, iface)),
+        inputRef: gqlStripBang(gqlRef(spelling, true, iface)),
+    }
+}
+
+/// A record's fields. An inline ` where ` refinement is stripped; its base maps.
+fn gqlRecordMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
+    let mut out: Array<GqlMember> = []
+    for f in gqlSplitTop(gqlBetweenBraces(rhs), 44) {
+        let colon = gqlIndexOf(bytes(f), ':', 0)
+        if colon >= 0 {
+            let fname = gqlTrim(gqlSlice(bytes(f), 0, colon))
+            let ftypeRaw = gqlTrim(gqlSlice(bytes(f), colon + 1, bytes(f).length))
+            let ftype = gqlStripWhere(ftypeRaw)
+            out.push(GqlMember {
+                name: fname,
+                ref: gqlRef(ftype, false, iface),
+                inputRef: gqlRef(ftype, true, iface),
+            })
+        }
+    }
+    return out
+}
+
+/// A payload enum's variants as members; none when every variant is nullary.
+fn gqlVariantMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
+    let variants = gqlVariantsOf(rhs)
+    let mut anyPayload = false
+    for v in variants {
+        if v.contains("(") {
+            anyPayload = true
+        }
+    }
+    if anyPayload == false {
+        return []
+    }
+    let mut out: Array<GqlMember> = []
+    for v in variants {
+        let paren = gqlIndexOf(bytes(v), '(', 0)
+        if paren < 0 {
+            out.push(GqlMember { name: gqlTrim(v), ref: "Boolean", inputRef: "Boolean" })
+        } else {
+            let vname = gqlTrim(gqlSlice(bytes(v), 0, paren))
+            let parts = gqlSplitTop(gqlBetweenParens(v), 44)
+            if parts.length == 1 {
+                out.push(gqlNullableMember(vname, parts[0], iface))
+            } else {
+                out.push(GqlMember { name: vname, ref: "JSON", inputRef: "JSON" })
+            }
+        }
+    }
+    return out
+}
+
+fn gqlVariantsOf(rhs: String) -> Array<String> {
+    let body = gqlTrim(rhs)
+    let stripped = if body.startsWith("|") {
+        gqlTrim(gqlSlice(bytes(body), 1, bytes(body).length))
+    } else {
+        body
+    }
+    return gqlSplitTop(stripped, 124)
+}
+
+/// The `{ ... }` body of an object or input definition. GraphQL refuses an empty
+/// one, and the error poisons every reference, so an empty body gets
+/// `_placeholder: Boolean` here, for the query root and a zero-field record alike.
+fn gqlBlock(fields: String) -> String {
+    if fields == "" {
+        return "{\n  _placeholder: Boolean\n}\n"
+    }
+    return "{\n" + fields + "}\n"
+}
+
+fn gqlObjectSdl(name: String, doc: String, ms: Array<GqlMember>) -> String {
+    let mut fields = ""
+    for m in ms {
+        fields = fields + "  " + m.name + ": " + m.ref + "\n"
+    }
+    return doc + "type " + name + " " + gqlBlock(fields)
+}
+
+/// A record's `type Name` and `input NameInput`, from one member list.
+fn gqlRecord(decl: GqlDecl, doc: String, ms: Array<GqlMember>) -> String {
+    let mut fields = ""
+    for m in ms {
+        fields = fields + "  " + m.name + ": " + m.inputRef + "\n"
+    }
+    return gqlObjectSdl(decl.name, doc, ms) + "input " + decl.name + "Input " + gqlBlock(fields)
+}
+
+fn gqlBetweenBraces(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = -1
+    let mut hi = -1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '{' && lo < 0 {
+            lo = i
+        }
+        if ba[i] == '}' {
+            hi = i
+        }
+        i = i + 1
+    }
+    if lo < 0 || hi <= lo {
+        return ""
+    }
+    return gqlSlice(ba, lo + 1, hi)
+}
+
+fn gqlStripWhere(s: String) -> String {
+    if s.contains(" where ") {
+        let ba = bytes(s)
+        let mut i = 0
+        while i + 7 <= ba.length {
+            if gqlSlice(ba, i, i + 7) == " where " {
+                return gqlTrim(gqlSlice(ba, 0, i))
+            }
+            i = i + 1
+        }
+    }
+    return s.copy()
+}
+
+/// A nullary enum as a GraphQL `enum`; a payload enum is an object (`gqlMembers`).
+fn gqlEnum(decl: GqlDecl, doc: String) -> String {
+    let mut out = doc + "enum " + decl.name + " {\n"
+    for v in gqlVariantsOf(decl.rhs) {
+        out = out + "  " + gqlTrim(v) + "\n"
+    }
+    return out + "}\n"
+}
+
+fn gqlBetweenParens(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = -1
+    let mut hi = -1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '(' && lo < 0 {
+            lo = i
+        }
+        if ba[i] == ')' {
+            hi = i
+        }
+        i = i + 1
+    }
+    if lo < 0 || hi <= lo {
+        return ""
+    }
+    return gqlSlice(ba, lo + 1, hi)
+}
+
+/// A leaf declaration (a `Map<..>` alias, a validated scalar, a primitive alias)
+/// as a custom `scalar` whose description carries the doc and the base.
+fn gqlScalar(decl: GqlDecl, iface: ModuleInterface) -> String {
+    let raw = gqlRawDoc(decl.name, iface)
+    let folded = gqlFoldWs(gqlTrim(decl.rhs))
+    let body = if raw != "" { raw + " — " + folded } else { folded }
+    return gqlDescBlock(body) + "scalar " + decl.name + "\n"
+}
+
+/// The SDL for one declaration: a record, an object (a payload enum or `Result`
+/// alias), a nullary `enum`, or a leaf `scalar`.
+fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
+    let decl = gqlSplitDecl(t.source)
+    let doc = gqlDocOf(decl.name, iface)
+    let ms = gqlMembers(decl, iface)
+    if decl.rhs.startsWith("{") {
+        return gqlRecord(decl, doc, ms)
+    }
+    if ms.length > 0 {
+        return gqlObjectSdl(decl.name, doc, ms)
+    }
+    if decl.rhs.startsWith("|") {
+        return gqlEnum(decl, doc)
+    }
+    return gqlScalar(decl, iface)
+}
+
+/// One name the document defines, and the route that defined it, for a collision message.
+type GqlDef = { name: String, from: String }
+
+/// The names a declaration defines: its own, and a record's `Input` twin, by the
+/// same test `gqlTypeSdl` uses.
+fn gqlDeclNames(t: TypeInfo) -> Array<String> {
+    let decl = gqlSplitDecl(t.source)
+    if decl.rhs.startsWith("{") {
+        return [decl.name.copy(), decl.name + "Input"]
+    }
+    return [decl.name.copy()]
+}
+
+/// The route already holding `name`, or `""`.
+fn gqlDefinedBy(defs: Array<GqlDef>, name: String) -> String {
+    for d in defs {
+        if d.name == name {
+            return d.from.copy()
+        }
+    }
+    return ""
+}
+
+/// Registers one definition, or reports a name already taken. Not a rename:
+/// these names are the wire surface, and which definition gives way is the
+/// author's decision.
+fn gqlDefine(defs: modify Array<GqlDef>, name: String, from: String) -> String {
+    let taken = gqlDefinedBy(defs, name)
+    if taken != "" {
+        return reportHere(
+            Error,
+            "the GraphQL document would define `\{name}` twice — \{taken}, and \{from}; a document may not define one name twice, so rename the contract's type",
+        )
+    }
+    defs.push(GqlDef { name: name.copy(), from: from.copy() })
+    return ""
+}
+
+/// Reports a name starting with `__`, reserved for introspection. Checked once
+/// per declaration, so a record and its `Input` twin get one diagnostic.
+fn gqlReservedName(name: String) -> String {
+    if name.startsWith("__") {
+        return reportHere(
+            Error,
+            "the GraphQL document would define `\{name}` — a name beginning with `__` is reserved for introspection, so rename the contract's type",
+        )
+    }
+    return ""
+}
+
+/// The root a procedure's field belongs under: `"mutation"` for a `mut fn`,
+/// `"query"` otherwise. The SDL and the resolver table both read it here.
+fn gqlRootOf(f: FnInfo) -> String {
+    if f.mutates {
+        return "mutation"
+    }
+    return "query"
+}
+
+export fn gqlRootType(root: String) -> String {
+    if root == "mutation" {
+        return "Mutation"
+    }
+    return "Query"
+}
+
+/// One root field: `name(input: <Req>Input): <Ret>`, or no arguments. A `Unit`
+/// return maps to `Boolean`; the resolver answers `true` (`gqlResolverTable`).
+fn gqlRootField(f: FnInfo, iface: ModuleInterface) -> String {
+    let ret = if f.ret == "" { "Boolean" } else { gqlStripBang(gqlRef(f.ret, false, iface)) }
+    if f.params.length == 1 {
+        let arg = gqlRef(f.params[0].spelling, true, iface)
+        return "  " + f.name + "(input: " + arg + "): " + ret + "\n"
+    }
+    return "  " + f.name + ": " + ret + "\n"
+}
+
+/// The named type inside a reference (`[Book]!` => `Book`), what a selection descends into.
+fn gqlNamed(r: String) -> String {
+    let ba = bytes(r)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b != '[' && b != ']' && b != '!' {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, r)
+}
+
+/// A root type's members, split by `gqlRootOf` as `gqlRootField` is.
+fn gqlRootMembers(iface: ModuleInterface, root: String) -> Array<GqlMember> {
+    let mut out: Array<GqlMember> = []
+    for f in iface.functions {
+        if gqlRootOf(f) == root {
+            let ret = if f.ret == "" { "Bool" } else { f.ret }
+            out.push(gqlNullableMember(f.name, ret, iface))
+        }
+    }
+    return out
+}
+
+/// The `_placeholder: Boolean` member `gqlBlock` writes into an empty body. The
+/// executor bakes it into the type graph and, at an empty query root, the
+/// resolver table, so the endpoint answers it.
+fn gqlPlaceholderMember() -> GqlMember {
+    return GqlMember { name: "_placeholder", ref: "Boolean", inputRef: "Boolean" }
+}
+
+/// Emits a module exporting `sdlText() -> String`, the contract's SDL as a constant.
+export gen fn sdl(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let mut doc = "# GraphQL SDL generated by std/graphql `sdl`.\n"
+    doc = doc + "# Records => type/input pairs; validated scalars => custom scalars\n"
+    doc = doc + "# (base + constraint in the description); Map => the JSON scalar;\n"
+    doc = doc + "# payload enums (incl. Result) => tagged objects (one nullable\n"
+    doc = doc + "# field per variant); a `mut fn` => Mutation, else Query.\n"
+    doc = doc + "\"\"\"An arbitrary JSON value — the wire form of a Vyrn Map<String, V>.\"\"\"\n"
+    doc = doc + "scalar JSON\n"
+
+    // Every name the document defines; a repeat is reported (`gqlDefine`).
+    let mut defs: Array<GqlDef> = []
+    let mut diags = gqlDefine(defs, "JSON", "the built-in JSON scalar")
+
+    for t in iface.types {
+        doc = doc + gqlTypeSdl(t, iface)
+        let dname = gqlSplitDecl(t.source).name
+        diags = diags + gqlReservedName(dname)
+        for n in gqlDeclNames(t) {
+            let from = if n == dname {
+                "the contract's type `\{dname}`"
+            } else {
+                "the input twin of the contract's record `\{dname}`"
+            }
+            diags = diags + gqlDefine(defs, n, from)
+        }
+    }
+
+    let mut queries = ""
+    let mut mutations = ""
+    for f in iface.functions {
+        if gqlRootOf(f) == "mutation" {
+            mutations = mutations + gqlRootField(f, iface)
+        } else {
+            queries = queries + gqlRootField(f, iface)
+        }
+    }
+    doc = doc + "type Query " + gqlBlock(queries)
+    diags = diags + gqlDefine(defs, "Query", "the generated query root")
+    if mutations != "" {
+        doc = doc + "type Mutation " + gqlBlock(mutations)
+        diags = diags + gqlDefine(defs, "Mutation", "the generated mutation root")
+    }
+
+    // The `\{doc}` splice is in expression position, so the compiler escapes
+    // `doc` as a string literal. A `//@diag` from the name registry
+    // goes in front, so the build fails in the generator's words.
+    return diags + render(vyrn"""/// Generated by std/graphql `sdl` — do not edit.
+/// The contract's GraphQL SDL document (deterministic, byte-stable).
+export fn sdlText() -> String {
+    return \{doc}
+}
+""")
+}
+
+// The executor: runtime code. It parses one request's query,
+// projects the value a procedure returned, and writes the reply; the generated
+// module holds only imports and a resolver table.
+
+/// One selected field: the response key (the alias, else the field name), the
+/// field it names, its arguments as a JSON tree, and its subselections.
+export type GqlSel = {
+    key: String,
+    name: String,
+    args: Array<JsonField>,
+    subs: Array<GqlSel>,
+}
+
+/// `GqlSel` reaches itself through `subs`, so the structural release has no
+/// bottom; this release is the bottom, and `drop subs` recurses. Each
+/// field is taken, not read, or its buffer would be given back twice.
+/// `args` releases its buffer only: `Json` declares no release.
+impl Owned for GqlSel {
+    fn release(consume self) {
+        let key = consume self.key
+        drop key
+        let name = consume self.name
+        drop name
+        let args = consume self.args
+        drop args
+        let subs = consume self.subs
+        drop subs
+    }
+}
+
+/// A parsed selection set; `err != ""` when it did not parse.
+type GqlSet = { sels: Array<GqlSel>, err: String }
+
+/// A parsed operation: its root (`"query"` or `"mutation"`), its fields, and `err != ""` when it did not parse.
+export type GqlQuery = { root: String, sels: Array<GqlSel>, err: String }
+
+/// The shared cursor with GraphQL's lexical rules: `#` line comments
+/// and `"` strings with `\` escapes, so a `{` in a string is never structure.
+fn gqlScanner(src: String) -> Scanner {
+    return scanner(src, "#", "", "", 34, -1, 92)
+}
+
+fn gqlAt(sc: Scanner, b: UInt8) -> Bool {
+    return peek(sc) == Int64(b)
+}
+
+fn gqlSetErr(why: String) -> GqlSet {
+    return GqlSet { sels: [], err: why.copy() }
+}
+
+type GqlVal = { value: Json, err: String }
+
+type GqlArgs = { args: Array<JsonField>, err: String }
+
+fn gqlValErr(why: String) -> GqlVal {
+    return GqlVal { value: JNull, err: why.copy() }
+}
+
+fn gqlIsNumByte(b: Int64) -> Bool {
+    return (b >= 48 && b <= 57) || b == 45 || b == 43 || b == 46 || b == 101 || b == 69
+}
+
+/// One GraphQL input value as a JSON tree, which `fromJson` decodes. Structure
+/// is read here; a string or number token goes to `std/json`'s reader over its
+/// source span, so there is one escape decoder and one number grammar.
+fn gqlValue(sc: modify Scanner, depth: Int64) -> GqlVal {
+    skipWs(sc)
+    if atEnd(sc) {
+        return gqlValErr("expected a value")
+    }
+    if gqlAt(sc, '$') {
+        advance(sc)
+        return gqlValErr("variable `$" + ident(sc) + "`: variables are not supported")
+    }
+    if gqlAt(sc, '"') {
+        let start = sc.pos
+        let _ = quotedString(sc)
+        let lit = slice(sc.src, start, sc.pos) ?? ""
+        return match parseJson(lit) {
+            Ok(v) => GqlVal { value: v, err: "" },
+            Err(e) => gqlValErr("malformed string value: " + e),
+        }
+    }
+    if gqlAt(sc, '[') || gqlAt(sc, '{') {
+        if depth >= gqlMaxDepth() {
+            return gqlValErr(gqlTooDeep())
+        }
+    }
+    if gqlAt(sc, '[') {
+        return gqlListValue(sc, depth + 1)
+    }
+    if gqlAt(sc, '{') {
+        return gqlObjectValue(sc, depth + 1)
+    }
+    let b = peek(sc)
+    if b == 45 || (b >= 48 && b <= 57) {
+        return gqlNumberValue(sc)
+    }
+    let word = ident(sc)
+    if word == "" {
+        return gqlValErr("expected a value")
+    }
+    if word == "true" {
+        return GqlVal { value: JBool(true), err: "" }
+    }
+    if word == "false" {
+        return GqlVal { value: JBool(false), err: "" }
+    }
+    if word == "null" {
+        return GqlVal { value: JNull, err: "" }
+    }
+    // An enum value is its own name on the wire.
+    return GqlVal { value: JStr(word), err: "" }
+}
+
+/// The deepest nesting a query may have: selection sets, lists and input
+/// objects. The parser recurses per level, and a client's `{a{a{a...}}}` would
+/// otherwise hit the engine's call cap and trap the process. Same limit as
+/// `std/jsonread`'s `maxDepth`.
+fn gqlMaxDepth() -> Int64 {
+    return 128
+}
+
+fn gqlTooDeep() -> String {
+    return "nesting deeper than " + gqlMaxDepth().toString() + " levels"
+}
+
+fn gqlNumberValue(sc: modify Scanner) -> GqlVal {
+    let start = sc.pos
+    while atEnd(sc) == false && gqlIsNumByte(peek(sc)) {
+        advance(sc)
+    }
+    let tok = slice(sc.src, start, sc.pos) ?? ""
+    return match parseJson(tok) {
+        Ok(v) => GqlVal { value: v, err: "" },
+        Err(e) => gqlValErr("malformed number `" + tok + "`"),
+    }
+}
+
+/// A list value `[a, b]`; commas are insignificant.
+fn gqlListValue(sc: modify Scanner, depth: Int64) -> GqlVal {
+    advance(sc)
+    let mut items: Array<Json> = []
+    skipWs(sc)
+    while atEnd(sc) == false && gqlAt(sc, ']') == false {
+        if gqlAt(sc, ',') {
+            advance(sc)
+            skipWs(sc)
+            continue
+        }
+        let v = gqlValue(sc, depth)
+        if v.err != "" {
+            return v
+        }
+        items.push(consume v.value)
+        skipWs(sc)
+    }
+    if gqlAt(sc, ']') == false {
+        return gqlValErr("unterminated list value: expected `]`")
+    }
+    advance(sc)
+    return GqlVal { value: JArr(items), err: "" }
+}
+
+/// An input-object value `{ a: 1, b: "x" }` with unquoted keys.
+fn gqlObjectValue(sc: modify Scanner, depth: Int64) -> GqlVal {
+    advance(sc)
+    let mut fields: Array<JsonField> = []
+    skipWs(sc)
+    while atEnd(sc) == false && gqlAt(sc, '}') == false {
+        if gqlAt(sc, ',') {
+            advance(sc)
+            skipWs(sc)
+            continue
+        }
+        let key = ident(sc)
+        if key == "" {
+            return gqlValErr("expected a field name in an input object")
+        }
+        skipWs(sc)
+        if gqlAt(sc, ':') == false {
+            return gqlValErr("input object field `" + key + "`: expected `:`")
+        }
+        advance(sc)
+        let v = gqlValue(sc, depth)
+        if v.err != "" {
+            return v
+        }
+        fields.push(JsonField { key: key, value: consume v.value })
+        skipWs(sc)
+    }
+    if gqlAt(sc, '}') == false {
+        return gqlValErr("unterminated input object: expected `}`")
+    }
+    advance(sc)
+    return GqlVal { value: JObj(fields), err: "" }
+}
+
+/// An argument list, the cursor on its `(`. The caller moves the list out with
+/// `consume parsed.args`: `Json` has no structural copy.
+fn gqlArgList(sc: modify Scanner, depth: Int64) -> GqlArgs {
+    advance(sc)
+    let mut out: Array<JsonField> = []
+    // A Map, so the duplicate test is one hashed lookup.
+    let mut names: Map<String, Bool> = [:]
+    skipWs(sc)
+    while atEnd(sc) == false && gqlAt(sc, ')') == false {
+        if gqlAt(sc, ',') {
+            advance(sc)
+            skipWs(sc)
+            continue
+        }
+        let name = ident(sc)
+        if name == "" {
+            return GqlArgs { args: [], err: "expected an argument name" }
+        }
+        if let Some(_) = names[name] {
+            return GqlArgs { args: [], err: "duplicate argument `" + name + "`" }
+        }
+        names[name.copy()] = true
+        skipWs(sc)
+        if gqlAt(sc, ':') == false {
+            return GqlArgs { args: [], err: "argument `" + name + "`: expected `:`" }
+        }
+        advance(sc)
+        let v = gqlValue(sc, depth)
+        if v.err != "" {
+            return GqlArgs { args: [], err: consume v.err }
+        }
+        out.push(JsonField { key: name, value: consume v.value })
+        skipWs(sc)
+    }
+    if gqlAt(sc, ')') == false {
+        return GqlArgs { args: [], err: "unterminated argument list: expected `)`" }
+    }
+    advance(sc)
+    return GqlArgs { args: out, err: "" }
+}
+
+/// A selection set, the cursor on its `{`. Commas are insignificant.
+fn gqlSelSet(sc: modify Scanner, depth: Int64) -> GqlSet {
+    if gqlAt(sc, '{') == false {
+        return gqlSetErr("expected `{` to open a selection set")
+    }
+    advance(sc)
+    let mut out: Array<GqlSel> = []
+    // A Map, as `gqlArgList`'s `names`.
+    let mut keys: Map<String, Bool> = [:]
+    skipWs(sc)
+    while atEnd(sc) == false && gqlAt(sc, '}') == false {
+        if gqlAt(sc, ',') {
+            advance(sc)
+            skipWs(sc)
+            continue
+        }
+        let first = ident(sc)
+        if first == "" {
+            return gqlSetErr("expected a field name in a selection set")
+        }
+        skipWs(sc)
+        // `key: field`: the alias renames the answer only.
+        let mut name = first.copy()
+        if gqlAt(sc, ':') {
+            advance(sc)
+            skipWs(sc)
+            name = ident(sc)
+            if name == "" {
+                return gqlSetErr("alias `" + first + "`: expected the field it renames")
+            }
+            skipWs(sc)
+        }
+        // GraphQL refuses a response key written twice (`{ x: a x: b }`).
+        if let Some(_) = keys[first] {
+            return gqlSetErr("duplicate response key `" + first + "` in a selection set")
+        }
+        keys[first.copy()] = true
+        let mut args: Array<JsonField> = []
+        if gqlAt(sc, '(') {
+            let parsed = gqlArgList(sc, depth)
+            if parsed.err != "" {
+                return gqlSetErr("field `" + name + "`: " + parsed.err)
+            }
+            args = consume parsed.args
+            skipWs(sc)
+        }
+        let mut subs: Array<GqlSel> = []
+        if gqlAt(sc, '{') {
+            if depth >= gqlMaxDepth() {
+                return gqlSetErr(gqlTooDeep())
+            }
+            let inner = gqlSelSet(sc, depth + 1)
+            if inner.err != "" {
+                return inner
+            }
+            subs = consume inner.sels
+        }
+        out.push(GqlSel { key: first, name: name, args: args, subs: subs })
+        skipWs(sc)
+    }
+    if gqlAt(sc, '}') == false {
+        return gqlSetErr("unterminated selection set: expected `}`")
+    }
+    advance(sc)
+    if out.length == 0 {
+        return gqlSetErr("a selection set must select at least one field")
+    }
+    return GqlSet { sels: out, err: "" }
+}
+
+/// One executable operation: an optional `query` or `mutation` keyword and name,
+/// then a selection set. A second operation is refused.
+export fn gqlParseQuery(src: String) -> GqlQuery {
+    let mut sc = gqlScanner(src)
+    skipWs(sc)
+    let mut root = "query"
+    if gqlAt(sc, '{') == false {
+        let kw = ident(sc)
+        if kw == "" {
+            return GqlQuery { root: root, sels: [], err: "the request carried no query" }
+        }
+        if kw != "query" && kw != "mutation" {
+            return GqlQuery {
+                root: root,
+                sels: [],
+                err: "expected `{`, `query` or `mutation`, found `" + kw + "`",
+            }
+        }
+        root = kw
+        skipWs(sc)
+        // The operation name, which nothing selects on.
+        let _ = ident(sc)
+        skipWs(sc)
+        // Nothing substitutes `variables`, so a definition list is refused
+        // here rather than leaving each `$id` a bare enum value.
+        if gqlAt(sc, '(') {
+            return GqlQuery { root: root, sels: [], err: "variable definitions are not supported" }
+        }
+    }
+    let set = gqlSelSet(sc, 1)
+    if set.err != "" {
+        return GqlQuery { root: root, sels: [], err: consume set.err }
+    }
+    skipWs(sc)
+    if atEnd(sc) == false {
+        return GqlQuery {
+            root: root,
+            sels: [],
+            err: "a document with more than one operation is not supported",
+        }
+    }
+    return GqlQuery { root: root, sels: consume set.sels, err: "" }
+}
+
+/// The index of `key` among `fields`, or -1, so the projection reads the member in place.
+fn gqlFieldIndex(fields: Array<JsonField>, key: String) -> Int64 {
+    let mut i = 0
+    while i < fields.length {
+        if fields[i].key == key {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// "" when `field`, declared on `owner` with named type `ty`, may be selected as
+/// written, else the GraphQL error. `toJson` omits a `None` field, so only the
+/// type graph can tell an undeclared field from an absent value:
+/// `schema(owner, field)` is "" for an undeclared field, and `schema(ty, "")` is
+/// "" for a type with no subfields.
+fn gqlCheckSel(
+    owner: String,
+    field: String,
+    ty: String,
+    hasSubs: Bool,
+    schema: fn(String, String) -> String,
+) -> String {
+    if ty == "" {
+        return "Cannot query field `" + field + "` on type `" + owner + "`."
+    }
+    if hasSubs && schema(ty, "") == "" {
+        return "Field `" + field + "` must not have a selection since type `" + ty
+        + "` has no subfields."
+    }
+    return ""
+}
+
+/// One GraphQL error: its message and the response path to the fault, response
+/// keys and list indices as `JStr` and `JNum` in one array.
+export type GqlErr = { message: String, path: Array<Json> }
+
+/// A completed position: its value, every error at or below it, and whether its
+/// `null` is still climbing (`failed`), as a fault under a non-null position does.
+export type GqlOut = { value: Json, errs: Array<GqlErr>, failed: Bool }
+
+fn gqlOk(v: consume Json) -> GqlOut {
+    return GqlOut { value: v, errs: [], failed: false }
+}
+
+/// A fault at one position: `null`, climbing when `tref` is non-null.
+/// `gqlProject` decides where a climb stops.
+fn gqlFaultAt(message: String, at: Array<Json>, tref: String) -> GqlOut {
+    let mut path: Array<Json> = []
+    for p in at {
+        path.push(copyJson(p))
+    }
+    return GqlOut {
+        value: JNull,
+        errs: [GqlErr { message: message.copy(), path: path }],
+        failed: tref.endsWith("!"),
+    }
+}
+
+/// A deep copy of `e`: `Json` refers to itself, so `copy` refuses it.
+fn gqlCopyErr(e: GqlErr) -> GqlErr {
+    let mut path: Array<Json> = []
+    for p in e.path {
+        path.push(copyJson(p))
+    }
+    return GqlErr { message: e.message.copy(), path: path }
+}
+
+/// `gqlCopyErr` over a list; `errs.copy()` refuses a `Json`.
+fn copyGqlErrs(es: Array<GqlErr>) -> Array<GqlErr> {
+    let mut out: Array<GqlErr> = []
+    for e in es {
+        out.push(gqlCopyErr(e))
+    }
+    return out
+}
+
+fn gqlStep(path: Array<Json>, step: Json) -> Array<Json> {
+    let mut out: Array<Json> = []
+    for p in path {
+        out.push(copyJson(p))
+    }
+    out.push(copyJson(step))
+    return out
+}
+
+/// The element reference of a list reference (`[Book!]` => `Book!`), else `r`.
+fn gqlElemRef(r: String) -> String {
+    if r.startsWith("[") && r.endsWith("]") {
+        let ba = bytes(r)
+        return gqlSlice(ba, 1, ba.length - 1)
+    }
+    return r.copy()
+}
+
+/// Completes one field position: projects `sels` out of `v` at `path`, against
+/// `tref`, the field's type reference with its wrappers. An empty `sels` takes
+/// the value whole.
+///
+/// This is a projection over a value the procedure already computed: a leaf is
+/// omitted, not avoided. A lazy field (`.lazy`) would be the one case
+/// where omission must also skip the work.
+///
+/// A fault becomes a `null` at its position and climbs through non-null (`!`)
+/// positions. This is the one place a climb stops: at a nullable
+/// position.
+export fn gqlProject(
+    v: Json,
+    sels: Array<GqlSel>,
+    tref: String,
+    path: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let r = gqlProjectCore(v, sels, gqlStripBang(tref), path, schema)
+    if r.failed && tref.endsWith("!") == false {
+        // Nullable: the climb stops here and this position is the `null`.
+        return GqlOut { value: JNull, errs: copyGqlErrs(r.errs), failed: false }
+    }
+    return r
+}
+
+/// `gqlPick` over the named form of `core`, bound so the name has a release.
+fn gqlPickNamed(
+    fields: Array<JsonField>,
+    sels: Array<GqlSel>,
+    core: String,
+    path: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let named = gqlNamed(core)
+    return gqlPick(fields, sels, named, path, schema)
+}
+
+fn gqlProjectCore(
+    v: Json,
+    sels: Array<GqlSel>,
+    core: String,
+    path: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    if sels.length == 0 {
+        // `v` is the caller's, so the leaf answers a copy; `Json` has no `.copy()`.
+        return gqlOk(copyJson(v))
+    }
+    return match v {
+        JArr(items) => gqlProjectEach(items, sels, gqlElemRef(core), path, schema),
+        JObj(fields) => gqlPickNamed(fields, sels, core, path, schema),
+        // `null` under a selection is an absent nullable object and stays `null`.
+        // `gqlCheckSel` refused a selection on the other three; they answer
+        // themselves to keep the match total. A string payload is copied: `s`
+        // borrows the caller's `v`, which is released before the answer.
+        JNull => gqlOk(JNull),
+        JBool(b) => gqlOk(JBool(b)),
+        JNum(n) => gqlOk(JNum(n.copy())),
+        JStr(s) => gqlOk(JStr(s.copy())),
+    }
+}
+
+/// The selection projected out of every element, each under its index in the
+/// path. A faulting element nulls the whole list, as `[Book!]` requires; every
+/// element is still walked, so each fault is reported.
+fn gqlProjectEach(
+    items: Array<Json>,
+    sels: Array<GqlSel>,
+    elem: String,
+    path: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let mut out: Array<Json> = []
+    let mut errs: Array<GqlErr> = []
+    let mut failed = false
+    let mut i = 0
+    for it in items {
+        let r = gqlProject(it, sels, elem, gqlStep(path, JNum(i.toString())), schema)
+        for e in r.errs {
+            errs.push(gqlCopyErr(e))
+        }
+        if r.failed {
+            failed = true
+        }
+        out.push(consume r.value)
+        i = i + 1
+    }
+    let v = if failed { JNull } else { JArr(out) }
+    return GqlOut { value: v, errs: errs, failed: failed }
+}
+
+/// The selected members in query order, under their response keys. A declared
+/// member the value lacks answers `null` (a `None` `Option`). A member that fails
+/// validation is an error at its own path, and its siblings still answer.
+fn gqlPick(
+    fields: Array<JsonField>,
+    sels: Array<GqlSel>,
+    ty: String,
+    path: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let mut out: Array<JsonField> = []
+    let mut errs: Array<GqlErr> = []
+    let mut failed = false
+    for s in sels {
+        let fref = schema(ty, s.name)
+        let at = gqlStep(path, JStr(s.key.copy()))
+        let bad = gqlFieldFault(ty, s, fref, schema)
+        let mi = gqlFieldIndex(fields, s.name)
+        let r = if bad != "" {
+            gqlFaultAt(bad, at, fref)
+        } else {
+            if mi < 0 {
+                gqlProject(JNull, s.subs, fref, at, schema)
+            } else {
+                // Passed as the place it is; only kept leaves are copied.
+                gqlProject(fields[mi].value, s.subs, fref, at, schema)
+            }
+        }
+        for e in r.errs {
+            // `r` owns its errors; this array needs its own copies.
+            errs.push(gqlCopyErr(e))
+        }
+        if r.failed {
+            failed = true
+        } else {
+            out.push(JsonField { key: s.key.copy(), value: consume r.value })
+        }
+    }
+    let v = if failed { JNull } else { JObj(out) }
+    return GqlOut { value: v, errs: errs, failed: failed }
+}
+
+/// "" when `s` may be selected on `owner` as written, else the GraphQL error.
+/// Only a root field takes arguments, so any argument here is undeclared.
+fn gqlFieldFault(
+    owner: String,
+    s: GqlSel,
+    tref: String,
+    schema: fn(String, String) -> String,
+) -> String {
+    let stray = gqlNoArgs(s.name, s.args)
+    if stray != "" {
+        return stray
+    }
+    return gqlCheckSel(owner, s.name, gqlNamed(tref), s.subs.length > 0, schema)
+}
+
+/// The query text of a request body: the `query` member of a JSON envelope, or
+/// the body itself (`application/graphql`). A GraphQL document is not JSON, so the
+/// two cannot be confused.
+export fn gqlQueryText(body: String) -> String {
+    return match parseJson(body) {
+        Ok(doc) => gqlEnvelopeQuery(doc, body),
+        Err(e) => body.copy(),
+    }
+}
+
+fn gqlEnvelopeQuery(doc: Json, fallback: String) -> String {
+    return match doc {
+        JObj(fields) => gqlQueryMember(fields, fallback),
+        JNull => fallback.copy(),
+        JBool(b) => fallback.copy(),
+        JNum(n) => fallback.copy(),
+        JStr(s) => fallback.copy(),
+        JArr(xs) => fallback.copy(),
+    }
+}
+
+/// The envelope's `query` member, read in place, or `fallback`.
+fn gqlQueryMember(fields: Array<JsonField>, fallback: String) -> String {
+    let qi = gqlFieldIndex(fields, "query")
+    if qi < 0 {
+        return fallback.copy()
+    }
+    return gqlStrOr(fields[qi].value, fallback)
+}
+
+fn gqlStrOr(j: Json, fallback: String) -> String {
+    return match j {
+        JStr(s) => s.copy(),
+        JNull => fallback.copy(),
+        JBool(b) => fallback.copy(),
+        JNum(n) => fallback.copy(),
+        JArr(xs) => fallback.copy(),
+        JObj(o) => fallback.copy(),
+    }
+}
+
+/// `{"errors":[{"message":"..."}]}`: a fault before execution (an unparseable
+/// document, a second operation, a validation fault), with no `data`. A 200,
+/// because a GraphQL client reads `errors`, not the status line.
+export fn gqlErrorBody(message: String) -> String {
+    let one: Array<JsonField> = [JsonField { key: "message", value: JStr(message.copy()) }]
+    return emit(JObj([JsonField { key: "errors", value: JArr([JObj(one)]) }]))
+}
+
+/// The reply for an executed operation: `errors` first, when any position
+/// faulted, then `data`, which is `null` only when a fault climbed past every
+/// root field.
+fn gqlExecBody(data: consume Json, errs: Array<GqlErr>) -> String {
+    let mut top: Array<JsonField> = []
+    if errs.length > 0 {
+        top.push(JsonField { key: "errors", value: gqlErrJson(errs) })
+    }
+    top.push(JsonField { key: "data", value: data })
+    return emit(JObj(top))
+}
+
+fn gqlErrJson(errs: Array<GqlErr>) -> Json {
+    let mut out: Array<Json> = []
+    for e in errs {
+        out.push(JObj([
+            JsonField { key: "message", value: JStr(e.message.copy()) },
+            JsonField { key: "path", value: JArr(copyJsonArray(e.path)) },
+        ]))
+    }
+    return JArr(out)
+}
+
+fn gqlReply(body: String) -> Response {
+    return Response { status: 200, contentType: "application/json", body: body.copy(), vary: "", headers: [:] }
+}
+
+/// One argument as the JSON text `fromJson` reads, or `err != ""`.
+export type GqlArg = { json: String, err: String }
+
+/// The `want` argument of `field` as JSON text, decoded by the same
+/// `fromJson<ReqType>` that `std/rpc` runs on a body, so both wires validate
+/// alike. Any other argument name is undeclared: the SDL names it `input`.
+export fn gqlArgOf(field: String, args: Array<JsonField>, want: String) -> GqlArg {
+    let stray = gqlNoArgs(field, gqlArgsBesides(args, want))
+    if stray != "" {
+        return GqlArg { json: "", err: stray }
+    }
+    for a in args {
+        if a.key == want {
+            return GqlArg { json: emit(a.value), err: "" }
+        }
+    }
+    return GqlArg {
+        json: "",
+        err: "Field `" + field + "` argument `" + want + "` is required, but it was not provided.",
+    }
+}
+
+fn gqlArgsBesides(args: Array<JsonField>, want: String) -> Array<JsonField> {
+    let mut out: Array<JsonField> = []
+    for a in args {
+        if a.key != want {
+            out.push(JsonField { key: a.key.copy(), value: copyJson(a.value) })
+        }
+    }
+    return out
+}
+
+/// "" when `args` is empty, else the error naming the first undeclared argument.
+export fn gqlNoArgs(field: String, args: Array<JsonField>) -> String {
+    if args.length > 0 {
+        return "Unknown argument `" + args[0].key + "` on field `" + field + "`."
+    }
+    return ""
+}
+
+/// The error for an argument the input record refuses: `fromJson`'s issues, as a 422 carries.
+export fn gqlArgError(field: String, issues: Array<Issue>) -> String {
+    let mut out = "Field `" + field + "` got an invalid argument"
+    // Appends, not an `if` expression whose arms borrow and allocate, so every
+    // temporary has one owner.
+    for i in issues {
+        out = out + "; "
+        if i.path != "" {
+            out = out + i.path + ": "
+        }
+        out = out + i.message
+    }
+    return out + "."
+}
+
+/// One selection validated against the type graph, subfields included.
+/// `rootArgsOk` marks a root position, whose arguments the resolver checks.
+fn gqlValidateSel(
+    owner: String,
+    s: GqlSel,
+    rootArgsOk: Bool,
+    schema: fn(String, String) -> String,
+) -> String {
+    let tref = schema(owner, s.name)
+    let bad = gqlCheckSel(owner, s.name, gqlNamed(tref), s.subs.length > 0, schema)
+    if bad != "" {
+        return bad
+    }
+    if rootArgsOk == false {
+        let stray = gqlNoArgs(s.name, s.args)
+        if stray != "" {
+            return stray
+        }
+    }
+    let ty = gqlNamed(tref)
+    for sub in s.subs {
+        let inner = gqlValidateSel(ty, sub, false, schema)
+        if inner != "" {
+            return inner
+        }
+    }
+    return ""
+}
+
+/// The first fault among the root selections, or "".
+fn gqlValidate(rootType: String, sels: Array<GqlSel>, schema: fn(String, String) -> String) -> String {
+    for s in sels {
+        let bad = gqlValidateSel(rootType, s, true, schema)
+        if bad != "" {
+            return bad
+        }
+    }
+    return ""
+}
+
+/// Answers one GraphQL request body with the two baked tables: `resolve`
+/// (root, field, args -> the encoded value or why not) and `schema`, the type
+/// graph. The whole tree is validated before any procedure runs, so a typo'd
+/// subfield of a `mut fn` never performs the mutation. Each root field then
+/// completes on its own: a fault puts its message in `errors` at its path and
+/// leaves the siblings in `data`. Argument decode faults surface per field.
+export fn gqlAnswer(
+    body: String,
+    resolve: fn(String, String, Array<JsonField>) -> Result<Json, String>,
+    schema: fn(String, String) -> String,
+) -> Response {
+    let q = gqlParseQuery(gqlQueryText(body))
+    if q.err != "" {
+        return gqlReply(gqlErrorBody(q.err))
+    }
+    let rootType = gqlRootType(q.root)
+    let bad = gqlValidate(rootType, q.sels, schema)
+    if bad != "" {
+        return gqlReply(gqlErrorBody(bad))
+    }
+    let mut out: Array<JsonField> = []
+    let mut errs: Array<GqlErr> = []
+    let mut dataNull = false
+    for sel in q.sels {
+        let key = sel.key
+        let r = gqlAnswerOne(rootType, sel, resolve(q.root, sel.name, sel.args), schema)
+        for e in r.errs {
+            errs.push(gqlCopyErr(e))
+        }
+        if r.failed {
+            dataNull = true
+        } else {
+            out.push(JsonField { key: key.copy(), value: r.value.copy() })
+        }
+    }
+    let data = if dataNull { JNull } else { JObj(out) }
+    return gqlReply(gqlExecBody(data, errs))
+}
+
+/// Completes one root field at its path. A resolver's refusal (an argument
+/// `fromJson` rejects) is a fault here like any other. A procedure's `Err` value
+/// is not a fault: it projects into `data` as its tagged object.
+fn gqlAnswerOne(
+    rootType: String,
+    sel: GqlSel,
+    resolved: Result<Json, String>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let tref = schema(rootType, sel.name)
+    // `.copy()`: the path must own its key, or releasing `at` frees `sel.key`.
+    let at: Array<Json> = [JStr(sel.key.copy())]
+    return match resolved {
+        Err(why) => gqlFaultAt(why, at, tref),
+        Ok(v) => gqlAnswerValue(rootType, sel, v, tref, at, schema),
+    }
+}
+
+/// Checks the selection against the root type, then projects the value. The
+/// resolver checks a root field's arguments.
+fn gqlAnswerValue(
+    rootType: String,
+    sel: GqlSel,
+    v: Json,
+    tref: String,
+    at: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let named = gqlNamed(tref)
+    let bad = gqlCheckSel(rootType, sel.name, named, sel.subs.length > 0, schema)
+    if bad != "" {
+        return gqlFaultAt(bad, at, tref)
+    }
+    return gqlProject(v, sel.subs, tref, at, schema)
+}
+
+/// The emitted module's imports: the procedures from the contract, each type
+/// from the module that declares it.
+fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
+    let mut specs: Array<String> = [contract.copy()]
+    for t in iface.types {
+        if gqlHas(specs, t.module) == false {
+            specs.push(t.module.copy())
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        if spec == contract {
+            for f in iface.functions {
+                names.push(f.name.copy())
+            }
+        }
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name.copy())
+            }
+        }
+        if names.length > 0 {
+            out = out + "import { " + gqlJoin(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+fn gqlHas(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+fn gqlJoin(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// The resolver table: one arm per procedure, from the same walk and the same
+/// `gqlRootOf` as `sdl`. An unclaimed field is "Cannot query field", not a trap.
+/// An argument decodes through `fromJson<ParamInfo.spelling>`, as `std/rpc` does.
+fn gqlResolverTable(iface: ModuleInterface) -> String {
+    let mut out = "/// Decode the procedure's encoded result into the value tree a projection is\n"
+    out = out + "/// written over. The procedure has ALREADY run when this is reached.\n"
+    out = out + "fn gqlValueOf(encoded: String) -> Json {\n"
+    out = out + "    return match parseJson(encoded) {\n"
+    out = out + "        Ok(v) => v,\n"
+    out = out + "        Err(e) => JNull,\n"
+    out = out + "    }\n}\n"
+    // A Unit procedure is a `Boolean` root field, so its runner calls it and
+    // resolves `true`.
+    for f in iface.functions {
+        if f.ret == "" {
+            if f.params.length == 1 {
+                out = out + "/// Runs `" + f.name + "` for its Boolean root field: the procedure returns\n"
+                out = out + "/// nothing, so the field resolves to `true` once it has run.\n"
+                out = out + "fn gqlRun_" + f.name + "(input: " + f.params[0].spelling + ") -> Result<Json, String> {\n"
+                out = out + "    " + f.name + "(input)\n"
+            } else {
+                out = out + "/// Runs `" + f.name + "` for its Boolean root field: the procedure returns\n"
+                out = out + "/// nothing, so the field resolves to `true` once it has run.\n"
+                out = out + "fn gqlRun_" + f.name + "() -> Result<Json, String> {\n"
+                out = out + "    " + f.name + "()\n"
+            }
+            out = out + "    return Ok(JBool(true))\n}\n"
+        }
+    }
+    out = out + "/// The resolver table, generated from the contract's reflection.\n"
+    out = out + "fn gqlResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {\n"
+    // An empty query root's `_placeholder` is in the SDL and the graph, so the
+    // resolver answers it too.
+    let roots = gqlRootMembers(iface, "query")
+    if roots.length == 0 {
+        out = out + "    if root == \"Query\" && field == \"_placeholder\" {\n"
+        out = out + "        return Ok(JNull)\n"
+        out = out + "    }\n"
+    }
+    for f in iface.functions {
+        let want = gqlRootOf(f)
+        out = out + "    if field == \"" + f.name + "\" {\n"
+        out = out + "        if root != \"" + want + "\" {\n"
+        out = out + "            return Err(\"Cannot query field `" + f.name + "` on type `\" + gqlRootType(root) + \"`.\")\n"
+        out = out + "        }\n"
+        out = out + gqlResolverArm(f)
+        out = out + "    }\n"
+    }
+    out = out + "    return Err(\"Cannot query field `\" + field + \"` on type `\" + gqlRootType(root) + \"`.\")\n}\n"
+    return out
+}
+
+fn gqlResolverArm(f: FnInfo) -> String {
+    if f.ret == "" {
+        if f.params.length == 0 {
+            let mut out = "        let stray = gqlNoArgs(\"" + f.name + "\", args)\n"
+            out = out + "        if stray != \"\" {\n            return Err(stray)\n        }\n"
+            return out + "        return gqlRun_" + f.name + "()\n"
+        }
+        let reqType = f.params[0].spelling
+        let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
+        out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
+        out = out + "        return match fromJson<" + reqType + ">(arg.json) {\n"
+        out = out + "            Valid(input) => gqlRun_" + f.name + "(input),\n"
+        out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
+        out = out + "        }\n"
+        return out
+    }
+    if f.params.length == 0 {
+        let mut out = "        let stray = gqlNoArgs(\"" + f.name + "\", args)\n"
+        out = out + "        if stray != \"\" {\n            return Err(stray)\n        }\n"
+        return out + "        return Ok(gqlValueOf(toJson(" + f.name + "())))\n"
+    }
+    let reqType = f.params[0].spelling
+    let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
+    out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
+    out = out + "        return match fromJson<" + reqType + ">(arg.json) {\n"
+    out = out + "            Valid(input) => Ok(gqlValueOf(toJson(" + f.name + "(input)))),\n"
+    out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
+    out = out + "        }\n"
+    return out
+}
+
+/// The type graph as one runtime lookup. `gqlSchema(t, field)` is the type
+/// reference of `t`'s `field`, `!` markers included, or "" when undeclared;
+/// `gqlSchema(t, "")` is `t` for an object type and "" for a leaf. Built from
+/// the same `gqlMembers` and `gqlRootOf` as the SDL, so both declare one set of
+/// fields. A leaf has no arm; an empty object keeps one with `_placeholder`.
+fn gqlSchemaTable(iface: ModuleInterface) -> String {
+    let mut out = "/// The schema's type graph: `gqlSchema(t, field)` is the GraphQL type reference\n"
+    out = out + "/// of `t`'s `field`, non-null markers included (\"\" when it declares none), and\n"
+    out = out + "/// `gqlSchema(t, \"\")` is `t` itself when `t` is an object type (\"\" when it is a\n"
+    out = out + "/// leaf, which has no subfields). The `!` markers are what say how far a `null`\n"
+    out = out + "/// climbs.\n"
+    out = out + "fn gqlSchema(t: String, field: String) -> String {\n"
+    // An empty query root gets the `_placeholder` arm. An empty mutation root
+    // gets none: the SDL omits `type Mutation`.
+    let mut queries = gqlRootMembers(iface, "query")
+    if queries.length == 0 {
+        queries.push(gqlPlaceholderMember())
+    }
+    out = out + gqlSchemaArm("Query", queries)
+    out = out + gqlSchemaArm("Mutation", gqlRootMembers(iface, "mutation"))
+    for t in iface.types {
+        let decl = gqlSplitDecl(t.source)
+        let ms = gqlMembers(decl, iface)
+        // A zero-field record is an object (its body is `_placeholder`); a leaf has no arm.
+        if ms.length > 0 || decl.rhs.startsWith("{") {
+            let mut members = ms
+            if members.length == 0 {
+                members.push(gqlPlaceholderMember())
+            }
+            out = out + gqlSchemaArm(decl.name, members)
+        }
+    }
+    return out + "    return \"\"\n}\n"
+}
+
+fn gqlSchemaArm(name: String, ms: Array<GqlMember>) -> String {
+    let mut out = "    if t == \"" + name + "\" {\n"
+    out = out + "        if field == \"\" {\n            return t.copy()\n        }\n"
+    for m in ms {
+        out = out + "        if field == \"" + m.name + "\" {\n"
+        out = out + "            return \"" + m.ref + "\"\n"
+        out = out + "        }\n"
+    }
+    return out + "        return \"\"\n    }\n"
+}
+
+/// Emits a module exposing `graphqlHandle(req: Request) -> Option<Response>`,
+/// answering `POST /graphql` for the contract `sdl(contract)` documents. It mounts
+/// beside `rpcHandle` and `connectHandle`. The generator and its module link into
+/// one flat namespace, so the generator is not named `graphqlHandle`.
+export gen fn graphqlServer(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    // The executor emits `toJson` per procedure, so it applies the rule the RPC
+    // and REST surfaces do; `sdl` reads spellings only and needs no check.
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/graphql `graphqlServer` — do not edit.\n"
+    out = out + gqlImportBlock(iface, contract)
+    out = out + "import { Json, JsonField } from \"std/json\"\n"
+    out = out + "import { parseJson } from \"std/jsonread\"\n"
+    out = out + "import { gqlAnswer, gqlRootType, gqlArgOf, gqlNoArgs, gqlArgError } from \"std/graphql\"\n"
+    out = out + gqlResolverTable(iface)
+    out = out + gqlSchemaTable(iface)
+    out = out + "/// `POST /graphql`. `None` (not our path) for everything else, so this mounts\n"
+    out = out + "/// beside the other projections of the same procedures.\n"
+    out = out + "export fn graphqlHandle(req: Request) -> Option<Response> {\n"
+    out = out + "    if req.path != \"/graphql\" {\n"
+    out = out + "        return None\n"
+    out = out + "    }\n"
+    out = out + "    if req.method != \"POST\" {\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\", headers: [:] })\n"
+    out = out + "    }\n"
+    out = out + "    return Some(gqlAnswer(req.body, gqlResolve, gqlSchema))\n}\n"
+    return out
+}
+
+test "gqlPrim maps the honest scalar table" {
+    assertEq(gqlPrim("Int64"), "Int")
+    assertEq(gqlPrim("UInt8"), "Int")
+    assertEq(gqlPrim("Float64"), "Float")
+    assertEq(gqlPrim("String"), "String")
+    assertEq(gqlPrim("Bool"), "Boolean")
+    assertEq(gqlPrim("Book"), "")
+}
+
+test "gqlSplitDecl splits name and rhs" {
+    let d = gqlSplitDecl("export type BookId = Int64 where value >= 0")
+    assertEq(d.name, "BookId")
+    assertEq(d.rhs, "Int64 where value >= 0")
+}
+
+test "gqlBetweenAngles and gqlStripWhere" {
+    assertEq(gqlBetweenAngles("Array<Tag>"), "Tag")
+    assertEq(gqlBetweenAngles("Map<String, Int64>"), "String, Int64")
+    assertEq(gqlStripWhere("String where value.byteLength >= 1"), "String")
+}
+
+test "gqlSplitTop respects angle and paren nesting" {
+    let parts = gqlSplitTop("id: BookId, tags: Array<Tag>, m: Map<String, Int64>", 44)
+    assertEq(parts.length, 3)
+    assertEq(parts[2], "m: Map<String, Int64>")
+}
+
+test "gqlSplitTop is string-literal aware — a predicate string never splits" {
+    // A comma, a brace and an escaped quote inside a regex string stay one field.
+    let parts = gqlSplitTop("a: String, b: String where value =~ \"x,y}z\\\"w\"", 44)
+    assertEq(parts.length, 2)
+    assertEq(parts[0], "a: String")
+    assertEq(parts[1], "b: String where value =~ \"x,y}z\\\"w\"")
+}
+
+test "gqlSplitTop clamps bracket depth at zero" {
+    let parts = gqlSplitTop("a}, b", 44)
+    assertEq(parts.length, 2)
+}
+
+test "gqlEscTripleQuote escapes only triple quotes" {
+    assertEq(gqlEscTripleQuote("a \"b\" c"), "a \"b\" c")
+    assertEq(gqlEscTripleQuote("x\"\"\"y"), "x\\\"\"\"y")
+}
+
+test "gqlDescBlock keeps a quote-free body single-line, pads a quote-ending body" {
+    assertEq(gqlDescBlock("A stored user."), "\"\"\"A stored user.\"\"\"\n")
+    assertEq(gqlDescBlock("re \"x\""), "\"\"\"\nre \"x\"\n\"\"\"\n")
+}
+
+test "gqlDescBlock keeps a trailing backslash away from the closing delimiter" {
+    // `"""Ends with \"""` would read its last four bytes as the `\"""` escape.
+    assertEq(gqlDescBlock("Ends with \\"), "\"\"\"\nEnds with \\\n\"\"\"\n")
+    assertEq(gqlDescBlock("\\"), "\"\"\"\n\\\n\"\"\"\n")
+    // An interior backslash round-trips.
+    assertEq(gqlDescBlock("a\\b"), "\"\"\"a\\b\"\"\"\n")
+    assertEq(gqlDescBlock("a\\\"\"\"b"), "\"\"\"a\\\\\"\"\"b\"\"\"\n")
+    assertEq(gqlDescBlock(""), "\"\"\"\"\"\"\n")
+}
+
+/// A shelf `browse` result as a JSON tree. The declared `rating` is absent, as
+/// `toJson` writes a `None`.
+fn gqlTestValue() -> Json {
+    let book: Array<JsonField> = [
+        JsonField { key: "id", value: JNum("0") },
+        JsonField { key: "title", value: JStr("SICP") },
+        JsonField { key: "url", value: JStr("https://example.com") },
+    ]
+    return JObj([JsonField { key: "books", value: JArr([JObj(book)]) }])
+}
+
+/// A type graph over that shape, as `gqlSchemaTable` bakes it. `rating` is the
+/// one nullable field.
+fn gqlTestSchema(t: String, field: String) -> String {
+    if t == "BookList" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "books" {
+            return "[Book!]!"
+        }
+        return ""
+    }
+    if t == "Book" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "id" {
+            return "BookId!"
+        }
+        if field == "title" {
+            return "Title!"
+        }
+        if field == "url" {
+            return "Url!"
+        }
+        if field == "rating" {
+            return "Stars"
+        }
+        return ""
+    }
+    return ""
+}
+
+/// One root field's completion: its value, errors, and whether a `null` is climbing.
+fn gqlTestProject(query: String) -> String {
+    let sels = gqlParseQuery(query).sels
+    let r = gqlProject(gqlTestValue(), sels[0].subs, "BookList!", [], gqlTestSchema)
+    return emit(JObj([
+        JsonField { key: "value", value: consume r.value },
+        JsonField { key: "errors", value: gqlErrJson(r.errs) },
+        JsonField { key: "climbing", value: JBool(r.failed) },
+    ]))
+}
+
+test "gqlParseQuery reads a nested selection set" {
+    let q = gqlParseQuery("{ browse { books { title } } }")
+    assertEq(q.err, "")
+    assertEq(q.root, "query")
+    assertEq(q.sels.length, 1)
+    assertEq(q.sels[0].name, "browse")
+    assertEq(q.sels[0].subs[0].name, "books")
+    assertEq(q.sels[0].subs[0].subs[0].name, "title")
+}
+
+test "gqlParseQuery takes an operation type and treats commas as whitespace" {
+    let q = gqlParseQuery("mutation Add { a, b }")
+    assertEq(q.err, "")
+    assertEq(q.root, "mutation")
+    assertEq(q.sels.length, 2)
+    assertEq(q.sels[1].name, "b")
+}
+
+test "gqlParseQuery reads an alias as the response key, not as the field" {
+    let q = gqlParseQuery("{ recent: browse { books { title } } }")
+    assertEq(q.err, "")
+    assertEq(q.sels[0].key, "recent")
+    assertEq(q.sels[0].name, "browse")
+    assertEq(q.sels[0].subs[0].key, "books")
+}
+
+test "gqlParseQuery reads arguments as the JSON tree fromJson decodes" {
+    let q = gqlParseQuery("{ byId(input: { id: 7, tags: [\"a\"], ok: true }) { title } }")
+    assertEq(q.err, "")
+    assertEq(q.sels[0].args.length, 1)
+    assertEq(q.sels[0].args[0].key, "input")
+    assertEq(emit(q.sels[0].args[0].value), "{\"id\":7,\"tags\":[\"a\"],\"ok\":true}")
+}
+
+/// `{ a { a { ... } } }` nested `n` deep.
+fn gqlNestedSel(n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + "{ a "
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        out = out + "}"
+        i = i + 1
+    }
+    return out
+}
+
+test "a query nested past gqlMaxDepth is an err, not a trap" {
+    assertEq(gqlParseQuery(gqlNestedSel(129)).err, "nesting deeper than 128 levels")
+    assertEq(gqlParseQuery(gqlNestedSel(2000)).err, "nesting deeper than 128 levels")
+    assertEq(gqlParseQuery(gqlNestedSel(128)).err, "")
+    // An argument value shares the depth budget.
+    assert(gqlParseQuery("{ a(input: " + gqlListNest(200) + ") { b } }").err.contains("nesting deeper than 128 levels"))
+}
+
+/// A list value nested `n` deep.
+fn gqlListNest(n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + "["
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        out = out + "]"
+        i = i + 1
+    }
+    return out
+}
+
+test "gqlParseQuery refuses what it cannot mean rather than dropping it" {
+    assert(gqlParseQuery("{ byId(input: $x) { title } }").err.contains("variable `$x`"))
+    assert(gqlParseQuery("query Q($id: Int) { byId { title } }").err.contains("variable definitions"))
+    assert(gqlParseQuery("{ byId(input: {id: 1) }").err.contains("expected a field name in an input object"))
+    assert(gqlParseQuery("{ byId(input: {id: 1").err.contains("unterminated input object"))
+    assert(gqlParseQuery("{ browse { title }").err.contains("unterminated selection set"))
+    assert(gqlParseQuery("").err.contains("no query"))
+}
+
+test "gqlProject omits what was not selected" {
+    // Asserts the absence: `url` and `id` were encoded and must be left out.
+    let out = gqlTestProject("{ browse { books { title } } }")
+    assertEq(out, "{\"value\":{\"books\":[{\"title\":\"SICP\"}]},\"errors\":[],\"climbing\":false}")
+    assert(out.contains("url") == false)
+    assert(out.contains("\"id\"") == false)
+}
+
+test "gqlProject answers under the alias the query wrote" {
+    assertEq(
+        gqlTestProject("{ browse { shelf: books { name: title } } }"),
+        "{\"value\":{\"shelf\":[{\"name\":\"SICP\"}]},\"errors\":[],\"climbing\":false}",
+    )
+}
+
+test "gqlProject takes a leaf whole and answers null for a DECLARED member the value lacks" {
+    assert(gqlTestProject("{ browse { books } }").contains("\"url\""))
+    // `rating` is declared and absent: `null`, not an error.
+    assertEq(
+        gqlTestProject("{ browse { books { rating } } }"),
+        "{\"value\":{\"books\":[{\"rating\":null}]},\"errors\":[],\"climbing\":false}",
+    )
+}
+
+test "gqlProject reports a member the schema does not declare — M1's first hole" {
+    // `toJson` omits a `None`, so only the type graph can refuse `shelved`. It
+    // declares no type for it, so the `null` stays put.
+    assertEq(
+        gqlTestProject("{ browse { books { shelved } } }"),
+        "{\"value\":{\"books\":[{\"shelved\":null}]},\"errors\":[{\"message\":"
+        + "\"Cannot query field `shelved` on type `Book`.\",\"path\":[\"books\",0,\"shelved\"]}],"
+        + "\"climbing\":false}",
+    )
+}
+
+test "gqlProject refuses a selection on a scalar — M1's second hole" {
+    // `title` is `Title!`, so the `null` climbs through `Book!`, `[Book!]!` and
+    // the non-null root: the `"data": null` case.
+    assertEq(
+        gqlTestProject("{ browse { books { title { nope } } } }"),
+        "{\"value\":null,\"errors\":[{\"message\":\"Field `title` must not have a selection "
+        + "since type `Title` has no subfields.\",\"path\":[\"books\",0,\"title\"]}],"
+        + "\"climbing\":true}",
+    )
+}
+
+test "a null stops at the nearest NULLABLE ancestor and the siblings survive" {
+    // `rating` is nullable, so the climb stops there and `title` still answers.
+    assertEq(
+        gqlTestProject("{ browse { books { title, rating { nope } } } }"),
+        "{\"value\":{\"books\":[{\"title\":\"SICP\",\"rating\":null}]},\"errors\":[{\"message\":"
+        + "\"Field `rating` must not have a selection since type `Stars` has no subfields.\","
+        + "\"path\":[\"books\",0,\"rating\"]}],\"climbing\":false}",
+    )
+}
+
+test "gqlProject refuses an argument written where the schema declares none" {
+    assertEq(
+        gqlTestProject("{ browse { books(first: 2) { title } } }"),
+        "{\"value\":null,\"errors\":[{\"message\":\"Unknown argument `first` on field `books`.\","
+        + "\"path\":[\"books\"]}],\"climbing\":true}",
+    )
+}
+
+test "gqlArgOf takes the declared argument and names any other" {
+    // The query is bound to a name, so the argument list is a borrow of it; read
+    // from a temporary, the release walk could not skip the element hole.
+    let doc = gqlParseQuery("{ byId(input: {id: 1}) }")
+    let args = doc.sels[0].args
+    assertEq(gqlArgOf("byId", args, "input").json, "{\"id\":1}")
+    let bad = gqlParseQuery("{ byId(id: 1) }")
+    let wrong = bad.sels[0].args
+    assertEq(gqlArgOf("byId", wrong, "input").err, "Unknown argument `id` on field `byId`.")
+    assertEq(
+        gqlArgOf("byId", [], "input").err,
+        "Field `byId` argument `input` is required, but it was not provided.",
+    )
+    assertEq(gqlNoArgs("browse", wrong), "Unknown argument `id` on field `browse`.")
+}
+
+test "gqlQueryText reads an envelope or a bare document" {
+    assertEq(gqlQueryText("{\"query\":\"{ browse }\"}"), "{ browse }")
+    assertEq(gqlQueryText("{ browse }"), "{ browse }")
+}
+
+test "gqlErrorBody is the shape a client reads" {
+    assertEq(gqlErrorBody("nope"), "{\"errors\":[{\"message\":\"nope\"}]}")
+    assertEq(gqlRootType("mutation"), "Mutation")
+    assertEq(gqlRootType("query"), "Query")
+}
+
+/// A resolver whose message in a reply proves a procedure ran.
+fn gqlSpyResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {
+    return Err("the resolver for `" + field + "` RAN")
+}
+
+/// A query and a mutation root over [`gqlTestSchema`]'s shapes.
+fn gqlExecTestSchema(t: String, field: String) -> String {
+    if t == "Query" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "browse" {
+            return "BookList!"
+        }
+        return ""
+    }
+    if t == "Mutation" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "dropAll" {
+            return "Boolean"
+        }
+        return ""
+    }
+    return gqlTestSchema(t, field)
+}
+
+test "a typo'd subfield of a mut fn is refused BEFORE the procedure runs" {
+    // A document that fails validation executes nothing and has no `data`.
+    let r = gqlAnswer("mutation { dropAll { typo } }", gqlSpyResolve, gqlExecTestSchema)
+    assert(r.body.contains("must not have a selection"))
+    assert(r.body.contains("RAN") == false)
+    assert(r.body.contains("\"data\"") == false)
+}
+
+test "validation descends: a typo two levels down refuses before any resolver runs" {
+    let r = gqlAnswer("{ browse { books { nope } } }", gqlSpyResolve, gqlExecTestSchema)
+    assert(r.body.contains("Cannot query field `nope` on type `Book`."))
+    assert(r.body.contains("RAN") == false)
+    let deep = gqlAnswer("{ browse { books(first: 2) { title } } }", gqlSpyResolve, gqlExecTestSchema)
+    assert(deep.body.contains("Unknown argument `first` on field `books`."))
+    assert(deep.body.contains("RAN") == false)
+}
+test "a valid operation still reaches its resolvers" {
+    // The fault is the spy's, at the field's own path: execution still runs.
+    let r = gqlAnswer("mutation { dropAll }", gqlSpyResolve, gqlExecTestSchema)
+    assert(r.body.contains("the resolver for `dropAll` RAN"))
+}
+
+test "a response key may be selected once" {
+    assert(gqlParseQuery("{ a a }").err.contains("duplicate response key `a`"))
+    assert(gqlParseQuery("{ x: a x: b }").err.contains("duplicate response key `x`"))
+    assertEq(gqlParseQuery("{ a b: a }").err, "")
+}
+
+test "an argument may be written once" {
+    assert(gqlParseQuery("{ f(a: 1, a: 2) { b } }").err.contains("duplicate argument `a`"))
+    assertEq(gqlParseQuery("{ f(a: 1) { b } }").err, "")
+}
+
+/// The graph of a contract with no query procedures: `Query` holds only `_placeholder`.
+fn gqlEmptyRootSchema(t: String, field: String) -> String {
+    if t == "Query" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "_placeholder" {
+            return "Boolean"
+        }
+    }
+    return ""
+}
+
+fn gqlNullResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {
+    return Ok(JNull)
+}
+
+test "{ _placeholder } on an empty query root is answered, not refused" {
+    let r = gqlAnswer("{ _placeholder }", gqlNullResolve, gqlEmptyRootSchema)
+    assertEq(r.body, "{\"data\":{\"_placeholder\":null}}")
+}

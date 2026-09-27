@@ -1,0 +1,93 @@
+/// The public REST API for pastes: base path `/pastes`, derived
+/// from this file's stem, so renaming the resource moves its URLs.
+///
+/// Opt-in and hand-written, because these decisions are API *design* and nothing
+/// can reflect them: that a listing is `GET /pastes` rather than a POST, that a
+/// lookup carries its id in the path rather than in a body, that creation is a
+/// POST to the collection, and — M2 — how long each answer is good for. The
+/// derived RPC surface these same procedures already answer on (`/_/pastes/*`)
+/// stays exactly as it was; it is what the pages call, and it needed no file.
+import { event, http, Frames, Live, Policy, Route, Socket, sse, Wire, ws, GET, POST } from "std/http"
+import { recent, byId, create } from http("./pastes")
+import * as store from "../store"
+import * as stream from "std/stream"
+import { startsWith } from "std/strpred"
+
+export fn routes() -> Array<Route> {
+    return [
+        // The listing changes whenever anyone posts, so it is cached briefly and
+        // revalidated by content: a client polling it mostly gets 304s.
+        GET(recent("/")).cacheFor(10).etag(),
+        // A paste is immutable once stored, so an hour is safe and `created` — the
+        // wall-clock stamp the store already writes — is a true `Last-Modified`.
+        // `Err("no paste with id …")` is the one absence this resource has.
+        GET(byId("/{id}")).cacheFor(3600).etag().lastModified("created").notFoundWhen(why -> why.startsWith("no paste with id")),
+        // 201 with a Location, built from the id the store content-addressed.
+        POST(create("/")).createdAt("/pastes/{id}"),
+    ]
+}
+
+/// The live tail: every paste from the cursor on, encoded as an
+/// SSE frame, then the stream ends and the client comes back two seconds later
+/// with its `Last-Event-ID`.
+///
+/// Ending is not a limitation being papered over — it is what a pull producer
+/// with nothing to say does, and a language that adds no concurrency has nothing
+/// else it could honestly do: a producer that blocked waiting for the next paste
+/// would block the whole single-threaded server. So `retryAfter` is the poll
+/// interval and `resumable` is what makes polling cost one round trip rather than
+/// the whole listing.
+///
+/// The cursor IS the storage position, which is why the id written on each frame
+/// is `i + 1`: the id a client last saw is the index it wants to resume AT.
+fn tailStep(c: stream.Cursor) -> Option<String> {
+    let i = stream.cursorGet(c)
+    if i < 0 || i >= store.pasteCount() {
+        return None
+    }
+    stream.cursorSet(c, i + 1)
+    return Some(event("\{i + 1}", "paste", toJson(store.pasteAt(i))))
+}
+
+/// `stream.unfold` and not a bare `unfold`, because `std/arrays` and
+/// `std/stream` both export a `map` and a `filter` and a top-level name is
+/// program-wide. A namespace import keeps the second module's names
+/// out of the flat one, which is what the diagnostic for the collision says to
+/// do. The cursor is `std/stream`'s to mint, so the module is imported rather
+/// than avoided.
+fn tail(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
+    return stream.unfold(since, tailStep)
+}
+
+/// The streams this projection publishes. A separate list from `routes()`
+/// because a stream is a separate value with a separate protocol — none of
+/// `cacheFor`/`etag`/`lastModified` means anything to a feed, and such an option
+/// is absent rather than ignored.
+export fn feeds() -> Array<Live> {
+    return [sse("/pastes/live", tail).retryAfter(2000).resumable()]
+}
+
+/// The same tail as a WebSocket, and the ownership rule made
+/// concrete rather than argued: `tailStep` above hands `sse` an ENCODED frame,
+/// because `id:` and `event:` are choices this file makes, while this one hands
+/// `ws` the JSON payload and nothing else, because a frame's opcode, length and
+/// mask are not choices anybody makes. Same store, same cursor, same `unfold`.
+fn socketStep(c: stream.Cursor) -> Option<String> {
+    let i = stream.cursorGet(c)
+    if i < 0 || i >= store.pasteCount() {
+        return None
+    }
+    stream.cursorSet(c, i + 1)
+    return Some(toJson(store.pasteAt(i)))
+}
+
+fn socketTail(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
+    return stream.unfold(since, socketStep)
+}
+
+/// 1001 ("going away") rather than 1000, because this feed ends by catching up
+/// and the client is meant to come back — the same statement `retryAfter` makes
+/// on the SSE side, in the vocabulary this transport has for it.
+export fn sockets() -> Array<Socket> {
+    return [ws("/pastes/socket", socketTail).closeCode(1001).maxFrame(65536)]
+}

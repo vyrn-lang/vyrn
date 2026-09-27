@@ -1,0 +1,2229 @@
+/// Accessibility, security and performance rules for `.vyx` components.
+///
+/// The library holds no privilege: it parses with `std/vyx`'s
+/// `vyxParseTemplate` and reports through `std/hints`, so a project swaps in
+/// its own rules by changing one import. The second import runs the checks;
+/// the namespace it binds is unused.
+///
+/// ```vyrn
+/// import { vyxHints } from "std/vyx-hints"
+/// import * as _hints from vyxHints("./app/widgets")
+/// ```
+///
+/// To configure, pass a JSON file; a generator reads only under the paths it
+/// is given:
+///
+/// ```vyrn
+/// import { vyxHintsConfigured } from "std/vyx-hints"
+/// import * as _hints from vyxHintsConfigured("./app/widgets", "./vyrn.json")
+/// ```
+///
+/// ```json
+/// { "hints": { "perf/img-size": "off", "a11y/img-alt": "error" } }
+/// ```
+///
+/// Only rules the template's own text decides are here
+/// (`docs/research/vyx-hints.md` ranks the rest). A rule that needs a rendered
+/// page, the author's intent, or a view across component boundaries would
+/// fire when unsure. Nine rules are errors: `sec/inline-handler`,
+/// `sec/unsafe-url`, and seven `html-validate` ports that keep its `"error"`
+/// preset severity. The rest are warnings.
+
+import { reportHere, Severity } from "std/diag"
+import { hint, noPolicy, policyOf, strictly, unusedWaivers, HintPolicy } from "std/hints"
+import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
+import { contains, endsWith, slice, startsWith } from "std/strpred"
+import { substring, toLower, trim } from "std/strings"
+
+/// The config key this library reads. A function, not a `let`: module state
+/// is not comptime-pure.
+fn hintsKey() -> String {
+    return "hints"
+}
+
+/// Checks every `<Name>.vyx` under `dir` at default severities. Emits
+/// `//@diag` reports and one declaration for the import to bind.
+export gen fn vyxHints(dir: String) -> String {
+    let scanned = vhScan(noPolicy(), dir)
+    return scanned.out + vhModule(scanned.checked)
+}
+
+/// [`vyxHints`] under the `"hints"` object of the JSON document at `config`.
+/// A config that cannot be read or is refused by `policyOf` is an error, and no
+/// file is checked.
+export gen fn vyxHintsConfigured(dir: String, config: String) -> String {
+    let text = match readFile(config) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    if text == "" {
+        return reportHere(Error, "vyx-hints: cannot read the hints config `\{config}`")
+        + vhModule(0)
+    }
+    let pol = vhPolicy(text)
+    if pol.err != "" {
+        return reportHere(Error, "vyx-hints: `\{config}` is not a usable hints config — \{pol.err}")
+        + vhModule(0)
+    }
+    let scanned = vhScan(pol.policy, dir)
+    return scanned.out + vhModule(scanned.checked)
+}
+
+/// The reports for a directory tree, and how many `.vyx` files earned them.
+type VhScan = { out: String, checked: Int64 }
+
+/// One `listDir`'s two outcomes, so an unreadable directory is refused rather
+/// than reported clean (the `std/ui` `UiDirRead` shape).
+type VhDirRead = { names: Array<String>, err: String }
+
+/// One `readFile`'s two outcomes, so an unreadable `.vyx` is refused rather than
+/// checked as empty (the `std/ui` `UiFileRead` shape).
+type VhFileRead = { src: String, err: String }
+
+/// Checks every `.vyx` under `dir`, recursively, since route trees nest. An
+/// unreadable directory or component is an error, not a silent zero.
+gen fn vhScan(p: HintPolicy, dir: String) -> VhScan {
+    // A subdirectory's name carries a trailing `/`, so one listing answers both
+    // "what is here" and "what to descend into" without reading OS error text.
+    let listed = match listDirKinds(dir) {
+        Ok(ns) => VhDirRead { names: ns, err: "" },
+        Err(e) => VhDirRead { names: [], err: e.copy() },
+    }
+    if listed.err != "" {
+        return VhScan {
+            out: reportHere(Error, "vyx-hints: cannot read the directory `\{dir}`: \{listed.err}"),
+            checked: 0,
+        }
+    }
+    let mut out = ""
+    let mut checked = 0
+    for name in listed.names {
+        if name.endsWith("/") {
+            let bare = slice(name, 0, name.byteLength - 1) ?? panic("vhScan: the cut is at the listing's own ASCII `/`")
+            let sub = vhScan(p, dir + "/" + bare)
+            out = out + sub.out
+            checked = checked + sub.checked
+        } else if name.endsWith(".vyx") {
+            let path = dir + "/" + name
+            let got = match readFile(path) {
+                Ok(v) => VhFileRead { src: v, err: "" },
+                Err(e) => VhFileRead { src: "", err: e },
+            }
+            if got.err != "" {
+                out = out + reportHere(Error, "vyx-hints: cannot read the component `\{path}`: \{got.err}")
+            } else {
+                out = out + vhCheck(p, got.src, path)
+                checked = checked + 1
+            }
+        }
+    }
+    return VhScan { out: out, checked: checked }
+}
+
+/// A parsed policy, or the refusal that explains why there is none.
+type VhPolicy = { policy: HintPolicy, err: String }
+
+fn vhPolicy(text: String) -> VhPolicy {
+    return match policyOf(text, hintsKey()) {
+        Ok(v) => VhPolicy { policy: v, err: "" },
+        Err(e) => VhPolicy { policy: noPolicy(), err: e.copy() },
+    }
+}
+
+/// The synthesized module: one declaration, so a selective import can bind it
+/// and `vyrn emit-gen` shows the checked-file count.
+fn vhModule(checked: Int64) -> String {
+    return "/// Generated by `std/vyx-hints`.\n"
+    + "export fn vyxHintsChecked() -> Int64 { return \{checked.toString()} }\n"
+}
+
+/// Every report `src` (the text of the `.vyx` file at `file`) earns. Exported
+/// for tests and for reuse under another library's configuration.
+export gen fn vhCheck(p: HintPolicy, src: String, file: String) -> String {
+    let t = vyxParseTemplate(src)
+    if t.err != "" {
+        // The compile already fails with a better message; lint advice about
+        // half a tree would bury it.
+        return ""
+    }
+    let out = vhNodes(p, src, file, t.nodes, false, false, false, false)
+    // hint/unused-waiver needs what the rules would report without waivers, so
+    // only a template carrying a marker pays for the second, strict walk.
+    if contains(src, "vyrn-ignore") {
+        let raw = vhNodes(strictly(p), src, file, t.nodes, false, false, false, false)
+        return out + unusedWaivers(p, src, file, raw)
+    }
+    return out
+}
+
+fn vhNodes(
+    p: HintPolicy,
+    src: String,
+    file: String,
+    nodes: Array<VyxNode>,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+    inForeign: Bool,
+) -> String {
+    let mut out = ""
+    for n in nodes {
+        out = out + vhNode(p, src, file, n, inFor, inLabel, inForm, inForeign)
+    }
+    return out
+}
+
+fn vhNode(
+    p: HintPolicy,
+    src: String,
+    file: String,
+    n: VyxNode,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+    inForeign: Bool,
+) -> String {
+    return match n {
+        VNElem(tag, isComp, attrs, kids, line) =>
+        vhElem(p, src, file, tag, isComp, attrs, kids, line, inFor, inLabel, inForm, inForeign),
+        // `vyxParseTemplate` does not group, so these nodes do not appear. Walked
+        // anyway, so a rule stays correct on a grouped tree.
+        VNFor(v, it, key, body, line, col) =>
+        vhNodes(p, src, file, body, true, inLabel, inForm, inForeign),
+        VNIf(conds, cl, cc, bodies, els, has) =>
+        vhBodies(p, src, file, bodies, els, has, inFor, inLabel, inForm, inForeign),
+        VNText(s) => "",
+        VNInterp(x, line, col) => "",
+        VNRaw(x, line, col) => "",
+        VNChildren => "",
+    }
+}
+
+fn vhBodies(
+    p: HintPolicy,
+    src: String,
+    file: String,
+    bodies: Array<VyxBody>,
+    els: VyxBody,
+    has: Bool,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+    inForeign: Bool,
+) -> String {
+    let mut out = ""
+    for b in bodies {
+        out = out + vhNodes(p, src, file, b.nodes, inFor, inLabel, inForm, inForeign)
+    }
+    if has {
+        out = out + vhNodes(p, src, file, els.nodes, inFor, inLabel, inForm, inForeign)
+    }
+    return out
+}
+
+/// Every rule for one element. A report anchors at the attribute that earned
+/// it, or at the element's line.
+fn vhElem(
+    p: HintPolicy,
+    src: String,
+    file: String,
+    tag: String,
+    isComp: Bool,
+    attrs: Array<VyxAttr>,
+    kids: Array<VyxNode>,
+    line: Int64,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+    inForeign: Bool,
+) -> String {
+    let kidsOut = vhNodes(
+        p,
+        src,
+        file,
+        kids,
+        inFor || vhHas(attrs, "v-for"),
+        inLabel || tag == "label",
+        inForm || tag == "form",
+        inForeign || tag == "svg" || tag == "math",
+    )
+    if isComp {
+        // A component call renders markup its tag name does not reveal; its own
+        // file is checked on its own terms.
+        return kidsOut
+    }
+    let aLine = vhAnchorLine(attrs, line)
+    let aCol = vhAnchorCol(attrs)
+    let mut out = ""
+
+    // html/deprecated and html/element-name. Not inside `<svg>`/`<math>`, whose
+    // vocabulary the table does not describe. A tag with `-` is a custom element.
+    if inForeign == false && contains(tag, "-") == false {
+        if vhDeprecatedTag(tag) {
+            // `"error"` in `html-validate`'s recommended preset.
+            out = out
+            + hint(
+                p,
+                "html/deprecated",
+                Error,
+                src,
+                file,
+                line,
+                0,
+                "`<\{tag}>` was removed from HTML; the platform still renders it, but nothing specifies how — write current markup",
+            )
+        } else if vhKnownTag(tag) == false {
+            // A warning: a vocabulary table grows, so the rule stays quiet until
+            // the table is exact.
+            out = out
+            + hint(
+                p,
+                "html/element-name",
+                Warning,
+                src,
+                file,
+                line,
+                0,
+                "`<\{tag}>` is not an HTML element — a typo? A custom element needs a `-` in its name; a component call starts with a capital",
+            )
+        }
+    }
+
+    for a in attrs {
+        // sec/inline-handler. `@click` dispatches through the export table and
+        // needs no `script-src 'unsafe-inline'`.
+        if a.evt == false && vhIsHandlerAttr(a.name) {
+            out = out
+            + hint(
+                p,
+                "sec/inline-handler",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is an inline script handler; write `@\{vhEventOf(a.name)}`, which dispatches through the export table",
+            )
+        }
+        // sec/unsafe-url. Static only: a dynamic URL is a value this library
+        // cannot see.
+        if a.dyn == false && vhIsUrlAttr(a.name) && vhIsJavascriptUrl(a.value) {
+            out = out
+            + hint(
+                p,
+                "sec/unsafe-url",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is a `javascript:` URL; only http, https, mailto, tel and relative URLs are safe here",
+            )
+        }
+        // sec/raw-html. `v-html` writes unescaped markup, the stack's one XSS
+        // sink. Waive it at the line where the value is proved safe.
+        if a.name == "v-html" {
+            out = out
+            + hint(
+                p,
+                "sec/raw-html",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`v-html` writes unescaped markup from `\{a.value}`; the value must never come from user input",
+            )
+        }
+        // a11y/tabindex-positive. A positive `tabindex` reorders the whole page's
+        // focus sequence.
+        if a.name == "tabindex" && a.dyn == false && vhPositive(a.value) {
+            out = out
+            + hint(
+                p,
+                "a11y/tabindex-positive",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`tabindex=\"\{a.value}\"` reorders focus for the whole page; use `0`, or `-1` for a programmatic target",
+            )
+        }
+        // a11y/dup-id. A `v-for` body renders once per row, so a static id is
+        // duplicated by construction.
+        if a.name == "id" && a.dyn == false && a.value != "" && (inFor || vhHas(attrs, "v-for")) {
+            out = out
+            + hint(
+                p,
+                "a11y/dup-id",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`id=\"\{a.value}\"` is inside a `v-for`, so every row renders the same id; write `:id` with the row key in it",
+            )
+        }
+        // sec/blank-target. Browsers imply `noopener`; the rule is about the
+        // referrer the new document receives.
+        if a.name == "target" && a.dyn == false && a.value == "_blank" {
+            if contains(toLower(vhValue(attrs, "rel")), "noreferrer") == false {
+                out = out
+                + hint(
+                    p,
+                    "sec/blank-target",
+                    Warning,
+                    src,
+                    file,
+                    a.line,
+                    a.col,
+                    "`target=\"_blank\"` hands the new document this page's referrer; add `rel=\"noopener noreferrer\"`",
+                )
+            }
+        }
+        // sec/inline-style (`html-validate` `no-inline-style`). `style-src
+        // 'unsafe-inline'` covers the whole page. Static only: a `:style` holds a
+        // computed value no class can hold.
+        if a.evt == false && a.dyn == false && a.name == "style" {
+            out = out
+            + hint(
+                p,
+                "sec/inline-style",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`style` is an inline style, so the page needs `style-src 'unsafe-inline'`; move the declarations to a class in the sheet",
+            )
+        }
+        // a11y/aria-name. The ARIA vocabulary is closed, so an unknown `aria*`
+        // name is a typo, and browsers ignore it silently. Bound names count too.
+        if a.evt == false && startsWith(a.name, "aria") && vhAriaAttr(a.name) == false {
+            out = out
+            + hint(
+                p,
+                "a11y/aria-name",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is not an ARIA attribute — a typo? The vocabulary is closed, and a misspelled name is silently ignored",
+            )
+        }
+        // html/deprecated-attr (`html-validate` `no-deprecated-attr`, `"error"`).
+        // The table is keyed by tag and attribute together: `align` is removed on
+        // `<td>` and was never on `<span>`.
+        if a.evt == false && vhDeprecatedAttrOn(tag, a.name) {
+            out = out
+            + hint(
+                p,
+                "html/deprecated-attr",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` on `<\{tag}>` was removed from HTML; the platform may ignore it — write CSS or current markup",
+            )
+        }
+        // html/attr-name. Names only, not values. A name that is not global, not
+        // the element's own, and not in a space with its own rule is a typo or a
+        // misplacement. Asked only on tags the element table knows; a warning,
+        // like `html/element-name`.
+        if a.evt == false
+        && inForeign == false
+        && tag != "svg"
+        && tag != "math"
+        && contains(tag, "-") == false
+        && vhKnownTag(tag)
+        && startsWith(a.name, "v-") == false
+        && a.name != "key"
+        && startsWith(a.name, "data-") == false
+        && startsWith(a.name, "aria") == false
+        && a.name != "role"
+        && vhGlobalAttr(a.name) == false
+        && vhElementAttr(tag, a.name) == false
+        && vhDeprecatedAttrOn(tag, a.name) == false
+        {
+            out = out
+            + hint(
+                p,
+                "html/attr-name",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is not an attribute of `<\{tag}>` — a typo, or an attribute that belongs on another element?",
+            )
+        }
+        // a11y/autoplay (`html-validate` `no-autoplay`, WCAG 1.4.2). The
+        // attribute is present in either spelling.
+        if a.evt == false && a.name == "autoplay" && (tag == "audio" || tag == "video") {
+            out = out
+            + hint(
+                p,
+                "a11y/autoplay",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`autoplay` starts this `<\{tag}>` before the reader asks; drop it, and let them press play",
+            )
+        }
+    }
+
+    // html/entity-in-text. `.vyx` text is emitted escaped, so no reference ever
+    // decodes: `&nbsp;` shows those bytes. So no entity table is needed.
+    // Anchored at the element, because a text node carries no position.
+    let ent = vhEntityInText(kids)
+    if ent != "" {
+        out = out
+        + hint(
+            p,
+            "html/entity-in-text",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`\{ent}` is not decoded here — text is emitted escaped, so the page shows those bytes literally; write the character itself",
+        )
+    }
+
+    // a11y/img-alt. `alt=""` counts: an empty alt marks the image decorative.
+    if vhNeedsAlt(tag, attrs) && vhHas(attrs, "alt") == false {
+        out = out
+        + hint(
+            p,
+            "a11y/img-alt",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<\{tag}>` has no `alt`; describe the image, or write `alt=\"\"` if it is decorative",
+        )
+    }
+    // perf/img-size. Without both `width` and `height` the browser cannot
+    // reserve the box, and the image shifts the layout when it loads.
+    if tag == "img" && (vhHas(attrs, "width") == false || vhHas(attrs, "height") == false) {
+        out = out
+        + hint(
+            p,
+            "perf/img-size",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<img>` has no `width` and `height`; the box cannot be reserved, so the page shifts when it loads",
+        )
+    }
+    // a11y/click-target. A `role` or a `tabindex` means the author handled it.
+    if vhHasEvent(attrs, "click") && vhInteractive(tag) == false {
+        if vhHas(attrs, "role") == false && vhHas(attrs, "tabindex") == false {
+            out = out
+            + hint(
+                p,
+                "a11y/click-target",
+                Warning,
+                src,
+                file,
+                aLine,
+                aCol,
+                "`@click` on `<\{tag}>` is not reachable by keyboard; use `<button>`, or add `role` and `tabindex`",
+            )
+        }
+    }
+    // a11y/control-name. Fires only on empty or whitespace children: any other
+    // child may be the name.
+    if vhNamedByContent(tag) && vhHasContent(kids) == false {
+        if vhHasAny(attrs, "aria-label", "aria-labelledby", "title") == false {
+            out = out
+            + hint(
+                p,
+                "a11y/control-name",
+                Warning,
+                src,
+                file,
+                aLine,
+                aCol,
+                "`<\{tag}>` is empty, so it has no accessible name; give it text or an `aria-label`",
+            )
+        }
+    }
+    // a11y/input-label. A control with no `id` cannot be reached by a
+    // `<label for>`; with no `aria-label`, `title` or `<label>` ancestor either,
+    // it has no name.
+    if vhIsNameable(tag, attrs) && inLabel == false {
+        if vhHasAny(attrs, "aria-label", "aria-labelledby", "title") == false
+        && vhHas(attrs, "id") == false
+        {
+            out = out
+            + hint(
+                p,
+                "a11y/input-label",
+                Warning,
+                src,
+                file,
+                aLine,
+                aCol,
+                "`<\{tag}>` has no accessible name and no `id` for a `<label for>` to reach; wrap it in a `<label>` or add `aria-label`",
+            )
+        }
+    }
+    // a11y/button-type. A `<button>` in a `<form>` submits it, so a `@click`
+    // button also navigates. Outside a form, or with no handler, it is harmless.
+    if tag == "button" && inForm && vhHas(attrs, "type") == false && vhAnyEvent(attrs) {
+        out = out
+        + hint(
+            p,
+            "a11y/button-type",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<button>` in a `<form>` submits it by default; write `type=\"button\"` next to the `@click`",
+        )
+    }
+    // a11y/th-scope (`html-validate` `wcag/h63`). Without `scope` a screen reader
+    // guesses the header from the table's shape, wrongly once the table has both
+    // a header row and a header column.
+    if tag == "th" && vhHas(attrs, "scope") == false {
+        out = out
+        + hint(
+            p,
+            "a11y/th-scope",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<th>` has no `scope`; write `scope=\"col\"` for a column header or `scope=\"row\"` for a row header",
+        )
+    }
+    // html/input-type (`html-validate` `no-implicit-input-type`). A missing
+    // `type` is a text box, seldom what the author meant.
+    if tag == "input" && vhHas(attrs, "type") == false {
+        out = out
+        + hint(
+            p,
+            "html/input-type",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<input>` has no `type`, so the browser makes it `text`; write the type you mean",
+        )
+    }
+    // html/prefer-tbody. The browser inserts the missing `<tbody>`, so every
+    // `table > tr` selector misses.
+    if tag == "table" && vhHasDirectRow(kids) {
+        out = out
+        + hint(
+            p,
+            "html/prefer-tbody",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<table>` holds `<tr>` directly; the browser inserts a `<tbody>` anyway, so write one",
+        )
+    }
+    // html/void-content. `.vyx` accepts `<img>x</img>`, but a browser renders
+    // `<img>x`: the content leaves the element.
+    if vhIsVoid(tag) && vhHasContent(kids) {
+        out = out
+        + hint(
+            p,
+            "html/void-content",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<\{tag}>` is a void element and takes no children; write `<\{tag}/>` and put the content after it",
+        )
+    }
+    // sec/require-sri. A script or sheet from another host runs with this page's
+    // privileges; `integrity` stops a tampered payload.
+    if vhSriUrlAttr(tag, attrs) != "" && vhHas(attrs, "integrity") == false {
+        out = out
+        + hint(
+            p,
+            "sec/require-sri",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<\{tag} \{vhSriUrlAttr(tag, attrs)}>` loads from another host with no `integrity`; add the sha384 hash that host publishes",
+        )
+    }
+    return out + kidsOut
+}
+
+/// The tags whose accessible name is an `alt`: `<img>`, `<area>` in an image
+/// map, and the button spelled as an image input.
+fn vhNeedsAlt(tag: String, attrs: Array<VyxAttr>) -> Bool {
+    if tag == "img" || tag == "area" {
+        return true
+    }
+    return tag == "input" && vhValue(attrs, "type") == "image"
+}
+
+/// Elements whose accessible name comes from their own content.
+fn vhNamedByContent(tag: String) -> Bool {
+    return tag == "button" || tag == "a" || tag == "h1" || tag == "h2" || tag == "h3"
+    || tag == "h4" || tag == "h5" || tag == "h6"
+}
+
+/// Form controls that carry their own name, minus the ones named some other way:
+/// a hidden field is not perceivable, and a `submit`/`reset`/`button` input is
+/// named by its `value`.
+fn vhIsNameable(tag: String, attrs: Array<VyxAttr>) -> Bool {
+    if tag == "select" || tag == "textarea" {
+        return true
+    }
+    if tag != "input" {
+        return false
+    }
+    // A bound `:type` may be any of the kinds below at run time, so the rule
+    // says nothing.
+    if vhHas(attrs, "type") && vhValue(attrs, "type") == "" {
+        return false
+    }
+    let ty = vhValue(attrs, "type")
+    return ty != "hidden" && ty != "submit" && ty != "reset" && ty != "button" && ty != "image"
+}
+
+/// The void elements. A named list, because this rule is an error.
+fn vhIsVoid(tag: String) -> Bool {
+    return tag == "area" || tag == "base" || tag == "br" || tag == "col"
+    || tag == "embed" || tag == "hr" || tag == "img" || tag == "input"
+    || tag == "link" || tag == "meta" || tag == "source" || tag == "track"
+    || tag == "wbr"
+}
+
+/// Whether a `<tr>` is a direct child. Rows inside `<thead>`, `<tbody>` or
+/// `<tfoot>` are that section's children.
+fn vhHasDirectRow(kids: Array<VyxNode>) -> Bool {
+    for k in kids {
+        if vhIsRow(k) {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhIsRow(n: VyxNode) -> Bool {
+    return match n {
+        VNElem(tag, isComp, attrs, kids, line) => tag == "tr" && isComp == false,
+        VNText(s) => false,
+        VNInterp(x, line, col) => false,
+        VNRaw(x, line, col) => false,
+        VNChildren => false,
+        VNIf(conds, cl, cc, bodies, els, has) => false,
+        VNFor(v, it, key, body, line, col) => false,
+    }
+}
+
+/// The URL attribute that must carry an `integrity` here, or `""` for an
+/// element that needs none.
+///
+/// `<script src>` and `<link rel="stylesheet" href>`, only for a static URL on
+/// another host. Narrower than `html-validate`, whose default also asks for
+/// same-origin files the build wrote.
+fn vhSriUrlAttr(tag: String, attrs: Array<VyxAttr>) -> String {
+    if tag == "script" && vhIsExternalUrl(vhValue(attrs, "src")) {
+        return "src"
+    }
+    if tag == "link" && vhValue(attrs, "rel") == "stylesheet"
+    && vhIsExternalUrl(vhValue(attrs, "href"))
+    {
+        return "href"
+    }
+    return ""
+}
+
+/// Whether a static URL names another host: scheme-relative `//host/...` or
+/// absolute `http`/`https`.
+fn vhIsExternalUrl(value: String) -> Bool {
+    let s = toLower(trim(value))
+    return startsWith(s, "//") || startsWith(s, "http://") || startsWith(s, "https://")
+}
+
+/// Elements a pointer and a keyboard can both operate without help.
+fn vhInteractive(tag: String) -> Bool {
+    return tag == "button" || tag == "a" || tag == "input" || tag == "select"
+    || tag == "textarea" || tag == "summary" || tag == "details" || tag == "label"
+    || tag == "option"
+}
+
+/// Attributes whose value is a URL the browser may navigate to or fetch.
+fn vhIsUrlAttr(name: String) -> Bool {
+    return name == "href" || name == "src" || name == "action" || name == "formaction"
+    || name == "poster" || name == "srcdoc" || name == "xlink:href" || name == "data"
+    || name == "ping"
+}
+
+/// Whether a static URL value is a `javascript:` URL.
+///
+/// Strips what a browser strips before reading a scheme: blanks and control
+/// bytes at the ends, tab/CR/LF anywhere. Interior spaces stay, because they
+/// make the URL inert, and a false report here is an error.
+fn vhIsJavascriptUrl(value: String) -> Bool {
+    return startsWith(toLower(vhStripForScheme(value)), "javascript:")
+}
+
+fn vhStripForScheme(s: String) -> String {
+    let n = s.byteLength
+    // The ends lose everything a URL parser trims (C0 controls and space).
+    let mut start = 0
+    while start < n && s[start] <= ' ' {
+        start = start + 1
+    }
+    let mut end = n
+    while end > start && s[end - 1] <= ' ' {
+        end = end - 1
+    }
+    // Inside, only the bytes a browser drops go; interior spaces stay.
+    let mut out = ""
+    let mut seg = start
+    let mut i = start
+    while i < end {
+        let b = s[i]
+        if b == '\t' || b == '\n' || b == '\r' {
+            if seg < i {
+                out = out + vhSlice(s, seg, i)
+            }
+            seg = i + 1
+        }
+        i = i + 1
+    }
+    if seg < end {
+        out = out + vhSlice(s, seg, end)
+    }
+    return out
+}
+
+/// `s[from..to]` for ASCII byte positions this module walked to, so the slice
+/// cannot split a character.
+fn vhSlice(s: String, from: Int64, to: Int64) -> String {
+    return match slice(s, from, to) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// The first `&name;` or `&#digits;` in an element's direct text children, or
+/// `""`. Nested elements report their own text.
+fn vhEntityInText(kids: Array<VyxNode>) -> String {
+    for k in kids {
+        if let VNText(s) = k {
+            let hit = vhEntityIn(s)
+            if hit != "" {
+                return hit
+            }
+        }
+    }
+    return ""
+}
+
+/// The first `&<name-or-#digits>;` in `s`, or `""`.
+fn vhEntityIn(s: String) -> String {
+    let n = s.byteLength
+    let mut i = 0
+    while i < n {
+        if s[i] == '&' && i + 2 < n {
+            let b = s[i + 1]
+            if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '#' {
+                let mut e = i + 2
+                while e < n
+                && ((s[e] >= 'a' && s[e] <= 'z') || (s[e] >= 'A' && s[e] <= 'Z')
+                    || (s[e] >= '0' && s[e] <= '9'))
+                {
+                    e = e + 1
+                }
+                if e < n && s[e] == ';' && e > i + 1 {
+                    return substring(s, i, e + 1)
+                }
+                i = e
+                continue
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// The HTML element vocabulary, from `html-validate` `src/elements/html5.ts`.
+/// Grouped by first byte. `svg` and `math` are known; their children are
+/// foreign content, gated by `inForeign`.
+fn vhKnownTag(tag: String) -> Bool {
+    if tag.byteLength == 0 {
+        return false
+    }
+    let lead = bytes(tag)[0]
+    if lead == 'a' {
+        return tag == "a" || tag == "abbr" || tag == "acronym" || tag == "address" || tag == "applet" || tag == "area" || tag == "article" || tag == "aside" || tag == "audio"
+    }
+    if lead == 'b' {
+        return tag == "b" || tag == "base" || tag == "basefont" || tag == "bdi" || tag == "bdo" || tag == "bgsound" || tag == "big" || tag == "blink" || tag == "blockquote" || tag == "body" || tag == "br" || tag == "button"
+    }
+    if lead == 'c' {
+        return tag == "canvas" || tag == "caption" || tag == "center" || tag == "cite" || tag == "code" || tag == "col" || tag == "colgroup"
+    }
+    if lead == 'd' {
+        return tag == "data" || tag == "datalist" || tag == "dd" || tag == "del" || tag == "details" || tag == "dfn" || tag == "dialog" || tag == "dir" || tag == "div" || tag == "dl" || tag == "dt"
+    }
+    if lead == 'e' {
+        return tag == "em" || tag == "embed"
+    }
+    if lead == 'f' {
+        return tag == "fieldset" || tag == "figcaption" || tag == "figure" || tag == "font" || tag == "footer" || tag == "form" || tag == "frame" || tag == "frameset"
+    }
+    if lead == 'h' {
+        return tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" || tag == "h6" || tag == "head" || tag == "header" || tag == "hgroup" || tag == "hr" || tag == "html"
+    }
+    if lead == 'i' {
+        return tag == "i" || tag == "iframe" || tag == "img" || tag == "input" || tag == "ins" || tag == "isindex"
+    }
+    if lead == 'k' {
+        return tag == "kbd" || tag == "keygen"
+    }
+    if lead == 'l' {
+        return tag == "label" || tag == "legend" || tag == "li" || tag == "link" || tag == "listing"
+    }
+    if lead == 'm' {
+        return tag == "main" || tag == "map" || tag == "mark" || tag == "marquee" || tag == "math" || tag == "menu" || tag == "meta" || tag == "meter" || tag == "multicol"
+    }
+    if lead == 'n' {
+        return tag == "nav" || tag == "nextid" || tag == "nobr" || tag == "noembed" || tag == "noframes" || tag == "noscript"
+    }
+    if lead == 'o' {
+        return tag == "object" || tag == "ol" || tag == "optgroup" || tag == "option" || tag == "output"
+    }
+    if lead == 'p' {
+        return tag == "p" || tag == "param" || tag == "picture" || tag == "plaintext" || tag == "pre" || tag == "progress"
+    }
+    if lead == 'q' {
+        return tag == "q"
+    }
+    if lead == 'r' {
+        return tag == "rb" || tag == "rp" || tag == "rt" || tag == "rtc" || tag == "ruby"
+    }
+    if lead == 's' {
+        return tag == "s" || tag == "samp" || tag == "script" || tag == "search" || tag == "section" || tag == "select" || tag == "selectedcontent" || tag == "slot" || tag == "small" || tag == "source" || tag == "spacer" || tag == "span" || tag == "strike" || tag == "strong" || tag == "style" || tag == "sub" || tag == "summary" || tag == "sup" || tag == "svg"
+    }
+    if lead == 't' {
+        return tag == "table" || tag == "tbody" || tag == "td" || tag == "template" || tag == "textarea" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "time" || tag == "title" || tag == "tr" || tag == "track" || tag == "tt"
+    }
+    if lead == 'u' {
+        return tag == "u" || tag == "ul"
+    }
+    if lead == 'v' {
+        return tag == "var" || tag == "video"
+    }
+    if lead == 'w' {
+        return tag == "wbr"
+    }
+    if lead == 'x' {
+        return tag == "xmp"
+    }
+    return false
+}
+
+fn vhDeprecatedTag(tag: String) -> Bool {
+    if tag.byteLength == 0 {
+        return false
+    }
+    let lead = bytes(tag)[0]
+    if lead == 'a' {
+        return tag == "acronym" || tag == "applet"
+    }
+    if lead == 'b' {
+        return tag == "basefont" || tag == "bgsound" || tag == "big" || tag == "blink"
+    }
+    if lead == 'c' {
+        return tag == "center"
+    }
+    if lead == 'd' {
+        return tag == "dir"
+    }
+    if lead == 'f' {
+        return tag == "font" || tag == "frame" || tag == "frameset"
+    }
+    if lead == 'i' {
+        return tag == "isindex"
+    }
+    if lead == 'k' {
+        return tag == "keygen"
+    }
+    if lead == 'l' {
+        return tag == "listing"
+    }
+    if lead == 'm' {
+        return tag == "marquee" || tag == "multicol"
+    }
+    if lead == 'n' {
+        return tag == "nextid" || tag == "nobr" || tag == "noembed" || tag == "noframes"
+    }
+    if lead == 'p' {
+        return tag == "plaintext"
+    }
+    if lead == 's' {
+        return tag == "spacer" || tag == "strike"
+    }
+    if lead == 't' {
+        return tag == "tt"
+    }
+    if lead == 'x' {
+        return tag == "xmp"
+    }
+    return false
+}
+
+/// The closed WAI-ARIA attribute set, from `A11yance/aria-query`
+/// `src/ariaPropsMap.js`. Deprecated names stay known: a legal name is not a
+/// typo. The removed (tag, attribute) pairs come from `html5.ts`.
+fn vhAriaAttr(name: String) -> Bool {
+    if name.byteLength < 6 {
+        return false
+    }
+    let lead = bytes(name)[5]
+    if lead == 'a' {
+        return name == "aria-activedescendant" || name == "aria-atomic" || name == "aria-autocomplete"
+    }
+    if lead == 'b' {
+        return name == "aria-braillelabel" || name == "aria-brailleroledescription" || name == "aria-busy"
+    }
+    if lead == 'c' {
+        return name == "aria-checked" || name == "aria-colcount" || name == "aria-colindex" || name == "aria-colspan" || name == "aria-controls" || name == "aria-current"
+    }
+    if lead == 'd' {
+        return name == "aria-describedby" || name == "aria-description" || name == "aria-details" || name == "aria-disabled" || name == "aria-dropeffect"
+    }
+    if lead == 'e' {
+        return name == "aria-errormessage" || name == "aria-expanded"
+    }
+    if lead == 'f' {
+        return name == "aria-flowto"
+    }
+    if lead == 'g' {
+        return name == "aria-grabbed"
+    }
+    if lead == 'h' {
+        return name == "aria-haspopup" || name == "aria-hidden"
+    }
+    if lead == 'i' {
+        return name == "aria-invalid"
+    }
+    if lead == 'k' {
+        return name == "aria-keyshortcuts"
+    }
+    if lead == 'l' {
+        return name == "aria-label" || name == "aria-labelledby" || name == "aria-level" || name == "aria-live"
+    }
+    if lead == 'm' {
+        return name == "aria-modal" || name == "aria-multiline" || name == "aria-multiselectable"
+    }
+    if lead == 'o' {
+        return name == "aria-orientation" || name == "aria-owns"
+    }
+    if lead == 'p' {
+        return name == "aria-placeholder" || name == "aria-posinset" || name == "aria-pressed"
+    }
+    if lead == 'r' {
+        return name == "aria-readonly" || name == "aria-relevant" || name == "aria-required" || name == "aria-roledescription" || name == "aria-rowcount" || name == "aria-rowindex" || name == "aria-rowspan"
+    }
+    if lead == 's' {
+        return name == "aria-selected" || name == "aria-setsize" || name == "aria-sort"
+    }
+    if lead == 'v' {
+        return name == "aria-valuemax" || name == "aria-valuemin" || name == "aria-valuenow" || name == "aria-valuetext"
+    }
+    return false
+}
+
+fn vhDeprecatedAttrOn(tag: String, name: String) -> Bool {
+    if name == "accept" {
+        return tag == "form"
+    }
+    if name == "align" {
+        return tag == "caption" || tag == "col" || tag == "div" || tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" || tag == "h6" || tag == "hr" || tag == "iframe" || tag == "img" || tag == "input" || tag == "legend" || tag == "math" || tag == "object" || tag == "p" || tag == "table" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "alink" {
+        return tag == "body"
+    }
+    if name == "allowtransparency" {
+        return tag == "iframe"
+    }
+    if name == "archive" {
+        return tag == "object"
+    }
+    if name == "axis" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "background" {
+        return tag == "body" || tag == "table" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "bgcolor" {
+        return tag == "body" || tag == "table" || tag == "td" || tag == "th" || tag == "tr"
+    }
+    if name == "border" {
+        return tag == "img" || tag == "object"
+    }
+    if name == "bordercolor" {
+        return tag == "table"
+    }
+    if name == "cellpadding" {
+        return tag == "table"
+    }
+    if name == "cellspacing" {
+        return tag == "table"
+    }
+    if name == "char" {
+        return tag == "col" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charoff" {
+        return tag == "col" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charset" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "classid" {
+        return tag == "object"
+    }
+    if name == "clear" {
+        return tag == "br"
+    }
+    if name == "code" {
+        return tag == "object"
+    }
+    if name == "codebase" {
+        return tag == "object"
+    }
+    if name == "codetype" {
+        return tag == "object"
+    }
+    if name == "color" {
+        return tag == "hr"
+    }
+    if name == "compact" {
+        return tag == "dl" || tag == "ol" || tag == "ul"
+    }
+    if name == "coords" {
+        return tag == "a"
+    }
+    if name == "datafld" {
+        return tag == "a" || tag == "applet" || tag == "button" || tag == "div" || tag == "fieldset" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "label" || tag == "legend" || tag == "marquee" || tag == "object" || tag == "param" || tag == "span" || tag == "textarea"
+    }
+    if name == "dataformatas" {
+        return tag == "button" || tag == "div" || tag == "input" || tag == "label" || tag == "legend" || tag == "marquee" || tag == "object" || tag == "option" || tag == "span" || tag == "table"
+    }
+    if name == "datapagesize" {
+        return tag == "table"
+    }
+    if name == "datasrc" {
+        return tag == "a" || tag == "applet" || tag == "button" || tag == "div" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "label" || tag == "legend" || tag == "marquee" || tag == "object" || tag == "option" || tag == "span" || tag == "table" || tag == "textarea"
+    }
+    if name == "declare" {
+        return tag == "object"
+    }
+    if name == "event" {
+        return tag == "script"
+    }
+    if name == "for" {
+        return tag == "script"
+    }
+    if name == "frame" {
+        return tag == "table"
+    }
+    if name == "frameborder" {
+        return tag == "iframe"
+    }
+    if name == "height" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "hspace" {
+        return tag == "iframe" || tag == "img" || tag == "input" || tag == "math" || tag == "object"
+    }
+    if name == "ismap" {
+        return tag == "input"
+    }
+    if name == "language" {
+        return tag == "script"
+    }
+    if name == "link" {
+        return tag == "body"
+    }
+    if name == "lowsrc" {
+        return tag == "img"
+    }
+    if name == "marginbottom" {
+        return tag == "body"
+    }
+    if name == "marginheight" {
+        return tag == "body" || tag == "iframe"
+    }
+    if name == "marginleft" {
+        return tag == "body"
+    }
+    if name == "marginright" {
+        return tag == "body"
+    }
+    if name == "margintop" {
+        return tag == "body"
+    }
+    if name == "marginwidth" {
+        return tag == "body" || tag == "iframe"
+    }
+    if name == "methods" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "name" {
+        return tag == "a" || tag == "img" || tag == "math" || tag == "option"
+    }
+    if name == "nohref" {
+        return tag == "area"
+    }
+    if name == "noshade" {
+        return tag == "hr"
+    }
+    if name == "nowrap" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "profile" {
+        return tag == "head"
+    }
+    if name == "rules" {
+        return tag == "table"
+    }
+    if name == "scheme" {
+        return tag == "meta"
+    }
+    if name == "scope" {
+        return tag == "td"
+    }
+    if name == "scrolling" {
+        return tag == "iframe"
+    }
+    if name == "shape" {
+        return tag == "a"
+    }
+    if name == "size" {
+        return tag == "hr"
+    }
+    if name == "standby" {
+        return tag == "object"
+    }
+    if name == "summary" {
+        return tag == "table"
+    }
+    if name == "target" {
+        return tag == "link"
+    }
+    if name == "text" {
+        return tag == "body"
+    }
+    if name == "type" {
+        return tag == "li" || tag == "param" || tag == "ul"
+    }
+    if name == "urn" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "usemap" {
+        return tag == "input"
+    }
+    if name == "valign" {
+        return tag == "col" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "valuetype" {
+        return tag == "param"
+    }
+    if name == "version" {
+        return tag == "html"
+    }
+    if name == "vlink" {
+        return tag == "body"
+    }
+    if name == "vspace" {
+        return tag == "iframe" || tag == "img" || tag == "input" || tag == "math" || tag == "object"
+    }
+    if name == "width" {
+        return tag == "col" || tag == "hr" || tag == "pre" || tag == "table" || tag == "td" || tag == "th"
+    }
+    return false
+}
+
+/// The global attributes, from `wooorm/html-element-attributes` `index.js`.
+/// `role` and `aria-*` are the ARIA space, `data-*` is custom, `v-*` is the
+/// template's own.
+fn vhGlobalAttr(name: String) -> Bool {
+    if name.byteLength == 0 {
+        return false
+    }
+    let lead = bytes(name)[0]
+    if lead == 'a' {
+        return name == "accesskey" || name == "autocapitalize" || name == "autocorrect" || name == "autofocus"
+    }
+    if lead == 'c' {
+        return name == "class" || name == "contenteditable"
+    }
+    if lead == 'd' {
+        return name == "dir" || name == "draggable"
+    }
+    if lead == 'e' {
+        return name == "enterkeyhint" || name == "exportparts"
+    }
+    if lead == 'h' {
+        return name == "hidden"
+    }
+    if lead == 'i' {
+        return name == "id" || name == "inert" || name == "inputmode" || name == "is" || name == "itemid" || name == "itemprop" || name == "itemref" || name == "itemscope" || name == "itemtype"
+    }
+    if lead == 'l' {
+        return name == "lang"
+    }
+    if lead == 'n' {
+        return name == "nonce"
+    }
+    if lead == 'p' {
+        return name == "part" || name == "popover"
+    }
+    if lead == 's' {
+        return name == "slot" || name == "spellcheck" || name == "style"
+    }
+    if lead == 't' {
+        return name == "tabindex" || name == "title" || name == "translate"
+    }
+    if lead == 'w' {
+        return name == "writingsuggestions"
+    }
+    return false
+}
+
+fn vhElementAttr(tag: String, name: String) -> Bool {
+    if name == "abbr" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "accept" {
+        return tag == "form" || tag == "input"
+    }
+    if name == "accept-charset" {
+        return tag == "form"
+    }
+    if name == "action" {
+        return tag == "form"
+    }
+    if name == "align" {
+        return tag == "applet" || tag == "caption" || tag == "col" || tag == "colgroup" || tag == "div" || tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" || tag == "h6" || tag == "hr" || tag == "iframe" || tag == "img" || tag == "input" || tag == "legend" || tag == "object" || tag == "p" || tag == "table" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "alink" {
+        return tag == "body"
+    }
+    if name == "allow" {
+        return tag == "iframe"
+    }
+    if name == "allowfullscreen" {
+        return tag == "iframe"
+    }
+    if name == "allowpaymentrequest" {
+        return tag == "iframe"
+    }
+    if name == "allowusermedia" {
+        return tag == "iframe"
+    }
+    if name == "alpha" {
+        return tag == "input"
+    }
+    if name == "alt" {
+        return tag == "applet" || tag == "area" || tag == "img" || tag == "input"
+    }
+    if name == "archive" {
+        return tag == "applet" || tag == "object"
+    }
+    if name == "as" {
+        return tag == "link"
+    }
+    if name == "async" {
+        return tag == "script"
+    }
+    if name == "autocomplete" {
+        return tag == "form" || tag == "input" || tag == "select" || tag == "textarea"
+    }
+    if name == "autoplay" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "axis" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "background" {
+        return tag == "body"
+    }
+    if name == "bgcolor" {
+        return tag == "body" || tag == "table" || tag == "td" || tag == "th" || tag == "tr"
+    }
+    if name == "blocking" {
+        return tag == "link" || tag == "script" || tag == "style"
+    }
+    if name == "border" {
+        return tag == "img" || tag == "object" || tag == "table"
+    }
+    if name == "cellpadding" {
+        return tag == "table"
+    }
+    if name == "cellspacing" {
+        return tag == "table"
+    }
+    if name == "char" {
+        return tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charoff" {
+        return tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charset" {
+        return tag == "a" || tag == "link" || tag == "meta" || tag == "script"
+    }
+    if name == "checked" {
+        return tag == "input"
+    }
+    if name == "cite" {
+        return tag == "blockquote" || tag == "del" || tag == "ins" || tag == "q"
+    }
+    if name == "classid" {
+        return tag == "object"
+    }
+    if name == "clear" {
+        return tag == "br"
+    }
+    if name == "closedby" {
+        return tag == "dialog"
+    }
+    if name == "code" {
+        return tag == "applet"
+    }
+    if name == "codebase" {
+        return tag == "applet" || tag == "object"
+    }
+    if name == "codetype" {
+        return tag == "object"
+    }
+    if name == "color" {
+        return tag == "basefont" || tag == "font" || tag == "link"
+    }
+    if name == "colorspace" {
+        return tag == "input"
+    }
+    if name == "cols" {
+        return tag == "frameset" || tag == "textarea"
+    }
+    if name == "colspan" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "command" {
+        return tag == "button"
+    }
+    if name == "commandfor" {
+        return tag == "button"
+    }
+    if name == "compact" {
+        return tag == "dir" || tag == "dl" || tag == "menu" || tag == "ol" || tag == "ul"
+    }
+    if name == "content" {
+        return tag == "meta"
+    }
+    if name == "controls" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "coords" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "crossorigin" {
+        return tag == "audio" || tag == "img" || tag == "link" || tag == "script" || tag == "video"
+    }
+    if name == "data" {
+        return tag == "object"
+    }
+    if name == "datetime" {
+        return tag == "del" || tag == "ins" || tag == "time"
+    }
+    if name == "declare" {
+        return tag == "object"
+    }
+    if name == "decoding" {
+        return tag == "img"
+    }
+    if name == "default" {
+        return tag == "track"
+    }
+    if name == "defer" {
+        return tag == "script"
+    }
+    if name == "dirname" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "disabled" {
+        return tag == "button" || tag == "fieldset" || tag == "input" || tag == "link" || tag == "optgroup" || tag == "option" || tag == "select" || tag == "textarea"
+    }
+    if name == "download" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "enctype" {
+        return tag == "form"
+    }
+    if name == "face" {
+        return tag == "basefont" || tag == "font"
+    }
+    if name == "fetchpriority" {
+        return tag == "img" || tag == "link" || tag == "script"
+    }
+    if name == "for" {
+        return tag == "label" || tag == "output"
+    }
+    if name == "form" {
+        return tag == "button" || tag == "fieldset" || tag == "input" || tag == "label" || tag == "object" || tag == "output" || tag == "select" || tag == "textarea"
+    }
+    if name == "formaction" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formenctype" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formmethod" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formnovalidate" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formtarget" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "frame" {
+        return tag == "table"
+    }
+    if name == "frameborder" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "headers" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "height" {
+        return tag == "applet" || tag == "canvas" || tag == "embed" || tag == "iframe" || tag == "img" || tag == "input" || tag == "object" || tag == "source" || tag == "td" || tag == "th" || tag == "video"
+    }
+    if name == "high" {
+        return tag == "meter"
+    }
+    if name == "href" {
+        return tag == "a" || tag == "area" || tag == "base" || tag == "link"
+    }
+    if name == "hreflang" {
+        return tag == "a" || tag == "area" || tag == "link"
+    }
+    if name == "hspace" {
+        return tag == "applet" || tag == "img" || tag == "object"
+    }
+    if name == "http-equiv" {
+        return tag == "meta"
+    }
+    if name == "imagesizes" {
+        return tag == "link"
+    }
+    if name == "imagesrcset" {
+        return tag == "link"
+    }
+    if name == "integrity" {
+        return tag == "link" || tag == "script"
+    }
+    if name == "ismap" {
+        return tag == "img" || tag == "input"
+    }
+    if name == "kind" {
+        return tag == "track"
+    }
+    if name == "label" {
+        return tag == "optgroup" || tag == "option" || tag == "track"
+    }
+    if name == "language" {
+        return tag == "script"
+    }
+    if name == "link" {
+        return tag == "body"
+    }
+    if name == "list" {
+        return tag == "input"
+    }
+    if name == "loading" {
+        return tag == "iframe" || tag == "img"
+    }
+    if name == "longdesc" {
+        return tag == "frame" || tag == "iframe" || tag == "img"
+    }
+    if name == "loop" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "low" {
+        return tag == "meter"
+    }
+    if name == "manifest" {
+        return tag == "html"
+    }
+    if name == "marginheight" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "marginwidth" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "max" {
+        return tag == "input" || tag == "meter" || tag == "progress"
+    }
+    if name == "maxlength" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "media" {
+        return tag == "link" || tag == "meta" || tag == "source" || tag == "style"
+    }
+    if name == "method" {
+        return tag == "form"
+    }
+    if name == "min" {
+        return tag == "input" || tag == "meter"
+    }
+    if name == "minlength" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "multiple" {
+        return tag == "input" || tag == "select"
+    }
+    if name == "muted" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "name" {
+        return tag == "a" || tag == "applet" || tag == "button" || tag == "details" || tag == "fieldset" || tag == "form" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "map" || tag == "meta" || tag == "object" || tag == "output" || tag == "param" || tag == "select" || tag == "slot" || tag == "textarea"
+    }
+    if name == "nohref" {
+        return tag == "area"
+    }
+    if name == "nomodule" {
+        return tag == "script"
+    }
+    if name == "noresize" {
+        return tag == "frame"
+    }
+    if name == "noshade" {
+        return tag == "hr"
+    }
+    if name == "novalidate" {
+        return tag == "form"
+    }
+    if name == "nowrap" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "object" {
+        return tag == "applet"
+    }
+    if name == "open" {
+        return tag == "details" || tag == "dialog"
+    }
+    if name == "optimum" {
+        return tag == "meter"
+    }
+    if name == "pattern" {
+        return tag == "input"
+    }
+    if name == "ping" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "placeholder" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "playsinline" {
+        return tag == "video"
+    }
+    if name == "popovertarget" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "popovertargetaction" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "poster" {
+        return tag == "video"
+    }
+    if name == "preload" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "profile" {
+        return tag == "head"
+    }
+    if name == "prompt" {
+        return tag == "isindex"
+    }
+    if name == "readonly" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "referrerpolicy" {
+        return tag == "a" || tag == "area" || tag == "iframe" || tag == "img" || tag == "link" || tag == "script"
+    }
+    if name == "rel" {
+        return tag == "a" || tag == "area" || tag == "link"
+    }
+    if name == "required" {
+        return tag == "input" || tag == "select" || tag == "textarea"
+    }
+    if name == "rev" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "reversed" {
+        return tag == "ol"
+    }
+    if name == "rows" {
+        return tag == "frameset" || tag == "textarea"
+    }
+    if name == "rowspan" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "rules" {
+        return tag == "table"
+    }
+    if name == "sandbox" {
+        return tag == "iframe"
+    }
+    if name == "scheme" {
+        return tag == "meta"
+    }
+    if name == "scope" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "scrolling" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "selected" {
+        return tag == "option"
+    }
+    if name == "shadowrootclonable" {
+        return tag == "template"
+    }
+    if name == "shadowrootcustomelementregistry" {
+        return tag == "template"
+    }
+    if name == "shadowrootdelegatesfocus" {
+        return tag == "template"
+    }
+    if name == "shadowrootmode" {
+        return tag == "template"
+    }
+    if name == "shadowrootserializable" {
+        return tag == "template"
+    }
+    if name == "shape" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "size" {
+        return tag == "basefont" || tag == "font" || tag == "hr" || tag == "input" || tag == "select"
+    }
+    if name == "sizes" {
+        return tag == "img" || tag == "link" || tag == "source"
+    }
+    if name == "span" {
+        return tag == "col" || tag == "colgroup"
+    }
+    if name == "src" {
+        return tag == "audio" || tag == "embed" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "script" || tag == "source" || tag == "track" || tag == "video"
+    }
+    if name == "srcdoc" {
+        return tag == "iframe"
+    }
+    if name == "srclang" {
+        return tag == "track"
+    }
+    if name == "srcset" {
+        return tag == "img" || tag == "source"
+    }
+    if name == "standby" {
+        return tag == "object"
+    }
+    if name == "start" {
+        return tag == "ol"
+    }
+    if name == "step" {
+        return tag == "input"
+    }
+    if name == "summary" {
+        return tag == "table"
+    }
+    if name == "target" {
+        return tag == "a" || tag == "area" || tag == "base" || tag == "form" || tag == "link"
+    }
+    if name == "text" {
+        return tag == "body"
+    }
+    if name == "type" {
+        return tag == "a" || tag == "area" || tag == "button" || tag == "embed" || tag == "input" || tag == "li" || tag == "link" || tag == "object" || tag == "ol" || tag == "param" || tag == "script" || tag == "source" || tag == "style" || tag == "ul"
+    }
+    if name == "typemustmatch" {
+        return tag == "object"
+    }
+    if name == "usemap" {
+        return tag == "img" || tag == "input" || tag == "object"
+    }
+    if name == "valign" {
+        return tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "value" {
+        return tag == "button" || tag == "data" || tag == "input" || tag == "li" || tag == "meter" || tag == "option" || tag == "param" || tag == "progress"
+    }
+    if name == "valuetype" {
+        return tag == "param"
+    }
+    if name == "version" {
+        return tag == "html"
+    }
+    if name == "vlink" {
+        return tag == "body"
+    }
+    if name == "vspace" {
+        return tag == "applet" || tag == "img" || tag == "object"
+    }
+    if name == "width" {
+        return tag == "applet" || tag == "canvas" || tag == "col" || tag == "colgroup" || tag == "embed" || tag == "hr" || tag == "iframe" || tag == "img" || tag == "input" || tag == "object" || tag == "pre" || tag == "source" || tag == "table" || tag == "td" || tag == "th" || tag == "video"
+    }
+    if name == "wrap" {
+        return tag == "textarea"
+    }
+    return false
+}
+
+/// Whether `name` is an HTML event handler attribute.
+///
+/// A named list, not `startsWith("on")`, because this rule is an error: `once`
+/// is an ordinary attribute. An unknown handler goes unreported.
+fn vhIsHandlerAttr(name: String) -> Bool {
+    return vhPointerHandler(name) || vhKeyboardHandler(name) || vhFormHandler(name)
+    || vhLoadHandler(name)
+}
+
+fn vhPointerHandler(name: String) -> Bool {
+    return name == "onclick" || name == "ondblclick" || name == "onmousedown"
+    || name == "onmouseup" || name == "onmouseover" || name == "onmouseout"
+    || name == "onmousemove" || name == "onmouseenter" || name == "onmouseleave"
+    || name == "oncontextmenu" || name == "onwheel" || name == "onscroll"
+    || name == "onpointerdown" || name == "onpointerup" || name == "onpointermove"
+    || name == "ontouchstart" || name == "ontouchend" || name == "ontouchmove"
+    || name == "ondrag" || name == "ondragstart" || name == "ondragend"
+    || name == "ondragover" || name == "ondragenter" || name == "ondragleave"
+    || name == "ondrop"
+}
+
+fn vhKeyboardHandler(name: String) -> Bool {
+    return name == "onkeydown" || name == "onkeyup" || name == "onkeypress"
+    || name == "onfocus" || name == "onblur" || name == "onfocusin"
+    || name == "onfocusout"
+}
+
+fn vhFormHandler(name: String) -> Bool {
+    return name == "oninput" || name == "onchange" || name == "onsubmit"
+    || name == "onreset" || name == "onselect" || name == "oninvalid"
+    || name == "onsearch" || name == "ontoggle" || name == "oncopy"
+    || name == "oncut" || name == "onpaste"
+}
+
+fn vhLoadHandler(name: String) -> Bool {
+    return name == "onload" || name == "onerror" || name == "onabort"
+    || name == "onbeforeunload" || name == "onunload" || name == "onresize"
+    || name == "onhashchange" || name == "onpopstate" || name == "onmessage"
+    || name == "onstorage" || name == "onanimationend" || name == "ontransitionend"
+    || name == "onplay" || name == "onpause" || name == "onended"
+    || name == "oncanplay"
+}
+
+/// `onclick` -> `click`, for the message that names the replacement.
+fn vhEventOf(name: String) -> String {
+    return vhSlice(name, 2, name.byteLength)
+}
+
+/// Whether a static attribute value is an integer above zero.
+fn vhPositive(value: String) -> Bool {
+    return match parse(trim(value)) {
+        Some(n) => n > 0,
+        None => false,
+    }
+}
+
+/// Whether `attrs` carries `name` static, `:bound` or as a `v-` directive.
+fn vhHas(attrs: Array<VyxAttr>, name: String) -> Bool {
+    for a in attrs {
+        if a.evt == false && a.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhHasAny(attrs: Array<VyxAttr>, a1: String, a2: String, a3: String) -> Bool {
+    return vhHas(attrs, a1) || vhHas(attrs, a2) || vhHas(attrs, a3)
+}
+
+/// The static value of `name`, or `""` when it is absent or dynamic.
+fn vhValue(attrs: Array<VyxAttr>, name: String) -> String {
+    for a in attrs {
+        if a.evt == false && a.dyn == false && a.name == name {
+            return a.value.copy()
+        }
+    }
+    return ""
+}
+
+/// Whether `attrs` binds the `@name` event.
+fn vhHasEvent(attrs: Array<VyxAttr>, name: String) -> Bool {
+    for a in attrs {
+        if a.evt && a.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhAnyEvent(attrs: Array<VyxAttr>) -> Bool {
+    for a in attrs {
+        if a.evt {
+            return true
+        }
+    }
+    return false
+}
+
+/// Whether a child list can name its parent: any node but whitespace text.
+fn vhHasContent(kids: Array<VyxNode>) -> Bool {
+    for k in kids {
+        if vhNodeHasContent(k) {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhNodeHasContent(n: VyxNode) -> Bool {
+    return match n {
+        VNText(s) => trim(s) != "",
+        VNInterp(x, line, col) => true,
+        VNRaw(x, line, col) => true,
+        VNChildren => true,
+        VNElem(tag, isComp, attrs, kids, line) => true,
+        VNIf(conds, cl, cc, bodies, els, has) => true,
+        VNFor(v, it, key, body, line, col) => true,
+    }
+}
+
+/// The first attribute's line, or `line` when there is none. A `VNElem` has no
+/// column, and the first attribute is on the tag.
+fn vhAnchorLine(attrs: Array<VyxAttr>, line: Int64) -> Int64 {
+    for a in attrs {
+        return a.line
+    }
+    return line
+}
+
+fn vhAnchorCol(attrs: Array<VyxAttr>) -> Int64 {
+    for a in attrs {
+        return a.col
+    }
+    return 1
+}
+
+/// A one-element template around `markup`, checked with no policy.
+fn checkOf(markup: String) -> String {
+    return vhCheck(noPolicy(), "<template>\n" + markup + "\n</template>\n", "T.vyx")
+}
+
+/// Whether the reports for `markup` mention `code`.
+fn fires(markup: String, code: String) -> Bool {
+    return contains(checkOf(markup), code)
+}
+
+test "img without alt fires; alt=\"\" and :alt do not" {
+    assert(fires("<img src=\"/a.png\" width=\"1\" height=\"1\"/>", "a11y/img-alt"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"1\" height=\"1\"/>", "a11y/img-alt") == false)
+    assert(fires("<img src=\"/a.png\" :alt=\"cap\" width=\"1\" height=\"1\"/>", "a11y/img-alt") == false)
+    assert(fires("<area shape=\"rect\"/>", "a11y/img-alt"))
+    assert(fires("<input type=\"image\" src=\"/go.png\"/>", "a11y/img-alt"))
+    assert(fires("<div>x</div>", "a11y/img-alt") == false)
+}
+
+test "an unsized image fires; a sized one does not" {
+    assert(fires("<img src=\"/a.png\" alt=\"\"/>", "perf/img-size"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"16\"/>", "perf/img-size"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"16\" height=\"16\"/>", "perf/img-size") == false)
+    assert(fires("<img src=\"/a.png\" alt=\"\" :width=\"w\" :height=\"h\"/>", "perf/img-size") == false)
+}
+
+test "a click handler on a non-interactive element fires unless it is made reachable" {
+    assert(fires("<div @click=\"go()\">x</div>", "a11y/click-target"))
+    assert(fires("<button @click=\"go()\">x</button>", "a11y/click-target") == false)
+    assert(fires("<a @click=\"go()\" href=\"/x\">x</a>", "a11y/click-target") == false)
+    assert(fires("<div @click=\"go()\" role=\"button\" tabindex=\"0\">x</div>", "a11y/click-target") == false)
+    assert(fires("<div>x</div>", "a11y/click-target") == false)
+}
+
+test "an inline on* handler is an error; @click and data- attributes are not" {
+    let out = checkOf("<div onclick=\"go()\">x</div>")
+    assert(contains(out, "//@diag error T.vyx:2:15 sec/inline-handler:"))
+    assert(contains(out, "write `@click`"))
+    assert(fires("<div @click=\"go()\" role=\"button\" tabindex=\"0\">x</div>", "sec/inline-handler") == false)
+    assert(fires("<div data-nav=\"prefetch\">x</div>", "sec/inline-handler") == false)
+    assert(fires("<ol start=\"2\"><li>x</li></ol>", "sec/inline-handler") == false)
+    // `once` begins with `on` and is not a handler.
+    assert(fires("<my-el once=\"true\" only=\"1\">x</my-el>", "sec/inline-handler") == false)
+}
+
+test "a literal javascript: URL is an error; http, relative and dynamic are not" {
+    assert(contains(checkOf("<a href=\"javascript:go()\">x</a>"), "//@diag error T.vyx:2:10 sec/unsafe-url:"))
+    assert(fires("<a href=\"JavaScript:go()\">x</a>", "sec/unsafe-url"))
+    assert(fires("<a href=\"java\tscript:go()\">x</a>", "sec/unsafe-url"))
+    assert(fires("<a href=\"/p/1\">x</a>", "sec/unsafe-url") == false)
+    assert(fires("<a href=\"https://x.test/\">x</a>", "sec/unsafe-url") == false)
+    assert(fires("<a :href=\"url\">x</a>", "sec/unsafe-url") == false)
+    assert(fires("<p title=\"javascript: the language\">x</p>", "sec/unsafe-url") == false)
+    // Browsers keep interior spaces in the scheme, so this URL is inert.
+    assert(fires("<a href=\"java script:go()\">x</a>", "sec/unsafe-url") == false)
+    // A browser trims end blanks.
+    assert(fires("<a href=\" javascript:go()\">x</a>", "sec/unsafe-url"))
+    assert(fires("<a href=\"javascript:go() \">x</a>", "sec/unsafe-url"))
+}
+
+test "v-html fires and can be waived at the line that earns it" {
+    assert(fires("<div v-html=\"body\"></div>", "sec/raw-html"))
+    let waived = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div v-html=\"body\"></div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(waived, "sec/raw-html") == false)
+}
+
+test "a positive tabindex fires; 0 and -1 do not" {
+    assert(fires("<div tabindex=\"3\" @click=\"go()\">x</div>", "a11y/tabindex-positive"))
+    assert(fires("<div tabindex=\"0\" @click=\"go()\">x</div>", "a11y/tabindex-positive") == false)
+    assert(fires("<div tabindex=\"-1\">x</div>", "a11y/tabindex-positive") == false)
+}
+
+test "a static id inside a v-for fires; outside one, or bound, it does not" {
+    assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\"><b id=\"row\">x</b></li></ul>", "a11y/dup-id"))
+    assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\" id=\"row\">x</li></ul>", "a11y/dup-id"))
+    assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\"><b :id=\"r.id\">x</b></li></ul>", "a11y/dup-id") == false)
+    assert(fires("<ul><li><b id=\"row\">x</b></li></ul>", "a11y/dup-id") == false)
+}
+
+test "target=_blank without noreferrer fires" {
+    assert(fires("<a href=\"/x\" target=\"_blank\">x</a>", "sec/blank-target"))
+    assert(fires("<a href=\"/x\" target=\"_blank\" rel=\"noopener noreferrer\">x</a>", "sec/blank-target") == false)
+    assert(fires("<a href=\"/x\" target=\"_self\">x</a>", "sec/blank-target") == false)
+}
+
+test "an empty control fires; content or an aria-label names it" {
+    assert(fires("<button @click=\"go()\"></button>", "a11y/control-name"))
+    assert(fires("<button @click=\"go()\">  </button>", "a11y/control-name"))
+    assert(fires("<button @click=\"go()\" aria-label=\"close\"></button>", "a11y/control-name") == false)
+    assert(fires("<button @click=\"go()\">ok</button>", "a11y/control-name") == false)
+    assert(fires("<button @click=\"go()\">{{ label }}</button>", "a11y/control-name") == false)
+    assert(fires("<button @click=\"go()\"><span>ok</span></button>", "a11y/control-name") == false)
+    assert(fires("<h2></h2>", "a11y/control-name"))
+}
+
+test "an unlabelled input fires; a wrapping label, an id or an aria-label names it" {
+    assert(fires("<input class=\"q\" @input=\"setQty()\"/>", "a11y/input-label"))
+    assert(fires("<label>Qty<input class=\"q\"/></label>", "a11y/input-label") == false)
+    assert(fires("<input class=\"q\" id=\"qty\"/>", "a11y/input-label") == false)
+    assert(fires("<input class=\"q\" aria-label=\"quantity\"/>", "a11y/input-label") == false)
+    assert(fires("<input type=\"hidden\" name=\"t\"/>", "a11y/input-label") == false)
+    assert(fires("<input type=\"submit\" value=\"go\"/>", "a11y/input-label") == false)
+    assert(fires("<input :type=\"kind\"/>", "a11y/input-label") == false)
+    assert(fires("<textarea></textarea>", "a11y/input-label"))
+}
+
+test "a handler button inside a form fires unless it names its type" {
+    assert(fires("<form><button @click=\"add()\">add</button></form>", "a11y/button-type"))
+    assert(fires("<form><button type=\"button\" @click=\"add()\">add</button></form>", "a11y/button-type") == false)
+    assert(fires("<form><button>submit</button></form>", "a11y/button-type") == false)
+    assert(fires("<div><button @click=\"add()\">add</button></div>", "a11y/button-type") == false)
+}
+
+test "a static style attribute is an error; a bound :style is not" {
+    assert(contains(checkOf("<p style=\"color:red\">x</p>"), "//@diag error T.vyx:2:11 sec/inline-style:"))
+    assert(fires("<p :style=\"barStyle(b)\">x</p>", "sec/inline-style") == false)
+    assert(fires("<p class=\"lede\">x</p>", "sec/inline-style") == false)
+}
+
+test "autoplay fires on audio and video only" {
+    assert(fires("<video src=\"/a.mp4\" autoplay=\"autoplay\"></video>", "a11y/autoplay"))
+    assert(fires("<audio src=\"/a.mp3\" :autoplay=\"wanted\"></audio>", "a11y/autoplay"))
+    assert(fires("<video src=\"/a.mp4\" controls=\"controls\"></video>", "a11y/autoplay") == false)
+    assert(fires("<div autoplay=\"autoplay\">x</div>", "a11y/autoplay") == false)
+}
+
+test "a th without scope fires; col, row and a bound scope do not" {
+    assert(fires("<table><thead><tr><th>Name</th></tr></thead></table>", "a11y/th-scope"))
+    assert(fires("<table><thead><tr><th scope=\"col\">Name</th></tr></thead></table>", "a11y/th-scope") == false)
+    assert(fires("<table><tbody><tr><th scope=\"row\">N</th><td>1</td></tr></tbody></table>", "a11y/th-scope") == false)
+    assert(fires("<table><thead><tr><th :scope=\"kind\">N</th></tr></thead></table>", "a11y/th-scope") == false)
+    assert(fires("<table><tbody><tr><td>1</td></tr></tbody></table>", "a11y/th-scope") == false)
+}
+
+test "an input without type fires; any type, static or bound, does not" {
+    assert(fires("<input name=\"q\" id=\"q\"/>", "html/input-type"))
+    assert(fires("<input name=\"q\" id=\"q\" type=\"search\"/>", "html/input-type") == false)
+    assert(fires("<input name=\"q\" id=\"q\" :type=\"kind\"/>", "html/input-type") == false)
+    assert(fires("<textarea id=\"q\"></textarea>", "html/input-type") == false)
+}
+
+test "a tr directly inside a table fires; one inside thead, tbody or tfoot does not" {
+    assert(fires("<table><tr><td>1</td></tr></table>", "html/prefer-tbody"))
+    assert(fires("<table><tbody><tr><td>1</td></tr></tbody></table>", "html/prefer-tbody") == false)
+    assert(fires("<table><thead><tr><th scope=\"col\">N</th></tr></thead></table>", "html/prefer-tbody") == false)
+    assert(fires("<table><tfoot><tr><td>1</td></tr></tfoot></table>", "html/prefer-tbody") == false)
+    assert(fires("<div><table><tbody><tr><td>1</td></tr></tbody></table></div>", "html/prefer-tbody") == false)
+}
+
+test "content inside a void element fires; a self-closed void does not" {
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"1\" height=\"1\">cap</img>", "html/void-content"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"1\" height=\"1\"/>", "html/void-content") == false)
+    assert(fires("<br></br>", "html/void-content") == false)
+    assert(fires("<span>x</span>", "html/void-content") == false)
+}
+
+test "an external script or sheet without integrity fires; a local one does not" {
+    assert(fires("<script src=\"https://cdn.test/a.js\"></script>", "sec/require-sri"))
+    assert(fires("<script src=\"//cdn.test/a.js\"></script>", "sec/require-sri"))
+    assert(fires("<link rel=\"stylesheet\" href=\"https://cdn.test/a.css\"/>", "sec/require-sri"))
+    assert(fires("<script src=\"https://cdn.test/a.js\" integrity=\"sha384-x\"></script>", "sec/require-sri") == false)
+    assert(fires("<script src=\"/app.js\"></script>", "sec/require-sri") == false)
+    assert(fires("<link rel=\"stylesheet\" href=\"/style.css\"/>", "sec/require-sri") == false)
+    assert(fires("<link rel=\"icon\" href=\"https://cdn.test/a.png\"/>", "sec/require-sri") == false)
+    assert(fires("<script :src=\"url\"></script>", "sec/require-sri") == false)
+}
+
+test "an attribute foreign to its element fires; every owned space does not" {
+    assert(fires("<img scr=\"/a.png\" alt=\"\" width=\"1\" height=\"1\"/>", "html/attr-name"))
+    assert(fires("<div alt=\"misplaced\">x</div>", "html/attr-name"))
+    // The element's own, a global, and a binding of either say nothing.
+    assert(fires("<a href=\"/x\">x</a>", "html/attr-name") == false)
+    assert(fires("<div class=\"c\" id=\"i\" title=\"t\">x</div>", "html/attr-name") == false)
+    assert(fires("<img :src=\"u\" alt=\"\" width=\"1\" height=\"1\"/>", "html/attr-name") == false)
+    // The spaces with rules (or vocabularies) of their own.
+    assert(fires("<li :key=\"r.id\">x</li>", "html/attr-name") == false)
+    assert(fires("<div data-track=\"x\">x</div>", "html/attr-name") == false)
+    assert(fires("<div role=\"note\" aria-label=\"n\">x</div>", "html/attr-name") == false)
+    assert(fires("<svg viewBox=\"0 0 4 4\"><path d=\"M0 0\" fill=\"none\"/></svg>", "html/attr-name") == false)
+    assert(fires("<my-thing whatever=\"x\">x</my-thing>", "html/attr-name") == false)
+    // An unknown ELEMENT is `html/element-name`'s report, not this rule's.
+    assert(fires("<buton type=\"button\">x</buton>", "html/attr-name") == false)
+}
+
+test "an entity in text fires; plain text, a bare ampersand and interpolation do not" {
+    assert(fires("<p>a &nbsp; b</p>", "html/entity-in-text"))
+    assert(fires("<p>dash &mdash; dash</p>", "html/entity-in-text"))
+    assert(fires("<p>em &#8212; em</p>", "html/entity-in-text"))
+    assert(fires("<p>salt &amp; pepper</p>", "html/entity-in-text"))
+    // A bare `&` is escaped; nothing to say.
+    assert(fires("<p>salt & pepper</p>", "html/entity-in-text") == false)
+    assert(fires("<p>plain text</p>", "html/entity-in-text") == false)
+    // `& then;` with a space is not a reference shape.
+    assert(fires("<p>now & then; later</p>", "html/entity-in-text") == false)
+}
+
+test "a waiver that waives nothing fires; one that earns its keep does not" {
+    // This marker covers sec/raw-html on the line below, so it is used.
+    let used = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div v-html=\"body\"></div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(used, "hint/unused-waiver") == false)
+    // The same marker over a plain div waives nothing.
+    let stale = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div>x</div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(stale, "hint/unused-waiver"))
+    assert(contains(stale, "waives nothing here"))
+    // A template with no marker never pays the audit pass, and says nothing.
+    assert(contains(vhCheck(noPolicy(), "<template>\n<div>x</div>\n</template>\n", "T.vyx"), "unused-waiver") == false)
+    // A marker may vouch for a marker: the audit rule is waivable like any other.
+    let vouched = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore hint/unused-waiver: seasonal template, rule returns -->\n<!-- vyrn-ignore sec/raw-html -->\n<div>x</div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(vouched, "hint/unused-waiver") == false)
+}
+
+test "a misspelled aria attribute fires; the vocabulary and bound values do not" {
+    assert(fires("<div arial-label=\"menu\">x</div>", "a11y/aria-name"))
+    assert(fires("<div aria-lable=\"menu\">x</div>", "a11y/aria-name"))
+    assert(fires("<div aria-label=\"menu\">x</div>", "a11y/aria-name") == false)
+    // A bound name counts: the value is dynamic, the typo is not.
+    assert(fires("<div :aria-lable=\"m\">x</div>", "a11y/aria-name"))
+    assert(fires("<div :aria-hidden=\"h\">x</div>", "a11y/aria-name") == false)
+    // Deprecated ARIA names are still names, not typos.
+    assert(fires("<div aria-grabbed=\"true\">x</div>", "a11y/aria-name") == false)
+}
+
+test "a removed attribute fires on its element and nowhere else" {
+    assert(fires("<td align=\"left\">x</td>", "html/deprecated-attr"))
+    assert(fires("<table cellpadding=\"0\"><tbody><tr><td>x</td></tr></tbody></table>", "html/deprecated-attr"))
+    assert(fires("<span align=\"left\">x</span>", "html/deprecated-attr") == false)
+    assert(fires("<td>x</td>", "html/deprecated-attr") == false)
+    // `scope` is removed on `<td>` and required on `<th>`.
+    assert(fires("<td scope=\"row\">x</td>", "html/deprecated-attr"))
+    assert(fires("<th scope=\"row\">x</th>", "html/deprecated-attr") == false)
+}
+
+test "an unknown element fires; the vocabulary, custom elements and foreign content do not" {
+    assert(fires("<buton>go</buton>", "html/element-name"))
+    assert(fires("<button type=\"button\">go</button>", "html/element-name") == false)
+    // A dash makes it a custom element, legal by definition.
+    assert(fires("<my-widget>x</my-widget>", "html/element-name") == false)
+    // `<svg>` is in the vocabulary; its CHILDREN are foreign content with a
+    // vocabulary of their own, which the table does not describe.
+    assert(fires("<svg><path d=\"M0 0\"/></svg>", "html/element-name") == false)
+    assert(fires("<search><p>x</p></search>", "html/element-name") == false)
+}
+
+test "a removed element fires; its replacement does not" {
+    assert(fires("<center>x</center>", "html/deprecated"))
+    assert(fires("<marquee>x</marquee>", "html/deprecated"))
+    assert(fires("<font size=\"3\">x</font>", "html/deprecated"))
+    assert(fires("<div>x</div>", "html/deprecated") == false)
+    // Removed, so not also unknown: one report.
+    assert(fires("<center>x</center>", "html/element-name") == false)
+}
+
+test "a component call is not an HTML element" {
+    // `<Img>` is a component call; no element rule reads it.
+    assert(fires("<div><Img src=\"/a.png\"/></div>", "a11y/img-alt") == false)
+    assert(fires("<div><Row @click=\"go()\"/></div>", "a11y/click-target") == false)
+}
+
+test "configuration turns a rule off and moves another to error" {
+    let p = match policyOf("{\"hints\": {\"perf/img-size\": \"off\", \"a11y/img-alt\": \"error\"}}", "hints") {
+        Ok(v) => v,
+        Err(e) => noPolicy(),
+    }
+    let out = vhCheck(p, "<template>\n<img src=\"/a.png\"/>\n</template>\n", "T.vyx")
+    assert(contains(out, "perf/img-size") == false)
+    assert(contains(out, "//@diag error T.vyx:2:11 a11y/img-alt:"))
+}
+
+test "a template that does not parse earns no advice" {
+    assertEq(vhCheck(noPolicy(), "<template>\n<div><span>\n</template>\n", "T.vyx"), "")
+    assertEq(vhCheck(noPolicy(), "no template here\n", "T.vyx"), "")
+}

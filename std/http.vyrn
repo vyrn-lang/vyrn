@@ -1,0 +1,1447 @@
+/// std/http -- the REST projection: hand-written routes over the same
+/// procedures the derived RPC surface reflects on. A projection is opt-in,
+/// because a path like `GET /pastes/{id}` is API design that reflection cannot
+/// derive:
+///
+/// ```vyrn
+/// // server/api/pastes.http.vyrn -- base path `/pastes`, from the stem.
+/// import { http, Route, GET, POST } from "std/http"
+/// import { recent, byId, create } from http("./pastes")
+///
+/// export fn routes() -> Array<Route> {
+///     return [GET(recent("/")), GET(byId("/{id}")), POST(create("/"))]
+/// }
+/// ```
+///
+/// The chain is value-level: every call takes a `Route` and returns a `Route`,
+/// so the type never widens. The pattern sits in the procedure's own parameter
+/// slot, whose generated type admits only the placeholders the input record has
+/// fields for, so `byId("/{ID}")` is a checker error at the call site. A generic
+/// `GET(pattern, proc)` could not do that: a type parameter cannot name a type to
+/// `fromJson`.
+
+import { Json, JsonField, copyJson, copyJsonFields, emit } from "std/json"
+import { parseJson } from "std/jsonread"
+import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
+import { fnv1aStr, sha1 } from "std/hash"
+// A path segment is wire text and a placeholder binds a value: `httpMatch`
+// decodes on the way in, `httpFill` encodes on the way out, with the RFC 3986
+// alphabet `std/ui` uses.
+import { base64EncodeBytes, urlDecode, urlEncode } from "std/codecs"
+import { civil, fromMillis, hour, minute, second } from "std/time"
+
+// A projection publishes the same procedures, so it applies the same rule.
+import { validateContract } from "std/rpc"
+
+// A projection re-exports each procedure under the declaration's own name; the
+// symbol map is the only record that the two are one, which a rename needs.
+import { Symbol, symbol, symbolMapFn } from "std/symbolmap"
+import { endsWith, startsWith } from "std/strpred"
+
+/// What a mounted route runs: the request and the placeholder bindings. `None`
+/// declines, and `mount` tries the next group.
+export type Handler = fn(Request, Map<String, String>) -> Option<Response>
+
+/// A whole mounted subsystem, such as `rpcHandle` or a page router. A prefix
+/// binds no placeholders, so it takes only the request.
+export type Surface = fn(Request) -> Option<Response>
+
+/// Whether an `Err` payload is the absence this resource is named after. A
+/// `String`, because `Route` erases the procedure's error type.
+export type IsMissing = fn(String) -> Bool
+
+/// One route: a method, a full path pattern (base + sub-path), what runs, and
+/// the `derived` policy line the diagnostics quote. `prefix` marks a subsystem
+/// mounted under `pattern` and selects whether `mount` calls `run` or `whole`.
+/// `method` is `""` until a method constructor sets it; `mount` traps on that.
+///
+/// Two fn fields, not one plus an adapting closure: an adapter would allocate a
+/// capture block per subsystem and add a dispatch per request. The policy fields
+/// are flat rather than a nested record, so no `fn` value sits one record deeper.
+export type Route = {
+    method: String,
+    pattern: String,
+    prefix: Bool,
+    run: Handler,
+    whole: Surface,
+    derived: String,
+    // `Cache-Control: max-age=N`; `-1` writes no header (`cacheFor`).
+    maxAge: Int64,
+    // Whether to compute an `ETag` and answer conditionals with it (`etag`).
+    validator: Bool,
+    // The response field carrying epoch millis for `Last-Modified`; `""` none.
+    modified: String,
+    // The `Vary` header this route forces; `""` keeps what the handler said.
+    varyOn: String,
+    // A success status that replaces the handler's; `0` keeps it (`status`).
+    ok: Int64,
+    // A `Location` template like `/pastes/{id}`; `""` none (`createdAt`).
+    location: String,
+    // Which `Err` payloads mean 404 (`notFoundWhen`).
+    missing: IsMissing,
+}
+
+/// The unused callable of a path route or a prefix route; `prefix` decides which `mount` calls.
+fn httpNoRun(req: Request, ps: Map<String, String>) -> Option<Response> {
+    return None
+}
+
+fn httpNoWhole(req: Request) -> Option<Response> {
+    return None
+}
+
+/// The default `notFoundWhen`: nothing is an absence. Named, so a fresh `Route` holds a real `fn` value.
+fn httpNeverMissing(why: String) -> Bool {
+    return false
+}
+
+/// A route with no method yet; `pattern` is already base-qualified. Generated constructors call it.
+export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
+    return Route {
+        method: "",
+        pattern: httpTidy(pattern),
+        prefix: false,
+        run: run.copy(),
+        whole: httpNoWhole,
+        derived: derived.copy(),
+        maxAge: -1,
+        validator: false,
+        modified: "",
+        varyOn: "",
+        ok: 0,
+        location: "",
+        missing: httpNeverMissing,
+    }
+}
+
+/// Every field of `r`, so a combinator sets the one it owns. Vyrn has no record-update syntax.
+fn httpCopy(r: Route) -> Route {
+    return Route {
+        method: r.method.copy(),
+        pattern: r.pattern.copy(),
+        prefix: r.prefix,
+        run: r.run.copy(),
+        whole: r.whole.copy(),
+        derived: r.derived.copy(),
+        maxAge: r.maxAge,
+        validator: r.validator,
+        modified: r.modified.copy(),
+        varyOn: r.varyOn.copy(),
+        ok: r.ok,
+        location: r.location.copy(),
+        missing: r.missing.copy(),
+    }
+}
+
+/// `/pastes/` => `/pastes`, `//` => `/`. Base and sub-path are concatenated, so
+/// `GET(recent("/"))` would otherwise mount `/pastes/`.
+fn httpTidy(pattern: String) -> String {
+    if pattern == "" {
+        return "/"
+    }
+    if pattern.endsWith("/") && pattern != "/" {
+        return substring(pattern, 0, pattern.byteLength - 1)
+    }
+    return pattern.copy()
+}
+
+/// Sets the route's method; `POST`, `PUT`, `PATCH` and `DELETE` are the same
+/// with their verb. Uppercase, because the five verbs are HTTP's own spelling.
+export fn GET(r: Route) -> Route {
+    return httpWithMethod(r, "GET")
+}
+
+export fn POST(r: Route) -> Route {
+    return httpWithMethod(r, "POST")
+}
+
+export fn PUT(r: Route) -> Route {
+    return httpWithMethod(r, "PUT")
+}
+
+export fn PATCH(r: Route) -> Route {
+    return httpWithMethod(r, "PATCH")
+}
+
+export fn DELETE(r: Route) -> Route {
+    return httpWithMethod(r, "DELETE")
+}
+
+fn httpWithMethod(r: Route, method: String) -> Route {
+    let line = method + " " + r.pattern + " " + r.derived
+    let mut out = httpCopy(r)
+    out.method = method.copy()
+    out.derived = line
+    return out
+}
+
+/// A whole subsystem mounted under `prefix`, such as the RPC surface or a page
+/// router, in the `handle` shape.
+export fn surface(prefix: String, run: consume Surface) -> Route {
+    return Route {
+        method: "*",
+        pattern: httpTidy(prefix),
+        prefix: true,
+        run: httpNoRun,
+        whole: run,
+        derived: "* " + prefix + " (surface)",
+        maxAge: -1,
+        validator: false,
+        modified: "",
+        varyOn: "",
+        ok: 0,
+        location: "",
+        missing: httpNeverMissing,
+    }
+}
+
+/// The route policy. Every method is `Route -> Route`, so the chain stays one
+/// nominal value to the checker:
+///
+/// ```vyrn
+/// GET(byId("/{id}")).cacheFor(3600).etag().notFoundWhen(|why| why == "no such user")
+/// ```
+export protocol Policy {
+    /// `Cache-Control: max-age=N` on a successful answer. Neither `public`, which
+    /// would let a shared cache store a credentialed response (RFC 9111 section
+    /// 3.5), nor `private`, which would stop a CDN caching the anonymous GET.
+    fn cacheFor(self, seconds: Int64) -> Route
+
+    /// A strong `ETag`, and `If-None-Match` answered with 304. The tag is
+    /// `FNV-1a-64(contentType + "\n" + body)` in hex: the representation, so two
+    /// `Vary` variants differ, and content only, so every process emits the same
+    /// tag. A 64-bit collision serves a 304 for content the client lacks.
+    fn etag(self) -> Route
+
+    /// `Last-Modified` from the named epoch-millis field, and `If-Modified-Since`
+    /// answered with 304. A missing field writes no header rather than trapping.
+    fn lastModified(self, field: String) -> Route
+
+    /// The `Vary` header, written to `Response.vary`.
+    fn vary(self, headers: String) -> Route
+
+    /// The status a successful answer carries, such as 202. An error keeps its
+    /// own status.
+    fn status(self, code: Int64) -> Route
+
+    /// `201 Created` with a `Location` built from the response: `"/pastes/{id}"`
+    /// takes `{id}` from the created object's `id` field. A template, because a
+    /// closure over the output type would make `Route` generic. An unknown
+    /// `{name}` stays verbatim in the URL.
+    fn createdAt(self, template: String) -> Route
+
+    /// Which `Err` payloads are an absence: `.notFoundWhen(|why| why == "no such
+    /// paste")` makes that error a 404, and every other `Err` stays a 200.
+    fn notFoundWhen(self, isMissing: IsMissing) -> Route
+}
+
+impl Policy for Route {
+    fn cacheFor(self, seconds: Int64) -> Route {
+        let mut out = httpCopy(self)
+        out.maxAge = seconds
+        out.derived = out.derived + " max-age=\{seconds}"
+        return out
+    }
+
+    fn etag(self) -> Route {
+        let mut out = httpCopy(self)
+        out.validator = true
+        out.derived = out.derived + " etag"
+        return out
+    }
+
+    fn lastModified(self, field: String) -> Route {
+        let mut out = httpCopy(self)
+        out.modified = field.copy()
+        out.derived = out.derived + " last-modified=" + field
+        return out
+    }
+
+    fn vary(self, headers: String) -> Route {
+        let mut out = httpCopy(self)
+        out.varyOn = headers.copy()
+        out.derived = out.derived + " vary=" + headers
+        return out
+    }
+
+    fn status(self, code: Int64) -> Route {
+        let mut out = httpCopy(self)
+        out.ok = code
+        out.derived = out.derived + " status=\{code}"
+        return out
+    }
+
+    fn createdAt(self, template: String) -> Route {
+        let mut out = httpCopy(self)
+        out.location = template.copy()
+        out.derived = out.derived + " created-at=" + template
+        return out
+    }
+
+    fn notFoundWhen(self, isMissing: IsMissing) -> Route {
+        let mut out = httpCopy(self)
+        out.missing = isMissing.copy()
+        out.derived = out.derived + " not-found-when"
+        return out
+    }
+}
+
+/// What a mounted stream runs: the request, the bindings, and the cursor, which
+/// is the client's `Last-Event-ID` when the route is `resumable` and `0`
+/// otherwise. It yields encoded frames (see `event`): `std/stream`'s `map` is
+/// eager, so mapping records to frames would buffer the whole feed.
+export type Feed = fn(Request, Map<String, String>, Int64) -> Stream<String>
+
+/// A mounted event stream. Not a `Route`: every `Policy` option describes a
+/// response that exists all at once, and an option meaningless to a transport is
+/// absent from it.
+export type Live = {
+    pattern: String,
+    feed: Feed,
+    // `retry: N` in milliseconds, written before the first frame; `0` writes
+    // none (`retryAfter`).
+    retry: Int64,
+    // Whether `Last-Event-ID` seeds the producer (`resumable`).
+    resume: Bool,
+    derived: String,
+}
+
+/// Mounts `feed` as an event stream at `pattern`. The pattern is an argument: a
+/// feed takes the request, not a record, so there are no fields to check the
+/// placeholders against.
+export fn sse(pattern: String, feed: consume Feed) -> Live {
+    return Live {
+        pattern: httpTidy(pattern),
+        feed: feed,
+        retry: 0,
+        resume: false,
+        derived: "SSE " + httpTidy(pattern),
+    }
+}
+
+/// A stream's policy. No `keepAlive`: a pull producer with nothing to say ends
+/// rather than idling.
+export protocol Wire {
+    /// `retry: N` before the first frame. A producer cannot say "nothing yet",
+    /// so a feed that catches up ends and the client returns `ms` later: this is
+    /// the poll interval.
+    fn retryAfter(self, ms: Int64) -> Live
+
+    /// `Last-Event-ID` becomes the producer's seed, so the feed resumes where the
+    /// client left off. Write the cursor as each frame's `id`. Without
+    /// it the seed is `0`.
+    fn resumable(self) -> Live
+}
+
+impl Wire for Live {
+    fn retryAfter(self, ms: Int64) -> Live {
+        return Live {
+            pattern: self.pattern.copy(),
+            feed: self.feed.copy(),
+            retry: ms,
+            resume: self.resume,
+            derived: self.derived + " retry=\{ms}",
+        }
+    }
+
+    fn resumable(self) -> Live {
+        return Live {
+            pattern: self.pattern.copy(),
+            feed: self.feed.copy(),
+            retry: self.retry,
+            resume: true,
+            derived: self.derived + " resumable",
+        }
+    }
+}
+
+/// One SSE frame: `id:`, `event:`, the `data:` lines and the closing blank line.
+/// An empty `id` or `name` writes no field. CR, LF and CRLF all end a line, so no
+/// argument may end one: `data` splits at every break into further `data:`
+/// lines, and `id` and `name` lose their CR and LF bytes, so an untrusted id
+/// cannot inject an event. A NUL cannot reach here; no `String` holds one.
+export fn event(id: String, name: String, data: String) -> String {
+    let mut out = ""
+    let safeId = sseOneLine(id)
+    if safeId != "" {
+        out = out + "id: " + safeId + "\n"
+    }
+    let safeName = sseOneLine(name)
+    if safeName != "" {
+        out = out + "event: " + safeName + "\n"
+    }
+    let flat = replace(replace(data, "\r\n", "\n"), "\r", "\n")
+    return out + "data: " + joinWith(split(flat, "\n"), "\ndata: ") + "\n\n"
+}
+
+/// `s` without CR and LF; see [`event`].
+fn sseOneLine(s: String) -> String {
+    let mut out: Array<UInt8> = []
+    for b in bytes(s) {
+        if b != '\r' && b != '\n' {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// A mounted WebSocket; not a `Route`. Server-push only: the host parses inbound
+/// frames to honour a close and the masking rule, and delivers no message.
+/// No heartbeat: between frames the host is blocked in the producer, and a
+/// failed write already detects a vanished peer.
+export type Socket = {
+    pattern: String,
+    feed: Feed,
+    // The close code the host sends when the feed ends (`closeCode`); 1000 is
+    // normal closure.
+    closing: Int64,
+    // Echoed as `Sec-WebSocket-Protocol` only when the client offered it
+    // (`subprotocol`); `""` negotiates none.
+    subproto: String,
+    // The largest payload per frame; longer ones fragment (`maxFrame`). `0`
+    // never fragments.
+    fragment: Int64,
+    derived: String,
+}
+
+/// Mounts `feed` as a WebSocket at `pattern`. The element is the message payload,
+/// not a frame: Vyrn owns what the user chooses (SSE's fields), and the host owns
+/// what the protocol fixes (opcode, length, mask).
+export fn ws(pattern: String, feed: consume Feed) -> Socket {
+    return Socket {
+        pattern: httpTidy(pattern),
+        feed: feed,
+        closing: 1000,
+        subproto: "",
+        fragment: 0,
+        derived: "WS " + httpTidy(pattern),
+    }
+}
+
+/// A socket's policy.
+export protocol Frames {
+    fn closeCode(self, code: Int64) -> Socket
+    fn subprotocol(self, name: String) -> Socket
+    fn maxFrame(self, size: Int64) -> Socket
+}
+
+impl Frames for Socket {
+    fn closeCode(self, code: Int64) -> Socket {
+        return Socket {
+            pattern: self.pattern.copy(),
+            feed: self.feed.copy(),
+            closing: code,
+            subproto: self.subproto.copy(),
+            fragment: self.fragment,
+            derived: self.derived + " close=\{code}",
+        }
+    }
+
+    fn subprotocol(self, name: String) -> Socket {
+        return Socket {
+            pattern: self.pattern.copy(),
+            feed: self.feed.copy(),
+            closing: self.closing,
+            subproto: name.copy(),
+            fragment: self.fragment,
+            derived: self.derived + " subprotocol=" + name,
+        }
+    }
+
+    fn maxFrame(self, size: Int64) -> Socket {
+        return Socket {
+            pattern: self.pattern.copy(),
+            feed: self.feed.copy(),
+            closing: self.closing,
+            subproto: self.subproto.copy(),
+            fragment: size,
+            derived: self.derived + " max-frame=\{size}",
+        }
+    }
+}
+
+/// RFC 6455 section 4.2.2's public GUID for `Sec-WebSocket-Accept`.
+fn httpWsGuid() -> String {
+    return "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+}
+
+/// The handshake response, with the producer handed to the host. A bad upgrade
+/// answers 426 for another version and 400 otherwise. A 101's `body` carries
+/// the close code and the fragment limit for the host, which writes none of it.
+fn httpOpenSocket(w: Socket, req: Request, ps: Map<String, String>) -> Response {
+    if httpHeader(req, "sec-websocket-version") != "13" {
+        return Response {
+            status: 426,
+            contentType: "text/plain",
+            body: "this endpoint speaks WebSocket version 13",
+            vary: "",
+            headers: ["Sec-WebSocket-Version": "13"],
+        }
+    }
+    let key = httpHeader(req, "sec-websocket-key")
+    if key == "" || httpHasToken(httpHeader(req, "upgrade"), "websocket") == false || httpHasToken(httpHeader(req, "connection"), "upgrade") == false {
+        return Response {
+            status: 400,
+            contentType: "text/plain",
+            body: "not a WebSocket upgrade",
+            vary: "",
+            headers: [:],
+        }
+    }
+    let accept = base64EncodeBytes(sha1(bytes(key + httpWsGuid())))
+    let mut headers: Map<String, String> = [
+        "Upgrade": "websocket",
+        "Connection": "Upgrade",
+        "Sec-WebSocket-Accept": accept,
+    ]
+    // The echo is the client's own spelling of the offered token: a client
+    // fails a handshake selecting a subprotocol it did not send (section 4.2.2).
+    if w.subproto != "" {
+        let offered = httpTokenAsOffered(httpHeader(req, "sec-websocket-protocol"), w.subproto)
+        if offered != "" {
+            headers["Sec-WebSocket-Protocol"] = offered
+        }
+    }
+    serveStream(httpFeed(w.feed, req, ps, 0))
+    return Response {
+        status: 101,
+        contentType: "",
+        body: "\{w.closing} \{w.fragment}",
+        vary: "",
+        headers: headers,
+    }
+}
+
+/// The client's spelling of `token` in the comma-separated header `value`, or "".
+/// Matches case-insensitively (RFC 9110 section 7.6.1); see `httpOpenSocket`.
+fn httpTokenAsOffered(value: String, token: String) -> String {
+    for part in split(value, ",") {
+        let t = trim(part)
+        if lowerOf(t) == lowerOf(token) {
+            return t.copy()
+        }
+    }
+    return ""
+}
+
+/// Whether a comma-separated header value lists `token`, case-insensitively.
+fn httpHasToken(value: String, token: String) -> Bool {
+    return httpTokenAsOffered(value, token) != ""
+}
+
+/// ASCII lowercase; a header value is not folded at the edge as a name is.
+fn lowerOf(s: String) -> String {
+    let mut out: Array<UInt8> = []
+    for b in bytes(s) {
+        if b >= 'A' && b <= 'Z' {
+            out.push(b + 32)
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, s)
+}
+
+/// The route a socket shadows, for the mount audit.
+fn httpSocketRoute(w: Socket) -> Route {
+    return httpRoute(w.pattern, httpNoRun, w.derived)
+}
+
+fn httpSocketMatch(w: Socket, req: Request) -> Option<Map<String, String>> {
+    if req.method != "GET" {
+        return None
+    }
+    return httpMatch(httpWithMethod(httpSocketRoute(w), "GET"), req)
+}
+
+/// The route a stream shadows, for the mount audit.
+fn httpLiveRoute(l: Live) -> Route {
+    return httpRoute(l.pattern, httpNoRun, l.derived)
+}
+
+/// Hands the producer to the host and answers with the header block. The host
+/// pulls, writes, and closes on the first failed write, which is the disconnect
+/// signal. The `body` is the prologue written before the first frame.
+fn httpOpen(l: Live, req: Request, ps: Map<String, String>) -> Response {
+    let seed = if l.resume { httpLastEventId(req) } else { 0 }
+    serveStream(httpFeed(l.feed, req, ps, seed))
+    let prologue = if l.retry > 0 { "retry: \{l.retry}\n\n" } else { "" }
+    return Response {
+        status: 200,
+        contentType: "text/event-stream",
+        body: prologue,
+        vary: "",
+        headers: [:],
+    }
+}
+
+/// Calls the stored feed; a `fn` value is called only through a parameter.
+fn httpFeed(f: Feed, req: Request, ps: Map<String, String>, seed: Int64) -> Stream<String> {
+    return f(req, ps, seed)
+}
+
+/// The cursor a reconnecting client resumes from; absent or non-integer reads as `0`.
+fn httpLastEventId(req: Request) -> Int64 {
+    return match parse(httpHeader(req, "last-event-id")) {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+/// Resolves `req` against the mounted groups, in order; the first match wins.
+/// A route that an earlier group, stream or socket already answers traps.
+/// The audit runs once per process, so `vyrn serve` reports it at startup; an
+/// app that changes its groups between requests is outside it. Streams and
+/// sockets are separate lists, because Vyrn has no sum over two record types.
+export fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> Option<Response> {
+    httpCheckMount(groups, live, sockets)
+    // A malformed escape is a fault in the request: 400, as `httpOpenSocket`
+    // answers an unreadable upgrade. Checked once, before every route.
+    if httpIsUrl(req.path) == false {
+        return Some(Response {
+            status: 400,
+            contentType: "text/plain",
+            body: "the request path is not percent-encoded text",
+            vary: "",
+            headers: [:],
+        })
+    }
+    for w in sockets {
+        if let Some(ps) = httpSocketMatch(w, req) {
+            return Some(httpOpenSocket(w, req, ps))
+        }
+    }
+    // Streams resolve before the buffered groups: a stream's path is exact, and
+    // a pattern like `/pastes/{id}` would swallow it.
+    for l in live {
+        if let Some(ps) = httpLiveMatch(l, req) {
+            return Some(httpOpen(l, req, ps))
+        }
+    }
+    for g in groups {
+        for r in g {
+            if let Some(ps) = httpMatch(r, req) {
+                let answer = if r.prefix { httpInvokeWhole(r.whole, req) } else { httpInvoke(r.run, req, ps) }
+                // A consuming match: `if let` would leave the `Option`'s box
+                // without an owner, one leak per answered request.
+                match consume answer {
+                    Some(resp) => { return Some(httpApply(r, req, resp)) }
+                    None => {}
+                }
+            }
+        }
+    }
+    return None
+}
+
+/// Calls a stored handler; a `fn` value is called only through a parameter.
+fn httpInvoke(h: Handler, req: Request, ps: Map<String, String>) -> Option<Response> {
+    return h(req, ps)
+}
+
+fn httpInvokeWhole(h: Surface, req: Request) -> Option<Response> {
+    return h(req)
+}
+
+// Policy applies in `mount`, the one place that holds the route, the request
+// and the response at once, so no combinator captures anything.
+
+fn httpApply(r: Route, req: Request, resp: consume Response) -> Response {
+    // A mounted subsystem owns its headers and caching.
+    if r.prefix {
+        return resp
+    }
+    // Edited rather than rebuilt, so the body is not copied.
+    let mut answered = httpMapMissing(r, resp)
+    // An error answer is not a representation: no cache headers, no validators.
+    if answered.status >= 300 {
+        return answered
+    }
+    let tag = if r.validator { httpEtag(answered.contentType, answered.body) } else { "" }
+    let stamp = if r.modified == "" { "" } else { httpStamp(answered.body, r.modified) }
+    let loc = if r.location == "" { "" } else { httpFill(r.location, answered.body) }
+    let hs = httpHeaders(answered.headers, r, tag, stamp, loc)
+    if r.varyOn != "" {
+        answered.vary = r.varyOn.copy()
+    }
+    // RFC 9110 section 15.4.5: a 304 keeps the validators and `Cache-Control`
+    // and drops the content and its media type.
+    if httpFresh(req, tag, stamp) {
+        answered.status = 304
+        answered.contentType = ""
+        answered.body = ""
+        answered.headers = hs
+        return answered
+    }
+    answered.status = httpStatus(r, answered.status, loc)
+    answered.headers = hs
+    return answered
+}
+
+/// An explicit `status` wins over `createdAt`'s 201; with neither, the handler's status stands.
+fn httpStatus(r: Route, given: Int64, loc: String) -> Int64 {
+    if r.ok != 0 {
+        return r.ok
+    }
+    if loc != "" {
+        return 201
+    }
+    return given
+}
+
+fn httpHeaders(base: Map<String, String>, r: Route, tag: String, stamp: String, loc: String) -> Map<String, String> {
+    let mut hs: Map<String, String> = [:]
+    for k in base.keys() {
+        hs[k] = httpAt(base, k)
+    }
+    if r.maxAge >= 0 {
+        hs["Cache-Control"] = "max-age=\{r.maxAge}"
+    }
+    if tag != "" {
+        hs["ETag"] = tag.copy()
+    }
+    if stamp != "" {
+        hs["Last-Modified"] = stamp.copy()
+    }
+    if loc != "" {
+        hs["Location"] = loc.copy()
+    }
+    return hs
+}
+
+/// The strong validator; see `etag`.
+fn httpEtag(contentType: String, body: String) -> String {
+    return "\"" + toHex(fnv1aStr(contentType + "\n" + body)) + "\""
+}
+
+/// Whether the request already holds this answer. When `If-None-Match` is
+/// present, `If-Modified-Since` is ignored (RFC 9110 section 13.1.3).
+fn httpFresh(req: Request, tag: String, stamp: String) -> Bool {
+    let inm = httpHeader(req, "if-none-match")
+    if inm != "" {
+        return tag != "" && httpAnyMatch(inm, tag)
+    }
+    if stamp == "" {
+        return false
+    }
+    // Exact equality: a date comparison needs an HTTP-date parser. A missed 304
+    // costs bytes; a wrong one costs correctness.
+    return httpHeader(req, "if-modified-since") == stamp
+}
+
+/// One request header, `""` when absent. Names arrive lowercased.
+fn httpHeader(req: Request, name: String) -> String {
+    return match req.headers[name] {
+        Some(v) => v.copy(),
+        None => "",
+    }
+}
+
+/// Whether an `If-None-Match` value names `tag`: `*`, or a list compared weakly
+/// (RFC 9110 section 8.8.3.2), so `W/"..."` still matches.
+fn httpAnyMatch(field: String, tag: String) -> Bool {
+    if trim(field) == "*" {
+        return true
+    }
+    for one in split(field, ",") {
+        if httpUnweak(trim(one)) == httpUnweak(tag) {
+            return true
+        }
+    }
+    return false
+}
+
+fn httpUnweak(t: String) -> String {
+    return if t.startsWith("W/") { substring(t, 2, t.byteLength) } else { t.copy() }
+}
+
+/// A 200 whose `Err(why)` the route calls an absence becomes a 404.
+fn httpMapMissing(r: Route, resp: consume Response) -> Response {
+    if resp.status != 200 {
+        return resp
+    }
+    return match httpErrOf(resp.body) {
+        Some(why) => httpMaybe404(r, resp, why),
+        None => resp,
+    }
+}
+
+fn httpMaybe404(r: Route, resp: consume Response, why: String) -> Response {
+    if httpAsk(r.missing, why) == false {
+        return resp
+    }
+    // The body stays as the codec wrote it; only the status changes.
+    let mut out = resp
+    out.status = 404
+    return out
+}
+
+/// Calls the stored predicate; a `fn` value is called only through a parameter.
+fn httpAsk(isMissing: IsMissing, why: String) -> Bool {
+    return isMissing(why)
+}
+
+/// The `Err` payload of a body encoding a `Result` (`{"Err": "..."}`),
+/// `None` otherwise. A record whose one field is a string named `Err` reads as an
+/// error too; the ambiguity is the wire form's.
+fn httpErrOf(body: String) -> Option<String> {
+    return match httpSingle(body, "Err") {
+        Some(v) => httpStrOf(v),
+        None => None,
+    }
+}
+
+fn httpStrOf(v: Json) -> Option<String> {
+    return match v {
+        JStr(s) => Some(s.copy()),
+        JNum(n) => None,
+        JBool(b) => None,
+        JNull => None,
+        JArr(xs) => None,
+        JObj(fs) => None,
+    }
+}
+
+/// The value of a single-field object with key `key`, `None` otherwise.
+fn httpSingle(body: String, key: String) -> Option<Json> {
+    return match parseJson(body) {
+        Ok(j) => httpSingleOf(j, key),
+        Err(e) => None,
+    }
+}
+
+fn httpSingleOf(j: Json, key: String) -> Option<Json> {
+    let fs = httpFieldsOf(j)
+    if fs.length != 1 {
+        return None
+    }
+    // An owned copy: lending the element would pin the caller's parsed document.
+    if fs[0].key == key {
+        return Some(copyJson(fs[0].value))
+    }
+    return None
+}
+
+/// The fields a `Location` template and `Last-Modified` read: the body's, or the
+/// payload's when the procedure returned `Ok(value)`.
+fn httpPayload(body: String) -> Array<JsonField> {
+    return match httpSingle(body, "Ok") {
+        Some(inner) => httpFieldsOf(inner),
+        None => httpBodyFields(body),
+    }
+}
+
+fn httpScalar(body: String, key: String) -> String {
+    for f in httpPayload(body) {
+        if f.key == key {
+            return httpText(f.value)
+        }
+    }
+    return ""
+}
+
+fn httpText(v: Json) -> String {
+    return match v {
+        JStr(s) => s.copy(),
+        JNum(n) => n.copy(),
+        JBool(b) => b.toString(),
+        JNull => "",
+        JArr(xs) => "",
+        JObj(fs) => "",
+    }
+}
+
+/// `"/pastes/{id}"` with each `{name}` replaced by that payload field,
+/// `urlEncode`d: `/tags/{name}` over `a/b` writes `/tags/a%2Fb`, and an already
+/// encoded value is encoded again. An unknown name stays verbatim.
+fn httpFill(template: String, body: String) -> String {
+    let mut out = template.copy()
+    for f in httpPayload(body) {
+        out = replace(out, "{" + f.key + "}", urlEncode(httpText(f.value)))
+    }
+    return out
+}
+
+/// The `Last-Modified` value from the named epoch-millis field; `""` when it is
+/// absent, non-numeric or negative, since `Instant` refuses a negative.
+fn httpStamp(body: String, field: String) -> String {
+    return match parse(httpScalar(body, field)) {
+        Some(ms) => httpDate(ms),
+        None => "",
+    }
+}
+
+/// The IMF-fixdate of RFC 9110 section 5.6.7, `Thu, 01 Jan 1970 00:00:00 GMT`.
+/// 1970-01-01 was a Thursday.
+fn httpDate(ms: Int64) -> String {
+    if ms < 0 {
+        return ""
+    }
+    let at = fromMillis(ms)
+    let c = civil(at)
+    let days = ms / 86400000
+    let dow = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    let clock = httpPad2(hour(at)) + ":" + httpPad2(minute(at)) + ":" + httpPad2(second(at))
+    return dow[(days + 4) % 7] + ", " + httpPad2(c.day) + " " + mon[c.month - 1] + " \{c.year} " + clock + " GMT"
+}
+
+fn httpPad2(n: Int64) -> String {
+    return padStart(n.toString(), 2, "0")
+}
+
+fn httpMatch(r: Route, req: Request) -> Option<Map<String, String>> {
+    if r.method != "*" && r.method != req.method {
+        return None
+    }
+    let path = httpPathOnly(req.path)
+    if r.prefix {
+        let under = r.pattern == "/" || path == r.pattern || path.startsWith(r.pattern + "/")
+        return if under { Some([:]) } else { None }
+    }
+    let pat = split(r.pattern, "/")
+    let got = split(path, "/")
+    if pat.length != got.length {
+        return None
+    }
+    let mut ps: Map<String, String> = [:]
+    let mut i = 0
+    while i < pat.length {
+        if httpIsPlaceholder(pat[i]) {
+            // The one place a segment becomes a value. `mount` has refused a
+            // path that does not decode, so the `else` only stops another caller
+            // binding wire bytes.
+            if let Some(v) = urlDecode(got[i]) {
+                ps[httpPlaceholderName(pat[i])] = v
+            } else {
+                return None
+            }
+        } else {
+            // A literal segment compares as written; `/%6Eotes` is not `/notes`.
+            if pat[i] != got[i] {
+                return None
+            }
+        }
+        i = i + 1
+    }
+    return Some(ps)
+}
+
+/// Whether the path, without its query, decodes. The query has its own
+/// alphabet, and nothing here decodes it.
+fn httpIsUrl(path: String) -> Bool {
+    return match urlDecode(httpPathOnly(path)) {
+        Some(decoded) => true,
+        None => false,
+    }
+}
+
+/// The request path without its query string.
+fn httpPathOnly(path: String) -> String {
+    return match indexOf(path, "?") {
+        Some(i) => substring(path, 0, i),
+        None => path.copy(),
+    }
+}
+
+fn httpIsPlaceholder(seg: String) -> Bool {
+    return seg.startsWith("{") && seg.endsWith("}")
+}
+
+fn httpPlaceholderName(seg: String) -> String {
+    return substring(seg, 1, seg.byteLength - 1)
+}
+
+/// The bindings if `req` is a GET at this stream's pattern.
+fn httpLiveMatch(l: Live, req: Request) -> Option<Map<String, String>> {
+    if req.method != "GET" {
+        return None
+    }
+    return httpMatch(httpWithMethod(httpLiveRoute(l), "GET"), req)
+}
+
+/// Whether the mount audit passed in this process (module state). A
+/// failing audit panics on every call.
+let mut httpMountAudited = false
+
+/// Traps on a route that never got a method or that an earlier mount already answers.
+fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) {
+    if httpMountAudited {
+        return
+    }
+    // Sockets and streams resolve first, so only they can shadow another list.
+    for w in sockets {
+        let a = httpWithMethod(httpSocketRoute(w), "GET")
+        for l in live {
+            if httpSubsumes(a, httpWithMethod(httpLiveRoute(l), "GET")) {
+                panic("mount: the stream route " + l.pattern + " (" + l.derived + ") is unreachable — the socket " + w.pattern + " already answers it")
+            }
+        }
+        for g in groups {
+            for b in g {
+                if httpSubsumes(a, b) {
+                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable — the socket " + w.pattern + " already answers it")
+                }
+            }
+        }
+    }
+    for l in live {
+        let a = httpWithMethod(httpLiveRoute(l), "GET")
+        for g in groups {
+            for b in g {
+                if httpSubsumes(a, b) {
+                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable — the stream route " + l.pattern + " already answers it")
+                }
+            }
+        }
+    }
+    // Within one list the first match wins too, so a later duplicate is dead.
+    let mut si = 0
+    while si < sockets.length {
+        let a = httpWithMethod(httpSocketRoute(sockets[si]), "GET")
+        let mut sj = si + 1
+        while sj < sockets.length {
+            let msg = httpSelfShadow(
+                a,
+                httpWithMethod(httpSocketRoute(sockets[sj]), "GET"),
+                "the stream " + sockets[si].pattern + " (" + sockets[si].derived + ")",
+                "the stream " + sockets[sj].pattern + " (" + sockets[sj].derived + ")",
+            )
+            if msg != "" {
+                panic(msg)
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    let mut li = 0
+    while li < live.length {
+        let a = httpWithMethod(httpLiveRoute(live[li]), "GET")
+        let mut lj = li + 1
+        while lj < live.length {
+            let msg = httpSelfShadow(
+                a,
+                httpWithMethod(httpLiveRoute(live[lj]), "GET"),
+                "the stream route " + live[li].pattern + " (" + live[li].derived + ")",
+                "the stream route " + live[lj].pattern + " (" + live[lj].derived + ")",
+            )
+            if msg != "" {
+                panic(msg)
+            }
+            lj = lj + 1
+        }
+        li = li + 1
+    }
+    let mut gi = 0
+    for g in groups {
+        for r in g {
+            if r.method == "" {
+                panic("mount: route `" + r.pattern + "` (" + r.derived + ") has no method — wrap it in GET(..)/POST(..)/PUT(..)/PATCH(..)/DELETE(..)")
+            }
+        }
+        let mut gj = 0
+        for earlier in groups {
+            if gj < gi {
+                for a in earlier {
+                    for b in g {
+                        if httpSubsumes(a, b) {
+                            panic("mount: " + b.method + " " + b.pattern + " (group " + gi.toString() + ", " + b.derived + ") is unreachable — " + a.method + " " + a.pattern + " (group " + gj.toString() + ") already answers it")
+                        }
+                    }
+                }
+            }
+            gj = gj + 1
+        }
+        gi = gi + 1
+    }
+    httpMountAudited = true
+}
+
+/// The shadowing message when `a` answers everything `b` matches within one list; "" otherwise.
+fn httpSelfShadow(a: Route, b: Route, aDesc: String, bDesc: String) -> String {
+    if httpSubsumes(a, b) == false {
+        return ""
+    }
+    return "mount: " + bDesc + " is unreachable — " + aDesc + " already answers it"
+}
+
+/// Whether `a` matches every path `b` does. Reports only containment it can
+/// prove, because a false startup trap is worse than a missed shadow.
+fn httpSubsumes(a: Route, b: Route) -> Bool {
+    if a.method != "*" && a.method != b.method {
+        return false
+    }
+    if a.prefix {
+        return a.pattern == "/" || b.pattern == a.pattern || b.pattern.startsWith(a.pattern + "/")
+    }
+    if b.prefix {
+        return false
+    }
+    let sa = split(a.pattern, "/")
+    let sb = split(b.pattern, "/")
+    if sa.length != sb.length {
+        return false
+    }
+    let mut i = 0
+    while i < sa.length {
+        if httpIsPlaceholder(sa[i]) == false && sa[i] != sb[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// The JSON a generated adapter hands `fromJson`: the bindings, then the body's
+/// fields. A bound name wins over a body field; a duplicate key would be a 422.
+/// Fields named in `numeric` bind as integers, so `/users/{id}` over an `Int64`
+/// gives `{"id":7}`; a value that does not parse stays a string, for the decoder
+/// to report. A `Float64` path field stays text: `parse` reads integers only.
+export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> String {
+    if ps.length == 0 {
+        return body.copy()
+    }
+    let mut fs: Array<JsonField> = []
+    for k in ps.keys() {
+        let v = httpValue(httpAt(ps, k), httpListHas(numeric, k))
+        fs.push(JsonField { key: k, value: v })
+    }
+    if body != "" {
+        for f in httpBodyFields(body) {
+            if httpHasField(fs, f.key) == false {
+                fs.push(f)
+            }
+        }
+    }
+    return emit(JObj(fs))
+}
+
+/// Whether `key` is already bound.
+fn httpHasField(fs: Array<JsonField>, key: String) -> Bool {
+    for f in fs {
+        if f.key == key {
+            return true
+        }
+    }
+    return false
+}
+
+fn httpValue(raw: String, isNumber: Bool) -> Json {
+    if isNumber {
+        return match parse(raw) {
+            Some(n) => JNum(n.toString()),
+            None => JStr(raw.copy()),
+        }
+    }
+    return JStr(raw.copy())
+}
+
+fn httpListHas(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+fn httpAt(ps: Map<String, String>, k: String) -> String {
+    return match ps[k] {
+        Some(v) => v.copy(),
+        None => "",
+    }
+}
+
+/// The body's top-level object fields, or none; a body that is not an object is
+/// left to `fromJson` to report.
+fn httpBodyFields(body: String) -> Array<JsonField> {
+    return match parseJson(body) {
+        Ok(j) => httpFieldsOf(j),
+        Err(e) => [],
+    }
+}
+
+fn httpFieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => copyJsonFields(fs),
+        JNull => [],
+        JBool(b) => [],
+        JNum(n) => [],
+        JStr(s) => [],
+        JArr(xs) => [],
+    }
+}
+
+fn httpCapFirst(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in raw {
+        if i == 0 && b >= 'a' && b <= 'z' {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, s)
+}
+
+/// The base path from the module's stem: `"./server/api/pastes"` => `"/pastes"`.
+fn httpBasePath(module: String) -> String {
+    let segs = split(module, "/")
+    return "/" + segs[segs.length - 1]
+}
+
+/// One field of a procedure's input type, and whether it is a number on the wire.
+type HttpField = { name: String, numeric: Bool }
+
+/// The fields of the record type `name`, in declaration order: at brace depth 1,
+/// an identifier followed by `:`. Read with the compiler's lexer.
+gen fn httpFields(name: String, iface: ModuleInterface) -> Array<HttpField> {
+    let mut out: Array<HttpField> = []
+    for t in iface.types {
+        if t.name == name {
+            let toks = lex(t.source)
+            let mut depth = 0
+            let mut i = 0
+            while i < toks.length {
+                let tk = toks[i]
+                if tk.kind == "punct" && tk.text == "{" {
+                    depth = depth + 1
+                }
+                if tk.kind == "punct" && tk.text == "}" {
+                    depth = depth - 1
+                }
+                if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
+                    let nx = toks[i + 1]
+                    if nx.kind == "punct" && nx.text == ":" {
+                        out.push(HttpField { name: tk.text.copy(), numeric: httpIsNumeric(toks[i + 2], iface) })
+                    }
+                }
+                i = i + 1
+            }
+        }
+    }
+    return out
+}
+
+/// Whether a field whose type begins with `ty` is a JSON number. One alias hop
+/// (`Age` => `Int64`); a longer chain reads as text and decodes as a 422.
+gen fn httpIsNumeric(ty: Token, iface: ModuleInterface) -> Bool {
+    if ty.kind != "ident" {
+        return false
+    }
+    if httpIsNumericBase(ty.text) {
+        return true
+    }
+    for t in iface.types {
+        if t.name == ty.text {
+            return httpIsNumericBase(t.schema.base)
+        }
+    }
+    return false
+}
+
+fn httpIsNumericBase(spelling: String) -> Bool {
+    return spelling.startsWith("Int") || spelling.startsWith("UInt") || spelling.startsWith("Float")
+}
+
+fn httpNamesOf(fields: Array<HttpField>) -> Array<String> {
+    let mut out: Array<String> = []
+    for f in fields {
+        out.push(f.name.copy())
+    }
+    return out
+}
+
+/// The numeric field names as a Vyrn array literal.
+fn httpNumericLit(fields: Array<HttpField>) -> String {
+    let mut names: Array<String> = []
+    for f in fields {
+        if f.numeric {
+            names.push("\"" + f.name + "\"")
+        }
+    }
+    return "[" + joinWith(names, ", ") + "]"
+}
+
+/// The `where` regex of a procedure's path type: plain bytes, or a placeholder
+/// the input type has a field for. Emitted into a Vyrn string literal, so each
+/// output backslash is doubled.
+fn httpPathRegex(fields: Array<String>) -> String {
+    let mut alts = "[^{}]"
+    for f in fields {
+        alts = alts + "|\\\\{" + f + "\\\\}"
+    }
+    return "(" + alts + ")*"
+}
+
+/// One procedure's projection: the path type that checks its placeholders, the
+/// decode-call-encode adapter, and the constructor the projection file calls.
+gen fn httpProcedure(f: FnInfo, iface: ModuleInterface, base: String) -> String {
+    let cap = httpCapFirst(f.name)
+    let run = "httpRun" + cap
+    let pathType = "Path" + cap
+    let mut fields: Array<HttpField> = []
+    if f.params.length == 1 {
+        fields = httpFields(f.params[0].spelling, iface)
+    }
+    let names = httpNamesOf(fields)
+    let mut out = "/// Path patterns `" + f.name + "` accepts"
+    if fields.length > 0 {
+        out = out + ": " + joinWith(httpBraced(names), ", ") + " (the fields of `" + f.params[0].spelling + "`)"
+    } else {
+        out = out + " — no placeholders (it takes no input)"
+    }
+    out = out + ".\n"
+    out = out + "export type " + pathType + " = String where value =~ \"" + httpPathRegex(names) + "\"\n"
+    out = out + "fn " + run + "(req: Request, ps: Map<String, String>) -> Option<Response> {\n"
+    let call = f.name + "__real"
+    if f.params.length == 1 {
+        let reqType = f.params[0].spelling
+        out = out + "    return match fromJson<" + reqType + ">(httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
+        if f.ret == "" {
+            out = out + "        Valid(input) => " + run + "Unit(input),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
+            out = out + "    }\n}\n"
+            out = out + "fn " + run + "Unit(input: " + reqType + ") -> Option<Response> {\n"
+            out = out + "    " + call + "(input)\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
+        } else {
+            out = out + "        Valid(input) => Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "(input)), vary: \"\", headers: [:] }),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
+            out = out + "    }\n}\n"
+        }
+    } else {
+        if f.ret == "" {
+            out = out + "    " + call + "()\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
+        } else {
+            out = out + "    return Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "()), vary: \"\", headers: [:] })\n}\n"
+        }
+    }
+    out = out + "/// `" + f.name + "` at `" + base + "` + `path`.\n"
+    out = out + "export fn " + f.name + "(path: " + pathType + ") -> Route {\n"
+    out = out + "    return httpRoute(\"" + base + "\" + path, " + run + ", \"" + f.name + "\")\n}\n"
+    return out
+}
+
+fn httpBraced(fields: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for f in fields {
+        out.push("{" + f + "}")
+    }
+    return out
+}
+
+/// The imports: procedures under `__real` aliases, since their constructors take
+/// their names, and each type from its declaring module.
+fn httpImports(iface: ModuleInterface, module: String) -> String {
+    let mut specs: Array<String> = [module.copy()]
+    for t in iface.types {
+        if httpContains(specs, t.module) == false {
+            specs.push(t.module.copy())
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        if spec == module {
+            for f in iface.functions {
+                names.push(f.name + " as " + f.name + "__real")
+            }
+        }
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name.copy())
+            }
+        }
+        if names.length > 0 {
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+fn httpContains(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+/// The REST projection of one procedure module: a placeholder-checked
+/// constructor per procedure, under the base path its stem derives.
+export gen fn http(module: String) -> String {
+    let iface = moduleInterface(module)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let base = httpBasePath(module)
+    let mut out = "/// Generated by std/http `http` — do not edit.\n"
+    out = out + "import { Route, httpRoute, httpInput } from \"std/http\"\n"
+    out = out + httpImports(iface, module)
+    out = out + "type HttpIssues = { issues: Array<Issue> }\n"
+    let mut syms: Array<Symbol> = []
+    for f in iface.functions {
+        out = out + httpProcedure(f, iface, base)
+        syms.push(symbol(f.name, f.origin, []))
+        syms.push(symbol("Path" + httpCapFirst(f.name), f.origin, []))
+    }
+    out = out + symbolMapFn("http(" + module + ")", syms)
+    return out
+}
+
+test "httpInput lets a placeholder win over a body field of the same name" {
+    // A duplicate key would be a 422, so the body's `id` is dropped.
+    let ps: Map<String, String> = ["id": "7"]
+    let numeric: Array<String> = ["id"]
+    assertEq(httpInput(ps, "{\"id\":9,\"name\":\"x\"}", numeric), "{\"id\":7,\"name\":\"x\"}")
+    assertEq(httpInput(ps, "{\"name\":\"x\"}", numeric), "{\"id\":7,\"name\":\"x\"}")
+    assertEq(httpInput([:], "{\"a\":1}", []), "{\"a\":1}")
+}
+
+test "the subprotocol echo is the client's own spelling" {
+    // The match is case-insensitive; the echo is the client's bytes.
+    assertEq(httpTokenAsOffered("Chat.v1", "chat.v1"), "Chat.v1")
+    assertEq(httpTokenAsOffered("chat.v1", "chat.v1"), "chat.v1")
+    assertEq(httpTokenAsOffered("gzip, Chat.v1", "chat.v1"), "Chat.v1")
+    assertEq(httpTokenAsOffered("other.v2", "chat.v1"), "")
+    assertEq(httpTokenAsOffered("", "chat.v1"), "")
+    assert(httpHasToken("Chat.v1", "chat.v1"))
+}
+
+test "two mounts on one pattern shadow within their own list" {
+    // Each list resolves first-match-wins, so the second `/e` is dead.
+    let a = httpWithMethod(httpRoute("/e", httpNoRun, "sseOne"), "GET")
+    let b = httpWithMethod(httpRoute("/e", httpNoRun, "sseTwo"), "GET")
+    assert(httpSelfShadow(a, b, "the stream /e (sseOne)", "the stream /e (sseTwo)") != "")
+    let x = httpWithMethod(httpRoute("/x", httpNoRun, "sseTwo"), "GET")
+    assertEq(httpSelfShadow(a, x, "a", "b"), "")
+}
+
+/// Every `derived` row a `mount(..)` argument list carries, one per line, for
+/// `vyrn routes`. The first word is the kind: `SSE`, `WS`, `*` for a subsystem,
+/// or the HTTP method of a route, whose third word is its procedure.
+export fn mountedRows(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> String {
+    let mut out = ""
+    for g in groups {
+        for r in g {
+            out = out + r.derived + "
+"
+        }
+    }
+    for l in live {
+        out = out + l.derived + "
+"
+    }
+    for w in sockets {
+        out = out + w.derived + "
+"
+    }
+    return out
+}

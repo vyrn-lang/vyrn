@@ -1,0 +1,20 @@
+// A `region` block frees a whole group of allocations at its closing brace. The
+// strings built inside it go back at one known point, not at a collector's
+// convenience.
+export fn demo() -> String {
+    let head = "line "
+    let mut widest = 0
+
+    region {
+        let mut i = 0
+        while i < 1000 {
+            let row = head + i.toString()
+            if row.byteLength > widest {
+                widest = row.byteLength
+            }
+            i = i + 1
+        }
+    }
+
+    return "1000 strings built, widest \{widest} bytes, all freed at the brace"
+}

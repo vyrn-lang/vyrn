@@ -1,0 +1,30 @@
+/// std/html refuses a name it cannot render safely — the run ends in a trap.
+///
+/// Escaping protects a VALUE, because a value sits inside quotes. A NAME sits
+/// outside them, where `&` and `"` mean nothing and one space starts a second
+/// attribute: `attr("src\" onload=\"alert(1)", "x")` used to render as
+/// `<img src" onload="alert(1)="x">`, an event handler the program never wrote.
+/// An escaped name is not the name, so the answer is a check and a refusal —
+/// the same shape `std/http`'s `mount` uses for an unreachable route.
+///
+/// The safe way to carry the same untrusted text is above the trap: put it in
+/// the VALUE, which is escaped and stays inside its quotes. The trap itself is
+/// last, because it ends the run — this example is a three-way parity citizen
+/// through its stderr and its exit code, like the other trapping examples.
+import { el, text, attr, toHtmlString } from "std/html"
+
+/// The attacker's string, whatever its source (a query parameter, a database
+/// column, a filename).
+fn untrusted() -> String {
+    return "\" onload=\"alert(1)"
+}
+
+fn main() -> Int64 {
+    // As a VALUE: escaped, inert, still rendered.
+    print(toHtmlString(el("p", [attr("title", untrusted())], [text("still fine")])))
+    // A legitimate dynamic name goes through untouched.
+    print(toHtmlString(el("input", [attr("data-" + "field", "q")], [])))
+    // As a NAME: refused, and the trap says where to put it instead.
+    print(toHtmlString(el("img", [attr("src" + untrusted(), "/logo.png")], [])))
+    return 0
+}

@@ -1,0 +1,135 @@
+// Generics: functions, types, enums, and bounds, in one tour.
+//
+// A type parameter `<T>` is inferred at each call/construction site; the
+// native backend monomorphizes — one specialized machine function per concrete
+// type. A parameter can carry a built-in bound — `Eq`, `Ord`, or `Num`
+// (Num ⊇ Ord ⊇ Eq) — which unlocks the matching operators on it.
+
+// ---- generic functions -----------------------------------------------------
+fn id<T>(x: T) -> T {
+    // A `read` parameter returned whole hands the caller a value it already
+    // owns. The generic body hides that from the checker —
+    // `T` has no type until the instance — so the kernel is what says so.
+    // Natively the two owners freed one buffer:
+    // STATUS_HEAP_CORRUPTION.
+    return x.copy()
+}
+
+fn pick<T>(cond: Bool, a: T, b: T) -> T {
+    if cond { return a.copy() }
+    return b.copy()
+}
+
+// ---- generic types -----------------------------------------------------------
+type Box<T> = { value: T }
+type Pair<A, B> = { first: A, second: B }
+
+// A literal with no annotation reads its parameter off the field VALUES, and it
+// reads them through whatever carries the parameter — an array, a map, an
+// `Option`, a `Result`, another generic record. Each of these used to be
+// refused: the field was checked against `Array<T>` with `T` still open, and the
+// value was reported against a type no value has ("expected T, found Int64").
+type Deque<T> = { front: Array<T>, back: Array<T> }
+type Bag<T> = { one: Option<T>, many: Map<String, T> }
+type Boxed<T> = { inner: Box<T> }
+type Fixed<T> = { xs: Array<T, 2> }
+type Small<T> = { xs: SmallArray<T, 4> }
+type Outcome<T> = { r: Result<T, String> }
+
+// A stored `fn` needs a solved signature before the value can be placed, so
+// `tag` is what settles `T` for `width`. The order the LITERAL writes the two
+// does not decide that; the order the record DECLARES them does, because both
+// backends emit a literal's fields in declared order.
+type Tagged<T> = { tag: T, width: fn(T) -> Int64 }
+
+fn widthOf(s: String) -> Int64 {
+    return 7
+}
+
+fn unbox<T>(b: Box<T>) -> T {
+    return b.value.copy()
+}
+
+// ---- generic enums -------------------------------------------------------------
+type Opt<T> =
+    | Wrap(T)
+    | Empty
+
+fn orElse<T>(o: Opt<T>, fallback: T) -> T {
+    return match o {
+        Wrap(x) => x.copy(),
+        Empty => fallback.copy(),
+    }
+}
+
+// ---- bounded generics ------------------------------------------------------------
+fn max<T: Ord>(a: T, b: T) -> T {
+    if a > b { return a.copy() }
+    return b.copy()
+}
+
+fn sum3<T: Num>(a: T, b: T, c: T) -> T {
+    return a + b + c
+}
+
+fn same<T: Eq>(a: T, b: T) -> Bool {
+    return a == b
+}
+
+fn main() -> Int64 {
+    print(id(42)) // 42          — id<Int64>
+    print(id("polymorphic")) // polymorphic — id<String>, the SAME source function
+    print(pick(true, 7, 9)) // 7
+
+    let n = Box { value: 41 } // Box<Int64>, inferred from the field
+    let p: Pair<Int64, String> = Pair { first: 7, second: "seven" }
+    print(unbox(n) + 1) // 42
+    print(p.second) // seven
+    let flag = Box { value: true } // Box<Bool>, a different instantiation
+    print(flag.value) // true
+
+    // The parameter under a container, with no annotation. The empty `back`
+    // says only that it is an array, so `front` is what settles `T` — and it
+    // does so whichever field is written first.
+    let d = Deque { front: [2, 1], back: [] }
+    print(d.front[0] + d.back.length) // 2
+    let e = Deque { back: ["z"], front: [] }
+    print(e.back[0]) // z
+    // The parameter under an `Option` and under a `Map`, in one literal.
+    let bag = Bag { one: Some(5), many: ["k": 6] }
+    // The `- 1` is deliberate: a `match` block is an operand, so the `}` ends a
+    // value and the minus after it is binary. `vyrn fmt` used to print it as
+    // `} -1`, and the re-lex invariant could not see the change — so the corpus
+    // carries the shape instead of avoiding it.
+    print(match bag.many["k"] { Some(v) => v, None => 0 } - 1) // 5
+    print(match bag.one { Some(v) => v, None => 0 }) // 5
+    // A generic record inside a generic record: the inner literal solves first
+    // and the outer one takes its answer.
+    let nested = Boxed { inner: Box { value: 40 } }
+    print(nested.inner.value + 2) // 42
+    // The fixed and small-buffer array shapes, and a `Result` whose error half
+    // the field type already names.
+    let fixed = Fixed { xs: [3, 4] }
+    print(fixed.xs[1]) // 4
+    let small = Small { xs: [8] }
+    print(small.xs[0]) // 8
+    let outcome = Outcome { r: Ok(9) }
+    print(match outcome.r { Ok(v) => v, Err(m) => 0 }) // 9
+    // The `fn`-typed field, written both ways round. The second spelling was
+    // refused until the solve stopped following the literal's own order.
+    let t1 = Tagged { tag: "ab", width: widthOf }
+    let t2 = Tagged { width: widthOf, tag: "cde" }
+    let w1 = t1.width
+    let w2 = t2.width
+    print(w1(t1.tag) + w2(t2.tag)) // 14
+
+    let a = Wrap(41) // Opt<Int64>, inferred from the payload
+    let b: Opt<Int64> = Empty // a nullary variant takes its type from context
+    print(orElse(a, 0) + 1) // 42
+    print(orElse(b, 99)) // 99
+
+    print(max(3, 9)) // 9
+    print(sum3(10, 20, 30)) // 60
+    if same("hi", "hi") { print("equal") } // equal (Eq works on String)
+    return 0
+}

@@ -1,0 +1,7 @@
+{
+  "name": "leak",
+  "artifacts": {
+    "api": { "entry": "server/main.vyrn", "target": "native" },
+    "app": { "entry": "client/boot.vyrn", "target": "browser" }
+  }
+}

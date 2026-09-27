@@ -1,0 +1,19 @@
+alice=11 bob=20
+missing=-1
+has bob: true has cid: false
+length=2
+alice -> 11
+bob -> 20
+removed alice? true
+order bob
+order alice
+snapshot still has 2 keys after remove
+prices length=2 usd=3
+{"apple":3,"pear":5}
+decoded total=8
+json.parse |  | line 1, col 17: duplicate object key: a
+dup-key a=-1
+json.type | oops | expected integer, found string
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":{"type":"integer"}}
+{"Batch":{"x":1,"y":2}}
+{"hits":7}

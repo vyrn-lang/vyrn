@@ -1,0 +1,14 @@
+// Row 09 of the refusals census, at the LOOP form of the take.
+//
+// `core::take_prefix` states the rule for `consume p`, and a `for .. in
+// consume` never reaches it. So the prefix form is refused twice and this
+// form once — by the checker alone.
+fn make() -> Array<String> { return ["a", "b"] }
+
+fn main() -> Int64 {
+    let mut n = 0
+    for x in consume make() {
+        n = n + x.byteLength
+    }
+    return n
+}

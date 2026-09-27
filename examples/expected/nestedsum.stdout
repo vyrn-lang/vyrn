@@ -1,0 +1,13 @@
+some some alpha
+some none
+none
+ok some beta
+some err boom
+array 111
+peel 4
+peel propagated
+iflet 5
+nullish 6
+map a = 1
+map b present, empty
+map c absent

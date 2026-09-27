@@ -1,0 +1,18 @@
+GET /users/7 -> 200 application/json {"id":7,"name":"user7","age":30}
+POST /users -> 201 application/json {"id":1000,"name":"ada","age":36}
+DELETE /users/0 -> 200 application/json {"Err":"cannot delete the root user"}
+POST /users (bad age) -> 422 application/json {"issues":[{"key":"validate","path":"age","message":"validation failed for `Age`"}]}
+GET /nope -> 404 text/plain no route
+REST body == RPC body: true
+REST type == RPC type: true
+REST status == RPC status: true
+cache-control: max-age=3600
+vary: Accept
+etag stable across calls: true
+etag differs by content: true
+If-None-Match -> 304, body 0 bytes, type ""
+304 keeps its validator: true
+stale If-None-Match -> 200 {"id":7,"name":"user7","age":30}
+POST /users -> 201 Location: /users/1000
+DELETE /users/1000 -> 404 application/json {"Err":"no such user"}
+DELETE /users/0 -> 200 application/json {"Err":"cannot delete the root user"}

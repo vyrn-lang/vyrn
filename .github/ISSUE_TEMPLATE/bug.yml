@@ -1,0 +1,46 @@
+name: Bug
+description: The compiler, a tool or std does something wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: One or two sentences. Say what is wrong, not how you found it.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Smallest program
+      description: The shortest `.vyrn` program that shows it.
+      render: vyrn
+    validations:
+      required: true
+  - type: textarea
+    id: run
+    attributes:
+      label: Command and output
+      description: The exact command, its output and its exit code. For a leak or double free, run with `VYRN_LEAK_CHECK=1`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What should happen instead, and the doc or rule that says so.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `vyrn --version`, or the commit you built.
+    validations:
+      required: true
+  - type: textarea
+    id: known
+    attributes:
+      label: What is known
+      description: Optional. What you ruled out, where you think the cause is.

@@ -1,0 +1,2573 @@
+//! The wasm target reclaims what it allocates.
+//!
+//! Parity cannot see memory, so these tests read `memory.buffer.byteLength` from
+//! a Node host that keeps one instance alive across many calls, as `web/` does.
+//! They assert a relation, not a number: memory after N calls equals memory
+//! after 4N. That bounds the steady state and survives allocator changes.
+//!
+//! The host is the real `web/wasi-min.js`, copied to a `.mjs`, because the JS
+//! half matters: the caller owns a `String` argument and hands it back through `__vyrn_free`.
+//!
+//! [`ROWS`] holds one export per census scenario and what it does to the heap;
+//! every row is steady except the `keptForever` canary. The fixture strings are
+//! ~900 bytes, so one leaked buffer is visible against the module's initial
+//! 128 KiB. A closure scenario needs a stored closure: a lambda handed straight
+//! to a `fn` parameter is monomorphized and allocates nothing.
+//!
+//! The later tests read `vyrn why --memory` and run programs under the free
+//! audit (`VYRN_LEAK_CHECK=1`). The Node tests skip without node, loudly under
+//! `VYRN_REQUIRE_TOOLS`.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn repo(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+}
+
+/// The Node binary (`VYRN_NODE`, default `node`), or `None`. Without Node
+/// nothing in the build checks that memory is reclaimed, so
+/// `VYRN_REQUIRE_TOOLS` (which CI exports) turns the skip into a panic.
+fn find_node() -> Option<PathBuf> {
+    let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
+    let found = Command::new(&node)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|_| PathBuf::from(&node));
+    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
+        panic!(
+            "VYRN_REQUIRE_TOOLS is set and `node` was not found — this run would have \
+             silently skipped the memory census, the only thing here that sees a leak. \
+             Point `VYRN_NODE` at the binary, or unset VYRN_REQUIRE_TOOLS."
+        );
+    }
+    found
+}
+
+/// An export taking a `String` the JS caller allocated in the module, plus a
+/// `String` the module allocates and drops. The argument is borrowed, so it
+/// tests the host's release; `echo` tests the module's block-exit release.
+const FIXTURE: &str = r#"let mut seen: Int64 = 0
+
+export extern fn absorb(arg: String) {
+    let echo = arg + "!"
+    seen = seen + Int64(echo.byteLength)
+}
+
+fn main() -> Int64 {
+    return 0
+}
+"#;
+
+const DRIVER: &str = r#"import { readFile } from "node:fs/promises";
+import { runVyrn } from "./wasi-min.mjs";
+
+const bytes = await readFile(new URL("./mem.wasm", import.meta.url));
+const arg = "x".repeat(900);
+
+// A fresh instance per run, so the two answers are two steady states rather than
+// one run's tail.
+async function after(n) {
+  const { exports, memory } = await runVyrn(bytes, {});
+  for (let i = 0; i < n; i++) exports.absorb(arg);
+  return memory.buffer.byteLength;
+}
+
+const n = Number(process.argv[2]);
+console.log(await after(n));
+console.log(await after(4 * n));
+"#;
+
+#[test]
+fn the_wasm_heap_reaches_a_steady_state() {
+    let Some(node) = find_node() else {
+        eprintln!("NOTE: no node — wasm reclamation is unverified on this machine");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("vyrn-m6-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mem.vyrn"), FIXTURE).unwrap();
+    std::fs::write(dir.join("drive.mjs"), DRIVER).unwrap();
+    std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(dir.join("mem.vyrn"))
+        .args(["--target", "wasm", "-o"])
+        .arg(dir.join("mem.wasm"))
+        .output()
+        .expect("vyrn build");
+    assert!(
+        build.status.success(),
+        "build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // At 20000 calls, a leaked 900-byte argument grows the heap by hundreds of
+    // pages.
+    let n = 5000;
+    let out = Command::new(&node)
+        .arg(dir.join("drive.mjs"))
+        .arg(n.to_string())
+        .output()
+        .expect("node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let sizes: Vec<u64> = text
+        .split_whitespace()
+        .map(|s| s.parse().expect("a byte count"))
+        .collect();
+    assert_eq!(sizes.len(), 2, "expected two byte counts, got {text:?}");
+
+    assert_eq!(
+        sizes[0],
+        sizes[1],
+        "the wasm heap grew with the call count: {} bytes after {n} calls, {} after {}. \
+         Four times the work must cost the same memory — a difference means something \
+         allocated is never handed back.",
+        sizes[0],
+        sizes[1],
+        4 * n
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// `vyrn why --memory`, through the real binary: an in-process API
+// could agree with itself while the command says something else.
+
+/// A leaking scenario, plus one binding for every reason the printer names.
+const WHY_FIXTURE: &str = r#"type Sizer = fn(Int64) -> Int64
+
+// A type that DECLARES what it owns, holding no heap of its own. It is the
+// fixture's alias case:
+// a value rule 1 does not move, so a second name for one is an alias and neither
+// name may release it. `Ref<T>` was the built-in case and is gone; a declared
+// container is the live one: a heap value inside a container.
+type Ticket = { id: Int64 }
+
+impl Owned for Ticket {
+    fn release(self) {
+        print("released")
+    }
+}
+
+fn mint(n: Int64) -> Ticket {
+    return Ticket { id: n }
+}
+
+fn takes(s: String) -> Int64 {
+    let named = s
+    return named.byteLength
+}
+
+fn make(a: String, b: String) -> String {
+    let whole = a + b
+    return whole
+}
+
+fn borrow(s: String) -> String {
+    return s.copy()
+}
+
+fn score(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn main() -> Int64 {
+    let a = "a"
+    let b = "b"
+    let c = true
+    let kept = a + b
+    let mut grown = a + b
+    let branch = if c { a + b } else { a + "c" }
+    let owner = a + b
+    let alias = owner
+    let given = a + b
+    let n = takes(given)
+    let gone = a + b
+    drop gone
+    let ticket = mint(1)
+    let second = ticket
+    let held = a + b
+    let joined = a + b
+    let picked = if c { joined } else { a + b }
+    let sent = a + b
+    let doubled = takes(sent)
+    let flow = fromArray([1, 2])
+    close(flow)
+    let f: Sizer = x -> x + held.byteLength
+    region {
+        let arena = a + b
+        print(arena)
+    }
+    print(kept)
+    print(grown)
+    print(branch)
+    print(alias)
+    print(picked)
+    print(given)
+    return n + second.id + f(1) + doubled
+}
+"#;
+
+fn why_memory_output() -> String {
+    // One directory per caller: these tests run in parallel, and a shared path
+    // would have one of them delete another's fixture mid-run.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn-why-mem-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("u1.vyrn");
+    std::fs::write(&file, WHY_FIXTURE).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["why", "--memory"])
+        .arg(&file)
+        .output()
+        .expect("vyrn why --memory");
+    assert!(out.status.success(), "`why` reports; it does not gate");
+    let _ = std::fs::remove_dir_all(&dir);
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
+    let text = why_memory_output();
+    let has = |needle: &str| {
+        assert!(text.contains(needle), "expected {needle:?} in:\n{text}");
+    };
+    // Rules 1 to 3 reclaim `grown` (mut), `branch` (an if-expression) and
+    // `given` (a read argument).
+    has("kept             reclaimed at block exit — freeing the String buffer");
+    has("grown            reclaimed at block exit — freeing the String buffer");
+    has("branch           reclaimed at block exit — freeing the String buffer");
+    has("given            reclaimed at block exit — freeing the String buffer");
+    has("alias            reclaimed at block exit — freeing the String buffer");
+    // A `region` is not a reason: `free` refuses an arena block by the class
+    // word in its header, so the walk asks for a binding inside one like any other.
+    has("arena            reclaimed at block exit — freeing the String buffer");
+    has("c                NOT reclaimed — the type Bool owns no heap");
+    // A lambda's capture is a deep snapshot, so the captured binding reclaims.
+    has("held             reclaimed at block exit — freeing the String buffer");
+    has("sent             reclaimed at block exit — freeing the String buffer");
+    has("named            NOT reclaimed — it is a borrow of somebody else's value");
+    // `let second = ticket` takes the value, so the report names both halves of
+    // one move.
+    has("ticket           moved at line 52 into the binding `second`");
+    has("second           reclaimed at block exit — calling `Owned__Ticket__release`");
+    // A join arm that yields the binding moves it; the other edge releases
+    // it at the join.
+    has("joined           moved at line 55 into a store");
+    // Not leaks, and the report must not call them leaks.
+    has("a                static data");
+    has("gone             reclaimed by `drop` at line");
+    has("whole            moved at line");
+    has("owner            moved at line");
+}
+
+#[test]
+fn why_memory_says_which_functions_transfer_ownership() {
+    let text = why_memory_output();
+    assert!(
+        text.contains(
+            "fn make(a: String, b: String) -> String\n    transfers: yes — the caller owns the \
+             result, and releases it by freeing the String buffer"
+        ),
+        "{text}"
+    );
+    // Rule 3 refuses returning a parameter, so the fixture returns `s.copy()`:
+    // no compiling program prints "transfers: no" for a heap-owning return type.
+    assert!(
+        text.contains(
+            "fn borrow(s: String) -> String\n    transfers: yes — the caller owns the result, \
+             and releases it by freeing the String buffer"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "fn takes(s: String) -> Int64\n    transfers: no — the return type Int64 \
+                       owns no heap"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn why_memory_counts_the_whole_file() {
+    let text = why_memory_output();
+    // The summary is the corpus instrument: one line of totals, then the leaks
+    // grouped by reason.
+    assert!(text.contains("  summary: "), "{text}");
+    assert!(text.contains(" reclaimed, "), "{text}");
+    assert!(text.contains("not reclaimed"), "{text}");
+    // A linear value is discharged where it is closed, so the report may not
+    // call it a leak. It has its own column.
+    assert!(text.contains(" discharged, "), "{text}");
+    assert!(
+        text.contains("discharged, not leaked — a stream is consumed, forwarded or closed"),
+        "{text}"
+    );
+    assert!(text.contains("it names somebody else's value"), "{text}");
+}
+
+/// What a shape does to the heap over four times the calls.
+#[derive(PartialEq, Eq, Debug)]
+enum Shape {
+    /// Four times the work costs the same memory.
+    Steady,
+    /// Memory grows with the call count.
+    Leaks,
+}
+
+/// One census scenario: its export and what it does.
+struct Row {
+    export: &'static str,
+    today: Shape,
+    why: &'static str,
+}
+
+const ROWS: &[Row] = &[
+    Row {
+        export: "control",
+        today: Shape::Steady,
+        why: "a local concat is freed at block exit — the control for every row below",
+    },
+    Row {
+        export: "copyLocal",
+        today: Shape::Steady,
+        why: "`x.copy()` transfers, so the copy is reclaimed at block exit — \
+              the row proves the builtin is not a leak",
+    },
+    Row {
+        export: "ifExpr",
+        today: Shape::Steady,
+        why: "reclamation follows the type, and an if-expression that yields a \
+              String yields a String — the expression's FORM stopped deciding",
+    },
+    Row {
+        export: "mutString",
+        today: Shape::Steady,
+        why: "`mut` does not hide who owns the value after a \
+              reassignment. Rule 1 says: the binding does, and it owns whatever it holds \
+              last. Releasing the OLD value on a store is `selfAppend`'s row, so this row \
+              does not reassign. An in-place append (`s = s + \"x\"`) is a second leak of \
+              its own: the accumulator shadow starts every `let` unowned, so the \
+              first append abandons the initializer's buffer",
+    },
+    Row {
+        export: "temporaryCall",
+        today: Shape::Steady,
+        why: "the unnamed String receiver of `.byteLength` is freed right \
+              after the header read — the read was its last observer. The field exists \
+              only on String, which is the type proof; the producer must transfer \
+              ownership (`owned_fns`, lenders filtered by `facts`), which is the \
+              ownership proof. A heap field of a temp RECORD stays out: extraction lends",
+    },
+    Row {
+        export: "escapingAccumulator",
+        today: Shape::Steady,
+        why: "ownedness is per STORE, not per binding. `fold_store_owned` \
+              proves each reassignment's old value has no other holder — the final \
+              consume takes only the last value, so every store before it releases. \
+              The old `slot_owns` gate abandoned the whole binding for that one consume",
+    },
+    Row {
+        export: "conditionalMove",
+        today: Shape::Steady,
+        why: "Rule N: the still-owning edge releases what the other branch \
+              consumed. The union at the merge says consumed, so block exit stays out of \
+              it — the release sits ON THE EDGE, which is the one point where the path \
+              that kept the value is known. 215.3 MB native before; one buffer after",
+    },
+    Row {
+        export: "conditionalMoveMatch",
+        today: Shape::Steady,
+        why: "Rule N at a match join: one arm consumes, another only reads, the release \
+              sits on the untouched arm's edge (its source index). The guards fail toward \
+              the leak — a binder shadow, a scrutinee mention, or an arm value that could \
+              alias the binding all refuse; a Binary value never can, so it does not",
+    },
+    Row {
+        export: "conditionalMoveIfExpr",
+        today: Shape::Steady,
+        why: "Rule N at an if-expression join, the third join shape. The release sits \
+              under the untouched branch's value — stack-neutral in the wasm lowering, \
+              before the branch to the phi in the textual one — with the match's value \
+              guard: the branch value must not be able to alias what the edge frees",
+    },
+    Row {
+        export: "revivedBinding",
+        today: Shape::Steady,
+        why: "The take is real, but the binding is provably re-established — the last \
+              event is an owning write at the let's own loop set and branch path, every \
+              take precedes it, and no early exit sits between — so block exit releases \
+              the FINAL value. A conditional revive, or a return/break/`?` in the \
+              window, refuses toward the leak",
+    },
+    Row {
+        export: "consumedParamRead",
+        today: Shape::Steady,
+        why: "A `consume` parameter is a value the frame OWNS, and it was the one owned \
+              value with no row — released only if the body wrote `drop v`. It is keyed \
+              by its `Param` node now, exactly as a `let` is keyed by its statement; a \
+              param that is moved on, dropped, or returned still releases nothing, and \
+              a declared release runs at the callee's exit in all three engines",
+    },
+    Row {
+        export: "temporaryArrayLength",
+        today: Shape::Steady,
+        why: "The container counterpart of `temporaryCall`: `.length` on an unnamed \
+              Array the frame owns frees the receiver — buffer and elements — right \
+              after the count is read. The producer's return KIND is the filter \
+              (FreeArr/FreeSmallArr/FreeMap join FreeStr); a declared release never \
+              enters the set, so the free is always silent",
+    },
+    Row {
+        export: "temporaryRecordField",
+        today: Shape::Steady,
+        why: "A heap field of a temporary record: `names_a_place` called every field \
+              read a borrow, but a field of a value NOBODY owns has no owner to borrow \
+              from — the binding owns the extracted buffer now, and its block exit \
+              releases it. The record aggregate itself is by value, so for a record \
+              whose only heap is the extracted field, the transfer is complete",
+    },
+    Row {
+        export: "temporaryRecordScalar",
+        today: Shape::Steady,
+        why: "A scalar field of a temporary record: the read is the record's last \
+              observer, so the record is freed whole right after it — deep, so its \
+              heap fields go too. A heap or `lazy` field, or an aggregate one (an \
+              address INTO the record), stays out; a `Deep` producer is admitted \
+              only while the program declares no `impl Owned` anywhere",
+    },
+    Row {
+        export: "temporaryChainedField",
+        today: Shape::Steady,
+        why: "`makeTag(..).label.byteLength` — the receiver is a heap field of a record               temporary. The `@fieldof:` marker carries the producer through the lender               filter, and `own` admits it without the Deep gate: what the edge frees is               the FIELD it read, a String or container, silent either way",
+    },
+    Row {
+        export: "prependLoop",
+        today: Shape::Steady,
+        why: "A `+` always allocates, so the store releases what it replaced. The guard was               \"does the new value mention the place\", which is right for `a = @push(a, i)`               and wrong for a concat; the append spine hid it, because the shape that reaches               the general store is a PREPEND and nobody writes one in a hot loop until they do",
+    },
+    Row {
+        export: "selfAppend",
+        today: Shape::Steady,
+        why: "a store releases what the place held, and a module-state accumulator \
+              grows in place. The reset hands back the last call's buffer and the eight \
+              appends reallocate one",
+    },
+    Row {
+        export: "fieldOverwrite",
+        today: Shape::Steady,
+        why: "`r.field = v` releases the old field after the new value is built",
+    },
+    Row {
+        export: "optionString",
+        today: Shape::Steady,
+        why: "an `if let` whose scrutinee is a TEMPORARY gets the reclamation row \
+              a `let` gets, keyed by the statement. The payload may escape the arm, so the \
+              release depends on recording that. The binders bind to the statement's row, \
+              so every `return`, \
+              store, capture and handover this pass already writes lands on it, and a row with \
+              nothing written is a value the arms did not hand on. The release runs on a drop \
+              frame of its own, so an arm that returns early releases it too",
+    },
+    Row {
+        export: "lambdaLoop",
+        today: Shape::Steady,
+        why: "a stored closure owns its capture block, so the block is freed at \
+              block exit and the loop stops allocating one per turn. The copy rule 1 then \
+              demands is DERIVED over the defunctionalized closure enum — one function per \
+              module, a switch from tag to block size, then one malloc and one memcpy — \
+              because a copy site cannot measure a size the tag decides at run time. \
+              Copy and release are both SHALLOW: two lambdas over one \
+              String build two blocks holding one pointer, so a deep release would free it \
+              twice. A captured String therefore still leaks, and `Gone::Captured` already \
+              says why nothing else releases it either",
+    },
+    Row {
+        export: "elementLeak",
+        today: Shape::Steady,
+        why: "an `Array<T>` releases its ELEMENTS as well as its buffer. Built-in rows are \
+              seeded; what it needs is the PROOF that the elements are the array's own, and \
+              rule 2 supplies it: every route \
+              into an element is a store, and a store of a borrow or of a projection is \
+              refused. The compiler's own back doors were three: `m.keys()` and \
+              `sa.toArray()` handed back a fresh \
+              buffer holding somebody else's element WORDS, and `xs.toArray()` on a plain \
+              `Array` handed back the receiver's triple unchanged. All three copy. An \
+              element is released the way its own type is, so an `Array<Record>` releases \
+              its records",
+    },
+    Row {
+        export: "recordFields",
+        today: Shape::Steady,
+        why: "an aggregate releases its PLACES. A record hands its insides out as \
+              projections, and rule 2 refuses all three spellings of that, so the row is \
+              sayable, and a record built per call gives its two Strings back with \
+              it. A type that reaches ITSELF is still left alone: the walk is structural and \
+              has no bottom, which is the guard the `Array` row already carried",
+    },
+    Row {
+        export: "takenField",
+        today: Shape::Steady,
+        why: "a take moves a field out of a record and leaves a hole, and the \
+              release walk is the TYPE — which does not know the field left. The hole set \
+              travels from `movecheck` to `own` to the emitter, so the record is \
+              reclaimed MINUS the place it gave away. The row is the arithmetic: N turns \
+              allocate two Strings and free two — N, not 2N and not 0. Where the walk cannot be \
+              told, the binding still leaks whole: a declared `release` is a user function, a \
+              path that is not a chain of record fields is not a place a static walk reaches, \
+              and a write that fills the hole already released what the take gave away",
+    },
+    Row {
+        export: "slotsContainer",
+        today: Shape::Steady,
+        why: "`std/slots` declares `impl<T> Owned for Slots<T>`, and the release gives \
+              back every element and then the five buffers. Two refusals had to move for it — \
+              a `mut` binding may take a declared release (the interpreter reads the slot now), \
+              and a generic impl carries a row (the drop site solves the type arguments and asks \
+              for the instance). The third — `drop v` where `v: T` — moved back: the release \
+              drops its ARRAYS now, never a bare `T`, and the Param pass was laundering the \
+              record rule, so it is refused. A heap value inside a container is released for a \
+              container that knows what it owns, and leaks for one that cannot",
+    },
+    Row {
+        export: "keysLoop",
+        today: Shape::Steady,
+        why: "a `for` over a TEMPORARY owns the snapshot, so it releases it — \
+              `optionString`'s row for an `if let` over a temporary, at the second statement \
+              that can walk \
+              one, with the same `names_a_place` guard. The loop VARIABLE is bound to that row, so \
+              every way an element can leave the body writes on it: a store \
+              (`fs.push(Field { key: k, .. })`, which `httpInput` does), a `return`, a `drop`, a \
+              capture. A row that says the value left is reclaimed from not at all — the elements \
+              the body kept stay allocated and the buffer with them, which is a leak and not a \
+              double free. One rule had to be added for it: a map takes its KEY, because both \
+              backends write the key pointer into `keys[len]` and copy nothing, so \
+              `for k in base.keys() { hs[k] = .. }` (`httpHeaders`) is a move nothing recorded. \
+              Measured native, 2000 turns over 100 65-byte keys: 6 MB peak before elements were \
+              released, 24 MB after, 4 MB with this row — and 4 MB again at four times the turns",
+    },
+    Row {
+        export: "mapRepeatKey",
+        today: Shape::Steady,
+        why: "A map takes its key, so the map releases the key it does not keep. `movecheck` \
+              refuses a BORROWED key, since otherwise `m[ks[i]] = v` gives one buffer two \
+              owners while the map LITERAL refuses the \
+              same borrow — and what arrives at `map_set` is therefore always a value the map \
+              may own. The hit path used to drop that value on the floor, so every repeat in a \
+              histogram loop leaked a key, and the `.copy()` the new rule requires would have \
+              paid for it once per turn. Measured native, 200 thousand inserts of one 3-byte \
+              key: 10.29 MB peak before, 4.09 MB after",
+    },
+    Row {
+        export: "mapReplaceValue",
+        today: Shape::Steady,
+        why: "the same rule as `mapRepeatKey`, for the other thing the map took. A store over \
+              a key the map already holds put the new value in the slot and released nothing, \
+              so `Map<String, String>` leaked the previous String on every repeat — the value \
+              half was missed one line from where the key half was fixed. It reaches any \
+              owning value type: a String, an `Array<T>`, a record with String fields. \
+              Measured native, 200 thousand stores over one key with ~200-byte values: 12.99 \
+              MB peak before, 3.26 MB after",
+    },
+    Row {
+        export: "mapRemoveEntry",
+        today: Shape::Steady,
+        why: "`remove` gives up the WHOLE entry, so the key and the value both go back. \
+              Neither did: the runtime's `map_remove_at` shifts the survivors down over two \
+              strides and is handed no types, so it cannot release either — at that ABI the \
+              value is `esz` anonymous bytes. The obligation belongs to the call site, where \
+              the two types are known, and the entry is read out of its slots BEFORE the \
+              shift moves the survivors over them. An insert-then-remove loop leaked one key \
+              String plus the value's heap a turn, unbounded, which is every cache eviction. \
+              Measured native, 200 thousand insert-and-remove turns with ~200-byte values: \
+              19.48 MB peak before, 3.26 MB after",
+    },
+    Row {
+        export: "argsBlock",
+        today: Shape::Steady,
+        why: "`args()` handed back an array whose data pointer was `ptrs + 4` — an address \
+              four bytes past a block rather than a block. `free` reads the class word at \
+              `p - HDR`, which there is the allocation's own header slack: always zero, \
+              below `MIN_CLASS`, so the free was refused without a word and `drop xs` \
+              reclaimed nothing. Native `__vyrn_args` hands back a fresh `malloc` and has \
+              always been freeable, so this was one backend alone. Copying `argv[1..]` down \
+              into slot 0 as the elements are built buys back an allocation base, and drops \
+              two more per-call blocks with it: the copy of the program name that the `+ 4` \
+              left stranded, and the host's staging blob, which native does not have at all \
+              because `main` stashes the argv it was handed. Measured on this harness before \
+              the fix, a hundred `args()` a call: 1,703,936 bytes after 500 calls and \
+              6,488,064 after 2,000; 131,072 at both after it",
+    },
+    Row {
+        export: "clockRead",
+        today: Shape::Steady,
+        why: "`monotonic()` asks the runtime whether `VYRN_FIXED_TIME` is set, and that \
+              reaches `envGet`, which asks WASI for the whole environment. The answer \
+              points into the blob WASI writes, so the blob cannot be freed — and it was \
+              allocated per call, so a program that polls the clock or reseeds in a loop \
+              grew the heap by a blob a turn until `malloc` trapped. Reading the \
+              environment once and holding the pair in the two dead class heads makes the \
+              comment that always claimed it (\"the two callers run once per process\") \
+              true. Measured on this harness before the fix, a hundred \
+              `monotonic()` a call: 9,109,504 bytes after 500 calls and 11,534,336 \
+              after 2,000; 8,323,072 at both after it",
+    },
+    Row {
+        export: "bytesRejected",
+        today: Shape::Steady,
+        why: "`stringFromBytes` allocates the String's buffer before it scans, and both \
+              refusals — an embedded NUL, and invalid UTF-8 — left with the message and \
+              without the buffer. Rejecting input in a loop is what a parser does with \
+              anything it did not write, so this leaked one block a turn for as long as the \
+              buffer has been allocated up front. One free at the join covers both exits; \
+              the block is not the arena's on any path, because a region records only the \
+              `str_temporary` shapes and this call's type is a `Result`. Measured here \
+              before the fix over 900 rejected bytes a call: 589,824 bytes after 500 calls \
+              and 2,162,688 after 2,000; 131,072 at both after it. The row is on the direct \
+              backend only — the textual one frees the buffer on both exits already",
+    },
+    Row {
+        export: "returnedString",
+        today: Shape::Steady,
+        why: "rule 3 makes a return the caller's, and across this boundary the               caller is `wasi-min.js` — it decodes the String, then hands the block back               through `__vyrn_free`. An export that would lend one does not compile",
+    },
+    Row {
+        export: "selfReferring",
+        today: Shape::Steady,
+        why: "a type that reaches ITSELF is released by DECLARATION. The release walk \
+              is structural, so `type Twig = | Fork(String, Array<Twig>)` has no bottom to stop \
+              at, and `release_kind` answered `None` — for the type, for `Array<Twig>`, and for \
+              every record that merely REACHES one. That was 63 of the corpus's unreclaimed \
+              bindings, all of them in `std/vyx` and `std/graphql`. A declared `release` IS the \
+              bottom: the walk emits a call there rather than expanding, so the guard now asks \
+              whether the cycle has a declaration ON it rather than whether a cycle exists, and \
+              the rows above the declaration come back with it. Two `impl`s closed all 63. The \
+              row is four ~900-byte Strings a call in a tree, under a record that only reaches \
+              one: removing the `impl` makes it grow, and so does removing the declared stop \
+              from the guard — verified by removing each. The depth is the language's own: a \
+              release of a chain 10,000 deep is 10,000 native frames, measured to overflow the \
+              default 1 MiB Windows stack at 11,000, where an ordinary recursive Vyrn walk over \
+              the same chain overflows at 20,000",
+    },
+    Row {
+        export: "injectedJson",
+        today: Shape::Steady,
+        why: "the declaration is in an INJECTED module. `std/json` is linked by \
+              the `toJson` desugar rather than by an import, and the linker renames its every \
+              declaration by prefix — so the type key this row's bindings carry is \
+              `json$Json`, and the declared row has to be keyed by the renamed spelling too. \
+              It is: the impl \
+              method follows its TYPE's rename, and `rewrite_module_refs` rewrites the impl \
+              HEAD, so one link has one key. The row also runs the composition of a declared \
+              release and a declared copy: `Json` declares `Copy` as well, and a copy \
+              shares nothing, so the tree and its copy are released once each. It builds one \
+              object of two ~900-byte Strings a turn, copies it, and emits both — a leak \
+              grows it, and a double free traps rather than reading steady, which is why \
+              `examples/copy.vyrn` runs the same shape on three engines",
+    },
+    Row {
+        export: "exprTemporary",
+        today: Shape::Steady,
+        why: "a String an EXPRESSION allocated has no binding, so `own` — which \
+              keys every release on a `let` — had nothing to write a row against. `\"n\" + \
+              i.toString()` leaked the `@str` result at every turn of a loop, and so did \
+              every hole of an interpolation, because `\"a\\{x}b\\{y}\"` folds left into \
+              nested `@concat`s and only the outermost result ever reaches a name. The \
+              consumer is the only place that knows the temporary exists and knows it is \
+              finished with, so the release goes there: `@concat`, a String `+`, `@str` \
+              and the in-place append each free an operand the expression itself \
+              allocated. Safe because all four COPY out of their operands, and because \
+              `@str` and `@concat` cannot be shadowed — the lexer produces no leading \
+              `@`, which is the argument `ban_append_expr` already stands on. It stood \
+              aside inside a `region` until the region triage; the arena refuses its own \
+              blocks at `free`, so the operand is handed back at every depth. En route it \
+              settled a DIVERGENCE: `@str` of a \
+              String was the identity on the direct backend and a strdup on the textual \
+              one, so a lone hole — `let t = \"\\{s}\"`, no literal piece and therefore \
+              no `@concat` above it — released one buffer twice on wasm and copied on \
+              native. Both copy now, which is what lets one rule answer for both. \
+              Measured native before the fix, `\"n\" + i.toString()` in a loop: 19.9 MB \
+              peak at 250,000 turns and 54.1 MB at four times that; 4.06 MB at both \
+              after it. Removing any one of the four frees makes this row grow",
+    },
+    Row {
+        export: "localAccumulator",
+        today: Shape::Steady,
+        why: "`own`'s static-data rule read the INITIALIZER. `let mut \
+              acc = \"\"` starts at a data-segment literal, so the whole binding answered \
+              `Fate::Static` and the heap buffer the last `acc = acc + …` left was never \
+              freed — the opening line of every accumulator in this language. The rule asks \
+              whether the binding can CHANGE now, and a `mut` one is released by its slot's \
+              final value like any other. A slot that still holds the literal — a loop that \
+              never runs, a branch that assigns another literal — frees nothing, because \
+              `@__vyrn_str_free` reads a `cap` of 0 as static and returns. Measured on the \
+              direct backend before the fix, over a smaller shape: 851,968 bytes after \
+              500 calls and 3,211,264 after 2,000; this row's own ~900-byte turns read \
+              8,323,072 against 32,899,072. It waited on the row below this one — \
+              releasing a reassigned accumulator is what made a `String` returned out of a \
+              `region` reachable, and that shape corrupted the native heap until the arena \
+              stopped handing out a pointer 8 bytes inside its block",
+    },
+    Row {
+        export: "callArgument",
+        today: Shape::Steady,
+        why: "the call argument: a value the ARGUMENT EXPRESSION built has no binding either, \
+              so `own` had nothing to write a row against and `width(tagged(seen))` leaked \
+              every turn where `let s = tagged(seen)` on the line above did not. The name was \
+              the whole difference — the proof was never missing, only the place to write it \
+              down. `movecheck` records the argument's node address and the callee's verdict; \
+              a `read` parameter that keeps nothing is released by the caller after the call, \
+              and rules 2 and 3 are what make `read` mean that. The row runs BOTH halves, \
+              because either alone is a bug: `wrap(tagged(seen))` hands its temporary to a \
+              position `note_retention` recorded, nothing is freed at the call, and the `Twig` \
+              gives it back once at block exit — free it here too and the row does not grow, \
+              it double frees. Measured native over `width(label(i))` in a loop before the \
+              rule: 14.62 MB at 250,000 turns and 49.12 MB at four times that, which is 48.2 \
+              bytes a turn — the String header and its buffer. After it: 3.94 MB and 4.26 MB. \
+              Make the retention question answer `Unknown` everywhere and this row leaks \
+              again, which is the negative test. The row carries the class NEXT DOOR too: \
+              `\"n\" + tagged(seen)` feeds a call result to the OPERATOR lowering rather \
+              than to a call, so it was in neither the call-argument class nor the expression \
+              operand class — that one frees an operand that allocated its own value, and a call \
+              result is one whose CALLEE decides. A String `+` is `@concat` written as an \
+              operator, so its operands take the same verdict and the same guards. Measured \
+              native over `\"n\" + label(i)` in a loop before the rule: 15.74 MB at 250,000 \
+              turns and 50.25 MB at four times that; 3.95 MB and 3.57 MB after it",
+    },
+    Row {
+        export: "regionArena",
+        today: Shape::Steady,
+        why: "the arena. Every dynamic String bound inside a `region` is the arena's to \
+              reclaim, and this backend had no arena. `region_exit` bumped a counter and reclaimed nothing, on \
+              the recorded argument that `malloc` here never freed either, which stopped \
+              being true once wasm reclaimed. So the one construct built for bounded memory \
+              was the one \
+              construct that made this target unbounded: an audit measured 13.4 MB native \
+              against 3,664.5 MB and `out of memory` under wasmtime, for 20,000 turns of a \
+              concatenation loop inside a region — and after the arena, 27.7 MB and a clean \
+              exit. `arena_route` routes what a lexically-inside-a-region allocation asks \
+              for, `rt.region_free` hands the frame's blocks back at the closing brace, \
+              and `rt.region_pop` leaves them alone on the one edge that carries one out. \
+              Lexical routing, like the textual backend's: routing on the RUNTIME depth would \
+              put a callee's String in a caller's arena, where the escape guard never looked. \
+              The release side asks nothing about the depth — `free` refuses an arena block \
+              by the class word in its header — so \
+              this row measures the arena and nothing else. Take `arena_route` out and this \
+              row leaks",
+    },
+    Row {
+        export: "regionCopy",
+        today: Shape::Steady,
+        why: "the arena's SET. The row above proves the arena reclaims; this one proves the two \
+              backends put the same blocks in it. The textual backend routes at the ALLOCATION \
+              — every `Gen::str_alloc` made while a region is open draws from the arena — and \
+              this one routed at the EXPRESSION, keeping the value of a node `own::str_temporary` \
+              said yes to. A `copy` is not one of those nodes and its buffer is not the node's \
+              value, it is one level down, so `let t = s.copy()` inside a region was the arena's \
+              natively and nobody's here: the walk stood off inside a region and nothing \
+              recorded it. 400,000 turns read 17.5 MB against native's 3.6 MB. The routing is \
+              at the allocation on both backends now (`Fn_::arena_route`, at the sites \
+              `Gen::str_alloc` is called from), and the walk asks for every block it holds — \
+              so a block under a container has one owner, and it is the one the block header \
+              names",
+    },
+    Row {
+        export: "regionRebind",
+        today: Shape::Steady,
+        why: "the other half of the row above, and it was the one place this rule was \
+              deliberately inexact. A store inside a region took no snapshot at all, on the \
+              argument that a `String` the place holds is the arena's and the snapshot would \
+              free it a second time — so a container reassigned inside a region handed its \
+              old buffer to nobody, on both backends alike. The argument was wrong about who \
+              owns the block: `free` refuses an arena block by its class word, so a snapshot \
+              may ask for every buffer and the arena keeps the ones that are its. So the \
+              store carries no region gate, and `Fn_::store_bufs` filters nothing",
+    },
+    Row {
+        export: "consumingLoop",
+        today: Shape::Steady,
+        why: "`for x in consume xs` takes the buffer, and the row the PLACE has \
+              says `Moved` — which is the truth about the place and was the end of the matter, \
+              so nothing freed the buffer at all. The loop is its last owner and releases it at \
+              every exit, the way a loop over a temporary releases its snapshot. `check_take` \
+              has already refused a borrowed root and refused module state, so the value is this \
+              frame's; the take is what stops the `let` from releasing it too. An early `break` \
+              is safe for the reason the whole row is: the loop variable binds to this row, so a \
+              body that hands ONE element on marks the row gone and the container leaks whole — \
+              a row that survives to the exit is a body that kept nothing, and the release then \
+              gives back the visited and the unvisited elements alike, each exactly once",
+    },
+    Row {
+        export: "matchTemporary",
+        today: Shape::Steady,
+        why: "a `match` whose scrutinee is a TEMPORARY owns what it holds, so the match \
+              releases it — `optionString`'s `if let` row at the third construct that walks one. \
+              An `if let` and a `for` each got a statement row and a `match` got none, \
+              because a match is an EXPRESSION and there was no statement to key on; the row \
+              is keyed by the match expression's own node address instead, and `movecheck` \
+              writes on it whenever an arm hands the payload out. A row nothing wrote on is a \
+              scrutinee the arms did not keep, and releasing it is what closes the row. \
+              `match makeResult(i) { Ok(s) => s.byteLength, .. }` leaked one `Option`'s heap \
+              per turn on both compiling backends and the identical `if let` did not — \
+              measured native at 3,000,000 turns, 141.7 MB before and 3.6 MB after. The row \
+              was not written at all inside a `region` until the region triage; the match \
+              releases its temporary at every depth now, and `free` refuses the block if the \
+              arena minted it",
+    },
+    Row {
+        export: "keptForever",
+        today: Shape::Leaks,
+        why: "the canary. Every row above says `Steady`, and so does a measurement that \
+              stopped measuring — a driver calling nothing, exports that vanished from the \
+              module, a `byteLength` read that no longer moves. This export keeps every \
+              buffer it makes in module state, on purpose, so the `Leaks` arm of the \
+              comparison is exercised by something. If this row ever reads `Steady`, the \
+              table is not looking at the heap and none of the verdicts above mean anything. \
+              It is not a defect and no phase will fix it: an array that is never emptied is \
+              supposed to hold what it was given",
+    },
+];
+
+/// One export per row. The strings are ~900 bytes so one leaked buffer is
+/// visible against the 128 KiB the module starts with.
+fn shapes_fixture() -> String {
+    let pad = "x".repeat(900);
+    format!(
+        r#"import {{ Slots, newSlots, insert, count }} from "std/slots"
+import {{ Json, JsonField, emit }} from "std/json"
+import {{ monotonic }} from "std/time"
+
+let mut seen: Int64 = 0
+
+let mut acc: String = ""
+
+type Bump = fn(Int64) -> Int64
+
+type Row = {{ name: String, n: Int64 }}
+
+type Doc = {{ title: String, body: String }}
+
+/// A type that reaches ITSELF — `Twig` holds `Array<Twig>`. The shape the
+/// release walk needs a declaration to enter, and the shape `std/vyx`'s
+/// `VyxNode` and `std/graphql`'s `GqlSel` have.
+type Twig =
+    | Tip(String)
+    | Fork(String, Array<Twig>)
+
+/// A record that merely REACHES the self-referring type. It had no row either,
+/// for the same missing bottom, and gets its structural one back with the
+/// declaration below.
+type Bough = {{ root: Twig, label: String }}
+
+/// The declaration that IS the bottom. The walk emits a call here rather than
+/// expanding, and this function makes the recursion the walk cannot. Block
+/// arms: `drop` stands in the arm itself, not in a generic trampoline —
+/// `drop` on a bare `T` is refused, for laundering
+/// the record rule.
+impl Owned for Twig {{
+    fn release(consume self) {{
+        match consume self {{
+            Tip(s) => {{
+                drop s
+            }}
+            Fork(s, kids) => {{
+                drop s
+                drop kids
+            }}
+        }}
+    }}
+}}
+
+let mut row: Row = Row {{ name: "", n: 0 }}
+
+let mut keyed: Map<String, Int64> = [:]
+
+/// Bytes that are not UTF-8, filled on the first call: a module-state
+/// initializer may call nothing, and the point of holding them here is that a
+/// `stringFromBytes` turn allocates only what the call itself allocates.
+let mut bad: Array<UInt8> = []
+
+/// A ~900-byte literal. It lives in the data segment, so calling this allocates
+/// nothing — every allocation below is the concatenation, and only that.
+fn tag() -> String {{
+    return "{pad}"
+}}
+
+/// The recommended fallible style, whose temporary scrutinee needs a
+/// reclamation row of its own.
+fn maybe(x: String) -> Option<String> {{
+    return Some(x + "!")
+}}
+
+export extern fn control() {{
+    let s = tag() + "!"
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// The copy is a fresh buffer with one owner, released at block
+/// exit exactly as `control`'s concatenation is.
+export extern fn copyLocal() {{
+    let s = tag() + "!"
+    let c = s.copy()
+    seen = seen + Int64(c.byteLength)
+}}
+
+export extern fn ifExpr() {{
+    let c = seen % 2 == 0
+    let s = if c {{ tag() + "a" }} else {{ tag() + "b" }}
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// A `mut` String. The keyword does not disqualify a binding from
+/// reclamation: the binding owns its buffer and the block frees it.
+///
+/// It does not reassign. A store that overwrites an owning place must release
+/// what was there — see `selfAppend` below, which is the
+/// same hole through module state.
+export extern fn mutString() {{
+    let mut s = tag() + "!"
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// A PREPEND in a loop, which no in-place append can serve: the old buffer is
+/// not a prefix of the new one, so `s = "x" + s` must allocate and the store
+/// must release what it replaced.
+///
+/// THE LEAK THIS PINS. The store's release was skipped whenever the new value
+/// mentioned the place at all — right for `a = @push(a, i)`, which grows the old
+/// buffer and hands it back, and wrong for a `+`, because `__vyrn_str_concat`
+/// always calls `__vyrn_str_new` and memcpy's both operands. It stayed invisible
+/// because `s = s + x` is caught by the append spine and never reaches the
+/// general store. Measured before the fix: 9.9 GB over 50,000 calls of a
+/// 200-iteration loop, where the append form used 4.2 MB.
+export extern fn prependLoop() {{
+    let mut s = ""
+    let mut i = 0
+    while i < 200 {{
+        s = "abcdefghij" + s
+        i = i + 1
+    }}
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// The shape a server has: module state reset and then grown.
+/// `examples/bin` and `examples/shelf` both rebuild module state per request.
+///
+/// Both halves of the store rule are here. The reset releases the buffer the last call
+/// built, and the self-append grows the new one IN PLACE rather than building a
+/// fresh buffer per turn and abandoning the old — which is what a module-state
+/// accumulator would do if the in-place check read one body, because a global
+/// is reachable from all of them.
+///
+/// It resets, and it has to. An accumulator that only ever grows has no bounded
+/// steady state to assert: its memory IS the string it built. What that costs is
+/// `examples/membench.vyrn`'s question, and it answers it.
+export extern fn selfAppend() {{
+    acc = ""
+    let mut i = 0
+    while i < 8 {{
+        acc = acc + "0123456789"
+        i = i + 1
+    }}
+    seen = seen + Int64(acc.byteLength)
+}}
+
+export extern fn fieldOverwrite() {{
+    row.name = tag() + "x"
+    seen = seen + Int64(row.n)
+}}
+
+export extern fn optionString() -> Int64 {{
+    if let Some(s) = maybe(tag()) {{
+        return Int64(s.byteLength)
+    }}
+    return 0
+}}
+
+export extern fn lambdaLoop() {{
+    let mut i = 0
+    while i < 32 {{
+        let k = i
+        let f: Bump = x -> x + k
+        seen = seen + f(i)
+        i = i + 1
+    }}
+}}
+
+/// A heap value inside a container. Both the array's buffer and the
+/// String in it are reclaimed at block exit.
+///
+/// A release that walks elements would free the same pointers twice
+/// wherever a shallow view exists, such as a `m.keys()` that hands back a
+/// FRESH buffer holding the map's OWN key pointers. There are no views: the
+/// three builtins that could make one copy their elements, so the only
+/// route into an element is a store, and rule 2 refuses storing a borrow.
+export extern fn elementLeak() {{
+    let mut xs: Array<String> = []
+    xs.push(tag() + "!")
+    seen = seen + Int64(xs.length)
+}}
+
+/// A heap value inside a container that DECLARES what it owns.
+///
+/// The same heap element as `elementLeak`, in a `Slots<String>` instead of a bare
+/// `Array<String>`. The slab is `mut` — `insert` takes `modify self` — so this
+/// row also proves the `mut` half: a `mut` binding takes a declared release,
+/// and all five buffers go back.
+/// The owning place releases what it holds, through a RECORD.
+///
+/// A record built per call, holding two ~900-byte Strings and never handed on.
+/// Without a record row `release_kind(Record)` answers `None`, so both
+/// buffers leak once per call while the identical `Option<Doc>` one line over
+/// releases both — one type, two verdicts, an `Option` apart.
+export extern fn recordFields() {{
+    let d = Doc {{ title: tag() + "t", body: tag() + "b" }}
+    seen = seen + Int64(d.title.byteLength) + Int64(d.body.byteLength)
+}}
+
+/// `consume d.title` moves the field out; the record's release
+/// walk skips it and hands back `body` alone, so the loop allocates two Strings
+/// a turn and frees two. Leaving `d` unreclaimed leaks `body` once per
+/// turn; under a walk that did not skip, `title` would be freed twice
+/// — which this harness cannot see and parity can.
+export extern fn takenField() {{
+    let mut i = 0
+    while i < 4 {{
+        let d = Doc {{ title: tag() + "t", body: tag() + "b" }}
+        let t = consume d.title
+        seen = seen + Int64(t.byteLength) + Int64(d.body.byteLength)
+        i = i + 1
+    }}
+}}
+
+export extern fn slotsContainer() {{
+    let mut s: Slots<String> = newSlots()
+    let h = insert(s, tag() + "!")
+    seen = seen + count(s)
+}}
+
+/// The price of copying views. `m.keys()` copies its keys, and the snapshot
+/// a `for` walks is a temporary — which owns what it holds, so the loop gives
+/// back one buffer and one String per key. The map is built once and kept in
+/// module state, so the only allocation per call is the snapshot.
+export extern fn keysLoop() {{
+    if keyed.length == 0 {{
+        keyed[tag() + "a"] = 1
+        keyed[tag() + "b"] = 2
+    }}
+    for k in keyed.keys() {{
+        seen = seen + Int64(k.byteLength)
+    }}
+}}
+
+/// The other half of "a map takes its key": the map releases the key it does not
+/// keep. Every call hands the map a freshly built key it already holds, so the
+/// hit path runs every time and the map keeps nothing new. Before the release
+/// the surplus key was dropped on the floor — one ~900-byte String a call, which
+/// is what a histogram loop over repeated words leaks.
+export extern fn mapRepeatKey() {{
+    let mut m: Map<String, Int64> = [:]
+    m[tag() + "r"] = 1
+    m[tag() + "r"] = 2
+    m[tag() + "r"] = 3
+    seen = seen + m.length
+    drop m
+}}
+
+/// The value half of the same rule. The map holds one key throughout and the
+/// value under it is replaced twice a call, so the two ~900-byte Strings the
+/// stores displace are the only allocation this can leak — and it did, because
+/// the hit path stored over the old value and released nothing.
+export extern fn mapReplaceValue() {{
+    let mut m: Map<String, String> = [:]
+    m["k" + "ey"] = tag() + "1"
+    m["k" + "ey"] = tag() + "2"
+    m["k" + "ey"] = tag() + "3"
+    seen = seen + m.length
+    drop m
+}}
+
+/// Both halves at once, through the other way a map gives an entry up. Every
+/// call inserts a built key with a ~900-byte value and removes it again, so the
+/// map is empty at the `drop` and the entry it dropped is the whole allocation.
+export extern fn mapRemoveEntry() {{
+    let mut m: Map<String, String> = [:]
+    m["k" + "ey"] = tag() + "v"
+    if m.remove("key") {{
+        seen = seen + 1
+    }}
+    seen = seen + m.length
+    drop m
+}}
+
+/// `args()` gives back a block a `drop` can reach. The array is empty here — a
+/// page has no argv — so a hundred turns a call is a hundred pointer blocks and a
+/// hundred staging blobs, and nothing else: exactly the two allocations the call
+/// makes for itself.
+export extern fn argsBlock() {{
+    let mut i = 0
+    while i < 100 {{
+        let xs = args()
+        seen = seen + xs.length
+        i = i + 1
+    }}
+}}
+
+/// The injected clock. Every `monotonic()` asks the runtime whether
+/// `VYRN_FIXED_TIME` is set, which reads the whole environment; the answer
+/// points into the blob WASI writes, so the blob is held rather than freed.
+/// Held ONCE: a hundred turns a call allocate on the first turn of the first
+/// call and nothing after it.
+export extern fn clockRead() {{
+    let mut i = 0
+    while i < 100 {{
+        seen = seen + monotonic()
+        i = i + 1
+    }}
+}}
+
+/// A REJECTED `stringFromBytes` gives its buffer back. The bytes are module state
+/// and the `Err` payload is an interned message, so the buffer the call allocates
+/// for the copy is the only thing a turn can leak.
+export extern fn bytesRejected() {{
+    if bad.length == 0 {{
+        let mut i = 0
+        while i < 900 {{
+            bad.push(255)
+            i = i + 1
+        }}
+    }}
+    let r = match stringFromBytes(bad) {{
+        Ok(s) => s.byteLength,
+        Err(e) => e.byteLength,
+    }}
+    seen = seen + r
+}}
+
+/// The row `keysLoop` is one keyword away from. The loop TAKES
+/// the array, so the binding's row says it moved and nothing else will ever free
+/// it. Two ~900-byte elements and one buffer per call, and the loop hands all
+/// three back at its exit.
+export extern fn consumingLoop() {{
+    let mut xs: Array<String> = []
+    xs.push(tag() + "a")
+    xs.push(tag() + "b")
+    for x in consume xs {{
+        seen = seen + Int64(x.byteLength)
+    }}
+}}
+
+/// A region. Three ~900-byte Strings a call, all of them the arena's: the
+/// closing brace is what reclaims them, and the release walk that asks for them
+/// too is refused by the class word in their headers. The brace reclaimed
+/// nothing on this backend until `arena_route` and `rt.region_free` — and the
+/// numbers that measured the difference are on the `regionArena` row above.
+export extern fn regionArena() {{
+    region {{
+        let a = tag() + "a"
+        let b = tag() + a
+        let c = b + "!"
+        seen = seen + Int64(c.byteLength)
+    }}
+}}
+
+/// The same arena, asked about the block a `copy` makes rather than the one a
+/// `+` makes. A routing rule that misses the copy leaks it: the block is the
+/// frame's then, and the frame's walk is where it comes back. The rule did miss
+/// it — the expression-level rule read the NODE, and a copy allocates one level
+/// under its node.
+export extern fn regionCopy() {{
+    region {{
+        let s = tag() + "!"
+        let t = s.copy()
+        seen = seen + Int64(t.byteLength)
+    }}
+}}
+
+/// The price of the same routing, paid in the other direction. The store
+/// snapshot inside a region was refused outright, because a `String` block was
+/// read as the arena's and the snapshot would free it twice. The refusal was
+/// blunt: an `Array` buffer is NEVER the arena's (`Gen::array_n_to_heap`), so
+/// reassigning a container inside a region handed its old buffer to nobody. The
+/// snapshot asks for every buffer now and `free` refuses the arena's, which is
+/// what this row measures.
+export extern fn regionRebind() {{
+    region {{
+        let mut xs: Array<Int64> = []
+        let mut i = 0
+        while i < 100 {{
+            xs.push(i)
+            i = i + 1
+        }}
+        xs = []
+        seen = seen + xs.length
+    }}
+}}
+
+/// Four ~900-byte Strings a call, in a tree that refers to itself,
+/// under a record that only reaches one.
+///
+/// Without the declaration nothing releases them: `release_kind` answers
+/// `None` for `Twig` because a structural walk of a self-referring type has no
+/// bottom, and `None` for `Bough` and for `Array<Twig>` for the same reason one
+/// hop away. `impl Owned for Twig` supplies the bottom — the walk emits a CALL
+/// there — and the three rows above it come back with it. Removing the `impl`
+/// makes this row grow; so does removing the declared stop from the guard, and
+/// then only `label` is reclaimed.
+export extern fn selfReferring() {{
+    let mut kids: Array<Twig> = []
+    kids.push(Tip(tag() + "a"))
+    kids.push(Tip(tag() + "b"))
+    let b = Bough {{ root: Fork(tag() + "r", kids), label: tag() + "l" }}
+    seen = seen + Int64(b.label.byteLength)
+}}
+
+/// The declared release of a type declared in an INJECTED module,
+/// reached through the reserved spelling the linker renames it to.
+///
+/// `toJson` below is what injects `std/json`, and the import beside it is a HAND
+/// import of the same module — both link modes in one program, which is the
+/// arrangement that had to have one type key rather than two. It also runs the
+/// composition: `Json` declares `Copy` too, so `doc` and `mirror` are two trees
+/// and each is released exactly once.
+/// What INJECTS `std/json`. The loader links the module because this function
+/// MENTIONS `toJson`; nothing calls it, so the row below measures the tree and
+/// not the encoder.
+fn jsonAnchor() -> String {{
+    return toJson(Doc {{ title: "", body: "" }})
+}}
+
+/// A String an EXPRESSION allocated, which no binding names.
+///
+/// `tag()` hands back a data-segment literal and allocates nothing, so every
+/// byte here is a concatenation: the two halves of `joined`, the hole that
+/// renders `joined + "y"`, the copy `@str` makes of it, and the inner join of
+/// the interpolation spine. Only the outermost result of each statement reaches
+/// a name. The last shape is the in-place append, whose operand the fast path
+/// copies in and must then release.
+///
+/// Removing the free in `@concat`, in the `+` lowering, or in the append makes
+/// this row grow.
+export extern fn exprTemporary() {{
+    let joined = (tag() + "a") + (tag() + "b")
+    let held = "x\{{joined + "y"}}z"
+    acc = ""
+    acc = acc + (tag() + "u")
+    seen = seen + Int64(held.byteLength) + Int64(acc.byteLength)
+}}
+
+/// A LOCAL String accumulator, which is the shape every
+/// generator in `std/` is written in.
+///
+/// The buffer is the one the loop grew, not the literal the binding opened with,
+/// and the release runs on the slot's FINAL value. Ten turns of ~900 bytes so
+/// one missed release is a page rather than a rounding error. Reverting the
+/// `mut` clause in `own::fate` makes this row read 8,323,072 bytes at 500 calls
+/// against 32,899,072 at 2,000 — four times the calls, four times the memory,
+/// which is the leak stated as the relation this file asserts.
+export extern fn localAccumulator() {{
+    let mut out = ""
+    let mut i = 0
+    while i < 10 {{
+        out = out + tag()
+        i = i + 1
+    }}
+    seen = seen + Int64(out.byteLength)
+}}
+
+export extern fn injectedJson() {{
+    let mut fs: Array<JsonField> = []
+    fs.push(JsonField {{ key: tag() + "k", value: JStr(tag() + "v") }})
+    // Sixteen short nodes beside the two ~900-byte ones. A `Json` payload is
+    // WIDE, so it travels in a heap block no Vyrn surface names, and a declared
+    // release leaks one block per node unless `free_declared_boxes` runs after
+    // the call. Two nodes would be 32 bytes a call and hide
+    // inside a page; thirty-six are a kilobyte a call and do not.
+    let mut xs: Array<Json> = []
+    let mut i = 0
+    while i < 16 {{
+        xs.push(JStr("node"))
+        i = i + 1
+    }}
+    fs.push(JsonField {{ key: "kids", value: JArr(xs) }})
+    let doc: Json = JObj(fs)
+    let mirror = doc.copy()
+    seen = seen + 1
+}}
+
+/// A temporary scrutinee at the third construct that walks one. Nothing leaves
+/// the arms — both hand back a number — so this `match` is the scrutinee's last
+/// owner and releases it, as the identical `optionString` one screen up
+/// does: a `match` is an expression and had no
+/// statement to key a row on.
+export extern fn matchTemporary() {{
+    let n = match maybe(tag()) {{
+        Some(s) => s.byteLength,
+        None => 0,
+    }}
+    seen = seen + Int64(n)
+}}
+
+export extern fn returnedString() -> String {{
+    return tag() + "!"
+}}
+
+fn work(n: Int64) -> Int64 {{
+    return n + 1
+}}
+
+/// A task result that OWNS heap, so a dropped task has something to release
+/// besides the box it sits in — and something this harness can SEE, which 8
+/// bytes of box per call was not.
+fn tagged(n: Int64) -> String {{
+    if n < 0 {{
+        return "-"
+    }}
+    return tag() + "!"
+}}
+
+/// A `read` parameter that keeps nothing — rules 2 and 3 refuse every way it
+/// could. It reads its argument and answers a number, which is what makes the
+/// caller the temporary's only owner.
+fn width(s: String) -> Int64 {{
+    return Int64(s.byteLength)
+}}
+
+/// The call-argument row. The temporary
+/// `tagged(seen)` builds has no binding, and `width` keeps nothing, so the
+/// CALLER releases it after the call.
+///
+/// The other half of the rule — a position that KEEPS what it is given — is not
+/// measurable here and has its own test (`the_retained_argument_is_not_freed_at_the_call`
+/// in `tests/parity.rs`). A builder that puts a `read` argument into a value it
+/// returns LENDS that value, so the caller may not release the value either: the
+/// shape leaks whatever this rule does, a finding of its own and 78 sites
+/// of this corpus. A leaking shape cannot be a steady row;
+/// a double free is what that test is for, and a double free is not a leak.
+export extern fn callArgument() {{
+    seen = seen + width(tagged(seen))
+    // The class next door, and the same 48 bytes: a call result fed to a `+`.
+    // It reaches the OPERATOR lowering rather than a call, so it was in neither
+    // the call-argument class nor the expression operand class, which frees an operand
+    // that ALLOCATED its own value, and `tagged(seen)` is a call whose callee
+    // decides. `s` names the concatenation, so a leak here is the operand's.
+    let s = "n" + tagged(seen)
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// The CANARY, and the only row here that is meant to grow.
+///
+/// Every other row asserts `Steady`, which is the state a broken measurement
+/// also reports: a driver that called nothing, a build whose exports vanished,
+/// or a `byteLength` read that stopped moving would leave the whole table green
+/// while checking nothing. So one export keeps every buffer it makes, on
+/// purpose, and its row says `Leaks`. It fails if the detector stops detecting,
+/// which is the half the other twenty rows structurally cannot cover.
+///
+/// It is not a defect and there is nothing to fix: a module-state array that is
+/// never emptied is SUPPOSED to hold what it was given. That is what makes it a
+/// safe canary — no later phase will ever flip this row.
+let mut kept: Array<String> = []
+
+export extern fn keptForever() {{
+    kept.push(tag() + "!")
+    seen = seen + Int64(kept.length)
+}}
+
+/// A TEMPORARY. `fresh()` returns a String the caller owns, it is
+/// read for its length, and nothing binds it — so `drop_slots`, which is keyed
+/// on `let`, has no row for it and nothing releases it.
+///
+/// The interpreter reclaims this one for free: `Val::Str` is an `Rc<String>`.
+/// The compiled backends carry no refcount and rely on an analysis that is not
+/// asked. Measured on the same program, 20,000 rounds: 8.5 MB interpreted
+/// against 313.9 MB native.
+export extern fn temporaryCall() {{
+    seen = seen + Int64(fresh().byteLength)
+}}
+
+fn fresh() -> String {{
+    return tag() + "!"
+}}
+
+/// An accumulator whose LAST value escapes. `Gen::slot_owns` asks
+/// whether the binding is in `drop_slots` — the set released at block exit — and
+/// one consumed into a record is not, so no assignment in its life releases what
+/// it replaced. Every intermediate leaks; only the last one is given back, by
+/// `b` at the end of the block.
+///
+/// The same loop with `acc` merely RETURNED is steady, which is what makes this
+/// a defect rather than a cost: 4.2 MB against 9.9 GB over 50,000 calls.
+type Held = {{ s: String }}
+
+export extern fn escapingAccumulator() {{
+    let mut acc = ""
+    let mut i = 0
+    while i < 8 {{
+        acc = acc + tag()
+        i = i + 1
+    }}
+    let b = Held {{ s: consume acc }}
+    seen = seen + Int64(b.s.byteLength)
+}}
+
+/// Rule N: a CONDITIONAL move. One branch gives the value away, the
+/// other only reads it, both continue to the join — so the move checker's
+/// union says "consumed" and block exit releases nothing, on the path where
+/// nothing consumed anything. 215.3 MB native over 200,000 rounds of a
+/// 1,000-byte value, taking the non-moving branch every time.
+fn takeIt(v: consume String) -> Int64 {{
+    return v.byteLength
+}}
+
+export extern fn conditionalMove() {{
+    let s = tag() + tag()
+    if seen < 0 {{
+        seen = seen + takeIt(consume s)
+    }} else {{
+        seen = seen + Int64(s.byteLength)
+    }}
+}}
+
+/// Rule N at a MATCH join: the same asymmetry, one arm consuming and
+/// one only reading, with the release on the untouched arm's edge — the arm's
+/// source index instead of then/else.
+export extern fn conditionalMoveMatch() {{
+    let s = tag() + tag()
+    seen = seen + match pick(seen) {{
+        Ok(v) => takeIt(consume s) + v,
+        Err(v) => Int64(s.byteLength) - v + v,
+    }}
+}}
+
+fn pick(n: Int64) -> Result<Int64, Int64> {{
+    if n < 0 {{ return Ok(n) }}
+    return Err(n)
+}}
+
+/// A `consume` parameter the body only READS. The callee owns it and
+/// releases it at exit; otherwise only an explicit `drop v` would, and a
+/// body without one would leak its argument every call.
+fn readOnly(v: consume String) -> Int64 {{
+    return Int64(v.byteLength)
+}}
+
+export extern fn consumedParamRead() {{
+    let s = tag() + tag()
+    seen = seen + readOnly(consume s)
+}}
+
+/// The container case: `.length` on an unnamed Array the frame owns.
+fn makeNums(n: Int64) -> Array<Int64> {{
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < n {{
+        a.push(i)
+        i = i + 1
+    }}
+    return a
+}}
+
+export extern fn temporaryArrayLength() {{
+    seen = seen + makeNums(64).length
+}}
+
+/// The last receiver case: a field of a TEMPORARY record. A heap
+/// field is read out of a value NOBODY owns, so the binding takes ownership
+/// (`names_a_place` does not call it a borrow); a scalar field is the
+/// record's last observer, so the record is freed whole after the read.
+type Tag = {{ label: String, n: Int64 }}
+
+fn makeTag(i: Int64) -> Tag {{
+    return Tag {{ label: tag(), n: i }}
+}}
+
+export extern fn temporaryRecordField() {{
+    let x = makeTag(seen).label
+    seen = seen + Int64(x.byteLength)
+}}
+
+export extern fn temporaryRecordScalar() {{
+    seen = seen + makeTag(seen).n
+}}
+
+/// The CHAINED projection: the receiver of `.byteLength` is itself a heap
+/// field of a record temporary, and freeing it frees only the field it read.
+export extern fn temporaryChainedField() {{
+    seen = seen + Int64(makeTag(seen).label.byteLength)
+}}
+
+/// Untake: the value is taken, the binding is provably re-established,
+/// and block exit releases the FINAL value — the taken one is the callee's,
+/// which `drop`s it (the language's contract for a read-only `consume`).
+fn takeDrop(v: consume String) -> Int64 {{
+    let n = Int64(v.byteLength)
+    drop v
+    return n
+}}
+
+export extern fn revivedBinding() {{
+    let mut s = tag() + tag()
+    seen = seen + takeDrop(consume s)
+    s = tag() + tag()
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// Rule N at an `if`-EXPRESSION join — the third join shape, same
+/// asymmetry, the release under the untouched branch's value.
+export extern fn conditionalMoveIfExpr() {{
+    let s = tag() + tag()
+    seen = seen + (if seen < 0 {{ takeIt(consume s) }} else {{ Int64(s.byteLength) }})
+}}
+
+fn main() -> Int64 {{
+    return 0
+}}
+"#
+    )
+}
+
+/// Reads every row's two byte counts, a fresh instance per count so the two
+/// answers are two steady states rather than one run's tail.
+const SHAPES_DRIVER: &str = r#"import { readFile } from "node:fs/promises";
+import { runVyrn } from "./wasi-min.mjs";
+
+const bytes = await readFile(new URL("./shapes.wasm", import.meta.url));
+const names = process.argv.slice(3);
+const n = Number(process.argv[2]);
+
+// `returnedString` is the export-return row. Nothing here names it: the
+// module's own `vyrn:exports` section says the result is a String, so the
+// wrapper decodes it and releases it. This row is
+// therefore also the section's end-to-end test: without it the pointer comes
+// back as a number and the buffer leaks.
+async function after(name, calls) {
+  const { exports, memory } = await runVyrn(bytes);
+  for (let i = 0; i < calls; i++) exports[name]();
+  return memory.buffer.byteLength;
+}
+
+for (const name of names) {
+  console.log(name, await after(name, n), await after(name, 4 * n));
+}
+"#;
+
+#[test]
+fn the_census_shapes_hold_their_measured_baseline() {
+    let Some(node) = find_node() else {
+        eprintln!("NOTE: no node — the census baseline is unmeasured on this machine");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("vyrn-shapes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("shapes.vyrn"), shapes_fixture()).unwrap();
+    std::fs::write(dir.join("drive.mjs"), SHAPES_DRIVER).unwrap();
+    std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(dir.join("shapes.vyrn"))
+        .args(["--target", "wasm", "-o"])
+        .arg(dir.join("shapes.wasm"))
+        .output()
+        .expect("vyrn build");
+    assert!(
+        build.status.success(),
+        "build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // 500 and 2000. `selfAppend` is quadratic in the call count, so
+    // a larger N buys nothing and costs minutes.
+    let n = 500;
+    let mut cmd = Command::new(&node);
+    cmd.arg(dir.join("drive.mjs")).arg(n.to_string());
+    for r in ROWS {
+        cmd.arg(r.export);
+    }
+    let out = cmd.output().expect("node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let mut lines = text.lines();
+    for r in ROWS {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("no reading for `{}`", r.export));
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(cols.len(), 3, "expected `name n 4n`, got {line:?}");
+        assert_eq!(cols[0], r.export, "the driver answered out of order");
+        let (a, b): (u64, u64) = (cols[1].parse().unwrap(), cols[2].parse().unwrap());
+        let seen = if b > a { Shape::Leaks } else { Shape::Steady };
+        assert_eq!(
+            seen,
+            r.today,
+            "`{}` moved: it reads {:?}, and this table says {:?}.\n  \
+             {} bytes after {n} calls, {} after {}.\n  \
+             baseline: {}\n  \
+             If a later phase fixed it, flip this row to Shape::Steady. If nothing \
+             meant to change it, something regressed.",
+            r.export,
+            seen,
+            r.today,
+            a,
+            b,
+            4 * n,
+            r.why
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `a ?? b` is a `match` the parser spells, so its result has no recorded type;
+/// the declared reading answers it as it answers `?`.
+#[test]
+fn why_memory_types_a_nullish_result_as_its_payload() {
+    let dir = std::env::temp_dir().join(format!("vyrn-why-nullish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("n.vyrn");
+    std::fs::write(
+        &file,
+        r#"fn pick(o: Option<Int64>) -> Int64 {
+    let v = o ?? 0
+    return v
+}
+
+fn main() -> Int64 {
+    let s: Option<String> = Some("x")
+    let t = s.copy() ?? "y"
+    print("{t}
+")
+    return pick(Some(3))
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["why", "--memory"])
+        .arg(&file)
+        .output()
+        .expect("vyrn why --memory");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        !text.contains("unknown"),
+        "a `??` result has a type:
+{text}"
+    );
+    assert!(
+        text.contains("v                NOT reclaimed — the type Int64 owns no heap"),
+        "{text}"
+    );
+    assert!(
+        text.contains("t                reclaimed at block exit — freeing the String buffer"),
+        "{text}"
+    );
+}
+
+// A join arm that hands out a name bound outside an enclosing loop. The arm
+// moves the outer name (`core::Builder::alias_out`) and the `let` owns the
+// join's result (`core::Builder::owned_binding`), so the move would repeat
+// once per turn (`examples/loopalias.vyrn`). The kernel refuses it. These tests pin the
+// sentence at every join form, and the two shapes that are not it: the menu's
+// `.copy()`, and a rebind, which binds nothing per turn.
+
+/// `vyrn check` over one source, as its whole standard error.
+fn check_text(stem: &str, source: &str) -> (bool, String) {
+    let dir = std::env::temp_dir().join(format!("vyrn-loopalias-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("{stem}.vyrn"));
+    std::fs::write(&file, source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("check")
+        .arg(&file)
+        .output()
+        .expect("vyrn check");
+    let _ = std::fs::remove_file(&file);
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+const LOOP_ALIAS_IF: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        let picked = if i > 0 { names } else { ["z"] }
+        n = n + picked.length
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+const LOOP_ALIAS_MATCH: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let opts: Array<Option<Int64>> = [None, Some(1), Some(2)]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        let picked: Array<String> = match opts[i] { None => ["z"], Some(_) => names }
+        n = n + picked.length
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+/// The `for` spelling of the same loop, so the refusal does not depend on which
+/// statement wrote the back edge. The loop VARIABLE is minted inside the mark,
+/// so each turn's element is its own and only the container is refused.
+const LOOP_ALIAS_FOR: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    for c in [1, 2, 3] {
+        let picked = if c > 1 { names } else { ["z"] }
+        n = n + picked.length
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+/// The second door: an argument position binds no name a reader wrote, and the
+/// unnamed temporary owns and releases the join's result just the same. The
+/// store into `n` is a rebind, and a rebind's flag answers for that expression
+/// and no expression inside it.
+const LOOP_ALIAS_ARGUMENT: &str = r#"fn size(xs: Array<String>) -> Int64 {
+    return xs.length
+}
+
+fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        n = n + size(if i > 0 { names } else { ["z"] })
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+#[test]
+fn a_join_arm_may_not_hand_an_outer_name_out_of_a_loop() {
+    let sentence = "`names` may not be handed out of an arm inside a loop — the result is \
+                    released on every turn, and `names` is bound outside the loop";
+    for (stem, src) in [
+        ("if", LOOP_ALIAS_IF),
+        ("match", LOOP_ALIAS_MATCH),
+        ("for", LOOP_ALIAS_FOR),
+        ("argument", LOOP_ALIAS_ARGUMENT),
+    ] {
+        let (ok, err) = check_text(stem, src);
+        assert!(!ok, "the {stem} form was accepted; it double-frees:\n{err}");
+        assert!(err.contains(sentence), "the {stem} form said:\n{err}");
+        assert!(
+            err.contains("fix: `names.copy()` if the arm should hand out a value of its own"),
+            "the {stem} form's menu:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn the_copy_the_menu_offers_is_accepted_and_a_rebind_is_untouched() {
+    let (ok, err) = check_text(
+        "copied",
+        &LOOP_ALIAS_IF.replace("{ names }", "{ names.copy() }"),
+    );
+    assert!(ok, "the fix the menu names was refused:\n{err}");
+
+    // A rebind releases once, at the name's own block exit, however many turns
+    // wrote it. `std/html.vyrn`'s `attrKey` has this shape.
+    let (ok, err) = check_text(
+        "rebound",
+        r#"fn main() -> Int64 {
+    let mut names: Array<String> = ["a", "b"]
+    let mut i = 0
+    while i < 3 {
+        names = if i > 0 { names } else { ["z"] }
+        i = i + 1
+    }
+    print("\{names.length}")
+    return 0
+}
+"#,
+    );
+    assert!(ok, "a rebind is not a second owner:\n{err}");
+}
+
+// `place_frames` files a whole-value row under four keys: the exit, a join's
+// edge, an arm's binder, and a store. The report counts all four. A name held
+// at both arms of a returned `match` is filed as one edge row per arm, because
+// an exit row inside an arm would be emitted on the arm beside it.
+
+const RETURNED_MATCH: &str = r#"type R = { id: Int64 }
+type Pack = { j: String }
+
+fn mk() -> Pack {
+    return Pack { j: "x" + "y" }
+}
+
+fn go() -> Int64 {
+    let arg = mk()
+    return match fromJson<R>(arg.j) {
+        Valid(v) => v.id,
+        Invalid(i) => 0,
+    }
+}
+
+fn main() -> Int64 {
+    print("\{go()}")
+    return 0
+}
+"#;
+
+#[test]
+fn a_name_held_at_a_returned_match_is_reported_reclaimed_and_is() {
+    let dir = std::env::temp_dir().join(format!("vyrn-retmatch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("m.vyrn");
+    std::fs::write(&file, RETURNED_MATCH).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["why", "--memory"])
+        .arg(&file)
+        .output()
+        .expect("vyrn why --memory");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "arg              reclaimed at block exit — releasing what the { j: String } holds"
+        ),
+        "the row the edge table carries:\n{text}"
+    );
+
+    // The free audit on the same program confirms the report.
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "the free audit: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// A store into an owned place releases what the place held, and the release
+// is the whole value's: a boxed payload's contents, an element, a String
+// riding in a payload word. Each store below displaced a value whose heap
+// the store's shallow snapshot never reached (record `m7-box`).
+const DISPLACED: &str = r#"type R = { o: Option<Array<Int64>>, n: Int64 }
+type E =
+    | A(Array<String>)
+    | B(Int64)
+
+let mut g: Option<Array<Int64>> = None
+
+fn main() -> Int64 {
+    let mut o: Option<Array<Int64>> = Some([1, 2, 3])
+    o = Some([7, 8, 9, 10])
+    for i in [1, 2, 3] {
+        o = Some([i, i])
+    }
+    let mut s: Option<String> = Some(1234567.toString())
+    s = Some(7654321.toString())
+    let mut e: E = A([1234567.toString()])
+    e = A([7654321.toString()])
+    e = B(3)
+    let mut r: R = R { o: Some([1, 2, 3]), n: 1 }
+    r = R { o: Some([4, 5]), n: 2 }
+    r.o = Some([6])
+    let mut a: Array<Option<Array<Int64>>> = [Some([1, 2, 3]), None]
+    a[0] = Some([4, 5])
+    let mut xs: Array<String> = [1234567.toString(), 7654321.toString()]
+    xs = [99999.toString()]
+    g = Some([1, 2, 3])
+    g = Some([4, 5])
+    return 0
+}
+"#;
+
+#[test]
+fn a_store_releases_the_whole_value_it_displaces() {
+    let dir = std::env::temp_dir().join(format!("vyrn-displaced-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("displaced.vyrn");
+    std::fs::write(&file, DISPLACED).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "the free audit: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// A store runs the declared `release` of the value it displaces, once per
+// store, and the value's heap comes back (record `m7-box`).
+const DECLARED: &str = r#"type Pool = { slots: Array<Int64>, taken: Int64 }
+
+impl Owned for Pool {
+    fn release(consume self) {
+        print("released")
+        let slots = consume self.slots
+        drop slots
+    }
+}
+
+fn main() -> Int64 {
+    let mut q: Pool = Pool { slots: [1, 2], taken: 0 }
+    q = Pool { slots: [3], taken: 0 }
+    q = Pool { slots: [4, 5, 6], taken: 0 }
+    print("end")
+    return 0
+}
+"#;
+
+#[test]
+fn a_store_runs_the_declared_release_of_what_it_displaces() {
+    let dir = std::env::temp_dir().join(format!("vyrn-declared-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("declared.vyrn");
+    std::fs::write(&file, DECLARED).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        (
+            run.status.code(),
+            String::from_utf8_lossy(&run.stdout).replace('\r', "")
+        ),
+        (Some(0), "released\nreleased\nend\nreleased\n".to_string()),
+        "the free audit: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// A payload binder read out of a scrutinee the frame owns, handed to a
+// `consume` parameter, leaves a hole in the scrutinee, and the scrutinee's
+// release walks around it (`vyxProcessElem` in `std/vyx.vyrn`). A miss is a
+// double free, exit 134.
+const PAYLOAD_DECLS: &str = r#"type Node =
+    | Elem(String, Array<Int64>, Int64)
+    | Text(String)
+
+fn sum(xs: consume Array<Int64>) -> Int64 {
+    let mut t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+fn size(n: consume Node) -> Int64 {
+    return match n {
+        Elem(a, b, c) => c,
+        Text(s) => s.byteLength,
+    }
+}
+"#;
+
+/// Runs `body` after the declarations under the free audit, and returns the
+/// exit code and output.
+fn payload_run(stem: &str, body: &str) -> (Option<i32>, String) {
+    audited_run(stem, &format!("{PAYLOAD_DECLS}\n{body}"))
+}
+
+/// Runs the program `src` under the free audit, and returns the exit code and
+/// output.
+fn audited_run(stem: &str, src: &str) -> (Option<i32>, String) {
+    let dir = std::env::temp_dir().join(format!("vyrn-hole-{stem}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("m.vyrn");
+    std::fs::write(&file, src).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+    (o.status.code(), text)
+}
+
+#[test]
+fn a_payload_handed_on_from_a_returned_match_is_released_once() {
+    let body = r#"type One = { node: Node, k: Int64 }
+
+fn process(n: consume Node) -> One {
+    return match n {
+        Elem(tag, kids, line) => One { node: Text("x"), k: sum(kids) + line },
+        Text(s) => One { node: n, k: 0 },
+    }
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4)).k)
+    print(process(Text("b")).k)
+    return 0
+}
+"#;
+    assert_eq!(payload_run("ret", body), (Some(0), "10\n0\n".to_string()));
+}
+
+#[test]
+fn a_payload_handed_on_from_an_if_let_is_released_once() {
+    let body = r#"fn process(n: consume Node) -> Int64 {
+    if let Elem(tag, kids, line) = n {
+        return sum(kids) + line
+    }
+    return size(n)
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4)))
+    print(process(Text("bc")))
+    return 0
+}
+"#;
+    assert_eq!(payload_run("iflet", body), (Some(0), "10\n2\n".to_string()));
+}
+
+/// #572: the scrutinee is a local the frame keeps, not a `consume`
+/// parameter, and a literal takes the payload.
+#[test]
+fn a_payload_put_into_a_literal_from_a_kept_scrutinee_is_released_once() {
+    let body = r#"fn heap(s: String) -> String {
+    return s + "!"
+}
+
+fn g() -> Option<String> {
+    let x: Option<String> = Some(heap("a"))
+    if let Some(v) = x {
+        return Some(v)
+    }
+    return None
+}
+
+fn main() -> Int64 {
+    if let Some(s) = g() {
+        print(s)
+    }
+    return 0
+}
+"#;
+    assert_eq!(payload_run("kept", body), (Some(0), "a!\n".to_string()));
+}
+
+#[test]
+fn a_scrutinee_given_whole_on_one_arm_is_released_around_the_payload_on_the_other() {
+    let body = r#"fn process(n: consume Node) -> Int64 {
+    let mut t = 0
+    match n {
+        Elem(tag, kids, line) => {
+            t = sum(kids) + line
+        }
+        Text(s) => {
+            t = size(n)
+        }
+    }
+    return t
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4)))
+    print(process(Text("bc")))
+    return 0
+}
+"#;
+    assert_eq!(payload_run("join", body), (Some(0), "10\n2\n".to_string()));
+}
+
+#[test]
+fn a_payload_handed_on_one_edge_is_released_on_the_other() {
+    let body = r#"fn process(n: consume Node, k: Int64) -> Int64 {
+    let mut t = 0
+    match n {
+        Elem(tag, kids, line) => {
+            if k > 0 {
+                t = sum(kids) + line
+            }
+        }
+        Text(s) => {
+            t = size(n)
+        }
+    }
+    return t
+}
+
+fn main() -> Int64 {
+    print(process(Elem("a", [1, 2, 3], 4), 1))
+    print(process(Elem("a", [1, 2, 3], 4), 0))
+    print(process(Text("bc"), 0))
+    return 0
+}
+"#;
+    assert_eq!(
+        payload_run("edge", body),
+        (Some(0), "10\n0\n2\n".to_string())
+    );
+}
+
+// A `for` whose elements each leave through the loop variable frees its
+// buffer alone; a `return` or a `break` out of it releases the elements no
+// turn reached first.
+#[test]
+fn a_for_that_leaves_early_releases_the_elements_it_never_reached() {
+    let body = r#"type Rec = { name: String, k: Int64 }
+
+fn mk(n: Int64) -> Array<Rec> {
+    let mut out: Array<Rec> = []
+    let mut i = 0
+    while i < n {
+        out.push(Rec { name: "r" + i.toString(), k: i })
+        i = i + 1
+    }
+    return out
+}
+
+fn first(n: Int64) -> Option<Rec> {
+    for x in mk(n) {
+        return Some(x)
+    }
+    return None
+}
+
+fn until(n: Int64, stop: Int64) -> Int64 {
+    let xs = mk(n)
+    let mut keep: Array<Rec> = []
+    for x in consume xs {
+        if x.k == stop {
+            break
+        }
+        keep.push(x)
+    }
+    return keep.length
+}
+
+fn main() -> Int64 {
+    if let Some(r) = first(3) {
+        print(r.name)
+    }
+    print(until(4, 1))
+    print(until(2, 5))
+    return 0
+}
+"#;
+    assert_eq!(
+        payload_run("forexit", body),
+        (Some(0), "r0\n1\n2\n".to_string())
+    );
+}
+
+// A removal hands back what it took out, and a statement that discards it is
+// no site that reads it, so a popped record's box is released.
+#[test]
+fn a_discarded_removal_releases_what_it_took_out() {
+    let body = r#"type Q = { k: Int64 }
+
+fn main() -> Int64 {
+    let mut qs: Array<Q> = [Q { k: 1 }, Q { k: 2 }, Q { k: 3 }]
+    let mut i = 0
+    while i < 2 {
+        qs.pop()
+        i = i + 1
+    }
+    print(qs.length)
+    return 0
+}
+"#;
+    assert_eq!(
+        payload_run("discardpop", body),
+        (Some(0), "1\n".to_string())
+    );
+}
+
+// A generic release that takes a field of a generic declared release type and
+// never drops it: the kernel places that release inside the body, and the
+// placer lowers a second time to build it (record `m7-slotrel`). The field
+// is freed.
+#[test]
+fn a_generic_release_placed_inside_a_generic_release_is_freed() {
+    shape_runs_clean("a-generic-release-placed-inside-a-generic-release", "6\n");
+}
+
+// A map literal whose values are layouts: a repeated key, a record with a
+// String field, and a nested array (record `m7-fieldmap`).
+#[test]
+fn a_map_literal_of_layout_values_is_freed() {
+    shape_runs_clean("a-map-literal-of-layout-values-the-rows-carry", "720323\n");
+}
+
+// A record and an enum as a map's key, stored over and looked up
+// (record `m7-mapkey2`).
+#[test]
+fn a_map_keyed_by_a_record_or_an_enum_is_freed() {
+    shape_runs_clean(
+        "a-map-keyed-by-a-record-or-an-enum-the-rows-carry",
+        "622327\n",
+    );
+}
+
+// A record and an enum key with String values, released and copied. Freeing
+// the packed key bytes as String pointers traps (#508).
+#[test]
+fn a_map_of_a_packed_key_and_a_string_value_is_freed() {
+    shape_runs_clean("a-map-of-a-packed-key-and-a-string-value", "22321\n");
+}
+
+// A capturing lambda literal handed to an alias `fn` parameter and to a
+// `consume fn` parameter (record `m7-lamval`).
+#[test]
+fn a_capturing_lambda_handed_on_as_a_value_is_freed() {
+    shape_runs_clean("a-capturing-lambda-handed-to-a-call-as-a-value", "415\n");
+}
+
+// A `consume` parameter of a generic instance and of a higher-order instance,
+// a stored value at a `consume fn` parameter among them (record `m7-lamval`).
+#[test]
+fn a_consume_parameter_of_an_instance_is_freed() {
+    shape_runs_clean("a-consume-parameter-of-an-instance", "462\n");
+}
+
+// A stored function value passed to a higher-order function, and passed on
+// (record `m7-fnval2`).
+#[test]
+fn a_stored_function_value_passed_on_is_freed() {
+    shape_runs_clean(
+        "a-stored-function-value-passed-to-a-higher-order-function",
+        "0\n4\n321353\n",
+    );
+}
+
+// An element store whose value copies a sibling element releases the element
+// it displaces (record `0125-m8-generic-heap`).
+#[test]
+fn an_element_stored_from_a_copy_of_its_sibling_is_released() {
+    shape_runs_clean("an-element-stored-from-a-copy-of-its-sibling", "11\n");
+}
+
+/// Runs the shape `stem` of `tests/shapes/` under the free audit, and asserts
+/// it prints `want`, exits 0 and prints nothing on stderr.
+fn shape_runs_clean(stem: &str, want: &str) {
+    let shape = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/shapes/{stem}.vyrn"));
+    let src = std::fs::read_to_string(shape).unwrap()
+        + "
+fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }
+";
+    let dir = std::env::temp_dir().join(format!("vyrn-shape-{stem}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("m.vyrn");
+    std::fs::write(&file, src).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+    cmd.env("VYRN_LEAK_CHECK", "1").arg("run").arg(&file);
+    let run = cmd.output().expect("vyrn run");
+    let got = (
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout).to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+    );
+    assert_eq!(got, (Some(0), want.to_string(), String::new()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A removal from a map held in a record field is a move-out window, and the
+// core states the removal into the field's place (record `0125-m7-mapleak`).
+#[test]
+fn a_removal_from_a_map_field_releases_the_entry() {
+    let body = r#"type H = { n: Int64, m: Map<String, String> }
+
+fn names() -> Map<String, String> {
+    let mut m: Map<String, String> = [:]
+    m["a"] = "x"
+    m["b"] = "y"
+    return m
+}
+
+fn main() -> Int64 {
+    let mut h = H { n: 1, m: names() }
+    let gone = h.m.remove("a")
+    h.m.remove("c")
+    print(gone)
+    print(h.m.length)
+    return 0
+}
+"#;
+    assert_eq!(
+        payload_run("mapfield", body),
+        (Some(0), "true\n1\n".to_string())
+    );
+}
+
+// A stream hands each element it yields to the turn that pulls it, and its
+// release gives back the elements no turn reached (#565): a loop that reads
+// its element, a `break` mid-stream, a record element, `merge` at `String`,
+// and a stream closed unread.
+#[test]
+fn a_stream_releases_each_element_once() {
+    let src = r#"import { merge } from "std/stream"
+
+type R = { name: String, n: Int64 }
+
+fn heap(s: String) -> String {
+    return s + "!"
+}
+
+fn main() -> Int64 {
+    let ws: Array<String> = [heap("a"), heap("bb")]
+    let mut n = 0
+    for x in fromArray(ws) {
+        n = n + x.byteLength
+    }
+    let more: Array<String> = [heap("a"), heap("bb"), heap("ccc")]
+    for x in fromArray(more) {
+        if n > 5 {
+            break
+        }
+        n = n + x.byteLength
+    }
+    let rs: Array<R> = [R { name: heap("a"), n: 1 }, R { name: heap("bb"), n: 2 }]
+    for r in fromArray(rs) {
+        n = n + r.name.byteLength + r.n
+    }
+    let a: Array<String> = [heap("a"), heap("bb")]
+    let b: Array<String> = [heap("ccc")]
+    for x in merge(fromArray(a), fromArray(b)) {
+        n = n + x.byteLength
+    }
+    let unread: Array<String> = [heap("a")]
+    close(fromArray(unread))
+    print(n)
+    return 0
+}
+"#;
+    assert_eq!(audited_run("stream", src), (Some(0), "24\n".to_string()));
+}
+
+/// #469: `consume g.f` of module state binds a borrow, as `consume g` does.
+/// The field stays in module state, and the audited teardown frees it once.
+#[test]
+fn a_prefix_consume_of_module_state_binds_a_borrow() {
+    let src = r#"type S = { keys: Array<String>, n: Int64 }
+let mut g: S = S { keys: [], n: 0 }
+
+fn take() -> Int64 {
+    let t = consume g.keys
+    return t.length
+}
+
+fn main() -> Int64 {
+    g.keys.push("x")
+    print(take())
+    return 0
+}
+"#;
+    assert_eq!(audited_run("statetake", src), (Some(0), "1\n".to_string()));
+}
+
+/// #468: a store into a place a `consume` left a hole in releases what the
+/// place still holds, around the hole: the field itself (nothing), a record
+/// around the field, and the whole binding. The new value is whole, so the
+/// binding's final release frees all of it.
+#[test]
+fn a_store_over_a_hole_releases_around_it() {
+    let src = r#"type R = { value: Array<Int64>, err: String }
+type In = { xs: Array<Int64>, s: String }
+type Outer = { inner: In, n: Int64 }
+
+fn keep(xs: consume Array<Int64>) -> Int64 {
+    return xs.length
+}
+
+fn field(k: Int64) -> Int64 {
+    let mut r = R { value: [k, k], err: "" }
+    let t = consume r.value
+    r.value = [k]
+    return keep(t) + r.value.length
+}
+
+fn around(k: Int64) -> Int64 {
+    let mut r = Outer { inner: In { xs: [k, k], s: "a" + "b" }, n: 0 }
+    let t = consume r.inner.xs
+    r.inner = In { xs: [k], s: "c" + "d" }
+    return keep(t) + r.inner.xs.length
+}
+
+fn whole(k: Int64) -> Int64 {
+    let mut r = R { value: [k, k], err: "e" + "f" }
+    let t = consume r.value
+    r = R { value: [k], err: "g" + "h" }
+    return keep(t) + r.value.length
+}
+
+fn main() -> Int64 {
+    print(field(3))
+    print(around(3))
+    print(whole(3))
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("storehole", src),
+        (Some(0), "3\n3\n3\n".to_string())
+    );
+}
+
+/// #463: `m[k]` of a boxed value (a wide aggregate, a nested `Option`, a
+/// vector) points into the map's buffer, so no box is allocated for a `let`,
+/// a `match` or an `if let` to free.
+#[test]
+fn a_map_key_read_allocates_no_box() {
+    let src = r#"fn main() -> Int64 {
+    let mut m: Map<String, Array<Int64>> = [:]
+    m["a"] = [1, 2]
+    let o = m["a"]
+    if let Some(xs) = o {
+        print(xs.length)
+    }
+    match m["a"] {
+        Some(xs) => print(xs.length),
+        None => print(0),
+    }
+    let mut n: Map<String, Option<Int64>> = [:]
+    n["a"] = Some(3)
+    let p = n["a"]
+    if let Some(q) = p {
+        if let Some(x) = q {
+            print(x)
+        }
+    }
+    let mut v: Map<String, F32x4> = [:]
+    v["a"] = F32x4.splat(1.0)
+    if let Some(x) = v["a"] {
+        print(x.lane(3))
+    }
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("mapbox", src),
+        (Some(0), "2\n2\n3\n1.000000\n".to_string())
+    );
+}
+
+/// A `let` of whole module state, with or without `consume`, binds a borrow
+/// of the global: nothing may take module state, so the name reads it in
+/// place and the teardown frees it once.
+#[test]
+fn a_let_of_whole_module_state_reads_it_in_place() {
+    let src = r#"let mut h: Array<String> = []
+
+fn plain() -> Int64 {
+    let t = h
+    return t.length
+}
+
+fn taken() -> Int64 {
+    let t = consume h
+    return t.length
+}
+
+fn main() -> Int64 {
+    h.push("x")
+    print(plain() + taken())
+    return 0
+}
+"#;
+    assert_eq!(audited_run("stateread", src), (Some(0), "2\n".to_string()));
+}
+
+/// A join arm that yields a name bound outside the construct moves it, and
+/// the edges that do not yield it release it at the join: into another
+/// binding, into the name itself (#456), on both edges.
+#[test]
+fn a_join_arm_that_yields_an_outer_name_moves_it() {
+    let src = r#"fn intoOther(c: Bool) -> Int64 {
+    let st = "a" + "b"
+    let rel = if c { st } else { "c" + "/" }
+    return rel.byteLength
+}
+
+fn fromOther(c: Bool) -> Int64 {
+    let mut xs: Array<Int64> = [1]
+    let ys: Array<Int64> = [5, 6]
+    xs = if c { ys } else { xs }
+    return xs.length
+}
+
+fn viaMatch(o: Option<Int64>) -> Int64 {
+    let mut xs: Array<Int64> = [1]
+    xs = match o { Some(k) => xs.push(k), None => xs }
+    return xs.length
+}
+
+fn inLoop(n: Int64) -> Int64 {
+    let mut xs: Array<Int64> = [1]
+    let mut i = 0
+    while i < n {
+        xs = if i % 2 == 0 { xs.push(i) } else { xs }
+        i = i + 1
+    }
+    return xs.length
+}
+
+fn main() -> Int64 {
+    print(intoOther(true) + intoOther(false))
+    print(fromOther(true) + fromOther(false))
+    print(viaMatch(Some(2)) + viaMatch(None))
+    print(inLoop(5))
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("joinmove", src),
+        (Some(0), "4\n3\n3\n4\n".to_string())
+    );
+}

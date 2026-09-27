@@ -1,0 +1,30 @@
+<script>
+props {
+    id: Int64,
+    title: String,
+    url: String,
+    rating: Int64,
+    tagsText: String,
+    confirming: Bool,
+    detailHref: String,
+    unratedLabel: String,
+    delLabel: String,
+    confirmLabel: String,
+    cancelLabel: String,
+}
+</script>
+
+<template>
+<li class="book">
+    <div class="meta">
+        <a class="title" :href="url">{{ title }}</a>
+        <a class="detail" :href="detailHref" data-nav="prefetch">details →</a>
+        <span class="tags">{{ tagsText }}</span>
+    </div>
+    <div class="row">
+        <button class="rate" @click="cycleRate(id)"><span v-if="rating > 0">★ {{ rating }}</span><span v-else>{{ unratedLabel }}</span></button>
+        <span v-if="confirming"><button class="danger" @click="confirmDelete(id)">{{ confirmLabel }}</button><button @click="cancelDelete(id)">{{ cancelLabel }}</button></span>
+        <button v-else @click="askDelete(id)">{{ delLabel }}</button>
+    </div>
+</li>
+</template>

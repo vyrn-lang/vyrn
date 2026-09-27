@@ -1,0 +1,42 @@
+/// The wire types: the validated records and scalars that cross the RPC boundary
+/// and define the persisted-file shape. Pure data — no state, no behavior.
+
+/// A paste id: a short content-addressed base36 string.
+export type PasteId = String where value.byteLength >= 1 && value.byteLength <= 16
+
+/// A paste title. May be empty (rendered as "untitled").
+export type Title = String where value.byteLength <= 80
+
+/// The paste body: non-empty, capped so a runaway paste can't bloat the store.
+export type Body = String where value.byteLength >= 1 && value.byteLength <= 100000
+
+/// The syntax label — a small finite set; anything else fails validation.
+export type Lang = String where value == "vyrn" || value == "text" || value == "json" || value == "rust" || value == "js" || value == "html"
+
+/// The created stamp: real wall-clock time as Unix epoch milliseconds.
+/// Structurally an `Int64`, so it round-trips through the
+/// JSON codec unchanged; `std/time.fromMillis`/`format` render it. `StoreFile`'s
+/// counter reuses the type as a plain monotonic count.
+export type Created = Int64 where value >= 0
+
+/// A stored paste. Every field is validated on every decode boundary.
+export type Paste = { id: PasteId, title: Title, body: Body, lang: Lang, created: Created }
+
+// ---- request / response shapes ----------------------------------------------
+
+/// The create payload (id + created are server-assigned, not sent by the client).
+export type CreateReq = { title: Title, body: Body, lang: Lang }
+
+/// A lookup by id.
+export type IdReq = { id: PasteId }
+
+/// A list wrapper, so the wire stays an object.
+export type PasteList = { pastes: Array<Paste> }
+
+/// Application outcome: an Err is a 200 carrying {"Err":..}, distinct from a 422
+/// request-validation failure.
+export type PasteResult = Result<Paste, String>
+
+/// The persisted-file shape: the paste array plus the monotonic counter, written
+/// to data/pastes.json through the same codec the RPC wire uses.
+export type StoreFile = { pastes: Array<Paste>, counter: Created }

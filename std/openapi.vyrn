@@ -1,0 +1,270 @@
+/// std/openapi -- the contract as an OpenAPI 3.1 document, built from
+/// generator imports. `openapi(contract)` reflects the contract with
+/// `moduleInterface` and returns a module exporting `openapiJson() -> String`.
+///
+///   import { openapi } from "std/openapi"
+///   import { openapiJson } from openapi("./contract")
+///
+/// The document holds one `POST /rpc/<proc>` path per procedure in declaration
+/// order, with a `200` response and the `422` Issues shape `std/rpc` returns, and
+/// one `components/schemas` entry per type in the reachable closure,
+/// sorted by name. Each schema body is a runtime `jsonSchema()` call, because
+/// `moduleInterface` carries only a scalar's shallow bounds; each is a compile-time
+/// constant, so the document is byte-stable. `std/json` writes it pretty-printed.
+/// No callbacks, webhooks or auth schemes.
+
+import { includes } from "std/arrays"
+import { fromBytesOr } from "std/strings"
+import { endsWith } from "std/strpred"
+
+/// The module base name of a specifier, for `info.title` (`"./contract"` =>
+/// `contract`, `"std/shelf.vyrn"` => `shelf`).
+fn oaBaseName(spec: String) -> String {
+    let ba = bytes(spec)
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '/' {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    let mut seg: Array<UInt8> = []
+    let mut j = start
+    while j < ba.length {
+        seg.push(ba[j])
+        j = j + 1
+    }
+    let name = fromBytesOr(seg, spec)
+    if name.endsWith(".vyrn") {
+        let nb = bytes(name)
+        let mut trimmed: Array<UInt8> = []
+        let mut k = 0
+        while k < nb.length - 5 {
+            trimmed.push(nb[k])
+            k = k + 1
+        }
+        return fromBytesOr(trimmed, name)
+    }
+    return name
+}
+
+/// `raw` escaped as the body of a Vyrn string literal, without the quotes.
+fn oaEscBody(raw: String) -> String {
+    let ba = bytes(raw)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b == '\\' {
+            out.push('\\')
+            out.push('\\')
+        } else if b == '"' {
+            out.push('\\')
+            out.push('"')
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// A sorted copy of `names`, so the schema keys do not depend on the closure's order. Insertion sort; the closure is small.
+fn oaSorted(names: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for n in names {
+        let mut placed = false
+        let mut res: Array<String> = []
+        for m in out {
+            if placed == false && n < m {
+                res.push(n.copy())
+                placed = true
+            }
+            res.push(m.copy())
+        }
+        if placed == false {
+            res.push(n.copy())
+        }
+        out = res
+    }
+    return out
+}
+
+fn oaIsNamedType(spelling: String, iface: ModuleInterface) -> Bool {
+    for t in iface.types {
+        if t.name == spelling {
+            return true
+        }
+    }
+    return false
+}
+
+/// One import per closure type, from the module that declares it.
+fn oaImportBlock(iface: ModuleInterface) -> String {
+    let mut specs: Array<String> = []
+    for t in iface.types {
+        if includes(specs, t.module) == false {
+            specs.push(t.module.copy())
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name.copy())
+            }
+        }
+        if names.length > 0 {
+            let mut line = "import { "
+            let mut i = 0
+            for n in names {
+                if i > 0 {
+                    line = line + ", "
+                }
+                line = line + n
+                i = i + 1
+            }
+            out = out + line + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+/// The JSON Schema of the `{ issues: [{ key, path, message }] }` body `std/rpc` returns on a 422.
+fn oaIssuesSchema() -> String {
+    return "{\"type\":\"object\",\"properties\":{\"issues\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"message\":{\"type\":\"string\"}},\"required\":[\"key\",\"path\",\"message\"]}}},\"required\":[\"issues\"]}"
+}
+
+/// A `$ref` to the named return type's component, `{"type":"null"}` for a `Unit`
+/// return, or `{}` for a bare type.
+fn oaResponseSchema(f: FnInfo, iface: ModuleInterface) -> String {
+    if f.ret == "" {
+        return "{\"type\":\"null\"}"
+    }
+    if oaIsNamedType(f.ret, iface) {
+        return "{\"$ref\":\"#/components/schemas/" + f.ret + "\"}"
+    }
+    return "{}"
+}
+
+/// A `$ref` when the spelling names a contract type, else `{}`: `components/schemas`
+/// holds only the closure's types, so a `$ref` to `Int64` would dangle.
+fn oaRequestSchema(spelling: String, typeNames: Array<String>) -> String {
+    if includes(typeNames, spelling) {
+        return "{\"$ref\":\"#/components/schemas/" + spelling + "\"}"
+    }
+    return "{}"
+}
+
+/// One procedure's `paths` value as compact JSON, parsed into the document at runtime.
+fn oaPathValue(f: FnInfo, iface: ModuleInterface) -> String {
+    let mut body = "{\"post\":{\"operationId\":\"" + f.name + "\","
+    if f.params.length == 1 {
+        body = body + "\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":"
+        + oaRequestSchema(f.params[0].spelling, oaTypeNames(iface)) + "}}},"
+    }
+    body = body + "\"responses\":{"
+    body = body + "\"200\":{\"description\":\"success\",\"content\":{\"application/json\":{\"schema\":" + oaResponseSchema(f, iface) + "}}},"
+    body = body + "\"422\":{\"description\":\"request validation failed\",\"content\":{\"application/json\":{\"schema\":" + oaIssuesSchema() + "}}}"
+    body = body + "}}}"
+    return body
+}
+
+fn oaTypeNames(iface: ModuleInterface) -> Array<String> {
+    let mut out: Array<String> = []
+    for t in iface.types {
+        out.push(t.name.copy())
+    }
+    return out
+}
+
+export gen fn openapi(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let title = oaBaseName(contract)
+    let mut out = "/// Generated by std/openapi `openapi` — do not edit.\n"
+    out = out + oaImportBlock(iface)
+    out = out + "import { Json, JsonField, copyJsonArray, emitPretty } from \"std/json\"\n"
+    out = out + "import { parseJson } from \"std/jsonread\"\n"
+
+    // The generated `oaWithId` puts `$id` first so a component's `#/$defs/..`
+    // references resolve (JSON Schema 2020-12).
+    out = out + "\n"
+    out = out + "fn oaNode(s: String) -> Json {\n"
+    out = out + "    return match parseJson(s) {\n"
+    out = out + "        Ok(j) => j,\n"
+    out = out + "        Err(e) => JObj([]),\n"
+    out = out + "    }\n"
+    out = out + "}\n"
+    out = out + "fn oaObjWithId(id: String, fs: consume Array<JsonField>) -> Json {\n"
+    out = out + "    let mut ordered: Array<JsonField> = []\n"
+    out = out + "    ordered.push(JsonField { key: \"$id\", value: JStr(id.copy()) })\n"
+    out = out + "    for f in consume fs {\n"
+    out = out + "        ordered.push(f)\n"
+    out = out + "    }\n"
+    out = out + "    return JObj(ordered)\n"
+    out = out + "}\n"
+    // It takes the node and rebuilds every arm: a return is owned,
+    // so returning a `read` parameter would hand back a borrow.
+    out = out + "fn oaWithId(id: String, j: consume Json) -> Json {\n"
+    out = out + "    return match j {\n"
+    out = out + "        JObj(fs) => oaObjWithId(id, fs),\n"
+    out = out + "        JNull => JNull,\n"
+    out = out + "        JBool(b) => JBool(b),\n"
+    out = out + "        JNum(n) => JNum(n.copy()),\n"
+    out = out + "        JStr(s) => JStr(s.copy()),\n"
+    out = out + "        JArr(a) => JArr(copyJsonArray(a)),\n"
+    out = out + "    }\n"
+    out = out + "}\n"
+    out = out + "fn oaSchema(id: String, schema: String) -> Json {\n"
+    out = out + "    return oaWithId(id, oaNode(schema))\n"
+    out = out + "}\n"
+
+    // Built once per process: the document is constant, and callers ask for it
+    // per HTTP request. A generated module may hold module state.
+    out = out + "let mut oaDocCache: String = \"\"\n"
+    out = out + "/// The OpenAPI 3.1 document for this contract (deterministic, byte-stable).\n"
+    out = out + "export fn openapiJson() -> String {\n"
+    out = out + "    if oaDocCache.byteLength > 0 {\n"
+    out = out + "        return oaDocCache.copy()\n"
+    out = out + "    }\n"
+    out = out + "    let mut paths: Array<JsonField> = []\n"
+    for f in iface.functions {
+        out = out + "    paths.push(JsonField { key: \"/rpc/" + f.name + "\", value: oaNode(\"" + oaEscBody(oaPathValue(f, iface)) + "\") })\n"
+    }
+    out = out + "    let mut schemas: Array<JsonField> = []\n"
+    let names = oaSorted(oaTypeNames(iface))
+    for name in names {
+        out = out + "    schemas.push(JsonField { key: \"" + name + "\", value: oaSchema(\"" + name + "\", jsonSchema<" + name + ">()) })\n"
+    }
+    out = out + "    let doc = JObj([\n"
+    out = out + "        JsonField { key: \"openapi\", value: JStr(\"3.1.0\") },\n"
+    out = out + "        JsonField { key: \"info\", value: JObj([JsonField { key: \"title\", value: JStr(\"" + oaEscBody(title) + "\") }, JsonField { key: \"version\", value: JStr(\"0.0.0\") }]) },\n"
+    out = out + "        JsonField { key: \"paths\", value: JObj(paths) },\n"
+    out = out + "        JsonField { key: \"components\", value: JObj([JsonField { key: \"schemas\", value: JObj(schemas) }]) },\n"
+    out = out + "    ])\n"
+    out = out + "    oaDocCache = emitPretty(doc, 2)\n"
+    out = out + "    return oaDocCache.copy()\n"
+    out = out + "}\n"
+    return out
+}
+
+test "oaBaseName strips the path and the .vyrn suffix" {
+    assertEq(oaBaseName("./contract"), "contract")
+    assertEq(oaBaseName("std/shelf.vyrn"), "shelf")
+}
+
+test "oaSorted orders names" {
+    let s = oaSorted(["Book", "AddBookReq", "TagCounts"])
+    assertEq(s[0], "AddBookReq")
+    assertEq(s[1], "Book")
+    assertEq(s[2], "TagCounts")
+}
+
+test "a request schema refs contract types and falls back inline for bare ones" {
+    assertEq(oaRequestSchema("Book", ["Book"]), "{\"$ref\":\"#/components/schemas/Book\"}")
+    assertEq(oaRequestSchema("Int64", ["Book"]), "{}")
+    assertEq(oaRequestSchema("Book", []), "{}")
+}
+
+test "oaEscBody escapes quotes and backslashes for a Vyrn literal" {
+    assertEq(oaEscBody("a\"b"), "a\\\"b")
+}

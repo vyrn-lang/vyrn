@@ -1,0 +1,156 @@
+; vyrn lowered v2 -- examples/projection.vyrn
+
+fn build(n)
+  {
+    let out! = make array()
+    let i = lit 0
+    loop
+      let @t1 = prim lt(i, n)
+      if @t1
+      else
+        break
+      {
+        let @t2 = prim mul(i, lit 10)
+        let @t3! = builtin @push(consume out!, consume @t2)
+        out! = @t3!  (Transferred)
+        let @t4 = prim add(i, lit 1)
+        i = @t4  (Transferred)
+      }
+    return out!
+  }
+
+fn main()
+  {
+    let @t1! = fn build(read lit 6)
+    let w! = make Window {data, start}(@t1!, lit 2)
+    let @t2 = read w!.start
+    let @t3 = prim add(@t2, lit 0)
+    let @borrow = read w!.data[@t3]
+    let @t4! = builtin @str(read @borrow)
+    let @t5! = prim add(lit "window: ", @t4!)
+    drop @t4!
+    let @t6! = prim add(@t5!, lit " ")
+    drop @t5!
+    let @t7 = read w!.start
+    let @t8 = prim add(@t7, lit 1)
+    let @borrow = read w!.data[@t8]
+    let @t9! = builtin @str(read @borrow)
+    let @t10! = prim add(@t6!, @t9!)
+    drop @t6!
+    drop @t9!
+    let @t11! = prim add(@t10!, lit " ")
+    drop @t10!
+    let @t12 = read w!.start
+    let @t13 = prim add(@t12, lit 3)
+    let @borrow = read w!.data[@t13]
+    let @t14! = builtin @str(read @borrow)
+    let @t15! = prim add(@t11!, @t14!)
+    drop @t11!
+    drop @t14!
+    do builtin print(read @t15!)
+    drop @t15!
+    let @t16! = fn build(read lit 9)
+    let s! = make Strided {data, stride}(@t16!, lit 3)
+    let @t17 = read s!.stride
+    let @b3.k = prim mul(lit 0, @t17)
+    let @borrow = read s!.data[@b3.k]
+    let @t18! = builtin @str(read @borrow)
+    let @t19! = prim add(lit "strided: ", @t18!)
+    drop @t18!
+    let @t20! = prim add(@t19!, lit " ")
+    drop @t19!
+    let @t21 = read s!.stride
+    let @b4.k = prim mul(lit 1, @t21)
+    let @borrow = read s!.data[@b4.k]
+    let @t22! = builtin @str(read @borrow)
+    let @t23! = prim add(@t20!, @t22!)
+    drop @t20!
+    drop @t22!
+    let @t24! = prim add(@t23!, lit " ")
+    drop @t23!
+    let @t25 = read s!.stride
+    let @b5.k = prim mul(lit 2, @t25)
+    let @borrow = read s!.data[@b5.k]
+    let @t26! = builtin @str(read @borrow)
+    let @t27! = prim add(@t24!, @t26!)
+    drop @t24!
+    drop @t26!
+    do builtin print(read @t27!)
+    drop @t27!
+    let @t28! = fn build(read lit 3)
+    let c! = make Clamped {data}(@t28!)
+    let @p6.i = lit 0
+    let @b6.n = read c!.data.length
+    let @t30 = prim lt(@p6.i, @b6.n)
+    if @t30
+      @t29 = @p6.i  (Nothing)
+    else
+      let @t31 = prim sub(@b6.n, lit 1)
+      @t29 = @t31  (Nothing)
+    let @b6.j = @t29
+    let @borrow = read c!.data[@b6.j]
+    let @t32! = builtin @str(read @borrow)
+    let @t33! = prim add(lit "clamped: ", @t32!)
+    drop @t32!
+    let @t34! = prim add(@t33!, lit " ")
+    drop @t33!
+    let @p7.i = lit 2
+    let @b7.n = read c!.data.length
+    let @t36 = prim lt(@p7.i, @b7.n)
+    if @t36
+      @t35 = @p7.i  (Nothing)
+    else
+      let @t37 = prim sub(@b7.n, lit 1)
+      @t35 = @t37  (Nothing)
+    let @b7.j = @t35
+    let @borrow = read c!.data[@b7.j]
+    let @t38! = builtin @str(read @borrow)
+    let @t39! = prim add(@t34!, @t38!)
+    drop @t34!
+    drop @t38!
+    let @t40! = prim add(@t39!, lit " ")
+    drop @t39!
+    let @p8.i = lit 9
+    let @b8.n = read c!.data.length
+    let @t42 = prim lt(@p8.i, @b8.n)
+    if @t42
+      @t41 = @p8.i  (Nothing)
+    else
+      let @t43 = prim sub(@b8.n, lit 1)
+      @t41 = @t43  (Nothing)
+    let @b8.j = @t41
+    let @borrow = read c!.data[@b8.j]
+    let @t44! = builtin @str(read @borrow)
+    let @t45! = prim add(@t40!, @t44!)
+    drop @t40!
+    drop @t44!
+    do builtin print(read @t45!)
+    drop @t45!
+    let a! = fn build(read lit 4)
+    a![lit 1] = lit 99  (Nothing)
+    let @borrow = read a![lit 0]
+    let @t46! = builtin @str(read @borrow)
+    let @t47! = prim add(lit "array: ", @t46!)
+    drop @t46!
+    let @t48! = prim add(@t47!, lit " ")
+    drop @t47!
+    let @borrow = read a![lit 1]
+    let @t49! = builtin @str(read @borrow)
+    let @t50! = prim add(@t48!, @t49!)
+    drop @t48!
+    drop @t49!
+    let @t51! = prim add(@t50!, lit " ")
+    drop @t50!
+    let @borrow = read a![lit 3]
+    let @t52! = builtin @str(read @borrow)
+    let @t53! = prim add(@t51!, @t52!)
+    drop @t51!
+    drop @t52!
+    do builtin print(read @t53!)
+    drop @t53!
+    drop a! minus []
+    drop c! minus []
+    drop s! minus []
+    drop w! minus []
+    return lit 0
+  }

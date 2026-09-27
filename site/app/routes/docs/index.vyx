@@ -1,0 +1,202 @@
+<script>
+// GET /docs — the reference entry: every standard library module, on this site.
+//
+// The reference used to be six links to the repository. It is now generated from
+// the source while the site compiles — `site/app/apidoc.vyrn` lexes every
+// `std/*.vyrn` and emits each export's signature, prose and line — so a module
+// name here opens a page rather than a Markdown file on GitHub.
+//
+// The links that remain point at things this site does not host: the README, the
+// roadmap, the examples. Those are the only ones worth leaving for — the design
+// record and the compiler notes were two of them, and both were development
+// reading on a consumer page. The record is a section of its own
+// now, reached from the footer.
+//
+// THE SEARCH AND THE GRAPH ARE HERE. They were `/explore`, which
+// was a second view of this same list and answered no question this page could
+// not. The module list below IS the search index: each row carries its own
+// lowercased haystack in `data-q` and its export names in `data-e`, so there is
+// no fetch, no index file, and a reader with no script still gets every module,
+// its first line and a link. `widgets.js` filters the rows and builds a link per
+// matching export with `createElement` — never by assembling markup out of what
+// was typed.
+//
+// There is one module list on this site and it is this one. `/explore` renders
+// packages — a different set, a different shape, and every card goes to that
+// package's own page.
+//
+// THE GRAPH IS NOT ON THIS PAGE. It was 25,347 of 52,815 bytes against the
+// 40,000-byte ceiling — one inline drawing, on the page every reader of the
+// reference lands on, downloaded whether or not they scrolled to it. It is
+// `/docs/graph` now, linked from the area cards below and from every module
+// page's own graph section.
+import { Head } from "std/ui"
+import { pageHeadOf } from "../../nav"
+import { exampleCount, blob } from "../../repo"
+import { ApiModule, apiModules, apiHref } from "../../docs"
+import { SearchRow, SearchGroup, searchRows, searchGroups, edgeCount, leafCount } from "../../stdgraph"
+import { chapters } from "../../guide"
+import { Icon } from "../../icons"
+import { TreeGroup, docsTree } from "../../docshell"
+
+/// The sidebar: the whole reference, with the Overview marked.
+fn tree() -> Array<TreeGroup> {
+    return docsTree("index")
+}
+
+/// One place to read next, outside this site.
+type Link = { href: String, name: String, what: String }
+
+
+export fn head() -> Head {
+    return pageHeadOf("/docs")
+}
+
+/// How many exports the whole reference covers.
+fn exportCount() -> Int64 {
+    let mut n = 0
+    for m in apiModules() {
+        n = n + m.count
+    }
+    return n
+}
+
+fn links() -> Array<Link> {
+    return [
+        Link { href: blob("examples"), name: "Examples", what: "Single-file programs, every one run on three engines." },
+        Link { href: blob("README.md"), name: "README", what: "The language in one page." },
+        Link { href: blob("ROADMAP.md"), name: "Roadmap", what: "The open work, and what blocks each item." },
+    ]
+}
+
+/// One row of the command table: what you type, and what it does.
+///
+/// The name is CODE, not a link. An earlier round wrapped each command in an
+/// anchor so the row would do something when clicked; that was wrong twice over.
+/// A command is something you copy — every inline code span on this site copies
+/// itself when you click it — and the anchors it grew pointed at GitHub, which
+/// is exactly the redirect this site exists to remove. Where a row has more to
+/// say, the sentence carries an ON-SITE link, in the sentence, as a link looks.
+type Command = { name: String, what: String }
+
+fn commands() -> Array<Command> {
+    return [
+        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/guide/getting-started.html#first\">Your first program.</a>" },
+        Command { name: "vyrn fmt --check", what: "The canonical formatter. <code>--check</code> is the CI gate." },
+        Command { name: "vyrn doc", what: "Markdown API docs from /// comments. <a href=\"/docs.html#std\">The pages on this site</a> are read off the same declarations." },
+        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it. <a href=\"/guide/ownership.html\">The chapter on ownership.</a>" },
+        Command { name: "vyrn emit-gen <file>", what: "The source a generator produced." },
+        Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table." },
+        Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in <code>vyrn.lock</code> and cache by sha256." },
+    ]
+}
+</script>
+
+<template>
+<main class="page docs docpage">
+    <aside class="docstree">
+        <details class="treebox">
+            <summary>Reference</summary>
+            <div class="treegroup" v-for="g in tree()" :key="g.name">
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
+                <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
+            </div>
+        </details>
+    </aside>
+        <section class="hero split">
+            <div class="say">
+                <p class="eyebrow">Reference</p>
+                <h1 class="display">Generated from the source</h1>
+                <p class="lede">{{ apiModules().length }} modules and {{ exportCount() }} exports, read off <code>std/</code> itself.</p>
+            </div>
+            <div class="finder" data-search>
+                <label class="eyebrow" for="std-q">Search modules and exports</label>
+                <input id="std-q" type="search" autocomplete="off" spellcheck="false" placeholder="parse, Map, schema, byteLength" data-search-input/>
+                <p class="eyebrow" data-search-count aria-live="polite">{{ searchRows().length }} modules</p>
+            </div>
+        </section>
+
+        <!-- THE FOUR AREAS. The page opened on its own module list,
+             which answered "which module does X" and nothing else; a reader who
+             arrived here from a search result could not see that the site also
+             holds the book, the driver and the graph. Each card's line is a count
+             from the generator that builds the page it points at. -->
+        <section class="band" id="areas">
+            <h2>Four places to start</h2>
+            <ul class="cards areas">
+                <li>
+                    <h3><Icon name="bytesize:book"/> The language</h3>
+                    <p>{{ chapters().length }} chapters in reading order. Every code block is a program this site compiled and ran while it built.</p>
+                    <p class="ctarow"><a class="cta" href="/guide.html">Start the book</a></p>
+                </li>
+                <li>
+                    <h3><Icon name="bytesize:code"/> The standard library</h3>
+                    <p>{{ apiModules().length }} modules and {{ exportCount() }} exports, each with its signatures and its tests.</p>
+                    <p class="ctarow"><a class="cta" href="#std">Browse the modules</a></p>
+                </li>
+                <li>
+                    <h3><Icon name="bytesize:settings"/> The tools</h3>
+                    <p>The driver, the formatter, the language server and the VS Code extension — all in one repository.</p>
+                    <p class="ctarow"><a class="cta" href="/tooling/editors.html">Set up your editor</a></p>
+                </li>
+                <li>
+                    <h3><Icon name="bytesize:activity"/> How it fits together</h3>
+                    <p>{{ edgeCount() }} imports between the modules, drawn from the <code>import</code> lines themselves. {{ leafCount() }} import nothing else.</p>
+                    <p class="ctarow"><a class="cta" href="/docs/graph.html">See the graph</a></p>
+                </li>
+            </ul>
+        </section>
+
+        <!-- THE WHOLE LIBRARY, IN FOUR GROUPS AND THREE COLUMNS.
+             Every row is generated — `apiGroups()` reads `std/` — so a module
+             added tomorrow is on this page on the next build. The rows still
+             carry `data-q` and `data-e`, so the search above filters them where
+             they sit; a group whose rows are all filtered out hides itself. -->
+        <section class="band" id="std">
+            <div data-search-list>
+                <div class="modgroup" v-for="g in searchGroups()" :key="g.name">
+                    <h2 class="eyebrow">{{ g.name }}</h2>
+                    <ul class="modgrid">
+                        <li v-for="r in g.rows" :key="r.name" :data-q="r.q" :data-e="r.e" :data-m="r.name">
+                            <a :href="r.href">std/{{ r.name }}</a>
+                            <span class="count">{{ r.count }}</span>
+                            <span class="d" v-html="r.summary"></span>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section class="band" id="cli">
+            <p class="eyebrow">The driver</p>
+            <h2>What <code>vyrn</code> does</h2>
+            <div class="scroller">
+            <table>
+                <thead>
+                    <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
+                </thead>
+                <tbody>
+                    <tr v-for="c in commands()" :key="c.name">
+                        <td><code>{{ c.name }}</code></td>
+                        <td v-html="c.what"></td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+        </section>
+
+        <section class="band split" id="read">
+            <div class="say">
+                <p class="eyebrow">Elsewhere</p>
+                <h2>Where to go next</h2>
+                <p><a href="/guide.html">The guide</a> teaches the language in order. <a href="/explore.html">The registry</a> lists what a project pulls in from outside <code>std/</code>.</p>
+            </div>
+            <ul class="plain">
+                <li v-for="l in links()" :key="l.href">
+                    <a :href="l.href">{{ l.name }}</a>
+                    <span>{{ l.what }}</span>
+                </li>
+            </ul>
+        </section>
+</main>
+</template>

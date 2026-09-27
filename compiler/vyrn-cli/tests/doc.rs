@@ -1,0 +1,268 @@
+//! `vyrn doc`: the byte-pinned golden output and the `--verify`
+//! drift gate. No clang needed.
+//!
+//! The fixture holds every documented shape: a detached file header,
+//! `fn`/`type`/`protocol` exports, a ` ```mermaid ` fence (passed verbatim), an
+//! unclosed fence (the tool never eats content), a `///` block detached from its
+//! declaration by a blank line (does not attach), a private declaration and a
+//! `test` block (both omitted), and a protocol with one documented method (gets
+//! a `###` section) beside one undocumented (does not).
+
+use std::path::PathBuf;
+use std::process::Command;
+
+fn vyrn() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_vyrn"))
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("vyrn-doc-tests").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+const FIXTURE: &str = r#"/// A tiny fixture module for `vyrn doc` golden output. It exercises the
+/// file header, fenced diagrams, and the detached-block rule.
+
+import { slice } from "std/strings"
+
+/// Routes a request through the middleware chain.
+///
+/// ```mermaid
+/// flowchart LR
+///   req --> handler
+/// ```
+export fn route(req: Request) -> Response {
+    return handle(req)
+}
+
+/// A rectangle the renderer knows how to draw.
+///
+/// ```text
+/// unclosed fence on purpose
+export type Shape = { width: Int64, height: Int64 }
+
+/// Things that can render themselves to a `String`.
+export protocol Show {
+    /// The one-line form — for a log line or a table cell.
+    fn show(self) -> String
+
+    fn debug(self) -> String
+}
+
+/// This block is DETACHED from the declaration below by a blank line.
+
+export fn area(s: Shape) -> Int64 {
+    return s.width * s.height
+}
+
+/// A private helper — omitted from the docs (not exported).
+fn handle(req: Request) -> Response {
+    return Response { ok: true, vary: "" }
+}
+
+export type Request = { path: String }
+
+export type Response = { ok: Bool }
+
+test "area multiplies" {
+    assertEq(area(Shape { width: 2, height: 3 }), 6)
+}
+"#;
+
+/// Flush-left so the mermaid indentation survives verbatim. `area` has no doc
+/// (its block is detached), `handle` is absent (private), and the unclosed
+/// ` ```text ` fence is emitted verbatim.
+const EXPECTED_PAGE: &str = r"# widgets
+
+A tiny fixture module for `vyrn doc` golden output. It exercises the
+file header, fenced diagrams, and the detached-block rule.
+
+## route
+
+```vyrn
+fn route(req: Request) -> Response
+```
+
+Routes a request through the middleware chain.
+
+```mermaid
+flowchart LR
+  req --> handler
+```
+
+## Shape
+
+```vyrn
+type Shape = { width: Int64, height: Int64 }
+```
+
+A rectangle the renderer knows how to draw.
+
+```text
+unclosed fence on purpose
+
+## Show
+
+```vyrn
+protocol Show { fn show(self) -> String; fn debug(self) -> String }
+```
+
+Things that can render themselves to a `String`.
+
+### `fn show(self) -> String`
+
+The one-line form — for a log line or a table cell.
+
+## area
+
+```vyrn
+fn area(s: Shape) -> Int64
+```
+
+## Request
+
+```vyrn
+type Request = { path: String }
+```
+
+## Response
+
+```vyrn
+type Response = { ok: Bool }
+```
+";
+
+const EXPECTED_INDEX: &str = r"# API Reference
+
+- [widgets](widgets.md) — A tiny fixture module for `vyrn doc` golden output. It exercises the
+";
+
+/// Documents the fixture in directory mode, so the `import` line is parsed and
+/// never resolved.
+fn generate(name: &str) -> PathBuf {
+    let dir = scratch(name);
+    std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
+    let out = dir.join("out");
+    let status = vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    out
+}
+
+#[test]
+fn golden_module_page_is_byte_pinned() {
+    let out = generate("golden-page");
+    let page = std::fs::read_to_string(out.join("widgets.md")).unwrap();
+    assert_eq!(
+        page, EXPECTED_PAGE,
+        "generated page drifted from the golden"
+    );
+}
+
+#[test]
+fn golden_index_is_byte_pinned() {
+    let out = generate("golden-index");
+    let index = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert_eq!(
+        index, EXPECTED_INDEX,
+        "generated index drifted from the golden"
+    );
+}
+
+#[test]
+fn verify_passes_on_freshly_generated_docs() {
+    let dir = scratch("verify-clean");
+    std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
+    let out = dir.join("out");
+    assert_eq!(
+        vyrn()
+            .arg("doc")
+            .arg(&dir)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+    let verified = vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .arg("--verify")
+        .output()
+        .unwrap();
+    assert_eq!(
+        verified.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+}
+
+#[test]
+fn verify_flags_out_of_date_docs() {
+    let dir = scratch("verify-drift");
+    std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
+    let out = dir.join("out");
+    vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
+    std::fs::write(out.join("widgets.md"), "stale\n").unwrap();
+    let verified = vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .arg("--verify")
+        .output()
+        .unwrap();
+    assert_eq!(verified.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&verified.stderr).contains("drift"),
+        "expected a drift message"
+    );
+}
+
+#[test]
+fn verify_flags_a_stale_extra_page() {
+    let dir = scratch("verify-stale");
+    std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
+    let out = dir.join("out");
+    vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
+    // A page the source does not generate, as after a removed module.
+    std::fs::write(out.join("orphan.md"), "# gone\n").unwrap();
+    let verified = vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .arg("--verify")
+        .output()
+        .unwrap();
+    assert_eq!(verified.status.code(), Some(1));
+}

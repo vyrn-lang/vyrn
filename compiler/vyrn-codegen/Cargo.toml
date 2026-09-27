@@ -1,0 +1,32 @@
+[package]
+name = "vyrn-codegen"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Emits wasm for Vyrn directly, with no LLVM."
+
+[dependencies]
+vyrn-frontend = { path = "../vyrn-frontend" }
+# The lowered form, which sits BELOW this crate. The edge is one way and stays
+# one way — `vyrn-lower` must not see a backend. The monomorphization worklist
+# is the lowering's, so `check_instantiations` asks how deep it goes without
+# emitting a module.
+vyrn-lower = { path = "../vyrn-lower" }
+# The direct wasm backend. Section framing and LEB128 are not where the interesting bugs live, and this is
+# the Bytecode Alliance's own encoder — the same org as the `wasmtime` this repo
+# already runs generators on, so it tracks the format from the same source.
+#
+# The property that matters — `cargo build` and `cargo test` with no LLVM, no clang, no wasi
+# sysroot — is untouched by it; see ../Cargo.toml.
+wasm-encoder = "0.221"
+# The same module, printed as text (`vyrn emit-wat`). The encoder's own family,
+# pinned to the encoder's version so the two never read the format differently.
+# `default-features = false` drops the component-model printer: this backend
+# emits core modules only.
+#
+# It gives the backend a form a test can READ.
+wasmprinter = { version = "0.221", default-features = false }
+
+[lib]
+name = "vyrn_codegen"
+path = "src/lib.rs"

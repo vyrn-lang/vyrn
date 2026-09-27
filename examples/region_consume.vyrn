@@ -1,0 +1,56 @@
+// A value a `region` allocated may not be handed to a `consume` parameter.
+// This file is that refusal on purpose: it does not build.
+//
+// `consume` declares that the callee TAKES the value. Inside a region the value
+// is the arena's, and the arena frees it at the closing brace — so the callee
+// owns a block that dies before it does. `keep` stores it in module state, the
+// brace frees it, and the next allocation hands the same block to somebody else.
+//
+// Before the rule, this program compiled. `vyrn check` printed `ok`, the
+// interpreter printed the three strings (its values are shared), and the native
+// binary printed freed memory that changed from run to run: `churn 200` in place
+// of `regionvalue-1` on one run, raw bytes on the next. The escape guard fired on
+// a named store — `kept.push(s)` written INSIDE the region — and a call argument
+// never reached it, so the same store one frame down went through.
+//
+// The rule sits where the fact is declared, not where the store happens. A
+// callee may store what it took, or hand it to a second callee that does; the
+// signature says it takes it, and that is enough to refuse. See regionarena.vyrn
+// for the two ways to write this so it runs.
+
+type Box = { s: String }
+
+let mut kept: Array<String> = []
+
+let mut boxed: Array<Box> = []
+
+fn keep(s: consume String) {
+    kept.push(s)
+}
+
+fn wrap(s: consume String) -> Box {
+    return Box { s: s }
+}
+
+fn stash(b: consume Box) {
+    boxed.push(b)
+}
+
+fn main() -> Int64 {
+    region {
+        let mut i = 0
+        while i < 3 {
+            // Refused here.
+            keep("regionvalue-" + i.toString())
+            i = i + 1
+        }
+    }
+    // Refused for the same reason, one hop further out: the arena String travels
+    // inside a record, through two `consume` parameters. `Box` carries heap, so
+    // `stash` is refused as well as `wrap`.
+    region {
+        stash(wrap("boxed-" + "1"))
+    }
+    print(kept.length + boxed.length)
+    return 0
+}

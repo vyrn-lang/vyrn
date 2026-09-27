@@ -1,0 +1,6 @@
+// a lambda whose captures are read in another order than they were bound
+// The row lists a closure's captures in the order the body first reads
+// them, which is the order the lifted signature takes them
+// (`core::lambda_captures`), a String capture
+// among them.
+fn vyrnTestMain() -> Int64 { let a = 1 let b = 20 let s = "abc" let f: fn(Int64) -> Int64 = x -> b + a * x + s.byteLength return f(300) * 10 + a }

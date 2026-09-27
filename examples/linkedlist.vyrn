@@ -1,0 +1,66 @@
+// A singly-linked list, over `std/slots`.
+//
+// A node holds a `Handle<Node>` into a `Slots<Node>` this function owns,
+// which is three ordinary words: a slot, a generation, and the container's
+// identity.
+//
+// Three properties hold, and none of them needs a runtime:
+//
+//   * `Handle<Node>` is fixed size, so `Node` can name its own type without
+//     becoming infinite,
+//   * an `Option` payload holds one, so `None` still ends the list,
+//   * `remove` gives a node's slot back, so walking the list bottom-up
+//     reclaims every slot. `examples/freelist.vyrn` is that at 20,000 lists.
+//
+// The storage is named. `nodes` is a value in `main`, it
+// grows to fit, and no other program shares it.
+
+import { Slots, Handle, newSlots, insert, remove } from "std/slots"
+
+type Node = { value: Int64, next: Option<Handle<Node>> }
+
+// Recursive traversal: match peels off one node, recurse on its tail. (Match
+// arms are single expressions, so traversal is a recursive function, not a
+// loop.) `nodes[h]` reads the element where it lives — the projection checks
+// the generation and yields the place, so `.value` is one load.
+fn sum(nodes: Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o {
+        Some(h) => nodes[h].value + sum(nodes, nodes[h].next),
+        None => 0,
+    }
+}
+fn length(nodes: Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o {
+        Some(h) => 1 + length(nodes, nodes[h].next),
+        None => 0,
+    }
+}
+
+// Reclaim every node: read the tail *before* removing the head, then recurse.
+// A handle read after its slot is removed is dead, and `nodes[h]` traps on one.
+fn freeList(nodes: modify Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o { Some(h) => freeNode(nodes, h), None => 0 }
+}
+fn freeNode(nodes: modify Slots<Node>, h: Handle<Node>) -> Int64 {
+    let tail = nodes[h].next.copy() // read before remove, or the access would trap
+    remove(nodes, h)
+    return freeList(nodes, tail)
+}
+
+fn main() -> Int64 {
+    // Build [1, 2, 3, 4, 5] by prepending nodes to the head.
+    let mut nodes: Slots<Node> = newSlots()
+    let mut head: Option<Handle<Node>> = None
+    let mut i = 5
+    while i > 0 {
+        head = Some(insert(nodes, Node { value: i, next: head }))
+        i = i - 1
+    }
+
+    print(length(nodes, head)) // 5
+    let total = sum(nodes, head) // 15
+    print(total)
+
+    freeList(nodes, head) // every node's slot goes back here
+    return total
+}

@@ -1,0 +1,173 @@
+/// The programs the playground starts from, and the one place they are written.
+///
+/// Every one is a WHOLE program — it declares `main`, it prints, and it returns
+/// an exit code — because the playground runs it rather than showing it. That is
+/// the difference between this list and `hl.vyrn`'s `pieces()`, which are
+/// fragments cut from real files to be READ. `hello` is the same program in both.
+///
+/// One file each, and no `import`. The playground's module resolver is empty:
+/// `std/` lives on a filesystem and a browser tab does not have one. The page
+/// says so, and the compiler says so too, in its own words.
+///
+/// Each source is copied into the page inside a hidden `<pre>`, escaped by the
+/// template. `play.js` reads it back with `textContent`, so nothing here is
+/// parsed by JavaScript and a `<` in a program is a `<`.
+
+/// One example: the id the dropdown uses, the label a reader sees, the source it
+/// loads, and the standard input that source expects.
+export type Example = { id: String, title: String, src: String, stdin: String }
+
+export fn playExamples() -> Array<Example> {
+    return [
+        Example {
+            id: "hello",
+            title: "Hello",
+            src: "fn main() -> Int64 {
+    print(\"hello\")
+    return 0
+}
+",
+            stdin: "",
+        },
+        Example {
+            id: "types",
+            title: "Types that carry their rule",
+            src: "type Age = Int64 where value >= 18
+
+fn admit(n: Int64) -> Int64 {
+    // `Age?(n)` is None when the rule fails, so untrusted input never traps.
+    return match Age?(n) {
+        Some(a) => a,
+        None => 0 - 1,
+    }
+}
+
+fn main() -> Int64 {
+    print(admit(30))
+    print(admit(5))
+    // Uncomment the next line. The compiler refuses it, and says why.
+    // let bad = Age(5)
+    return 0
+}
+",
+            stdin: "",
+        },
+        Example {
+            id: "ownership",
+            title: "Ownership is a word on a parameter",
+            src: "type Ticket = { id: Int64, seats: Int64 }
+
+fn seatCount(t: read Ticket) -> Int64 { return t.seats }
+fn addSeat(t: modify Ticket) { t.seats = t.seats + 1 }
+fn redeem(t: consume Ticket) -> Int64 { return t.id }
+
+fn main() -> Int64 {
+    let mut t = Ticket { id: 7, seats: 2 }
+    print(seatCount(t))
+    addSeat(t)
+    print(seatCount(t))
+    print(redeem(t))
+    // `t` was consumed above. Name it again and the compiler refuses:
+    // print(seatCount(t))
+    return 0
+}
+",
+            stdin: "",
+        },
+        Example {
+            id: "fib",
+            title: "Recursion",
+            src: "fn fib(n: Int64) -> Int64 {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    while i <= 15 {
+        print(fib(i))
+        i = i + 1
+    }
+    return 0
+}
+",
+            stdin: "",
+        },
+        Example {
+            id: "input",
+            title: "Reading standard input",
+            src: "// The lines in the standard input box below arrive here, one per call.
+// At the end of them `readLine()` answers None, exactly as a pipe does.
+fn main() -> Int64 {
+    let mut n = 0
+    while let Some(line) = readLine() {
+        print(\"\\{n}: \\{line}\")
+        n = n + 1
+    }
+    print(\"\\{n} line(s)\")
+    return 0
+}
+",
+            stdin: "alpha
+beta
+gamma
+",
+        },
+        Example {
+            id: "trap",
+            title: "A trap, and the exit code",
+            src: "// A trap writes to standard error and the program exits non-zero — the same
+// channels a terminal gives it.
+fn main() -> Int64 {
+    print(\"before\")
+    panic(\"this is a trap\")
+    return 0
+}
+",
+            stdin: "",
+        },
+    ]
+}
+
+test "every example is a whole program with a unique id" {
+    let all = playExamples()
+    assert(all.length > 0)
+    for e in all {
+        assert(e.id.byteLength > 0)
+        assert(e.title.byteLength > 0)
+        // A program the playground can RUN, not a fragment to read.
+        assert(hasText(e.src, "fn main() -> Int64"))
+        let mut seen = 0
+        for other in playExamples() {
+            if other.id == e.id {
+                seen = seen + 1
+            }
+        }
+        assertEq(seen, 1)
+    }
+}
+
+/// Whether `needle` occurs in `haystack`. Only the tests above use it.
+fn hasText(haystack: String, needle: String) -> Bool {
+    let h = bytes(haystack)
+    let n = bytes(needle)
+    if n.length > h.length {
+        return false
+    }
+    let mut i = 0
+    while i + n.length <= h.length {
+        let mut k = 0
+        let mut same = true
+        while k < n.length {
+            if h[i + k] != n[k] {
+                same = false
+            }
+            k = k + 1
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}

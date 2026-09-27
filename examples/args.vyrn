@@ -1,0 +1,23 @@
+/// Command-line arguments. `args()` is the program's arguments
+/// *excluding* the program name (argv[1..]), as an `Array<String>` — empty
+/// when none were given.
+///
+/// The parity harness runs every example with zero arguments, so this example
+/// is deterministic there; run it with real arguments yourself:
+///
+///   vyrn run examples/args.vyrn greet world
+///   vyrn build examples/args.vyrn -o args.exe && ./args.exe greet world
+
+fn main() -> Int64 {
+    let a = args()
+    print("got \{a.length} argument(s)")
+    let mut i = 0
+    for arg in a {
+        print("  \{i}: \{arg}")
+        i = i + 1
+    }
+    if a.length == 0 {
+        print("(try: vyrn run examples/args.vyrn hello world)")
+    }
+    return 0
+}

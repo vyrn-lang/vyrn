@@ -1,0 +1,29 @@
+// A protocol may NOT target a validated (nominal) scalar.
+//
+// A record may: it has room for its declared name and carries it, so a
+// protocol dispatches on it by name.
+//
+// An `Age` is a `Val::Int` in the interpreter with nowhere to put its name,
+// and a wrapper that gave it room would put a branch in every arithmetic
+// path, which is where numeric parity between the three engines is thinnest.
+//
+// The way around it is in the diagnostic: give the type a record shape, and
+// the impl is legal.
+//
+// `vyrn check` rejects this file; it is never run.
+
+type Age = Int64 where value >= 18
+
+protocol Show {
+    fn show(self) -> String
+}
+
+impl Show for Age {
+    fn show(self) -> String { return "age " + self.toString() }
+}
+
+fn main() -> Int64 {
+    let a: Age = 21
+    print(a.show())
+    return 0
+}

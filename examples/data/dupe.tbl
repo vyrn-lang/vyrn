@@ -1,0 +1,4 @@
+# accounts -- the second `id` is the fault
+id Int64
+email String(120)
+id Int64

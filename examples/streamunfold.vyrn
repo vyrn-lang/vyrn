@@ -1,0 +1,160 @@
+/// The pull representation, and the measurement that is the point of it.
+///
+/// `naturals` never answers `None`. A stream that had to hold its buffer could
+/// not run this file at all: `unfold` would fill an array with every element
+/// before the first one reached a consumer, which is the heap growth of tRPC
+/// `#6156`. So the pin here is not the values. It is the COUNT: `take(feed, 5)`
+/// prints 5 elements and leaves `steps` at 5, against a feed with no end. A
+/// lazy `take` checks its counter before it asks at all, so it never reads one
+/// element past its last.
+import { Cursor, cursorGet, cursorSet, unfold, map, filter, take } from "std/stream"
+
+/// How many times a step function has run. Module state rather than a capture
+/// because a closure captures by value at its evaluation site and
+/// this has to be observed after the loop, from the outside.
+let mut steps = 0
+
+/// The endless one. Reads the cursor, writes the next cursor, yields — and never
+/// answers `None`, so nothing but the consumer can stop it.
+fn naturals(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
+    cursorSet(c, n + 1)
+    steps = steps + 1
+    return Some(n)
+}
+
+/// A producer that DOES end, so `for … in` over it terminates on its own and the
+/// buffer and stepped variants are proven to agree about what "the end" means.
+fn upToThree(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
+    if n > 3 {
+        return None
+    }
+    cursorSet(c, n + 1)
+    return Some(n * 10)
+}
+
+/// The cursor need not step by one — it is a cursor, not an index, which is what
+/// makes it a resume token rather than a loop counter.
+fn powers(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
+    if n > 64 {
+        return None
+    }
+    cursorSet(c, n * 2)
+    return Some(n)
+}
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn odd(n: Int64) -> Bool {
+    return n % 2 == 1
+}
+
+/// A `close` on a stepped stream, which is the variant-aware half: the buffer
+/// variant has a buffer to release and this one has a cursor cell, and the cell
+/// comes from a slab of 65536 that a leak would exhaust.
+fn discard() -> Int64 {
+    let s = unfold(100, naturals)
+    close(s)
+    return 0
+}
+
+/// The measurement itself, as a relation rather than a single fact: taking `n`
+/// from a feed with no end runs the step `n` times, whatever `n` is, and
+/// allocates nothing at all — `take` is a wrapper, not a buffer. Under
+/// the eager representation there is no number here; there is a program that
+/// does not terminate.
+fn cost(n: Int64) -> Int64 {
+    steps = 0
+    let mut seen = 0
+    for v in take(unfold(0, naturals), n) {
+        seen = seen + v
+    }
+    return steps
+}
+
+/// "10 000 open-then-abandon cycles", at that scale. A stepped stream owns a
+/// cursor cell, and cells come from a slab of 65536 slots, so a `close` that
+/// did not release would not merely grow the heap: it would trap on the 65537th
+/// acquisition. This is therefore the one place in the corpus where the release
+/// is observable rather than inferred.
+fn cycles(n: Int64) -> Int64 {
+    let mut i = 0
+    while i < n {
+        let s = unfold(i, naturals)
+        close(s)
+        i = i + 1
+    }
+    return i
+}
+
+fn main() -> Int64 {
+    // The measurement. An endless feed, five elements taken.
+    for v in take(unfold(0, naturals), 5) {
+        print(v) // 0 1 2 3 4
+    }
+    print(steps) // 5 — one ask per element, and no more
+
+    // A stepped stream that ends by itself.
+    for v in unfold(0, upToThree) {
+        print(v) // 0 10 20 30
+    }
+
+    // A cursor that is not an index.
+    for v in unfold(1, powers) {
+        print(v) // 1 2 4 8 16 32 64
+    }
+
+    // The combinators do not care which variant they were handed.
+    for v in map(take(unfold(0, naturals), 4), double) {
+        print(v) // 0 2 4 6
+    }
+    for v in filter(unfold(0, upToThree), odd) {
+        print(v) // (nothing — every element is even)
+    }
+    print(-1)
+
+    // `break` out of an endless feed directly, with no `take` in the way.
+    for v in unfold(0, naturals) {
+        if v == 3 {
+            break
+        }
+        print(v) // 0 1 2
+    }
+
+    // An early `return` out of one, which is the other release path.
+    print(firstOver(7))
+    print(discard())
+
+    // The cost relation: n steps for n elements, at three sizes, against a
+    // producer that never ends. A lazy `take` checks its counter before
+    // asking, so it never reads an extra element.
+    print(cost(5)) // 5
+    print(cost(1000)) // 1000
+    print(cost(20000)) // 20000
+
+    // And the release, at the scale of 10 000 cycles.
+    print(cycles(10000)) // 10000
+
+    // Two streams alive at once, so the cursor cells cannot be one shared slot.
+    let mut a = unfold(0, upToThree)
+    let mut b = unfold(0, powers)
+    close(a)
+    close(b)
+
+    return 0
+}
+
+/// The early-`return` path: the stream is released on the way out, and the
+/// producer is never asked for the elements past the one that answered.
+fn firstOver(limit: Int64) -> Int64 {
+    for v in unfold(0, naturals) {
+        if v > limit {
+            return v
+        }
+    }
+    return -1
+}

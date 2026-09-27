@@ -1,0 +1,3 @@
+validate_compile.vyrn:24:0: 5 does not satisfy `Age` (predicate `where value >= 18` is false)
+validate_compile.vyrn:25:0: 10 does not satisfy `Age` (predicate `where value >= 18` is false)
+validate_compile.vyrn:26:0: 17 does not satisfy `Age` (predicate `where value >= 18` is false)

@@ -1,0 +1,33 @@
+/// The server root — the one module that legitimately names both sides, which is
+/// why the manifest's `server` key is what gives it its audience.
+/// Two generators compose here: `rpc("./server/api")` mounts every
+/// procedure module under the api directory at its DERIVED path
+/// (POST /_/<module>/<name>, GET /_/$schema) — no file declares a route — and
+/// `pages("./server/pages")` synthesizes `route` from the file-based
+/// pages directory. `handle` checks the RPC surface FIRST and delegates
+/// everything else to `route`.
+///
+/// `vyrn dev` serves this alongside the built client wasm + the `public/` static
+/// assets (style.css, app.js); `vyrn serve server.vyrn` runs just this.
+import { rpc } from "std/rpc"
+import { rpcHandle } from rpc("./server/api")
+import { pages } from "std/ui"
+import { route } from pages("./server/pages")
+
+fn handle(req: Request) -> Response {
+    return match rpcHandle(req) {
+        Some(r) => r,
+        None => route(req),
+    }
+}
+
+fn main() -> Int64 {
+    // Drive `handle` once so `vyrn run server.vyrn` is a quick smoke test.
+    let schema = handle(Request { method: "GET", path: "/_/$schema", headers: [:], body: "" })
+    print("$schema -> \{schema.status}")
+    let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
+    print("/ -> \{home.status}")
+    let user = handle(Request { method: "GET", path: "/users/7", headers: [:], body: "" })
+    print("/users/7 -> \{user.status}")
+    return 0
+}

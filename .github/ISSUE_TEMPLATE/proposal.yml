@@ -1,0 +1,25 @@
+name: Proposal
+description: A change to the language, std or tooling.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: The program you cannot write today, or the one that is too long. Show it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The change, with the program as it would read after it.
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: Cost and alternatives
+      description: What the change adds to the compiler, what it breaks, and what you considered instead. Check `docs/decisions.md` first.
+    validations:
+      required: true

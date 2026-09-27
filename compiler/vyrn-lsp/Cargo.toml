@@ -1,0 +1,37 @@
+[package]
+name = "vyrn-lsp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A tiny, synchronous Language Server Protocol server for Vyrn. It is NOT part
+# of the default workspace (see ../Cargo.toml `exclude`): it pulls in
+# `lsp-server`/`lsp-types`, which would add external dependencies to the default
+# resolve. Build it explicitly:
+#   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
+[dependencies]
+vyrn-frontend = { path = "../vyrn-frontend" }
+# The kernel. Seven ownership rules are
+# stated by it and by nothing else, so a server that cannot call it accepts a
+# program the build refuses. It is the crate directly above `vyrn-frontend` and
+# depends on nothing else, so this adds no external dependency and no toolchain.
+vyrn-lower = { path = "../vyrn-lower" }
+# The generation engine, the only one: a build without it could not open a
+# file that uses a `gen fn`.
+vyrn-genwasm = { path = "../vyrn-genwasm" }
+lsp-server = "0.7"
+lsp-types = "0.95"
+serde = "1"
+serde_json = "1"
+
+[[bin]]
+name = "vyrn-lsp"
+path = "src/main.rs"
+
+# The extension's dev fallback runs the DEBUG binary (extension.js), and an
+# unoptimized analysis measured ~6x slower than a release one. `opt-level = 1`
+# keeps debug builds fast to produce while making the server usable, so nobody
+# has to remember to package a release build just to get a responsive editor.
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,20 @@
+{ browse { books { title } } } -> 200 {"data":{"browse":{"books":[{"title":"The Pragmatic Programmer"},{"title":"Dune"},{"title":"SICP"}]}}}
+envelope -> 200 {"data":{"browse":{"books":[{"title":"The Pragmatic Programmer"},{"title":"Dune"},{"title":"SICP"}]}}}
+{ browse { books } } -> 200 {"data":{"browse":{"books":[{"id":0,"title":"The Pragmatic Programmer","url":"https://pragprog.com/titles/tpp20","tags":["reference","web"],"rating":5},{"id":1,"title":"Dune","url":"https://example.com/dune","tags":["fiction"],"rating":4},{"id":2,"title":"SICP","url":"https://mitpress.mit.edu/sicp","tags":["reference"],"rating":0}]}}}
+{ tags } -> 200 {"data":{"tags":{"reference":2,"web":1,"fiction":1}}}
+byId(input: {id: 2}) -> 200 {"data":{"byId":{"Ok":{"title":"SICP"}}}}
+byId(input: {id: -1}) -> 200 {"errors":[{"message":"Field `byId` got an invalid argument; id: validation failed for `BookId`.","path":["byId"]}],"data":{"byId":null}}
+mutation add(input: ..) -> 200 {"data":{"add":{"Ok":{"title":"Vyrn"}}}}
+alias -> 200 {"data":{"recent":{"books":[{"name":"The Pragmatic Programmer"},{"name":"Dune"},{"name":"SICP"},{"name":"Vyrn"}]}}}
+undeclared member -> 200 {"errors":[{"message":"Cannot query field `nope` on type `Book`."}]}
+{ shelved { title } } -> 200 {"errors":[{"message":"Cannot query field `shelved` on type `Query`."}]}
+{ add { title } } -> 200 {"errors":[{"message":"Cannot query field `add` on type `Query`."}]}
+unknown argument -> 200 {"errors":[{"message":"Unknown argument `id` on field `byId`.","path":["byId"]}],"data":{"byId":null}}
+missing argument -> 200 {"errors":[{"message":"Field `byId` argument `input` is required, but it was not provided.","path":["byId"]}],"data":{"byId":null}}
+two roots -> 200 {"data":{"browse":{"books":[{"title":"The Pragmatic Programmer"},{"title":"Dune"},{"title":"SICP"},{"title":"Vyrn"}]},"tags":{"reference":2,"web":1,"fiction":1,"lang":1}}}
+a sibling survives -> 200 {"errors":[{"message":"Cannot query field `nope` on type `Query`."}]}
+the null climbs to browse -> 200 {"errors":[{"message":"Field `title` must not have a selection since type `Title` has no subfields."}]}
+the null stops at Ok -> 200 {"errors":[{"message":"Field `title` must not have a selection since type `Title` has no subfields."}]}
+a non-null root -> 200 {"errors":[{"message":"Field `title` must not have a selection since type `Title` has no subfields."}]}
+GET /graphql -> 405 method not allowed
+POST /_/books/browse -> unrouted (not our path)

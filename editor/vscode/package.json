@@ -1,0 +1,150 @@
+{
+  "name": "vyrn",
+  "displayName": "Vyrn",
+  "description": "Language support for Vyrn: syntax highlighting + diagnostics via the vyrn-lsp server.",
+  "version": "0.1.0-alpha.3",
+  "publisher": "vyrn-lang",
+  "license": "MIT",
+  "icon": "icons/vyrn.png",
+  "engines": { "vscode": "^1.70.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:vyrn", "onLanguage:vyx"],
+  "main": "./extension.js",
+  "scripts": {
+    "package": "npx --yes @vscode/vsce@3.9.2 package --allow-missing-repository --no-update-package-json"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "vyrn",
+        "aliases": ["Vyrn", "vyrn"],
+        "extensions": [".vyrn"],
+        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "vyx",
+        "aliases": ["Vyx", "vyx"],
+        "extensions": [".vyx"],
+        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "von",
+        "aliases": ["VON", "von"],
+        "extensions": [".von"],
+        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vyrn",
+        "scopeName": "source.vyrn",
+        "path": "./vyrn.tmLanguage.json"
+      },
+      {
+        "language": "von",
+        "scopeName": "source.vyrn",
+        "path": "./vyrn.tmLanguage.json"
+      },
+      {
+        "language": "vyx",
+        "scopeName": "source.vyx",
+        "path": "./vyx.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "vyrn",
+        "scopes": {
+          "enumMember": ["variable.other.enummember"],
+          "namespace": ["entity.name.namespace"],
+          "type": ["entity.name.type"],
+          "parameter": ["variable.parameter"],
+          "macro": ["entity.name.function.macro"],
+          "method": ["entity.name.function.member"],
+          "*.modification": ["markup.deleted"]
+        }
+      },
+      {
+        "language": "vyx",
+        "scopes": {
+          "enumMember": ["variable.other.enummember"],
+          "namespace": ["entity.name.namespace"],
+          "type": ["entity.name.type"],
+          "parameter": ["variable.parameter"],
+          "macro": ["entity.name.function.macro"],
+          "method": ["entity.name.function.member"],
+          "*.modification": ["markup.deleted"]
+        }
+      }
+    ],
+    "snippets": [
+      {
+        "language": "vyrn",
+        "path": "./snippets/vyrn.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vyrn.run",
+        "title": "Vyrn: Run File",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.test",
+        "title": "Vyrn: Run Test",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.testAll",
+        "title": "Vyrn: Run All Tests",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.dev",
+        "title": "Vyrn: Run Dev Server",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.bench",
+        "title": "Vyrn: Run Bench",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.benchAll",
+        "title": "Vyrn: Run All Benches",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.profile",
+        "title": "Vyrn: Profile File",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.profileTests",
+        "title": "Vyrn: Profile Tests",
+        "category": "Vyrn"
+      }
+    ],
+    "configuration": {
+      "title": "Vyrn",
+      "properties": {
+        "vyrn.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the vyrn-lsp server binary. When empty, resolves vyrn-lsp from PATH (or from beside the vyrn on PATH — the release archive ships both), then the repository's own debug build at compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)."
+        },
+        "vyrn.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the vyrn compiler binary used by the ▶ Run CodeLens. When empty, resolves ${workspaceFolder}/compiler/target/release/vyrn(.exe), then the debug build, then falls back to `cargo run -p vyrn-cli`."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

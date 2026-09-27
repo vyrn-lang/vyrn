@@ -1,0 +1,707 @@
+/// std/jsonread: the strict JSON reader over the `Json` tree of `std/json`.
+///
+///   import { parseJson } from "std/jsonread"
+///   import { Json, JsonField, emit } from "std/json"
+///
+/// The reader imports the writer's tree, never the reverse, so a caller that
+/// only serializes links `std/json` alone. The name is `parseJson` because
+/// `parse` is a reserved builtin. Commas are required, trailing commas and
+/// duplicate keys are refused, every escape is decoded (a lone surrogate is an
+/// error), and object fields keep source order. Offsets are bytes; every error
+/// starts with `line N, col M:`.
+
+import { Json, JsonField, emit, emitPretty, jsonEq } from "std/json"
+import { fnv1aStr } from "std/hash"
+
+/// The reader cursor: the source bytes and a 1-based `line`/`col` position.
+type Parser = { src: Array<UInt8>, n: Int64, pos: Int64, line: Int64, col: Int64 }
+
+/// The deepest nesting `parseJson` accepts. Past the engine's call cap the
+/// recursion traps, which no `Err` arm catches. Each level costs about two
+/// frames here and two in `emit`, so 128 levels leave room for a re-emit, a
+/// `fromJson` decode and the caller's stack.
+fn maxDepth() -> Int64 {
+    return 128
+}
+
+fn newParser(s: String) -> Parser {
+    let ba = bytes(s)
+    // Read the length before the literal: `src: ba` moves `ba`.
+    let n = ba.length
+    return Parser { src: ba, n: n, pos: 0, line: 1, col: 1 }
+}
+
+/// The current byte, or `-1` at end of input.
+fn cur(p: Parser) -> Int64 {
+    if p.pos >= p.n {
+        return -1
+    }
+    return Int64(p.src[p.pos])
+}
+
+/// The byte `k` ahead, or `-1` past the end.
+fn ahead(p: Parser, k: Int64) -> Int64 {
+    let i = p.pos + k
+    if i < 0 || i >= p.n {
+        return -1
+    }
+    return Int64(p.src[i])
+}
+
+/// Advance one byte, keeping `line`/`col` in sync (an LF starts a new line).
+fn step(p: modify Parser) -> Unit {
+    if p.pos >= p.n {
+        return
+    }
+    let b = Int64(p.src[p.pos])
+    p.pos = p.pos + 1
+    if b == '\n' {
+        p.line = p.line + 1
+        p.col = 1
+    } else {
+        p.col = p.col + 1
+    }
+}
+
+/// `msg` prefixed with the cursor's 1-based `line N, col M:` position.
+fn errAt(p: Parser, msg: String) -> String {
+    return "line " + p.line.toString() + ", col " + p.col.toString() + ": " + msg
+}
+
+/// Skips JSON whitespace: space, tab, CR and LF only.
+fn skipWs(p: modify Parser) -> Unit {
+    while true {
+        let b = cur(p)
+        if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+            step(p)
+        } else {
+            return
+        }
+    }
+}
+
+fn isHex(b: Int64) -> Bool {
+    return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+/// The value of one ASCII hex digit (0..15); assumes `isHex(b)`.
+fn hexVal(b: Int64) -> Int64 {
+    if b >= '0' && b <= '9' {
+        return b - '0'
+    }
+    if b >= 'a' && b <= 'f' {
+        return b - 'a' + 10
+    }
+    return b - 'A' + 10
+}
+
+fn pushUtf8(out: modify Array<UInt8>, cp: Int64) -> Unit {
+    if cp < 128 {
+        out.push(UInt8(cp))
+    } else if cp < 2048 {
+        out.push(UInt8(192 + (cp / 64)))
+        out.push(UInt8(128 + (cp % 64)))
+    } else if cp < 65536 {
+        out.push(UInt8(224 + (cp / 4096)))
+        out.push(UInt8(128 + ((cp / 64) % 64)))
+        out.push(UInt8(128 + (cp % 64)))
+    } else {
+        out.push(UInt8(240 + (cp / 262144)))
+        out.push(UInt8(128 + ((cp / 4096) % 64)))
+        out.push(UInt8(128 + ((cp / 64) % 64)))
+        out.push(UInt8(128 + (cp % 64)))
+    }
+}
+
+/// Reads the 4 hex digits of a `\uXXXX` escape; the cursor is just past the `u`.
+fn readHex4(p: modify Parser) -> Result<Int64, String> {
+    let mut v = 0
+    let mut i = 0
+    while i < 4 {
+        let b = cur(p)
+        if isHex(b) == false {
+            return Err(errAt(p, "invalid \\u escape: expected 4 hex digits"))
+        }
+        v = v * 16 + hexVal(b)
+        step(p)
+        i = i + 1
+    }
+    return Ok(v)
+}
+
+/// Parses a JSON string, the cursor on the opening `"`, and decodes every
+/// escape to UTF-8.
+fn parseString(p: modify Parser) -> Result<String, String> {
+    step(p) // opening "
+    let mut out: Array<UInt8> = []
+    while true {
+        let b = cur(p)
+        if b < 0 {
+            return Err(errAt(p, "unterminated string"))
+        }
+        if b == '"' {
+            step(p) // closing "
+            return match stringFromBytes(out) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(errAt(p, "string is not valid UTF-8")),
+            }
+        }
+        if b == '\\' {
+            step(p) // backslash
+            let e = cur(p)
+            if e == '"' {
+                out.push('"')
+                step(p)
+            } else if e == '\\' {
+                out.push('\\')
+                step(p)
+            } else if e == '/' {
+                out.push('/')
+                step(p)
+            } else if e == 'b' {
+                out.push('\x08')
+                step(p)
+            } else if e == 'f' {
+                out.push('\x0c')
+                step(p)
+            } else if e == 'n' {
+                out.push('\n')
+                step(p)
+            } else if e == 'r' {
+                out.push('\r')
+                step(p)
+            } else if e == 't' {
+                out.push('\t')
+                step(p)
+            } else if e == 'u' {
+                step(p) // u
+                let hi = readHex4(p)?
+                if hi >= 55296 && hi <= 56319 {
+                    // A low surrogate `\uDC00..DFFF` must follow.
+                    if cur(p) != '\\' || ahead(p, 1) != 'u' {
+                        return Err(errAt(p, "unpaired high surrogate in \\u escape"))
+                    }
+                    step(p) // backslash
+                    step(p) // u
+                    let lo = readHex4(p)?
+                    if lo < 56320 || lo > 57343 {
+                        return Err(errAt(p, "unpaired high surrogate in \\u escape"))
+                    }
+                    let cp = 65536 + (hi - 55296) * 1024 + (lo - 56320)
+                    pushUtf8(out, cp)
+                } else if hi >= 56320 && hi <= 57343 {
+                    return Err(errAt(p, "unexpected low surrogate in \\u escape"))
+                } else {
+                    pushUtf8(out, hi)
+                }
+            } else if e < 0 {
+                return Err(errAt(p, "unterminated string"))
+            } else {
+                return Err(errAt(p, "invalid escape in string"))
+            }
+        } else if b < 32 {
+            return Err(errAt(p, "control character in string (must be escaped)"))
+        } else {
+            out.push(UInt8(b))
+            step(p)
+        }
+    }
+    return Err(errAt(p, "unterminated string"))
+}
+
+/// Validates a JSON number, the cursor on `-` or a digit, and returns its raw
+/// text. Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
+fn parseNumber(p: modify Parser) -> Result<String, String> {
+    let mut raw: Array<UInt8> = []
+    if cur(p) == '-' {
+        raw.push('-')
+        step(p)
+    }
+    let d = cur(p)
+    if d == '0' {
+        raw.push('0')
+        step(p)
+    } else if d >= '1' && d <= '9' {
+        raw.push(UInt8(d))
+        step(p)
+        while cur(p) >= '0' && cur(p) <= '9' {
+            raw.push(UInt8(cur(p)))
+            step(p)
+        }
+    } else {
+        return Err(errAt(p, "invalid number: expected a digit"))
+    }
+    if cur(p) == '.' {
+        raw.push('.')
+        step(p)
+        if (cur(p) >= '0' && cur(p) <= '9') == false {
+            return Err(errAt(p, "invalid number: expected a digit after '.'"))
+        }
+        while cur(p) >= '0' && cur(p) <= '9' {
+            raw.push(UInt8(cur(p)))
+            step(p)
+        }
+    }
+    if cur(p) == 'e' || cur(p) == 'E' {
+        raw.push(UInt8(cur(p)))
+        step(p)
+        if cur(p) == '+' || cur(p) == '-' {
+            raw.push(UInt8(cur(p)))
+            step(p)
+        }
+        if (cur(p) >= '0' && cur(p) <= '9') == false {
+            return Err(errAt(p, "invalid number: expected a digit in the exponent"))
+        }
+        while cur(p) >= '0' && cur(p) <= '9' {
+            raw.push(UInt8(cur(p)))
+            step(p)
+        }
+    }
+    return match stringFromBytes(raw) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(errAt(p, "invalid number")),
+    }
+}
+
+/// Consumes the keyword `word`, the cursor on its first byte.
+fn parseKeyword(p: modify Parser, word: String, val: Json) -> Result<Json, String> {
+    let wb = bytes(word)
+    let mut i = 0
+    while i < wb.length {
+        if cur(p) != Int64(wb[i]) {
+            return Err(errAt(p, "invalid literal: expected `" + word + "`"))
+        }
+        step(p)
+        i = i + 1
+    }
+    return Ok(val.copy())
+}
+
+/// Parses one value; the caller skipped leading whitespace. `depth` counts the
+/// enclosing arrays and objects, and this is the one place it is checked.
+fn parseValue(p: modify Parser, depth: Int64) -> Result<Json, String> {
+    let b = cur(p)
+    if b < 0 {
+        return Err(errAt(p, "unexpected end of input"))
+    }
+    if b == '{' || b == '[' {
+        if depth >= maxDepth() {
+            return Err(errAt(p, "nesting deeper than " + maxDepth().toString() + " levels"))
+        }
+    }
+    if b == '{' {
+        return parseObject(p, depth + 1)
+    }
+    if b == '[' {
+        return parseArray(p, depth + 1)
+    }
+    if b == '"' {
+        return match parseString(p) {
+            Ok(s) => Ok(JStr(s)),
+            Err(e) => Err(e),
+        }
+    }
+    if b == 't' {
+        return parseKeyword(p, "true", JBool(true))
+    }
+    if b == 'f' {
+        return parseKeyword(p, "false", JBool(false))
+    }
+    if b == 'n' {
+        return parseKeyword(p, "null", JNull)
+    }
+    if b == '-' || (b >= '0' && b <= '9') {
+        return match parseNumber(p) {
+            Ok(s) => Ok(JNum(s)),
+            Err(e) => Err(e),
+        }
+    }
+    return Err(errAt(p, "unexpected character"))
+}
+
+/// Parses an array, the cursor on `[`. `depth` counts this array.
+fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
+    step(p) // [
+    let mut items: Array<Json> = []
+    let mut failMsg = ""
+    skipWs(p)
+    if cur(p) == ']' {
+        step(p)
+        return Ok(JArr(items))
+    }
+    while true {
+        skipWs(p)
+        // A statement match, not `?`: the failure must drop the partial tree,
+        // and `?` has no statement to hang a `drop` on. So the failure keeps the
+        // message, breaks, and the drop runs after the loop.
+        let mut v = JNull
+        match parseValue(p, depth) {
+            Ok(ax) => {
+                v = ax
+            }
+            Err(ae) => {
+                failMsg = ae.copy()
+            }
+        }
+        if failMsg.byteLength > 0 {
+            break
+        }
+        items.push(v)
+        skipWs(p)
+        let b = cur(p)
+        if b == ',' {
+            step(p)
+            skipWs(p)
+            if cur(p) == ']' {
+                // Drop the partial tree by hand: `Json` declares its release,
+                // and only an explicit `drop` releases it on all three engines.
+                drop items
+                return Err(errAt(p, "trailing comma before ']'"))
+            }
+        } else if b == ']' {
+            step(p)
+            return Ok(JArr(items))
+        } else if b < 0 {
+            drop items
+            return Err(errAt(p, "unterminated array"))
+        } else {
+            drop items
+            return Err(errAt(p, "expected ',' or ']' in array"))
+        }
+    }
+    // Only the element-failure break reaches here.
+    drop items
+    return Err(failMsg)
+}
+
+/// One object's seen keys: linear probing over FNV-1a-64, capacity a power of
+/// two (`mask = cap - 1`), grown at 70% load. A scan per member would make an
+/// N-key object O(N^2), which one wide untrusted body could exploit.
+type KeySet = { keys: Array<String>, slots: Array<Int64>, mask: UInt64 }
+
+fn newKeySet() -> KeySet {
+    return KeySet { keys: [], slots: [0, 0, 0, 0, 0, 0, 0, 0], mask: UInt64(7) }
+}
+
+/// The slot holding `key`, or -1 when absent. `slots[i]` stores the key's
+/// index in `keys` plus one, so 0 marks an empty slot.
+fn ksFind(s: KeySet, key: String) -> Int64 {
+    let mut i = Int64(fnv1aStr(key) & s.mask)
+    while true {
+        if s.slots[i] == 0 {
+            return -1
+        }
+        if s.keys[s.slots[i] - 1] == key {
+            return i
+        }
+        i = Int64((UInt64(i) + UInt64(1)) & s.mask)
+    }
+    return -1
+}
+
+/// Places key index `ki` at the first empty slot from the key's hash.
+fn ksPlace(slots: modify Array<Int64>, key: String, mask: UInt64, ki: Int64) -> Unit {
+    let mut i = Int64(fnv1aStr(key) & mask)
+    while slots[i] != 0 {
+        i = Int64((UInt64(i) + UInt64(1)) & mask)
+    }
+    slots[i] = ki + 1
+}
+
+/// Records `key`. If the new entry pushes load past 70%, grows first and
+/// rehashes every key, the new one included, so a probe always finds an empty
+/// slot.
+fn ksAdd(s: modify KeySet, key: String) -> Unit {
+    s.keys.push(key.copy())
+    let cap = Int64(s.mask) + 1
+    if Int64(s.keys.length) * 10 > cap * 7 {
+        let mut slots: Array<Int64> = []
+        let newCap = cap * 2
+        let mut n = 0
+        while n < newCap {
+            slots.push(0)
+            n = n + 1
+        }
+        s.mask = UInt64(newCap - 1)
+        let mut ki = 0
+        while ki < s.keys.length {
+            ksPlace(slots, s.keys[ki], s.mask, Int64(ki))
+            ki = ki + 1
+        }
+        s.slots = slots
+        return
+    }
+    let mut i = Int64(fnv1aStr(key) & s.mask)
+    while s.slots[i] != 0 {
+        i = Int64((UInt64(i) + UInt64(1)) & s.mask)
+    }
+    s.slots[i] = Int64(s.keys.length)
+}
+
+/// Parses an object, the cursor on `{`. `depth` counts this object.
+fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
+    step(p) // {
+    let mut fields: Array<JsonField> = []
+    let mut seen = newKeySet()
+    let mut failMsg = ""
+    skipWs(p)
+    if cur(p) == '}' {
+        step(p)
+        return Ok(JObj(fields))
+    }
+    while true {
+        skipWs(p)
+        if cur(p) != '"' {
+            // Every refusal drops the partial tree, as in `parseArray`.
+            drop fields
+            return Err(errAt(p, "expected a string key"))
+        }
+        let mut key = ""
+        match parseString(p) {
+            Ok(kx) => {
+                key = kx
+            }
+            Err(ke) => {
+                failMsg = ke.copy()
+            }
+        }
+        if failMsg.byteLength > 0 {
+            break
+        }
+        if ksFind(seen, key) != -1 {
+            let dupMsg = errAt(p, "duplicate object key: " + key)
+            drop key
+            drop fields
+            return Err(dupMsg)
+        }
+        skipWs(p)
+        if cur(p) != ':' {
+            drop key
+            drop fields
+            return Err(errAt(p, "expected ':' after object key"))
+        }
+        step(p) // :
+        skipWs(p)
+        let mut v = JNull
+        match parseValue(p, depth) {
+            Ok(vx) => {
+                v = vx
+            }
+            Err(ve) => {
+                failMsg = ve.copy()
+            }
+        }
+        if failMsg.byteLength > 0 {
+            // Park the key in the partial tree so the drop releases it.
+            fields.push(JsonField { key: key, value: JNull })
+            break
+        }
+        ksAdd(seen, key)
+        fields.push(JsonField { key: key, value: v })
+        skipWs(p)
+        let b = cur(p)
+        if b == ',' {
+            step(p)
+            skipWs(p)
+            if cur(p) == '}' {
+                drop fields
+                return Err(errAt(p, "trailing comma before '}'"))
+            }
+        } else if b == '}' {
+            step(p)
+            return Ok(JObj(fields))
+        } else if b < 0 {
+            drop fields
+            return Err(errAt(p, "unterminated object"))
+        } else {
+            drop fields
+            return Err(errAt(p, "expected ',' or '}' in object"))
+        }
+    }
+    // Only the key and value failure breaks reach here.
+    drop fields
+    return Err(failMsg)
+}
+
+/// Parses a whole JSON document, or returns a `line N, col M: <reason>` error.
+/// Numbers are validated and stored as raw text; nesting past [`maxDepth`] is
+/// an `Err`.
+export fn parseJson(src: String) -> Result<Json, String> {
+    let mut p = newParser(src)
+    skipWs(p)
+    let v = parseValue(p, 0)?
+    skipWs(p)
+    if p.pos < p.n {
+        // Drop the tree by hand, as `parseArray` does.
+        drop v
+        return Err(errAt(p, "trailing content after the JSON value"))
+    }
+    return Ok(v)
+}
+
+/// The parsed tree, or a `JStr` carrying the error.
+fn parseOr(src: String) -> Json {
+    return match parseJson(src) {
+        Ok(v) => v,
+        Err(e) => JStr("ERR:" + e),
+    }
+}
+
+/// The parse error, or "" if the parse succeeded.
+fn parseErr(src: String) -> String {
+    return match parseJson(src) {
+        Ok(v) => "",
+        Err(e) => e,
+    }
+}
+
+test "parses scalars, arrays, and objects" {
+    assert(jsonEq(parseOr("null"), JNull))
+    assert(jsonEq(parseOr("true"), JBool(true)))
+    assert(jsonEq(parseOr("false"), JBool(false)))
+    assert(jsonEq(parseOr("42"), JNum("42")))
+    assert(jsonEq(parseOr("-3.14e2"), JNum("-3.14e2")))
+    assert(jsonEq(parseOr("\"hi\""), JStr("hi")))
+    assert(jsonEq(parseOr("[1,2,3]"), JArr([JNum("1"), JNum("2"), JNum("3")])))
+}
+
+test "object field order is preserved in source order" {
+    // emit preserves field order, so a compact re-emit witnesses the ordering.
+    assertEq(emit(parseOr("{ \"b\": 1, \"a\": 2, \"c\": 3 }")), "{\"b\":1,\"a\":2,\"c\":3}")
+}
+
+test "decodes the full escape set" {
+    assert(jsonEq(parseOr("\"a\\nb\""), JStr("a\nb")))
+    assert(jsonEq(parseOr("\"tab\\there\""), JStr("tab\there")))
+    assert(jsonEq(parseOr("\"q\\\"q\""), JStr("q\"q")))
+    assert(jsonEq(parseOr("\"slash\\/slash\""), JStr("slash/slash")))
+    assert(jsonEq(parseOr("\"\\u0041\""), JStr("A")))
+}
+
+test "decodes a surrogate pair to UTF-8" {
+    // U+1F600 is the bytes F0 9F 98 80.
+    let grin = match stringFromBytes(['\xf0', '\x9f', '\x98', '\x80']) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    assert(jsonEq(parseOr("\"\\uD83D\\uDE00\""), JStr(grin)))
+}
+
+test "rejects a lone high surrogate" {
+    assertEq(parseErr("\"\\uD83D\""), "line 1, col 8: unpaired high surrogate in \\u escape")
+}
+
+test "rejects a lone low surrogate" {
+    assertEq(parseErr("\"\\uDE00\""), "line 1, col 8: unexpected low surrogate in \\u escape")
+}
+
+test "rejects a trailing comma in an array" {
+    assertEq(parseErr("[1, 2, ]"), "line 1, col 8: trailing comma before ']'")
+}
+
+test "rejects a trailing comma in an object" {
+    assertEq(parseErr("{ \"a\": 1, }"), "line 1, col 11: trailing comma before '}'")
+}
+
+test "rejects a missing comma between members" {
+    assertEq(parseErr("[1 2]"), "line 1, col 4: expected ',' or ']' in array")
+}
+
+test "rejects a duplicate object key, naming it" {
+    assertEq(parseErr("{ \"a\": 1, \"a\": 2 }"), "line 1, col 14: duplicate object key: a")
+}
+
+test "rejects an invalid number" {
+    assertEq(parseErr("01"), "line 1, col 2: trailing content after the JSON value")
+    assertEq(parseErr("1."), "line 1, col 3: invalid number: expected a digit after '.'")
+}
+
+test "reports line and column across newlines" {
+    assertEq(parseErr("[\n  1,\n  @\n]"), "line 3, col 3: unexpected character")
+}
+
+test "round-trip law: parse(emit(j)) is structurally j" {
+    let j = JObj([
+        JsonField { key: "name", value: JStr("vyrn") },
+        JsonField { key: "nums", value: JArr([JNum("1"), JNum("-2.5"), JNum("3e4")]) },
+        JsonField { key: "nested", value: JObj([JsonField { key: "ok", value: JBool(true) }]) },
+        JsonField { key: "nothing", value: JNull },
+    ])
+    let round = match parseJson(emit(j)) {
+        Ok(v) => v,
+        Err(e) => JStr("ERR:" + e),
+    }
+    assert(jsonEq(round, j))
+    // The writer is byte-stable through a parse.
+    assertEq(emit(round), emit(j))
+}
+
+test "the round-trip law holds for the awkward keys and values too" {
+    // Keys holding JSON punctuation, a quote, a backslash and a control byte;
+    // two keys that differ only by case; a character above the BMP; empty
+    // containers; and each number form `JNum` may carry.
+    let ctrl = match stringFromBytes(['k', '\x01', 'v']) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let j = JObj([
+        JsonField { key: "a\"quoted\": {key}, [here]", value: JStr("}\",") },
+        JsonField { key: "back\\slash", value: JStr("\\") },
+        JsonField { key: ctrl, value: JStr("\n\t") },
+        JsonField { key: "Case", value: JNum("0") },
+        JsonField { key: "case", value: JNum("-0") },
+        JsonField { key: "𝄞 above the BMP", value: JStr("𝄞") },
+        JsonField { key: "", value: JArr([]) },
+        JsonField { key: "empty", value: JObj([]) },
+        JsonField {
+            key: "nums",
+            value: JArr([JNum("1e-9"), JNum("-2.5"), JNum("1E+30"), JNum("9007199254740993")]),
+        },
+    ])
+    let round = match parseJson(emit(j)) {
+        Ok(v) => v,
+        Err(e) => JStr("ERR:" + e),
+    }
+    assert(jsonEq(round, j))
+    assertEq(emit(round), emit(j))
+    // The same tree through the pretty writer reads back as the same tree.
+    let pretty = match parseJson(emitPretty(j, 2)) {
+        Ok(v) => v,
+        Err(e) => JStr("ERR:" + e),
+    }
+    assert(jsonEq(pretty, j))
+}
+
+/// A document nested exactly `n` deep: `open` n times, `core`, `close` n times.
+fn nest(open: String, core: String, close: String, n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + open
+        i = i + 1
+    }
+    out = out + core
+    i = 0
+    while i < n {
+        out = out + close
+        i = i + 1
+    }
+    return out
+}
+
+test "nesting past maxDepth is an Err, not a trap" {
+    assertEq(parseErr(nest("[", "", "]", 129)), "line 1, col 129: nesting deeper than 128 levels")
+    assertEq(parseErr(nest("[", "", "]", 4000)), "line 1, col 129: nesting deeper than 128 levels")
+    // The object form refuses at the 129th `{`, five columns a level.
+    assertEq(
+        parseErr(nest("{\"a\":", "1", "}", 400)),
+        "line 1, col 641: nesting deeper than 128 levels",
+    )
+}
+
+test "nesting at maxDepth parses, and re-emits" {
+    // 128 itself parses, and `emit` can walk the result.
+    assertEq(parseErr(nest("[", "", "]", 128)), "")
+    assertEq(emit(parseOr(nest("[", "", "]", 128))), nest("[", "", "]", 128))
+    assertEq(parseErr(nest("{\"a\":", "1", "}", 128)), "")
+}

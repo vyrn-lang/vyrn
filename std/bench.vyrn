@@ -1,0 +1,246 @@
+/// std/bench: the runtime the `vyrn bench` transform links against.
+/// Only the synthesized bench `main` imports it, so its clock use never reaches
+/// a `run` or `build`.
+
+import { monotonic } from "std/time"
+import { Json, JsonField, emit } from "std/json"
+import { parseJson } from "std/jsonread"
+
+/// The minimum of a non-empty sample array.
+export fn minOf(xs: Array<Int64>) -> Int64 {
+    let mut m = xs[0]
+    for v in xs {
+        if v < m {
+            m = v
+        }
+    }
+    return m
+}
+
+/// The truncating integer mean of a non-empty sample array.
+export fn mean(xs: Array<Int64>) -> Int64 {
+    let mut sum: Int64 = 0
+    for v in xs {
+        sum = sum + v
+    }
+    return sum / xs.length
+}
+
+/// A sorted copy of `xs`, by insertion sort.
+fn sortedCopy(xs: Array<Int64>) -> Array<Int64> {
+    let mut c: Array<Int64> = []
+    for v in xs {
+        c.push(v)
+    }
+    let mut i: Int64 = 1
+    while i < c.length {
+        let key = c[i]
+        let mut j = i - 1
+        let mut placed = false
+        while j >= 0 && placed == false {
+            if c[j] > key {
+                c[j + 1] = c[j]
+                j = j - 1
+            } else {
+                placed = true
+            }
+        }
+        c[j + 1] = key
+        i = i + 1
+    }
+    return c
+}
+
+/// The median (upper-middle element) of a non-empty sample array.
+export fn median(xs: Array<Int64>) -> Int64 {
+    let sorted = sortedCopy(xs)
+    return sorted[sorted.length / 2]
+}
+
+/// Two-digit zero-padded decimal, for a 0..99 fractional part.
+fn pad2(n: Int64) -> String {
+    if n < 10 {
+        return "0\{n}"
+    }
+    return "\{n}"
+}
+
+/// `value/unit` with two fractional digits: `41.20` for (41205, 1000).
+/// Integer-only, so every engine prints the same bytes.
+fn twoDecimals(value: Int64, unit: Int64) -> String {
+    let whole = value / unit
+    let frac = value % unit * 100 / unit
+    return "\{whole}.\{pad2(frac)}"
+}
+
+/// A nanosecond duration in human units: `ns` below one microsecond, then
+/// microseconds, `ms` or `s` with two fractional digits.
+export fn formatDuration(ns: Int64) -> String {
+    if ns < 1000 {
+        return "\{ns} ns"
+    }
+    if ns < 1000000 {
+        return "\{twoDecimals(ns, 1000)} µs"
+    }
+    if ns < 1000000000 {
+        return "\{twoDecimals(ns, 1000000)} ms"
+    }
+    return "\{twoDecimals(ns, 1000000000)} s"
+}
+
+/// Right-pads `s` with spaces to `width` bytes; never truncates.
+export fn padRight(s: String, width: Int64) -> String {
+    let mut out = s.copy()
+    let mut i = s.byteLength
+    while i < width {
+        out = out + " "
+        i = i + 1
+    }
+    return out
+}
+
+/// One bench's per-iteration statistics in nanoseconds, and the
+/// sample and iteration counts. Compare regressions on `minNs`, the least
+/// noisy.
+export type BenchResult = {
+    name: String,
+    minNs: Int64,
+    medianNs: Int64,
+    meanNs: Int64,
+    samples: Int64,
+    iters: Int64,
+}
+
+/// Times one bench body and returns its statistics:
+///
+///   1. warm up for about 50 ms, discarding results;
+///   2. double the per-sample iteration count until one sample takes 1 ms;
+///   3. collect samples until at least 31 and 500 ms, capped at 2 s;
+///   4. compute min, median and mean per-iteration time.
+///
+/// The body keeps its work alive with `blackBox`, so the compiler cannot delete
+/// it between iterations.
+export fn benchMeasure(name: String, body: fn() -> Unit) -> BenchResult {
+    let warmStart = monotonic()
+    while monotonic() - warmStart < 50000000 {
+        body()
+    }
+
+    let mut iters: Int64 = 1
+    let mut scaled = false
+    while scaled == false {
+        let start = monotonic()
+        let mut k: Int64 = 0
+        while k < iters {
+            body()
+            k = k + 1
+        }
+        let dt = monotonic() - start
+        if dt >= 1000000 || iters >= 1000000000 {
+            scaled = true
+        } else {
+            iters = iters * 2
+        }
+    }
+
+    let mut samples: Array<Int64> = []
+    let collectStart = monotonic()
+    let mut sampling = true
+    while sampling {
+        let start = monotonic()
+        let mut k: Int64 = 0
+        while k < iters {
+            body()
+            k = k + 1
+        }
+        let dt = monotonic() - start
+        samples.push(dt / iters)
+        let elapsed = monotonic() - collectStart
+        if samples.length >= 31 && elapsed >= 500000000 {
+            sampling = false
+        }
+        if elapsed >= 2000000000 {
+            sampling = false
+        }
+    }
+
+    return BenchResult {
+        name: name.copy(),
+        minNs: minOf(samples),
+        medianNs: median(samples),
+        meanNs: mean(samples),
+        samples: samples.length,
+        iters: iters,
+    }
+}
+
+/// Times one bench body and prints its report line. `width` is the label column
+/// width, computed from every bench name.
+export fn benchOne(name: String, width: Int64, body: fn() -> Unit) {
+    let r = benchMeasure(name, body)
+    let label = padRight("bench \"\{name}\"", width)
+    print("\{label}   min \{formatDuration(r.minNs)}   median \{formatDuration(r.medianNs)}   mean \{formatDuration(r.meanNs)}   (\{r.samples} samples × \{r.iters} iters)")
+}
+
+/// The `--json` bench report: compact, benches in
+/// declaration order, every number an integer:
+/// `{ backend, opt, benches: [ { name, minNs, medianNs, meanNs, samples, iters } ] }`.
+export fn benchJson(results: Array<BenchResult>, backend: String, opt: String) -> String {
+    let mut benches: Array<Json> = []
+    for r in results {
+        let entry: Array<JsonField> = [
+            JsonField { key: "name", value: JStr(r.name.copy()) },
+            JsonField { key: "minNs", value: JNum("\{r.minNs}") },
+            JsonField { key: "medianNs", value: JNum("\{r.medianNs}") },
+            JsonField { key: "meanNs", value: JNum("\{r.meanNs}") },
+            JsonField { key: "samples", value: JNum("\{r.samples}") },
+            JsonField { key: "iters", value: JNum("\{r.iters}") },
+        ]
+        benches.push(JObj(entry))
+    }
+    let doc: Array<JsonField> = [
+        JsonField { key: "backend", value: JStr(backend.copy()) },
+        JsonField { key: "opt", value: JStr(opt.copy()) },
+        JsonField { key: "benches", value: JArr(benches) },
+    ]
+    return emit(JObj(doc))
+}
+
+test "formatDuration picks human units" {
+    assertEq(formatDuration(512), "512 ns")
+    assertEq(formatDuration(41205), "41.20 µs")
+    assertEq(formatDuration(1290000), "1.29 ms")
+    assertEq(formatDuration(2500000000), "2.50 s")
+}
+
+test "median and mean over a small sample" {
+    let xs: Array<Int64> = [30, 10, 20, 50, 40]
+    assertEq(minOf(xs), 10)
+    assertEq(median(xs), 30)
+    assertEq(mean(xs), 30)
+}
+
+test "padRight fills to width and never truncates" {
+    assertEq(padRight("ab", 5), "ab   ")
+    assertEq(padRight("abcdef", 3), "abcdef")
+}
+
+test "benchJson emits the locked schema in stable order" {
+    let results: Array<BenchResult> = [
+        BenchResult { name: "push 1000", minNs: 2070, medianNs: 2500, meanNs: 2540, samples: 383, iters: 512 },
+        BenchResult { name: "hash 1000", minNs: 3100, medianNs: 3200, meanNs: 3250, samples: 300, iters: 256 },
+    ]
+    let out = benchJson(results, "native", "O2")
+    assertEq(out, "{\"backend\":\"native\",\"opt\":\"O2\",\"benches\":[{\"name\":\"push 1000\",\"minNs\":2070,\"medianNs\":2500,\"meanNs\":2540,\"samples\":383,\"iters\":512},{\"name\":\"hash 1000\",\"minNs\":3100,\"medianNs\":3200,\"meanNs\":3250,\"samples\":300,\"iters\":256}]}")
+}
+
+test "benchJson output round-trips through parseJson" {
+    let results: Array<BenchResult> = [
+        BenchResult { name: "one", minNs: 10, medianNs: 11, meanNs: 12, samples: 31, iters: 64 },
+    ]
+    let out = benchJson(results, "native", "O2")
+    match parseJson(out) {
+        Ok(tree) => assertEq(emit(tree), out),
+        Err(e) => assert(false),
+    }
+}

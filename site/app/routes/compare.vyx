@@ -1,0 +1,30 @@
+<script>
+// GET /compare — a stub, for a bookmark and a search result.
+//
+// The page was a cross-language matrix, three code plates and three charts,
+// and it had two problems: the numbers a
+// reader came for now live on `/benchmarks`, in the documentation where they
+// belong, and the prose comparing languages belongs in the book, where a
+// reader who is learning one is standing. Both moved; this is the old name.
+import { Head } from "std/ui"
+import { pageHead, hrefOf } from "../nav"
+
+export fn head() -> Head {
+    return pageHead("Moved to Benchmarks — Vyrn")
+}
+
+/// Where this stub sends a reader.
+fn target() -> String {
+    return hrefOf("/benchmarks")
+}
+</script>
+
+<template>
+<main class="page">
+    <section class="hero">
+        <p class="eyebrow">Moved</p>
+        <h1 class="display">The numbers are on the benchmarks page</h1>
+        <p class="lede">Nothing was deleted. <a :href="target()">Read the benchmarks</a>.</p>
+    </section>
+</main>
+</template>

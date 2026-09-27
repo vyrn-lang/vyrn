@@ -1,0 +1,80 @@
+/// Typed RPC as a library — the deterministic, in-process flavor, so
+/// this is an ordinary three-way parity citizen (interp == native == wasm).
+///
+/// `clientInProcess("./fullstack/server/api")` reads the SAME api directory the
+/// browser demo serves and synthesizes `<module><Proc>(req, cb)` dispatchers that
+/// run the real procedures and hand the result to the callback synchronously — no
+/// wire, no externs, no host. The stubs are named exactly as `client()`'s wire
+/// stubs are, so a composition root swaps one import line and no
+/// call site moves. The wire flavor adds a network and a JS runtime, so it lives
+/// in `examples/fullstack/` under `vyrn dev`; this file keeps the procedures'
+/// logic covered by the parity corpus.
+///
+/// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpc.vyrn
+import { clientInProcess } from "std/rpc"
+import { usersById, usersCreate, usersDel, RpcReply } from clientInProcess("./fullstack/server/api")
+import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "./fullstack/shared/wire"
+
+// Module state: the last dispatch result, filled by the callbacks below.
+let mut line: String = "(none)"
+
+/// The completion callback for `usersById` — in-process, always `Done`.
+fn onGetUser(res: RpcReply<User>) {
+    line = match res {
+        Done(u) => "usersById -> \{u.name} (age \{u.age})",
+        Rejected(issues) => "usersById failed",
+        Failed(why) => "usersById failed",
+    }
+}
+
+/// The completion callback for `usersCreate`.
+fn onCreateUser(res: RpcReply<User>) {
+    line = match res {
+        Done(u) => "usersCreate -> id \{u.id} \{u.name}",
+        Rejected(issues) => "usersCreate failed",
+        Failed(why) => "usersCreate failed",
+    }
+}
+
+/// The completion callback for `usersDel` — a `Result` procedure. An
+/// application-level `Err` is a `Done(Err(..))` here, distinct from the wire's
+/// decode failures (`Rejected`) and transport faults (`Failed`).
+fn onDeleteUser(res: RpcReply<DeleteResult>) {
+    line = match res {
+        Done(r) => match r {
+            Ok(done) => "usersDel -> ok",
+            Err(why) => "usersDel -> refused: \{why}",
+        },
+        Rejected(issues) => "usersDel failed",
+        Failed(why) => "usersDel failed",
+    }
+}
+
+fn main() -> Int64 {
+    usersById(GetUserReq { id: 7 }, onGetUser)
+    print(line)
+    usersCreate(CreateUserReq { name: "Ada", age: 36 }, onCreateUser)
+    print(line)
+    usersDel(DeleteReq { id: 5 }, onDeleteUser)
+    print(line)
+    usersDel(DeleteReq { id: 0 }, onDeleteUser)
+    print(line)
+    return 0
+}
+
+test "in-process usersById runs the real procedure" {
+    usersById(GetUserReq { id: 42 }, onGetUser)
+    assertEq(line, "usersById -> user42 (age 30)")
+}
+
+test "in-process usersCreate echoes its validated fields" {
+    usersCreate(CreateUserReq { name: "Grace", age: 45 }, onCreateUser)
+    assertEq(line, "usersCreate -> id 1000 Grace")
+}
+
+test "in-process usersDel carries a Result outcome" {
+    usersDel(DeleteReq { id: 5 }, onDeleteUser)
+    assertEq(line, "usersDel -> ok")
+    usersDel(DeleteReq { id: 0 }, onDeleteUser)
+    assertEq(line, "usersDel -> refused: cannot delete the root user")
+}

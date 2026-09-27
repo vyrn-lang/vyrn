@@ -1,0 +1,102 @@
+; vyrn lowered v2 -- examples/option.vyrn
+
+fn agePlus(n, extra)
+  {
+    let @t2 = fn parseAge(read n)
+    switch @t2
+      arm(@err)
+        let @t3 = ctor Err(consume @err)
+        return @t3  (?)
+      arm(@ok)
+        @t1 = @ok  (Nothing)
+    let a = @t1
+    let @t4 = prim add(a, extra)
+    let @t5 = ctor Ok(consume @t4)
+    return @t5
+  }
+
+fn main()
+  {
+    let @t1 = fn safeDiv(read lit 10, read lit 2)
+    let @t2 = prim sub(lit 0, lit 1)
+    let @t3 = fn unwrapOr(read @t1, read @t2)
+    do builtin print(read @t3)
+    let @t4 = fn safeDiv(read lit 10, read lit 0)
+    let @t5 = prim sub(lit 0, lit 1)
+    let @t6 = fn unwrapOr(read @t4, read @t5)
+    do builtin print(read @t6)
+    let @t8 = fn agePlus(read lit 30, read lit 5)
+    switch @t8
+      arm(v)
+        @t7 = v  (Nothing)
+      arm(e)
+        let @t9 = prim sub(lit 0, e)
+        @t7 = @t9  (Nothing)
+    let ok = @t7
+    let @t11 = fn agePlus(read lit 10, read lit 5)
+    switch @t11
+      arm(v)
+        @t10 = v  (Nothing)
+      arm(e)
+        let @t12 = prim sub(lit 0, e)
+        @t10 = @t12  (Nothing)
+    let bad = @t10
+    do builtin print(read ok)
+    do builtin print(read bad)
+    return lit 0
+  }
+
+fn parseAge(n)
+  {
+    let @t1 = prim gteq(n, lit 18)
+    if @t1
+      {
+        let @t2 = named Age(consume n)
+        let @t3 = ctor Ok(consume @t2)
+        return @t3
+      }
+    else
+    let @t4 = ctor Err(consume n)
+    return @t4
+  }
+
+fn safeDiv(a, b)
+  {
+    let @t1 = prim eq(b, lit 0)
+    if @t1
+      {
+        let @nullary = ctor None()
+        return @nullary
+      }
+    else
+    let @t2 = prim div(a, b)
+    let @t3 = ctor Some(consume @t2)
+    return @t3
+  }
+
+fn unwrapOr(o, fallback)
+  {
+    switch o
+      arm(x)
+        return x
+      arm()
+        return fallback
+  }
+
+fn where$cAge(value)
+  {
+    let @t1 = fn where$pAge(read value)
+    let @t2 = prim not(@t1)
+    if @t2
+      {
+        do builtin panic(read lit "validation failed for `age`")
+        trap
+      }
+    else
+  }
+
+fn where$pAge(value)
+  {
+    let @t1 = prim gteq(value, lit 18)
+    return @t1
+  }

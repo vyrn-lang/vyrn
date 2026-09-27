@@ -1,0 +1,173 @@
+<script>
+// GET /releases — the changelog: what is published, and what has landed since.
+//
+// IT DOES NOT INSTALL ANYTHING. This page used to carry a `curl … | sh` block of
+// its own, which was one platform's command on a page that is not about
+// platforms, and a second copy of the thing `/install` exists to be. One link
+// takes its place. The page is now what its name says:
+// the latest version at the top with the stat tiles and the highlights, then
+// every release ever tagged.
+//
+// It is also NOT IN THE MASTHEAD any more. Four nav names beat five, and nobody
+// navigates to a changelog before they have installed anything — so it is reached
+// from the index's own `Latest release` section, from `/install`, and from the
+// footer of every page.
+//
+// The newest tag is BAKED: `site/release.txt` is refreshed from the GitHub
+// listing before every build of this site, and read here through `../repo`,
+// which reconciles it against the repository's own tags and takes the newer.
+// Nothing on this page is written by hand — not the tag, not the date, not
+// whether it is a pre-release, which is the tag's own suffix.
+//
+// FOUR STAT TILES, AND NOT ONE OF THEM IS TYPED. Each is arithmetic over a file
+// something else wrote: the pull requests are summed out of
+// `site/data/history.json` over the days AFTER the baked tag, the test blocks
+// and their files are counted in that same file by `scripts/site-history.py`,
+// and the examples and the standard library are counted off the working tree by
+// the generator in `app/facts.vyrn`. The tiles this page does NOT carry are the
+// ones this repository cannot compute: the
+// number of ARCHIVES a release published, and the platforms they were built
+// for, live in the release on GitHub and nowhere in this tree. A tile is a
+// number a reader trusts, so a number nobody can recompute does not get one.
+import { Head } from "std/ui"
+import { pageHeadOf } from "../nav"
+import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, exampleCount, stdCount, backendCount } from "../repo"
+import { Release, releaseRows, days, testBlockCount, testFileCount } from "../history"
+import { feedName } from "../feed"
+import { indexOf } from "std/strings"
+
+/// The feed, as a site-root path the export can rewrite like any other link.
+fn feedHref() -> String {
+    return "/" + feedName()
+}
+
+export fn head() -> Head {
+    return pageHeadOf("/releases")
+}
+
+/// The heading, which is a different sentence in each of the two states.
+fn headline() -> String {
+    if !hasRelease() {
+        return "Nothing is released yet"
+    }
+    return releaseTag()
+}
+
+/// What that release is, in one line.
+fn standing() -> String {
+    if !hasRelease() {
+        return "There is no versioned release and no published binary."
+    }
+    let kind = if releasePre() { "a pre-release" } else { "a stable release" }
+    return "Published " + releaseDate() + " as " + kind + "."
+}
+
+/// What the first tile measures. With a tag it is the pull requests that
+/// landed after it; with none, the same sum over all of history is exactly
+/// what it claims — an empty date compares `>` against every day.
+fn sinceLabel() -> String {
+    if hasRelease() {
+        return "Since the tag"
+    }
+    return "All time"
+}
+
+/// Merged pull requests since the baked tag, summed out of the history the
+/// script wrote. Dates are ISO, so `>` on the strings is `>` on the days.
+fn prsSince() -> Int64 {
+    let mut n = 0
+    for d in days() {
+        if d.date > releaseDate() {
+            n = n + d.prs
+        }
+    }
+    return n
+}
+
+/// The eyebrow above the heading. In the nothing-released state there is no
+/// kind to name — an empty tag carries no suffix, so `kindOf` answered
+/// "stable" over a headline saying nothing was released.
+fn eyebrow() -> String {
+    if !hasRelease() {
+        return "Releases"
+    }
+    return "Releases · " + kindOf(releaseTag())
+}
+
+/// Every release, newest first — the table's own order, which is the order a
+/// reader looks for the current one in.
+fn releasesNewestFirst() -> Array<Release> {
+    let rows = releaseRows()
+    let mut out: Array<Release> = []
+    let mut i = rows.length - 1
+    while i >= 0 {
+        out.push(Release { tag: rows[i].tag.copy(), date: rows[i].date.copy() })
+        i = i - 1
+    }
+    return out
+}
+
+/// Whether a tag is a pre-release: it carries a suffix. The same rule
+/// `release.yml` applies when it decides whether to pass `--prerelease`.
+fn kindOf(tag: String) -> String {
+    return match indexOf(tag, "-") {
+        Some(at) => "pre-release",
+        None => "stable",
+    }
+}
+</script>
+
+<template>
+<main class="page wide">
+        <!-- SPLIT: what is published on the left with the command
+             that gets it, what it took to get there on the right. -->
+        <section class="hero split" id="status">
+            <div class="say">
+                <p class="eyebrow">{{ eyebrow() }}</p>
+                <h1 class="display">{{ headline() }}</h1>
+                <p class="lede">{{ standing() }} The language changes without a deprecation period.</p>
+                <p class="ctarow"><a class="cta" href="/install.html">Install or upgrade</a></p>
+                <p class="eyebrow"><a :href="releaseUrl()">Notes and downloads</a> · <a :href="feedHref()">Feed</a></p>
+            </div>
+
+            <div>
+                <dl class="specs">
+                    <div><dt>{{ sinceLabel() }}</dt><dd>{{ prsSince() }}<small>pull requests merged</small></dd></div>
+                    <div><dt>Test blocks</dt><dd>{{ testBlockCount() }}<small>in {{ testFileCount() }} files</small></dd></div>
+                    <div><dt>Examples</dt><dd>{{ exampleCount() }}<small>on {{ backendCount() }} engines each</small></dd></div>
+                    <div><dt>Standard library</dt><dd>{{ stdCount() }}<small>modules, in Vyrn</small></dd></div>
+                </dl>
+            </div>
+        </section>
+
+        <section class="band" id="all">
+            <p class="eyebrow">Every release</p>
+            <div class="scroller">
+                <table>
+                    <thead><tr><th scope="col">Version</th><th scope="col">Tagged</th><th scope="col">Kind</th><th scope="col">Archives</th></tr></thead>
+                    <tbody>
+                        <tr v-for="r in releasesNewestFirst()" :key="r.tag">
+                            <td><code>{{ r.tag }}</code></td>
+                            <td>{{ r.date }}</td>
+                            <td>{{ kindOf(r.tag) }}</td>
+                            <td><a :href="releaseUrlOf(r.tag)">Archives and SHA256SUMS</a></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="band split" id="how">
+            <div class="say">
+                <p class="eyebrow">How</p>
+                <h2>One tag, one archive per platform</h2>
+                <p>A <code>v*</code> tag builds <code>vyrn</code> for Linux, macOS and Windows, checks it against the crate version, and publishes one <code>SHA256SUMS</code> beside the archives. A suffix makes it a pre-release.</p>
+            </div>
+            <ul class="plain">
+                <li><strong>The installers take the newest release</strong><span>Pin another with <code>VYRN_VERSION</code>.</span></li>
+                <li><strong>Every example runs both ways</strong><span>Byte for byte, on every push.</span></li>
+                <li><strong>Verified, not stable</strong><span>The route harness runs before a tag is cut.</span></li>
+            </ul>
+        </section>
+</main>
+</template>

@@ -1,0 +1,15 @@
+{
+    "home": {
+        "title": "Welcome",
+        "subtitle": "Your dashboard"
+    },
+    "nav": {
+        "home": { "label": "Home" },
+        "settings": { "label": "Settings" }
+    },
+    "cart": {
+        "items": "{count, plural, one {# item} other {# items}}"
+    },
+    "greeting": "Hello, {name}!",
+    "status": "{state, select, active {Active} paused {Paused} other {Unknown}}"
+}

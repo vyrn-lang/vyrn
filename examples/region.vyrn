@@ -1,0 +1,94 @@
+// region { .. } — an arena scope.
+//
+// Heap allocations made inside a region (here, `concat`) are freed
+// deterministically when the block exits — reclamation for a whole *group* of
+// allocations at once, versus the per-value ownership analysis. A region
+// produces a non-heap result (a length), so nothing escapes to dangle; storing
+// an arena value into a binding that outlives the region is a compile error.
+
+type Tagged = { label: String, size: Int64 }
+
+// A String built inside a region and RETURNED out of it. The return pops the
+// frame without freeing it, so the buffer the return carries is the caller's to
+// release — and the caller does, at `label`'s block exit. That works because the
+// arena hands out exactly what `__vyrn_malloc` returned, with no chain link in
+// front of the payload.
+fn viaString(n: Int64) -> String {
+    region {
+        return "n=" + n.toString()
+    }
+    return ""
+}
+
+fn main() -> Int64 {
+    let hello = "Hello, "
+    let world = "world!"
+
+    let mut total = 0
+
+    // Build many temporary strings and measure them. Each `concat` allocates in
+    // the arena; all of it is freed at the closing brace — no leak, no GC.
+    region {
+        let mut i = 0
+        while i < 1000 {
+            let greeting = hello + world
+            total = greeting.byteLength
+            i = i + 1
+        }
+    }
+
+    // Growable arrays built inside a region use the ordinary heap (push grows
+    // the buffer with realloc), so they compose with the arena freely.
+    let mut n = 0
+    region {
+        let mut a: Array<Int64> = [1, 2]
+        a.push(3)
+        a.push(4)
+        a.push(5)
+        n = a[4]
+    }
+    print(n) // 5
+
+    // The arena and the ownership walk partition the heap: the arena owns every
+    // String buffer allocated inside the block, and the walk owns everything
+    // else. A `copy` made here must not break the partition: a copied buffer
+    // from the arena must not be freed by the walk as well. Both halves
+    // are pinned here: an Array copy, whose buffer is ordinary heap, and a
+    // String copy, whose buffer is the arena's.
+    let mut copied = 0
+    region {
+        let a: Array<Int64> = [1, 2, 3]
+        let b = a.copy()
+        let s = hello + world
+        let t = s.copy()
+        copied = b.length + t.byteLength
+    }
+    print(copied) // 16
+
+    // The same partition, one level down: a String the arena allocated, reached
+    // by the walk through a container and through a record field. The walk frees
+    // the buffer that holds them and leaves the Strings to the arena.
+    let mut held = 0
+    region {
+        let mut names: Array<String> = []
+        names.push(hello + world)
+        names.push(hello + "again")
+        let tagged = Tagged { label: hello + world, size: names.length }
+        held = names.length + tagged.label.byteLength
+    }
+    print(held) // 15
+
+    // 200 calls, each releasing the String the region handed back.
+    let mut p = 0
+    let mut carried = 0
+    while p < 200 {
+        let label = viaString(p)
+        carried = label.byteLength
+        p = p + 1
+    }
+    print(carried) // 5
+
+    // `total` is a plain Int64 computed inside the region — safe to carry out.
+    print(total) // 13
+    return total
+}

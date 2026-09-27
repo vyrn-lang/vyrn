@@ -1,0 +1,12 @@
+/// §44's exclusivity question: the same variable as `read` and `modify` in one
+/// call — two aliased parameter views, one of which mutates.
+fn g(a: Array<Int64>, b: modify Array<Int64>) -> Int64 {
+    b.push(9)
+    return a.length + b.length
+}
+
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = [1, 2]
+    print("\{g(xs, xs)}")
+    return 0
+}

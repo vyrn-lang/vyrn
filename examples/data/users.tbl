@@ -1,0 +1,5 @@
+# users -- one column per line: <name> <type>
+id Int64
+email String
+displayName String(120)
+signupCount Int64

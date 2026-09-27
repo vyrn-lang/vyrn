@@ -1,0 +1,13 @@
+/// A formatting helper, and the hop nobody looks at. It is honestly shared —
+/// `title` is pure — but it also re-exports the store's reader for convenience,
+/// which is how a filesystem ends up in a browser bundle three hops from the
+/// module that asked for a string.
+import { loadNote } from "../server/db"
+
+export fn title(note: String) -> String {
+    return "note: \{note}"
+}
+
+export fn titleOf(path: String) -> String {
+    return title(loadNote(path))
+}

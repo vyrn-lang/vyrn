@@ -1,0 +1,33 @@
+// A module's own `raw` and `render`, beside a generator that means the builtins.
+//
+// `render`, `rawAt`, `raw` and `lex` are unreserved: they are common words, and
+// a program that wants a function called `render` should have one. Whose
+// declaration counts is the whole subtlety: it is the module's, not the LINKED
+// PROGRAM's, so one module's `fn raw` does not take the builtin away from every
+// other module, `std/vyx` included.
+//
+// This program is the two meanings in one place. `lib/gen_surface.vyrn`
+// declares neither name and means the builtins. This file declares both and
+// means its own. If either engine resolves across the module boundary, the
+// generator receives a String where it wants a Code and the program does not
+// compile.
+import { surface } from "./lib/gen_surface"
+import { tagged } from surface("from-the-builtin")
+
+/// This module's own `raw` — a different arity and a different type from the
+/// builtin's, so a wrong resolution cannot type-check.
+fn raw(s: String) -> String {
+    return "raw:" + s
+}
+
+/// And its own `render`, which the builtin would never accept an Int64 for.
+fn render(n: Int64) -> String {
+    return "render:\{n}"
+}
+
+fn main() -> Int64 {
+    print(raw("mine"))
+    print(render(7))
+    print(tagged())
+    return 0
+}

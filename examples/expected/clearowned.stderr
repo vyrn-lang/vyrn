@@ -1,0 +1,1 @@
+clearowned.vyrn:6:0: `clear` forgets or overwrites elements without releasing them, and `String` owns heap — move the elements one at a time instead

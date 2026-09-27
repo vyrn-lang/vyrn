@@ -1,0 +1,42 @@
+// Automatic reclamation and ownership transfer — no `region`,
+// no GC, no manual free.
+//
+// The compiler's ownership analysis proves that a heap string bound to a `let`
+// never escapes its block (only read by `len`/`print`/`concat`, never
+// returned, aliased, or stored outward) and frees it deterministically at
+// block exit. A function that returns a freshly-allocated value *transfers
+// ownership*: the caller's receiving binding becomes the owner and is freed
+// when it falls out of scope. A value that genuinely escapes by aliasing is
+// simply left to leak — never double-freed, never dangling.
+
+fn greetingLen(a: String, b: String) -> Int64 {
+    let g = a + b // a heap temporary…
+    return g.byteLength // …freed automatically before this return
+}
+
+fn fullName(first: String, last: String) -> String {
+    let firstSpace = first + " " // inner temp — freed inside fullName
+    let whole = firstSpace + last // built by reading firstSpace
+    return whole // moved out to the caller
+}
+
+fn main() -> Int64 {
+    // ---- non-escaping temporaries: freed per iteration, memory stays flat --
+    let mut i = 0
+    let mut n = 0
+    while i < 1000000 {
+        n = greetingLen("Hello, ", "world!")
+        i = i + 1
+    }
+    print(n) // 13
+
+    // ---- ownership transfer: the caller owns (and frees) the result ---------
+    i = 0
+    while i < 1000000 {
+        let name = fullName("Ada", "Lovelace") // owned result — freed each turn
+        n = name.byteLength
+        i = i + 1
+    }
+    print(n) // 12  ("Ada Lovelace")
+    return n
+}

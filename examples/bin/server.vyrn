@@ -1,0 +1,109 @@
+/// The bin server root: RPC handler, page routers, OpenAPI document, and theme
+/// stylesheet, composed from the api directory and the two route trees.
+///
+/// It is the one module that legitimately names both sides of the wire, and the
+/// manifest key that NAMES it is what gives it its audience: no
+/// path segment could say it, and blessing the filename would be the hardcoding
+/// the `audience` key exists to avoid.
+///
+/// Two page trees, because they have two audiences. `app/routes` is universal:
+/// server-rendered here AND compiled into the browser bundle, so a soft nav
+/// paints the next page itself. `server/routes` holds the raw endpoint, which
+/// answers with `respond` and is never bundled — it is server-only, and saying so
+/// in the tree is the point.
+import { rpc } from "std/rpc"
+import { rpcHandle } from rpc("./server/api")
+import { openapi } from "std/openapi"
+import { openapiJson } from openapi("./server/api/pastes")
+import { pagesThemed } from "std/ui"
+import * as appPages from pagesThemed("./app/routes", "./theme.json")
+import * as rawPages from pagesThemed("./server/routes", "./theme.json")
+import { tw } from "std/tw"
+import * as theme from tw("./theme.json")
+import { mount, surface } from "std/http"
+import * as pastesHttp from "./server/api/pastes.http"
+
+/// A middleware may answer a request outright (`Some`) or pass it along (`None`);
+/// the chain runs in registration order in front of routing.
+type Middleware = fn(Request) -> Option<Response>
+
+/// The chain, installed at module-state init. Request logging runs for every
+/// request and never answers.
+let mut middleware: Array<Middleware> = [
+    req -> {
+        logger("http").info("\{req.method} \{req.path}")
+        return None
+    },
+]
+
+/// Run the chain: the first `Some` wins; middleware after a hit never runs.
+fn runMiddleware(req: Request) -> Option<Response> {
+    let mut hit: Option<Response> = None
+    let mut done = false
+    for m in middleware {
+        if done == false {
+            if let Some(r) = m(req) {
+                hit = Some(r)
+                done = true
+            }
+        }
+    }
+    return hit
+}
+
+fn handle(req: Request) -> Response {
+    return match runMiddleware(req) {
+        Some(r) => r,
+        None => routed(req),
+    }
+}
+
+fn routed(req: Request) -> Response {
+    // Baked constants served with their conventional content types.
+    if req.method == "GET" && req.path == "/theme.css" {
+        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "", headers: [:] }
+    }
+    if req.method == "GET" && req.path == "/openapi.json" {
+        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "", headers: [:] }
+    }
+    // Every wire surface, mounted in order, first match wins: the
+    // derived RPC surface (/_/*) that the pages call, then the public REST API
+    // written over the same three procedures, then the two page trees — the
+    // server-only one (/raw/{id}, never bundled) ahead of the universal one.
+    // `mount` traps at startup if any of them could shadow another, so "which one
+    // answers /pastes/x" is not a question anyone has to hold in their head.
+    //
+    // The page trees are groups like any other, and the reason they can be is that
+    // a page DECLINES: `routes()` enumerates one route per page, each matching its
+    // own pattern. What "always answers" is the tree's 404, and that is `route`
+    // below — the fallback, which is where a fallback belongs. The `/raw/` prefix
+    // this root used to test by hand is not a prefix at all: the tree literally
+    // contains `raw/[id].vyrn`, so its route says `/raw/{id}` itself.
+    //
+    // The last two lists are the streams and sockets. They are
+    // not routes and they do not carry `Policy`; `mount` resolves them first,
+    // because a stream's path is exact and `/pastes/{id}` is exactly the shape
+    // that would swallow one.
+    return match mount(req, [[surface("/_", rpcHandle)], pastesHttp.routes(), rawPages.routes(), appPages.routes()], pastesHttp.feeds(), pastesHttp.sockets()) {
+        Some(r) => r,
+        None => appPages.route(req),
+    }
+}
+
+fn main() -> Int64 {
+    // A read-only smoke over handle. `vyrn serve`/`vyrn dev` run main() once at
+    // startup, so it must not mutate the live store.
+    let list = handle(Request { method: "POST", path: "/_/pastes/recent", headers: [:], body: "" })
+    print("pastes/recent -> \{list.status}: \{list.body}")
+    let bad = handle(Request { method: "POST", path: "/_/pastes/create", headers: [:], body: "{\"title\":\"x\",\"body\":\"\",\"lang\":\"klingon\"}" })
+    print("pastes/create(bad) -> \{bad.status}: \{bad.body}")
+    let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
+    print("/ -> \{home.status}")
+    let miss = handle(Request { method: "GET", path: "/p/deadbeef", headers: [:], body: "" })
+    print("/p/deadbeef -> \{miss.status}")
+    let rawMiss = handle(Request { method: "GET", path: "/raw/deadbeef", headers: [:], body: "" })
+    print("/raw/deadbeef -> \{rawMiss.status}")
+    let oa = handle(Request { method: "GET", path: "/openapi.json", headers: [:], body: "" })
+    print("/openapi.json -> \{oa.status} (\{oa.body.byteLength} bytes)")
+    return 0
+}

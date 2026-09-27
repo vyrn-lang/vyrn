@@ -1,0 +1,17 @@
+<script>
+props { issueLine: String }
+
+fn issueClass(line: String) -> String {
+    if line.byteLength > 0 {
+        return "out issues has-issues"
+    }
+    return "out issues"
+}
+</script>
+
+<template>
+<p id="issueOut" :class="issueClass(issueLine)">
+    <span v-if="issueLine.byteLength > 0">{{ issueLine }}</span>
+    <span v-else class="ok">no issues</span>
+</p>
+</template>

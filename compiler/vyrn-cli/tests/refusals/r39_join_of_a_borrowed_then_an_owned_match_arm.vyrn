@@ -1,0 +1,12 @@
+fn f(o: Option<String>, k: Int64) -> String {
+    let m = match o {
+        Some(s) => s,
+        None => k.toString(),
+    }
+    return "a" + m
+}
+
+fn main() -> Int64 {
+    print(f(None, 3))
+    return 0
+}

@@ -1,0 +1,17 @@
+/// Tag-string parsing for the client, on std/strings' substring / split / trim
+/// primitives.
+
+import { split, trim } from "std/strings"
+
+/// Split `s` on the separator `sep`, each part trimmed of ASCII whitespace and
+/// empty parts dropped. `"fiction, web ,"` with sep `","` -> ["fiction", "web"].
+export fn splitTrim(s: String, sep: String) -> Array<String> {
+    let mut parts: Array<String> = []
+    for piece in split(s, sep) {
+        let t = trim(piece)
+        if t.byteLength > 0 {
+            parts.push(t)
+        }
+    }
+    return parts
+}

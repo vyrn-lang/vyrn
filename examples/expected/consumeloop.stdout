@@ -1,0 +1,9 @@
+joined: a0 a1 a2 b0 b1
+count 5
+taken: p0 p1 p2 p3
+echoed: p0 p1 p2 p3
+taken again: p0 p1 p2 p3
+t0;t1;t2;
+none 0
+short 10
+long 3

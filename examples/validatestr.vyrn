@@ -1,0 +1,33 @@
+/// Fallible construction over a STRING base — `Root?(s) -> Option<Root>`.
+///
+/// The ownership pass must read `Root?(s)` as an `Option<Root>`, not a `Root`;
+/// otherwise an `if let` over one releases the sum's tag word as a String
+/// pointer. This example runs the accepted path, the refused path, and the path
+/// where the value came from another Option, byte-identically on interp, native
+/// and wasm.
+
+type Root = String where value.byteLength > 0
+
+fn give(k: String) -> Option<String> {
+    return Some(k.copy())
+}
+
+fn main() -> Int64 {
+    if let Some(ok) = Root?("abc") {
+        print(ok)
+    }
+    // The value arrives out of another Option, which is the shape a parsed
+    // command-line option has.
+    if let Some(text) = give("xy") {
+        if let Some(ok) = Root?(text) {
+            print(ok)
+        }
+    }
+    // Refused: the empty string fails the type's own rule, and nothing traps.
+    if let Some(bad) = Root?("") {
+        print(bad)
+    } else {
+        print("refused")
+    }
+    return 0
+}

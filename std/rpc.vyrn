@@ -1,0 +1,1173 @@
+/// std/rpc -- typed RPC as a library, built on generator imports.
+/// A procedure is an exported function of a procedure module with at
+/// most one parameter and both ends serializable (the `Api` contract plus
+/// `rpcWhyNotSerializable`); anything else fails the load at the generator call.
+///
+/// - Directory forms: `rpc(dir)` mounts every module under an api
+///   directory at a path derived from the module path and the export name;
+///   `client(dir)` and `clientInProcess(dir)` emit the calling side.
+/// - Single-module forms: `rpcServer`, `rpcClient` and `rpcInProcess`.
+///
+/// Inspect a generated module with `vyrn emit-gen <file>`, the derived table
+/// with `vyrn routes <file>`.
+
+import { fromBytesOr } from "std/strings"
+import { checkContract } from "std/contract"
+import { report, reportHere, Severity } from "std/diag"
+
+// `rpc` and `client` bake a `symbolMap()` into the module they emit, so the
+// content-hash cache invalidates the map with the code it describes.
+import { Symbol, symbol, strField, symbolMapFn } from "std/symbolmap"
+import { contains, endsWith, slice, startsWith } from "std/strpred"
+
+/// What a procedure module may export. Open: procedure names are the
+/// application's vocabulary. The rule constrains only the return, and the rest
+/// (one parameter, both ends serializable) is a property of the types that the
+/// contract grammar cannot spell, so `rpcWhyNotSerializable` checks it.
+export contract Api {
+    /// A procedure: at most one serializable parameter in, a serializable value
+    /// (or nothing) out.
+    fn *(..) -> R
+}
+
+/// Uppercases the first ASCII byte: `getUser` gives `vyrnRpcDoneGetUser` and `rpcPendingGetUser`.
+fn capFirst(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in raw {
+        if i == 0 && b >= 'a' && b <= 'z' {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, s)
+}
+
+fn joinList(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// Whether `spelling` names one of the contract's exported types.
+fn isNamedType(spelling: String, iface: ModuleInterface) -> Bool {
+    for t in iface.types {
+        if t.name == spelling {
+            return true
+        }
+    }
+    return false
+}
+
+/// The serializability rule, stated once: "" when a value of `spelling` can
+/// cross the wire, else the clause saying why. `uncodable` is the reflected
+/// verdict for the end asked about (`ParamInfo.uncodable` or `FnInfo.retUncodable`).
+/// A `Unit` return (spelled "") sends nothing: the server's 204.
+///
+/// Three refusals, in order:
+/// - A `Stream`, by name: a procedure answers all at once, and a feed belongs to
+///   `sse`/`ws` in a dotted projection module.
+/// - Not codable: the compiler's own `toJson`/`fromJson` rule, carried by
+///   reflection, so a record with a `fn` field is refused here and not inside the
+///   generated module.
+/// - Not nameable: `fromJson<Type>` and `jsonSchema<Type>` are emitted as source
+///   text, so a bare `Int64` or `Array<Paste>` must be wrapped in a record.
+fn rpcWhyNotSerializable(spelling: String, uncodable: String, iface: ModuleInterface) -> String {
+    if spelling == "" {
+        return ""
+    }
+    if spelling.startsWith("Stream<") {
+        return "a procedure answers all at once, and a stream is still producing — publish a feed with `sse` or `ws` from a dotted projection module beside the procedures"
+    }
+    if uncodable != "" {
+        return "`\{uncodable}` cannot cross a JSON wire"
+    }
+    if isNamedType(spelling, iface) == false {
+        return "it must be a type the contract exports by name — wrap it in a record, which is what keeps the wire an object and the payload versionable"
+    }
+    return ""
+}
+
+/// The first objection to `iface` as a procedure module, or "": the `Api`
+/// contract, then serializability. A `gen fn`, because `contractOf` has no
+/// runtime lowering. Exported for `std/http`'s REST projection, which publishes
+/// the same procedures under the same rule.
+export gen fn validateContract(iface: ModuleInterface) -> String {
+    for iss in checkContract(iface, contractOf(Api)) {
+        return reportHere(Error, iss.message)
+    }
+    for f in iface.functions {
+        if f.params.length > 1 {
+            return reportHere(
+                Error,
+                "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a procedure takes at most one; gather them into one exported record type",
+            )
+        }
+        if f.params.length == 1 {
+            let why = rpcWhyNotSerializable(f.params[0].spelling, f.params[0].uncodable, iface)
+            if why != "" {
+                return reportHere(
+                    Error,
+                    "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which cannot cross the wire: \{why}",
+                )
+            }
+        }
+        let whyRet = rpcWhyNotSerializable(f.ret, f.retUncodable, iface)
+        if whyRet != "" {
+            return reportHere(
+                Error,
+                "procedure `\{f.name}` returns `\{f.ret}`, which cannot cross the wire: \{whyRet}",
+            )
+        }
+    }
+    return ""
+}
+
+/// The server's imports: the procedures from the contract, and each closure type
+/// from the module that declares it, so the type keeps one identity; a
+/// re-emitted copy would collide in the flat namespace.
+fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) -> String {
+    // The contract first: its procedures always live there.
+    let mut specs: Array<String> = [contract.copy()]
+    for t in iface.types {
+        if rpcListContains(specs, t.module) == false {
+            specs.push(t.module.copy())
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        if spec == contract {
+            for f in iface.functions {
+                if procAlias {
+                    names.push(f.name + " as " + f.name + "__real")
+                } else {
+                    names.push(f.name.copy())
+                }
+            }
+        }
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name.copy())
+            }
+        }
+        if names.length > 0 {
+            out = out + "import { " + joinList(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+fn rpcListContains(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+/// The reply surface every client flavor exports: `RpcIssue`,
+/// `RpcReply<T>`, and `rpcIssuesFrom`, which maps client-side `fromJson` issues
+/// to the shape a server 422 yields. The wire client and the in-process mirror
+/// emit it identically, so their stubs are interchangeable.
+///
+/// The 422 arm is `Rejected`, not `Invalid`: variant constructors
+/// share one global table, and the prelude `Validation` owns `Invalid`.
+fn rpcReplyTypes() -> String {
+    let mut out = "export type RpcIssue = { key: String, path: String, message: String }\n"
+    out = out + "export type RpcReply<T> =\n"
+    out = out + "    | Done(T)\n"
+    out = out + "    | Rejected(Array<RpcIssue>)\n"
+    out = out + "    | Failed(String)\n"
+    out = out + "/// Map validation `Issue`s (a client-side `fromJson` prevalidation) into the\n"
+    out = out + "/// same `RpcIssue` shape a server 422 yields, so both rejection sides render one shape.\n"
+    out = out + "export fn rpcIssuesFrom(from: Array<Issue>) -> Array<RpcIssue> {\n"
+    out = out + "    let mut out: Array<RpcIssue> = []\n"
+    out = out + "    for i in from {\n"
+    out = out + "        out.push(RpcIssue { key: i.key.copy(), path: i.path.copy(), message: i.message.copy() })\n"
+    out = out + "    }\n"
+    out = out + "    return out\n}\n"
+    return out
+}
+
+/// One procedure's handler: decode, call, encode. A decode failure is a 422 with
+/// the issues; a `Unit` return is a 204.
+fn serverHandlerFn(f: FnInfo) -> String {
+    let cap = capFirst(f.name)
+    let handler = "rpcHandle" + cap
+    let retUnit = f.ret == ""
+    let mut out = "fn " + handler + "(body: String) -> Response {\n"
+    if f.params.length == 1 {
+        let reqType = f.params[0].spelling
+        out = out + "    return match fromJson<" + reqType + ">(body) {\n"
+        if retUnit {
+            let runName = "rpcRun" + cap
+            out = out + "        Valid(input) => " + runName + "(input),\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\", headers: [:] },\n"
+            out = out + "    }\n}\n"
+            out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
+            out = out + "    " + f.name + "(input)\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] }\n}\n"
+        } else {
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)), vary: \"\", headers: [:] },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\", headers: [:] },\n"
+            out = out + "    }\n}\n"
+        }
+    } else {
+        if retUnit {
+            out = out + "    " + f.name + "()\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] }\n}\n"
+        } else {
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()), vary: \"\", headers: [:] }\n}\n"
+        }
+    }
+    return out
+}
+
+/// The `GET /rpc/$schema` registry: every procedure with its request and response
+/// JSON Schema, or `null` when the end is not a named type.
+fn serverSchemaFn(iface: ModuleInterface) -> String {
+    // Built once per process: every piece is constant, and the caller serves it
+    // per HTTP request.
+    let mut out = "let mut rpcSchemaCache: String = \"\"\n"
+    out = out + "fn rpcSchema() -> String {\n"
+    out = out + "    if rpcSchemaCache.byteLength > 0 {\n"
+    out = out + "        return rpcSchemaCache.copy()\n"
+    out = out + "    }\n"
+    out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
+    let mut i = 0
+    for f in iface.functions {
+        let lead = if i > 0 { "," } else { "" }
+        out = out + "    acc = acc + \"" + lead + "{\\\"name\\\":\\\"" + f.name + "\\\",\\\"request\\\":\"\n"
+        if f.params.length == 1 && isNamedType(f.params[0].spelling, iface) {
+            out = out + "    acc = acc + jsonSchema<" + f.params[0].spelling + ">()\n"
+        } else {
+            out = out + "    acc = acc + \"null\"\n"
+        }
+        out = out + "    acc = acc + \",\\\"response\\\":\"\n"
+        if isNamedType(f.ret, iface) {
+            out = out + "    acc = acc + jsonSchema<" + f.ret + ">()\n"
+        } else {
+            out = out + "    acc = acc + \"null\"\n"
+        }
+        out = out + "    acc = acc + \"}\"\n"
+        i = i + 1
+    }
+    out = out + "    acc = acc + \"]}\"\n"
+    out = out + "    rpcSchemaCache = acc\n"
+    out = out + "    return rpcSchemaCache.copy()\n}\n"
+    return out
+}
+
+/// The exported router: 405 on the wrong method, 404 on an unknown procedure
+/// under `/rpc/`, and `None` for any other path.
+fn serverRouterFn(iface: ModuleInterface) -> String {
+    let mut out = "export fn rpcHandle(req: Request) -> Option<Response> {\n"
+    out = out + "    if req.path == \"/rpc/$schema\" {\n"
+    out = out + "        if req.method == \"GET\" {\n"
+    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema(), vary: \"\", headers: [:] })\n"
+    out = out + "        }\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\", headers: [:] })\n"
+    out = out + "    }\n"
+    for f in iface.functions {
+        let cap = capFirst(f.name)
+        out = out + "    if req.path == \"/rpc/" + f.name + "\" {\n"
+        out = out + "        if req.method != \"POST\" {\n"
+        out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\", headers: [:] })\n"
+        out = out + "        }\n"
+        out = out + "        return Some(rpcHandle" + cap + "(req.body))\n"
+        out = out + "    }\n"
+    }
+    out = out + "    if req.path.startsWith(\"/rpc/\") {\n"
+    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\", vary: \"\", headers: [:] })\n"
+    out = out + "    }\n"
+    out = out + "    return None\n}\n"
+    return out
+}
+
+/// Emits a module that imports the contract's procedures and exposes
+/// `rpcHandle(req: Request) -> Option<Response>`.
+export gen fn rpcServer(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/rpc `rpcServer` — do not edit.\n"
+    out = out + "import { startsWith } from \"std/strpred\"\n"
+    out = out + typeImportBlock(iface, contract, false)
+    out = out + "type RpcIssues = { issues: Array<Issue> }\n"
+    for f in iface.functions {
+        out = out + serverHandlerFn(f)
+    }
+    out = out + serverSchemaFn(iface)
+    out = out + serverRouterFn(iface)
+    return out
+}
+
+/// Unifies a reply: 200 decodes into `Done` (an undecodable body is
+/// `Failed`); 204 on a `Unit` procedure is `Done(true)`; 422 is `Rejected` with
+/// the server's issues; anything else is `Failed` (status 0 = unreachable).
+fn clientUnifyFn(f: FnInfo) -> String {
+    let cap = capFirst(f.name)
+    let unify = "rpcUnify" + cap
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if retUnit {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<Bool> {\n"
+        out = out + "    if status == 200 { return Done(true) }\n"
+        out = out + "    if status == 204 { return Done(true) }\n"
+    } else {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<" + f.ret + "> {\n"
+        out = out + "    if status == 200 {\n"
+        out = out + "        return match fromJson<" + f.ret + ">(body) {\n"
+        out = out + "            Valid(v) => Done(v),\n"
+        out = out + "            Invalid(iss) => Failed(\"procedure `" + f.name + "` returned a malformed reply\"),\n"
+        out = out + "        }\n"
+        out = out + "    }\n"
+    }
+    out = out + "    if status == 422 {\n"
+    out = out + "        return match fromJson<RpcIssues>(body) {\n"
+    out = out + "            Valid(bag) => Rejected(consume bag.issues),\n"
+    out = out + "            Invalid(iss) => Failed(\"procedure `" + f.name + "` sent an unparseable 422 body\"),\n"
+    out = out + "        }\n"
+    out = out + "    }\n"
+    out = out + "    if status == 0 {\n"
+    out = out + "        return Failed(\"procedure `" + f.name + "` is unreachable\")\n"
+    out = out + "    }\n"
+    out = out + "    return Failed(\"procedure `" + f.name + "` failed with status \" + status.toString())\n}\n"
+    return out
+}
+
+/// A procedure's callback type; a `Unit` return is `RpcReply<Bool>`.
+fn cbType(f: FnInfo) -> String {
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
+    return "fn(RpcReply<" + ret + ">)"
+}
+
+/// One procedure's client: a pending-callback map keyed by
+/// call id, the stub `(req, cb)` that calls the shared transport, a deliver helper,
+/// and the `export extern fn` completion the host calls.
+fn clientProcFns(f: FnInfo) -> String {
+    let cap = capFirst(f.name)
+    let cb = cbType(f)
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
+    let mut out = clientUnifyFn(f)
+    out = out + "let mut rpcPending" + cap + ": Map<String, " + cb + "> = [:]\n"
+    if f.params.length == 1 {
+        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + f.name + "\", toJson(req))\n"
+    } else {
+        out = out + "export fn " + f.name + "(cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + f.name + "\", \"\")\n"
+    }
+    out = out + "    rpcPending" + cap + "[id.toString()] = cb.copy()\n}\n"
+    // Drops the pending callback, then calls it: a fetched callback must be bound
+    // to a parameter before it is called.
+    out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: RpcReply<" + ret + ">) {\n"
+    out = out + "    rpcPending" + cap + ".remove(key)\n"
+    out = out + "    cb(res)\n}\n"
+    // A reply with no pending callback is ignored.
+    out = out + "export extern fn vyrnRpcDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
+    out = out + "    let key = id.toString()\n"
+    out = out + "    match rpcPending" + cap + "[key] {\n"
+    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb, rpcUnify" + cap + "(status, body)),\n"
+    out = out + "        None => rpcIgnoreReply(),\n"
+    out = out + "    }\n}\n"
+    return out
+}
+
+/// Emits the client: the contract's type declarations, one stub per procedure
+/// over one `vyrnRpcCall` extern, and one completion per procedure. The caller
+/// passes the callback inline: `createPaste(req, |res| match res { .. })`.
+export gen fn rpcClient(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/rpc `rpcClient` — do not edit.\n"
+    for t in iface.types {
+        out = out + t.source + "\n"
+    }
+    out = out + rpcReplyTypes()
+    out = out + "type RpcIssues = { issues: Array<RpcIssue> }\n"
+    out = out + "extern fn vyrnRpcCall(name: String, body: String) -> Int64\n"
+    out = out + "fn rpcIgnoreReply() {\n}\n"
+    for f in iface.functions {
+        out = out + clientProcFns(f)
+    }
+    return out
+}
+
+/// One in-process stub under the procedure's own name, calling the real
+/// procedure through its `__real` import alias and `cb` synchronously. Only
+/// `Done` is produced: `Rejected` and `Failed` come from decoding an untrusted
+/// payload, which in-process never does.
+fn inProcStub(f: FnInfo) -> String {
+    let cb = cbType(f)
+    let real = f.name + "__real"
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if f.params.length == 1 {
+        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
+        if retUnit {
+            out = out + "    " + real + "(req)\n"
+            out = out + "    cb(Done(true))\n}\n"
+        } else {
+            out = out + "    cb(Done(" + real + "(req)))\n}\n"
+        }
+    } else {
+        out = out + "export fn " + f.name + "(cb: " + cb + ") {\n"
+        if retUnit {
+            out = out + "    " + real + "()\n"
+            out = out + "    cb(Done(true))\n}\n"
+        } else {
+            out = out + "    cb(Done(" + real + "()))\n}\n"
+        }
+    }
+    return out
+}
+
+/// Emits the deterministic test and SSR flavor: a stub per procedure under the
+/// same name the wire client exposes, running the real procedure synchronously.
+export gen fn rpcInProcess(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/rpc `rpcInProcess` — do not edit.\n"
+    out = out + typeImportBlock(iface, contract, true)
+    // Shared with the wire client, so the stubs stay interchangeable.
+    out = out + rpcReplyTypes()
+    for f in iface.functions {
+        out = out + inProcStub(f)
+    }
+    return out
+}
+
+// Directory forms. Every module under an api directory is a
+// procedure module, and a procedure's wire path derives from the module path and
+// the export name. `client(dir)` reads interfaces and never imports an api
+// module, so no procedure body reaches a client bundle.
+import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
+import { parseJson } from "std/jsonread"
+import { replace, split } from "std/strings"
+
+/// One procedure module: the path a generator reflects
+/// (`./server/api/orders/refund`) and the api-relative `{module}` (`orders/refund`).
+type RpcModule = { modPath: String, rel: String }
+
+/// The path rule for one api directory. The pins are parallel arrays, which keep
+/// declaration order for `vyrn routes`.
+type RpcConfig = { prefix: String, path: String, pinKeys: Array<String>, pinPaths: Array<String> }
+
+type RpcRoute = { path: String, key: String, pinned: Bool }
+
+fn rpcStem(name: String) -> String {
+    let b = bytes(name)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < b.length - 5 {
+        out.push(b[i])
+        i = i + 1
+    }
+    return fromBytesOr(out, name)
+}
+
+/// Every procedure module under `dir`, with the api-relative prefix so far.
+/// `module.vyrn` is the directory's own slot, and a dotted stem such as
+/// `pastes.http.vyrn` is a protocol projection over its neighbours;
+/// neither is mounted.
+gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
+    // `listDirKinds` marks a subdirectory with a trailing `/`.
+    let entries = match listDirKinds(dir) {
+        Ok(ns) => ns,
+        Err(err) => [],
+    }
+    let mut out: Array<RpcModule> = []
+    for name in entries {
+        if name.endsWith("/") {
+            let bare = slice(name, 0, name.byteLength - 1) ?? panic("rpcScan: the cut is at the listing's own ASCII `/`")
+            let deeper = if prefix == "" { bare.copy() } else { prefix + "/" + bare }
+            for m in rpcScan(dir + "/" + bare, deeper) {
+                out.push(m)
+            }
+        } else if name.endsWith(".vyrn") {
+            let st = rpcStem(name)
+            if st != "module" && st.contains(".") == false {
+                let rel = if prefix == "" { st.copy() } else { prefix + "/" + st }
+                out.push(RpcModule { modPath: dir + "/" + st, rel: rel })
+            }
+        }
+    }
+    return out
+}
+
+fn rpcStrOf(j: Json) -> String {
+    return match j {
+        JStr(s) => s.copy(),
+        JNull => "",
+        JBool(b) => "",
+        JNum(n) => "",
+        JArr(xs) => "",
+        JObj(o) => "",
+    }
+}
+
+fn rpcFieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => copyJsonFields(fs),
+        JNull => [],
+        JBool(b) => [],
+        JNum(n) => [],
+        JStr(s) => [],
+        JArr(xs) => [],
+    }
+}
+
+fn rpcMember(j: Json, key: String) -> Json {
+    for f in rpcFieldsOf(j) {
+        if f.key == key {
+            return copyJson(f.value)
+        }
+    }
+    return JNull
+}
+
+/// `path` parsed as JSON, or `JNull` when it is absent or malformed; a missing config is normal.
+gen fn rpcReadJson(path: String) -> Json {
+    let text = match readFile(path) {
+        Ok(t) => t,
+        Err(e) => "",
+    }
+    if text == "" {
+        return JNull
+    }
+    return match parseJson(text) {
+        Ok(j) => j,
+        Err(e) => JNull,
+    }
+}
+
+fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
+    let p = rpcStrOf(rpcMember(doc, "prefix"))
+    let t = rpcStrOf(rpcMember(doc, "path"))
+    let mut keys = cfg.pinKeys.copy()
+    let mut paths = cfg.pinPaths.copy()
+    for f in rpcFieldsOf(rpcMember(doc, "pin")) {
+        let v = rpcStrOf(f.value)
+        if v != "" {
+            keys.push(consume f.key)
+            paths.push(v)
+        }
+    }
+    return RpcConfig {
+        prefix: if p == "" { cfg.prefix.copy() } else { p },
+        path: if t == "" { cfg.path.copy() } else { t },
+        pinKeys: keys.copy(),
+        pinPaths: paths.copy(),
+    }
+}
+
+/// The path rule for `dir`: `/_` and `{module}/{name}`, overridden by an
+/// `rpc.json` in `dir`, which may also pin procedures by `{module}/{name}`. Both
+/// the flat form and a `{"rpc": {...}}` wrapper are read. It is not `vyrn.json`:
+/// a generator may read only the paths it was given.
+gen fn rpcConfig(dir: String) -> RpcConfig {
+    let cfg = RpcConfig { prefix: "/_", path: "{module}/{name}", pinKeys: [], pinPaths: [] }
+    let doc = rpcReadJson(dir + "/rpc.json")
+    let nested = rpcMember(doc, "rpc")
+    let applied = rpcApplyConfig(cfg, doc)
+    return rpcApplyConfig(applied, nested)
+}
+
+fn rpcTemplatePath(cfg: RpcConfig, rel: String, name: String) -> String {
+    return cfg.prefix + "/" + replace(replace(cfg.path, "{module}", rel), "{name}", name)
+}
+
+/// The wire path of one procedure: its last matching pin, else the template.
+fn rpcPathFor(cfg: RpcConfig, rel: String, name: String) -> String {
+    let key = rel + "/" + name
+    let mut pinned = ""
+    let mut i = 0
+    while i < cfg.pinKeys.length {
+        if cfg.pinKeys[i] == key {
+            pinned = cfg.pinPaths[i].copy()
+        }
+        i = i + 1
+    }
+    if pinned != "" {
+        return pinned
+    }
+    return rpcTemplatePath(cfg, rel, name)
+}
+
+gen fn rpcRoutesOf(mods: Array<RpcModule>, cfg: RpcConfig) -> Array<RpcRoute> {
+    let mut out: Array<RpcRoute> = []
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let path = rpcPathFor(cfg, m.rel, f.name)
+            // Compared before the record takes `path`.
+            let pinned = path != rpcTemplatePath(cfg, m.rel, f.name)
+            out.push(RpcRoute {
+                path: path,
+                key: m.rel + "/" + f.name,
+                pinned: pinned,
+            })
+        }
+    }
+    return out
+}
+
+/// The first two routes deriving one path, reported naming both, or "". Pins and
+/// a `{name}`-only template can collide, and only the author can settle it.
+fn rpcCollision(routes: Array<RpcRoute>) -> String {
+    let mut i = 0
+    while i < routes.length {
+        let mut j = i + 1
+        while j < routes.length {
+            if routes[i].path == routes[j].path {
+                return reportHere(
+                    Error,
+                    "procedures `\{routes[i].key}` and `\{routes[j].key}` both answer `\{routes[i].path}` — two procedures may not derive one path, so repin one of them",
+                )
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// The first objection in the directory: each module against `Api` and
+/// serializability, then type and flat-name collisions; "" when clean.
+gen fn rpcValidateAll(mods: Array<RpcModule>) -> String {
+    for m in mods {
+        let err = validateContract(moduleInterface(m.modPath))
+        if err != "" {
+            return err
+        }
+    }
+    let typeClash = rpcTypeCollision(mods)
+    if typeClash != "" {
+        return typeClash
+    }
+    return rpcQualifiedCollision(mods)
+}
+
+/// One type name the directory defines, its canonical declaration, and the declaring file.
+type RpcDef = { name: String, source: String, from: String }
+
+/// The declaration registered under `name`, or one with an empty `name`.
+gen fn rpcDefinedAs(defs: Array<RpcDef>, name: String) -> RpcDef {
+    for d in defs {
+        if d.name == name {
+            return RpcDef { name: d.name.copy(), source: d.source.copy(), from: d.from.copy() }
+        }
+    }
+    return RpcDef { name: "", source: "", from: "" }
+}
+
+/// Refuses two different declarations of one type name across the directory.
+/// Every flavor builds one flat module, so `client` would silently keep the first
+/// and `rpc` would emit two imports of one name. `TypeInfo.source` is the
+/// canonical rendering, so identical declarations (a shared module's type seen
+/// from two api modules) are not a collision.
+gen fn rpcTypeCollision(mods: Array<RpcModule>) -> String {
+    let mut defs: Array<RpcDef> = []
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for t in iface.types {
+            let prior = rpcDefinedAs(defs, t.name)
+            if prior.name == "" {
+                defs.push(RpcDef { name: t.name.copy(), source: t.source.copy(), from: t.origin.file.copy() })
+            } else if prior.source != t.source {
+                return report(
+                    Error,
+                    t.origin.file,
+                    t.origin.line,
+                    t.origin.col,
+                    "`\{t.name}` is declared here as `\{t.source}`, and in `\{prior.from}` as `\{prior.source}` — one api directory derives one module, so one name may carry only one shape; rename one of them, or declare it once in a module both import",
+                )
+            }
+        }
+    }
+    return ""
+}
+
+/// The flat name of a directory-derived procedure: module path and export name,
+/// camel-joined (`orders/refund` + `run` -> `ordersRefundRun`). `import * as`
+/// binds one level only, so `api.orders.refund.run` is not available.
+fn rpcQualified(rel: String, name: String) -> String {
+    let mut out = ""
+    for seg in split(rel, "/") {
+        if out == "" {
+            out = seg
+        } else {
+            out = out + capFirst(seg)
+        }
+    }
+    return out + capFirst(name)
+}
+
+/// The first two procedures whose flat names collide, reported naming both, or "".
+/// Camel joining is not injective (`a/b` + `c` and `a` + `bC` both give `aBC`),
+/// and a duplicate would break the generated module far from either cause.
+gen fn rpcQualifiedCollision(mods: Array<RpcModule>) -> String {
+    let mut quals: Array<String> = []
+    let mut keys: Array<String> = []
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            quals.push(rpcQualified(m.rel, f.name))
+            keys.push(m.rel + "/" + f.name)
+        }
+    }
+    return rpcQualClash(quals, keys)
+}
+
+/// The pairwise scan, apart so the wording is testable without an interface.
+fn rpcQualClash(quals: Array<String>, keys: Array<String>) -> String {
+    let mut i = 0
+    while i < quals.length {
+        let mut j = i + 1
+        while j < quals.length {
+            if quals[i] == quals[j] {
+                return reportHere(
+                    Error,
+                    "procedures `\{keys[i]}` and `\{keys[j]}` both derive the flat name `\{quals[i]}` — camel-joining a module path and an export name is not unique, so rename one of them",
+                )
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// A procedure's derived wire facts for its symbol map entry, as `//@route` carries them.
+fn rpcDerived(path: String, pinned: Bool) -> Array<JsonField> {
+    return [
+        strField("kind", "rpc"),
+        strField("method", "POST"),
+        strField("path", path),
+        strField("source", if pinned { "override" } else { "convention" }),
+    ]
+}
+
+/// A procedure's symbol map entry under the generator's name for it (`client`
+/// exports `pastesList`, `rpc` dispatches to `rpcHandlePastesList`).
+fn rpcProcSymbol(name: String, f: FnInfo, cfg: RpcConfig, rel: String) -> Symbol {
+    let path = rpcPathFor(cfg, rel, f.name)
+    let pinned = path != rpcTemplatePath(cfg, rel, f.name)
+    return symbol(name, f.origin, rpcDerived(path, pinned))
+}
+
+/// One `//@route` line per route. The loader ignores it and `vyrn routes` reads
+/// it, so the generator that mounts the table is its only producer.
+fn rpcRouteDirectives(routes: Array<RpcRoute>) -> String {
+    let mut out = ""
+    for r in routes {
+        let src = if r.pinned { "override" } else { "convention" }
+        out = out + "//@route POST " + r.path + " " + r.key + " " + src + "\n"
+    }
+    return out
+}
+
+/// The namespace a procedure module is reached through: `rpcM0`, `rpcM1`. Only
+/// `import * as` keeps exports out of the flat namespace, and two api modules
+/// both exporting `get` is the normal shape.
+fn rpcNs(i: Int64) -> String {
+    return "rpcM" + i.toString()
+}
+
+/// The server's imports: one namespace per procedure module, and each reachable
+/// type once, from the module that declares it.
+gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
+    let mut out = ""
+    let mut typeMods: Array<String> = []
+    let mut typeNames: Array<String> = []
+    let mut mi = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        if iface.functions.length > 0 {
+            out = out + "import * as " + rpcNs(mi) + " from \"" + m.modPath + "\"\n"
+        }
+        mi = mi + 1
+        for t in iface.types {
+            if rpcHasPair(typeMods, typeNames, t.module, t.name) == false {
+                typeMods.push(t.module.copy())
+                typeNames.push(t.name.copy())
+            }
+        }
+    }
+    let mut specs: Array<String> = []
+    for s in typeMods {
+        if rpcListContains(specs, s) == false {
+            specs.push(s.copy())
+        }
+    }
+    for spec in specs {
+        let mut names: Array<String> = []
+        let mut i = 0
+        while i < typeMods.length {
+            if typeMods[i] == spec {
+                names.push(typeNames[i].copy())
+            }
+            i = i + 1
+        }
+        if names.length > 0 {
+            out = out + "import { " + joinList(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+fn rpcHasPair(mods: Array<String>, names: Array<String>, spec: String, name: String) -> Bool {
+    let mut i = 0
+    while i < mods.length {
+        if mods[i] == spec && names[i] == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// One handler, as `serverHandlerFn`, over a qualified name.
+fn rpcDirHandler(f: FnInfo, qual: String, ns: String) -> String {
+    let handler = "rpcHandle" + capFirst(qual)
+    let real = ns + "." + f.name
+    let retUnit = f.ret == ""
+    let mut out = "fn " + handler + "(body: String) -> Response {\n"
+    if f.params.length == 1 {
+        let reqType = f.params[0].spelling
+        out = out + "    return match fromJson<" + reqType + ">(body) {\n"
+        if retUnit {
+            let runName = "rpcRun" + capFirst(qual)
+            out = out + "        Valid(input) => " + runName + "(input),\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\", headers: [:] },\n"
+            out = out + "    }\n}\n"
+            out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
+            out = out + "    " + real + "(input)\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] }\n}\n"
+        } else {
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "(input)), vary: \"\", headers: [:] },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\", headers: [:] },\n"
+            out = out + "    }\n}\n"
+        }
+    } else {
+        if retUnit {
+            out = out + "    " + real + "()\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] }\n}\n"
+        } else {
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "()), vary: \"\", headers: [:] }\n}\n"
+        }
+    }
+    return out
+}
+
+/// The directory-wide `$schema` registry, keyed by wire path as well as name,
+/// since the path is what a caller has.
+gen fn rpcDirSchema(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
+    // Once per process, as `serverSchemaFn`; only one of the two reaches a
+    // generated module, so the name is shared.
+    let mut out = "let mut rpcSchemaCache: String = \"\"\n"
+    out = out + "fn rpcSchema() -> String {\n"
+    out = out + "    if rpcSchemaCache.byteLength > 0 {\n"
+    out = out + "        return rpcSchemaCache.copy()\n"
+    out = out + "    }\n"
+    out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
+    let mut i = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let lead = if i > 0 { "," } else { "" }
+            let path = rpcPathFor(cfg, m.rel, f.name)
+            out = out + "    acc = acc + \"" + lead + "{\\\"path\\\":\\\"" + path + "\\\",\\\"name\\\":\\\"" + m.rel + "/" + f.name + "\\\",\\\"request\\\":\"\n"
+            if f.params.length == 1 && isNamedType(f.params[0].spelling, iface) {
+                out = out + "    acc = acc + jsonSchema<" + f.params[0].spelling + ">()\n"
+            } else {
+                out = out + "    acc = acc + \"null\"\n"
+            }
+            out = out + "    acc = acc + \",\\\"response\\\":\"\n"
+            if isNamedType(f.ret, iface) {
+                out = out + "    acc = acc + jsonSchema<" + f.ret + ">()\n"
+            } else {
+                out = out + "    acc = acc + \"null\"\n"
+            }
+            out = out + "    acc = acc + \"}\"\n"
+            i = i + 1
+        }
+    }
+    out = out + "    acc = acc + \"]}\"\n"
+    out = out + "    rpcSchemaCache = acc\n"
+    out = out + "    return rpcSchemaCache.copy()\n}\n"
+    return out
+}
+
+/// The exported router. Paths are distinct (a collision is a build error), so a flat chain of tests suffices.
+gen fn rpcDirRouter(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
+    let mut out = "export fn rpcHandle(req: Request) -> Option<Response> {\n"
+    out = out + "    if req.path == \"" + cfg.prefix + "/$schema\" {\n"
+    out = out + "        if req.method == \"GET\" {\n"
+    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema(), vary: \"\", headers: [:] })\n"
+    out = out + "        }\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\", headers: [:] })\n"
+    out = out + "    }\n"
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let qual = rpcQualified(m.rel, f.name)
+            out = out + "    if req.path == \"" + rpcPathFor(cfg, m.rel, f.name) + "\" {\n"
+            out = out + "        if req.method != \"POST\" {\n"
+            out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\", headers: [:] })\n"
+            out = out + "        }\n"
+            out = out + "        return Some(rpcHandle" + capFirst(qual) + "(req.body))\n"
+            out = out + "    }\n"
+        }
+    }
+    out = out + "    if req.path.startsWith(\"" + cfg.prefix + "/\") {\n"
+    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\", vary: \"\", headers: [:] })\n"
+    out = out + "    }\n"
+    out = out + "    return None\n}\n"
+    return out
+}
+
+/// Mounts every procedure module under `dir` at its derived path. Two procedures
+/// deriving one path fail the build naming both.
+export gen fn rpc(dir: String) -> String {
+    let mods = rpcScan(dir, "")
+    let bad = rpcValidateAll(mods)
+    if bad != "" {
+        return bad
+    }
+    let cfg = rpcConfig(dir)
+    let routes = rpcRoutesOf(mods, cfg)
+    let clash = rpcCollision(routes)
+    if clash != "" {
+        return clash
+    }
+    let mut out = "/// Generated by std/rpc `rpc` — do not edit.\n"
+    out = out + "import { startsWith } from \"std/strpred\"\n"
+    out = out + rpcRouteDirectives(routes)
+    out = out + rpcDirImports(mods)
+    out = out + "type RpcIssues = { issues: Array<Issue> }\n"
+    let mut syms: Array<Symbol> = []
+    let mut mi = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let qual = rpcQualified(m.rel, f.name)
+            out = out + rpcDirHandler(f, qual, rpcNs(mi))
+            syms.push(rpcProcSymbol("rpcHandle" + capFirst(qual), f, cfg, m.rel))
+        }
+        mi = mi + 1
+    }
+    out = out + rpcDirSchema(mods, cfg)
+    out = out + rpcDirRouter(mods, cfg)
+    out = out + symbolMapFn("rpc(" + dir + ")", syms)
+    return out
+}
+
+/// `clientUnifyFn` over a qualified name.
+fn rpcDirUnifyFn(f: FnInfo, qual: String) -> String {
+    let cap = capFirst(qual)
+    let unify = "rpcUnify" + cap
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if retUnit {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<Bool> {\n"
+        out = out + "    if status == 200 { return Done(true) }\n"
+        out = out + "    if status == 204 { return Done(true) }\n"
+    } else {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<" + f.ret + "> {\n"
+        out = out + "    if status == 200 {\n"
+        out = out + "        return match fromJson<" + f.ret + ">(body) {\n"
+        out = out + "            Valid(v) => Done(v),\n"
+        out = out + "            Invalid(iss) => Failed(\"procedure `" + qual + "` returned a malformed reply\"),\n"
+        out = out + "        }\n"
+        out = out + "    }\n"
+    }
+    out = out + "    if status == 422 {\n"
+    out = out + "        return match fromJson<RpcIssues>(body) {\n"
+    out = out + "            Valid(bag) => Rejected(consume bag.issues),\n"
+    out = out + "            Invalid(iss) => Failed(\"procedure `" + qual + "` sent an unparseable 422 body\"),\n"
+    out = out + "        }\n"
+    out = out + "    }\n"
+    out = out + "    if status == 0 {\n"
+    out = out + "        return Failed(\"procedure `" + qual + "` is unreachable\")\n"
+    out = out + "    }\n"
+    out = out + "    return Failed(\"procedure `" + qual + "` failed with status \" + status.toString())\n}\n"
+    return out
+}
+
+/// One wire stub. The transport gets the qualified name and the path: a pin can
+/// make the path anything, so the host could not derive the dispatcher from it.
+fn rpcDirClientFns(f: FnInfo, qual: String, path: String) -> String {
+    let cap = capFirst(qual)
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
+    let cb = "fn(RpcReply<" + ret + ">)"
+    let mut out = rpcDirUnifyFn(f, qual)
+    out = out + "let mut rpcPending" + cap + ": Map<String, " + cb + "> = [:]\n"
+    if f.params.length == 1 {
+        out = out + "export fn " + qual + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + qual + "\", \"" + path + "\", toJson(req))\n"
+    } else {
+        out = out + "export fn " + qual + "(cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + qual + "\", \"" + path + "\", \"\")\n"
+    }
+    out = out + "    rpcPending" + cap + "[id.toString()] = cb.copy()\n}\n"
+    out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: RpcReply<" + ret + ">) {\n"
+    out = out + "    rpcPending" + cap + ".remove(key)\n"
+    out = out + "    cb(res)\n}\n"
+    out = out + "export extern fn vyrnRpcDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
+    out = out + "    let key = id.toString()\n"
+    out = out + "    match rpcPending" + cap + "[key] {\n"
+    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb, rpcUnify" + cap + "(status, body)),\n"
+    out = out + "        None => rpcIgnoreReply(),\n"
+    out = out + "    }\n}\n"
+    return out
+}
+
+type RpcClientTypes = { source: String, symbols: Array<Symbol> }
+
+/// Every distinct type declaration in the directory, re-emitted once, with its
+/// symbol. Re-emitted, not imported, so no api module enters the client build;
+/// the symbol map keeps where each came from. The dedupe is by name, which is
+/// safe only because `rpcValidateAll` has refused two shapes under one name.
+gen fn rpcClientTypes(mods: Array<RpcModule>) -> RpcClientTypes {
+    let mut seen: Array<String> = []
+    let mut out = ""
+    let mut syms: Array<Symbol> = []
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for t in iface.types {
+            if rpcListContains(seen, t.name) == false {
+                seen.push(t.name.copy())
+                out = out + t.source + "\n"
+                syms.push(symbol(t.name, t.origin, []))
+            }
+        }
+    }
+    return RpcClientTypes { source: out, symbols: syms }
+}
+
+/// The calling side of an api directory. It reads interfaces, re-emits types and
+/// never imports an api module, so no procedure body reaches a client bundle.
+export gen fn client(dir: String) -> String {
+    let mods = rpcScan(dir, "")
+    let bad = rpcValidateAll(mods)
+    if bad != "" {
+        return bad
+    }
+    let cfg = rpcConfig(dir)
+    let routes = rpcRoutesOf(mods, cfg)
+    let clash = rpcCollision(routes)
+    if clash != "" {
+        return clash
+    }
+    let types = rpcClientTypes(mods)
+    let mut out = "/// Generated by std/rpc `client` — do not edit.\n"
+    out = out + rpcRouteDirectives(routes)
+    out = out + types.source
+    out = out + rpcReplyTypes()
+    out = out + "type RpcIssues = { issues: Array<RpcIssue> }\n"
+    out = out + "extern fn vyrnRpcCall(proc: String, path: String, body: String) -> Int64\n"
+    out = out + "fn rpcIgnoreReply() {\n}\n"
+    // `consume`: `RpcClientTypes` has a drop rule, so copying the
+    // field out and passing `syms` on would free the buffer twice.
+    let mut syms: Array<Symbol> = consume types.symbols
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let qual = rpcQualified(m.rel, f.name)
+            out = out + rpcDirClientFns(f, qual, rpcPathFor(cfg, m.rel, f.name))
+            syms.push(rpcProcSymbol(qual, f, cfg, m.rel))
+        }
+    }
+    out = out + symbolMapFn("client(" + dir + ")", syms)
+    return out
+}
+
+/// One in-process stub over a qualified name.
+fn rpcDirInProcStub(f: FnInfo, qual: String, ns: String) -> String {
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
+    let cb = "fn(RpcReply<" + ret + ">)"
+    let real = ns + "." + f.name
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if f.params.length == 1 {
+        out = out + "export fn " + qual + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
+        if retUnit {
+            out = out + "    " + real + "(req)\n"
+            out = out + "    cb(Done(true))\n}\n"
+        } else {
+            out = out + "    cb(Done(" + real + "(req)))\n}\n"
+        }
+    } else {
+        out = out + "export fn " + qual + "(cb: " + cb + ") {\n"
+        if retUnit {
+            out = out + "    " + real + "()\n"
+            out = out + "    cb(Done(true))\n}\n"
+        } else {
+            out = out + "    cb(Done(" + real + "()))\n}\n"
+        }
+    }
+    return out
+}
+
+/// `client(dir)` with direct dispatch. A separate generator, because a generator
+/// cannot see its importer's audience; the stubs share names, so a composition
+/// root swaps one import line.
+export gen fn clientInProcess(dir: String) -> String {
+    let mods = rpcScan(dir, "")
+    let bad = rpcValidateAll(mods)
+    if bad != "" {
+        return bad
+    }
+    let mut out = "/// Generated by std/rpc `clientInProcess` — do not edit.\n"
+    out = out + rpcDirImports(mods)
+    out = out + rpcReplyTypes()
+    let mut mi = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            out = out + rpcDirInProcStub(f, rpcQualified(m.rel, f.name), rpcNs(mi))
+        }
+        mi = mi + 1
+    }
+    return out
+}
+
+test "rpcQualified camel-joins the relative path and the export name" {
+    assertEq(rpcQualified("orders/refund", "run"), "ordersRefundRun")
+    assertEq(rpcQualified("pastes", "list"), "pastesList")
+}
+
+test "distinct module/export pairs can derive one qualified name" {
+    // Both camel-join to `aBC`; rpcValidateAll reports it.
+    assertEq(rpcQualified("a/b", "c"), "aBC")
+    assertEq(rpcQualified("a", "bC"), "aBC")
+}
+
+test "rpcQualClash names both sources of one derived name" {
+    let msg = rpcQualClash(["aBC", "aBC"], ["a/b/c", "a/bC"])
+    assert(msg.contains("`a/b/c` and `a/bC`"))
+    assert(msg.contains("both derive the flat name `aBC`"))
+    assertEq(rpcQualClash(["aB", "aC"], ["a/b", "a/c"]), "")
+}

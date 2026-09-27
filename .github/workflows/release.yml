@@ -1,0 +1,387 @@
+name: Release
+
+# Inert until someone pushes a tag. No schedule, no branch trigger, no
+# workflow_dispatch: the only thing that starts a release is `git push origin
+# v0.1.0-alpha.1`. A tag carrying a suffix (`-alpha.N`, `-rc.N`) is published as
+# a GitHub pre-release; a bare `v0.1.0` is published as a full release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# The workflow writes releases, reads the tree, and reads the CI runs of the
+# commit it is about to publish. Nothing else.
+permissions:
+  contents: write
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts help nobody on a one-shot clean runner.
+  CARGO_INCREMENTAL: 0
+  # Symbols are half the binary and no user of an alpha reads them. Set here
+  # rather than in compiler/Cargo.toml so the release build is the only build
+  # that differs from what a contributor runs locally.
+  RUSTFLAGS: -C strip=symbols
+
+jobs:
+  gate:
+    name: CI passed for this commit
+    runs-on: ubuntu-latest
+    # A TAG COULD PUBLISH A RED TREE. This workflow triggers on `v*` and nothing
+    # else, with no status requirement anywhere in it — so `git push origin
+    # v0.1.0` at a commit whose CI failed, or whose CI never ran, built four
+    # binaries and shipped them. Every gate in ci.yml was optional at the one
+    # moment it mattered most.
+    #
+    # What this checks is the weakest thing that is still true: the tagged commit
+    # has at least one COMPLETED, SUCCESSFUL run of the CI workflow. Not "the
+    # newest run", because a re-run after a flake is a legitimate green; not the
+    # combined status API, because that mixes in checks this repo does not own.
+    #
+    # The escape hatch for a docs-only commit (ci.yml's `paths-ignore` means such
+    # a commit has no run at all): re-run CI against it from the Actions tab —
+    # ci.yml carries `workflow_dispatch` for exactly this — then push the tag.
+    steps:
+      - name: The tagged commit must have a green CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          green=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow CI \
+                    --commit "$GITHUB_SHA" --limit 30 \
+                    --json status,conclusion \
+                    --jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length')
+          echo "$GITHUB_SHA: $green successful CI run(s)"
+          if [ "$green" -lt 1 ]; then
+            echo "refusing to publish ${GITHUB_REF_NAME}: no successful CI run for $GITHUB_SHA." >&2
+            echo "Run the CI workflow against this commit (Actions -> CI -> Run workflow)," >&2
+            echo "or move the tag to a commit that has one." >&2
+            exit 1
+          fi
+
+  build:
+    name: build ${{ matrix.name }}
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A missing platform is a broken install command for everyone on it, so a
+      # partial matrix must not reach `publish`.
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: x86_64-linux
+            target: x86_64-unknown-linux-gnu
+            bin: vyrn
+          # Docker on an Apple Silicon Mac defaults to `linux/arm64`, so without
+          # this stanza `install.sh` had no binary for an ordinary and large
+          # audience — inside a container it fell through to "build from source".
+          # `ubuntu-24.04-arm` is a GA runner label, free for public repos, so
+          # this is a native build rather than a cross one: the smoke step below
+          # runs the binary on the architecture it will ship to.
+          - os: ubuntu-24.04-arm
+            name: aarch64-linux
+            target: aarch64-unknown-linux-gnu
+            bin: vyrn
+          - os: macos-latest
+            name: aarch64-macos
+            target: aarch64-apple-darwin
+            bin: vyrn
+          - os: windows-latest
+            name: x86_64-windows
+            target: x86_64-pc-windows-msvc
+            bin: vyrn.exe
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: The tag and the crate version must agree
+        shell: bash
+        working-directory: compiler
+        # `vyrn --version` prints `CARGO_PKG_VERSION`, and the archive carries a
+        # `VERSION` file. Two spellings of one fact drift, so this fails the
+        # release before it builds anything rather than shipping a binary that
+        # disagrees with the tag beside it.
+        run: |
+          set -eu
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' vyrn-cli/Cargo.toml | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} but compiler/vyrn-cli/Cargo.toml says $crate" >&2
+            exit 1
+          fi
+
+      - name: Build the CLI and the language server
+        working-directory: compiler
+        # `--target` is named explicitly rather than left implicit so the
+        # archive name is a fact about the binary, not about which architecture
+        # GitHub happened to give the `macos-latest` label this year. Building
+        # `vyrn` needs no clang, no LLVM and no wasi sysroot (compiler/Cargo.toml).
+        #
+        # `vyrn-lsp` is EXCLUDED from the workspace and carries its own
+        # Cargo.lock, so it needs its own `--manifest-path` and its own
+        # `--locked`. It ships in this archive because the .vsix is one
+        # platform-neutral file for every platform: the editor extension is
+        # JavaScript, the thing that has an architecture is the server, and the
+        # archives are per-platform already. So the extension resolves
+        # `vyrn-lsp` beside the `vyrn` on PATH, and installing the toolchain is
+        # what puts it there.
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked -p vyrn-cli --target ${{ matrix.target }}
+          cargo build --release --locked --manifest-path vyrn-lsp/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Stage the archive
+        shell: bash
+        # What a user gets, and why:
+        #   vyrn          the driver
+        #   vyrn-lsp      the language server the VS Code extension spawns. It
+        #                 sits BESIDE `vyrn` because that is how the extension
+        #                 finds it (editor/vscode/extension.js), and because the
+        #                 install scripts move the whole directory into
+        #                 $DIR/bin, which the user puts on PATH.
+        #   std/          `vyrn` resolves `std/...` imports from files on disk;
+        #                 it finds them by walking up from the executable, so
+        #                 `std/` MUST stay a sibling of the binary's directory
+        #                 (compiler/vyrn-cli/src/main.rs::std_root)
+        #   web/          the browser-side runtimes `vyrn dev` serves
+        #                 (main.rs::web_root, same walk-up rule)
+        #   README.md     what this is
+        #   VERSION       the tag, which the step above proved is what
+        #                 `vyrn --version` prints
+        #   LICENSE-MIT   the two licences the user may choose between, and the
+        #   LICENSE-APACHE  third-party notice the emitted binaries carry. These
+        #   THIRD-PARTY-NOTICES.md  are terms, so they ship WITH the thing they
+        #                 govern rather than being a link somebody has to follow.
+        run: |
+          set -eu
+          stage="vyrn-${{ matrix.name }}"
+          lsp="vyrn-lsp"
+          if [ "${{ runner.os }}" = "Windows" ]; then lsp="vyrn-lsp.exe"; fi
+          mkdir -p "$stage"
+          cp "compiler/target/${{ matrix.target }}/release/${{ matrix.bin }}" "$stage/"
+          cp "compiler/vyrn-lsp/target/${{ matrix.target }}/release/$lsp" "$stage/"
+          cp -r std "$stage/std"
+          cp -r web "$stage/web"
+          cp README.md "$stage/"
+          cp LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md "$stage/"
+          printf '%s\n' "${GITHUB_REF_NAME}" > "$stage/VERSION"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$stage.zip" "$stage" > /dev/null
+          else
+            tar czf "$stage.tar.gz" "$stage"
+          fi
+          ls -l "$stage".*
+
+      - name: Run the artifact before anyone else has to
+        shell: bash
+        # Until now the release workflow built binaries that NOBODY ran before
+        # they were published. A `vyrn` that cannot start — a stripped symbol it
+        # needed, a `std/` that did not survive `7z`, a target that builds but
+        # does not execute — reached users and only then a bug report.
+        #
+        # So: unpack the archive that is about to be uploaded (not the staging
+        # directory it was made from — the archive is what a user gets, and
+        # `tar`/`7z` are between the two) and use it.
+        #
+        # Every leg is a NATIVE build for its own runner, so there is nothing to
+        # emulate. And the three things exercised are exactly the three the
+        # release notes promise need "nothing beyond this archive":
+        #
+        #   vyrn run                the interpreter, plus the walk-up that finds
+        #                           `std/` beside the binary — `hello.vyrn`
+        #                           imports from it on purpose, so a `std/` that
+        #                           did not make it into the archive fails here.
+        #   vyrn fmt --check        the formatter, on a file already canonical.
+        #   vyrn build --target wasm  the direct wasm backend, which
+        #                           needs no clang, no wasi sysroot
+        #                           and no builtins — hence no skip and no
+        #                           reason to state one. `vyrn build` NATIVE is
+        #                           the one thing not tested here, because it
+        #                           needs clang on PATH and the notes say so.
+        #                           The module is RUN, not stat'ed: `test -s
+        #                           hello.wasm` passed for any nonempty file,
+        #                           while the notes promise a working wasm
+        #                           target. node's WASI is on every runner, so
+        #                           the same output the interpreter printed a
+        #                           line earlier has to come back out of the
+        #                           module — which is a second engine agreeing,
+        #                           for free, on the machine that will ship it.
+        #
+        # `fail-fast: true` above is what makes this a gate: a leg that cannot
+        # run its own binary takes `publish` down with it.
+        run: |
+          set -eux
+          stage="vyrn-${{ matrix.name }}"
+          mkdir smoke && cd smoke
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z x "../$stage.zip" > /dev/null
+          else
+            tar xzf "../$stage.tar.gz"
+          fi
+          vyrn="$PWD/$stage/${{ matrix.bin }}"
+          "$vyrn" --version
+          cat > hello.vyrn <<'EOF'
+          import { toUpper } from "std/strings"
+
+          fn main() -> Int64 {
+              print(toUpper("hello from the release archive"))
+              return 0
+          }
+          EOF
+          want="HELLO FROM THE RELEASE ARCHIVE"
+          test "$("$vyrn" run hello.vyrn)" = "$want"
+          "$vyrn" fmt --check hello.vyrn
+          "$vyrn" build hello.vyrn --target wasm -o hello.wasm
+          test -s hello.wasm
+          cat > wasi-run.mjs <<'EOF'
+          import { WASI } from 'node:wasi';
+          import { readFileSync } from 'node:fs';
+          const wasi = new WASI({ version: 'preview1', args: ['hello'] });
+          const mod = await WebAssembly.compile(readFileSync(process.argv[2]));
+          const inst = await WebAssembly.instantiate(mod, wasi.getImportObject());
+          process.exitCode = wasi.start(inst);
+          EOF
+          got=$(node --experimental-wasi-unstable-preview1 wasi-run.mjs hello.wasm 2>/dev/null)
+          test "$got" = "$want" || { echo "the shipped wasm printed '$got'" >&2; exit 1; }
+          # The server in the same archive, proved the only way a server can be
+          # proved: speak to it. `vyrn-lsp` is an ordinary stdio LSP, so one
+          # `initialize` request framed with its Content-Length header and a
+          # closed stdin is a whole session — it answers with its capabilities
+          # and exits 0 at EOF. A binary that cannot start, or that was stripped
+          # of something it needed, fails here rather than in someone's editor.
+          lsp="$PWD/$stage/vyrn-lsp"
+          if [ "${{ runner.os }}" = "Windows" ]; then lsp="$lsp.exe"; fi
+          body='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}'
+          printf 'Content-Length: %d\r\n\r\n%s' "${#body}" "$body" | "$lsp" > init.out
+          grep -q '"capabilities"' init.out || { echo "vyrn-lsp did not answer initialize:" >&2; cat init.out >&2; exit 1; }
+
+      # actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vyrn-${{ matrix.name }}
+          path: |
+            vyrn-*.tar.gz
+            vyrn-*.zip
+          if-no-files-found: error
+
+  vsix:
+    name: package the VS Code extension
+    needs: gate
+    # ONE runner, not the matrix, because the .vsix is one file for every
+    # platform. The extension is plain JavaScript with a single runtime
+    # dependency; the only part of the editor story with an architecture is
+    # `vyrn-lsp`, and that ships in the per-platform archives above.
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: The tag and the extension version must agree
+        shell: bash
+        working-directory: editor/vscode
+        # Same refusal as the crate check, for the same reason: the version is
+        # baked into the .vsix and into its file name, and a version that
+        # disagrees with the tag beside it is a lie a user cannot see.
+        #
+        # The mapping is IDENTITY — `v0.1.0-alpha.2` means `0.1.0-alpha.2` — and
+        # that is a checked fact, not an assumption: `vsce@3.9.2 package`
+        # accepts a semver pre-release identifier, and `code --install-extension`
+        # installs the file it produces. No transform, so nothing to remember.
+        run: |
+          set -eu
+          ext=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$ext" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} but editor/vscode/package.json says $ext" >&2
+            exit 1
+          fi
+
+      - name: Package the extension
+        working-directory: editor/vscode
+        # `vsce` is the official packager and the ONE third-party tool in this
+        # workflow. It is pinned by exact version in package.json's `package`
+        # script (`@vscode/vsce@3.9.2`) — one spelling of the pin, used by this
+        # job and by a contributor running `npm run package` — and it runs
+        # BEFORE the checksums, so whatever it produced is covered by
+        # SHA256SUMS like every other asset.
+        #
+        # `npm ci --omit=dev` installs exactly the lockfile's runtime tree
+        # (`vscode-languageclient` and its four transitive packages), which is
+        # what `.vscodeignore` lets into the .vsix.
+        run: |
+          set -eu
+          npm ci --omit=dev
+          npm run package -- -o "../../vyrn-vscode-${GITHUB_REF_NAME#v}.vsix"
+          ls -l ../../vyrn-vscode-*.vsix
+
+      # actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vyrn-vscode
+          path: vyrn-vscode-*.vsix
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: [build, vsix]
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        # One SHA256SUMS asset in `sha256sum -c` format, sorted so two runs of
+        # the same tree produce the same file. The install scripts refuse to
+        # install anything whose line is missing from it.
+        run: |
+          set -eu
+          sha256sum vyrn-*.tar.gz vyrn-*.zip vyrn-vscode-*.vsix | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # `gh` ships on the runner, so no third-party action is in the trust
+        # path of a signed artifact. `--verify-tag` refuses to invent a tag that
+        # was never pushed.
+        #
+        # The notes heredoc is QUOTED and stays quoted: its body holds backticks
+        # around `SHA256SUMS` and the command names, and an expanding heredoc
+        # would run them. So the repository arrives as `__REPO__` and one `sed`
+        # fills it in, rather than the name being typed twice in a release note
+        # a fork would then publish pointing at this repository.
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          flags="--verify-tag --generate-notes"
+          case "$tag" in
+            *-*) flags="$flags --prerelease" ;;
+          esac
+          cat > notes.md <<'EOF'
+          Vyrn is an alpha. The language changes without a deprecation period.
+
+          Install (Linux, macOS):
+
+              curl -fsSL https://raw.githubusercontent.com/__REPO__/main/install.sh | sh
+
+          Install (Windows PowerShell):
+
+              irm https://raw.githubusercontent.com/__REPO__/main/install.ps1 | iex
+
+          Verify a manual download against `SHA256SUMS`.
+
+          VS Code support: download `vyrn-vscode-<version>.vsix` below and run `code --install-extension vyrn-vscode-<version>.vsix`. One file for every platform. It needs the `vyrn-lsp` server, which ships inside the archives above and beside `vyrn` — so an install through the script or the archive already has it.
+
+          `vyrn run`, `vyrn check`, `vyrn test` and `vyrn build --target wasm` need nothing beyond this archive. `vyrn build` (native) needs `clang` on `PATH`.
+          EOF
+          sed -i "s|__REPO__|${GITHUB_REPOSITORY}|g" notes.md
+          if grep -q __REPO__ notes.md; then echo "notes.md still holds __REPO__"; exit 1; fi
+          gh release create "$tag" $flags --title "$tag" --notes-file notes.md dist/*

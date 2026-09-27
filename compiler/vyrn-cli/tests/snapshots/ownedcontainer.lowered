@@ -1,0 +1,94 @@
+; vyrn lowered v2 -- examples/ownedcontainer.vyrn
+
+fn Owned__Ring__release(self)
+  {
+    let @borrow = read self.label
+    let @t1! = prim add(lit "release ", @borrow)
+    let @t2! = prim add(@t1!, lit " (")
+    drop @t1!
+    let @t3 = read self.slots.length
+    let @t4! = builtin @str(read @t3)
+    let @t5! = prim add(@t2!, @t4!)
+    drop @t2!
+    drop @t4!
+    let @t6! = prim add(@t5!, lit ")")
+    drop @t5!
+    do builtin print(read @t6!)
+    drop @t6!
+    let @t7! = take self.slots
+    let slots! = @t7!
+    drop slots!
+    let @t8! = take self.label
+    let label! = @t8!
+    drop label!
+  }
+
+fn Owned__Tally__release(self)
+  {
+    let @t1 = read self.total
+    let @t2! = builtin @str(read @t1)
+    let @t3! = prim add(lit "tally ", @t2!)
+    drop @t2!
+    do builtin print(read @t3!)
+    drop @t3!
+  }
+
+fn inner()
+  {
+    let t! = fn tallyOf(read lit 4)
+    do builtin print(read lit "inside")
+    drop t! minus []
+  }
+
+fn main()
+  {
+    let i = lit 1
+    loop
+      let @t1 = prim lteq(i, lit 3)
+      if @t1
+      else
+        break
+      {
+        let @t2! = builtin @str(read i)
+        let @t3! = prim add(lit "ring", @t2!)
+        drop @t2!
+        let r! = fn ringOf(read @t3!, read i)
+        drop @t3!
+        let @t4 = prim add(i, lit 1)
+        i = @t4  (Transferred)
+        drop r! minus []
+      }
+    do fn inner()
+    do builtin print(read lit "after")
+    let last! = fn ringOf(read lit "last", read lit 2)
+    drop last! minus []
+    return lit 0
+  }
+
+fn ringOf(label, n)
+  {
+    let slots! = make array()
+    let i = lit 0
+    loop
+      let @t1 = prim lt(i, n)
+      if @t1
+      else
+        break
+      {
+        let @t2 = prim mul(i, i)
+        let @t3! = builtin @push(consume slots!, consume @t2)
+        slots! = @t3!  (Transferred)
+        let @t4 = prim add(i, lit 1)
+        i = @t4  (Transferred)
+      }
+    let @t5! = reserved @copy(read label)
+    let @t6! = make Ring {label, slots}(@t5!, slots!)
+    return @t6!
+  }
+
+fn tallyOf(n)
+  {
+    let @t1 = prim mul(n, lit 10)
+    let @t2! = make Tally {total}(@t1)
+    return @t2!
+  }

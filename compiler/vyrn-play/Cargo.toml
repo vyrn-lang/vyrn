@@ -1,0 +1,52 @@
+[package]
+name = "vyrn-play"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "The compiler's front end as a wasm module, for the playground on the website."
+
+# NOT part of the default workspace (see ../Cargo.toml `exclude`), for the same
+# reason `vyrn-lsp` and `vyrn-genwasm` are not: it is not needed to build or test
+# the language, and it only makes sense for one target. Nothing depends on it.
+#
+# THE BUILD COMMAND HAS TO RUN FROM THIS DIRECTORY. `.cargo/config.toml` beside
+# this file sets the linker's stack size, and cargo reads that file from the
+# working directory upward — `--manifest-path` from elsewhere silently misses it
+# and leaves the module with wasm-ld's 1 MB default, which the compiler's own
+# recursion exhausts on a deeply nested program.
+#
+#   cd compiler/vyrn-play
+#   cargo build --release --target wasm32-unknown-unknown
+#
+# `cargo test` from here runs the host-side checks (the crate is an rlib too).
+[dependencies]
+vyrn-frontend = { path = "../vyrn-frontend" }
+# The page RUNS what this crate COMPILES. `play_compile` answers a
+# module's bytes, and the page instantiates them with `web/wasi-min.js` — the
+# same runtime the `vyrn build --target wasm` demos in `web/` already use. This
+# crate cannot instantiate one itself: it IS a wasm module. The direct backend
+# is pure Rust plus `wasm-encoder`, so it needs no LLVM and no sysroot, which is
+# what makes it the one backend that compiles for this target.
+vyrn-codegen = { path = "../vyrn-codegen" }
+# The page compiles with the SAME compiler `vyrn run` does: `load` calls
+# `install` on `vyrn-lower`, so the placer runs and the kernel's refusals reach
+# the page. Reached only through `vyrn-codegen`, it would never be installed. Its
+# only dependency is `vyrn-frontend`, so it costs this target nothing new.
+vyrn-lower = { path = "../vyrn-lower" }
+
+[lib]
+name = "vyrn_play"
+path = "src/lib.rs"
+# `cdylib` is the wasm module. `rlib` is what lets `cargo test` run the pure
+# functions below on the host, where a failure is readable.
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+# The page downloads this. Size is the only axis that matters here; the front end
+# is not the slow part of typing into a textarea.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

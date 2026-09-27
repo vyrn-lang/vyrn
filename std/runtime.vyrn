@@ -1,0 +1,1819 @@
+/// std/runtime: the runtime in Vyrn. The compiler links
+/// it into every program; a user import of it or of `std/mem` is refused, and
+/// the loader puts it alone in `std/mem`'s audience.
+///
+/// A `String` arrives here as an `Int32` address of its NUL-terminated bytes;
+/// nothing outside this module holds an address. The emitter does not count
+/// these frames against the call-depth budget, and a `panic` here prints the
+/// trap table's line with no site, the same on every engine. A builtin's twin
+/// carries a `V` (`readFileV` for `readFile`), because the builtin's name is
+/// reserved.
+
+import {
+    load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase, trap,
+    addr, adopt, ioTable, utf8Table,
+    procExit,
+    fdWrite, fdRead, fdClose, pathOpen, pathRename, fdSync, fdPrestatGet, argsSizesGet, argsGet,
+    environSizesGet, environGet, clockTimeGet, randomGet, fdReaddir, genRead, genFetch,
+} from "std/mem"
+
+/// `strlen`: the bytes before the NUL at `p`.
+export fn strLen(p: Int32) -> Int32 {
+    let mut q = p
+    while load8(q) != 0 {
+        q = q + 1
+    }
+    return q - p
+}
+
+/// `strcmp`: unsigned byte order, which is `String` order. Negative, zero or
+/// positive.
+export fn strCmp(a: Int32, b: Int32) -> Int32 {
+    let mut p = a
+    let mut q = b
+    while true {
+        let ca = load8(p)
+        let cb = load8(q)
+        if ca != cb {
+            return Int32(ca) - Int32(cb)
+        }
+        if ca == 0 {
+            return 0
+        }
+        p = p + 1
+        q = q + 1
+    }
+    return 0
+}
+
+/// `starts`: whether NUL-terminated `a` begins with NUL-terminated `b`.
+export fn starts(a: Int32, b: Int32) -> Bool {
+    let mut p = a
+    let mut q = b
+    while true {
+        let c = load8(q)
+        if c == 0 {
+            return true
+        }
+        if load8(p) != c {
+            return false
+        }
+        p = p + 1
+        q = q + 1
+    }
+    return true
+}
+
+/// `int_str`: the decimal digits of `v`, two's complement when `signed`, else
+/// as a `UInt64`. The caller owns the result. The magnitude is taken in
+/// `UInt64`, where `0 - u` of `Int64.min` is exactly 2^63.
+export fn intStr(v: Int64, signed: Bool) -> String {
+    let mut u: UInt64 = UInt64(v)
+    let neg = signed && v < 0
+    if neg {
+        u = 0 - u
+    }
+    let mut w: Array<UInt8> = []
+    while true {
+        w.push(UInt8(u % 10) + 48)
+        u = u / 10
+        if u == 0 {
+            break
+        }
+    }
+    if neg {
+        w.push('-')
+    }
+    let n = w.length
+    let mut i = 0
+    while i < n / 2 {
+        let t = w[i]
+        w[i] = w[n - 1 - i]
+        w[n - 1 - i] = t
+        i = i + 1
+    }
+    return match stringFromBytes(w) {
+        Ok(s) => s,
+        Err(e) => panic("intStr: the bytes it builds are ASCII digits and a sign"),
+    }
+}
+
+/// `parse_i64`: `parse`. An optional `-`, then digits, all consumed; anything
+/// else is `None`. `acc * 10 + d` wraps, so `"9223372036854775808"` is
+/// `Int64.min` on every engine (`examples/numbytes.vyrn`). Unlike `strI64`, it
+/// reads no `+` and does not stop early.
+export fn parseV(s: String) -> Option<Int64> {
+    let mut p = addr(s)
+    let mut neg = false
+    if load8(p) == '-' {
+        neg = true
+        p = p + 1
+    }
+    if load8(p) == 0 {
+        return None
+    }
+    let mut acc: Int64 = 0
+    while true {
+        let c = load8(p)
+        if c == 0 {
+            break
+        }
+        if c < '0' || c > '9' {
+            return None
+        }
+        acc = acc * 10 + Int64(c) - 48
+        p = p + 1
+    }
+    if neg {
+        acc = 0 - acc
+    }
+    return Some(acc)
+}
+
+/// `str_i64`: `strtoll(p, 0, 10)` without whitespace skip or clamp: an optional
+/// sign, then digits up to the first non-digit. The only callers read
+/// `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`.
+export fn strI64(p: Int32) -> Int64 {
+    let mut q = p
+    let mut neg = false
+    let c0 = load8(q)
+    if c0 == '-' {
+        neg = true
+        q = q + 1
+    } else if c0 == '+' {
+        q = q + 1
+    }
+    let mut v: Int64 = 0
+    while true {
+        let c = load8(q)
+        if c < '0' || c > '9' {
+            break
+        }
+        v = v * 10 + Int64(c) - 48
+        q = q + 1
+    }
+    if neg {
+        return 0 - v
+    }
+    return v
+}
+
+/// `utf8valid`: whether the `len` bytes at `s` are valid UTF-8, by Hoehrmann's
+/// DFA over `table` (`utf8d_table`): 256 byte classes, then 9 states x 12
+/// classes of transitions. State 0 accepts; 12 rejects and absorbs, so the loop
+/// needs no early exit. Accepts exactly what Rust's `from_utf8` accepts. The
+/// ASCII prefix goes eight bytes at a time.
+export fn utf8Valid(s: Int32, len: Int32, table: Int32) -> Bool {
+    let hi: UInt64 = 9259542123273814144 // 0x8080808080808080
+    let mut i: Int32 = 0
+    while len - i >= 8 {
+        if (load64(s + i) & hi) != 0 {
+            break
+        }
+        i = i + 8
+    }
+    let mut st: Int32 = 0
+    while i < len {
+        let cls = Int32(load8(table + Int32(load8(s + i))))
+        st = Int32(load8(table + 256 + st + cls))
+        i = i + 1
+    }
+    return st == 0
+}
+
+/// `regex_run`: whether the NUL-terminated bytes at `s` match the DFA `=~`
+/// compiled. Every state has 256 transitions and a dead state absorbs a
+/// non-match, so the walk only tests for the end. `table` is `states x 256`
+/// four-byte entries, `accept` one byte per state. The byte is read unsigned,
+/// or a UTF-8 continuation byte would index negative.
+export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool {
+    let mut p = s
+    let mut st = start
+    while true {
+        let ch = Int32(load8(p))
+        if ch == 0 {
+            break
+        }
+        st = Int32(load32(table + (st << 10) + (ch << 2)))
+        p = p + 1
+    }
+    return load8(accept + st) != 0
+}
+
+// The allocator: a segregated free list, four classes per power of two. A
+// request rounds up to a multiple of eight, at least eight. With
+// `t = size - 1`, `shift = floorLog2(t) - 2` and `sub` the two bits under
+// `t`'s leading one, the class is `shift * 4 + sub` and its size
+// `(sub + 5) << shift`: classes 3 to 115, 8 bytes to 2 GiB, round-up at most
+// 25 percent. Every block has an eight-byte header: the class word, then a
+// word only the audit instrument writes.
+//
+// The heap's first bytes are the allocator's: one head per class (116 words),
+// the bump offset at 464, the arena's words at 468-476, the I/O cells from 480,
+// the digit cell at 8736; the first block starts at 8768. All start at zero,
+// which is an empty state for each, so nothing initializes them. A freed
+// block's list link lives in its payload.
+//
+// `free` silently ignores a pointer below `heapBase()` (a literal's data
+// segment, an unspilled `SmallArray`'s null) and a header class outside 3-115.
+// Both leak rather than corrupt. An arena block carries class 0, so `free`
+// ignores it and only `regionExit` reclaims it.
+//
+// The request is an `Int64` because callers compute `count * stride` from an
+// `Int64` length, and an `Int32` product once wrapped (`tests/parity.rs`,
+// `a_malloc_whose_bump_pointer_would_wrap_traps_instead_of_lying`). The width
+// check precedes the rounding because `n + 7` is the cast.
+
+/// `malloc`: `n` bytes, eight-aligned, from the class's free list or the bump
+/// region. Traps `out of memory` when the request cannot fit a wasm32 memory
+/// or `grow` refuses.
+export fn malloc(n: Int64) -> Int32 {
+    if UInt64(n) > 2147483648 {
+        panic("out of memory")
+    }
+    let mut t = Int32((n + 7) & -8)
+    if t < 8 {
+        t = 8
+    }
+    t = t - 1
+    // `shift = floorLog2(t) - 2`; `t >= 7`, so `u >= 1`.
+    let mut shift: Int32 = 0
+    let mut u = t >> 2
+    while u > 1 {
+        u = u >> 1
+        shift = shift + 1
+    }
+    let sub = (t >> shift) & 3
+    let cls = (shift << 2) + sub
+    let size = (sub + 5) << shift
+    let base = heapBase()
+    let h = base + (cls << 2)
+    let head = Int32(load32(h))
+    if head != 0 {
+        store32(h, load32(head))
+        auditBirth(head, size)
+        return head
+    }
+    let p = base + 8768 + Int32(load32(base + 464))
+    // In 64 bits so the sum cannot wrap.
+    let end = Int64(UInt32(p)) + Int64(size) + 8
+    if end > 4294967295 {
+        panic("out of memory")
+    }
+    let need = Int32((end + 65535) >> 16) - memorySize()
+    if need > 0 {
+        if grow(need) == -1 {
+            panic("out of memory")
+        }
+    }
+    store32(base + 464, UInt32(end - Int64(base) - 8768))
+    store32(p, UInt32(cls))
+    auditBirth(p + 8, size)
+    return p + 8
+}
+
+/// `free`: pushes `p`'s block on its class's list. See the refusals above.
+export fn free(p: Int32) {
+    let base = heapBase()
+    if UInt32(p) < UInt32(base) {
+        return
+    }
+    let cls = Int32(load32(p - 8))
+    if cls < 3 || cls > 115 {
+        return
+    }
+    auditDeath(p, cls)
+    let h = base + (cls << 2)
+    store32(p, load32(h))
+    store32(h, UInt32(p))
+}
+
+// The exit-residue instrument: is every block back on a free list when the
+// program ends? A call to a function named `audit*` is emitted only in an
+// audited build (`VYRN_LEAK_CHECK`; `Fn_::call` in `direct.rs`), so a normal
+// build emits no call and `Module::sweep` drops these bodies.
+//
+// Classes 0-2 cannot occur, so their heads at `heapBase() + 0..8` are free
+// memory. The instrument keeps its block's address in the first; zero means
+// not armed. The block holds the live count, the live bytes and four interned
+// wordings. A block's second header word is its liveness mark (1 live, 0
+// free), so a double or foreign free is caught at the site, before the push
+// corrupts the list.
+
+/// A class's payload size, the inverse of `malloc`'s `cls`.
+fn classSize(cls: Int32) -> Int32 {
+    return ((cls & 3) + 5) << (cls >> 2)
+}
+
+/// Arms the instrument; the emitter calls it first in `_start`. The block is
+/// allocated before its address is stored, so it never counts itself.
+fn auditInit(pre: Int32, mid: Int32, post: Int32, dbl: Int32) {
+    let s = malloc(32)
+    store32(s, 0)
+    store32(s + 4, 0)
+    store32(s + 8, UInt32(pre))
+    store32(s + 12, UInt32(mid))
+    store32(s + 16, UInt32(post))
+    store32(s + 20, UInt32(dbl))
+    store32(heapBase(), UInt32(s))
+}
+
+fn auditBirth(p: Int32, size: Int32) {
+    let s = Int32(load32(heapBase()))
+    if s == 0 {
+        return
+    }
+    store32(p - 4, 1)
+    store32(s, load32(s) + 1)
+    store32(s + 4, load32(s + 4) + UInt32(size))
+}
+
+/// A block goes back, after `free`'s refusals and before its push. A block
+/// not marked live is a double or foreign free.
+fn auditDeath(p: Int32, cls: Int32) {
+    let s = Int32(load32(heapBase()))
+    if s == 0 {
+        return
+    }
+    if load32(p - 4) != 1 {
+        auditFail(s)
+    }
+    store32(p - 4, 0)
+    store32(s, load32(s) - 1)
+    store32(s + 4, load32(s + 4) - UInt32(classSize(cls)))
+}
+
+/// Uncounts a block the runtime holds for the process's life (`envGet`'s
+/// environment pair), so it is not reported as the program's residue.
+fn auditForget(p: Int32) {
+    let s = Int32(load32(heapBase()))
+    if s == 0 {
+        return
+    }
+    store32(p - 4, 0)
+    store32(s, load32(s) - 1)
+    store32(s + 4, load32(s + 4) - UInt32(classSize(Int32(load32(p - 8)))))
+}
+
+/// The double-free report: one line on fd 2 and exit 134, at the site, while
+/// the list is still readable.
+fn auditFail(s: Int32) {
+    let msg = Int32(load32(s + 20))
+    writeAll(2, msg, strLen(msg))
+    procExit(134)
+}
+
+/// The completeness check, called at the end of `_start` after stdout is
+/// flushed. Live blocks exit 135 with the line the ratchet reads. The arena's
+/// retained chunks are the allocator's, so they are subtracted.
+export fn auditExit() {
+    let base = heapBase()
+    let s = Int32(load32(base))
+    if s == 0 {
+        return
+    }
+    let mut live = Int32(load32(s))
+    let mut bytes = Int32(load32(s + 4))
+    let mut c = Int32(load32(base + 468))
+    while c != 0 {
+        live = live - 1
+        bytes = bytes - classSize(Int32(load32(c - 8)))
+        c = Int32(load32(c))
+    }
+    if live == 0 {
+        return
+    }
+    let pre = Int32(load32(s + 8))
+    let mid = Int32(load32(s + 12))
+    let post = Int32(load32(s + 16))
+    let buf = base + 8736
+    writeAll(2, pre, strLen(pre))
+    let n = digitsAt(buf, 31, Int64(live), false)
+    writeAll(2, n, buf + 32 - n)
+    writeAll(2, mid, strLen(mid))
+    let bn = digitsAt(buf, 31, Int64(bytes), false)
+    writeAll(2, bn, buf + 32 - bn)
+    writeAll(2, post, strLen(post))
+    procExit(135)
+}
+
+// The region arena. An allocation inside `region { .. }` is a bump, and the
+// closing brace gives all of it back at once. Its words:
+//
+//   468  the chunk being bumped, 0 when the arena has none
+//   472  the next free byte in that chunk
+//   476  the routing flag: nonzero while the emitter routes a `String` here.
+//        Only `strNew` reads it, so a program with no region pays nothing
+//
+// A chunk is one `malloc` block: the older chunk at 0, the end address at 4,
+// blocks from 8. A new chunk is at least 4 KiB or as large as the request.
+//
+// Routing is lexical: the emitter raises the flag around exactly the calls
+// `Fn_::arena_route` in `direct.rs` marks. Everything else allocated while a
+// region is open (an `Array` buffer, a `Map`, a callee's `String`) is the free
+// list's and may outlive the region; routing by open region would dangle
+// those, which the checker permits (`contains_heap`).
+//
+// An arena block has class 0, so `free` ignores it. A `return` out of a
+// region carries blocks out, so the emitter skips `regionExit` on that edge.
+// The oldest standard 4 KiB chunk is kept, so a `region` in a loop asks the
+// allocator nothing after its first turn.
+
+/// The bump inside the open region's chunks. A new chunk is an ordinary
+/// `malloc` block, which the flag does not affect.
+fn arenaAlloc(n: Int64, base: Int32) -> Int32 {
+    if UInt64(n) > 2147483648 {
+        panic("out of memory")
+    }
+    let size = Int32((n + 7) & -8) + 8
+    let mut c = Int32(load32(base + 468))
+    let mut cur = Int32(load32(base + 472))
+    // In 64 bits: a chunk near the top of a wasm32 memory would wrap the sum.
+    let full = c == 0 || Int64(UInt32(cur)) + Int64(size) > Int64(load32(c + 4))
+    if full {
+        let mut body = size
+        if body < 4096 {
+            body = 4096
+        }
+        let nc = malloc(Int64(body) + 8)
+        store32(nc, UInt32(c))
+        store32(nc + 4, UInt32(nc + 8 + body))
+        store32(base + 468, UInt32(nc))
+        c = nc
+        cur = nc + 8
+    }
+    // Class 0: the ownership test above.
+    store32(cur, 0)
+    store32(base + 472, UInt32(cur + size))
+    return cur + 8
+}
+
+/// `region_enter`'s arena half: the bump top, which `regionExit` restores. The
+/// nesting depth and its trap stay with the emitter.
+export fn regionEnter() -> Int32 {
+    return Int32(load32(heapBase() + 472))
+}
+
+/// `region_exit`: frees everything bumped since `mark`, down to the chunk
+/// `mark` points into or the oldest, whichever comes first.
+export fn regionExit(mark: Int32) {
+    let base = heapBase()
+    let mut c = Int32(load32(base + 468))
+    while c != 0 {
+        let holds = UInt32(mark) >= UInt32(c + 8) && UInt32(mark) <= UInt32(load32(c + 4))
+        if holds {
+            break
+        }
+        let next = Int32(load32(c))
+        // The oldest chunk stays if it is standard-size; an oversized one
+        // would pin its memory for the program's life.
+        if next == 0 && Int32(load32(c + 4)) - c - 8 == 4096 {
+            break
+        }
+        free(c)
+        c = next
+    }
+    store32(base + 468, UInt32(c))
+    // A region opened on an empty arena marks below the retained chunk: all of
+    // it is free again.
+    let mut cur = mark
+    if c != 0 && UInt32(cur) < UInt32(c + 8) {
+        cur = c + 8
+    }
+    store32(base + 472, UInt32(cur))
+}
+
+// Strings. A `String` is the address of its bytes; the eight bytes in front
+// are its `{ len, cap }` header (`len` at -8, `cap` at -4, both 32-bit), and a
+// NUL sits at `len`. A `cap` of all ones marks a data-segment literal. Every
+// String block comes from `strNew`. Lengths are `Int32` offsets into a wasm32
+// memory.
+
+/// `str_new`: one block holding the header, room for `cap` bytes and the NUL;
+/// returns the address of the bytes. The only place the region arena is routed.
+export fn strNew(len: Int32, cap: Int32) -> Int32 {
+    let heap = heapBase()
+    let mut base: Int32 = 0
+    if load32(heap + 476) != 0 {
+        base = arenaAlloc(Int64(cap) + 9, heap)
+    } else {
+        base = malloc(Int64(cap) + 9)
+    }
+    store32(base, UInt32(len))
+    store32(base + 4, UInt32(cap))
+    let p = base + 8
+    store8(p + len, 0)
+    return p
+}
+
+/// `concat`: `a + b` as a fresh String of exact size; the second copy carries
+/// `b`'s NUL.
+export fn strConcat(a: Int32, b: Int32) -> Int32 {
+    let la = Int32(load32(a - 8))
+    let lb = Int32(load32(b - 8))
+    let r = strNew(la + lb, la + lb)
+    copy(r, a, la)
+    copy(r + la, b, lb + 1)
+    return r
+}
+
+/// `str_append`: appends `v` to the accumulator `p` and returns the possibly
+/// new pointer, since a wasm local has no address. `own` points at a caller
+/// word saying whether `p`'s buffer is the caller's. If not, or if its `cap` is
+/// all ones (a literal returned through a call), the bytes are copied into a
+/// fresh buffer of at least 32; a literal grown in place would overwrite the
+/// next literal's header. Otherwise the buffer doubles when full, so N appends
+/// copy O(N) bytes. The grow is `strNew`, `copy`, `free`: a doubling always
+/// leaves its size class, so an in-place realloc would never hit.
+export fn strAppend(own: Int32, p: Int32, v: Int32) -> Int32 {
+    let vlen = Int32(load32(v - 8))
+    let len = Int32(load32(p - 8))
+    let mut q = p
+    let mut cap: Int32 = 0
+    if Int32(load32(own)) == 0 || Int32(load32(p - 4)) == -1 {
+        cap = len + vlen
+        if UInt32(cap) < 32 {
+            cap = 32
+        }
+        q = strNew(len, cap)
+        copy(q, p, len)
+        store32(own, 1)
+    } else {
+        cap = Int32(load32(p - 4))
+    }
+    let need = len + vlen
+    if UInt32(need) > UInt32(cap) {
+        let mut nc = cap << 1
+        if UInt32(nc) < UInt32(need) {
+            nc = need
+        }
+        let nb = strNew(len, nc)
+        copy(nb, q, len)
+        free(q - 8)
+        q = nb
+    }
+    // The operand's bytes and its NUL over the old terminator.
+    copy(q + len, v, vlen + 1)
+    store32(q - 8, UInt32(need))
+    return q
+}
+
+/// `str_from_bytes`: the build half of `stringFromBytes`. `fault` is
+/// `std/text`'s `stringFault` answer, computed by the emitter before this call:
+/// 1 returns `bnul`, 2 returns `butf8`, else the `len` bytes at `data` are
+/// copied into a fresh String. `bnul` and `butf8` are interned messages, never
+/// freed. Payloads are addresses as `Int64`, the `Result<String, String>` shape.
+export fn strFromBytes(data: Int32, len: Int32, fault: Int32, bnul: Int32, butf8: Int32) -> Result<Int64, Int64> {
+    if fault == 1 {
+        return Err(Int64(UInt32(bnul)))
+    }
+    if fault == 2 {
+        return Err(Int64(UInt32(butf8)))
+    }
+    let buf = strNew(len, len)
+    copy(buf, data, len)
+    return Ok(Int64(UInt32(buf)))
+}
+
+// Maps. A `Map` header is `{ keys, vals, len, cap, idx }`: buffer addresses at
+// 0 and 4, `Int64` counts at 8 and 16, the index at 24. `keys` and `vals` are
+// columns in insertion order. `idx` is `cap * 2` `Int64` buckets,
+// each a position plus one so zero is empty; `len <= cap` keeps it at most
+// half full, so a probe always reaches an empty bucket. A grow or a remove
+// rebuilds the index.
+//
+// One body serves every key layout. `kind` names it, `klen` is its byte count,
+// and the key travels as an `Int64`: the value for an `Int64` key, else an
+// address.
+//
+//   0  String       a 4-byte pointer column; FNV-1a to the NUL; `strCmp`
+//   1  Int64        an 8-byte value column; SplitMix64's finalizer; the bits
+//   2  pack         `klen` canonical bytes inline; FNV-1a; a byte
+//                   compare, which is field-wise equality because the emitter
+//                   zeroes padding before packing
+//   3  byte window  `tallyBytes`'s probe against a String column: FNV-1a over
+//                   `klen` bytes, equal to the stored String's hash since keys
+//                   have no interior NUL; equal when the `klen` bytes match and
+//                   the stored byte `klen` is NUL. Never stored
+//
+// The hashes are not observable: the columns decide every visible order.
+// `std/hash`'s `fnv1a` works on an `Array<UInt8>`, not an address, so the two
+// stay separate. The layout branch is on an emitter constant; k-nucleotide
+// measured no gain from three specialized bodies.
+
+/// FNV-1a over the `n` bytes at `p`, or up to the NUL when `n` is negative.
+fn mapHash(p: Int32, n: Int32) -> UInt64 {
+    let mut h: UInt64 = 14695981039346656037 // 0xCBF29CE484222325
+    let mut i: Int32 = 0
+    while true {
+        let c = load8(p + i)
+        if i == n || (n < 0 && c == 0) {
+            break
+        }
+        h = (h ^ UInt64(c)) * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+/// The bytes one key column entry takes.
+fn mapKeyStride(kind: Int32, klen: Int32) -> Int32 {
+    if kind == 1 {
+        return 8
+    }
+    if kind == 2 {
+        return klen
+    }
+    return 4
+}
+
+fn mapBytesEq(a: Int32, b: Int32, n: Int32) -> Bool {
+    let mut i: Int32 = 0
+    while i < n {
+        if load8(a + i) != load8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// Whether entry `i`'s key equals `key` under a byte layout (0, 2 or 3).
+fn mapKeyEq(kind: Int32, klen: Int32, keys: Int32, i: Int32, key: Int64) -> Bool {
+    if kind == 2 {
+        return mapBytesEq(keys + i * klen, Int32(key), klen)
+    }
+    let stored = Int32(load32(keys + i * 4))
+    if kind == 0 {
+        return strCmp(stored, Int32(key)) == 0
+    }
+    return mapBytesEq(stored, Int32(key), klen) && load8(stored + klen) == 0
+}
+
+/// `map_slot`: the bucket that holds `key`, or the first empty one after its
+/// hash; a lookup and an insert share it. `nb` is a power of two.
+///
+/// Callers pick the lane by `kind` themselves: under wasmtime one more call
+/// level cost k-nucleotide 20 percent (PLAN-0125-runtime section 6, step 5).
+/// This lane hashes an `Int64` with SplitMix64's finalizer and compares bits;
+/// `mapSlotBytes` hashes with FNV-1a and compares through `mapKeyEq`.
+fn mapSlotI64(keys: Int32, idx: Int32, nb: Int32, key: Int64) -> Int32 {
+    let mask = nb - 1
+    let m1: UInt64 = 13787848793156543929 // 0xBF58476D1CE4E5B9
+    let m2: UInt64 = 10723151780598845931 // 0x94D049BB133111EB
+    let mut h: UInt64 = UInt64(key)
+    h = (h ^ (h >> 30)) * m1
+    h = (h ^ (h >> 27)) * m2
+    let mut s = Int32(h ^ (h >> 31)) & mask
+    while true {
+        let ent = Int32(load64(idx + s * 8))
+        if ent == 0 || Int64(load64(keys + (ent - 1) * 8)) == key {
+            return s
+        }
+        s = (s + 1) & mask
+    }
+    return s
+}
+
+fn mapSlotBytes(kind: Int32, klen: Int32, keys: Int32, idx: Int32, nb: Int32, key: Int64) -> Int32 {
+    let mask = nb - 1
+    let mut n = klen
+    if kind == 0 {
+        n = -1
+    }
+    let mut s = Int32(mapHash(Int32(key), n)) & mask
+    while true {
+        let ent = Int32(load64(idx + s * 8))
+        if ent == 0 {
+            return s
+        }
+        if mapKeyEq(kind, klen, keys, ent - 1, key) {
+            return s
+        }
+        s = (s + 1) & mask
+    }
+    return s
+}
+
+/// `map_find`: the entry's position, or -1. `mapReserve` keeps a non-zero
+/// `cap` paired with an index, so a null `idx` there is a defect.
+export fn mapFind(kind: Int32, klen: Int32, keys: Int32, len: Int32, key: Int64, idx: Int32, cap: Int32) -> Int32 {
+    if len <= 0 || cap <= 0 {
+        return -1
+    }
+    let mut s: Int32 = 0
+    if kind == 1 {
+        s = mapSlotI64(keys, idx, cap * 2, key)
+    } else {
+        s = mapSlotBytes(kind, klen, keys, idx, cap * 2, key)
+    }
+    return Int32(load64(idx + s * 8)) - 1
+}
+
+/// `map_put`: indexes entry `i`, whose key is already in the column.
+export fn mapPut(kind: Int32, klen: Int32, keys: Int32, idx: Int32, nb: Int32, i: Int32) {
+    let mut key: Int64 = 0
+    if kind == 1 {
+        key = Int64(load64(keys + i * 8))
+    } else if kind == 2 {
+        key = Int64(UInt32(keys + i * klen))
+    } else {
+        key = Int64(load32(keys + i * 4))
+    }
+    let mut s: Int32 = 0
+    if kind == 1 {
+        s = mapSlotI64(keys, idx, nb, key)
+    } else {
+        s = mapSlotBytes(kind, klen, keys, idx, nb, key)
+    }
+    store64(idx + s * 8, UInt64(Int64(i) + 1))
+}
+
+/// `map_reindex`: rebuilds the index from the columns, after a grow or a
+/// remove.
+export fn mapReindex(kind: Int32, klen: Int32, keys: Int32, len: Int32, idx: Int32, nb: Int32) {
+    if nb <= 0 {
+        return
+    }
+    fill(idx, 0, nb * 8)
+    let mut i: Int32 = 0
+    while i < len {
+        mapPut(kind, klen, keys, idx, nb, i)
+        i = i + 1
+    }
+}
+
+/// `map_reserve`: room for one more entry in the map at `hdr`, whose values are
+/// `esz` bytes each. Capacity goes 0 to 4, then doubles, for both columns; the
+/// index is rebuilt, because `nb` changed. The emitter checks `len + 1 > cap`
+/// first, so an insert that fits pays no call.
+export fn mapReserve(kind: Int32, klen: Int32, hdr: Int32, esz: Int32) {
+    let len = Int32(load64(hdr + 8))
+    let cap = Int32(load64(hdr + 16))
+    if len + 1 <= cap {
+        return
+    }
+    let mut nc: Int32 = 4
+    if cap != 0 {
+        nc = cap * 2
+    }
+    let ks = mapKeyStride(kind, klen)
+    // In 64 bits: the product may not fit 32; `malloc` judges it.
+    let nk = malloc(Int64(nc) * Int64(ks))
+    let ok = Int32(load32(hdr))
+    copy(nk, ok, len * ks)
+    free(ok)
+    store32(hdr, UInt32(nk))
+    let nv = malloc(Int64(nc) * Int64(esz))
+    let ov = Int32(load32(hdr + 4))
+    copy(nv, ov, len * esz)
+    free(ov)
+    store32(hdr + 4, UInt32(nv))
+    store64(hdr + 16, UInt64(Int64(nc)))
+    let ni = malloc(Int64(nc) * 16)
+    free(Int32(load32(hdr + 24)))
+    store32(hdr + 24, UInt32(ni))
+    mapReindex(kind, klen, nk, len, ni, nc * 2)
+}
+
+/// `map_remove_at`: shifts the survivors after position `i` down in both
+/// columns, keeping insertion order, then rebuilds the index. The emitter
+/// releases the entry's key and value first.
+export fn mapRemoveAt(kind: Int32, klen: Int32, hdr: Int32, esz: Int32, i: Int32) {
+    let len = Int32(load64(hdr + 8))
+    let rest = len - i - 1
+    let ks = mapKeyStride(kind, klen)
+    let kb = Int32(load32(hdr)) + i * ks
+    copy(kb, kb + ks, rest * ks)
+    let vb = Int32(load32(hdr + 4)) + i * esz
+    copy(vb, vb + esz, rest * esz)
+    store64(hdr + 8, UInt64(Int64(len - 1)))
+    mapReindex(kind, klen, Int32(load32(hdr)), len - 1, Int32(load32(hdr + 24)), Int32(load64(hdr + 16)) * 2)
+}
+
+/// `map_keys_copy`: the key column copied into a buffer of its own. An empty
+/// map still gets a buffer, so an `Array`'s pointer is never null. The emitter
+/// dups String keys afterwards.
+export fn mapKeysCopy(kind: Int32, klen: Int32, hdr: Int32) -> Int32 {
+    let len = Int32(load64(hdr + 8))
+    let ks = mapKeyStride(kind, klen)
+    let buf = malloc(Int64(UInt32((len + 1) * ks)))
+    copy(buf, Int32(load32(hdr)), len * ks)
+    return buf
+}
+
+// Arrays. An `Array<T>` is a 24-byte triple `{ data, len, cap }`: the buffer's
+// address at 0, `Int64` counts at 8 and 16. The emitter passes the element
+// stride (size rounded to alignment); `malloc` blocks are eight-aligned and no
+// element aligns coarser. `append` and `copyFrom` take only heapless elements,
+// so one `copy` moves any number.
+//
+// Each function reads all of the triple at `src` before it writes the rebuilt
+// one at `dst`; the two may be one address. `xs.push(v)` is
+// `xs = @push(xs, v)`, so the write-back is the assignment.
+//
+// Growth is `malloc`, `copy`, `free`. `push` doubles from four; `append` grows
+// to the larger of double and the need; `reserve` and `copyFrom` grow to
+// exactly the need. Products are 64-bit and `malloc` judges them, so doubling
+// a 2 GiB buffer traps `out of memory` (`tests/parity.rs`). `a[i]`'s bounds
+// check stays at its site.
+
+/// `push` without the element: the triple at `dst` with `len + 1`, and the
+/// buffer the growth replaced, or 0. The emitter stores the element, then frees
+/// that buffer: the element expression may read the old buffer through the
+/// caller's header (`std/hash` reads `w[t - 3]` inside `w.push(..)`).
+export fn arrPush(dst: Int32, src: Int32, stride: Int32) -> Int32 {
+    let mut data = Int32(load32(src))
+    let len = Int64(load64(src + 8))
+    let mut cap = Int64(load64(src + 16))
+    let mut stale: Int32 = 0
+    if len == cap {
+        if cap == 0 {
+            cap = 4
+        } else {
+            cap = cap * 2
+        }
+        let grown = malloc(cap * Int64(stride))
+        copy(grown, data, Int32(len) * stride)
+        stale = data
+        data = grown
+    }
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(len + 1))
+    store64(dst + 16, UInt64(cap))
+    return stale
+}
+
+/// `push` on the `SmallArray<T, n>` whose header is at `hdr`, all but the
+/// element: at `len == cap` the live buffer moves to one of twice the capacity.
+/// `inl` is the inline slots' offset in the header. It never moves back inline,
+/// so a `pop` below `n` stays on the heap. Returns the heap buffer the growth
+/// left, or 0 when nothing grew or the elements were inline.
+export fn saPush(hdr: Int32, stride: Int32, n: Int64, inl: Int32) -> Int32 {
+    let len = Int64(load64(hdr))
+    let cap = Int64(load64(hdr + 8))
+    let mut stale: Int32 = 0
+    if len == cap {
+        let mut base = hdr + inl
+        if cap != n {
+            base = Int32(load32(hdr + 16))
+            stale = base
+        }
+        let grown = malloc(cap * 2 * Int64(stride))
+        copy(grown, base, Int32(len) * stride)
+        store32(hdr + 16, UInt32(grown))
+        store64(hdr + 8, UInt64(cap * 2))
+    }
+    store64(hdr, UInt64(len + 1))
+    return stale
+}
+
+/// `reserve`: room for `n` more elements, grown once to exactly `len + n`.
+export fn arrReserve(dst: Int32, src: Int32, stride: Int32, n: Int64) {
+    let mut data = Int32(load32(src))
+    let len = Int64(load64(src + 8))
+    let mut cap = Int64(load64(src + 16))
+    let need = len + n
+    if need > cap {
+        let grown = malloc(need * Int64(stride))
+        copy(grown, data, Int32(len) * stride)
+        free(data)
+        data = grown
+        cap = need
+    }
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(len))
+    store64(dst + 16, UInt64(cap))
+}
+
+/// `append`: the elements of the array at `xs` after the receiver's; one growth
+/// to the larger of `cap * 2` and the need. A self-append's source is
+/// retargeted to the grown buffer before the old one is freed.
+export fn arrAppend(dst: Int32, src: Int32, stride: Int32, xs: Int32) {
+    let mut data = Int32(load32(src))
+    let len = Int64(load64(src + 8))
+    let mut cap = Int64(load64(src + 16))
+    let mut xdata = Int32(load32(xs))
+    let xlen = Int64(load64(xs + 8))
+    let need = len + xlen
+    if need > cap {
+        let mut nc = cap * 2
+        if nc < need {
+            nc = need
+        }
+        let grown = malloc(nc * Int64(stride))
+        copy(grown, data, Int32(len) * stride)
+        if xdata == data {
+            xdata = grown
+        }
+        free(data)
+        data = grown
+        cap = nc
+    }
+    copy(data + Int32(len) * stride, xdata, Int32(xlen) * stride)
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(need))
+    store64(dst + 16, UInt64(cap))
+}
+
+/// `copyFrom`: the receiver's buffer refilled with the elements at `xs`. Grows
+/// without copying the dead contents; a self-copy moves nothing.
+export fn arrCopyFrom(dst: Int32, src: Int32, stride: Int32, xs: Int32) {
+    let mut data = Int32(load32(src))
+    let mut cap = Int64(load64(src + 16))
+    let xdata = Int32(load32(xs))
+    let xlen = Int64(load64(xs + 8))
+    if xlen > cap {
+        let grown = malloc(xlen * Int64(stride))
+        free(data)
+        data = grown
+        cap = xlen
+    }
+    if xdata != data {
+        copy(data, xdata, Int32(xlen) * stride)
+    }
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(xlen))
+    store64(dst + 16, UInt64(cap))
+}
+
+/// `clear`: the triple with its length zeroed; buffer and capacity are kept
+/// for the next fill.
+export fn arrClear(dst: Int32, src: Int32) {
+    copy(dst, src, 24)
+    store64(dst + 8, 0)
+}
+
+/// `bytes(s, from, to)`: the string's bytes `from..to`, copied into a fresh
+/// `Array<UInt8>` whose triple is written at `dst`. A range outside the string
+/// traps with the trap table's row `rule`, at the low offset when it is negative
+/// or out of order and at the high one otherwise. An empty copy still gets a
+/// buffer, so the triple's pointer is never null.
+export fn bytesOf(dst: Int32, s: Int32, from: Int64, to: Int64, rule: Int32, table: Int32) {
+    if from < 0 || to < from {
+        trapAt(rule, from, table)
+    }
+    if to > Int64(load32(s - 8)) {
+        trapAt(rule, to, table)
+    }
+    let n = to - from
+    store32(dst, UInt32(malloc(n + 1)))
+    copy(Int32(load32(dst)), s + Int32(from), Int32(n))
+    store64(dst + 8, UInt64(n))
+    store64(dst + 16, UInt64(n))
+}
+
+// I/O, over the host imports `std/mem` declares. The `@.io.*` wording is never
+// spelled here: the emitter interns each message's halves from `trap.rs`'s
+// `io_message_parts` and passes them in. A `dest` is the caller's slot for an
+// aggregate the emitter reads back.
+//
+// State that outlives a call, and scratch a host import writes through, lives
+// in cells after the allocator's 480 bytes; this module has no module state
+// (an initializer running after a top-level `let` printed would reset the
+// buffer). Offsets from `heapBase()`, all zeroed by the engine:
+//
+//   480    stdout buffer, 4,096 bytes    `writeAll` gathers fd 1 here
+//   4576   stdout position
+//   4580   stdin buffer, 4,096 bytes     `getByte` scatters fd 0 from here
+//   8676   stdin length                  what the last `fd_read` returned
+//   8680   stdin position                the next byte
+//   8684   the length a slurp hands back (`readAll`, `slurpGen`, `readdirBlob`)
+//   8688   the status a `genRead` answered
+//   8692   one byte: the newline `printStr` writes
+//   8696   32 bytes of scratch for the host imports' out-parameters
+//   8728   the fixed clock's monotonic counter, an `Int64`
+//   8736   32 bytes of digits, written backwards (`digitsAt`)
+//   8768   the allocator's first block
+//
+// One host call is in flight at a time, so the scratch is never shared. Both
+// buffers save a syscall per byte or line (reverse-complement, fasta).
+//
+// Rights and flags are the preview1 witx's: `right::fd_read` 2,
+// `right::fd_sync` 16, `right::fd_write` 64, `right::fd_readdir` 16384;
+// `oflags::creat | trunc` 9, `oflags::directory` 2;
+// `lookupflags::symlink_follow` 1; `filetype::directory` 3; `errno::xdev` 75,
+// not POSIX's 18. A `dirent` is a 24-byte header (`d_next: u64, d_ino: u64,
+// d_namlen: u32, d_type: u8`, three bytes of padding), then the name.
+
+/// Writes `n` bytes at `p` to `fd` in as many `fd_write`s as it takes. Zero
+/// when every byte went; else the errno, or 1 for a write that moved nothing.
+fn drain(fd: Int32, p: Int32, n: Int32) -> Int32 {
+    let iov = heapBase() + 8696
+    let mut q = p
+    let mut left = n
+    while left != 0 {
+        store32(iov, UInt32(q))
+        store32(iov + 4, UInt32(left))
+        let e = fdWrite(fd, iov, 1, iov + 8)
+        if e != 0 {
+            return e
+        }
+        let w = Int32(load32(iov + 8))
+        if w == 0 {
+            return 1
+        }
+        q = q + w
+        left = left - w
+    }
+    return 0
+}
+
+/// `write_all`: the one place bytes leave a program. Zero when every byte
+/// arrived, non-zero when `drain` gave up. A write to fd 1 that fits the buffer
+/// is gathered; any other write flushes the buffer first, so order holds
+/// against stderr and files. A trap writes fd 2 before exiting, which flushes;
+/// `_start` flushes with a zero-length write to fd 2.
+export fn writeAll(fd: Int32, p: Int32, n: Int32) -> Int32 {
+    let base = heapBase()
+    let buffered = fd == 1 && UInt32(n) < 4096
+    let mut st: Int32 = 0
+    let pos = Int32(load32(base + 4576))
+    if pos != 0 && (!buffered || UInt32(pos + n) > 4096) {
+        store32(base + 4576, 0)
+        st = drain(1, base + 480, pos)
+    }
+    if buffered {
+        let at = Int32(load32(base + 4576))
+        copy(base + 480 + at, p, n)
+        store32(base + 4576, UInt32(at + n))
+    } else {
+        let s2 = drain(fd, p, n)
+        if s2 != 0 {
+            st = s2
+        }
+    }
+    return st
+}
+
+/// `print_str`: the bytes, then a newline.
+export fn printStr(s: Int32) {
+    let base = heapBase()
+    writeAll(1, s, Int32(load32(s - 8)))
+    store8(base + 8692, '\n')
+    writeAll(1, base + 8692, 1)
+}
+
+/// `env_get`: the value of the entry `key` names (`key` ends in its own `=`),
+/// or 0.
+///
+/// The environment is read once and held for the process's life, because
+/// answers point into it and a clock read in a loop would otherwise grow the
+/// heap until `malloc` traps. The pointer array and count live in the dead
+/// class heads at +4 and +8; zero means not read yet. A failing
+/// `environ_sizes_get` caches nothing.
+export fn envGet(key: Int32) -> Int32 {
+    let base = heapBase()
+    if load32(base + 4) == 0 {
+        let sc = base + 8696
+        store32(sc, 0)
+        store32(sc + 4, 0)
+        if environSizesGet(sc, sc + 4) != 0 {
+            return 0
+        }
+        let n = Int32(load32(sc))
+        let pa = malloc(Int64((n << 2) + 8))
+        let blob = malloc(Int64(Int32(load32(sc + 4)) + 1))
+        auditForget(pa)
+        auditForget(blob)
+        environGet(pa, blob)
+        store32(base + 4, UInt32(pa))
+        store32(base + 8, UInt32(n))
+    }
+    let ptrs = Int32(load32(base + 4))
+    let cnt = Int32(load32(base + 8))
+    let mut i: Int32 = 0
+    while UInt32(i) < UInt32(cnt) {
+        let e = Int32(load32(ptrs + (i << 2)))
+        if starts(e, key) {
+            return e + strLen(key)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// The injected value `key` names when set and non-empty, else 0; an empty
+/// value falls through to the real host.
+fn injected(key: Int32) -> Int32 {
+    let e = envGet(key)
+    if e != 0 && load8(e) != 0 {
+        return e
+    }
+    return 0
+}
+
+/// `now_millis`: epoch milliseconds, or `VYRN_FIXED_TIME` when set. A failing
+/// clock reads 0.
+export fn nowMillis(fixedTime: Int32) -> Int64 {
+    let e = injected(fixedTime)
+    if e != 0 {
+        return strI64(e)
+    }
+    let out = heapBase() + 8696
+    if clockTimeGet(0, 1000000, out) != 0 {
+        return 0
+    }
+    return Int64(load64(out) / 1000000)
+}
+
+/// `mono_nanos`: monotonic nanoseconds. Under a fixed clock, the interpreter's
+/// `1e9 + n * 1e6` for the n-th call, so engines agree byte for byte.
+export fn monoNanos(fixedTime: Int32) -> Int64 {
+    let base = heapBase()
+    if injected(fixedTime) != 0 {
+        let n = Int64(load64(base + 8728))
+        store64(base + 8728, UInt64(n + 1))
+        return n * 1000000 + 1000000000
+    }
+    let out = base + 8696
+    clockTimeGet(1, 1000, out)
+    return Int64(load64(out))
+}
+
+/// `random_seed`: eight CSPRNG bytes as an `Int64`, or `VYRN_FIXED_SEED`.
+/// Zeroed first, so a failed `random_get` reads 0.
+export fn randomSeedV(fixedSeed: Int32) -> Int64 {
+    let e = injected(fixedSeed)
+    if e != 0 {
+        return strI64(e)
+    }
+    let out = heapBase() + 8696
+    store64(out, 0)
+    randomGet(out, 8)
+    return Int64(load64(out))
+}
+
+/// `args`: `argv[1..]` as the `Array<String>` triple written through `dest`.
+/// WASI's contiguous pointer array becomes the buffer; each element is copied
+/// into its own String, ascending from `argv[1]` into slot 0, so each slot is
+/// read before it is overwritten. The host's blob is freed; the copies are
+/// never freed. Two words of slack keep the pointer block non-empty.
+fn argsAt(dest: Int32) {
+    let sc = heapBase() + 8696
+    store32(sc, 0)
+    store32(sc + 4, 0)
+    argsSizesGet(sc, sc + 4)
+    let cnt = Int32(load32(sc))
+    let ptrs = malloc(Int64((cnt << 2) + 8))
+    let blob = malloc(Int64(Int32(load32(sc + 4)) + 1))
+    argsGet(ptrs, blob)
+    let mut i: Int32 = 1
+    while UInt32(i) < UInt32(cnt) {
+        let e = Int32(load32(ptrs + (i << 2)))
+        let n = strLen(e)
+        let c = strNew(n, n)
+        copy(c, e, n)
+        store32(ptrs + ((i - 1) << 2), UInt32(c))
+        i = i + 1
+    }
+    free(blob)
+    let mut n: Int32 = 0
+    if UInt32(cnt) > 1 {
+        n = cnt - 1
+    }
+    store32(dest, UInt32(ptrs))
+    store64(dest + 8, UInt64(Int64(n)))
+    store64(dest + 16, UInt64(Int64(n)))
+}
+
+/// `args()`: `argsAt` writes the triple over the empty one.
+export fn argsV() -> Array<String> {
+    let a: Array<String> = []
+    argsAt(addr(a))
+    return a
+}
+
+/// `getbyte`: one byte of stdin, or -1 at EOF and on any error. `fd_read`
+/// refills 4,096 bytes when the buffer is spent; the initial zero state reads
+/// as spent.
+export fn getByte() -> Int32 {
+    let base = heapBase()
+    let mut pos = Int32(load32(base + 8680))
+    if UInt32(pos) >= UInt32(load32(base + 8676)) {
+        let iov = base + 8696
+        store32(iov, UInt32(base + 4580))
+        store32(iov + 4, 4096)
+        store32(iov + 8, 0)
+        // An error and an empty read both answer EOF, and neither may leave
+        // the buffer looking full.
+        if fdRead(0, iov, 1, iov + 8) != 0 {
+            return -1
+        }
+        let got = Int32(load32(iov + 8))
+        if got == 0 {
+            return -1
+        }
+        store32(base + 8676, UInt32(got))
+        pos = 0
+    }
+    store32(base + 8680, UInt32(pos + 1))
+    return Int32(load8(base + 4580 + pos))
+}
+
+/// `read_line`: `readLine()`. `None` at EOF, for a line with a NUL byte, and
+/// for one that is not UTF-8 by `utf8Table`. The buffer starts at 64
+/// and doubles at `len + 2`, leaving room for the terminator. A trailing
+/// `\r` goes with the `\n`, so Windows and POSIX pipes read alike. The
+/// payload is the buffer, adopted as the String.
+export fn readLineV() -> Option<String> {
+    let mut c = getByte()
+    if c < 0 {
+        return None
+    }
+    let mut cap: Int32 = 64
+    let mut buf = strNew(0, cap)
+    let mut len: Int32 = 0
+    let mut nul = false
+    while c >= 0 && c != '\n' {
+        if c == 0 {
+            nul = true
+        }
+        if UInt32(len + 2) >= UInt32(cap) {
+            cap = cap << 1
+            let nb = strNew(0, cap)
+            copy(nb, buf, len)
+            free(buf - 8)
+            buf = nb
+        }
+        store8(buf + len, UInt8(c))
+        len = len + 1
+        c = getByte()
+    }
+    if len != 0 && load8(buf + len - 1) == '\r' {
+        len = len - 1
+    }
+    store8(buf + len, 0)
+    store32(buf - 8, UInt32(len))
+    if nul || !utf8Valid(buf, len, utf8Table()) {
+        free(buf - 8)
+        return None
+    }
+    return Some(adopt(buf))
+}
+
+/// `open_at`: a descriptor for `path`, or -1. WASI resolves every path under a
+/// preopened directory, so the preopens are tried from fd 3 until
+/// `fd_prestat_get` fails; the first that resolves the path wins. With no
+/// preopens (a browser) every path gives -1.
+///
+/// ponytail: no prefix matching against the preopens' names, so an absolute
+/// guest path opens only under a preopen mounted at `/`.
+export fn openAt(path: Int32, oflags: Int32, rights: Int64) -> Int32 {
+    let plen = strLen(path)
+    let sc = heapBase() + 8696
+    let mut fd: Int32 = 3
+    while fdPrestatGet(fd, sc) == 0 {
+        if pathOpen(fd, 1, path, plen, oflags, rights, 0, 0, sc + 8) == 0 {
+            return Int32(load32(sc + 8))
+        }
+        fd = fd + 1
+    }
+    return -1
+}
+
+/// `read_all`: the whole descriptor into one NUL-terminated buffer, its length
+/// in the cell at 8684; 0 on a read error, the buffer freed. A read loop, so a
+/// pipe reads like a file; 1,024 bytes, then doubling. `hdr` bytes are left in
+/// front of the returned pointer: 8 for a `String` header, 0 for an
+/// `Array<UInt8>`.
+fn readAll(fd: Int32, hdr: Int32) -> Int32 {
+    let base = heapBase()
+    let iov = base + 8696
+    let mut cap: Int32 = 1024
+    let mut buf = malloc(Int64(UInt32(cap + hdr))) + hdr
+    let mut len: Int32 = 0
+    while true {
+        if UInt32(len + 1) >= UInt32(cap) {
+            cap = cap << 1
+            let nb = malloc(Int64(UInt32(cap + hdr))) + hdr
+            copy(nb, buf, len)
+            free(buf - hdr)
+            buf = nb
+        }
+        store32(iov, UInt32(buf + len))
+        store32(iov + 4, UInt32(cap - len - 1))
+        store32(iov + 8, 0)
+        if fdRead(fd, iov, 1, iov + 8) != 0 {
+            free(buf - hdr)
+            return 0
+        }
+        let got = Int32(load32(iov + 8))
+        if got == 0 {
+            break
+        }
+        len = len + got
+    }
+    store8(buf + len, 0)
+    store32(base + 8684, UInt32(len))
+    return buf
+}
+
+/// `err3`: one I/O message with the path between the two interned halves, as a
+/// fresh String the `Err` owns.
+fn err3(pre: Int32, mid: Int32, post: Int32) -> Int32 {
+    let t = strConcat(pre, mid)
+    let r = strConcat(t, post)
+    free(t - 8)
+    return r
+}
+
+/// `trap.rs`'s I/O wording `k` about `path`, as a fresh String. `k` is the
+/// wording's position among the `IO` entries with a `%s`, which is the order
+/// `ioTable` lays them out in: 0 readerr, 1 writeerr, 2 utf8err, 3 listerr,
+/// 4 nulerr, 5 xdeverr.
+fn ioErr(k: Int32, path: Int32) -> Int64 {
+    let t = ioTable() + (k << 3)
+    return Int64(UInt32(err3(Int32(load32(t)), path, Int32(load32(t + 4)))))
+}
+
+/// Opens and slurps `path`: the buffer with `hdr` bytes in front, its length at
+/// 8684, or 0 when the open or the read failed.
+fn slurpFile(path: Int32, hdr: Int32) -> Int32 {
+    let fd = openAt(path, 0, 2)
+    if fd < 0 {
+        return 0
+    }
+    let buf = readAll(fd, hdr)
+    fdClose(fd)
+    return buf
+}
+
+/// The slurp under a generation: `genRead` answers `(status << 32) | len` and
+/// stashes the bytes, and `genFetch` copies them into a buffer allocated here,
+/// because the host must not allocate in guest memory. The status goes to 8688
+/// (0 ok, 1 io, 3 an embedded NUL in a String read), the length to 8684. A
+/// String answer gets a header from `strNew`; bytes and a listing get a NUL.
+fn slurpGen(path: Int32, mode: Int32, asString: Bool) -> Int32 {
+    let base = heapBase()
+    let packed = UInt64(genRead(path, mode))
+    let st = Int32(packed >> 32)
+    store32(base + 8688, UInt32(st))
+    if st != 0 {
+        return 0
+    }
+    let len = Int32(packed)
+    store32(base + 8684, UInt32(len))
+    if asString {
+        let s = strNew(len, len)
+        genFetch(s)
+        return s
+    }
+    // The NUL is added in 64 bits, so a 4 GiB answer traps out of memory.
+    let buf = malloc(Int64(UInt32(len)) + 1)
+    genFetch(buf)
+    store8(buf + len, 0)
+    return buf
+}
+
+/// The message for a generation's read failure: the NUL wording for status 3,
+/// the caller's for the rest.
+fn genErr(path: Int32) -> Int64 {
+    if Int32(load32(heapBase() + 8688)) == 3 {
+        return ioErr(4, path)
+    }
+    return ioErr(0, path)
+}
+
+/// `readFile` after the slurp: the NUL scan before the UTF-8 check, with its
+/// own wording, because a NUL-terminated `String` cannot hold a NUL. The buffer
+/// is freed on either failure.
+fn readFileFrom(path: Int32, buf: Int32, len: Int32) -> Result<Int64, Int64> {
+    let mut i: Int32 = 0
+    while UInt32(i) < UInt32(len) {
+        if load8(buf + i) == 0 {
+            free(buf - 8)
+            return Err(ioErr(4, path))
+        }
+        i = i + 1
+    }
+    if !utf8Valid(buf, len, utf8Table()) {
+        free(buf - 8)
+        return Err(ioErr(2, path))
+    }
+    return Ok(Int64(UInt32(buf)))
+}
+
+/// `read_file`: `readFile` as a `Result<String, String>`. Fills the header
+/// `readAll` left room for, with `cap == len`.
+fn readFileAt(path: Int32) -> Result<Int64, Int64> {
+    let buf = slurpFile(path, 8)
+    if buf == 0 {
+        return Err(ioErr(0, path))
+    }
+    let len = Int32(load32(heapBase() + 8684))
+    store32(buf - 8, UInt32(len))
+    store32(buf - 4, UInt32(len))
+    return readFileFrom(path, buf, len)
+}
+
+/// `readFileAt` under a generation, in the host's String read mode, 0
+/// (`vyrn-genwasm`'s `MODE_READ`).
+fn readFileGenAt(path: Int32) -> Result<Int64, Int64> {
+    let buf = slurpGen(path, 0, true)
+    if buf == 0 {
+        return Err(genErr(path))
+    }
+    let len = Int32(load32(heapBase() + 8684))
+    return readFileFrom(path, buf, len)
+}
+
+/// An `Array<UInt8>` of `len` bytes at `buf` as an `Ok`: the triple is boxed,
+/// because a sum's payload is one word.
+fn bytesBox(buf: Int32, len: Int32) -> Result<Int64, Int64> {
+    let boxed = malloc(24)
+    store32(boxed, UInt32(buf))
+    store64(boxed + 8, UInt64(UInt32(len)))
+    store64(boxed + 16, UInt64(UInt32(len)))
+    return Ok(Int64(UInt32(boxed)))
+}
+
+/// `read_file_bytes`: the slurp without the NUL or UTF-8 rule.
+fn readFileBytesAt(path: Int32) -> Result<Int64, Int64> {
+    let buf = slurpFile(path, 0)
+    if buf == 0 {
+        return Err(ioErr(0, path))
+    }
+    return bytesBox(buf, Int32(load32(heapBase() + 8684)))
+}
+
+/// `readFileBytesAt` under a generation, in the host's byte mode, 1. The host
+/// never answers status 3 for a byte read.
+fn readFileBytesGenAt(path: Int32) -> Result<Int64, Int64> {
+    let buf = slurpGen(path, 1, false)
+    if buf == 0 {
+        return Err(genErr(path))
+    }
+    return bytesBox(buf, Int32(load32(heapBase() + 8684)))
+}
+
+/// `write_file_bytes`: the only file writer. Creates or truncates
+/// and writes every byte; `Ok` carries 1 (`true`). The open, the write and the
+/// close share one message. The descriptor is closed on every path, and a
+/// failed close fails the write.
+fn writeBytesAt(path: Int32, p: Int32, n: Int32) -> Result<Int64, Int64> {
+    let fd = openAt(path, 9, 64)
+    if fd < 0 {
+        return Err(ioErr(1, path))
+    }
+    let wst = writeAll(fd, p, n)
+    if (fdClose(fd) | wst) != 0 {
+        return Err(ioErr(1, path))
+    }
+    return Ok(1)
+}
+
+/// `writeFileBytes`: the triple's data pointer and length.
+export fn writeFileBytesV(path: String, b: Array<UInt8>) -> Result<Bool, String> {
+    let h = addr(b)
+    return adopt(writeBytesAt(addr(path), Int32(load32(h)), Int32(load64(h + 8))))
+}
+
+/// `write_file`: a String never holds a NUL, so `strLen` is its whole length.
+export fn writeFileV(path: String, s: String) -> Result<Bool, String> {
+    return adopt(writeBytesAt(addr(path), addr(s), strLen(addr(s))))
+}
+
+/// `writeStdout(bytes)`: `print` for bytes, through the same buffered writer.
+/// Its status is dropped, as `print` drops it.
+export fn writeStdoutV(b: Array<UInt8>) {
+    let h = addr(b)
+    writeAll(1, Int32(load32(h)), Int32(load64(h + 8)))
+}
+
+/// `rename_file`: the atomic overwrite, as a `Result<Bool, String>`.
+/// Walks the preopens as `openAt` does, both paths under one descriptor.
+/// `errno::xdev` gives `@.io.xdeverr`, any other failure `@.io.writeerr`, both
+/// about the target. A failure is remembered, since a later preopen may still
+/// succeed; no preopen at all is an io failure.
+fn renameAt(from: Int32, to: Int32) -> Result<Int64, Int64> {
+    let flen = strLen(from)
+    let tlen = strLen(to)
+    let sc = heapBase() + 8696
+    let mut fd: Int32 = 3
+    let mut xdev = false
+    while fdPrestatGet(fd, sc) == 0 {
+        let e = pathRename(fd, from, flen, fd, to, tlen)
+        if e == 0 {
+            return Ok(1)
+        }
+        if e == 75 {
+            xdev = true
+        }
+        fd = fd + 1
+    }
+    if xdev {
+        return Err(ioErr(5, to))
+    }
+    return Err(ioErr(1, to))
+}
+
+/// `fsync_file`: the durability step: open, sync, close. The open asks
+/// for write and sync rights (without sync a host may refuse `ENOTCAPABLE`)
+/// and no oflags, so it neither creates nor truncates. Every failure is
+/// `@.io.writeerr` about the path.
+fn fsyncAt(path: Int32) -> Result<Int64, Int64> {
+    let fd = openAt(path, 0, 80)
+    if fd < 0 {
+        return Err(ioErr(1, path))
+    }
+    let st = fdSync(fd)
+    if (fdClose(fd) | st) != 0 {
+        return Err(ioErr(1, path))
+    }
+    return Ok(1)
+}
+
+/// `readdir_blob`: the directory's entry names joined with `\n`,
+/// NUL-terminated, in a fresh block with its length at 8684; or 0 when the
+/// directory cannot be read. The encoding is the generator host's, so
+/// `splitNames` takes either. `.` and `..` are dropped; with `kinds` a
+/// directory's name gets a `/`. The order is the host's.
+///
+/// `fd_readdir` fills the buffer with as many entries as fit and may cut the
+/// last; asking again from its predecessor's `d_next` cookie re-reads it. A
+/// fill shorter than the buffer is the end.
+///
+/// ponytail: a 4 KiB read buffer, so a name longer than that re-reads
+/// forever; NAME_MAX is 255.
+fn readdirBlob(path: Int32, kinds: Bool) -> Int32 {
+    let base = heapBase()
+    let fd = openAt(path, 2, 16384)
+    if fd < 0 {
+        return 0
+    }
+    let mut cap: Int32 = 1024
+    let mut buf = malloc(Int64(cap))
+    let rb = malloc(4096)
+    let mut len: Int32 = 0
+    let mut cookie: Int64 = 0
+    let usedAt = base + 8696
+    while true {
+        if fdReaddir(fd, rb, 4096, cookie, usedAt) != 0 {
+            free(buf)
+            buf = 0
+            break
+        }
+        let used = Int32(load32(usedAt))
+        let mut off: Int32 = 0
+        while UInt32(off + 24) <= UInt32(used) {
+            let ent = rb + off
+            let namlen = Int32(load32(ent + 16))
+            if UInt32(namlen + off + 24) > UInt32(used) {
+                break
+            }
+            cookie = Int64(load64(ent))
+            let dtype = load8(ent + 20)
+            let name = ent + 24
+            // `.` and `..`: a name of one or two bytes that are all `.`.
+            let dot = UInt32(namlen) <= 2 && load8(name) == '.' && load8(name + namlen - 1) == '.'
+            if !dot {
+                // Room for the name, a `/`, the `\n` and the NUL.
+                let need = namlen + 3 + len
+                if UInt32(need) > UInt32(cap) {
+                    cap = cap << 1
+                    if UInt32(cap) <= UInt32(need) {
+                        cap = need
+                    }
+                    let nb = malloc(Int64(UInt32(cap)))
+                    copy(nb, buf, len)
+                    free(buf)
+                    buf = nb
+                }
+                copy(buf + len, name, namlen)
+                len = len + namlen
+                if kinds && dtype == 3 {
+                    store8(buf + len, '/')
+                    len = len + 1
+                }
+                store8(buf + len, '\n')
+                len = len + 1
+            }
+            off = off + 24 + namlen
+        }
+        if UInt32(used) < 4096 {
+            break
+        }
+    }
+    fdClose(fd)
+    free(rb)
+    if buf == 0 {
+        return 0
+    }
+    // The last `\n` is a separator with nothing after it.
+    if len != 0 {
+        len = len - 1
+    }
+    store8(buf + len, 0)
+    store32(base + 8684, UInt32(len))
+    return buf
+}
+
+fn strCopy(p: Int32, n: Int32) -> Int32 {
+    let s = strNew(n, n)
+    copy(s, p, n)
+    return s
+}
+
+/// Splits a `\n`-joined listing of `len` bytes at `buf` into an
+/// `Array<String>`, boxed as an `Ok`. A name cannot contain a newline. An empty
+/// listing is `[]`, not `[""]`, and still gets a buffer. Each name is copied
+/// out, because its String header needs room in front; the blob is freed.
+/// `sort` sorts by `strCmp`, as the interpreter sorts; the generator host
+/// sorts before joining.
+///
+/// ponytail: insertion sort, quadratic in the listing's length.
+fn splitNames(buf: Int32, len: Int32, sort: Bool) -> Result<Int64, Int64> {
+    let mut n: Int32 = 0
+    let mut i: Int32 = 0
+    while UInt32(i) < UInt32(len) {
+        if load8(buf + i) == '\n' {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if len != 0 {
+        n = n + 1
+    }
+    let mut room = n
+    if room == 0 {
+        room = 1
+    }
+    let names = malloc(Int64(room) * 4)
+    let mut start = buf
+    let mut k: Int32 = 0
+    i = 0
+    while UInt32(i) < UInt32(len) {
+        if load8(buf + i) == '\n' {
+            store32(names + (k << 2), UInt32(strCopy(start, buf + i - start)))
+            k = k + 1
+            start = buf + i + 1
+        }
+        i = i + 1
+    }
+    if len != 0 {
+        store32(names + (k << 2), UInt32(strCopy(start, buf + len - start)))
+    }
+    if sort {
+        i = 1
+        while UInt32(i) < UInt32(n) {
+            let own = Int32(load32(names + (i << 2)))
+            k = i
+            while k != 0 {
+                let prev = Int32(load32(names + ((k - 1) << 2)))
+                if strCmp(prev, own) <= 0 {
+                    break
+                }
+                store32(names + (k << 2), UInt32(prev))
+                k = k - 1
+            }
+            store32(names + (k << 2), UInt32(own))
+            i = i + 1
+        }
+    }
+    free(buf)
+    let boxed = malloc(24)
+    store32(boxed, UInt32(names))
+    store64(boxed + 8, UInt64(UInt32(n)))
+    store64(boxed + 16, UInt64(UInt32(n)))
+    return Ok(Int64(UInt32(boxed)))
+}
+
+/// `list_dir`: `listDir` and `listDirKinds`, sorted.
+fn listDirAt(path: Int32, kinds: Bool) -> Result<Int64, Int64> {
+    let buf = readdirBlob(path, kinds)
+    if buf == 0 {
+        return Err(ioErr(3, path))
+    }
+    return splitNames(buf, Int32(load32(heapBase() + 8684)), true)
+}
+
+/// `listDirV` under a generation: the listing comes sorted and recorded from
+/// the loader's resolver through `genRead`, in the interpreter's encoding, so
+/// either engine invalidates the same cache entry. `mode` is `vyrn-genwasm`'s
+/// `MODE_LIST` 2 or `MODE_LIST_KINDS` 4; the host appends the kind `/` before
+/// joining.
+fn listDirGenAt(path: Int32, mode: Int32) -> Result<Int64, Int64> {
+    let buf = slurpGen(path, mode, false)
+    if buf == 0 {
+        return Err(ioErr(3, path))
+    }
+    return splitNames(buf, Int32(load32(heapBase() + 8684)), false)
+}
+
+// The I/O builtins' typed faces: `loader::RT_MODULES` routes each call here,
+// and `loader::GEN_ROUTES` a generator host's. Each hands its operands'
+// addresses to the untyped body and adopts the value that body built.
+
+export fn readFileV(path: String) -> Result<String, String> {
+    return adopt(readFileAt(addr(path)))
+}
+
+export fn readFileGenV(path: String) -> Result<String, String> {
+    return adopt(readFileGenAt(addr(path)))
+}
+
+export fn readFileBytesV(path: String) -> Result<Array<UInt8>, String> {
+    return adopt(readFileBytesAt(addr(path)))
+}
+
+export fn readFileBytesGenV(path: String) -> Result<Array<UInt8>, String> {
+    return adopt(readFileBytesGenAt(addr(path)))
+}
+
+export fn renameFileV(from: String, to: String) -> Result<Bool, String> {
+    return adopt(renameAt(addr(from), addr(to)))
+}
+
+export fn fsyncFileV(path: String) -> Result<Bool, String> {
+    return adopt(fsyncAt(addr(path)))
+}
+
+export fn listDirV(path: String) -> Result<Array<String>, String> {
+    return adopt(listDirAt(addr(path), false))
+}
+
+export fn listDirKindsV(path: String) -> Result<Array<String>, String> {
+    return adopt(listDirAt(addr(path), true))
+}
+
+export fn listDirGenV(path: String) -> Result<Array<String>, String> {
+    return adopt(listDirGenAt(addr(path), 2))
+}
+
+export fn listDirKindsGenV(path: String) -> Result<Array<String>, String> {
+    return adopt(listDirGenAt(addr(path), 4))
+}
+
+// Traps and the printer. Parity compares stderr, so every `error:` line in
+// the corpus tests these. A trap writes through `writeAll`, so the stdout
+// buffer is flushed first; `std/mem`'s `trap` is that write and
+// `proc_exit(1)`, and does not return.
+
+/// Writes the decimal digits of `v` backwards from `buf + end` and returns the
+/// address of the first. No allocation: a trap must not need the heap to say
+/// why it trapped. The magnitude is taken in `UInt64`, so `Int64.min` prints;
+/// an unsigned value prints its magnitude.
+fn digitsAt(buf: Int32, end: Int32, v: Int64, signed: Bool) -> Int32 {
+    let mut u: UInt64 = UInt64(v)
+    let neg = signed && v < 0
+    if neg {
+        u = 0 - u
+    }
+    let mut p = end
+    while true {
+        store8(buf + p, UInt8(u % 10) + 48)
+        u = u / 10
+        p = p - 1
+        if u == 0 {
+            break
+        }
+    }
+    if neg {
+        store8(buf + p, '-')
+        p = p - 1
+    }
+    return buf + p + 1
+}
+
+/// `print(n: Int64)`: the digits and a newline to fd 1, in one `writeAll`; the
+/// newline sits at the end of the cell.
+export fn printI64(v: Int64, signed: Bool) {
+    let buf = heapBase() + 8736
+    store8(buf + 31, '\n')
+    let at = digitsAt(buf, 30, v, signed)
+    writeAll(1, at, buf + 32 - at)
+}
+
+/// `bool_str`: the interned literal itself, not a copy. `print` frees nothing;
+/// `@str` copies at its call site.
+export fn boolStr(v: Bool, t: Int32, f: Int32) -> Int32 {
+    if v {
+        return t
+    }
+    return f
+}
+
+/// `trap(msg)`: the message on fd 2 and exit 1. Not a wasm `unreachable`,
+/// which would print the engine's wording.
+export fn trapV(msg: Int32) {
+    trap(msg, strLen(msg))
+}
+
+/// `trapAt(rule, v, table)`: the trap table's row `rule`, with `v` between the
+/// halves of a row that has one. `table` is eight rows
+/// of two addresses laid out from `vyrn_frontend::trap::Rule`: the wording
+/// before the value, and after it, or zero for a row with no value.
+export fn trapAt(rule: Int32, v: Int64, table: Int32) {
+    let row = table + (rule << 3)
+    let pre = Int32(load32(row))
+    let post = Int32(load32(row + 4))
+    if post == 0 {
+        trap(pre, strLen(pre))
+    }
+    writeAll(2, pre, strLen(pre))
+    let buf = heapBase() + 8736
+    let at = digitsAt(buf, 31, v, true)
+    writeAll(2, at, buf + 32 - at)
+    trap(post, strLen(post))
+}

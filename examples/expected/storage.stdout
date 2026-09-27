@@ -1,0 +1,10 @@
+saved: true
+present: Loaded(v2 vyrn)
+absent:  Missing
+wrote broken: true
+broken:  Corrupt(1 issue)
+loadOr missing -> v0 default
+wrote raw: true
+read back: hello atomic
+fsynced: true
+fsync missing: cannot write `data/missing.store.json`

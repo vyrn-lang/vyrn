@@ -1,0 +1,19 @@
+// A generic holds at every instance, so its body as written is judged with
+// `T` owning heap: a `read` parameter of type `T` may not be handed to a
+// `consume self` member, whether or not a caller instantiates it
+// at an owning type.
+protocol Eat {
+    fn eat(consume self) -> Int64
+}
+type Food = { s: String }
+impl Eat for Food {
+    fn eat(consume self) -> Int64 {
+        return 1
+    }
+}
+fn eatOne<T: Eat>(x: T) -> Int64 {
+    return x.eat()
+}
+fn main() -> Int64 {
+    return 0
+}

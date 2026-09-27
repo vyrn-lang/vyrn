@@ -1,0 +1,29 @@
+[package]
+name = "vyrn-frontend"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Vyrn front end: lexer, parser, AST and type checker."
+
+[dependencies]
+
+# NOTHING, and that is the point: the front end is what every other crate reads,
+# so it reads no one. Tests are the exception — the `library-run` tests run
+# a linked program on the compiled route, which is the direct backend
+# plus the driver's WASI host, so the two are DEV-dependencies. Cargo allows the
+# cycle back to `vyrn-cli` for a dev-dependency; the shipped crate keeps an empty
+# list above.
+[dev-dependencies]
+vyrn-codegen = { path = "../vyrn-codegen" }
+vyrn-cli = { path = "../vyrn-cli", default-features = false }
+# Generation is not this crate's. `gen::generate` asks the INSTALLED engine and
+# refuses when there is none, so a test that runs a `gen fn` supplies the
+# engine, as every driver does.
+vyrn-genwasm = { path = "../vyrn-genwasm" }
+# The effect judgment and the placer live there, and an
+# integration test of either has to install them.
+vyrn-lower = { path = "../vyrn-lower" }
+
+[lib]
+name = "vyrn_frontend"
+path = "src/lib.rs"

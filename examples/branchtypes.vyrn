@@ -1,0 +1,140 @@
+// The type an expression WILL have, read from a branch.
+//
+// A `match` or an `if` used as an expression needs its destination before
+// either arm runs, so the wasm backend predicts each arm's type before it
+// emits it (`direct.rs`, `peek`). The prediction was kept by hand and the
+// emitting path was kept by hand, and the two lists drifted: `m.length` on a
+// `Map` compiled everywhere EXCEPT in an arm, where it read as "a field of the
+// non-record type `Map<String, Int64>`".
+//
+// Every read below sits in an arm on purpose. Outside one they were always
+// legal, so this file is only about the arm.
+type Age = Int64 where value >= 0
+
+fn addOne(n: Int64) -> Int64 {
+    return n + 1
+}
+
+fn first(xs: Array<Int64>) -> Option<Int64> {
+    if xs.length > 0 {
+        return Some(xs[0])
+    }
+    return None
+}
+
+// `?` in an arm propagates the same way it does in a statement.
+fn head(xs: Array<Int64>) -> Option<Int64> {
+    let pick: Option<Int64> = Some(1)
+    return Some(match pick {
+        Some(n) => first(xs)?,
+        None => 0,
+    })
+}
+
+fn main() -> Int64 {
+    let pick: Option<Int64> = Some(1)
+
+    // `.length` on all four receivers that have one, plus `.byteLength`.
+    let text = "hello"
+    let arr: Array<Int64> = [1, 2, 3]
+    let map: Map<String, Int64> = ["a": 1, "b": 2]
+    let small: SmallArray<Int64, 4> = [7, 8]
+
+    let bytesLen = match pick {
+        Some(n) => text.byteLength,
+        None => 0,
+    }
+    let arrLen = match pick {
+        Some(n) => arr.length,
+        None => 0,
+    }
+    let mapLen = match pick {
+        Some(n) => map.length,
+        None => 0,
+    }
+    let smallLen = match pick {
+        Some(n) => small.length,
+        None => 0,
+    }
+    print("lengths \{bytesLen} \{arrLen} \{mapLen} \{smallLen}")
+
+    // A numeric conversion in an arm.
+    let narrow: Int32 = match pick {
+        Some(n) => Int32(n),
+        None => Int32(0),
+    }
+    print("narrow \{narrow}")
+
+    // A call in an arm, and the binding that reads it in another.
+    let called: Int64 = match pick {
+        Some(n) => addOne(n),
+        None => addOne(0),
+    }
+    let read = match pick {
+        Some(n) => called,
+        None => called - 1,
+    }
+    print("joined \{read}")
+
+    // An empty `[]` takes its type from the position, in an arm like anywhere.
+    let empty: Array<Int64> = match pick {
+        Some(n) => [],
+        None => [],
+    }
+    print("empty \{empty.length}")
+
+    // A fallible construction in an arm.
+    let age: Option<Age> = match pick {
+        Some(n) => Age?(n),
+        None => Age?(0),
+    }
+    let shown = match age {
+        Some(a) => a,
+        None => 0 - 1,
+    }
+    print("age \{shown}")
+
+    // `?` reached through an arm, on both a full and an empty array.
+    let got = match head(arr) {
+        Some(n) => n,
+        None => 0 - 1,
+    }
+    let none = match head([]) {
+        Some(n) => n,
+        None => 0 - 1,
+    }
+    print("head \{got} \{none}")
+    // A join whose arms carry the SAME type in two SHAPES: an array VALUE in
+    // one arm and an array LITERAL in the other. `Array<String>` is
+    // `{ptr,len,cap}` and `["z"]` is `[1 x ptr]`, so a join that reads its type
+    // off an arm reads one of the two and the other arm feeds the merge a value
+    // of the wrong shape. Native refused to link this (`'%t20' defined with
+    // type '{ ptr, i64, i64 }' but expected '[1 x ptr]'`) and, with an EMPTY
+    // literal in the second arm, linked and printed a pointer where the String
+    // belonged. The interpreter and the wasm backend were right about all three
+    // spellings. The type is the checker's for the join, and every arm coerces
+    // into it.
+    let names: Array<String> = ["a", "b"]
+    let picked = match pick {
+        Some(n) => names,
+        None => ["z"],
+    }
+    print("picked \{picked.length} \{picked[0]}")
+    let branched = if picked.length > 1 { picked } else { ["y"] }
+    print("branched \{branched.length} \{branched[0]}")
+    // The empty literal is the silent half: `[]` has the growable shape
+    // already, so the merge linked and the ELEMENT type came from the arm that
+    // answered last.
+    let widened = match pick {
+        Some(n) => branched,
+        None => [],
+    }
+    print("widened \{widened.length} \{widened[0]}")
+
+    drop widened
+    drop arr
+    drop map
+    drop small
+    drop empty
+    return 0
+}

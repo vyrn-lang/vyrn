@@ -1,0 +1,17 @@
+# The stack this module needs is the COMPILER's, not a program's:
+# `play_compile` answers a module and the page runs it
+# (`site/public/play-worker.js`), so what recurses in here is the parser, the
+# checker and the backend, over the syntax of one file.
+#
+# wasm-ld's default is 1 MB and this is 16, and nobody has measured a smaller
+# one that suffices: it is the module's INITIAL MEMORY, which the page pays for once,
+# and the deep-nesting programs that reach it are the ones a reader types into a
+# playground on purpose. The stack sits at the bottom of linear memory, where an
+# overflow traps instead of writing over the heap (`--stack-first`, which rustc
+# passes for this target), and `play-worker.js` catches the engine's `RangeError`
+# and says whose ceiling it was.
+#
+# Cargo reads this file from the working directory upward, so it only applies to
+# builds started in `compiler/vyrn-play`. See the note in Cargo.toml.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=16777216"]

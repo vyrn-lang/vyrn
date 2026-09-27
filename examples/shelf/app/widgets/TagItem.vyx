@@ -1,0 +1,7 @@
+<script>
+props { name: String, label: String, count: Int64, cls: String }
+</script>
+
+<template>
+<li><button :class="cls" @click="setFilter(name)">{{ label }} ({{ count }})</button></li>
+</template>

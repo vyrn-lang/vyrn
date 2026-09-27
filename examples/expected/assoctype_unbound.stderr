@@ -1,0 +1,3 @@
+assoctype_unbound.vyrn:29:1: `impl Unwrap for Int64` does not bind the associated type `Output` — add `type Output = ..` (protocol `Unwrap` declares it)
+assoctype_unbound.vyrn:35:1: `impl Unwrap for String` does not bind the associated type `Output` — add `type Output = ..` (protocol `Unwrap` declares it)
+assoctype_unbound.vyrn:35:1: `impl Unwrap for String` binds `type Elem`, which protocol `Unwrap` does not declare

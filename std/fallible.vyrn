@@ -1,0 +1,20 @@
+/// `Fallible`: the protocol `?` resolves through for a type that is not
+/// `Option` or `Result`.
+///
+/// `x?` returns the whole sum it was given, byte for byte, into a function of
+/// the same type. So the protocol answers only which side a value is on and how
+/// to read the success payload; any number of failing variants propagate intact.
+///
+///     impl Fallible for Http {
+///         type Output = Body
+///         fn isSuccess(self) -> Bool { .. }
+///         fn success(self) -> Body { .. }   // total: `panic` on the failing arms
+///     }
+///
+/// `?` calls `success` only after `isSuccess` answered true.
+
+export protocol Fallible {
+    type Output
+    fn isSuccess(self) -> Bool
+    fn success(self) -> Output
+}

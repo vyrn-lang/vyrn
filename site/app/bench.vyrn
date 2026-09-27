@@ -1,0 +1,2016 @@
+/// The Benchmarks Game radar, computed while the site builds.
+///
+/// WHERE THE NUMBERS COME FROM. `bench/results/2026-09-01.json`
+/// and `-run2.json`, written by `bench/harness/run.py`, read here at
+/// export time. Nothing on the two pages this module feeds is typed in by hand:
+/// change the record, rebuild, and
+/// every chart, ratio and caption moves with it. That is the point — a chart
+/// whose numbers were transcribed is a chart that can disagree with its source.
+///
+/// WHY THIS READS THE RECORD BY SLICING IT RATHER THAN PARSING IT. `std/jsonread`
+/// is a real JSON reader and this is not one. It is also 72 SECONDS on one of
+/// these two files, measured, under the interpreter that runs `vyrn run
+/// site/export.vyrn` — a two-and-a-half minute tax on every build for a document
+/// whose shape is fixed by the program that writes it. `run.py` emits
+/// `json.dump(..., indent=2)`, so every key sits at a known depth and `indexOf`
+/// and `substring` — both builtins, both native — cut it exactly. The whole read
+/// is 0.3 seconds. The shape is not assumed: `the record still has the shape this
+/// reader cuts` below fails the build the day `run.py` changes it.
+///
+/// THE SCALE, AND WHY IT IS THE ONE DECISION THIS FILE MAKES OUT LOUD. The
+/// measured ratios span 0.23x to 18.2x. No linear radial axis carries both ends
+/// well, and the previous dataset — which reached 222x before the map was
+/// hashed — is why the axis was designed this way and why it stays: **log2
+/// around the baseline** — the centre ring is an eighth of it, every ring out
+/// is a doubling, the rim is sixteen times it. A value past the rim is drawn AT
+/// the rim and carries an off-scale marker on its spoke; its exact figure is in
+/// the table, in the axis panel and in the detail table. No cell is drawn that
+/// way with C as the baseline now, and two are with Rust — both wasm legs,
+/// which run no optimizer. None is truncated quietly, and `no cell is ever
+/// silently truncated` below is the test that keeps that true.
+import { indexOf, substring, trim, split, joinWith } from "std/strings"
+import { parseFloat64 } from "std/num"
+import { sin, cos } from "std/math"
+import { ghBlob } from "./github"
+
+/// One measured cell: one program on one engine, in both recorded runs.
+///
+/// Times are MICROSECONDS as integers. The record holds seconds as floats; the
+/// site prints milliseconds and ratios, and integer microseconds carry every
+/// figure either page shows (the smallest is k-nucleotide's C leg at 13.7 ms)
+/// with no float arithmetic between the record and the reader.
+export type Measure = {
+    program: String,
+    contestant: String,
+    us1: Int64,
+    us2: Int64,
+    spread1: String,
+    spread2: String,
+    runs1: String,
+    cpuUs: Int64,
+    peakBytes: Int64,
+    makeUs: Int64,
+    gzBytes: Int64,
+}
+
+/// One program, as the record and the game name it, and where the game's own
+/// page for it is. The link is the point: a benchmark that names a program
+/// without pointing at the original is asking to be taken on trust.
+export type Prog = { key: String, name: String, n: String, note: String, game: String }
+
+/// One contestant: the key in the record, the name a reader sees, and the class
+/// the stylesheet colours it with.
+export type Series = { key: String, name: String, tone: String }
+
+/// One ring of the radar: how far out it is, and what it is worth.
+export type Ring = { id: String, r: String, points: String, label: String, y: String, tone: String }
+
+/// One axis: the spoke, where its name goes, and the hit wedge behind it.
+export type Spoke = { key: String, name: String, x: String, y: String, lx: String, ly: String, anchor: String, wedge: String }
+
+/// One contestant's polygon, in both normalizations, with its off-scale marks.
+export type Line = { key: String, name: String, tone: String, points: String, marks: Array<Mark> }
+
+/// A point that did not fit: drawn at the rim, named here, never dropped.
+export type Mark = { id: String, d: String, title: String }
+
+/// One cell of a table or an axis panel. The first five fields after the name
+/// are the Benchmarks Game's own columns, in its own order — cpu secs, secs,
+/// mem, gz, make secs — because a reader who has read one of its per-program
+/// pages should not have to learn a second layout to read this one.
+export type Reading = { key: String, name: String, tone: String, cpu: String, secs: String, mem: String, gz: String, make: String, norm: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool, pct: String, over: Bool }
+
+/// One axis panel: everything known about one program, shown on focus.
+export type Panel = { key: String, name: String, n: String, note: String, cause: String, label: String, verdict: String, game: String, cells: Array<Reading> }
+
+// ---------------------------------------------------------------------------
+// Reading the record
+// ---------------------------------------------------------------------------
+
+/// The dataset the site publishes. One machine, one afternoon, twice.
+///
+/// The 2026-09-01 pair is measured at v0.1.0-alpha.3 — the release where the
+/// exit-residue survey reads zero: every leak
+/// class the 57-round triage closed is in these binaries, and the ratios the
+/// page draws are unchanged from the 2026-08-28 pair within run-to-run noise
+/// — the native leg still tracks C on nbody and pidigits, and k-nucleotide's
+/// map stays faster than C — which is itself the measurement: a memory model
+/// that frees everything costs nothing the radar can see.
+export fn run1File() -> String {
+    return "bench/results/2026-09-01.json"
+}
+
+/// The dataset itself, in the repository. The page's whole claim is that no
+/// figure on it was typed in, and a provenance line nobody can open is a claim
+/// a reader has to take on faith.
+export fn run1Href() -> String {
+    return ghBlob(run1File())
+}
+
+fn run2File() -> String {
+    return "bench/results/2026-09-01-run2.json"
+}
+
+/// The text after the first `needle`, or nothing.
+fn after(src: String, needle: String) -> String {
+    return match indexOf(src, needle) {
+        Some(at) => substring(src, at + needle.byteLength, src.byteLength),
+        None => "",
+    }
+}
+
+/// The text before the first `needle`, or all of it.
+fn upTo(src: String, needle: String) -> String {
+    return match indexOf(src, needle) {
+        Some(at) => substring(src, 0, at),
+        None => src.copy(),
+    }
+}
+
+/// The object written for `key` at `indent` spaces of depth, cut at the next key
+/// of the same depth. `json.dump(indent=2)` is what makes this exact: a key at
+/// depth d is the only thing that can appear at that indentation.
+fn objectAt(src: String, indent: String, key: String) -> String {
+    return upTo(after(src, "\n" + indent + "\"" + key + "\": {"), "\n" + indent + "\"")
+}
+
+/// The scalar written for `key` at `indent` spaces of depth: the text between the
+/// colon and the end of its line, with any trailing comma removed.
+fn scalarAt(src: String, indent: String, key: String) -> String {
+    let raw = upTo(after(src, "\n" + indent + "\"" + key + "\": "), "\n")
+    let cut = if raw.byteLength > 0 && substring(raw, raw.byteLength - 1, raw.byteLength) == "," {
+        substring(raw, 0, raw.byteLength - 1)
+    } else {
+        raw.copy()
+    }
+    return trim(cut)
+}
+
+/// A string scalar with its quotes taken off and its escapes undone.
+fn textAt(src: String, indent: String, key: String) -> String {
+    let raw = scalarAt(src, indent, key)
+    if raw.byteLength >= 2 && substring(raw, 0, 1) == "\"" {
+        return unescaped(substring(raw, 1, raw.byteLength - 1))
+    }
+    return unescaped(raw)
+}
+
+/// A JSON string body as the characters it stands for.
+///
+/// THE SLICER IS NOT A PARSER, and this is the one place that costs something.
+/// `json.dump` writes every character outside ASCII as `\uXXXX`, so the em
+/// dashes in the harness's own program notes reached the page as the six
+/// literal characters a reader saw on `regex-redux`, and the regex patterns in
+/// those notes carry `\\w` and `\\d` for the same reason. The BMP and the six
+/// short escapes cover everything `run.py` can emit; a surrogate pair would
+/// need a second branch, and `no escape survives into the page` below is what
+/// says so if one ever appears.
+fn unescaped(text: String) -> String {
+    if !has(text, "\\") {
+        return text.copy()
+    }
+    let raw = bytes(text)
+    let mut out = ""
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] != '\\' || i + 1 >= raw.length {
+            out = out + substring(text, i, i + 1)
+            i = i + 1
+            continue
+        }
+        let c = raw[i + 1]
+        if c == 'u' && i + 5 < raw.length {
+            out = out + charOf(hexAt(text, i + 2))
+            i = i + 6
+            continue
+        }
+        if c == 'n' {
+            out = out + "\n"
+        } else if c == 't' {
+            out = out + "\t"
+        } else if c == 'r' {
+            out = out + "\r"
+        } else {
+            // `\\`, `\"` and `\/` all stand for the character after the
+            // backslash, which is also the safest thing to do with an escape
+            // this reader does not know.
+            out = out + substring(text, i + 1, i + 2)
+        }
+        i = i + 2
+    }
+    return out
+}
+
+/// The four hex digits at `at`, as a number.
+fn hexAt(text: String, at: Int64) -> Int64 {
+    let raw = bytes(text)
+    let mut n = 0
+    let mut i = at
+    while i < at + 4 {
+        let b = Int64(raw[i])
+        let d = if b >= 48 && b <= 57 {
+            b - 48
+        } else if b >= 97 && b <= 102 {
+            b - 87
+        } else {
+            b - 55
+        }
+        n = n * 16 + d
+        i = i + 1
+    }
+    return n
+}
+
+/// One code point below U+10000, as UTF-8. A byte literal is a `UInt8` and
+/// arithmetic on a code point is not, so the boundaries are written as numbers.
+fn charOf(cp: Int64) -> String {
+    let mut raw: Array<UInt8> = []
+    if cp < 128 {
+        raw.push(UInt8(cp))
+    } else if cp < 2048 {
+        raw.push(UInt8(192 + cp / 64))
+        raw.push(UInt8(128 + cp % 64))
+    } else {
+        raw.push(UInt8(224 + cp / 4096))
+        raw.push(UInt8(128 + (cp / 64) % 64))
+        raw.push(UInt8(128 + cp % 64))
+    }
+    return match stringFromBytes(raw) {
+        Ok(text) => text,
+        // Unreachable for a scalar value. A lone surrogate is the one thing
+        // `run.py` could write that this does not encode, and it comes back as
+        // nothing rather than as invalid UTF-8.
+        Err(_) => "",
+    }
+}
+
+/// Seconds, as the record writes them, in whole microseconds. A reading the
+/// reader could not cut is -1 rather than 0: a zero would plot as a real point.
+fn microsOf(text: String) -> Int64 {
+    return match parseFloat64(text) {
+        Some(s) => Int64(s * 1000000.0 + 0.5),
+        None => 0 - 1,
+    }
+}
+
+/// One record's file, read once — now actually once. This function said "read
+/// once" in its comment and read the file on every call, and `programs()` above
+/// it is an EXPORTED accessor the benchmarks template asks for inside every
+/// loop it draws. Rendering `/benchmarks` was 22.3 s of the export's 95.6 s
+/// against 1.3 s for the largest reference page, and this was why: a file read
+/// and two full scans of a JSON record, per ask.
+let mut records: Map<String, String> = [:]
+
+fn recordText(file: String) -> String {
+    if let Some(hit) = records[file] {
+        return hit.copy()
+    }
+    let body = match readFile(file) {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+    records[file.copy()] = body.copy()
+    return body
+}
+
+// ---------------------------------------------------------------------------
+// The fixed sets
+//
+// The ten programs and the five contestants are written out here rather than
+// discovered in
+// the record — because a program that vanished from a re-run should break this
+// page loudly rather than shrink the chart quietly. `every program and every
+// contestant is in both records` is where that break happens.
+// ---------------------------------------------------------------------------
+
+/// All ten Benchmarks Game programs, in the record's order.
+let mut progs: Array<Prog> = []
+
+export fn programs() -> Array<Prog> {
+    if progs.length > 0 {
+        return progs.copy()
+    }
+    let src = recordText(run1File())
+    let results = objectAt(src, "  ", "results")
+    let mut out: Array<Prog> = []
+    for p in progNames() {
+        let slice = objectAt(results, "    ", p[0])
+        out.push(Prog {
+            key: p[0].copy(),
+            name: p[1].copy(),
+            n: grouped(scalarAt(slice, "      ", "n")),
+            note: textAt(slice, "      ", "note"),
+            game: gameHref(p[2]),
+        })
+    }
+    progs = out.copy()
+    return out
+}
+
+/// The record's key for each program, the name the game gives it, and the slug
+/// its own page sits under. The slug is written out rather than derived: it is
+/// `fannkuchredux` where the record says `fannkuch` and the reader sees
+/// `fannkuch-redux`, and three spellings do not compute from one another.
+fn progNames() -> Array<Array<String>> {
+    return [
+        ["nbody", "nbody", "nbody"],
+        ["spectralnorm", "spectral-norm", "spectralnorm"],
+        ["fannkuch", "fannkuch-redux", "fannkuchredux"],
+        ["binarytrees", "binary-trees", "binarytrees"],
+        ["fasta", "fasta", "fasta"],
+        ["revcomp", "reverse-complement", "revcomp"],
+        ["knucleotide", "k-nucleotide", "knucleotide"],
+        ["pidigits", "pidigits", "pidigits"],
+        ["mandelbrot", "mandelbrot", "mandelbrot"],
+        ["regexredux", "regex-redux", "regexredux"],
+    ]
+}
+
+/// The game's own page for one program. Every one of the ten was fetched and
+/// resolved on the date `ceilingFetched` states.
+fn gameHref(slug: String) -> String {
+    return "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/" + slug + ".html"
+}
+
+/// The five lines on the radar. `c` is the baseline and is drawn as one: a
+/// neutral grey, because a baseline that carries an accent is a competitor.
+export fn contestants() -> Array<Series> {
+    return [
+        Series { key: "c", name: "C", tone: "sr-c" },
+        Series { key: "rust", name: "Rust", tone: "sr-rust" },
+        Series { key: "js", name: "node", tone: "sr-node" },
+        Series { key: "vyrn-native", name: "Vyrn native", tone: "sr-vyrn" },
+        Series { key: "vyrn-wasm", name: "Vyrn wasm", tone: "sr-vyrn dashed" },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The cell table, read once
+// ---------------------------------------------------------------------------
+
+/// Forty cells, filled on first use. Module state, because every
+/// accessor below wants the same forty readings and the export renders these two
+/// pages more than once.
+let mut cells: Array<Measure> = []
+
+/// Fill `cells` from the two records, the first time anything asks.
+fn loadCells() {
+    if cells.length > 0 {
+        return
+    }
+    let one = objectAt(recordText(run1File()), "  ", "results")
+    let two = objectAt(recordText(run2File()), "  ", "results")
+    for p in progNames() {
+        let slice1 = objectAt(one, "    ", p[0])
+        let slice2 = objectAt(two, "    ", p[0])
+        let box1 = objectAt(slice1, "      ", "contestants")
+        let box2 = objectAt(slice2, "      ", "contestants")
+        for s in contestants() {
+            let cell1 = objectAt(box1, "        ", s.key)
+            let cell2 = objectAt(box2, "        ", s.key)
+            cells.push(Measure {
+                program: p[0].copy(),
+                contestant: s.key.copy(),
+                us1: microsOf(scalarAt(cell1, "          ", "median_s")),
+                us2: microsOf(scalarAt(cell2, "          ", "median_s")),
+                spread1: scalarAt(cell1, "          ", "spread_pct"),
+                spread2: scalarAt(cell2, "          ", "spread_pct"),
+                runs1: rawRuns(cell1),
+                cpuUs: microsOf(scalarAt(cell1, "          ", "cpu_median_s")),
+                peakBytes: wholeOf(scalarAt(cell1, "          ", "peak_bytes")),
+                makeUs: microsOf(scalarAt(cell1, "          ", "make_s")),
+                gzBytes: wholeOf(scalarAt(cell1, "          ", "gz_bytes")),
+            })
+        }
+    }
+}
+
+/// The ten raw readings of one cell, in milliseconds, comma separated. They are
+/// the evidence under a median, and the detail table prints them; no chart
+/// does.
+fn rawRuns(cell: String) -> String {
+    let list = upTo(after(cell, "\"runs_s\": ["), "]")
+    let mut out: Array<String> = []
+    for piece in split(list, ",") {
+        let t = trim(piece)
+        if t.byteLength > 0 {
+            out.push(msOf(microsOf(t)))
+        }
+    }
+    return joinWith(out, "  ")
+}
+
+/// One cell, or a cell of -1 when the record does not hold it.
+fn cellOf(program: String, contestant: String) -> Measure {
+    loadCells()
+    for c in cells {
+        if c.program == program && c.contestant == contestant {
+            return c.copy()
+        }
+    }
+    return Measure {
+        program: program.copy(),
+        contestant: contestant.copy(),
+        us1: 0 - 1,
+        us2: 0 - 1,
+        spread1: "",
+        spread2: "",
+        runs1: "",
+        cpuUs: 0 - 1,
+        peakBytes: 0 - 1,
+        makeUs: 0 - 1,
+        gzBytes: 0 - 1,
+    }
+}
+
+/// The median of `program` on `contestant`, in microseconds, from the published
+/// run. Run two is the noise statement, not the published figure.
+///
+/// EXPORTED for the index's five-bar strip, which needs a length
+/// and not a formatted string: every other reader of this module takes `ms`,
+/// `secs` or a ratio, and a bar is a width in the chart's own units.
+export fn medianUs(program: String, contestant: String) -> Int64 {
+    return cellOf(program, contestant).us1
+}
+
+// ---------------------------------------------------------------------------
+// Numbers, as a reader reads them
+// ---------------------------------------------------------------------------
+
+/// Microseconds as the milliseconds the record's own tables print: whole above
+/// a hundred milliseconds, one decimal below, where the figure is close enough
+/// to the four-millisecond process floor for a decimal to mean something.
+export fn msOf(us: Int64) -> String {
+    if us < 0 {
+        return "—"
+    }
+    if us >= 100000 {
+        return ((us + 500) / 1000).toString() + " ms"
+    }
+    let tenths = (us + 50) / 100
+    return (tenths / 10).toString() + "." + (tenths % 10).toString() + " ms"
+}
+
+/// A whole number the record wrote, or -1 where it wrote nothing.
+fn wholeOf(text: String) -> Int64 {
+    return match parseFloat64(text) {
+        Some(v) => Int64(v),
+        None => 0 - 1,
+    }
+}
+
+/// Seconds to two decimals, which is the precision the game's own per-program
+/// tables print and the reason this column reads like one of theirs.
+///
+/// A reading that would round to `0.00` prints `<0.01` instead. Two cells in
+/// this set are that small — k-nucleotide's C and Rust legs at ten and eight
+/// milliseconds — and a table claiming a program took no time is worse than a
+/// table admitting the column cannot resolve it. The millisecond figure is a
+/// click away in the detail table either way.
+export fn secsOf(us: Int64) -> String {
+    if us < 0 {
+        return "—"
+    }
+    let cs = (us + 5000) / 10000
+    if cs == 0 && us > 0 {
+        return "<0.01"
+    }
+    return (cs / 100).toString() + "." + pad2(cs % 100)
+}
+
+/// Build time. Zero is not a very fast build: it is node, which has no build
+/// step at all, and a dash says that where `0.00` would claim a measurement.
+export fn makeOf(us: Int64) -> String {
+    if us == 0 {
+        return "—"
+    }
+    return secsOf(us)
+}
+
+/// Peak resident memory in the unit that fits: kilobytes below ten megabytes,
+/// megabytes to one decimal above it. The set spans 4 MB to over a gigabyte,
+/// and one unit across all of it is either six digits or a rounding error.
+export fn memOf(bytes: Int64) -> String {
+    if bytes <= 0 {
+        return "—"
+    }
+    let kb = (bytes + 512) / 1024
+    if kb < 10240 {
+        return grouped(kb.toString()) + " KB"
+    }
+    let tenths = (bytes * 10 + 524288) / 1048576
+    return grouped((tenths / 10).toString()) + "." + (tenths % 10).toString() + " MB"
+}
+
+/// A byte count, grouped. The game's `gz` column is the gzipped source in
+/// bytes, and it is how much program the entry took.
+export fn bytesOf(n: Int64) -> String {
+    if n <= 0 {
+        return "—"
+    }
+    return grouped(n.toString())
+}
+
+/// `a / b` in hundredths, rounded.
+fn hundredths(a: Int64, b: Int64) -> Int64 {
+    if b <= 0 {
+        return 0
+    }
+    return (a * 100 + b / 2) / b
+}
+
+/// A ratio in hundredths as text: two decimals under a hundred times, whole
+/// above it: 14.52 and 287.
+export fn ratioText(h: Int64) -> String {
+    if h <= 0 {
+        return "—"
+    }
+    if h >= 10000 {
+        return ((h + 50) / 100).toString() + "x"
+    }
+    return (h / 100).toString() + "." + pad2(h % 100) + "x"
+}
+
+fn pad2(n: Int64) -> String {
+    if n < 10 {
+        return "0" + n.toString()
+    }
+    return n.toString()
+}
+
+/// An integer with thousands separated, because 25000000 is not a number a
+/// reader can take in and 25,000,000 is.
+fn grouped(digits: String) -> String {
+    let raw = trim(digits)
+    let mut out = ""
+    let mut i = 0
+    let n = raw.byteLength
+    while i < n {
+        if i > 0 && (n - i) % 3 == 0 {
+            out = out + ","
+        }
+        out = out + substring(raw, i, i + 1)
+        i = i + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// The radial scale
+// ---------------------------------------------------------------------------
+
+/// Where the radar's centre is, and how far the rim reaches.
+///
+/// The box is wider than it is tall, and that is the axis names rather than the
+/// chart: `fannkuch-redux` hangs off the right spoke and `k-nucleotide` off the
+/// left, and at a centre of 280 in a 560-wide box both ran off the sheet — 34
+/// units past the right edge and 22 past the left, measured in the browser with
+/// `getBBox`. Widening the box costs nothing (the SVG is scaled to fit either
+/// way) and moving the names inward would have put them on top of the rim.
+fn cx() -> Int64 {
+    return 350
+}
+
+fn cy() -> Int64 {
+    return 272
+}
+
+fn radius() -> Int64 {
+    return 200
+}
+
+/// How many doublings the rim is above the centre. Seven, split either side of
+/// the baseline: the centre is an eighth of it and the rim is sixteen times it.
+fn decades() -> Int64 {
+    return 7
+}
+
+/// How many doublings BELOW the baseline the centre sits.
+fn belowBase() -> Int64 {
+    return 3
+}
+
+export fn radarBox() -> String {
+    return "0 0 700 544"
+}
+
+/// The centre, for the spokes the template draws from it.
+export fn radarCx() -> String {
+    return cx().toString()
+}
+
+export fn radarCy() -> String {
+    return cy().toString()
+}
+
+/// The natural logarithm of `x` for x > 0, by the arctangent-hyperbolic series
+/// after `x` is folded into [1/sqrt(2), sqrt(2)) — where the series argument is
+/// at most 0.172 and twenty terms are far past the precision anything here
+/// prints. There is no `log` in `std/math`, and a chart with a log axis needs
+/// one; this is the whole of it.
+fn log2(x: Float64) -> Float64 {
+    if x <= 0.0 {
+        return 0.0 - 1000.0
+    }
+    let mut m = x
+    let mut e = 0
+    while m >= 1.4142135623730951 {
+        m = m / 2.0
+        e = e + 1
+    }
+    while m < 0.7071067811865476 {
+        m = m * 2.0
+        e = e - 1
+    }
+    let z = (m - 1.0) / (m + 1.0)
+    let zz = z * z
+    let mut term = z
+    let mut sum = z
+    let mut k = 1
+    while k < 20 {
+        term = term * zz
+        sum = sum + term / Float64(2 * k + 1)
+        k = k + 1
+    }
+    // ln(m) = 2 * sum, and log2(m) = ln(m) / ln(2).
+    return Float64(e) + 2.0 * sum / 0.6931471805599453
+}
+
+/// How far out a ratio in hundredths plots, in the chart's own units. Past the
+/// rim it is the rim, and the caller marks it — see `marksFor`.
+fn radiusOf(h: Int64) -> Int64 {
+    if h <= 0 {
+        return 0
+    }
+    let steps = log2(Float64(h) / 100.0) + Float64(belowBase())
+    if steps <= 0.0 {
+        return 0
+    }
+    let r = steps * Float64(radius()) / Float64(decades())
+    if r >= Float64(radius()) {
+        return radius()
+    }
+    return Int64(r + 0.5)
+}
+
+/// Whether a ratio in hundredths is past the rim of the scale.
+fn offScale(h: Int64) -> Bool {
+    return h > 100 * pow2(decades() - belowBase())
+}
+
+/// Two to the power of `n`, for the small `n` this scale uses.
+fn pow2(n: Int64) -> Int64 {
+    let mut v = 1
+    let mut i = 0
+    while i < n {
+        v = v * 2
+        i = i + 1
+    }
+    return v
+}
+
+/// The angle of axis `i`, in radians, clockwise from straight up.
+fn angleOf(i: Int64) -> Float64 {
+    return Float64(i) * 6.283185307179586 / Float64(progNames().length)
+}
+
+/// The point `r` out along axis `i`, as `x,y`.
+fn pointAt(i: Int64, r: Int64) -> String {
+    let a = angleOf(i)
+    let x = Float64(cx()) + Float64(r) * sin(a)
+    let y = Float64(cy()) - Float64(r) * cos(a)
+    return Int64(x + 0.5).toString() + "," + Int64(y + 0.5).toString()
+}
+
+/// A closed ring at radius `r`, as a polygon's points.
+fn ringPoints(r: Int64) -> String {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < progNames().length {
+        out.push(pointAt(i, r))
+        i = i + 1
+    }
+    return joinWith(out, " ")
+}
+
+/// The rings, one per doubling, labelled with what they are worth. The ring at
+/// the baseline itself carries the emphasis: it is the only one that answers
+/// "the same time as the language this is normalized to".
+export fn radarRings() -> Array<Ring> {
+    let mut out: Array<Ring> = []
+    let mut step = 1
+    while step <= decades() {
+        let r = ringRadius(step)
+        let power = step - belowBase()
+        out.push(Ring {
+            id: step.toString(),
+            r: r.toString(),
+            points: ringPoints(r),
+            label: ringLabel(power),
+            y: (cy() - r).toString(),
+            tone: if power == 0 { "ring base" } else { "ring" },
+        })
+        step = step + 1
+    }
+    return out
+}
+
+/// How far out ring `step` sits. Rounded, not truncated — `radiusOf` rounds, and
+/// a ring drawn one unit inside the point that should sit on it is a chart that
+/// disagrees with itself. `every polygon has one vertex per program` is where
+/// the two are held together.
+fn ringRadius(step: Int64) -> Int64 {
+    return (radius() * step + decades() / 2) / decades()
+}
+
+/// What a ring is worth, as a multiple of the baseline.
+fn ringLabel(power: Int64) -> String {
+    if power < 0 {
+        return "1/" + pow2(0 - power).toString() + "x"
+    }
+    return pow2(power).toString() + "x"
+}
+
+/// The ten spokes: the line, the name at its end, and the wedge a pointer
+/// hovers to select the axis.
+export fn radarSpokes() -> Array<Spoke> {
+    let progs = programs()
+    let mut out: Array<Spoke> = []
+    let mut i = 0
+    while i < progs.length {
+        let tip = split(pointAt(i, radius()), ",")
+        let label = split(pointAt(i, radius() + 32), ",")
+        out.push(Spoke {
+            key: progs[i].key.copy(),
+            name: progs[i].name.copy(),
+            x: tip[0].copy(),
+            y: tip[1].copy(),
+            lx: label[0].copy(),
+            ly: labelBaseline(i, label[1]),
+            anchor: anchorOf(i),
+            wedge: wedgeOf(i),
+        })
+        i = i + 1
+    }
+    return out
+}
+
+/// Which side of its own end a spoke's name sits on. Straight up and straight
+/// down it is centred; otherwise it hangs off the side the spoke points to, so
+/// no name crosses the chart.
+fn anchorOf(i: Int64) -> String {
+    let half = progNames().length / 2
+    if i == 0 || i == half {
+        return "middle"
+    }
+    if i < half {
+        return "start"
+    }
+    return "end"
+}
+
+/// A name's baseline, nudged so the one straight above the chart is not sitting
+/// on the rim and the one straight below is clear of it.
+fn labelBaseline(i: Int64, y: String) -> String {
+    let base = match parseFloat64(y) {
+        Some(v) => Int64(v),
+        None => cy(),
+    }
+    let half = progNames().length / 2
+    if i == 0 {
+        return (base - 2).toString()
+    }
+    if i == half {
+        return (base + 12).toString()
+    }
+    return (base + 4).toString()
+}
+
+/// The wedge behind one axis: the slice of the disc that belongs to it, so a
+/// pointer anywhere near a spoke selects that axis rather than only the one-pixel
+/// line. Drawn as a triangle from the centre to two points either side of the
+/// spoke at the rim, which is a polygon and needs no arc.
+fn wedgeOf(i: Int64) -> String {
+    let n = progNames().length
+    let leftIdx = (i + n - 1) % n
+    let rightIdx = (i + 1) % n
+    return midPoint(i, leftIdx) + " " + cx().toString() + "," + cy().toString() + " " + midPoint(i, rightIdx) + " " + pointAt(i, radius() + 20)
+}
+
+/// Halfway between two axes, at the rim: the boundary of a wedge.
+fn midPoint(a: Int64, b: Int64) -> String {
+    let one = split(pointAt(a, radius() + 20), ",")
+    let two = split(pointAt(b, radius() + 20), ",")
+    let mx = (numOf(one[0]) + numOf(two[0])) / 2
+    let my = (numOf(one[1]) + numOf(two[1])) / 2
+    return mx.toString() + "," + my.toString()
+}
+
+fn numOf(s: String) -> Int64 {
+    return match parseFloat64(s) {
+        Some(v) => Int64(v),
+        None => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The five polygons
+// ---------------------------------------------------------------------------
+
+/// One contestant's polygon in both normalizations. The alternative is computed
+/// here and shipped in the markup as a second attribute, so the normalization
+/// switch swaps two strings and computes nothing — the site's rule is that Vyrn
+/// computes the geometry and the script moves one value.
+export fn radarLines() -> Array<Line> {
+    let mut out: Array<Line> = []
+    for s in contestants() {
+        out.push(Line {
+            key: s.key.copy(),
+            name: s.name.copy(),
+            tone: s.tone.copy(),
+            points: polygonFor(s.key, "c"),
+            marks: marksFor(s.key, "c"),
+        })
+    }
+    return out
+}
+
+/// One contestant's ten vertices against `base`.
+fn polygonFor(contestant: String, base: String) -> String {
+    let progs = programs()
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < progs.length {
+        out.push(pointAt(i, radiusOf(ratioOf(progs[i].key, contestant, base))))
+        i = i + 1
+    }
+    return joinWith(out, " ")
+}
+
+/// The ratio of `contestant` to `base` on `program`, in hundredths.
+/// Which way a ratio points — `ahead`, `level` or `behind` — so a table of
+/// bare multipliers can say whether 1.35x is good news (user: it was not
+/// clear what the numbers measure). Level is the +/-2% band the record's own
+/// noise makes meaningless.
+export fn ratioWay(program: String, contestant: String, base: String) -> String {
+    let h = ratioOf(program, contestant, base)
+    if h <= 0 {
+        return "level"
+    }
+    if h < 98 {
+        return "ahead"
+    }
+    if h > 102 {
+        return "behind"
+    }
+    return "level"
+}
+
+fn ratioOf(program: String, contestant: String, base: String) -> Int64 {
+    return hundredths(medianUs(program, contestant), medianUs(program, base))
+}
+
+/// Every point of one contestant that did not fit the scale, as a chevron drawn
+/// just outside the rim on its own spoke. A point past the rim is drawn AT the
+/// rim, and this is what says so — the alternative is a polygon that quietly
+/// claims 302x and 16x are the same reading.
+fn marksFor(contestant: String, base: String) -> Array<Mark> {
+    let progs = programs()
+    let baseName = if base == "c" { "C" } else { "Rust" }
+    let mut out: Array<Mark> = []
+    let mut i = 0
+    while i < progs.length {
+        let h = ratioOf(progs[i].key, contestant, base)
+        if offScale(h) {
+            out.push(Mark {
+                id: progs[i].key.copy(),
+                d: chevronAt(i),
+                title: progs[i].name + ": " + ratioText(h) + " " + baseName + ", past the " + ringLabel(decades() - belowBase()) + " rim of this scale",
+            })
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The off-scale mark on axis `i`: a stroke continuing outward past the rim,
+/// where the polygon had to stop. It reads as "and further", which is what it
+/// means.
+fn chevronAt(i: Int64) -> String {
+    let a = split(pointAt(i, radius() + 6), ",")
+    let b = split(pointAt(i, radius() + 20), ",")
+    return "M " + a[0] + " " + a[1] + " L " + b[0] + " " + b[1]
+}
+
+// ---------------------------------------------------------------------------
+// The numbers, as a table and as ten program blocks
+// ---------------------------------------------------------------------------
+
+/// One program's five readings.
+fn readingsFor(program: String) -> Array<Reading> {
+    let base = medianUs(program, "c")
+    let mut out: Array<Reading> = []
+    for s in contestants() {
+        let cell = cellOf(program, s.key)
+        let spread = pctOf(cell.spread1)
+        out.push(Reading {
+            key: s.key.copy(),
+            name: s.name.copy(),
+            tone: s.tone.copy(),
+            cpu: secsOf(cell.cpuUs),
+            secs: secsOf(cell.us1),
+            mem: memOf(cell.peakBytes),
+            gz: bytesOf(cell.gzBytes),
+            make: makeOf(cell.makeUs),
+            norm: normText(program, s.key),
+            ms: msOf(cell.us1),
+            vsC: ratioText(ratioOf(program, s.key, "c")),
+            vsRust: ratioText(ratioOf(program, s.key, "rust")),
+            spread: spread,
+            noisy: noisy(cell.spread1),
+            pct: trackPct(cell.us1, base),
+            over: base > 0 && cell.us1 > base * trackTimes(),
+        })
+    }
+    return out
+}
+
+/// How far the bar track runs, as a multiple of C. Four holds every reading in
+/// the set except the two wasm legs the radar already draws off-scale, and it
+/// puts C itself a quarter of the way along — the same place on all ten rows,
+/// which is what lets the column be read DOWN as well as across.
+fn trackTimes() -> Int64 {
+    return 4
+}
+
+/// One reading as its share of that track, to one decimal.
+///
+/// The bar this replaces divided by the SLOWEST engine on its own card, so
+/// every card carried a different scale. On nbody, where the wasm leg is
+/// fourteen times C, that gave the other four engines the first seven per cent
+/// of the track between them — indistinguishable slivers, in the one place the
+/// comparison matters. Against a fixed track the same four land at 18 to 31
+/// per cent. A reading past the end is drawn AT the end and its row carries
+/// `over`, which is the same rule the radar keeps: nothing is truncated
+/// quietly.
+fn trackPct(us: Int64, base: Int64) -> String {
+    if us <= 0 || base <= 0 {
+        return "0.0"
+    }
+    let full = base * trackTimes()
+    let tenths = if us >= full { 1000 } else { us * 1000 / full }
+    return (tenths / 10).toString() + "." + (tenths % 10).toString()
+}
+
+/// Where one engine's program for one benchmark lives.
+///
+/// A page that publishes a ratio and not the two programs behind it is asking
+/// to be taken on trust — the same objection the game's own link answers for
+/// the task. Both Vyrn legs are built from ONE source: `examples/<name>.vyrn`
+/// is compiled native and to WebAssembly with nothing changed between them,
+/// which is why the two rows point at the same file.
+export fn srcHref(program: String, engine: String) -> String {
+    if engine == "c" {
+        return ghBlob("bench/harness/c/" + program + ".c")
+    }
+    if engine == "rust" {
+        return ghBlob("bench/harness/rust/" + program + ".rs")
+    }
+    if engine == "js" {
+        return ghBlob("bench/harness/js/" + program + ".js")
+    }
+    return ghBlob("examples/" + program + ".vyrn")
+}
+
+/// Both normalizations of one cell in one string: what the radar plots.
+///
+/// The chart is drawn from these two ratios, so they cannot leave the page —
+/// but five measured columns and two derived ones is a table nobody reads.
+/// They therefore ride on the row (a pointer sees them) and are printed in
+/// full in the ratio table under the chart, which is the chart's own fallback.
+fn normText(program: String, contestant: String) -> String {
+    return ratioText(ratioOf(program, contestant, "c")) + " C, " + ratioText(ratioOf(program, contestant, "rust")) + " Rust"
+}
+
+/// A percentage from the record, with its own sign.
+fn pctOf(raw: String) -> String {
+    if raw.byteLength == 0 {
+        return "—"
+    }
+    return raw + "%"
+}
+
+/// Whether a within-run spread is wide enough that the reading deserves a
+/// warning beside it. The bar is 15%, and the cells that cross it
+/// are the small ones — a reading a few multiples of the process floor cannot be
+/// read to better than the floor. The count is not pinned here: `the noisy cells
+/// are flagged where they are printed` counts what the record holds, so a
+/// quieter machine flags fewer and this module does not have to be edited.
+fn noisy(spread: String) -> Bool {
+    return match parseFloat64(spread) {
+        Some(v) => v >= 15.0,
+        None => false,
+    }
+}
+
+/// One engine's bar on a card: what it is called, how long it took, and how
+/// much of the card's widest bar that is.
+export type BarRow = { key: String, name: String, tone: String, ms: String, pct: String, mem: String }
+
+/// One program's bars, fastest first, each measured against the slowest of
+/// them — a card is its own scale, which is what makes six cards readable
+/// side by side.
+export fn panelBars(program: String) -> Array<BarRow> {
+    let cells = readingsFor(program)
+    let mut top = 1
+    for c in cells {
+        let us = medianUs(program, c.key)
+        if us > top {
+            top = us
+        }
+    }
+    // Fastest first: a card is a ranking, and the record's own order is the
+    // chart's (C, Rust, node, ours) — which reads as an opinion here.
+    let mut order: Array<Reading> = []
+    for c in cells {
+        order.push(c.copy())
+    }
+    let mut i = 1
+    while i < order.length {
+        let mut j = i
+        while j > 0 && medianUs(program, order[j].key) < medianUs(program, order[j - 1].key) {
+            let hold = order[j].copy()
+            order[j] = order[j - 1].copy()
+            order[j - 1] = hold.copy()
+            j = j - 1
+        }
+        i = i + 1
+    }
+    let mut out: Array<BarRow> = []
+    for c in order {
+        let us = medianUs(program, c.key)
+        out.push(BarRow {
+            key: c.key.copy(),
+            name: c.name.copy(),
+            tone: c.tone.copy(),
+            ms: c.ms.copy(),
+            pct: barPct(us, top),
+            mem: c.mem.copy(),
+        })
+    }
+    return out
+}
+
+/// `us` as a percentage of `top`, to one decimal — the width a bar is given.
+fn barPct(us: Int64, top: Int64) -> String {
+    let tenths = us * 1000 / top
+    let whole = tenths / 10
+    let rest = tenths - whole * 10
+    return whole.toString() + "." + rest.toString()
+}
+
+/// The first six panels — what the index shows before its More card. Ten
+/// cards is a wall; six and a door is a section (user).
+export fn frontPanels() -> Array<Panel> {
+    let all = axisPanels()
+    let mut out: Array<Panel> = []
+    let mut i = 0
+    while i < all.length && i < 6 {
+        out.push(all[i].copy())
+        i = i + 1
+    }
+    return out
+}
+
+/// A card's one line about the program, cut at its first sentence. The record
+/// writes a paragraph for the programs whose size needs defending, and a
+/// paragraph inside a card is a wall the page does not build.
+export fn panelNote(program: String) -> String {
+    for p in programs() {
+        if p.key == program {
+            return firstSentence(p.note)
+        }
+    }
+    return ""
+}
+
+/// Up to the first `. `, with the stop kept.
+fn firstSentence(text: String) -> String {
+    let raw = bytes(text)
+    let mut i = 0
+    while i + 1 < raw.length {
+        if raw[i] == '.' && raw[i + 1] == ' ' {
+            return substring(text, 0, i + 1)
+        }
+        i = i + 1
+    }
+    return text.copy()
+}
+
+/// What the card says about SPEED, in the shape the reader is looking for:
+/// where the language's own build stands against the field.
+///
+/// `fastest of the five` when it wins, `1.36x Rust` when it does not — the
+/// ratio against whichever engine beat it, which is the number a reader would
+/// work out anyway (user, against the reference site's own cards).
+export fn panelSpeed(program: String) -> String {
+    let mut ours = 0
+    let mut best = 0
+    let mut bestName = ""
+    for c in readingsFor(program) {
+        // The WebAssembly build is a different target and not the comparison
+        // this line is about.
+        if c.key == "vyrn-wasm" {
+            continue
+        }
+        let us = medianUs(program, c.key)
+        if us <= 0 {
+            continue
+        }
+        if c.key == "vyrn-native" {
+            ours = us
+        }
+        if best == 0 || us < best {
+            best = us
+            bestName = c.name.copy()
+        }
+    }
+    if ours == 0 || best == 0 {
+        return ""
+    }
+    if ours <= best {
+        return "fastest of the five"
+    }
+    return ratioText(ours * 100 / best) + " " + bestName
+}
+
+/// How much less memory the language's own build needed than the hungriest
+/// engine on the same program — `9x less` — or "" when the record cannot say.
+fn panelMemRatio(program: String) -> String {
+    let mut ours = 0
+    let mut worst = 0
+    for c in readingsFor(program) {
+        let b = cellOf(program, c.key).peakBytes
+        if c.key == "vyrn-native" {
+            ours = b
+        }
+        if b > worst {
+            worst = b
+        }
+    }
+    if ours <= 0 || worst <= ours {
+        return ""
+    }
+    let tenths = worst * 10 / ours
+    let whole = tenths / 10
+    let rest = tenths - whole * 10
+    if rest == 0 {
+        return whole.toString() + "x less"
+    }
+    return whole.toString() + "." + rest.toString() + "x less"
+}
+
+/// What the language's own build needed, and what the hungriest did.
+fn panelMemPair(program: String) -> String {
+    let mut ours = ""
+    let mut oursBytes = 0
+    let mut worstName = ""
+    let mut worstText = ""
+    let mut worst = 0
+    let mut runnerName = ""
+    let mut runnerText = ""
+    let mut runner = 0
+    for c in readingsFor(program) {
+        let b = cellOf(program, c.key).peakBytes
+        if c.key == "vyrn-native" {
+            ours = c.mem.copy()
+            oursBytes = b
+        }
+        if b > worst {
+            runner = worst
+            runnerName = worstName.copy()
+            runnerText = worstText.copy()
+            worst = b
+            worstName = c.name.copy()
+            worstText = c.mem.copy()
+        } else if b > runner {
+            runner = b
+            runnerName = c.name.copy()
+            runnerText = c.mem.copy()
+        }
+    }
+    if ours.byteLength == 0 || worstText.byteLength == 0 {
+        return ""
+    }
+    // WHEN OURS IS THE HUNGRIEST the old line read "2,093.5 MB vs Vyrn native
+    // 2,093.5 MB", which is a sentence about nothing (user). The card says so
+    // instead, and names who is next.
+    if worstName == "Vyrn native" {
+        if runnerText.byteLength == 0 {
+            return ours + " peak"
+        }
+        return ours + " peak — the most here, over " + runnerName + " " + runnerText
+    }
+    return ours + " vs " + worstName + " " + worstText
+}
+
+/// The card's memory line: what the language's own build needed against the
+/// hungriest engine, and how much less that is when it IS less.
+export fn panelMemLine(program: String) -> String {
+    let pair = panelMemPair(program)
+    if pair.byteLength == 0 {
+        return ""
+    }
+    let ratio = panelMemRatio(program)
+    if ratio.byteLength == 0 {
+        return pair
+    }
+    return pair + " · " + ratio
+}
+
+/// Vyrn's own build against Rust on one program.
+///
+/// The verdict beside a program is a reading of THIS number and nothing else —
+/// a deviation past ten per cent either way, inside the band under it — and it
+/// was the one figure the verdict depended on that the page never printed. A
+/// label a reader cannot check is a label a reader has to trust.
+export fn nativeVsRust(program: String) -> String {
+    return ratioText(ratioOf(program, "vyrn-native", "rust"))
+}
+
+/// The ten program blocks: everything the record knows
+/// about one program, in one place.
+export fn axisPanels() -> Array<Panel> {
+    let mut out: Array<Panel> = []
+    for p in programs() {
+        out.push(Panel {
+            key: p.key.copy(),
+            name: p.name.copy(),
+            n: p.n.copy(),
+            note: p.note.copy(),
+            cause: causeOf(p.key),
+            label: labelOf(p.key),
+            verdict: verdictOf(p.key),
+            game: p.game.copy(),
+            cells: readingsFor(p.key),
+        })
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// The named causes
+//
+// Every measured deviation is a named defect or a named missing feature, one
+// line each. They are prose and they are written here rather than read from the
+// record, because the record holds measurements and a cause is a conclusion
+// somebody drew from one.
+// ---------------------------------------------------------------------------
+
+/// The short cause for a program.
+fn causeOf(program: String) -> String {
+    for row in causeRows() {
+        if row[0] == program {
+            return row[2].copy()
+        }
+    }
+    return ""
+}
+
+/// Whether the row is a deviation at all.
+fn verdictOf(program: String) -> String {
+    for row in causeRows() {
+        if row[0] == program {
+            return row[1].copy()
+        }
+    }
+    return ""
+}
+
+/// The cause in a handful of words — the whole of what `/compare` prints about
+/// one program's deviation.
+///
+/// The paragraph it stands for is still written and still sourced. What changed
+/// is where it is read: ten paragraphs of diagnosis under a chart is a page
+/// nobody finishes, and a label beside the number is the same claim at a length
+/// that gets read.
+fn labelOf(program: String) -> String {
+    for row in causeRows() {
+        if row[0] == program {
+            return row[3].copy()
+        }
+    }
+    return ""
+}
+
+/// Program, verdict, cause, label. The verdict is the ratio of Vyrn native to
+/// Rust and whether it is outside the stated +/-10% noise band; the label is
+/// the cause in a few words, for the consumer page.
+export fn causeRows() -> Array<Array<String>> {
+    return [
+        ["nbody", "a deviation", "Rust's compiler folds the inner loop into instructions that do four sums at once; ours emits them one at a time. What that transformation needs to be safe — that two arrays in the loop are never the same array — the language already proves, because it uses the same fact to free memory. It does not yet reach the part of the compiler that would act on it.", "no vector instructions"],
+        ["spectralnorm", "inside the noise band", "", ""],
+        ["fannkuch", "inside the noise band", "The previous dataset was 679 ms behind Rust, and most of that was one array built fresh 39,916,800 times. The language gained a way to refill a buffer in place instead, and the row moved inside the band the day it landed.", "the copy that cost 600 ms"],
+        ["binarytrees", "at the edge of the band", "Node wins this one outright, and the WebAssembly build is twice as fast as the native one — because it brings its own allocator with it, and the native build asks the operating system for every node. The memory this row used to carry is settled: it peaked above two gigabytes when nothing was being freed, and now sits level with Rust.", "who allocates the memory"],
+        ["fasta", "a deviation", "What one 60-byte output line costs: an array grown from nothing by doubling, then a check that its bytes are valid text — over bytes already known to be plain ASCII — and a second allocation, because the program still builds a piece of text per line. A way to write raw bytes straight out exists; this program has not been moved onto it.", "the price of one output line"],
+        ["revcomp", "a deviation", "Three passes over every byte, and a cost per output line on top: about 120 million appends for 40 million bases, each one a bounds and capacity check into an array that grows by doubling, where Rust's output loop allocates nothing at all. The spread of the whole set is in this one program — the C entry is itself four times slower than Rust here, for reading its input a line at a time.", "a pass per byte, and a cost per line"],
+        ["knucleotide", "ahead of the band", "This row once took 211 times C's time, when looking a key up in a map meant reading every key in it. Maps carry a hash index now, and this program's key is a single number rolled along the sequence rather than a fresh piece of text at every position. Its N moved a hundredfold with this dataset: the old one was chosen for the slow version and outlived it.", "faster than C, and why"],
+        ["pidigits", "inside the noise band", "", ""],
+        ["mandelbrot", "inside the noise band", "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic — which is why even the WebAssembly build, two to fourteen times slower everywhere else, is within 15% of C here. The program is on the list at all because Vyrn can write raw bytes now: this image's pixels are arbitrary bytes, and text cannot carry them.", "the closest five readings here"],
+        ["regexredux", "a deviation", "The entries are not running comparable engines, which is the first thing to say about the number. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus — about sixty lines, hand-fitted to these patterns, no backtracking — and node uses the engine built into it. So the gap is the shape of a general engine against a special-cased scan, and not a finding about the language. What it does measure honestly is that Vyrn's engine has had no optimisation work at all.", "not the same engine on both sides"],
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The environment, which is what makes a number a measurement
+// ---------------------------------------------------------------------------
+
+/// The environment block of the published record.
+fn envText() -> String {
+    return objectAt(recordText(run1File()), "  ", "environment")
+}
+
+/// The machine and the toolchain, in one line, for a caption. Every number on
+/// either page names this — a benchmark without it is an advertisement.
+export fn benchMachine() -> String {
+    let env = envText()
+    let hw = objectAt(env, "    ", "hardware")
+    let vyrn = objectAt(env, "    ", "vyrn")
+    let wasmtime = objectAt(env, "    ", "wasmtime")
+    return textAt(hw, "      ", "cpu") + ", " + textAt(env, "    ", "os") + ", " + textAt(vyrn, "      ", "version") + ", wasmtime " + textAt(wasmtime, "      ", "version") + ", " + benchDate()
+}
+
+/// When the dataset was measured.
+export fn benchDate() -> String {
+    return textAt(recordText(run1File()), "  ", "date")
+}
+
+/// How many timed runs each median is of.
+export fn benchRuns() -> String {
+    return scalarAt(recordText(run1File()), "  ", "runs")
+}
+
+/// How the runner timed a program.
+export fn benchMethod() -> String {
+    return textAt(recordText(run1File()), "  ", "method")
+}
+
+/// The environment, row by row. Name and value; the value is
+/// the record's own text and nothing here rewrites it.
+export fn envRows() -> Array<Array<String>> {
+    let env = envText()
+    let hw = objectAt(env, "    ", "hardware")
+    let vyrn = objectAt(env, "    ", "vyrn")
+    let wasmtime = objectAt(env, "    ", "wasmtime")
+    let flags = objectAt(env, "    ", "flags")
+    // NO HOST ROW. It printed the machine's own
+    // name — `LOCUST` — in a caption on the index and on `/compare`, which is a
+    // private detail of somebody's desk and tells a reader nothing about the
+    // number beside it. What makes a measurement checkable is below: the CPU,
+    // the memory, the OS and every toolchain version and flag. The recorder
+    // stopped collecting it too, and the committed records do not carry it —
+    // see `bench/harness/run.py`.
+    return [
+        ["Operating system", textAt(env, "    ", "os")],
+        ["CPU", textAt(hw, "      ", "cpu") + " (" + scalarAt(hw, "      ", "cores") + " logical cores)"],
+        ["Memory", scalarAt(hw, "      ", "ram_gib") + " GiB"],
+        ["clang", textAt(env, "    ", "clang")],
+        ["rustc", textAt(env, "    ", "rustc")],
+        ["node", textAt(env, "    ", "node")],
+        ["python", textAt(env, "    ", "python")],
+        ["vyrn", textAt(vyrn, "      ", "version") + " at " + textAt(vyrn, "      ", "commit")],
+        ["wasmtime", textAt(wasmtime, "      ", "version") + ", sha256 " + textAt(wasmtime, "      ", "lock_sha256")],
+        ["C flags", textAt(flags, "      ", "c")],
+        ["Rust flags", textAt(flags, "      ", "rust")],
+        ["JavaScript", textAt(flags, "      ", "js")],
+        ["Vyrn native", textAt(flags, "      ", "vyrn-native")],
+        ["Vyrn wasm", textAt(flags, "      ", "vyrn-wasm")],
+    ]
+}
+
+/// The empty-program floor of each contestant, which is what a reader subtracts
+/// from a median to get the work. Included because a whole-process wall time
+/// that does not publish its floor is not checkable.
+export fn floorRows() -> Array<Reading> {
+    let box = objectAt(recordText(run1File()), "  ", "floor")
+    let mut out: Array<Reading> = []
+    for s in contestants() {
+        let cell = objectAt(box, "    ", s.key)
+        out.push(Reading {
+            key: s.key.copy(),
+            name: s.name.copy(),
+            tone: s.tone.copy(),
+            cpu: secsOf(microsOf(scalarAt(cell, "      ", "cpu_median_s"))),
+            secs: secsOf(microsOf(scalarAt(cell, "      ", "median_s"))),
+            mem: memOf(wholeOf(scalarAt(cell, "      ", "peak_bytes"))),
+            gz: "",
+            make: "",
+            norm: "",
+            ms: msOf(microsOf(scalarAt(cell, "      ", "median_s"))),
+            vsC: "",
+            vsRust: "",
+            spread: "",
+            noisy: false,
+            pct: "0.0",
+            over: false,
+        })
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// The detail tables: both runs, cell by cell
+// ---------------------------------------------------------------------------
+
+/// One cell as the detail table prints it: both runs, the drift between them, the
+/// within-run spread, and the ten raw readings the median came from.
+export type Detail = { key: String, name: String, one: String, two: String, drift: String, cpu: String, mem: String, gz: String, make: String, spread: String, noisy: Bool, runs: String }
+
+/// One program's five cells, in full.
+export fn detailRows(program: String) -> Array<Detail> {
+    let mut out: Array<Detail> = []
+    for s in contestants() {
+        let cell = cellOf(program, s.key)
+        out.push(Detail {
+            key: s.key.copy(),
+            name: s.name.copy(),
+            one: msOf(cell.us1),
+            two: msOf(cell.us2),
+            drift: driftText(cell.us1, cell.us2),
+            cpu: secsOf(cell.cpuUs),
+            mem: memOf(cell.peakBytes),
+            gz: bytesOf(cell.gzBytes),
+            make: makeOf(cell.makeUs),
+            spread: pctOf(cell.spread1),
+            noisy: noisy(cell.spread1),
+            runs: cell.runs1.copy(),
+        })
+    }
+    return out
+}
+
+/// How far the second run's median moved from the first, as a signed
+/// percentage. This is the whole of the page's noise statement, cell by
+/// cell: the gate said "reproduces on a second run within stated noise", and
+/// this is where a reader checks it.
+fn driftText(one: Int64, two: Int64) -> String {
+    if one <= 0 || two <= 0 {
+        return "—"
+    }
+    let h = driftHundredths(one, two)
+    let sign = if two >= one { "+" } else { "-" }
+    return sign + (h / 100).toString() + "." + pad2(h % 100) + "%"
+}
+
+/// The magnitude of the drift between two medians, in hundredths of a per cent,
+/// against the FIRST run — which is the denominator the noise figures use
+/// (median 1.9%, 95th 8.6%, worst 9.5%: they reproduce to the digit this way and
+/// no other).
+fn driftHundredths(one: Int64, two: Int64) -> Int64 {
+    let diff = if two >= one { two - one } else { one - two }
+    return (diff * 10000 + one / 2) / one
+}
+
+/// The largest drift between the two runs, over all forty cells, for the noise
+/// statement's headline. Computed rather than quoted, so the sentence cannot
+/// outlive the data.
+export fn worstDrift() -> String {
+    loadCells()
+    let mut worst = 0
+    let mut which = ""
+    for c in cells {
+        if c.us1 > 0 && c.us2 > 0 {
+            let mag = driftHundredths(c.us1, c.us2)
+            if mag > worst {
+                worst = mag
+                which = c.program + " / " + c.contestant
+            }
+        }
+    }
+    return (worst / 100).toString() + "." + pad2(worst % 100) + "% (" + which + ")"
+}
+
+/// How many of the forty cells moved by less than five per cent between runs.
+///
+/// Computed from the two committed records, never quoted — an earlier dataset's
+/// hand-written "thirty-six" was contradicted by its own data,
+/// which is why this sentence is a function.
+export fn steadyCells() -> String {
+    loadCells()
+    let mut steady = 0
+    for c in cells {
+        if c.us1 > 0 && c.us2 > 0 && driftHundredths(c.us1, c.us2) < 500 {
+            steady = steady + 1
+        }
+    }
+    return steady.toString() + " of " + cells.length.toString()
+}
+
+// ---------------------------------------------------------------------------
+// The published ceiling
+//
+// The game's own published entries are hand-tuned to
+// the bone, and the harness compares plainly written C, Rust and JavaScript
+// instead. The game's numbers are recorded here as a CEILING, with the date they
+// were read — "recorded, not vendored". No source was taken.
+//
+// THEY ARE NOT ON THE CHART, AND THEY MAY NOT BE. The game runs every program at
+// its own N — 50,000,000 steps of nbody where this dataset runs 25,000,000,
+// fannkuch-redux at n = 12 against n = 11, binary-trees at depth 21 against 18 —
+// on its own machine, with its own compilers. A ratio taken across those two
+// worlds would be arithmetic on unlike quantities. What the rows are good for is
+// the one question they can answer: how far a hand-tuned entry is from a plainly
+// written one in the same language.
+// ---------------------------------------------------------------------------
+
+/// Program, the game's own N, its fastest published Rust time, its fastest
+/// published C time. Seconds, as the game prints them.
+export fn ceilingRows() -> Array<Array<String>> {
+    return [
+        ["nbody", "50,000,000", "2.192 s", "2.10 s"],
+        ["spectral-norm", "5,500", "0.718 s", "0.40 s"],
+        ["fannkuch-redux", "12", "3.807 s", "2.14 s"],
+        ["binary-trees", "21", "1.065 s", "1.56 s"],
+        ["fasta", "25,000,000", "0.778 s", "0.79 s"],
+        ["reverse-complement", "25,000,000 bases", "0.549 s", "0.44 s"],
+        ["k-nucleotide", "25,000,000", "2.568 s", "3.58 s"],
+        ["pidigits", "10,000", "0.714 s", "0.74 s"],
+        ["mandelbrot", "16,000", "0.95 s", "1.64 s"],
+        ["regex-redux", "25,627,472-byte FASTA", "0.78 s", "0.97 s"],
+    ]
+}
+
+/// Where the ceiling was read, and when. A reference number without a fetch date
+/// is a number that has already drifted.
+export fn ceilingFetched() -> String {
+    return "benchmarksgame-team.pages.debian.net, read 2026-08-19; mandelbrot and regex-redux read 2026-09-01"
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Whether `needle` occurs in `haystack`. Only the tests below use it.
+fn has(haystack: String, needle: String) -> Bool {
+    return match indexOf(haystack, needle) {
+        Some(at) => true,
+        None => false,
+    }
+}
+
+test "the record still has the shape this reader cuts" {
+    // The reader is a slicer and not a parser, so its contract with `run.py` is
+    // the indentation of `json.dump(indent=2)`. If that changes, every number on
+    // two pages becomes an em-dash, and this is where it fails instead.
+    loadCells()
+    assertEq(cells.length, 50)
+    for c in cells {
+        assert(c.us1 > 0)
+        assert(c.us2 > 0)
+        assert(c.spread1.byteLength > 0)
+        assert(c.runs1.byteLength > 0)
+    }
+    assertEq(benchDate(), "2026-09-01")
+    assertEq(benchRuns(), "10")
+}
+
+test "the medians are the ones the published record holds" {
+    // Every figure below is read off `2026-09-01.json` by hand. They
+    // are pins, and they are meant to be: the day the record is replaced they
+    // fail, which is what makes a repointed reader visible instead of silent.
+    assertEq(msOf(medianUs("nbody", "c")), "897 ms")
+    assertEq(msOf(medianUs("nbody", "rust")), "659 ms")
+    assertEq(msOf(medianUs("nbody", "js")), "1125 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-native")), "882 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "12511 ms")
+    assertEq(msOf(medianUs("knucleotide", "c")), "313 ms")
+    assertEq(msOf(medianUs("knucleotide", "rust")), "221 ms")
+    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "125 ms")
+    assertEq(msOf(medianUs("binarytrees", "js")), "436 ms")
+    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1330 ms")
+}
+
+test "the normalized figures are the ones the record computes" {
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "0.98x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "13.95x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.04x")
+    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.47x")
+    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.22x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.40x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.96x")
+    // And against Rust, which is the comparison the gate was written about.
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.34x")
+    assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.00x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "7.83x")
+}
+
+test "the log scale puts a doubling on every ring" {
+    // The baseline is at the ring the scale is named for, and each doubling is
+    // one ring further out. This is the whole claim of the radial axis.
+    assertEq(radiusOf(100), ringRadius(belowBase()))
+    assertEq(radiusOf(200), ringRadius(belowBase() + 1))
+    assertEq(radiusOf(400), ringRadius(belowBase() + 2))
+    assertEq(radiusOf(50), ringRadius(belowBase() - 1))
+    // Two hundred units over seven doublings: the baseline ring is 86 out.
+    assertEq(radiusOf(100), 86)
+    assertEq(radiusOf(200), 114)
+    // The centre is an eighth of the baseline and the rim is sixteen times it.
+    assertEq(radiusOf(12), 0)
+    assertEq(radiusOf(1600), radius())
+    // And past the rim the scale stops rather than running off the sheet.
+    assertEq(radiusOf(30200), radius())
+    assertEq(ringLabel(0 - 3), "1/8x")
+    assertEq(ringLabel(0), "1x")
+    assertEq(ringLabel(4), "16x")
+}
+
+test "no cell is ever silently truncated" {
+    // Every point past the rim is drawn at the rim AND carries a mark naming its
+    // real figure. The two counts must agree, or a reading has been flattened
+    // into the rim with nothing to say so.
+    let mut clamped = 0
+    let mut marked = 0
+    for line in radarLines() {
+        marked = marked + line.marks.length
+        for p in programs() {
+            if offScale(ratioOf(p.key, line.key, "c")) {
+                clamped = clamped + 1
+            }
+        }
+    }
+    assertEq(clamped, marked)
+    // None under C: the three cells the old dataset drew at the rim — reverse-
+    // complement's wasm leg and both of k-nucleotide's — came inside when the
+    // map was hashed and stdin stopped being read a byte at a time.
+    assertEq(clamped, 0)
+    // And no reading falls off the INNER end: the fastest cell in the set is
+    // 0.22x, still comfortably outside the centre.
+    for line in radarLines() {
+        for p in programs() {
+            assert(radiusOf(ratioOf(p.key, line.key, "c")) > 0)
+        }
+    }
+}
+
+test "every polygon has one vertex per program" {
+    for line in radarLines() {
+        assertEq(split(line.points, " ").length, programs().length)
+    }
+    assertEq(radarLines().length, 5)
+    // The C polygon against C is the baseline ring itself, vertex for vertex.
+    let base = radarRings()[belowBase() - 1]
+    assertEq(radarLines()[0].points, base.points)
+    assertEq(base.label, "1x")
+    assertEq(base.tone, "ring base")
+}
+
+test "no axis name runs off the sheet" {
+    // Found in the browser with `getBBox` and pinned here so it stays found. The
+    // widest name is the horizontal pair, which hangs a whole label off the rim
+    // rather than half of one — `k-nucleotide` to the left, `fannkuch-redux` to
+    // the right. Ten-pixel mono is about six units a character.
+    let spokes = radarSpokes()
+    let mut i = 0
+    while i < spokes.length {
+        let x = numOf(spokes[i].lx)
+        let room = spokes[i].name.byteLength * 6
+        if spokes[i].anchor == "start" {
+            assert(x + room <= 700)
+        }
+        if spokes[i].anchor == "end" {
+            assert(x - room >= 0)
+        }
+        i = i + 1
+    }
+}
+
+test "every axis carries a name, a spoke and a wedge to reach it" {
+    let spokes = radarSpokes()
+    assertEq(spokes.length, 10)
+    assertEq(spokes[0].key, "nbody")
+    assertEq(spokes[0].anchor, "middle")
+    assertEq(spokes[2].anchor, "start")
+    assertEq(spokes[5].anchor, "middle")
+    assertEq(spokes[7].anchor, "end")
+    for s in spokes {
+        assert(s.name.byteLength > 0)
+        assert(split(s.wedge, " ").length == 4)
+    }
+}
+
+test "a block is the whole of what is known about one program" {
+    let panels = axisPanels()
+    assertEq(panels.length, 10)
+    for p in panels {
+        assertEq(p.cells.length, 5)
+        assert(p.verdict.byteLength > 0)
+    }
+    assertEq(panels[0].n, "25,000,000")
+    assertEq(panels[0].cells[0].ms, "897 ms")
+    assertEq(panels[0].cells[3].vsC, "0.98x")
+    assertEq(panels[0].cells[3].vsRust, "1.34x")
+    // The verdict is a reading of the native leg against Rust, and the block
+    // prints both so a reader can check the label against its own number.
+    assertEq(nativeVsRust("nbody"), "1.34x")
+    assertEq(nativeVsRust("pidigits"), "1.00x")
+    assertEq(nativeVsRust("knucleotide"), "0.57x")
+    // The rows that are not deviations say so rather than naming a defect, the
+    // one that sits on the line says THAT rather than picking a side, and the
+    // one that is outside the band on the FAST side is not called a deviation.
+    assertEq(panels[1].verdict, "inside the noise band")
+    assertEq(panels[2].verdict, "inside the noise band")
+    assertEq(panels[3].verdict, "at the edge of the band")
+    assertEq(panels[6].verdict, "ahead of the band")
+    assertEq(panels[7].verdict, "inside the noise band")
+}
+
+test "the noisy cells are flagged where they are printed" {
+    // The COUNT is not pinned: it is a property of the machine on the day, and a
+    // quieter one flags fewer. What is pinned is the wiring — every flag on the
+    // page is the spread of that program on that contestant, and not of the cell
+    // beside it — and that the mechanism is exercised by at least one cell.
+    let mut flagged = 0
+    for p in programs() {
+        let cells = readingsFor(p.key)
+        let mut i = 0
+        while i < cells.length {
+            assertEq(cells[i].noisy, noisy(cellOf(p.key, contestants()[i].key).spread1))
+            assertEq(cells[i].spread, pctOf(cellOf(p.key, contestants()[i].key).spread1))
+            if cells[i].noisy {
+                flagged = flagged + 1
+            }
+            i = i + 1
+        }
+    }
+    assert(flagged > 0)
+    // k-nucleotide's C leg is the smallest reading in the set — a few multiples
+    // of the process floor — so it is noisy on any machine this runs on.
+    assert(readingsFor("knucleotide")[0].noisy)
+    // And nbody's, three orders of magnitude above the floor, is not.
+    assert(!readingsFor("nbody")[0].noisy)
+}
+
+test "the caption names the hardware and the toolchain, and never the machine" {
+    let cap = benchMachine()
+    assert(has(cap, "Ryzen"))
+    assert(has(cap, "wasmtime 46.0.1"))
+    assert(has(cap, "2026-09-01"))
+    assertEq(envRows().length, 14)
+    for row in envRows() {
+        assert(row[0].byteLength > 0)
+        assert(row[1].byteLength > 0)
+        // The host name is gone from the record, from the file names and from
+        // here, and this is what says so if one comes back. A row whose label
+        // is `Host` would fail the first assertion; a record that still carried
+        // the field would fail the second.
+        assert(row[0] != "Host")
+    }
+    assert(!has(envText(), "\"host\""))
+    // The floor is published beside the medians, because a whole-process time
+    // that hides its floor cannot be checked.
+    assertEq(floorRows().length, 5)
+    assertEq(floorRows()[0].ms, "4.7 ms")
+    assertEq(floorRows()[4].ms, "13.4 ms")
+}
+
+test "both runs are published, and the drift is computed from them" {
+    let rows = detailRows("nbody")
+    assertEq(rows.length, 5)
+    for r in rows {
+        assert(r.one.byteLength > 0)
+        assert(r.two.byteLength > 0)
+        assert(r.drift.byteLength > 2)
+        assertEq(split(r.runs, "  ").length, 10)
+    }
+    // The gate's own sentence, computed: forty-four of fifty cells moved by
+    // less than five per cent between the two runs, and no cell moved by
+    // as much as ten — which is what sizing every row above the process
+    // floor bought (see the N notes in the harness's program table).
+    assertEq(steadyCells(), "44 of 50")
+    assertEq(detailRows("binarytrees")[1].drift, "-3.38%")
+    assert(has(worstDrift(), "binarytrees / c"))
+}
+
+test "the published ceiling is dated, and never mixed with the measured rows" {
+    // The game's own numbers are a CEILING and not a comparison: a different N,
+    // a different machine, hand-tuned entries. They live in their own table
+    // and on no chart — which is what "recorded, not vendored" means.
+    let rows = ceilingRows()
+    assertEq(rows.length, 10)
+    for row in rows {
+        assertEq(row.length, 4)
+        assert(row[1].byteLength > 0)
+        assert(row[2].byteLength > 0)
+    }
+    assertEq(rows[0][0], "nbody")
+    assertEq(rows[0][1], "50,000,000")
+    assert(has(ceilingFetched(), "2026-08-19"))
+}
+
+test "every program links to the game's own page for it" {
+    // The link is the amendment's own gate: a benchmark that names a program
+    // and does not point at the original is asking to be taken on trust. All
+    // ten were fetched and resolved on the dates `ceilingFetched` states.
+    let progs = programs()
+    assertEq(progs.length, 10)
+    for p in progs {
+        assert(has(p.game, "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/"))
+        assert(has(p.game, ".html"))
+    }
+    // The three spellings that do not compute from one another: the record's
+    // key, the name a reader sees, and the slug the game's own page sits under.
+    assertEq(progs[2].key, "fannkuch")
+    assertEq(progs[2].name, "fannkuch-redux")
+    assert(has(progs[2].game, "/fannkuchredux.html"))
+    assert(has(progs[1].game, "/spectralnorm.html"))
+    assert(has(progs[6].game, "/knucleotide.html"))
+    assert(has(progs[5].game, "/revcomp.html"))
+}
+
+test "every cell carries the five columns the game prints" {
+    for p in programs() {
+        let cells = readingsFor(p.key)
+        assertEq(cells.length, 5)
+        for c in cells {
+            assert(c.cpu.byteLength > 0)
+            assert(c.secs.byteLength > 0)
+            assert(c.mem.byteLength > 2)
+            assert(c.gz.byteLength > 2)
+            assert(has(c.norm, " C, "))
+        }
+        // node is the one contestant with no build step, and the column says so
+        // rather than printing a zero somebody would read as a fast build.
+        assertEq(cells[2].make, "—")
+        assert(cells[0].make != "—")
+        assert(cells[3].make != "—")
+    }
+}
+
+test "every bar is measured against the same track, and none is clipped in silence" {
+    // THE DEFECT THIS PINS. The bar used to be a share of the SLOWEST engine on
+    // its own card, so each card carried its own scale and no two could be
+    // compared. nbody is the case that showed it: the wasm leg is fourteen
+    // times C, so the four engines a reader actually wants to tell apart
+    // shared the first seven per cent of the track. Against a fixed track —
+    // four times C — the same four are 18 to 31 per cent, C is a quarter of
+    // the way along on EVERY program, and the column reads down.
+    assertEq(trackPct(medianUs("nbody", "c"), medianUs("nbody", "c")), "25.0")
+    for p in programs() {
+        let base = medianUs(p.key, "c")
+        for c in readingsFor(p.key) {
+            // C is the baseline and lands on its own quarter mark, everywhere.
+            if c.key == "c" {
+                assertEq(c.pct, "25.0")
+            }
+            // A reading past the end is drawn AT the end and says so; one
+            // inside it is not flagged. Same rule as the radar's rim.
+            assertEq(c.over, medianUs(p.key, c.key) > base * 4)
+            if c.over {
+                assertEq(c.pct, "100.0")
+            } else {
+                assert(c.pct != "100.0")
+            }
+        }
+    }
+    // THREE cells run past the end of the track, and they are named here
+    // because a clipped bar is a claim: nbody's wasm leg at 13.95x — the
+    // backend that runs no optimizer — and BOTH regex-redux legs, which are
+    // std/regex's general NFA against a purpose-built scan and say so in that
+    // row's own cause. No other row on any program reaches four times C.
+    let mut past: Array<String> = []
+    for p in programs() {
+        for c in readingsFor(p.key) {
+            if c.over {
+                past.push(p.key + "/" + c.key)
+            }
+        }
+    }
+    assertEq(joinWith(past, " "), "nbody/vyrn-wasm regexredux/vyrn-native regexredux/vyrn-wasm")
+}
+
+test "every row points at the program behind it" {
+    // A ratio without its two programs is a number a reader has to take on
+    // trust. Both Vyrn legs are ONE source compiled two ways, so they point at
+    // the same file — which is itself the claim that the wasm column is not a
+    // different program.
+    for p in programs() {
+        assertEq(srcHref(p.key, "c"), "https://github.com/vyrn-lang/vyrn/blob/main/bench/harness/c/" + p.key + ".c")
+        assertEq(srcHref(p.key, "rust"), "https://github.com/vyrn-lang/vyrn/blob/main/bench/harness/rust/" + p.key + ".rs")
+        assertEq(srcHref(p.key, "js"), "https://github.com/vyrn-lang/vyrn/blob/main/bench/harness/js/" + p.key + ".js")
+        assertEq(srcHref(p.key, "vyrn-native"), srcHref(p.key, "vyrn-wasm"))
+        assertEq(srcHref(p.key, "vyrn-native"), "https://github.com/vyrn-lang/vyrn/blob/main/examples/" + p.key + ".vyrn")
+    }
+}
+
+test "a row with nothing to explain explains nothing" {
+    // A cause is a label short enough to scan beside a paragraph long enough
+    // to be one — OR IT IS NOTHING AT ALL. Two rows are level with Rust and
+    // have no finding, and what they used to print was `nothing to explain —
+    // Not a deviation. Level with Rust, in the middle of the ten per cent
+    // band`: one fact, said four times, under a header that had already said
+    // it (user). They print no line now.
+    let mut silent = 0
+    for p in axisPanels() {
+        if p.cause.byteLength == 0 {
+            assertEq(p.label, "")
+            assertEq(p.verdict, "inside the noise band")
+            silent = silent + 1
+            continue
+        }
+        assert(p.label.byteLength > 0)
+        assert(p.label.byteLength < 40)
+        assert(p.cause.byteLength > 40)
+        // And a cause states what a reader cannot read off the table above it.
+        // Every one of these opened by restating the verdict in the header.
+        assert(!has(p.cause, "Not a deviation"))
+        assert(!has(p.cause, "noise band"))
+    }
+    assertEq(silent, 2)
+    // Every deviation has one.
+    for p in axisPanels() {
+        if p.verdict == "a deviation" {
+            assert(p.cause.byteLength > 40)
+        }
+    }
+    for row in causeRows() {
+        assertEq(row.length, 4)
+    }
+}
+
+test "the page names no design record and no internal symbol" {
+    // WHY THIS EXISTS (user, twice). These causes were written for the
+    // people fixing them, and they reached
+    // `/benchmarks` carrying RFC numbers, function names and instruction
+    // mnemonics. The site publishes no design records, so those numbers
+    // pointed a reader at nothing at all. What the page carries is the
+    // finding in words somebody outside the project can use.
+    let banned = ["RFC-", "std/", "noalias", "malloc", "sqrt", "()", "Int64", "wasm ", "UTF-8", "V8"]
+    for row in causeRows() {
+        for word in banned {
+            assert(!has(row[2], word))
+            assert(!has(row[3], word))
+        }
+    }
+}
+
+test "a second, a memory size and a byte count read the way the game prints them" {
+    assertEq(secsOf(898000), "0.90")
+    assertEq(secsOf(13029000), "13.03")
+    assertEq(secsOf(10100), "0.01")
+    // Two cells in the set are smaller than the column can resolve, and this is
+    // what they print rather than claiming the program took no time.
+    assertEq(secsOf(4000), "<0.01")
+    assertEq(secsOf(0), "0.00")
+    assertEq(secsOf(0 - 1), "—")
+    assertEq(makeOf(0), "—")
+    assertEq(makeOf(591825), "0.59")
+    assertEq(memOf(4386816), "4,284 KB")
+    assertEq(memOf(41000000), "39.1 MB")
+    assertEq(memOf(0), "—")
+    assertEq(bytesOf(1168), "1,168")
+    assertEq(bytesOf(0), "—")
+}
+
+test "no escape survives into the page" {
+    // `json.dump` writes every non-ASCII character as a `\uXXXX` escape, and the
+    // slicer handed those six characters straight to the template: `regex-redux`
+    // printed `100,000 \u2014 a hundred times the fixture` where the record means
+    // an em dash. The regex patterns in the same notes carry doubled
+    // backslashes for the same reason.
+    assertEq(unescaped("100,000 \\u2014 a hundred"), "100,000 — a hundred")
+    assertEq(unescaped("\\\\w+"), "\\w+")
+    assertEq(unescaped("line\\nbreak"), "line\nbreak")
+    assertEq(unescaped("nothing to undo"), "nothing to undo")
+    assertEq(charOf(65), "A")
+    assertEq(charOf(233), "é")
+    assertEq(charOf(8212), "—")
+    assertEq(hexAt("\\u2014", 2), 8212)
+    assertEq(hexAt("00ff", 0), 255)
+    assertEq(hexAt("00FF", 0), 255)
+    // And nothing the page prints from the record still carries one.
+    for prog in programs() {
+        assert(!has(prog.note, "\\"))
+    }
+    for row in envRows() {
+        assert(!has(row[1], "\\"))
+    }
+}
+
+test "a thousands separator lands every three digits and nowhere else" {
+    assertEq(grouped("25000000"), "25,000,000")
+    assertEq(grouped("100"), "100")
+    assertEq(grouped("1000"), "1,000")
+    assertEq(grouped("11"), "11")
+}
+
+test "a duration and a ratio read the way the record's tables print them" {
+    assertEq(msOf(898000), "898 ms")
+    assertEq(msOf(10100), "10.1 ms")
+    assertEq(msOf(99900), "99.9 ms")
+    assertEq(msOf(100000), "100 ms")
+    assertEq(ratioText(97), "0.97x")
+    assertEq(ratioText(1452), "14.52x")
+    assertEq(ratioText(9999), "99.99x")
+    assertEq(ratioText(10000), "100x")
+    assertEq(ratioText(28700), "287x")
+}

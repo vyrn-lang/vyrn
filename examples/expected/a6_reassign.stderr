@@ -1,0 +1,1 @@
+a6_reassign.vyrn:3:0: cannot assign to `x` (declared without `mut`)

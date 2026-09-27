@@ -1,0 +1,249 @@
+/// The site navigation, and the one place that maps a route to its published
+/// file.
+///
+/// It sits OUTSIDE `routes/` on purpose. `pages("./app/routes")` scans that
+/// directory, so a page importing the module the scan generates would be a cycle.
+/// The binding is kept honest from the other side instead: `export.vyrn` asserts
+/// every row here against the generated typed-URL helper, so a route that is
+/// renamed or deleted fails the export.
+///
+/// The two sockets the brief reserved are filled: `/guide` is the book, and
+/// `/explore` is the registry. Both arrived as a directory drop plus a
+/// row here, which is what reserving them was for. A row is still only written
+/// when the route behind it exists — there is no placeholder page anywhere.
+import { substring, split, repeat } from "std/strings"
+import { startsWith } from "std/strpred"
+import { Head, noHead, withTitle, withMeta } from "std/ui"
+import { metaOf } from "./meta"
+
+/// The head for a page that is not a place: the language's own paragraph as the
+/// description.
+///
+/// It lives here rather than in the layout because the layout's `head { … }`
+/// block has entries for a stylesheet and a script and none for a `<meta>`,
+/// while a page's `head()` returns a `Head` value, which does.
+///
+/// SIX CALLERS, AND ALL SIX ARE REDIRECT STUBS. This was the head
+/// of every page on the site, which is why 67 of 80 documents carried one
+/// paragraph between them. Every page that is a place now writes its own
+/// sentence — from the table for a named page, from the chapter, the module or
+/// the package for a generated one. A stub is the OLD NAME of a page: the export
+/// gives it no card at all, and the paragraph about the language is the honest
+/// thing for the one head element it keeps.
+export fn pageHead(title: String) -> Head {
+    return pageHeadWith(title, "Vyrn is a systems language with the expressiveness of TypeScript. Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, and one program for three backends.")
+}
+
+/// A head with a title and a description of its own.
+///
+/// The one place a page's two head strings are written, and the three callers
+/// below and in `app/routes/` differ only in where the strings come from: the
+/// table for a named page, the chapter's lede or the module's first
+/// documentation line for a generated one, and the language's own paragraph for
+/// a redirect stub, which is the old name of a page rather than a place.
+///
+/// A page's description is the string its CARD is built from —
+/// `site/export.vyrn` reads it back out of the document — so a page that writes
+/// one here cannot preview as something else.
+export fn pageHeadWith(title: String, description: String) -> Head {
+    let titled = withTitle(noHead(), title)
+    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
+    return withMeta(sized, "description", description)
+}
+
+/// The head for a page `app/meta.vyrn` names: its own title and its own
+/// sentence, from the table.
+///
+/// THIS IS WHERE THE ONE SHARED DESCRIPTION ENDS. Every page on the site used
+/// `pageHead` above, so 174 documents carried the same paragraph, and a link to
+/// `/install` previewed as a link to `/compare`. A page in the table takes
+/// its sentence from there instead, and `site/export.vyrn` reads the title
+/// and the description back out of the document to write the OpenGraph card — so
+/// the tab, the search result, the card and the search overlay's own row are one
+/// string with one author.
+///
+/// It TAKES THE PATH and not the title, which is the whole point: a route that
+/// passes its own path cannot drift from the table, and the four titles that had
+/// already drifted are the evidence. `/why-vyrn` was still titled "Philosophy"
+/// after the route was renamed; `/docs` was titled "Docs" while the masthead
+/// called it Reference and called the book Docs.
+///
+/// The generated pages take `pageHeadWith` instead, with the sentence each of
+/// them already carries — a chapter's lede, a module's first documentation line,
+/// a package's summary — so a page that no table names still says what it is.
+export fn pageHeadOf(path: String) -> Head {
+    let m = metaOf(path)
+    return pageHeadWith(m.title, m.blurb)
+}
+
+/// One navigation entry: where it goes, and what it is called.
+export type NavRow = { href: String, label: String }
+
+/// The theme control, for the masthead of both fronts.
+///
+/// ONE button that cycles system → light → dark, not three in a group. The group
+/// was three 27px boxes in a row of 13px capitals: it made the
+/// masthead fourteen pixels taller and moved the navigation off the baseline it
+/// had shared with the wordmark since the site was written. A cycling button is
+/// one box the height of the wordmark's own line, so the masthead is what it was
+/// before the control existed.
+///
+/// It still says all three states, because the state is the button's TEXT —
+/// `System`, `Light`, `Dark` — and not a colour or a pressed mark. The
+/// accessible name says the state and what the next press does, so a reader who
+/// cannot see the word gets both halves: "Theme: System. Press to use Light."
+/// That is one string that changes on the focused element rather than a live
+/// region beside it, which would announce the same fact twice.
+///
+/// It renders in the `system` state on every page, and `site/public/theme.js`
+/// rewrites the word and the name from `localStorage` when the document is
+/// parsed. The stale word is never seen: without script the button is
+/// `display: none` (`[data-js]` gates it), and with script the correction
+/// happens before a reader could look. The alternative — a control the export
+/// marks — cannot exist, because a static page has no reader's choice to mark it
+/// from.
+///
+/// One definition, one masthead. It was two — the second front built its
+/// masthead as a string — and the string caller went with that section.
+export fn themeControl() -> String {
+    return "<button type=\"button\" class=\"theme\" data-theme-cycle aria-label=\"Theme: System. Press to use Light.\">System</button>"
+}
+
+/// The published file for a route path: `/why-vyrn` is `why-vyrn.html`, and
+/// `/docs/std/json` is `docs/std/json.html`.
+///
+/// A route keeps its own shape, and the URL keeps the `.html`. A Vyrn program
+/// has `readFile`, `writeFile` and `listDir` but no way to CREATE a directory,
+/// so a nested route needs its directory made before the export runs —
+/// `site.yml` makes `out/docs/std` and `out/explore` — and
+/// `philosophy/index.html` would need one per page. When a `makeDir` builtin
+/// lands, this one function changes and the extension can go.
+export fn published(path: String) -> String {
+    if path == "/" {
+        return "index.html"
+    }
+    return substring(path, 1, path.byteLength) + ".html"
+}
+
+/// The URL a link uses for a route path, as the site's own root names it.
+///
+/// This is the route's IDENTITY — the string the navigation marker matches on,
+/// the string a `data-key` carries, the string one route compares to another.
+/// It is not what the published document says. `site/export.vyrn` turns every
+/// `href` and `src` it writes into a document-relative URL as the last thing it
+/// does to a page, with `upTo` below. Nothing here has to know where the site
+/// is served from, because nothing here writes the URL a browser reads.
+export fn hrefOf(path: String) -> String {
+    return "/" + published(path)
+}
+
+/// The step back up to the site's root from the page published for `path`:
+/// `""` for `index.html`, `"../"` for `guide/values.html`, `"../../"` for
+/// `docs/std/json.html`.
+///
+/// A page's own depth is the only input, and that is the whole point. A
+/// build-time `--base` flag bakes one host into the output, and the next host
+/// breaks: the site shipped every link as `/style.css`, which is correct at a
+/// domain root and 404 under GitHub Pages' `/vyrn/`. A URL written relative to
+/// the document that carries it is correct at a domain root, under `/vyrn/`, on
+/// a fork's Pages, behind a preview URL, and opened from disk as `file://` —
+/// one artifact, no configuration, nothing to get wrong twice.
+export fn upTo(path: String) -> String {
+    return repeat("../", split(published(path), "/").length - 1)
+}
+
+/// The navigation: FOUR groups, in reading order.
+///
+/// It was nine flat rows with no hierarchy — 718px of links showing 343px of
+/// itself on a phone, with a hidden scrollbar and nothing on the page saying
+/// so. Four names a reader already knows, and the five routes that left the row
+/// are not gone: `/install` is the persistent button below, `/compare` is
+/// reached from the index teaser and from the book, `/why-vyrn` from the index,
+/// and the editors page from the book.
+///
+/// `/releases` IS THE FIFTH. A changelog is not
+/// a place anybody navigates to before they have installed anything, and it was
+/// taking a permanent quarter of the row from the four pages that are. It is
+/// reached from the index's own `Latest release` section, from the install page,
+/// and from the footer of every page — three doors, none of them in the row a
+/// reader scans on arrival.
+///
+/// TWO OF THESE ARE LABEL CHANGES AND NOT PATH CHANGES. `Docs` is the book,
+/// which lives at `/guide`; `Reference` is the standard library, which lives at
+/// `/docs`. Renaming the paths to match the labels would need `/docs` to mean
+/// the reference to the 284 links that name it and the book to the nav row
+/// above it at the same time, and no redirect stub can hold a path its own
+/// replacement occupies. A label costs nothing and breaks nothing.
+export fn navRows() -> Array<NavRow> {
+    return [
+        NavRow { href: hrefOf("/guide"), label: "Docs" },
+        // No `Reference` row any more: the docs subnav
+        // owns the documentation's areas, and a masthead row over the same
+        // path marked one page in two bars.
+        NavRow { href: hrefOf("/explore"), label: "Explore" },
+        NavRow { href: hrefOf("/play"), label: "Play" },
+    ]
+}
+
+/// The one call to action, in the masthead of every consumer page.
+///
+/// It is a LINK and not a button, because it goes to a page: `/install` is where
+/// the commands are, and a reader who middle-clicks or bookmarks it gets what
+/// they asked for. It reads as a button because it is the one thing on the page
+/// the site wants pressed.
+///
+/// A string rather than markup in the layout, for the reason `themeControl()` is
+/// one: `site/export.vyrn` stamps `aria-current` by finding
+/// `<a href="…" data-key="…"` in the document, so the two attributes have to be
+/// the first two and in that order. A template writing `class` first would put
+/// the CTA outside the marker's reach, and the reader on `/install` would see
+/// nothing in the masthead saying so.
+export fn installCta() -> String {
+    return "<a href=\"\{hrefOf("/install")}\" data-key=\"\{hrefOf("/install")}\" class=\"cta\">Install</a>"
+}
+
+test "the home page keeps the bare index name" {
+    assertEq(published("/"), "index.html")
+    assertEq(hrefOf("/"), "/index.html")
+}
+
+test "a route becomes one file, and a nested route keeps its directory" {
+    assertEq(published("/why-vyrn"), "why-vyrn.html")
+    assertEq(hrefOf("/compare"), "/compare.html")
+    assertEq(published("/docs/std/json"), "docs/std/json.html")
+    assertEq(hrefOf("/docs/std/json"), "/docs/std/json.html")
+}
+
+test "a page's climb back to the root is its own depth and nothing else" {
+    assertEq(upTo("/"), "")
+    assertEq(upTo("/why-vyrn"), "")
+    assertEq(upTo("/guide/values"), "../")
+    assertEq(upTo("/docs/std/json"), "../../")
+}
+
+test "the navigation is three groups, and the book keeps its label" {
+    let rows = navRows()
+    assertEq(rows.length, 3)
+    // The label a reader sees, against the path it goes to. These two pairs are
+    // the whole of the label decision, and a change to either of them is a
+    // change to what 284 and 227 content links mean.
+    assertEq(rows[0].label, "Docs")
+    assertEq(rows[0].href, "/guide.html")
+    assertEq(rows[1].label, "Explore")
+    assertEq(rows[1].href, "/explore.html")
+    // The five routes that left the row are not in it under another name.
+    for row in rows {
+        assert(row.href != hrefOf("/install"))
+        assert(row.href != hrefOf("/compare"))
+        assert(row.href != hrefOf("/why-vyrn"))
+        assert(row.href != hrefOf("/tooling/editors"))
+        assert(row.href != hrefOf("/releases"))
+    }
+}
+
+test "the call to action names the install route, and names it first" {
+    let cta = installCta()
+    // The two attributes the export's marker looks for, in the order it looks
+    // for them. A `class` written before them puts the CTA out of its reach.
+    assert(startsWith(cta, "<a href=\"/install.html\" data-key=\"/install.html\""))
+}

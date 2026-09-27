@@ -1,0 +1,39 @@
+// A hundred thousand values through one slot.
+//
+// A `Slots<T>` grows, so there is no bound to trip, and a handle is a plain
+// value, so `remove` is written where the program means it. The property shown:
+// a slot that goes back is a slot that comes out again. A hundred thousand
+// inserts and as many removals leave a table of ONE slot.
+//
+// So the number below replaces the absent trap. It is printed, so all three
+// engines are held to it, and it fails loudly if reuse ever stops working —
+// where the old file could only fail by trapping, and only past 65,536.
+//
+// The count came down from a million because the interpreter now runs Vyrn for
+// what used to be four builtin calls, and a million turns of it took 75 seconds
+// where the builtins took 0.8. A hundred thousand is still past the slab that
+// bound the old file, and the property under test does not depend on the count.
+
+import { Slots, newSlots, insert, remove, capacity } from "std/slots"
+
+fn main() -> Int64 {
+    let mut cells: Slots<Int64> = newSlots()
+    let mut i = 0
+    let mut last = 0
+    while i < 100000 {
+        // `insert` takes its payload by `consume`, and movecheck cannot see
+        // that this instance's `T` is an `Int64` that owns nothing — so the
+        // loop counter is copied into a binding of the turn rather than
+        // handed over.
+        let v = i
+        let h = insert(cells, v)
+        cells[h] = cells[h] + 1
+        last = cells[h]
+        remove(cells, h) // the slot goes back; the next turn takes it
+        i = i + 1
+    }
+
+    print(last) // 100000
+    print(capacity(cells)) // 1 — a hundred thousand values, one slot
+    return 0
+}

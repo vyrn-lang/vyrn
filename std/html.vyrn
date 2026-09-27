@@ -1,0 +1,661 @@
+/// The view tree and its string renderer. A view is a pure function
+/// returning `Html`; the server renders it with `toHtmlString`, and the client
+/// ships `toJson(view())` or a `diff` to `web/vyrn-dom.js`, which builds and
+/// patches the DOM.
+///
+///   import { el, text, cls, attr, on, keyed, empty, toHtmlString, document } from "std/html"
+
+// Every buffer decoded here is an ASCII escape of valid UTF-8, so the `Err`
+// arm of the decode is unreachable.
+import { fromBytesOr } from "std/strings"
+
+/// An attribute on an element. `On(event, handler, payload)` renders as
+/// `data-on-<event>="handler" data-arg-<event>="payload"`; `web/vyrn-dom.js`
+/// calls the root-exported `export extern fn` named `handler`. `Key(k)` is list
+/// identity for the keyed differ and renders as `data-key="k"`.
+export type Attr =
+    | Cls(String)
+    | Id(String)
+    | A(String, String)
+    | On(String, String, String)
+    | Key(String)
+
+/// A node in the view tree. `Text` is always escaped; `Raw` is never escaped
+/// and is the only way to emit markup from a string. `Empty` renders as nothing.
+export type Html =
+    | Empty
+    | Text(String)
+    | Raw(String)
+    | El(String, Array<Attr>, Array<Html>)
+
+/// A host subscription. An app may export `vyrnSubs() -> String` returning
+/// `toJson(subs())`; after each render `web/vyrn-dom.js` diffs the list by
+/// value and wires what appeared and unwires what went. `Every(ms, handler)`
+/// calls `handler` every `ms` milliseconds; `Keydown(key, handler)` calls it
+/// when `key` (a `KeyboardEvent.key` value) is pressed on the document.
+export type Sub =
+    | Every(Int64, String)
+    | Keydown(String, String)
+
+/// Written out because `Html` reaches itself through `El`, and the structural
+/// copy has no bottom to stop at.
+impl Copy for Html {
+    fn copy(self) -> Html {
+        return match self {
+            Empty => Empty,
+            Text(s) => Text(s.copy()),
+            Raw(s) => Raw(s.copy()),
+            El(tag, attrs, kids) => El(tag.copy(), attrs.copy(), copyHtmlArray(kids)),
+        }
+    }
+}
+
+/// Declared because `Html` reaches itself through `El`, and the structural
+/// release walk has no bottom.
+impl Owned for Html {
+    fn release(consume self) {
+        match consume self {
+            Empty => {}
+            Text(s) => {
+                drop s
+            }
+            Raw(s) => {
+                drop s
+            }
+            El(tag, attrs, kids) => {
+                drop tag
+                drop attrs
+                drop kids
+            }
+        }
+    }
+}
+
+/// Exported because `ks.copy()` cannot be written for this element type: a
+/// declared `Copy` answers for the whole value, not a part of one.
+export fn copyHtmlArray(ks: Array<Html>) -> Array<Html> {
+    let mut out: Array<Html> = []
+    for k in ks {
+        out.push(k.copy())
+    }
+    return out
+}
+
+// Every constructor takes its arguments by `consume`: the node holds them and
+// outlives the call. A caller holding a borrow passes `.copy()`.
+
+export fn el(tag: consume String, attrs: consume Array<Attr>, kids: consume Array<Html>) -> Html {
+    return El(tag, attrs, kids)
+}
+
+export fn text(s: consume String) -> Html {
+    return Text(s)
+}
+
+export fn empty() -> Html {
+    return Empty
+}
+
+export fn cls(s: consume String) -> Attr {
+    return Cls(s)
+}
+
+export fn attr(n: consume String, v: consume String) -> Attr {
+    return A(n, v)
+}
+
+export fn on(event: consume String, handler: consume String, payload: consume String) -> Attr {
+    return On(event, handler, payload)
+}
+
+/// Keying a non-element node returns it unchanged.
+export fn keyed(k: consume String, node: consume Html) -> Html {
+    // `consume node`: the binders take the payloads, so the rebuilt node is
+    // owned. A plain `match` would make `keyed` return a borrow.
+    return match consume node {
+        El(tag, attrs, kids) => El(tag, withKey(attrs, k), kids),
+        Empty => Empty,
+        Text(s) => Text(s),
+        Raw(s) => Raw(s),
+    }
+}
+
+fn withKey(attrs: consume Array<Attr>, k: consume String) -> Array<Attr> {
+    let mut out = attrs
+    out.push(Key(k))
+    return out
+}
+
+// Escaping is byte-level: every special character is ASCII and never a
+// continuation byte, so multi-byte UTF-8 passes through.
+
+fn escapeText(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    for b in raw {
+        if b == '&' {
+            out.append(bytes("&amp;"))
+        } else if b == '<' {
+            out.append(bytes("&lt;"))
+        } else if b == '>' {
+            out.append(bytes("&gt;"))
+        } else if b == '"' {
+            out.append(bytes("&quot;"))
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// Escapes the two characters that can leave a double-quoted value: `&` `"`.
+fn escapeAttr(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    for b in raw {
+        if b == '&' {
+            out.append(bytes("&amp;"))
+        } else if b == '"' {
+            out.append(bytes("&quot;"))
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+// A name lands outside the quotes, where escaping cannot protect it, so a name
+// is checked and a bad one traps: a name built from untrusted text is a bug.
+
+/// A name holds only ASCII letters, digits, `-`, `_` and `:`, and is not empty.
+fn nameOk(n: String) -> Bool {
+    let raw = bytes(n)
+    if raw.length == 0 {
+        return false
+    }
+    for b in raw {
+        let ok = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '_' || b == ':'
+        if !ok {
+            return false
+        }
+    }
+    return true
+}
+
+/// `kind` is `tag`, `attribute` or `event`, for the message.
+fn requireName(kind: String, n: String) {
+    if !nameOk(n) {
+        panic("html: `" + n + "` is not a usable " + kind + " name — a name holds only letters, digits, `-`, `_` and `:`; untrusted text belongs in a VALUE, which is escaped")
+    }
+}
+
+/// The HTML void elements: no closing tag, and children are refused.
+fn isVoid(tag: String) -> Bool {
+    let voids = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]
+    for v in voids {
+        if v == tag {
+            return true
+        }
+    }
+    return false
+}
+
+/// One attribute with its leading space: ` class="row"`.
+fn renderAttr(a: Attr) -> String {
+    return match a {
+        Cls(v) => attrPair("class", v),
+        Id(v) => attrPair("id", v),
+        A(n, v) => attrPair(n, v),
+        On(event, handler, payload) => onPair(event, handler, payload),
+        Key(k) => attrPair("data-key", k),
+    }
+}
+
+fn attrPair(n: String, v: String) -> String {
+    requireName("attribute", n)
+    return " " + n + "=\"" + escapeAttr(v) + "\""
+}
+
+/// The event name is part of an attribute name, so it is checked, not escaped.
+fn onPair(event: String, handler: String, payload: String) -> String {
+    requireName("event", event)
+    let mut out = " data-on-" + event + "=\"" + escapeAttr(handler) + "\""
+    out = out + " data-arg-" + event + "=\"" + escapeAttr(payload) + "\""
+    return out
+}
+
+fn renderAttrs(attrs: Array<Attr>) -> String {
+    let mut out = ""
+    for a in attrs {
+        out = out + renderAttr(a)
+    }
+    return out
+}
+
+fn renderKids(kids: Array<Html>) -> String {
+    let mut out = ""
+    for k in kids {
+        out = out + toHtmlString(k)
+    }
+    return out
+}
+
+/// Children on a void element trap: they could never render.
+fn renderEl(tag: String, attrs: Array<Attr>, kids: Array<Html>) -> String {
+    requireName("tag", tag)
+    if isVoid(tag) {
+        if kids.length > 0 {
+            panic("html: <" + tag + "> is a void element and takes no children — " + kids.length.toString() + " given; a void element has no content model, so those nodes can never render")
+        }
+        return "<" + tag + renderAttrs(attrs) + ">"
+    }
+    return "<" + tag + renderAttrs(attrs) + ">" + renderKids(kids) + "</" + tag + ">"
+}
+
+/// Renders a view tree to HTML. Text and attribute values are escaped; `Raw`
+/// is not.
+///
+/// # Panics
+///
+/// On a tag, attribute or event name outside `[A-Za-z0-9_:-]`, or children on
+/// a void element.
+export fn toHtmlString(h: Html) -> String {
+    return match h {
+        Empty => "",
+        Text(s) => escapeText(s),
+        Raw(s) => s.copy(),
+        El(tag, attrs, kids) => renderEl(tag, attrs, kids),
+    }
+}
+
+/// A DOM edit produced by `diff`, applied in order by `web/vyrn-dom.js`; the
+/// wire form is `toJson(diff(a, b))`. A path is a child-index vector from the
+/// mount root (`[]` the root, `[2, 0]` the first child of its third child).
+/// Each vnode maps to one DOM node, so a vnode index is a `childNodes` index.
+///
+/// Each op's path is valid against the DOM as patched by every earlier op:
+///   - A kind or tag change is one `OpReplace`; otherwise a node's own ops come
+///     before its children's.
+///   - Positional children: diff the common prefix, `OpRemove` the surplus
+///     high to low, then `OpInsert` the new tail low to high.
+///   - Keyed children (as `patchKeyed` in `web/vyrn-dom.js`): `OpRemove` dropped
+///     keys high to low; then, left to right, `OpInsert` new keys and `OpMove`
+///     reused ones (always leftward); then diff matched children at their final
+///     indices.
+export type PatchOp =
+    | OpSetText(Array<Int64>, String)
+    | OpSetAttrs(Array<Int64>, Array<Attr>)
+    | OpReplace(Array<Int64>, Html)
+    | OpInsert(Array<Int64>, Int64, Html)
+    | OpRemove(Array<Int64>, Int64)
+    | OpMove(Array<Int64>, Int64, Int64)
+
+/// Applying the ops in order turns a DOM built from `old` into one built from `new`.
+export fn diff(old: Html, new: Html) -> Array<PatchOp> {
+    let root: Array<Int64> = []
+    return diffNode(root, old, new)
+}
+
+/// A bare `[]` needs the element type.
+fn noOps() -> Array<PatchOp> {
+    let o: Array<PatchOp> = []
+    return o
+}
+
+/// `None` for anything but a keyed element.
+fn htmlKey(h: Html) -> Option<String> {
+    return match h {
+        El(tag, attrs, kids) => attrKey(attrs),
+        Empty => None,
+        Text(s) => None,
+        Raw(s) => None,
+    }
+}
+
+/// The last `Key(k)`; `keyed` appends exactly one.
+fn attrKey(attrs: Array<Attr>) -> Option<String> {
+    let mut found: Option<String> = None
+    for a in attrs {
+        found = match a {
+            Key(k) => Some(k.copy()),
+            Cls(v) => found,
+            Id(v) => found,
+            A(n, v) => found,
+            On(e, h, p) => found,
+        }
+    }
+    return found
+}
+
+/// A different kind or tag forces `OpReplace`.
+fn sameKind(a: Html, b: Html) -> Bool {
+    return match a {
+        Empty => match b {
+            Empty => true,
+            Text(y) => false,
+            Raw(y) => false,
+            El(t, at, k) => false,
+        },
+        Text(s) => match b {
+            Empty => false,
+            Text(y) => true,
+            Raw(y) => false,
+            El(t, at, k) => false,
+        },
+        Raw(s) => match b {
+            Empty => false,
+            Text(y) => false,
+            Raw(y) => true,
+            El(t, at, k) => false,
+        },
+        El(tag, at, k) => match b {
+            Empty => false,
+            Text(y) => false,
+            Raw(y) => false,
+            El(tag2, at2, k2) => tag == tag2,
+        },
+    }
+}
+
+/// Only called behind `sameKind`.
+fn htmlText(h: Html) -> String {
+    return match h {
+        Text(s) => s.copy(),
+        Empty => "",
+        Raw(s) => s.copy(),
+        El(t, a, k) => "",
+    }
+}
+
+fn htmlRaw(h: Html) -> String {
+    return match h {
+        Raw(s) => s.copy(),
+        Empty => "",
+        Text(s) => s.copy(),
+        El(t, a, k) => "",
+    }
+}
+
+fn htmlAttrs(h: Html) -> Array<Attr> {
+    return match h {
+        El(t, a, k) => a.copy(),
+        Empty => [],
+        Text(s) => [],
+        Raw(s) => [],
+    }
+}
+
+fn htmlKids(h: Html) -> Array<Html> {
+    return match h {
+        El(t, a, k) => copyHtmlArray(k),
+        Empty => [],
+        Text(s) => [],
+        Raw(s) => [],
+    }
+}
+
+/// Equal when they render identically, so an unusable name traps here too. A
+/// false negative costs only a redundant `OpSetAttrs`.
+fn attrsEqual(a: Array<Attr>, b: Array<Attr>) -> Bool {
+    return renderAttrs(a) == renderAttrs(b)
+}
+
+fn childPath(p: Array<Int64>, i: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    for x in p {
+        out.push(x)
+    }
+    out.push(i)
+    return out
+}
+
+fn diffNode(path: Array<Int64>, old: Html, new: Html) -> Array<PatchOp> {
+    if !sameKind(old, new) {
+        return [OpReplace(path.copy(), new.copy())]
+    }
+    return match old {
+        Empty => noOps(),
+        Text(s) => diffText(path, s, new),
+        Raw(s) => diffRaw(path, s, new),
+        El(tag, attrs, kids) => diffEl(path, attrs, kids, new),
+    }
+}
+
+fn diffText(path: Array<Int64>, oldS: String, new: Html) -> Array<PatchOp> {
+    let newS = htmlText(new)
+    if oldS == newS {
+        return noOps()
+    }
+    return [OpSetText(path.copy(), newS)]
+}
+
+fn diffRaw(path: Array<Int64>, oldS: String, new: Html) -> Array<PatchOp> {
+    let newS = htmlRaw(new)
+    if oldS == newS {
+        return noOps()
+    }
+    return [OpReplace(path.copy(), new.copy())]
+}
+
+fn diffEl(path: Array<Int64>, oldAttrs: Array<Attr>, oldKids: Array<Html>, new: Html) -> Array<PatchOp> {
+    let newAttrs = htmlAttrs(new)
+    let newKids = htmlKids(new)
+    let mut ops: Array<PatchOp> = []
+    if !attrsEqual(oldAttrs, newAttrs) {
+        ops.push(OpSetAttrs(path.copy(), newAttrs))
+    }
+    for o in diffChildren(path, oldKids, newKids) {
+        ops.push(o)
+    }
+    return ops
+}
+
+/// Keyed or positional reconciliation, as `patchChildren` in `web/vyrn-dom.js`.
+fn anyKeyed(kids: Array<Html>) -> Bool {
+    for k in kids {
+        let has = match htmlKey(k) {
+            Some(x) => true,
+            None => false,
+        }
+        if has {
+            return true
+        }
+    }
+    return false
+}
+
+fn diffChildren(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> Array<PatchOp> {
+    if anyKeyed(oldKids) || anyKeyed(newKids) {
+        return diffKeyed(path, oldKids, newKids)
+    }
+    return diffPositional(path, oldKids, newKids)
+}
+
+fn diffPositional(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> Array<PatchOp> {
+    let mut ops: Array<PatchOp> = []
+    let oldLen = oldKids.length
+    let newLen = newKids.length
+    let mut common = oldLen
+    if newLen < common {
+        common = newLen
+    }
+    let mut i = 0
+    while i < common {
+        let cp = childPath(path, i)
+        for o in diffNode(cp, oldKids[i], newKids[i]) {
+            ops.push(o)
+        }
+        i = i + 1
+    }
+    let mut r = oldLen - 1
+    while r >= common {
+        ops.push(OpRemove(path.copy(), r))
+        r = r - 1
+    }
+    let mut k = common
+    while k < newLen {
+        ops.push(OpInsert(path.copy(), k, newKids[k].copy()))
+        k = k + 1
+    }
+    return ops
+}
+
+fn diffKeyed(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> Array<PatchOp> {
+    let oldLen = oldKids.length
+    let newLen = newKids.length
+    let mut ops: Array<PatchOp> = []
+
+    // Match each new child to an old index or -1, using each old child once.
+    let mut used: Array<Bool> = []
+    let mut u = 0
+    while u < oldLen {
+        used.push(false)
+        u = u + 1
+    }
+    let mut matchOf: Array<Int64> = []
+    let mut ni = 0
+    while ni < newLen {
+        let m = matchNew(oldKids, used, newKids[ni])
+        if m >= 0 {
+            used[m] = true
+        }
+        matchOf.push(m)
+        ni = ni + 1
+    }
+
+    // Remove unused old children, high to low.
+    let mut r = oldLen - 1
+    while r >= 0 {
+        if !used[r] {
+            ops.push(OpRemove(path.copy(), r))
+        }
+        r = r - 1
+    }
+
+    // The live children after removal: reused old indices, ascending.
+    let mut cur: Array<Int64> = []
+    let mut a = 0
+    while a < oldLen {
+        if used[a] {
+            cur.push(a)
+        }
+        a = a + 1
+    }
+
+    // Left to right: insert new keys, move reused ones.
+    let mut i = 0
+    while i < newLen {
+        let m = matchOf[i]
+        if m < 0 {
+            ops.push(OpInsert(path.copy(), i, newKids[i].copy()))
+            cur = listInsert(cur, i, -2)
+        } else {
+            let j = listIndexOf(cur, m)
+            if j != i {
+                ops.push(OpMove(path.copy(), j, i))
+                cur = listMove(cur, j, i)
+            }
+        }
+        i = i + 1
+    }
+
+    // Recurse into matched children at their final indices.
+    let mut c = 0
+    while c < newLen {
+        let m = matchOf[c]
+        if m >= 0 {
+            let cp = childPath(path, c)
+            for o in diffNode(cp, oldKids[m], newKids[c]) {
+                ops.push(o)
+            }
+        }
+        c = c + 1
+    }
+    return ops
+}
+
+/// The unused old index with the same key and kind as `newChild`, or -1.
+fn matchNew(oldKids: Array<Html>, used: Array<Bool>, newChild: Html) -> Int64 {
+    return match htmlKey(newChild) {
+        None => -1,
+        Some(k) => findOld(oldKids, used, k, newChild),
+    }
+}
+
+fn findOld(oldKids: Array<Html>, used: Array<Bool>, key: String, newChild: Html) -> Int64 {
+    let mut j = 0
+    let mut found = -1
+    while j < oldKids.length {
+        if found < 0 {
+            if !used[j] {
+                let sameKey = match htmlKey(oldKids[j]) {
+                    Some(x) => x == key,
+                    None => false,
+                }
+                if sameKey {
+                    if sameKind(oldKids[j], newChild) {
+                        found = j
+                    }
+                }
+            }
+        }
+        j = j + 1
+    }
+    return found
+}
+
+fn listInsert(xs: Array<Int64>, at: Int64, v: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < xs.length {
+        if i == at {
+            out.push(v)
+        }
+        out.push(xs[i])
+        i = i + 1
+    }
+    if at >= xs.length {
+        out.push(v)
+    }
+    return out
+}
+
+/// The first index of `v` in `xs`, or -1.
+fn listIndexOf(xs: Array<Int64>, v: Int64) -> Int64 {
+    let mut i = 0
+    let mut found = -1
+    while i < xs.length {
+        if found < 0 {
+            if xs[i] == v {
+                found = i
+            }
+        }
+        i = i + 1
+    }
+    return found
+}
+
+fn listMove(xs: Array<Int64>, from: Int64, to: Int64) -> Array<Int64> {
+    let v = xs[from]
+    let mut without: Array<Int64> = []
+    let mut i = 0
+    while i < xs.length {
+        if i != from {
+            without.push(xs[i])
+        }
+        i = i + 1
+    }
+    return listInsert(without, to, v)
+}
+
+/// A full `<!doctype html>` page. `title` is escaped.
+export fn document(title: String, head: Array<Html>, body: Html) -> String {
+    let mut out = "<!doctype html>\n<html>\n<head>\n"
+    out = out + "<meta charset=\"utf-8\">\n"
+    out = out + "<title>" + escapeText(title) + "</title>\n"
+    out = out + renderKids(head)
+    out = out + "</head>\n<body>\n"
+    out = out + toHtmlString(body)
+    out = out + "\n</body>\n</html>\n"
+    return out
+}

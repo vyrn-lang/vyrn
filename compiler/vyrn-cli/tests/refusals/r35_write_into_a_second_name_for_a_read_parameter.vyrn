@@ -1,0 +1,14 @@
+// A `let mut` of a `read` parameter holds the caller's heap, and a store into
+// its part would release it.
+type R = { name: String, n: Int64 }
+
+fn rename(r: R) -> Int64 {
+    let mut c = r
+    c.name = "z" + "!"
+    return c.n
+}
+
+fn main() -> Int64 {
+    let r = R { name: "ab" + "c", n: 3 }
+    return rename(r)
+}

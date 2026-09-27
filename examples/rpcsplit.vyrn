@@ -1,0 +1,47 @@
+/// Split-module typed RPC, in-process flavor — a three-way parity
+/// citizen (interp == native == wasm). Where `examples/rpc.vyrn` reflects an api
+/// directory whose procedures name types declared beside them, this one reflects
+/// one whose wire types live in a `shared` leaf and whose state lives in a
+/// `server/store` module. It proves the directory generators handle the reachable
+/// type closure: the generated dispatch module imports `GetReq`/`ItemResult` from
+/// `./rpcsplit/shared/wire` (their declaring module), not from the procedure
+/// module that merely names them.
+///
+/// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpcsplit.vyrn
+import { clientInProcess } from "std/rpc"
+import { itemsById, RpcReply } from clientInProcess("./rpcsplit/server/api")
+import { Id, Item, GetReq, ItemResult } from "./rpcsplit/shared/wire"
+
+// Module state: the last dispatch result, filled by the callback below.
+let mut line: String = "(none)"
+
+/// The completion callback for `itemsById` — in-process, always `Done` (validated
+/// types cannot be constructed invalid without the wire's `fromJson`).
+fn onGetItem(res: RpcReply<ItemResult>) {
+    line = match res {
+        Done(r) => match r {
+            Ok(it) => "itemsById -> \{it.label}",
+            Err(why) => "itemsById -> \{why}",
+        },
+        Rejected(issues) => "itemsById failed",
+        Failed(why) => "itemsById failed",
+    }
+}
+
+fn main() -> Int64 {
+    itemsById(GetReq { id: 1 }, onGetItem)
+    print(line)
+    itemsById(GetReq { id: 9 }, onGetItem)
+    print(line)
+    return 0
+}
+
+test "in-process itemsById runs the real store procedure with no forwarding layer" {
+    itemsById(GetReq { id: 2 }, onGetItem)
+    assertEq(line, "itemsById -> beta")
+}
+
+test "in-process itemsById carries the store's Err outcome for a missing id" {
+    itemsById(GetReq { id: 9 }, onGetItem)
+    assertEq(line, "itemsById -> no item 9")
+}

@@ -1,0 +1,14 @@
+// Row 25 of the refusals census, over a record that owns no heap.
+type Token = { id: Int64 }
+
+fn take(t: consume Token) -> Int64 { return t.id }
+
+fn main() -> Int64 {
+    let x = Token { id: 1 }
+    let mut i = 0
+    while i < 3 {
+        let n = take(x)
+        i = i + n
+    }
+    return 0
+}

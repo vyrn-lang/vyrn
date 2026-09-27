@@ -1,0 +1,5 @@
+// a `fn` value bound by `let` and captured by a lambda
+// A `let` of a function's name binds a closure enum's value; the screen must
+// not refuse the name by its type. The lambda
+// keeps the body off the whole-body walk.
+fn dbl(x: Int64) -> Int64 { return x * 2 }          fn wrap(n: Int64) -> fn(Int64) -> Int64 { let g: fn(Int64) -> Int64 = dbl return m -> g(m + n) }          fn vyrnTestMain() -> Int64 { let h = wrap(1) return h(5) }

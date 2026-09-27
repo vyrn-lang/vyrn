@@ -1,0 +1,576 @@
+// Benchmarking the memory model: an allocation, a String concatenation, and a
+// generation check, the three things the memory model costs.
+//
+// Every row here is a baseline. A change to what these operations do needs a
+// number beside it.
+//
+//   $ vyrn bench examples/membench.vyrn
+//   $ vyrn bench examples/membench.vyrn --check      (deterministic, CI)
+//
+// Two rules the earlier benchmarking work paid for:
+//
+//   * `blackBox` the INPUTS, not only the output. `blackBox` on the result
+//     alone leaves the operands constant, and the optimizer hoists the whole
+//     computation out of the sample loop.
+//   * `vyrn bench` does NOT run `main`. Module state a `main` would build is
+//     empty inside a bench block, so each block builds what it needs.
+
+import { Slots, newSlots, insert, remove } from "std/slots"
+import * as stream from "std/stream"
+
+/// 32 bytes of data-segment literal. Reading it allocates nothing, so a
+/// concatenation of two of these measures the concatenation.
+fn pad() -> String {
+    return "0123456789abcdef0123456789abcdef"
+}
+
+/// A fresh buffer per operation: `n` concatenations, each allocated, read once
+/// and freed at block exit.
+///
+/// `s[0]` is an O(1) read of the new buffer. It is there so the allocation has
+/// a use — a `malloc`/`free` pair with no reader between them is a pair the
+/// optimizer may remove.
+fn concatFresh(n: Int64, a: String, b: String) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let s = a + b
+        t = t + Int64(s[0])
+        i = i + 1
+    }
+    return t
+}
+
+/// The append spine (`str_append`): one local `mut` String, appended `n` times.
+/// This is the shape that reallocates in place.
+fn spine(n: Int64) -> String {
+    let mut s = ""
+    let mut i = 0
+    while i < n {
+        s = s + "0123456789"
+        i = i + 1
+    }
+    return s
+}
+
+/// Module state, so the twin below accumulates in module state.
+let mut g: String = ""
+
+/// The module-state twin of `spine` — the slow half, and the shape a
+/// server that accumulates a response body has.
+///
+/// The pair measured at n = 160 000: 0.095 s for the local against 4.92 s and
+/// 12.2 GB for the global. One reason, two faces. The in-place whitelist read one
+/// function body, and a global is reachable from all of them, so a module-state
+/// accumulator got the general path — `malloc`, copy both halves, drop the old
+/// buffer on the floor — which is quadratic in time AND unbounded in memory.
+/// Phase 5 reads the whitelist over the whole program, so the two rows should now
+/// differ by nothing but the store.
+///
+/// It resets first: `vyrn bench` runs a block many times and module state
+/// survives between runs, so without the reset this would time a different `n`
+/// on every sample.
+fn globalSpine(n: Int64) -> Int64 {
+    g = ""
+    let mut i = 0
+    while i < n {
+        g = g + "0123456789"
+        i = i + 1
+    }
+    return Int64(g.byteLength)
+}
+
+/// Push churn: `n` pushes into a growable array, then the length.
+fn pushChurn(n: Int64) -> Int64 {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        xs.push(i)
+        i = i + 1
+    }
+    return xs.length
+}
+
+/// `[0, 1, .., n-1]` — a buffer for the element benches to read.
+fn oneToN(n: Int64) -> Array<Int64> {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        xs.push(i)
+        i = i + 1
+    }
+    return xs
+}
+
+/// `a[i]` through the seeded `Index` projection, which the compiler looks up
+/// like any other. The mechanism claims to be free, so it is timed rather than
+/// asserted.
+fn elemRead(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + xs[i % xs.length]
+        i = i + 1
+    }
+    return t
+}
+
+/// `a[i]` on a fixed `Array<T, N>`, whose storage is the binding itself.
+///
+/// A `[N x T]` is a value, and a value has no address to index. Reading one
+/// element used to copy all N to a fresh stack slot to get an address: 128
+/// bytes per read at N = 16, and **1.55 µs** here against the 312 ns of the
+/// growable row below. The binding is already in memory, so the read is now one
+/// offset and one load, and the row is **191 ns** — under the growable array,
+/// which pays a header load the fixed one does not.
+///
+/// A fixed array reached through a record field paid the same copy and is the
+/// same read now, so both are timed: the cost was the representation, and the
+/// two rows are the evidence that the fix is the representation's and not one
+/// receiver's.
+fn fixedRead(n: Int64) -> Int64 {
+    let a: Array<Int64, 16> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + a[i % a.length]
+        i = i + 1
+    }
+    return t
+}
+
+type Cells = {
+    at: Array<Int64, 16>,
+}
+
+/// The same read one field deep. See [`fixedRead`].
+fn fixedFieldRead(n: Int64) -> Int64 {
+    let c = Cells { at: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + c.at[i % 16]
+        i = i + 1
+    }
+    return t
+}
+
+/// The growable twin of [`fixedRead`], with the same constant modulus so the
+/// two rows differ by the representation and nothing else.
+fn heapRead(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + xs[i % 16]
+        i = i + 1
+    }
+    return t
+}
+
+/// `for x in xs` over a builtin array.
+///
+/// A user container's loop is a desugar onto `size` and `place nth`. A builtin
+/// array's is not, and must not become one: the element walk is three pointer
+/// bumps and a bounds test, and a protocol that cost iteration speed would be a
+/// bad trade. Timed rather than asserted, like the two rows above.
+fn iterSum(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut k = 0
+    while k < n {
+        for x in xs {
+            t = t + x
+        }
+        k = k + 1
+    }
+    return t
+}
+
+/// `a[i] = v` through the same table.
+fn elemStore(n: Int64) -> Int64 {
+    let mut xs: Array<Int64> = []
+    let mut k = 0
+    while k < 64 {
+        xs.push(0)
+        k = k + 1
+    }
+    let mut i = 0
+    while i < n {
+        xs[i % 64] = i
+        i = i + 1
+    }
+    return xs[0]
+}
+
+/// The same five operations as handles over two `Array<Int64>`, written in Vyrn
+/// with no compiler support.
+///
+/// `vals` holds the payloads, `gens` the generation of each slot, and the free
+/// list is threaded through `vals` (a free slot's payload IS the next free
+/// slot). A handle is the pair (slot, generation); it is a plain value here
+/// because the loop uses both parts at once.
+///
+/// Nothing is boxed. The arrays stay flat, which is the whole claim.
+///
+/// Read the number with one caveat. The handle is made and used in the same
+/// block, so the optimizer proves the four generation checks true and removes
+/// them. So this row times an allocation difference and not a check difference.
+///
+/// This row and the next measure each other: a hand-written slab against the
+/// std container.
+fn slabChurn(n: Int64) -> Int64 {
+    let mut vals: Array<Int64> = []
+    let mut gens: Array<Int64> = []
+    let mut freeHead = 0 - 1
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        // insert(i)
+        let mut slot = freeHead
+        if slot < 0 {
+            slot = vals.length
+            vals.push(i)
+            gens.push(1)
+        } else {
+            freeHead = vals[slot]
+            vals[slot] = i
+            gens[slot] = gens[slot] + 1
+        }
+        let gen = gens[slot]
+        // set(handle, i + 1)
+        if gens[slot] == gen {
+            vals[slot] = i + 1
+        }
+        // get(handle), twice
+        if gens[slot] == gen {
+            t = t + vals[slot]
+        }
+        if gens[slot] == gen {
+            t = t + vals[slot]
+        }
+        // remove(handle)
+        if gens[slot] == gen {
+            gens[slot] = gen + 1
+            vals[slot] = freeHead
+            freeHead = slot
+        }
+        i = i + 1
+    }
+    return t
+}
+
+/// The same five operations again, through `std/slots` rather than the
+/// hand-inlined arrays above.
+///
+/// The row above is the shape a slab WOULD have if a program wrote one inline.
+/// This one is the library: `insert`/`remove` are Vyrn function calls, `s[h]` is
+/// a `place at` projection inlined at the access site, and the container carries
+/// two more arrays than `slabChurn` does — a dense list of live slots and the
+/// map back from a slot to its place in it, which is what buys O(1) removal and
+/// `for x in s`.
+///
+/// So this is the number the gate cares about: what the corpus pays for the
+/// container it will actually import.
+fn slotsChurn(n: Int64) -> Int64 {
+    let mut s: Slots<Int64> = newSlots()
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let v = i
+        let h = insert(s, v)
+        s[h] = i + 1
+        t = t + s[h] + s[h]
+        remove(s, h)
+        i = i + 1
+    }
+    return t
+}
+
+/// What a container's RECLAMATION costs — Phase 8b, and the number `slotsChurn`
+/// cannot show.
+///
+/// `slotsChurn` builds one slab and works it a thousand times, so the declared
+/// release runs once and disappears into the row. This one builds and abandons a
+/// slab per turn, so every turn pays the whole release: a walk of the table plus
+/// five `free`s. Sixteen elements, which is a small container — the cost per
+/// container is what a program that makes many short-lived ones pays, and it
+/// never had a Path B counterpart to compare against: a global slab has no
+/// per-container lifetime at all.
+fn slotsLifetime(n: Int64) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let mut s: Slots<Int64> = newSlots()
+        let mut j = 0
+        while j < 16 {
+            let v = j
+            let h = insert(s, v)
+            t = t + h.slot
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return t
+}
+
+/// `copy` of a long String: a header read, one allocation and one `memcpy` per
+/// turn. The row beside it is `s + ""`, the trick that does the same job, so the
+/// pair says what the named operation costs against it.
+fn copyString(n: Int64, s: String) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let c = s.copy()
+        t = t + Int64(c[0])
+        i = i + 1
+    }
+    return t
+}
+
+/// `copy` of a 1000-element `Array<Int64>`: one allocation and one `memcpy`, and
+/// no per-element work at all, because an `Int64` owns no heap. An array of
+/// Strings would add a loop of `copy`s — that is the same row, per element.
+fn copyArray(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let c = xs.copy()
+        t = t + c[0]
+        i = i + 1
+    }
+    return t
+}
+
+/// Splice 1000 owned Strings into a second array. The loop CONSUMES the source,
+/// so each element moves: one pointer store per element, no allocation.
+fn spliceConsuming(src: consume Array<String>) -> Int64 {
+    let mut out: Array<String> = []
+    for x in consume src {
+        out.push(x)
+    }
+    return out.length
+}
+
+/// The same splice with the source still borrowed. The element belongs to the
+/// container, so every push copies: one `malloc` and one
+/// `memcpy` per element. This row is the price of NOT having the consuming form.
+fn spliceCopying(src: Array<String>) -> Int64 {
+    let mut out: Array<String> = []
+    for x in src {
+        out.push(x.copy())
+    }
+    return out.length
+}
+
+/// 1000 distinct 16-byte Strings — small enough that the copy is allocator cost
+/// rather than `memcpy` cost, which is what a corpus of names and keys looks
+/// like.
+fn words(n: Int64) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < n {
+        out.push("wordwordword" + i.toString())
+        i = i + 1
+    }
+    return out
+}
+
+/// The same 1000 sixteen-byte Strings as keys of a map — the shape `m.keys()`
+/// is asked over in a corpus of names and keys.
+fn keyMap(n: Int64) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    while i < n {
+        m["wordwordword" + i.toString()] = i
+        i = i + 1
+    }
+    return m
+}
+
+/// `m.keys()`, `times` times.
+///
+/// The snapshot is an `Array<String>` and an array owns its elements, so it
+/// copies the KEYS: one `malloc` and one `memcpy` per key, so O(total key
+/// bytes) rather than O(count).
+fn keysSnapshot(m: Map<String, Int64>, times: Int64) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < times {
+        let ks = m.keys()
+        t = t + ks.length
+        i = i + 1
+    }
+    return t
+}
+
+/// The stream rows. A cursor is a slot in `std/stream`'s own `Slots`, so these
+/// time what every element and every release costs. Three shapes, because they
+/// are three different costs: pulling from a bare producer, pulling through a
+/// wrapper, and opening and closing one.
+///
+/// `naturals` never ends, so `take` is what stops it — which is also what makes
+/// the count exact: n elements is n asks.
+fn naturals(c: stream.Cursor) -> Option<Int64> {
+    let n = stream.cursorGet(c)
+    stream.cursorSet(c, n + 1)
+    return Some(n)
+}
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+/// n elements out of a plain producer: one dispatch and one cursor read/write
+/// each.
+fn streamPull(n: Int64) -> Int64 {
+    let mut t = 0
+    for v in stream.take(stream.unfold(0, naturals), n) {
+        t = t + v
+    }
+    return t
+}
+
+/// The same n through a `map`, which is a second producer whose step pulls the
+/// first: two dispatches, two cursors, one box read.
+fn streamMapped(n: Int64) -> Int64 {
+    let mut t = 0
+    for v in stream.take(stream.map(stream.unfold(0, naturals), double), n) {
+        t = t + v
+    }
+    return t
+}
+
+/// Open and close, with nothing pulled: the acquisition and the release on their
+/// own: the "open-then-abandon cycles" row as a timing rather than as a
+/// ceiling.
+fn streamCycles(n: Int64) -> Int64 {
+    let mut i = 0
+    while i < n {
+        let s = stream.unfold(i, naturals)
+        close(s)
+        i = i + 1
+    }
+    return i
+}
+
+bench "copy of a 10 KB string, 1000 times" {
+    let s = spine(blackBox(1000))
+    blackBox(copyString(blackBox(1000), blackBox(s)))
+}
+
+bench "copy of a 1000-element Array<Int64>, 1000 times" {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < 1000 {
+        xs.push(i)
+        i = i + 1
+    }
+    blackBox(copyArray(blackBox(1000), blackBox(xs)))
+}
+
+bench "string concat, 1000 fresh buffers" {
+    blackBox(concatFresh(blackBox(1000), blackBox(pad()), blackBox(pad())))
+}
+
+bench "string append spine, 1000 appends" {
+    blackBox(spine(blackBox(1000)).byteLength)
+}
+
+bench "module-state append spine, 1000 appends" {
+    blackBox(globalSpine(blackBox(1000)))
+}
+
+bench "byteLength of a 10 KB string, 500 reads" {
+    // The string is built once per sample; 500 scans of 10 KB dwarf 1000
+    // appends. `blackBox(s)` inside the loop is load-bearing: `byteLength` is a
+    // `strlen`, the optimizer knows `strlen` reads nothing that changes, and
+    // without an opaque pointer it hoists all 500 reads into one.
+    let s = spine(blackBox(1000))
+    let mut t = 0
+    let mut i = 0
+    while i < 500 {
+        t = t + Int64(blackBox(s).byteLength)
+        i = i + 1
+    }
+    blackBox(t)
+}
+
+bench "splice 1000 Strings, consuming loop" {
+    blackBox(spliceConsuming(blackBox(words(blackBox(1000)))))
+}
+
+bench "splice 1000 Strings, copying loop" {
+    blackBox(spliceCopying(blackBox(words(blackBox(1000)))))
+}
+
+bench "keys() of a 1000-key map, 10 snapshots" {
+    blackBox(keysSnapshot(blackBox(keyMap(blackBox(1000))), blackBox(10)))
+}
+
+bench "array push churn, 1000 pushes" {
+    blackBox(pushChurn(blackBox(1000)))
+}
+
+bench "array element read, 10000 reads" {
+    blackBox(elemRead(blackBox(10000), blackBox(oneToN(blackBox(64)))))
+}
+
+bench "fixed array element read, 1024 reads" {
+    blackBox(fixedRead(blackBox(1024)))
+}
+
+bench "fixed array field read, 1024 reads" {
+    blackBox(fixedFieldRead(blackBox(1024)))
+}
+
+bench "growable array element read, 1024 reads" {
+    blackBox(heapRead(blackBox(1024), blackBox(oneToN(blackBox(16)))))
+}
+
+bench "array element store, 10000 stores" {
+    blackBox(elemStore(blackBox(10000)))
+}
+
+bench "array iteration, 10000 elements" {
+    blackBox(iterSum(blackBox(157), blackBox(oneToN(blackBox(64)))))
+}
+
+bench "handle insert/set/get/get/remove, 1000 times" {
+    blackBox(slabChurn(blackBox(1000)))
+}
+
+bench "std/slots insert/set/get/get/remove, 1000 times" {
+    blackBox(slotsChurn(blackBox(1000)))
+}
+
+bench "std/slots build and release, 1000 containers of 16" {
+    blackBox(slotsLifetime(blackBox(1000)))
+}
+
+bench "stream unfold + take, 1000 elements" {
+    blackBox(streamPull(blackBox(1000)))
+}
+
+bench "stream map over unfold + take, 1000 elements" {
+    blackBox(streamMapped(blackBox(1000)))
+}
+
+bench "stream open and close, 1000 cycles" {
+    blackBox(streamCycles(blackBox(1000)))
+}
+
+fn main() -> Int64 {
+    // Small, deterministic, and identical on all three engines — the benches
+    // themselves are stripped from `run`/`build`.
+    print(concatFresh(4, pad(), pad()))
+    print(spine(4).byteLength)
+    print(globalSpine(4))
+    print(pushChurn(4))
+    print(slabChurn(4))
+    print(slotsChurn(4))
+    print(copyString(4, pad()))
+    print(copyArray(4, [1, 2, 3]))
+    print(streamPull(4))
+    print(streamMapped(4))
+    print(streamCycles(4))
+    return 0
+}

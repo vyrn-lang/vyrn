@@ -1,0 +1,57 @@
+/// String refinements — length bounds and regular expressions.
+///
+/// A `String` base may carry a `where` over `value.byteLength` (the byte length,
+/// same as `strlen`) and/or `value =~ "pattern"`, which full-matches against a
+/// regex. Patterns are string literals compiled to a DFA at compile time and
+/// run identically by the interpreter and native backend (the code generator
+/// emits the transition table + a fixed runner). Refinements reflect to JSON
+/// Schema: `minLength`/`maxLength` and `pattern` (several patterns → `allOf`).
+///
+/// Supported regex subset (a subset of ECMA-262, so JSON Schema agrees):
+/// literals, `.`, classes `[a-z]`/`[^0-9]`, shorthands `\d \w \s` (and
+/// `\D \W \S`), alternation `a|b`, grouping `(…)`, and the quantifiers `* + ?`.
+/// A literal backslash is written `\\` (e.g. `\\.` for a literal dot).
+
+type Username = String where value.byteLength >= 3 && value.byteLength <= 16
+type Email = String where value =~ "[a-z0-9_.]+@[a-z0-9]+\\.[a-z]+"
+
+/// Several checks compose in one refinement: a size bound, a general regex, and
+/// "every 2nd character is 'a'" — the last expressed as the group pattern `(.a)*`.
+type EveryOther = String where value.byteLength >= 2 && value =~ "[a-z]+" && value =~ "(.a)*"
+
+fn register(name: String) -> Username {
+    // Checked at runtime because `name` is not a compile-time constant.
+    //
+    // The copy: `name` is a `read` parameter, the caller still owns it, and a
+    // validated constructor hands its argument on as the result. Without it
+    // the caller and the result would release one buffer.
+    return Username(name.copy())
+}
+
+fn main() -> Int64 {
+    // `=~` is an ordinary Bool expression.
+    print("abc" =~ "[a-z]+") // true
+    print("abc9" =~ "[a-z]+") // false (a digit is not [a-z])
+    print("id_42" =~ "\\w+") // true
+    print("cat" =~ "cat|dog") // true  (alternation)
+    print("xaya" =~ "(.a)*") // true  (every 2nd char is 'a')
+    print("xayb" =~ "(.a)*") // false
+
+    // Length-refined strings.
+    let u = Username("alice") // valid at compile time — no runtime check
+    print(u) // alice
+    print(u.byteLength) // 5
+    print(register("bob")) // bob — validated at runtime
+
+    // Regex-refined strings run the same matcher.
+    let e = Email("dev@vyrn.io")
+    print(e) // dev@vyrn.io
+    let w = EveryOther("banana") // 6 chars, a-z, every 2nd char 'a'
+    print(w) // banana
+
+    // Refinements reflect into JSON Schema.
+    print(jsonSchema<Username>()) // ... "minLength":3,"maxLength":16
+    print(jsonSchema<Email>()) // ... "pattern":"^...$"
+    print(jsonSchema<EveryOther>()) // ... "minLength":2,"allOf":[{...},{...}]
+    return 0
+}

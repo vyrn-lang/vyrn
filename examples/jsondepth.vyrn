@@ -1,0 +1,45 @@
+/// A hostile JSON document is deep, not just long — and a recursive-descent
+/// reader with no budget of its own answers a deep one by TRAPPING on the
+/// engine's call cap, which no `Err` arm catches. `parseJson` returns
+/// `Result<Json, String>`, so this is the shape that promise has to survive:
+/// past `std/jsonread`'s 128-level limit the caller gets an `Err` and the process
+/// stays up, at the limit the document parses and re-emits.
+import { parseJson } from "std/jsonread"
+import { emit } from "std/json"
+
+/// `open` repeated `n` times, then `close` repeated `n` times.
+fn nest(open: String, close: String, n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + open
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        out = out + close
+        i = i + 1
+    }
+    return out
+}
+
+/// What a parse says: the compact re-emit, or the error.
+fn answer(src: String) -> String {
+    return match parseJson(src) {
+        Ok(j) => "ok " + emit(j).charCount().toString() + " bytes",
+        Err(e) => "err " + e,
+    }
+}
+
+fn main() -> Int64 {
+    // At the limit: 128 enclosing arrays, and the tree walks back out through the
+    // writer.
+    print(answer(nest("[", "]", 128)))
+    // One past it, and the fuzzer's two favourite shapes far past it.
+    print(answer(nest("[", "]", 129)))
+    print(answer(nest("[", "]", 4000)))
+    print(answer(nest("{\"a\":", "}", 4000)))
+    // A shallow document is untouched by any of this.
+    print(answer("{\"a\":[1,{\"b\":null}]}"))
+    return 0
+}

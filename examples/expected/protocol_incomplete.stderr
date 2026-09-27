@@ -1,0 +1,1 @@
+protocol_incomplete.vyrn:27:1: `impl Shape for Sq` does not provide `fn name(self) -> String`, which protocol `Shape` declares — a protocol's methods are all required, so anything holding a `T: Shape` may call it

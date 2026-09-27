@@ -1,0 +1,80 @@
+# Rust build output (workspace and the excluded vyrn-codegen-llvm crate)
+target/
+
+# Compiled Vyrn artifacts (regenerable via `vyrn build`)
+*.exe
+*.ll
+*.obj
+*.pdb
+# Files written by I/O examples — recreated on every run
+examples/data/*.tmp.txt
+# storage.vyrn atomic-write artifacts — recreated on every run
+# (`.store.json` targets and their transient `.store.json.tmp` siblings)
+examples/data/*.store.json
+examples/data/*.store.json.tmp
+# The one temp `std/storage.vyrn`'s own test CANNOT clean up. It proves that a
+# rename onto a missing directory fails and leaves the written temp behind, and
+# the language has no delete to remove it with — so the leak is the assertion.
+# It lands in the crate the std suite runs from, and it reached a commit once
+# (`wa-rename-failure-leak.tmp`, two bytes of `{}`) before this line existed.
+wa-rename-failure-leak.tmp
+# Runtime store written by the `examples/bin` pastebin (persistence dogfood) —
+# app data, not source. The DIRECTORY must exist in a fresh clone (`writeFile`
+# does not create parents, and the language has no mkdir yet), so .gitkeep is
+# tracked while the store files stay ignored.
+examples/bin/data/*
+!examples/bin/data/.gitkeep
+# Browser-demo modules (regenerable via web/build.ps1)
+web/*.wasm
+web/*.shim.c
+# `vyrn dev` scratch: the client wasm it rebuilds on each start
+.vyrn-dev/
+*.wasm
+*.shim.c
+
+# Editor / tooling
+.air/
+editor/**/node_modules/
+# Bundled LSP server binary (copied from vyrn-lsp/target by npm run package)
+editor/vscode/server/
+*.vsix
+
+# OS noise
+Thumbs.db
+.DS_Store
+# A hand-unpacked wasmtime or wasi sysroot, which is step 3 of the tool
+# discovery order — the fallback for a project that pins nothing. This one pins
+# (see vyrn.json), so what a build here uses lives in ~/.vyrn/tools instead.
+tools/
+.claude/worktrees/
+.claude/settings.local.json
+
+# Site build output (`vyrn run site/export.vyrn out`) and the hero module the
+# same build produces. Both are rebuilt by .github/workflows/site.yml.
+out/
+site/public/*.wasm
+gate-*.txt
+
+# The repository's own history, for the velocity charts on /backstage. Derived
+# from git by `scripts/site-history.py`, which the site workflow runs before the
+# export — a committed copy would be a picture of the day somebody ran it. The
+# fixture beside it IS committed: it is five made-up days, and it is what the
+# export's tests run on when nobody has run the script.
+site/data/history.json
+# The recorded terminal demo on `/`, written by `scripts/site-demo.py` running
+# the real binary. Derived for the same reason and on the same terms: a
+# committed copy would be a recording of whatever compiler somebody had that
+# afternoon, and the site says which version produced it. The fixture beside it
+# IS committed.
+site/data/demo.json
+# `vyrn vendor` output: content-addressed copies of everything vyrn.lock pins,
+# the toolchain archives included — hundreds of megabytes, all of it
+# regenerable from the lock.
+vyrn_vendor/
+
+# Python bytecode from the two build scripts in scripts/.
+__pycache__/
+
+# Screenshots taken for a design review. Not published, not an input.
+shots/
+oxout/

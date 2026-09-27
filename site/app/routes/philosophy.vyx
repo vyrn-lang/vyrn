@@ -1,0 +1,42 @@
+<script>
+// GET /philosophy — a stub, for a bookmark and a search result.
+//
+// The page itself is `/why-vyrn` now. A static host has no 301, so a published
+// document at the old path is the only mechanism there is: `site/export.vyrn`
+// stamps the `<meta http-equiv="refresh">` and the `<link rel="canonical">`,
+// because `Head` has entries for a title, a stylesheet, a script and a
+// `<meta name=…>` and none for either of those — the same reason the language
+// attribute and the icon are stamped there.
+//
+// The visible link below is not a decoration. A browser can be told to decline a
+// refresh, a screen reader announces the document before the refresh fires, and
+// a reader who lands here with the refresh blocked has to be able to leave.
+//
+// A search for these two URLs in `README.md`, both install scripts, both
+// published release bodies, the editor README, `docs/`, and the issue and pull
+// request templates found zero of them. The argument for these stubs is
+// bookmarks and search engines, not this repository.
+import { Head } from "std/ui"
+import { pageHead, hrefOf } from "../nav"
+
+export fn head() -> Head {
+    return pageHead("Moved to Why Vyrn — Vyrn")
+}
+
+/// Where this stub sends a reader. The one place the new path is written on this
+/// page, so the link and the stamped canonical cannot disagree — `export.vyrn`
+/// reads the same function.
+fn target() -> String {
+    return hrefOf("/why-vyrn")
+}
+</script>
+
+<template>
+<main class="page">
+    <section class="hero">
+        <p class="eyebrow">Moved</p>
+        <h1 class="display">This page is now Why Vyrn</h1>
+        <p class="lede">Nothing was deleted. <a :href="target()">Read Why Vyrn</a>.</p>
+    </section>
+</main>
+</template>

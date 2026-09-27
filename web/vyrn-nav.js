@@ -1,0 +1,864 @@
+// vyrn-nav.js - soft navigation for Vyrn's MPA pages.
+//
+// Plain, dependency-free JavaScript, a sibling of vyrn-dom.js. It gives an
+// ordinary server-rendered site (std/ui pages) an SPA *feel* without giving up
+// the MPA *truth*: the server renders every page, and only the page transition
+// goes soft. No flash, no lost scroll, no rebooted wasm.
+//
+// The wasm instance SURVIVES a navigation, with its module state (a draft).
+// A soft nav:
+//   1. resolves the target against the client bundle FIRST, if the island's
+//      wasm exports `resolvePage(path) -> {found, hasData, lazy, page, title}`.
+//      A known dataless page renders at once from null props, with no network.
+//      A data page fetches its `{page, title, props}` JSON payload and renders
+//      it client-side through `renderPage` into `<main>` via vyrn-dom. A LAZY
+//      page (`lazy fn load()`) renders its skeleton at once from a
+//      `{"__loading__":true}` payload, then fetches the payload and PATCHES the
+//      retained skeleton view (vyrn-dom's static differ), so only the data
+//      region repaints. A bundle that hands over only `renderPage` fetches the
+//      payload on every nav.
+//   2. asks for the payload at `<path>` with `Accept: application/json`: one
+//      URL, two representations, and a request you can paste into curl. The
+//      document channel states `Accept: text/html` for the same reason.
+//   3. otherwise (an unknown path, no bundle, a non-JSON answer) fetches the
+//      destination HTML with an ordinary GET, swaps `document.title` and the
+//      page-owned <head> tags (stylesheets and loaded scripts are kept, never
+//      refetched), and REPLACES the layout's content region (`<main>`, falling
+//      back to `<body>`). The shell (header/nav, the persistent <head> assets,
+//      the wasm instance) is never touched.
+//   4. RE-MOUNTS the TEA islands inside the new content against the EXISTING
+//      wasm instance (the boot path minus instantiation: the widget re-requests
+//      its view and paints it into the fresh mount node).
+//   5. pushState on forward nav (scroll to top), restores scroll on popstate.
+// After an HTML soft nav the network log shows exactly ONE document fetch: no
+// wasm, no runtimes, no stylesheets are refetched.
+//
+// FALLBACK BIAS (locked): soft nav is an optimization, never a correctness
+// layer. Anything ambiguous - a cross-origin target, a non-2xx response (a 404
+// hard-navs BY DESIGN so the themed error page still loads normally), a
+// non-HTML body, a fetch failure/timeout, a second click mid-flight, or any
+// exception thrown while swapping - degrades to a plain hard navigation, never
+// to a broken page.
+//
+// ISLANDS: a page may mount a wasm client app (the `#app` convention). Because
+// morphed-in <script> tags are NOT re-executed, the client boot cannot ride the
+// page's own <script> across a soft nav. Instead the boot registers an island
+// with `window.vyrnNav.registerIsland(selector, boot)`; vyrn-nav owns its
+// lifecycle:
+//   - FIRST time the selector appears: call `boot(el)`, which does the one-time
+//     instantiation and returns an INSTANCE.
+//   - Every later nav where the selector reappears: if the instance exposes a
+//     `mount(el)`, call it: the SAME instance re-attaches its view to the new
+//     node (module state, e.g. a draft, is intact). If it does not (a legacy
+//     island), tear it down and `boot(el)` afresh (a fresh instance per nav).
+//   - A nav to a page WITHOUT the selector: the instance is left alive and
+//     unmounted, so its module state persists until the mount reappears.
+//
+// Progressive enhancement: if this file is absent, nothing here ran, every <a>
+// is a normal link, and the app boot falls back to booting directly. `data-nav`
+// attributes are inert hints with no soft-nav present.
+
+import { renderTree, makePageView, patchPageView } from "./vyrn-dom.js";
+
+const CONFIG = Object.assign(
+  {
+    timeoutMs: 10000, // fetch guard: past this a soft nav falls back hard
+    progress: true, // built-in top progress bar (rides the nav events)
+    staticData: false, // payloads live in sibling files, not behind `Accept`
+  },
+  (typeof window !== "undefined" && window.__vyrnNavConfig) || {}
+);
+
+// ---------------------------------------------------------------------------
+// Events. Consumers (and the built-in progress bar) hook these.
+// ---------------------------------------------------------------------------
+function emit(name, detail) {
+  document.dispatchEvent(new CustomEvent("vyrn:" + name, { detail: detail || {} }));
+}
+
+// ---------------------------------------------------------------------------
+// Island registry. An island is booted ONCE (its wasm instance then survives
+// every navigation); its view is re-mounted from the new DOM on each nav that
+// lands on a page carrying the mount node.
+// ---------------------------------------------------------------------------
+const islands = []; // { selector, boot, instance, created }
+
+// Re-mount an already-created island against the node now in the document.
+function remountIsland(reg, el) {
+  Promise.resolve(reg.instance).then((inst) => {
+    try {
+      if (inst && typeof inst.mount === "function") {
+        inst.mount(el); // persistent instance: re-attach the view (wasm survives)
+      } else {
+        // Legacy island (no persistent mount): tear down + boot a fresh instance,
+        // exactly like a hard load.
+        if (inst && typeof inst.destroy === "function") {
+          try {
+            inst.destroy();
+          } catch (e) {
+            /* a failing teardown must not wedge navigation */
+          }
+        }
+        reg.instance = reg.boot(el) || null;
+      }
+    } catch (e) {
+      /* an island that fails to re-mount must not break the whole nav */
+    }
+  });
+}
+
+// Reconcile every registered island against the CURRENT document. Called after
+// each content swap (and once per registration).
+function syncIslands() {
+  for (const reg of islands) {
+    const el = document.querySelector(reg.selector);
+    if (!el) continue; // not on this page: leave the instance alive + unmounted
+    if (!reg.created) {
+      reg.created = true;
+      reg.instance = reg.boot(el) || null; // first appearance: one-time boot
+    } else {
+      remountIsland(reg, el);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Head. Swap the title and the page-owned tags, but NEVER refetch an asset:
+// stylesheets (<link rel=stylesheet>, <style>) and loaded scripts (<script
+// src>) are kept in place and only ADDED when genuinely new. Everything else in
+// <head> (meta, canonical/icon links, base) is "page-owned" and swapped to the
+// incoming page's set.
+//
+// The server emits no per-tag head-ownership markers: `document()` concatenates
+// the layout head and the page head with no attribute distinguishing them, and
+// the server stays unchanged. So we identify the never-refetch assets by KIND
+// instead, which for the pages runtime is exactly the layout-owned stylesheets
+// + the runtime module. This keeps the wasm/runtime/stylesheet "never
+// refetched" guarantee and still swaps the genuinely page-owned tags (a dynamic
+// <title>, page <meta>).
+// ---------------------------------------------------------------------------
+function isKeptAsset(el) {
+  const tag = el.tagName;
+  if (tag === "STYLE") return true;
+  if (tag === "LINK") return (el.getAttribute("rel") || "").split(/\s+/).includes("stylesheet");
+  if (tag === "SCRIPT") return el.hasAttribute("src");
+  return false;
+}
+
+function assetKey(el) {
+  const tag = el.tagName;
+  if (tag === "STYLE") return "style:" + el.textContent;
+  if (tag === "LINK") return "css:" + new URL(el.getAttribute("href"), location.href).href;
+  return "js:" + new URL(el.getAttribute("src"), location.href).href;
+}
+
+// A page-owned head tag: neither a kept asset, nor the <title> (handled via
+// document.title), nor the charset <meta>.
+function isPageOwnedHead(el) {
+  if (isKeptAsset(el)) return false;
+  if (el.tagName === "TITLE") return false;
+  if (el.tagName === "META" && el.hasAttribute("charset")) return false;
+  return true;
+}
+
+// Import a head element so it WORKS in this document. A <script> from a
+// DOMParser document is permanently inert — the spec's "already started" flag
+// survives importNode, so the node lands in <head> but never fetches or runs
+// (observed live: soft-nav /about → / never loaded the home page's /app.js
+// island module, leaving the create form dead until a hard reload). Rebuild
+// scripts with createElement so insertion executes them; everything else
+// imports as-is. A module script re-added with a previously-seen src is a
+// no-op by ES module caching, so this stays idempotent.
+function executableImport(el) {
+  if (el.tagName !== "SCRIPT") return document.importNode(el, true);
+  const s = document.createElement("script");
+  for (const a of el.attributes) s.setAttribute(a.name, a.value);
+  s.textContent = el.textContent;
+  return s;
+}
+
+function swapHead(newDoc) {
+  const newTitle = newDoc.querySelector("title");
+  if (newTitle) document.title = newTitle.textContent;
+
+  // 1) Additive assets — add any new stylesheet/style/script[src], remove none.
+  const have = new Set();
+  for (const el of document.head.children) if (isKeptAsset(el)) have.add(assetKey(el));
+  for (const el of newDoc.head.children) {
+    if (isKeptAsset(el) && !have.has(assetKey(el))) {
+      document.head.appendChild(executableImport(el));
+      have.add(assetKey(el));
+    }
+  }
+
+  // 2) Page-owned tags — swap the set: drop the current ones, add the incoming.
+  for (const el of Array.from(document.head.children)) {
+    if (isPageOwnedHead(el)) el.remove();
+  }
+  for (const el of newDoc.head.children) {
+    if (isPageOwnedHead(el)) document.head.appendChild(executableImport(el));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Content region. Replace the layout's <main> (falling back to <body>) with the
+// fetched one. The header/nav and the persistent <head> assets sit OUTSIDE
+// <main>, so they — and the delegated document-level click listener that binds
+// every <a> — are never disturbed.
+// ---------------------------------------------------------------------------
+function isNavUi(node) {
+  return node.nodeType === 1 && node.hasAttribute("data-vyrn-nav-ui");
+}
+
+// Shell bands a page carries OUTSIDE <main> — a docs subnav, say — opt into
+// the swap with `data-nav-swap="<key>"`. Each key is reconciled to the
+// incoming document: replaced when both sides have it, removed when only the
+// live side does, and inserted before <main> when only the incoming side does.
+// Without the attribute nothing outside <main> is ever touched, which is the
+// contract above.
+function reconcileShellBands(newDoc, liveMain) {
+  const keyed = (root) => {
+    const map = new Map();
+    for (const el of root.querySelectorAll("[data-nav-swap]")) {
+      map.set(el.getAttribute("data-nav-swap"), el);
+    }
+    return map;
+  };
+  const live = keyed(document);
+  const incoming = keyed(newDoc);
+  for (const [key, el] of live) {
+    const next = incoming.get(key);
+    if (next) el.replaceWith(document.importNode(next, true));
+    else el.remove();
+  }
+  for (const [key, el] of incoming) {
+    if (live.has(key)) continue;
+    // Where the shell puts such bands: after the page header when there is
+    // one (the band must not become a child of the content grid), before
+    // <main> otherwise.
+    const header = document.querySelector("body header");
+    const node = document.importNode(el, true);
+    if (header) header.after(node);
+    else liveMain.before(node);
+  }
+}
+
+function replaceContent(newDoc) {
+  const liveMain = document.querySelector("main");
+  const newMain = newDoc.querySelector("main");
+  if (liveMain && newMain) {
+    reconcileShellBands(newDoc, liveMain);
+    liveMain.replaceWith(document.importNode(newMain, true));
+    return;
+  }
+  // Fallback: a page with no <main> — replace the body's children wholesale
+  // (the progress bar lives on <html>, so a body swap never touches it; any
+  // body-level nav UI a consumer marked is preserved defensively).
+  const newBody = newDoc.body;
+  if (!newBody) throw new Error("vyrn-nav: fetched document has no <body>");
+  const preserved = Array.from(document.body.childNodes).filter(isNavUi);
+  const incoming = Array.from(newBody.childNodes).map((n) => document.importNode(n, true));
+  document.body.replaceChildren(...preserved, ...incoming);
+}
+
+// ---------------------------------------------------------------------------
+// Apply a parsed document to the live one: title/head, content region, islands.
+// ---------------------------------------------------------------------------
+// The masthead persists across a soft navigation, so its `aria-current` marker
+// is frozen at whatever page the session STARTED on unless someone moves it.
+// The fetched document already knows the answer — the export marked it — so the
+// live rows mirror the fetched ones, keyed by `data-key` (user: Docs stayed
+// unmarked after navigating into the documentation).
+function syncNavMark(newDoc) {
+  const marked = new Set();
+  for (const el of newDoc.querySelectorAll("header [data-key][aria-current]")) {
+    marked.add(el.getAttribute("data-key"));
+  }
+  for (const el of document.querySelectorAll("header [data-key]")) {
+    if (marked.has(el.getAttribute("data-key"))) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+  }
+}
+
+// THE SWAP IS SYNCHRONOUS, DELIBERATELY. Wrapping it in
+// `document.startViewTransition` was tried and reverted: the transition runs
+// the swap in a later frame while `nav-end` is announced immediately, so
+// every listener that reacts to the new page — the shell's own `boot()` — ran
+// against the old one, and anything it derives from the page (the
+// playground's title-bar masthead) came out a navigation behind. A band that
+// changes size between pages animates through its own CSS transition when
+// the class lands, which needs no transition API and works on a hard
+// navigation too.
+function applyDocument(newDoc) {
+  swapHead(newDoc);
+  syncNavMark(newDoc);
+  replaceContent(newDoc);
+  syncIslands();
+}
+
+// ---------------------------------------------------------------------------
+// The client page renderer. The island's wasm bundle exports
+// `renderPage(payloadJson) -> String`; its boot hands it here. Feature-detected
+// once per nav: when it is a function, the navigator uses the data channel;
+// when it is null (no bundle, still booting, or a no-JS page), the navigator
+// uses the HTML swap.
+// ---------------------------------------------------------------------------
+let pageRenderer = null;
+
+// The client page RESOLVER. The island's wasm also exports `resolvePage(path)
+// -> String` ({found, hasData, lazy, page, title} JSON); its boot hands it
+// here. With a resolver, a soft nav decides its channel WITHOUT a network
+// round- trip: a known dataless page renders immediately (zero fetch), a data
+// page fetches its payload, an unknown path falls through to the HTML swap.
+// When it is null (a bundle that registered only the renderer), the navigator
+// asks for the data representation on every nav.
+let pageResolver = null;
+
+// The request headers that ask for a page's DATA representation instead of its
+// document. Same URL, different `Accept`: content negotiation. The
+// URL a soft nav fetches is exactly the URL in the address bar, so a payload
+// request is copy-pasteable into curl and names no framework on the wire.
+const DATA_HEADERS = { Accept: "application/json" };
+
+// The headers for an HTML swap: the document representation, stated explicitly
+// so the negotiation is symmetric and nothing depends on the browser's default.
+const DOC_HEADERS = { Accept: "text/html" };
+
+// Where the payload lives. Content negotiation needs a server that can read
+// `Accept`; a file host cannot. So a statically exported site sets
+// `__vyrnNavConfig.staticData` and the payload is fetched from the sibling file
+// the export wrote — `/philosophy.html` → `/philosophy.data.json`. The `Accept`
+// header still goes out, so the same page works unchanged behind a real server.
+// Nothing else about the navigation changes.
+function payloadUrl(url) {
+  if (!CONFIG.staticData) return url;
+  const u = new URL(url, location.href);
+  const p = u.pathname;
+  u.pathname = p.endsWith(".html")
+    ? p.slice(0, -5) + ".data.json"
+    : (p.endsWith("/") ? p + "index" : p) + ".data.json";
+  return u.href;
+}
+
+// Resolve a nav target against the client bundle, returning the parsed {found,
+// hasData, lazy, page, title} descriptor, or null when there is no resolver /
+// it throws / its answer will not parse (the caller then fetches the payload).
+function resolveTarget(url) {
+  if (typeof pageResolver !== "function") return null;
+  try {
+    return JSON.parse(pageResolver(new URL(url, location.href).pathname));
+  } catch (_) {
+    return null;
+  }
+}
+
+// Paint a `renderPage` tree (a page body whose root is `<main>`) into the live
+// document, replacing the current `<main>`. Throws if there is no `<main>` — the
+// caller turns that into a hard nav (fallback bias).
+function paintMain(treeJson) {
+  const liveMain = document.querySelector("main");
+  if (!liveMain) throw new Error("vyrn-nav: no <main> to paint into");
+  liveMain.replaceWith(renderTree(JSON.parse(treeJson)));
+}
+
+// ---------------------------------------------------------------------------
+// Navigation. One in-flight guard: a second click while a soft nav is running
+// falls back to a hard navigation (fallback bias).
+// ---------------------------------------------------------------------------
+let inflight = null;
+
+function hardNav(url) {
+  window.location.assign(url);
+}
+
+// Persist the current scroll offset into this history entry so back/forward can
+// restore it. Throttled to once per frame.
+let scrollScheduled = false;
+function saveScroll() {
+  if (scrollScheduled) return;
+  scrollScheduled = true;
+  requestAnimationFrame(() => {
+    scrollScheduled = false;
+    const st = Object.assign({}, history.state, { vyrnNav: true, scrollY: window.scrollY });
+    try {
+      history.replaceState(st, "");
+    } catch (e) {
+      /* ignore */
+    }
+  });
+}
+
+function pushEntry(url) {
+  // Synchronously stamp the leaving entry with its scroll offset BEFORE pushing
+  // the new one (the throttled scroll listener may not have run yet, and a late
+  // frame must never write this offset into the new entry).
+  history.replaceState(Object.assign({}, history.state, { vyrnNav: true, scrollY: window.scrollY }), "");
+  history.pushState({ vyrnNav: true, scrollY: 0 }, "", url);
+}
+
+let pendingPopScroll = 0;
+// Restore the saved offset — then re-apply it on a short, bounded schedule. An
+// island re-mount (or any async content) can briefly collapse page height right
+// after the swap, clamping the scroll; re-applying for ~½s lets the target stick
+// once the content grows back. Harmless once the page is tall enough.
+function restorePopScroll() {
+  const target = pendingPopScroll || 0;
+  const delays = [0, 60, 160, 320, 520];
+  let i = 0;
+  const apply = () => {
+    window.scrollTo(0, target);
+    i += 1;
+    if (i < delays.length && window.scrollY < target) setTimeout(apply, delays[i] - delays[i - 1]);
+  };
+  apply();
+}
+
+// A cross-page #fragment — the search index links sections as
+// `/guide/x.html#anchor` — must land on its target after a soft nav, the way
+// a hard navigation would. The id is percent-decoded first; like
+// restorePopScroll, the landing retries while content streams in under us,
+// and an anchor that never appears leaves the page at the top.
+function scrollToFragment(url) {
+  let id;
+  try {
+    id = decodeURIComponent(url.hash.slice(1));
+  } catch (_) {
+    id = url.hash.slice(1);
+  }
+  const delays = [0, 60, 160, 320, 520];
+  let i = 0;
+  const apply = () => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.scrollIntoView();
+      return;
+    }
+    window.scrollTo(0, 0);
+    i += 1;
+    if (i < delays.length) setTimeout(apply, delays[i] - delays[i - 1]);
+  };
+  apply();
+}
+
+// Where a freshly painted page ends up: a Back/Forward pop keeps its place, a
+// plain navigation lands at the top, and a #fragment lands on its section.
+function settleScroll(url, push) {
+  if (!push) restorePopScroll();
+  else if (url.hash && url.hash !== "#") scrollToFragment(url);
+  else window.scrollTo(0, 0);
+}
+
+// A lazy page's soft nav. Paint the skeleton (the `Loading` view) at
+// once from a `{"__loading__":true}` payload — no wait — then fetch the data marker
+// and fill in `Ready(props)` by PATCHING the retained skeleton view (only the data
+// region changes; the shell + island are left in place). Any failure degrades to a
+// hard nav (fallback bias). A payload that comes back as a DIFFERENT page (an
+// `@error` for a failed lazy load) can't be patched into the skeleton, so it repaints
+// `<main>` wholesale. If the skeleton render itself fails (e.g. a dynamic lazy page
+// whose Params the host can't build), we skip the instant paint and just do the fill.
+async function navigateLazy(url, { push }, resolved) {
+  emit("nav-start", { url });
+
+  // 1) Instant skeleton paint (best-effort).
+  let view = null;
+  let pushed = false; // one history entry per navigation, even if the skeleton paint throws
+  try {
+    const loadingTree = pageRenderer(JSON.stringify({ page: resolved.page, props: { __loading__: true }, params: null }));
+    if (loadingTree && loadingTree !== "__vyrn_fallback__") {
+      const liveMain = document.querySelector("main");
+      if (liveMain) {
+        if (push) {
+          pushEntry(url);
+          pushed = true;
+        }
+        if (resolved.title) document.title = String(resolved.title);
+        view = makePageView(loadingTree);
+        liveMain.replaceWith(view.dom);
+        syncIslands(); // mount the island into the freshly-painted #app
+        if (push) window.scrollTo(0, 0);
+      }
+    }
+  } catch (_) {
+    view = null; // fall through to the blocking fill
+  }
+
+  // 2) Fetch the data payload.
+  const controller = new AbortController();
+  inflight = controller;
+  const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
+  let res;
+  try {
+    res = await fetch(payloadUrl(url), { headers: DATA_HEADERS, signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timer);
+    inflight = null;
+    emit("nav-error", { url, reason: "fetch-failed" });
+    hardNav(url);
+    return;
+  }
+  clearTimeout(timer);
+  inflight = null;
+  if (!res.ok) {
+    emit("nav-error", { url, reason: "non-2xx" });
+    hardNav(url);
+    return;
+  }
+  if (!(res.headers.get("content-type") || "").includes("application/json")) {
+    emit("nav-error", { url, reason: "non-json" });
+    hardNav(url);
+    return;
+  }
+  let payloadText;
+  try {
+    payloadText = await res.text();
+  } catch (err) {
+    emit("nav-error", { url, reason: "body-failed" });
+    hardNav(url);
+    return;
+  }
+
+  // 3) Fill in `Ready` (or repaint wholesale for an @error / page mismatch).
+  try {
+    const readyTree = pageRenderer(payloadText);
+    if (!readyTree || readyTree === "__vyrn_fallback__") {
+      throw new Error("client bundle cannot render this page");
+    }
+    let payload = null;
+    try {
+      payload = JSON.parse(payloadText);
+    } catch (_) {
+      /* title/page stay as-is if the envelope won't parse */
+    }
+    const samePage = payload && payload.page === resolved.page;
+    if (payload && payload.title != null) document.title = String(payload.title);
+    if (view && samePage) {
+      // The common path: patch the skeleton into the data view — only the data
+      // region repaints; the shell/#app island is untouched (no re-sync needed).
+      patchPageView(view, readyTree);
+    } else {
+      // No skeleton painted, or a different page (a failed lazy load's @error):
+      // repaint <main> wholesale. Push only if the skeleton step didn't.
+      if (!view && push && !pushed) {
+        pushEntry(url);
+        pushed = true;
+      }
+      paintMain(readyTree);
+      syncIslands();
+    }
+    // Post-paint scroll: a pop keeps its place; a push lands at the top — or,
+    // for a #fragment URL, on its section now that the real content is in
+    // (the skeleton's instant top scroll above is just feedback while the
+    // fetch runs).
+    settleScroll(url, push);
+    emit("nav-end", { url });
+  } catch (err) {
+    emit("nav-error", { url, reason: "render-failed" });
+    hardNav(url);
+  }
+}
+
+async function navigate(url, { push }) {
+  if (inflight) {
+    hardNav(url); // mid-flight second click → hard nav
+    return;
+  }
+
+  // Feature-detect the client bundle once per nav. With a renderer AND a resolver,
+  // resolve the target against the bundle FIRST, no network.
+  const dataMode = typeof pageRenderer === "function";
+  const resolved = dataMode ? resolveTarget(url) : null;
+
+  // A resolved LAZY page renders its skeleton INSTANTLY (zero wait), then
+  // fetches its data payload and fills in `Ready` — vyrn-dom patches only the data
+  // region, so the shell (and the island inside it) never repaints. A dynamic lazy
+  // page whose Params the host cannot build simply degrades to the blocking fill.
+  if (dataMode && resolved && resolved.found && resolved.lazy) {
+    await navigateLazy(url, { push }, resolved);
+    return;
+  }
+
+  // A known page with NO data renders immediately from null props — ZERO fetch (the
+  // Nuxt model: declaring load() is the declaration; a dataless page navigates with no
+  // network). The render is synchronous, so the in-flight guard above is enough — no
+  // AbortController is armed. Any failure degrades to a hard nav (fallback bias).
+  if (dataMode && resolved && resolved.found && resolved.hasData === false) {
+    emit("nav-start", { url });
+    try {
+      const treeJson = pageRenderer(JSON.stringify({ page: resolved.page, props: null, params: null }));
+      if (!treeJson || treeJson === "__vyrn_fallback__") {
+        throw new Error("client bundle cannot render this page");
+      }
+      if (push) pushEntry(url);
+      // An empty resolved title leaves document.title at the layout default (a page
+      // that declares no title{} must NOT overwrite it with the url-pattern).
+      if (resolved.title) document.title = String(resolved.title);
+      paintMain(treeJson);
+      syncIslands();
+      settleScroll(url, push);
+      emit("nav-end", { url });
+    } catch (err) {
+      emit("nav-error", { url, reason: "resolve-render-failed" });
+      hardNav(url);
+    }
+    return;
+  }
+
+  emit("nav-start", { url });
+  const controller = new AbortController();
+  inflight = controller;
+  const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
+
+  // Ask for the JSON payload ONLY for a resolved DATA page; an unresolved path
+  // — not in the client bundle — takes the plain HTML channel (the HTML swap /
+  // hard-nav chain). Without a resolver (a bundle that registered only the
+  // renderer), ask for data on every nav. Both channels hit the SAME URL and
+  // differ only in `Accept`.
+  const wantData = dataMode && (resolved ? resolved.found && resolved.hasData : true);
+
+  let res;
+  try {
+    res = await fetch(wantData ? payloadUrl(url) : url, { headers: wantData ? DATA_HEADERS : DOC_HEADERS, signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timer);
+    inflight = null;
+    emit("nav-error", { url, reason: "fetch-failed" });
+    hardNav(url); // network failure / timeout / abort → hard nav
+    return;
+  }
+  clearTimeout(timer);
+  inflight = null;
+
+  if (!res.ok) {
+    emit("nav-error", { url, reason: "non-2xx" });
+    hardNav(url);
+    return;
+  }
+  const ct = res.headers.get("content-type") || "";
+
+  // Data channel: a JSON payload the client renders itself. Set the
+  // title, render the page's tree via the wasm, paint it into <main>, and re-sync
+  // islands (the create island re-mounts against its surviving instance). A
+  // distinguished fallback sentinel — or any exception — degrades to a hard nav.
+  if (wantData && ct.includes("application/json")) {
+    let payloadText;
+    try {
+      payloadText = await res.text();
+    } catch (err) {
+      emit("nav-error", { url, reason: "body-failed" });
+      hardNav(url);
+      return;
+    }
+    try {
+      const treeJson = pageRenderer(payloadText);
+      if (!treeJson || treeJson === "__vyrn_fallback__") {
+        throw new Error("client bundle cannot render this page");
+      }
+      let payload = null;
+      try {
+        payload = JSON.parse(payloadText);
+      } catch (_) {
+        /* title stays as-is if the envelope won't parse */
+      }
+      if (push) pushEntry(url);
+      if (payload && payload.title != null) document.title = String(payload.title);
+      paintMain(treeJson);
+      syncIslands();
+      settleScroll(url, push);
+      emit("nav-end", { url });
+    } catch (err) {
+      emit("nav-error", { url, reason: "render-failed" });
+      hardNav(url);
+    }
+    return;
+  }
+
+  // HTML channel: a full document, either with no client bundle or for a valid
+  // route not in it (a `.vyrn`/respond page whose marked request returned its
+  // real HTML).
+  if (ct.includes("text/html")) {
+    let html;
+    try {
+      html = await res.text();
+    } catch (err) {
+      emit("nav-error", { url, reason: "body-failed" });
+      hardNav(url);
+      return;
+    }
+    try {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      if (push) pushEntry(url);
+      applyDocument(doc);
+      settleScroll(url, push);
+      emit("nav-end", { url });
+    } catch (err) {
+      // Any exception mid-swap: reload for real rather than leave a half-swapped
+      // page (hardNav discards whatever partial mutation happened).
+      emit("nav-error", { url, reason: "swap-failed" });
+      hardNav(url);
+    }
+    return;
+  }
+
+  // Anything else — a non-client route answering non-JSON (e.g. `/raw` text/plain),
+  // or any other body — hands off to the browser.
+  emit("nav-error", { url, reason: "non-html" });
+  hardNav(url);
+}
+
+// ---------------------------------------------------------------------------
+// Wiring: click interception, popstate, scroll saving.
+// ---------------------------------------------------------------------------
+function linkFor(target) {
+  return target instanceof Element ? target.closest("a[href]") : null;
+}
+
+export function shouldIntercept(a, e) {
+  if (e.defaultPrevented) return false;
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return false;
+  if (!a || !a.getAttribute("href")) return false;
+  if (a.hasAttribute("download")) return false;
+  if (a.getAttribute("data-nav") === "hard") return false;
+  const target = a.getAttribute("target");
+  if (target && target !== "_self") return false;
+  if ((a.getAttribute("rel") || "").split(/\s+/).includes("external")) return false;
+  let url;
+  try {
+    // `getAttribute`, never the `href` PROPERTY. On an SVG `<a>` the property is
+    // an `SVGAnimatedString`, not a string, so `new URL(a.href, …)` resolves the
+    // text "[object SVGAnimatedString]" as a same-origin path and every link
+    // inside a chart navigates to a page that does not exist. The attribute is a
+    // string on both element kinds, and the URL constructor resolves it.
+    url = new URL(a.getAttribute("href"), location.href);
+  } catch (_) {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false; // mailto:, tel:, … → native
+  if (url.origin !== location.origin) return false; // external → native
+  // pure in-page hash change → let the browser scroll/anchor natively
+  if (url.pathname === location.pathname && url.search === location.search && url.hash) return false;
+  return url;
+}
+
+function onClick(e) {
+  const a = linkFor(e.target);
+  const url = a && shouldIntercept(a, e);
+  if (!url) return;
+  e.preventDefault();
+  navigate(url.href, { push: true });
+}
+
+function onPopState(e) {
+  if (!e.state || !e.state.vyrnNav) return; // not one of ours
+  pendingPopScroll = e.state.scrollY || 0;
+  navigate(location.href, { push: false });
+}
+
+// ---------------------------------------------------------------------------
+// Built-in top progress bar. Rides the nav events like any consumer would; it
+// is marked data-vyrn-nav-ui so no swap ever touches it. Disable via
+// window.__vyrnNavConfig = { progress: false } and hook the events yourself.
+// ---------------------------------------------------------------------------
+function installProgressBar() {
+  const bar = document.createElement("div");
+  bar.setAttribute("data-vyrn-nav-ui", "");
+  Object.assign(bar.style, {
+    position: "fixed",
+    top: "0",
+    left: "0",
+    height: "3px",
+    width: "0",
+    background: "currentColor",
+    color: "#7c5cff",
+    opacity: "0",
+    zIndex: "2147483647",
+    pointerEvents: "none",
+    transition: "width .2s ease, opacity .3s ease",
+    boxShadow: "0 0 8px currentColor",
+  });
+  document.documentElement.appendChild(bar);
+
+  // The bar only appears when a nav is actually SLOW (>150ms). A localhost
+  // swap completes in a few ms; flashing 0→80→100% on it reads exactly like a
+  // full page load — the opposite of what a soft nav should feel like.
+  let done = null;
+  let arm = null;
+  let shown = false;
+  document.addEventListener("vyrn:nav-start", () => {
+    clearTimeout(done);
+    clearTimeout(arm);
+    shown = false;
+    arm = setTimeout(() => {
+      shown = true;
+      bar.style.transition = "none";
+      bar.style.width = "0";
+      bar.style.opacity = "1";
+      // next frame: animate to a plausible "most of the way there" width
+      requestAnimationFrame(() => {
+        bar.style.transition = "width .3s ease, opacity .3s ease";
+        bar.style.width = "80%";
+      });
+    }, 150);
+  });
+  const finish = () => {
+    clearTimeout(arm);
+    if (!shown) return; // fast nav: the bar never appeared — keep it that way
+    bar.style.width = "100%";
+    done = setTimeout(() => {
+      bar.style.opacity = "0";
+      setTimeout(() => (bar.style.width = "0"), 300);
+    }, 150);
+  };
+  document.addEventListener("vyrn:nav-end", finish);
+  document.addEventListener("vyrn:nav-error", finish);
+}
+
+// ---------------------------------------------------------------------------
+// Public surface + boot.
+// ---------------------------------------------------------------------------
+export const vyrnNav = {
+  navigate: (url) => navigate(new URL(url, location.href).href, { push: true }),
+  // Prefetch is a no-op, so a `data-nav
+  // ="prefetch"` link and any `vyrnNav.prefetch(url)` caller stay harmless.
+  prefetch: () => {},
+  registerIsland(selector, boot) {
+    const reg = { selector, boot, instance: null, created: false };
+    islands.push(reg);
+    syncIslands(); // boot now if the mount is already present
+    return reg;
+  },
+  // The island boot hands its wasm `renderPage` here once the client
+  // bundle is instantiated; a soft nav then renders pages client-side. Until it is
+  // set (no bundle, still booting, a no-JS page), navigation uses the HTML swap.
+  setPageRenderer(fn) {
+    pageRenderer = typeof fn === "function" ? fn : null;
+  },
+  // The island boot hands its wasm `resolvePage` here. With it, a soft
+  // nav resolves the target against the bundle before any network — a dataless page
+  // then navigates with zero fetch. Until it is set, the navigator fetches the
+  // data payload on every nav.
+  setPageResolver(fn) {
+    pageResolver = typeof fn === "function" ? fn : null;
+  },
+  config: CONFIG,
+};
+
+let started = false;
+export function start() {
+  if (started || typeof document === "undefined") return;
+  started = true;
+
+  if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+  // Seed the initial entry so back/forward to it is recognized as ours.
+  history.replaceState(Object.assign({}, history.state, { vyrnNav: true, scrollY: window.scrollY }), "");
+
+  document.addEventListener("click", onClick);
+  window.addEventListener("popstate", onPopState);
+  window.addEventListener("scroll", saveScroll, { passive: true });
+
+  if (CONFIG.progress) installProgressBar();
+}
+
+if (typeof window !== "undefined") {
+  window.vyrnNav = vyrnNav; // island registration reaches this before app boot
+  start();
+}

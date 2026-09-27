@@ -1,0 +1,2490 @@
+/// std/ui: file-based routing as a generator. `pages(dir)` scans a
+/// directory of page modules at generation time and returns a router module.
+///
+///   import { pages } from "std/ui"
+///   import { route } from pages("./pages")
+///   fn handle(req: Request) -> Response { return route(req) }
+///
+///   pages/index.vyrn        -> GET /
+///   pages/items/index.vyrn  -> GET /items
+///   pages/items/[id].vyrn   -> GET /items/:id
+///
+/// A page module exports what the `Page` contract below allows. A page with
+/// `[bracket]` segments exports `type Params`, whose field names must equal the
+/// segments; a segment that does not parse as its type is a 404 before user
+/// code runs. The router module exports `route(req: Request) -> Response`,
+/// `type RoutePath` (the regex of every route), and a typed URL helper per
+/// route. A Params mismatch, an unsupported param type or a route collision
+/// fails the load with a report at the page module.
+
+// A `.vyx` page's routing shape comes from `std/vyx`, and the router imports
+// it through a nested `vyxPage(...)` generator import.
+import { vyxPageShape, vyxPageInterface, vyxQueryDataType, vyxDataRunner, vyxDataFormHasParams, vyxDataFormIsLazy } from "std/vyx"
+import { joinWith, trim, fromBytesOr, indexOf, toLower } from "std/strings"
+import { includes } from "std/arrays"
+import { el, empty, Html, Attr } from "std/html"
+import { checkContract, matchedMember } from "std/contract"
+import { endsWith, slice, startsWith } from "std/strpred"
+import { report, reportHere, Severity } from "std/diag"
+
+/// A page-load failure. The router renders the nearest `error.vyx`, or a
+/// built-in error body, at `status`.
+export type PageError = { status: Int64, message: String }
+
+export fn pageError(status: Int64, message: String) -> PageError {
+    return PageError { status: status, message: message.copy() }
+}
+
+export fn notFound(message: String) -> PageError {
+    return PageError { status: 404, message: message.copy() }
+}
+
+export fn badRequest(message: String) -> PageError {
+    return PageError { status: 400, message: message.copy() }
+}
+
+/// A lazy page's view data. `Loading` exists only on a client soft
+/// nav; the server always renders `Ready`. Defined once here, because each
+/// constructor may register only once.
+export type PageData<T> = | Loading | Ready(T)
+
+// Contract members are functions because every top-level `let` is
+// module-private, and page data is per request, not per module init.
+
+export type Meta = { name: String, content: String }
+
+/// What a page contributes to the document head, built from `noHead()` and
+/// the `with*` combinators:
+///
+///     export fn head() -> Head {
+///         return withModule(noHead(), "/app.js")
+///     }
+export type Head = {
+    title: Option<String>,
+    stylesheets: Array<String>,
+    modules: Array<String>,
+    scripts: Array<String>,
+    meta: Array<Meta>,
+}
+
+export fn noHead() -> Head {
+    return Head { title: None, stylesheets: [], modules: [], scripts: [], meta: [] }
+}
+
+/// The page's title wins over its layouts'.
+export fn withTitle(h: Head, title: String) -> Head {
+    return Head { title: Some(title.copy()), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
+}
+
+export fn withStylesheet(h: Head, href: String) -> Head {
+    let mut ss = h.stylesheets.copy()
+    ss.push(href.copy())
+    return Head { title: h.title.copy(), stylesheets: ss, modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
+}
+
+export fn withModule(h: Head, src: String) -> Head {
+    let mut ms = h.modules.copy()
+    ms.push(src.copy())
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: ms, scripts: h.scripts.copy(), meta: h.meta.copy() }
+}
+
+export fn withScript(h: Head, src: String) -> Head {
+    let mut sc = h.scripts.copy()
+    sc.push(src.copy())
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: sc, meta: h.meta.copy() }
+}
+
+export fn withMeta(h: Head, name: String, content: String) -> Head {
+    let mut mt = h.meta.copy()
+    mt.push(Meta { name: name.copy(), content: content.copy() })
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: mt }
+}
+
+/// Stylesheets, then modules, then scripts, then meta, each in the order added.
+export fn headHtml(h: Head) -> Array<Html> {
+    let mut out: Array<Html> = []
+    for href in h.stylesheets {
+        out.push(el("link", [A("rel", "stylesheet"), A("href", href.copy())], []))
+    }
+    for src in h.modules {
+        out.push(el("script", [A("type", "module"), A("src", src.copy())], []))
+    }
+    for src in h.scripts {
+        out.push(el("script", [A("src", src.copy())], []))
+    }
+    for m in h.meta {
+        out.push(el("meta", [A("name", m.name.copy()), A("content", m.content.copy())], []))
+    }
+    return out
+}
+
+/// `""` when the head declares no title.
+export fn headTitleOf(h: Head) -> String {
+    return match h.title {
+        Some(t) => t.copy(),
+        None => "",
+    }
+}
+
+/// A page's data, produced by a deferred call. The page blocks until the data
+/// lands; return a [`Lazy`] to render first and fill in later.
+///
+///     export fn data() -> Query<Array<Paste>> {
+///         return query(|| listPastes().pastes)
+///     }
+export type Query<T> = { run: fn() -> T }
+
+/// A page's data when the page renders lazily: on a client soft nav
+/// the shell paints first and the data region fills in. A distinct type, not a
+/// flag, because laziness decides the view's type (`PageData<T>`), and the
+/// generator reads types, not function bodies.
+export type Lazy<T> = { run: fn() -> T }
+
+/// A page's data when it depends on the route parameters. `P` is the page's own
+/// `Params`, which `std/ui` cannot name.
+///
+///     export fn data() -> ParamQuery<Params, Result<Paste, PageError>> {
+///         return paramQuery(|p: Params| fetch(p.id))
+///     }
+export type ParamQuery<P, T> = { run: fn(P) -> T }
+
+export type ParamLazy<P, T> = { run: fn(P) -> T }
+
+export fn query<T>(run: consume fn() -> T) -> Query<T> {
+    return Query { run: run }
+}
+
+/// The server always has the data, so SSR is unaffected.
+export fn lazy<T>(q: consume Query<T>) -> Lazy<T> {
+    return Lazy { run: consume q.run }
+}
+
+export fn paramQuery<P, T>(run: consume fn(P) -> T) -> ParamQuery<P, T> {
+    return ParamQuery { run: run }
+}
+
+export fn paramLazy<P, T>(q: consume ParamQuery<P, T>) -> ParamLazy<P, T> {
+    return ParamLazy { run: consume q.run }
+}
+
+export fn runQuery<T>(q: Query<T>) -> T {
+    let f = q.run
+    return f()
+}
+
+/// Laziness changes how the document is delivered, not whether data is fetched.
+export fn runLazy<T>(q: Lazy<T>) -> T {
+    let f = q.run
+    return f()
+}
+
+export fn runParamQuery<P, T>(q: ParamQuery<P, T>, p: P) -> T {
+    let f = q.run
+    return f(p)
+}
+
+export fn runParamLazy<P, T>(q: ParamLazy<P, T>, p: P) -> T {
+    let f = q.run
+    return f(p)
+}
+
+/// The default `data` for a page that declares none.
+export fn noQuery() -> Query<Unit> {
+    return query(uiNoData)
+}
+
+fn uiNoData() -> Unit {
+}
+
+/// What a page module may export. Closed: any other export is
+/// reported, with a did-you-mean for a near miss. Each member has several
+/// shapes, because a page takes what its view takes: nothing, the loaded data,
+/// the route params, or both.
+export contract Page {
+    /// Document head contributions for this page.
+    /// The house rule is that head takes what the view takes.
+    fn head() -> Head = noHead()
+    fn head(d: T) -> Head
+    fn head(p: P) -> Head
+    fn head(p: P, d: T) -> Head
+
+    /// This page's data, resolved before render. The return type says whether
+    /// the page blocks (`Query`) or renders first (`Lazy`), and whether the call
+    /// sees the route parameters (`Param*`).
+    fn data() -> Query<T> = noQuery()
+    fn data() -> Lazy<T>
+    fn data() -> ParamQuery<P, T>
+    fn data() -> ParamLazy<P, T>
+
+    /// This page's view, rendered into the document.
+    fn page() -> Html = uiNoView()
+    fn page(d: T) -> Html
+    fn page(p: P) -> Html
+    fn page(p: P, d: T) -> Html
+
+    /// A raw response, for a route that is not a document. A page exports
+    /// `page` or `respond`; `uiInspectPage` enforces that rule.
+    fn respond() -> Response = uiNoRespond()
+    fn respond(d: T) -> Response
+    fn respond(p: P) -> Response
+    fn respond(p: P, d: T) -> Response
+}
+
+/// The default that makes `page` optional. A page exports `page` or `respond`,
+/// so this is never substituted.
+export fn uiNoView() -> Html {
+    return empty()
+}
+
+/// The default that makes `respond` optional. See [`uiNoView`].
+export fn uiNoRespond() -> Response {
+    return Response { status: 404, contentType: "text/plain", body: "", vary: "", headers: [:] }
+}
+
+/// The `data` member's shape indices as `matchedMember` reports them, in the
+/// declaration order of `contract Page`. `fn data() -> Query<T>`.
+export fn uiDataQuery() -> Int64 {
+    return 0
+}
+
+export fn uiDataLazy() -> Int64 {
+    return 1
+}
+
+export fn uiDataParamQuery() -> Int64 {
+    return 2
+}
+
+export fn uiDataParamLazy() -> Int64 {
+    return 3
+}
+
+// Runtime helpers the router uses to answer a soft-nav data request with
+// `{page, title, props[, params]}` JSON. One URL has two
+// representations, chosen by `Accept`.
+
+/// `accept` is lowercased; only the presence of `ty` matters.
+fn uiAcceptNames(accept: String, ty: String) -> Bool {
+    return match indexOf(accept, ty) {
+        Some(at) => true,
+        None => false,
+    }
+}
+
+/// JSON wins only when the client names `application/json` and not
+/// `text/html`. A browser navigation, `*/*` and a missing `Accept` get HTML.
+/// No q-value ranking: no client of this router separates the two by weight.
+export fn uiWantsData(req: Request) -> Bool {
+    let accept = match req.headers["accept"] {
+        Some(v) => toLower(v),
+        None => "",
+    }
+    return uiAcceptNames(accept, "application/json") && uiAcceptNames(accept, "text/html") == false
+}
+
+/// `props` and `params` are already JSON; `page` and `title` are encoded here.
+export fn uiPayload(page: String, title: String, props: String, params: String) -> String {
+    return "{\"page\":" + toJson(page) + ",\"title\":" + toJson(title) + ",\"props\":" + props + ",\"params\":" + params + "}"
+}
+
+/// The `@error` payload a client renders on a load miss.
+export fn uiErrorPayload(status: Int64, props: String) -> String {
+    return "{\"page\":\"@error\",\"status\":" + status.toString() + ",\"title\":\"Error\",\"props\":" + props + "}"
+}
+
+/// A data fetch always answers 200; the payload says what to render. `vary:
+/// "Accept"` keeps a shared cache from serving a page's JSON to a browser.
+export fn uiDataResponse(body: String) -> Response {
+    return Response { status: 200, contentType: "application/json", body: body.copy(), vary: "Accept", headers: [:] }
+}
+
+/// The data response when no route matched.
+export fn uiDataMiss() -> Response {
+    return uiDataResponse(uiErrorPayload(404, "{\"status\":404,\"message\":\"Not Found\"}"))
+}
+
+/// `e` is a typed parameter so `toJson` sees `PageError`: bound from an
+/// `Err(e)` arm it loses its type for `toJson`.
+export fn uiErrorResponseOf(e: PageError) -> Response {
+    return uiDataResponse(uiErrorPayload(e.status, toJson(e)))
+}
+
+/// `ba[s..e)` as a String, `""` on a non-UTF-8 slice.
+gen fn uiSliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut out: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        out.push(ba[i])
+        i = i + 1
+    }
+    return fromBytesOr(out, "")
+}
+
+gen fn uiUpperFirst(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in ba {
+        if i == 0 && b >= 'a' && b <= 'z' {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, s)
+}
+
+/// A copy-append: siblings in `uiScanAll`'s recursion share the prefix, so an
+/// in-place `push` would corrupt it.
+gen fn uiAppendStr(arr: Array<String>, s: String) -> Array<String> {
+    let mut out = arr.copy()
+    out.push(s.copy())
+    return out
+}
+
+/// The source text of an interpolation hole, `\{name}`, built so the lexer
+/// never reads it as an escape here.
+gen fn uiHole(name: String) -> String {
+    return "\\" + "{" + name + "}"
+}
+
+/// `raw` as a Vyrn string literal. The code quote makes the compiler
+/// escape it, so no page path or segment can inject code.
+gen fn uiStrLit(raw: String) -> String {
+    return render(vyrn"\{raw}")
+}
+
+/// Each regex metacharacter gets a backslash, doubled because the result is
+/// re-lexed inside a Vyrn string literal.
+gen fn uiRegexEscapeLit(seg: String) -> String {
+    let ba = bytes(seg)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b == '.' || b == '\\' || b == '(' || b == ')' || b == '[' || b == ']'
+        || b == '{' || b == '}' || b == '|' || b == '*' || b == '+' || b == '?'
+        || b == '^' || b == '$' {
+            out.push('\\')
+            out.push('\\')
+            out.push(b)
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, seg)
+}
+
+/// `[id].vyrn` -> `[id]`.
+gen fn uiStem(name: String) -> String {
+    let ba = bytes(name)
+    return uiSliceStr(ba, 0, ba.length - 5)
+}
+
+gen fn uiIsDynSeg(s: String) -> Bool {
+    return s.startsWith("[") && s.endsWith("]")
+}
+
+/// `[id]` -> `id`.
+gen fn uiDynName(s: String) -> String {
+    let ba = bytes(s)
+    return uiSliceStr(ba, 1, ba.length - 1)
+}
+
+/// `index` adds no segment; it is its directory's route.
+gen fn uiRouteSegsFor(prefix: Array<String>, st: String) -> Array<String> {
+    if st == "index" {
+        return prefix.copy()
+    }
+    return uiAppendStr(prefix, st)
+}
+
+gen fn uiDynNamesOf(segs: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            out.push(uiDynName(s))
+        }
+    }
+    return out
+}
+
+/// Static tokens verbatim, dynamic ones as `:`; equal keys claim one route.
+gen fn uiCollisionKey(segs: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push(":")
+        } else {
+            parts.push(s.copy())
+        }
+    }
+    return "/" + joinWith(parts, "/")
+}
+
+/// `/users/:id`, for titles and diagnostics.
+gen fn uiUrlPatternOf(segs: Array<String>) -> String {
+    if segs.length == 0 {
+        return "/"
+    }
+    let mut parts: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push(":" + uiDynName(s))
+        } else {
+            parts.push(s.copy())
+        }
+    }
+    return "/" + joinWith(parts, "/")
+}
+
+/// `/users/{id}`, the `std/http` spelling that `mount` matches and `vyrn
+/// routes` prints. Always the whole path: a page router matches `req.path`
+/// entire.
+gen fn uiWirePatternOf(segs: Array<String>) -> String {
+    if segs.length == 0 {
+        return "/"
+    }
+    let mut parts: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push("{" + uiDynName(s) + "}")
+        } else {
+            parts.push(s.copy())
+        }
+    }
+    return "/" + joinWith(parts, "/")
+}
+
+/// The `procedure` column name: the page's place in the tree (`p/[id]`).
+gen fn uiPageKeyOf(segs: Array<String>) -> String {
+    if segs.length == 0 {
+        return "index"
+    }
+    return joinWith(segs, "/")
+}
+
+/// Static tokens literal, a param as its type's regex. The root is `/`.
+gen fn uiRoutePathBranch(segs: Array<String>, dynTypes: Array<String>) -> String {
+    if segs.length == 0 {
+        return "/"
+    }
+    let mut parts: Array<String> = []
+    let mut k = 0
+    for s in segs {
+        if uiIsDynSeg(s) {
+            let ty = if k < dynTypes.length { dynTypes[k] } else { "Int64" }
+            parts.push(uiSegRegex(ty))
+            k = k + 1
+        } else {
+            parts.push(uiRegexEscapeLit(s))
+        }
+    }
+    return "/" + joinWith(parts, "/")
+}
+
+/// One URL slug as an identifier fragment: every run of non-alphanumeric ASCII
+/// is a word break and goes, and each later word is capitalised
+/// (`about-us` -> `aboutUs`, `a.b` -> `aB`, `2fa` -> `2fa`). Many-to-one:
+/// `uiHelperCollisions` reports clashes, and `uiIdentLead` fixes a leading digit.
+gen fn uiSegIdent(s: String) -> String {
+    let mut out: Array<UInt8> = []
+    let mut atWordStart = false
+    for b in bytes(s) {
+        if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
+            if atWordStart && b >= 'a' && b <= 'z' {
+                out.push(b - 32)
+            } else {
+                out.push(b)
+            }
+            atWordStart = false
+        } else {
+            atWordStart = true
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// A leading digit gets a `_` (`2faPath` -> `_2faPath`). Reserved words need no
+/// handling: every built name carries an affix (`href...`, `...Path`).
+gen fn uiIdentLead(name: String) -> String {
+    let ba = bytes(name)
+    if ba.length > 0 && ba[0] >= '0' && ba[0] <= '9' {
+        return "_" + name
+    }
+    return name.copy()
+}
+
+/// `/items/sub` -> `itemsSubPath`, `/about-us` -> `aboutUsPath`, `/` -> `rootPath`.
+gen fn uiStaticHelperName(segs: Array<String>) -> String {
+    if segs.length == 0 {
+        return "rootPath"
+    }
+    let mut out = ""
+    let mut i = 0
+    for s in segs {
+        if i == 0 {
+            out = out + uiSegIdent(s)
+        } else {
+            out = out + uiUpperFirst(uiSegIdent(s))
+        }
+        i = i + 1
+    }
+    return uiIdentLead(out + "Path")
+}
+
+/// `href` and the PascalCase static segments: `/users/[id]` -> `hrefUsers`.
+gen fn uiDynHelperName(segs: Array<String>) -> String {
+    let mut out = "href"
+    for s in segs {
+        if uiIsDynSeg(s) == false {
+            out = out + uiUpperFirst(uiSegIdent(s))
+        }
+    }
+    return out
+}
+
+/// The one place the helper name is decided, so the emitter and the collision
+/// check agree.
+gen fn uiHelperNameOf(p: UiPageInfo) -> String {
+    if p.dynNames.length > 0 {
+        return uiDynHelperName(p.segs)
+    }
+    return uiStaticHelperName(p.segs)
+}
+
+/// A string literal with a hole per dynamic segment: `/users/[id]` ->
+/// `"/users/\{id}"`. A `String` param goes through `urlEncode` (RFC 3986
+/// section 2.3), whose exact inverse is `urlDecode`, so a `/` in a value
+/// becomes `%2F`. An `Int64` spelling is all unreserved and is not encoded.
+gen fn uiDynHelperBody(segs: Array<String>, dynTypes: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    let mut k = 0
+    for s in segs {
+        if uiIsDynSeg(s) {
+            let ty = if k < dynTypes.length { dynTypes[k] } else { "Int64" }
+            let name = uiDynName(s)
+            parts.push(uiHole(if ty == "String" { "urlEncode(" + name + ")" } else { name }))
+            k = k + 1
+        } else {
+            parts.push(s.copy())
+        }
+    }
+    return "\"/" + joinWith(parts, "/") + "\""
+}
+
+type UiFields = { names: Array<String>, types: Array<String> }
+
+gen fn uiRecordBody(source: String) -> String {
+    let ba = bytes(source)
+    let mut open = 0 - 1
+    let mut close = 0 - 1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '{' && open < 0 {
+            open = i
+        }
+        if ba[i] == '}' {
+            close = i
+        }
+        i = i + 1
+    }
+    if open < 0 || close <= open {
+        return ""
+    }
+    return uiSliceStr(ba, open + 1, close)
+}
+
+/// Splits on commas at `<>` and `{}` depth 0, so `Array<A, B>` stays whole.
+gen fn uiSplitFields(body: String) -> Array<String> {
+    let ba = bytes(body)
+    let mut parts: Array<String> = []
+    let mut depth = 0
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        let b = ba[i]
+        if b == '<' || b == '{' {
+            depth = depth + 1
+        } else if b == '>' || b == '}' {
+            depth = depth - 1
+        } else if b == ',' && depth == 0 {
+            parts.push(uiSliceStr(ba, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    parts.push(uiSliceStr(ba, start, ba.length))
+    return parts
+}
+
+gen fn uiParseFields(source: String) -> UiFields {
+    let body = uiRecordBody(source)
+    let mut names: Array<String> = []
+    let mut types: Array<String> = []
+    for part in uiSplitFields(body) {
+        let trimmed = trim(part)
+        if trimmed.byteLength > 0 {
+            let pb = bytes(trimmed)
+            let mut colon = 0 - 1
+            let mut i = 0
+            while i < pb.length && colon < 0 {
+                if pb[i] == ':' {
+                    colon = i
+                }
+                i = i + 1
+            }
+            if colon >= 0 {
+                names.push(trim(uiSliceStr(pb, 0, colon)))
+                types.push(trim(uiSliceStr(pb, colon + 1, pb.length)))
+            }
+        }
+    }
+    return UiFields { names: names, types: types }
+}
+
+/// `""` when there is no field `name`.
+gen fn uiFieldType(f: UiFields, name: String) -> String {
+    let mut i = 0
+    while i < f.names.length {
+        if f.names[i] == name {
+            return f.types[i].copy()
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+gen fn uiSupportedParamType(spelling: String) -> Bool {
+    return spelling == "Int64" || spelling == "String"
+}
+
+/// An integer for `Int64`; for `String`, a non-empty run of unreserved bytes
+/// and `%XX` escapes, which is `urlEncode`'s output alphabet, so a helper's
+/// result always validates.
+gen fn uiSegRegex(spelling: String) -> String {
+    if spelling == "String" {
+        return "([A-Za-z0-9._~-]|%[0-9A-Fa-f][0-9A-Fa-f])+"
+    }
+    return "(0|-?[1-9][0-9]*)"
+}
+
+gen fn uiHasFn(iface: ModuleInterface, name: String) -> Bool {
+    for f in iface.functions {
+        if f.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// -1 when there is no exported function `name`.
+gen fn uiFnArity(iface: ModuleInterface, name: String) -> Int64 {
+    for f in iface.functions {
+        if f.name == name {
+            return f.params.length
+        }
+    }
+    return 0 - 1
+}
+
+/// `""` when there is no exported function `name`.
+gen fn uiFnRet(iface: ModuleInterface, name: String) -> String {
+    for f in iface.functions {
+        if f.name == name {
+            return f.ret.copy()
+        }
+    }
+    return ""
+}
+
+gen fn uiHasType(iface: ModuleInterface, name: String) -> Bool {
+    for t in iface.types {
+        if t.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+gen fn uiTypeSource(iface: ModuleInterface, name: String) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return t.source.copy()
+        }
+    }
+    return ""
+}
+
+/// The module that declares type `name`, `""` when absent. It may be one the
+/// reflected module imports.
+gen fn uiTypeModule(iface: ModuleInterface, name: String) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return t.module.copy()
+        }
+    }
+    return ""
+}
+
+/// One page and everything the emitter needs. `err` is `""` for a clean page,
+/// else reports anchored at the page module.
+type UiPageInfo = {
+    modPath: String,
+    segs: Array<String>,
+    urlPattern: String,
+    dynNames: Array<String>,
+    // Parallel to `dynNames`: `Int64` or `String`.
+    dynTypes: Array<String>,
+    // The page has data to load. For a `.vyx` page, `vyxBuildPageModule` wraps
+    // its `data` into the `load()` the router calls.
+    hasLoad: Bool,
+    // The page module itself exports the `data` member, so the router runs the
+    // query directly. False for a `.vyx` page.
+    hasData: Bool,
+    // The runner for the `data` shape the page matched: `runQuery`, `runLazy`,
+    // `runParamQuery` or `runParamLazy`; `""` without `data`.
+    dataRunner: String,
+    // The deferred call takes `Params`.
+    loadHasParams: Bool,
+    // The view is over `PageData<T>`. Only a `.vyx` page can be lazy.
+    loadLazy: Bool,
+    // The page exports `respond` instead of `page`.
+    hasRespond: Bool,
+    // Imported through a nested `vyxPage(...)` generator import.
+    isVyx: Bool,
+    pageArity: Int64,
+    // The module declaring `Params` when the page imports it, else
+    // `""`. The router imports a foreign `Params` under a `uiParams<idx>` alias,
+    // because a namespace reaches only a module's own exports.
+    paramsModule: String,
+    // The route segments of the page's directory, for the nearest layout and
+    // error page.
+    dirPrefix: Array<String>,
+    // `validation`, `result`, `plain` (no failure path), or `""` (no loader).
+    loadKind: String,
+    // `layout="none"`; only a `.vyx` page can set it.
+    layoutNone: Bool,
+    err: String,
+}
+
+/// Line 1, column 1: reflection gives a module's surface, not the line of a
+/// declaration, so the file is the finest correct anchor.
+gen fn uiPageErrAt(path: String, message: String) -> String {
+    return report(Error, path, 1, 1, message)
+}
+
+gen fn uiContractErrs(iface: ModuleInterface, path: String) -> String {
+    let mut out = ""
+    for iss in checkContract(iface, contractOf(Page)) {
+        out = out + uiPageErrAt(path, iss.message)
+    }
+    return out
+}
+
+/// Reflects a page module and checks its surface against its route segments.
+gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<String>) -> UiPageInfo {
+    // `modPath` is an import specifier; a diagnostic anchor is a file.
+    let srcPath = modPath + ".vyrn"
+    let dyns = uiDynNamesOf(segs)
+    let iface = moduleInterface(modPath)
+    let mut err = ""
+
+    // A page exports `page` or `respond` (a raw Response).
+    let hasPage = uiHasFn(iface, "page")
+    let hasRespond = uiHasFn(iface, "respond")
+    if hasPage == false && hasRespond == false {
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "this page exports neither `page` nor `respond` — a page renders through `fn page(…) -> Html`, or takes over the whole reply with `fn respond(…) -> Response`",
+        )
+        return uiPageErr(modPath, segs, dirPrefix, dyns, err)
+    }
+    let entry = if hasRespond { "respond" } else { "page" }
+    let arity = uiFnArity(iface, entry)
+    err = err + uiContractErrs(iface, srcPath)
+    let dataForm = matchedMember(iface, contractOf(Page), "data")
+    let hasData = dataForm >= 0
+    let hasLoad = hasData
+    // The matched `data` shape decides how the router runs it.
+    let dataRunner = if hasData { vyxDataRunner(dataForm) } else { "" }
+    let loadHasParams = hasData && vyxDataFormHasParams(dataForm)
+    // A `.vyrn` view has no `Loading` arm, so a lazy query is refused, not
+    // downgraded to a blocking one.
+    if hasData && vyxDataFormIsLazy(dataForm) {
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "this page declares a lazy `data`, and a `.vyrn` page's view is a plain `fn page(…) -> Html` with no `Loading` arm to render — write the page as `.vyx`, or drop `lazy`",
+        )
+    }
+    // A `Param*` query on a static route has no segment to build `Params`
+    // from; without this the generated dispatch would not parse.
+    if hasData && loadHasParams && dyns.length == 0 {
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params — there is no dynamic segment to build `Params` from, so declare `data` without params",
+        )
+    }
+    let needParams = dyns.length > 0 || loadHasParams
+
+    let mut dynTypes: Array<String> = []
+    for d in dyns {
+        dynTypes.push("Int64")
+    }
+
+    if needParams {
+        if uiHasType(iface, "Params") == false {
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` binds parameters, and this page declares no `Params` type — declare `type Params = { … }` with one field per dynamic segment",
+            )
+        } else {
+            let f = uiParseFields(uiTypeSource(iface, "Params"))
+            for d in dyns {
+                if includes(f.names, d) == false {
+                    err = err
+                    + uiPageErrAt(
+                        srcPath,
+                        "route segment `[\{d}]` has no field `\{d}` in `Params` — every dynamic segment binds to a field of the same name",
+                    )
+                }
+            }
+            // Default Int64.
+            let mut di = 0
+            while di < dyns.length {
+                let t = uiFieldType(f, dyns[di])
+                if t.byteLength > 0 {
+                    dynTypes[di] = t
+                }
+                di = di + 1
+            }
+            let mut i = 0
+            while i < f.names.length {
+                let fn2 = f.names[i]
+                if includes(dyns, fn2) == false {
+                    err = err
+                    + uiPageErrAt(
+                        srcPath,
+                        "`Params` declares `\{fn2}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{fn2}]` segment — a `Params` field binds a dynamic segment, so add the segment or drop the field",
+                    )
+                }
+                if uiSupportedParamType(f.types[i]) == false {
+                    err = err
+                    + uiPageErrAt(
+                        srcPath,
+                        "`Params` field `\{fn2}` is `\{f.types[i]}`, which a URL segment cannot carry — a route parameter is `Int64` or `String`",
+                    )
+                }
+                i = i + 1
+            }
+        }
+    }
+
+    if hasRespond {
+        if hasLoad {
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "this page exports both `respond` and `data` — a `respond` page owns the whole reply, so it loads whatever it needs itself; drop one of the two",
+            )
+        }
+        if dyns.length > 0 && arity != 1 {
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` is dynamic, so its entry must be `fn respond(p: Params) -> Response`",
+            )
+        }
+        if dyns.length == 0 && arity != 0 {
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` binds nothing, so its entry must be `fn respond() -> Response`",
+            )
+        }
+        if uiFnRet(iface, "respond") != "Response" {
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "`respond` returns `\{uiFnRet(iface, "respond")}` — a `respond` page owns the whole reply, so it must return `Response`",
+            )
+        }
+    } else if hasLoad {
+        if loadHasParams {
+            if arity != 2 {
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "this page's `data` takes the route params, so its view must be `fn page(p: Params, d: Data) -> Html`",
+                )
+            }
+        } else {
+            if arity != 1 {
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "this page's `data` takes no params, so its view must be `fn page(d: Data) -> Html`",
+                )
+            }
+            if dyns.length > 0 {
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params — its segments would have nowhere to bind, so declare `data` over `Params`",
+                )
+            }
+        }
+    } else {
+        if dyns.length > 0 && arity != 1 {
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` is dynamic and this page has no `data`, so its view must be `fn page(p: Params) -> Html`",
+            )
+        }
+        if dyns.length == 0 && arity != 0 {
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` binds nothing and this page has no `data`, so its view must be `fn page() -> Html`",
+            )
+        }
+    }
+
+    // A foreign `Params` must be imported by the router.
+    let mut paramsModule = ""
+    if needParams {
+        let declared = uiTypeModule(iface, "Params")
+        if declared != modPath {
+            paramsModule = declared
+        }
+    }
+
+    let loadRet = if hasData { vyxQueryDataType(uiFnRet(iface, "data")) } else { "" }
+    let loadKind = if hasLoad {
+        if loadRet.startsWith("Result<") { "result" } else if loadRet.startsWith("Validation<") { "validation" } else { "plain" }
+    } else {
+        ""
+    }
+
+    return UiPageInfo {
+        modPath: modPath.copy(),
+        segs: segs.copy(),
+        urlPattern: uiUrlPatternOf(segs),
+        dynNames: dyns,
+        dynTypes: dynTypes,
+        hasLoad: hasLoad,
+        hasData: hasData,
+        dataRunner: dataRunner,
+        loadHasParams: loadHasParams,
+        loadLazy: false,
+        hasRespond: hasRespond,
+        isVyx: false,
+        pageArity: arity,
+        paramsModule: paramsModule,
+        dirPrefix: dirPrefix.copy(),
+        loadKind: loadKind,
+        layoutNone: false,
+        err: err,
+    }
+}
+
+/// A match arm is one expression, so the OS reason travels in a record instead
+/// of the read becoming `""`.
+type UiFileRead = { src: String, err: String }
+
+gen fn uiReadVyx(path: String) -> UiFileRead {
+    return match readFile(path) {
+        Ok(v) => UiFileRead { src: v, err: "" },
+        Err(e) => UiFileRead { src: "", err: e },
+    }
+}
+
+type UiDirRead = { entries: Array<String>, err: String }
+
+gen fn uiReadDirOf(dir: String) -> UiDirRead {
+    // A subdirectory's name ends in `/`, so one call serves the whole scan.
+    return match listDirKinds(dir) {
+        Ok(ns) => UiDirRead { entries: ns, err: "" },
+        Err(err) => UiDirRead { entries: [], err: err },
+    }
+}
+
+/// [`uiInspectPage`] for a `.vyx` page. `modPath` is the
+/// file path without `.vyx`.
+gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<String>) -> UiPageInfo {
+    let srcPath = modPath + ".vyx"
+    let dyns = uiDynNamesOf(segs)
+    let read = uiReadVyx(srcPath)
+    if read.err != "" {
+        // Compiling `""` instead would reflect a page with no params and no loader.
+        return uiPageErr(modPath, segs, dirPrefix, dyns, uiPageErrAt(srcPath, "std/ui cannot read `\{srcPath}`: \{read.err}"))
+    }
+    let src = read.src
+    let shape = vyxPageShape(src)
+    // A `.vyx` file is not a module, so its exported surface is read from
+    // source and checked against the same `Page` contract.
+    let mut err = shape.err + uiContractErrs(vyxPageInterface(src), srcPath)
+    let hasLoad = shape.hasLoad
+    let loadLazy = hasLoad && shape.loadLazy
+    let loadHasParams = hasLoad && shape.loadHasParams
+    let loadKind = if hasLoad {
+        if shape.loadRet.startsWith("Result<") { "result" } else if shape.loadRet.startsWith("Validation<") { "validation" } else { "plain" }
+    } else {
+        ""
+    }
+    // As in `uiInspectPage`.
+    let mut dynTypes: Array<String> = []
+    for d in dyns {
+        dynTypes.push("Int64")
+    }
+    if hasLoad && loadHasParams == false && dyns.length > 0 {
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params — its segments would have nowhere to bind, so declare `data` over `params`",
+        )
+    }
+    let needParams = dyns.length > 0 || loadHasParams
+    if needParams {
+        for d in dyns {
+            if includes(shape.paramNames, d) == false {
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "route segment `[\{d}]` has no field `\{d}` in this page's `params` — every dynamic segment binds to a field of the same name",
+                )
+            }
+        }
+        let mut di = 0
+        while di < dyns.length {
+            let mut ti = 0
+            while ti < shape.paramNames.length {
+                if shape.paramNames[ti] == dyns[di] {
+                    dynTypes[di] = shape.paramTypes[ti].copy()
+                }
+                ti = ti + 1
+            }
+            di = di + 1
+        }
+        let mut i = 0
+        while i < shape.paramNames.length {
+            let nm = shape.paramNames[i]
+            if includes(dyns, nm) == false {
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "`params` declares `\{nm}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{nm}]` segment — a `params` field binds a dynamic segment, so add the segment or drop the field",
+                )
+            }
+            if uiSupportedParamType(shape.paramTypes[i]) == false {
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "`params` field `\{nm}` is `\{shape.paramTypes[i]}`, which a URL segment cannot carry — a route parameter is `Int64` or `String`",
+                )
+            }
+            i = i + 1
+        }
+    }
+    // A `Param*` loader on a static route; see `uiInspectPage`.
+    if hasLoad && loadHasParams && dyns.length == 0 {
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params — there is no dynamic segment to build `Params` from, so declare `data` without params",
+        )
+    }
+
+    let arity = if hasLoad {
+        if loadHasParams { 2 } else { 1 }
+    } else {
+        if dyns.length > 0 { 1 } else { 0 }
+    }
+    return UiPageInfo {
+        modPath: modPath.copy(),
+        segs: segs.copy(),
+        urlPattern: uiUrlPatternOf(segs),
+        dynNames: dyns,
+        dynTypes: dynTypes,
+        hasLoad: hasLoad,
+        hasData: false,
+        dataRunner: "",
+        loadHasParams: loadHasParams,
+        loadLazy: loadLazy,
+        hasRespond: false,
+        isVyx: true,
+        pageArity: arity,
+        paramsModule: "",
+        dirPrefix: dirPrefix.copy(),
+        loadKind: loadKind,
+        layoutNone: shape.layoutNone,
+        err: err,
+    }
+}
+
+/// A `UiPageInfo` carrying only an error.
+gen fn uiPageErr(modPath: String, segs: Array<String>, dirPrefix: Array<String>, dyns: Array<String>, err: String) -> UiPageInfo {
+    let mut dynTypes: Array<String> = []
+    for d in dyns {
+        dynTypes.push("Int64")
+    }
+    return UiPageInfo {
+        modPath: modPath.copy(),
+        segs: segs.copy(),
+        urlPattern: uiUrlPatternOf(segs),
+        dynNames: dyns.copy(),
+        dynTypes: dynTypes,
+        hasLoad: false,
+        hasData: false,
+        dataRunner: "",
+        loadHasParams: false,
+        loadLazy: false,
+        hasRespond: false,
+        isVyx: false,
+        pageArity: 0,
+        paramsModule: "",
+        dirPrefix: dirPrefix.copy(),
+        loadKind: "",
+        layoutNone: false,
+        err: err.copy(),
+    }
+}
+
+/// A `layout.vyx` or `error.vyx` and the route segments of its directory.
+type UiChrome = { modPath: String, dirPrefix: Array<String> }
+
+/// Pages plus the `layout.vyx`/`error.vyx` chrome, which are not routes. `err`
+/// carries the OS reason a directory could not be listed.
+type UiScan = { pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Array<UiChrome>, err: String }
+
+/// Scans `dir` and its subdirectories, `prefix` being the route segments so far.
+gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
+    let listed = uiReadDirOf(dir)
+    let mut scanErr = listed.err.copy()
+    let mut pages: Array<UiPageInfo> = []
+    let mut layouts: Array<UiChrome> = []
+    let mut errors: Array<UiChrome> = []
+    for name in listed.entries {
+        if name.endsWith("/") {
+            let bare = slice(name, 0, name.byteLength - 1) ?? panic("uiScanAll: the cut is at the listing's own ASCII `/`")
+            let kid = uiScanAll(dir + "/" + bare, uiAppendStr(prefix, bare))
+            scanErr = scanErr + kid.err
+            for p in kid.pages {
+                pages.push(p.copy())
+            }
+            for l in kid.layouts {
+                layouts.push(l.copy())
+            }
+            for e in kid.errors {
+                errors.push(e.copy())
+            }
+        } else if name.endsWith(".vyrn") {
+            let st = uiStem(name)
+            let modPath = dir + "/" + st
+            pages.push(uiInspectPage(modPath, uiRouteSegsFor(prefix, st), prefix))
+        } else if name.endsWith(".vyx") {
+            let nb = bytes(name)
+            let st = uiSliceStr(nb, 0, nb.length - 4)
+            let modPath = dir + "/" + st
+            if st == "layout" {
+                layouts.push(UiChrome { modPath: modPath, dirPrefix: prefix.copy() })
+            } else if st == "error" {
+                errors.push(UiChrome { modPath: modPath, dirPrefix: prefix.copy() })
+            } else {
+                pages.push(uiInspectVyxPage(modPath, uiRouteSegsFor(prefix, st), prefix))
+            }
+        }
+    }
+    return UiScan { pages: pages, layouts: layouts, errors: errors, err: scanErr }
+}
+
+/// Whether `a` is a prefix of `b`, equal included.
+gen fn uiIsPrefixOf(a: Array<String>, b: Array<String>) -> Bool {
+    if a.length > b.length {
+        return false
+    }
+    let mut i = 0
+    while i < a.length {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// The indices of the layouts wrapping a page, outermost first.
+/// Empty when the page set `layout="none"` or has no layout.
+gen fn uiLayoutChain(p: UiPageInfo, layouts: Array<UiChrome>) -> Array<Int64> {
+    let mut idxs: Array<Int64> = []
+    if p.layoutNone {
+        return idxs
+    }
+    // One layout per directory, so ancestors sort by prefix length without ties.
+    let mut maxLen = 0
+    for l in layouts {
+        if uiIsPrefixOf(l.dirPrefix, p.dirPrefix) && l.dirPrefix.length > maxLen {
+            maxLen = l.dirPrefix.length
+        }
+    }
+    let mut want = 0
+    while want <= maxLen {
+        let mut i = 0
+        while i < layouts.length {
+            if uiIsPrefixOf(layouts[i].dirPrefix, p.dirPrefix) && layouts[i].dirPrefix.length == want {
+                idxs.push(i)
+            }
+            i = i + 1
+        }
+        want = want + 1
+    }
+    return idxs
+}
+
+/// The nearest ancestor `error.vyx` by longest prefix, or -1.
+gen fn uiErrorIndex(p: UiPageInfo, errors: Array<UiChrome>) -> Int64 {
+    let mut best = 0 - 1
+    let mut bestLen = 0 - 1
+    let mut i = 0
+    while i < errors.length {
+        if uiIsPrefixOf(errors[i].dirPrefix, p.dirPrefix) && errors[i].dirPrefix.length > bestLen {
+            best = i
+            bestLen = errors[i].dirPrefix.length
+        }
+        i = i + 1
+    }
+    return best
+}
+
+/// Two pages that claim one route; `uiHelperCollisions` adds distinct routes
+/// that claim one helper name.
+gen fn uiCollisionErrors(pages: Array<UiPageInfo>) -> String {
+    let mut err = ""
+    let mut i = 0
+    while i < pages.length {
+        let mut j = i + 1
+        while j < pages.length {
+            if uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs) {
+                err = err
+                + reportHere(
+                    Error,
+                    "pages `\{pages[i].modPath}` and `\{pages[j].modPath}` both claim route `\{uiUrlPatternOf(pages[i].segs)}` — one URL reaches one page, so move or rename one of them",
+                )
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return err + uiHelperCollisions(pages)
+}
+
+/// Distinct routes whose helpers share a name (`/about-us` and `/aboutUs` ->
+/// `aboutUsPath`). Reported, not resolved: which route to rename is the
+/// author's choice. `reportHere`, because the fault lies between two files.
+gen fn uiHelperCollisions(pages: Array<UiPageInfo>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < pages.length {
+        let mut j = i + 1
+        while j < pages.length {
+            let sameName = uiHelperNameOf(pages[i]) == uiHelperNameOf(pages[j])
+            let sameRoute = uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs)
+            if sameName && sameRoute == false {
+                out = out
+                + reportHere(
+                    Error,
+                    "routes `\{uiUrlPatternOf(pages[i].segs)}` and `\{uiUrlPatternOf(pages[j].segs)}` both name the typed-URL helper `\{uiHelperNameOf(pages[i])}` — a URL slug and a Vyrn identifier are different alphabets, and these two slugs convert to one identifier; rename one route",
+                )
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The runtime block every generated router shares. The `uiRoute` prefix keeps
+/// it clear of page and app names.
+gen fn uiFixedRuntime() -> String {
+    // A code quote, so this Vyrn is checked when std/ui compiles.
+    // `uiRouteSegments` strips the query and collapses slashes; percent-decoding
+    // is `urlDecode`, in the emitted try fns.
+    return render(vyrn"""fn uiRouteSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut acc: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        acc.push(ba[i])
+        i = i + 1
+    }
+    return match stringFromBytes(acc) {
+        Ok(v) => v,
+        Err(err) => "",
+    }
+}
+fn uiRouteSegments(path: String) -> Array<String> {
+    let ba = bytes(path)
+    let mut segs: Array<String> = []
+    let mut start = 0
+    let mut i = 0
+    let mut stop = ba.length
+    while i < ba.length {
+        if ba[i] == '?' {
+            stop = i
+            i = ba.length
+        } else {
+            i = i + 1
+        }
+    }
+    i = 0
+    while i < stop {
+        if ba[i] == '/' {
+            if i > start {
+                segs.push(uiRouteSlice(ba, start, i))
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if stop > start {
+        segs.push(uiRouteSlice(ba, start, stop))
+    }
+    return segs
+}
+fn uiRouteNone(o: Option<Response>) -> Bool {
+    return match o {
+        Some(r) => false,
+        None => true,
+    }
+}
+fn uiRouteNotFound() -> Response {
+    return Response { status: 404, contentType: "text/html", body: document("Not Found", [], el("main", [], [el("h1", [], [text("404 — Not Found")])])), vary: "", headers: [:] }
+}
+fn uiRouteIssue(iss: Issue) -> Html {
+    return el("li", [], [text(iss.path + ": " + iss.message)])
+}
+fn uiRouteError(issues: Array<Issue>) -> Html {
+    let mut items: Array<Html> = []
+    for iss in issues {
+        items.push(uiRouteIssue(iss))
+    }
+    return el("main", [], [el("h1", [], [text("Unable to load this page")]), el("ul", [], items)])
+}
+""")
+}
+
+/// Emitted only when some page threads a head: `uiFirst` picks the
+/// title, `uiHeadJoin2` joins heads.
+gen fn uiHeadRuntime() -> String {
+    return render(vyrn"""fn uiFirst(a: String, b: String) -> String {
+    if a.byteLength > 0 {
+        return a.copy()
+    }
+    return b.copy()
+}
+fn uiHeadJoin2(a: consume Array<Html>, b: consume Array<Html>) -> Array<Html> {
+    let mut out: Array<Html> = []
+    for x in consume a {
+        out.push(x)
+    }
+    for x in consume b {
+        out.push(x)
+    }
+    return out
+}
+""")
+}
+
+/// Emitted only when some page dispatches a `PageError`.
+gen fn uiErrorRuntime() -> String {
+    return render(vyrn"""fn uiRoutePageError(e: PageError) -> Html {
+    return el("main", [], [el("h1", [], [text(e.status.toString() + " — " + e.message)])])
+}
+fn uiIssuesToError(issues: Array<Issue>) -> PageError {
+    let mut msg = ""
+    let mut i = 0
+    for iss in issues {
+        if i > 0 {
+            msg = msg + "; "
+        }
+        msg = msg + iss.path + ": " + iss.message
+        i = i + 1
+    }
+    return PageError { status: 422, message: msg }
+}
+""")
+}
+
+/// The `try`/`render` pair for page `n`. An origin directive at `1:1`
+/// attributes a type error in this derived glue to the page file.
+gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
+    let idx = n.toString()
+    let mut out = "//@origin " + p.modPath + (if p.isVyx { ".vyx" } else { ".vyrn" }) + ":1:1\n"
+
+    out = out + uiEmitTryFn(p, idx, "uiTry", "uiRender")
+    out = out + uiEmitRender(p, idx, layoutIdxs, errorIdx)
+    out = out + "//@origin end\n"
+    return out
+}
+
+/// The data-channel `uiTryData<n>`/`uiRenderData<n>` pair,
+/// emitted only for client-renderable `.vyx` pages.
+gen fn uiEmitDataRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
+    let idx = n.toString()
+    let mut out = "//@origin " + p.modPath + (if p.isVyx { ".vyx" } else { ".vyrn" }) + ":1:1\n"
+    out = out + uiEmitTryFn(p, idx, "uiTryData", "uiRenderData")
+    out = out + uiEmitDataRender(p, idx, layoutIdxs, errorIdx)
+    out = out + "//@origin end\n"
+    return out
+}
+
+/// A structural-match fn `<tryName><idx>` that calls `<renderName><idx>(args)`.
+gen fn uiEmitTryFn(p: UiPageInfo, idx: String, tryName: String, renderName: String) -> String {
+    let segCount = p.segs.length.toString()
+    let mut out = "fn " + tryName + idx + "(segs: Array<String>) -> Option<Response> {\n"
+    out = out + "    if segs.length != " + segCount + " {\n        return None\n    }\n"
+    let mut i = 0
+    for s in p.segs {
+        if uiIsDynSeg(s) == false {
+            if uiSegNeedsDecode(s) {
+                // Only the percent-encoded form can reach the wire, so decode
+                // before comparing; an undecodable segment is a 404.
+                out = out + "    if let Some(v) = urlDecode(segs[" + i.toString() + "]) {\n"
+                out = out + "        if v != " + uiStrLit(s) + " {\n            return None\n        }\n"
+                out = out + "    } else {\n        return None\n    }\n"
+            } else {
+                out = out + "    if segs[" + i.toString() + "] != " + uiStrLit(s) + " {\n        return None\n    }\n"
+            }
+        }
+        i = i + 1
+    }
+    // An `Int64` segment that is not an integer and a `String` segment that is
+    // not percent-encoded text both 404 without reaching user code.
+    out = out + "    return " + uiEmitDynMatch(p, 0, idx, renderName) + "\n}\n"
+    return out
+}
+
+/// Whether the literal holds a byte outside the unreserved set (RFC 3986
+/// section 2.3), which a browser sends only percent-encoded.
+fn uiSegNeedsDecode(s: String) -> Bool {
+    let b = bytes(s)
+    let mut i = 0
+    while i < b.length {
+        let c = b[i]
+        let plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~'
+        if plain == false {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// The other reason, beside `uiAnyStrSeg`, the router imports `urlDecode`.
+gen fn uiAnyEncodedStatic(pages: Array<UiPageInfo>) -> Bool {
+    for p in pages {
+        for s in p.segs {
+            if uiIsDynSeg(s) == false && uiSegNeedsDecode(s) {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+/// The nested parse over the dynamic segments from position `k`, ending in
+/// `Some(<renderName><idx>(args))`. A `String` segment is `urlDecode`d, the
+/// inverse of the helper's `urlEncode`; bytes that do not decode are `None`,
+/// the same 404 as a non-integer `Int64`.
+gen fn uiEmitDynMatch(p: UiPageInfo, k: Int64, idx: String, renderName: String) -> String {
+    if k >= p.dynNames.length {
+        return "Some(" + renderName + idx + "(" + joinWith(uiDynArgs(p.dynNames), ", ") + "))"
+    }
+    let segIdx = uiDynSegIndex(p.segs, k)
+    let vv = "v" + k.toString()
+    if p.dynTypes[k] == "String" {
+        let mut out = "match urlDecode(segs[" + segIdx.toString() + "]) {\n"
+        out = out + "        Some(" + vv + ") => " + uiEmitDynMatch(p, k + 1, idx, renderName) + ",\n"
+        out = out + "        None => None,\n"
+        out = out + "    }"
+        return out
+    }
+    let mut out = "match fromJson<UiRouteInt>(segs[" + segIdx.toString() + "]) {\n"
+    out = out + "        Valid(" + vv + ") => " + uiEmitDynMatch(p, k + 1, idx, renderName) + ",\n"
+    out = out + "        Invalid(issues) => None,\n"
+    out = out + "    }"
+    return out
+}
+
+/// `v0, v1, ...`, one per dynamic segment.
+gen fn uiDynArgs(dynNames: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < dynNames.length {
+        out.push("v" + i.toString())
+        i = i + 1
+    }
+    return out
+}
+
+gen fn uiDynSegIndex(segs: Array<String>, k: Int64) -> Int64 {
+    let mut seen = 0
+    let mut i = 0
+    while i < segs.length {
+        if uiIsDynSeg(segs[i]) {
+            if seen == k {
+                return i
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// `p, d` with params and a loader, `d` with a loader only, `p` with params
+/// only, `""` for neither.
+gen fn uiPageCallArgs(p: UiPageInfo) -> String {
+    if p.hasLoad {
+        if p.loadHasParams {
+            return "p, d"
+        }
+        return "d"
+    }
+    if p.dynNames.length > 0 {
+        return "p"
+    }
+    return ""
+}
+
+gen fn uiBodyCall(p: UiPageInfo, idx: String) -> String {
+    return "p" + idx + ".page(" + uiPageCallArgs(p) + ")"
+}
+
+/// Head and layout threading is needed for an ancestor layout or a `.vyx`
+/// page. Otherwise the plain `document(title, [], body)` form is emitted.
+gen fn uiNeedsThreading(p: UiPageInfo, layoutIdxs: Array<Int64>) -> Bool {
+    return layoutIdxs.length > 0 || p.isVyx
+}
+
+/// The innermost layout wraps the body; the outermost wraps last.
+gen fn uiWrapLayout(bodyExpr: String, layoutIdxs: Array<Int64>) -> String {
+    let mut out = bodyExpr.copy()
+    let mut i = layoutIdxs.length - 1
+    while i >= 0 {
+        out = "uiLay" + layoutIdxs[i].toString() + ".layout([" + out + "])"
+        i = i - 1
+    }
+    return out
+}
+
+/// Layout heads outermost first, then the page head. `pageHeadCall` is `""`
+/// for a `.vyrn` page or the error path.
+gen fn uiHeadExpr(layoutIdxs: Array<Int64>, pageHeadCall: String) -> String {
+    let mut out = if pageHeadCall.byteLength > 0 { pageHeadCall.copy() } else { "[]" }
+    let mut i = layoutIdxs.length - 1
+    while i >= 0 {
+        out = "uiHeadJoin2(uiLay" + layoutIdxs[i].toString() + ".head(), " + out + ")"
+        i = i - 1
+    }
+    return out
+}
+
+/// Precedence: page, innermost layout, ..., outermost layout, `dflt`.
+gen fn uiTitleExpr(layoutIdxs: Array<Int64>, pageTitleCall: String, dflt: String) -> String {
+    let mut out = uiStrLit(dflt)
+    let mut i = 0
+    while i < layoutIdxs.length {
+        out = "uiFirst(uiLay" + layoutIdxs[i].toString() + ".headTitle(), " + out + ")"
+        i = i + 1
+    }
+    if pageTitleCall.byteLength > 0 {
+        out = "uiFirst(" + pageTitleCall + ", " + out + ")"
+    }
+    return out
+}
+
+/// `d` must be in scope when the page has a loader.
+gen fn uiSuccessResponse(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>) -> String {
+    let bodyExpr = uiWrapLayout(uiBodyCall(p, idx), layoutIdxs)
+    if uiNeedsThreading(p, layoutIdxs) == false {
+        return "Response { status: 200, contentType: \"text/html\", body: document(" + uiStrLit(p.urlPattern) + ", [], " + bodyExpr + "), vary: \"\", headers: [:] }"
+    }
+    let args = uiPageCallArgs(p)
+    let pageHeadCall = if p.isVyx { "p" + idx + ".head(" + args + ")" } else { "" }
+    let pageTitleCall = if p.isVyx { "p" + idx + ".headTitle(" + args + ")" } else { "" }
+    let headE = uiHeadExpr(layoutIdxs, pageHeadCall)
+    let titleE = uiTitleExpr(layoutIdxs, pageTitleCall, p.urlPattern)
+    return "Response { status: 200, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\", headers: [:] }"
+}
+
+/// A `Result` loader, or a `Validation` loader with an `error.vyx`.
+gen fn uiUsesErrDoc(p: UiPageInfo, errorIdx: Int64) -> Bool {
+    if p.loadKind == "plain" {
+        return false
+    }
+    return p.hasLoad && (p.loadKind == "result" || errorIdx >= 0)
+}
+
+/// Renders a `PageError` at its status through the nearest `error.vyx`, or a
+/// built-in body, inside the page's layouts.
+gen fn uiEmitErrDoc(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
+    let inner = if errorIdx >= 0 { "uiErrPg" + errorIdx.toString() + ".errorPage(uiPe)" } else { "uiRoutePageError(uiPe)" }
+    let bodyExpr = uiWrapLayout(inner, layoutIdxs)
+    let headE = uiHeadExpr(layoutIdxs, "")
+    let titleE = uiTitleExpr(layoutIdxs, "", "Error")
+    let mut out = "fn uiErrDoc" + idx + "(uiPe: PageError) -> Response {\n"
+    out = out + "    return Response { status: uiPe.status, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\", headers: [:] }\n}\n"
+    return out
+}
+
+/// `<runner>(p<idx>.data()[, p])` for a `.vyrn` page; `p<idx>.load(...)` for a
+/// `.vyx` page, whose module wraps its `data` in the same runner call.
+gen fn uiLoadCall(p: UiPageInfo, idx: String, args: String) -> String {
+    if p.hasData {
+        let extra = if p.loadHasParams { ", " + args } else { "" }
+        return p.dataRunner + "(p" + idx + ".data()" + extra + ")"
+    }
+    return "p" + idx + ".load(" + args + ")"
+}
+
+/// A plain loader binds `d` and renders; a `Result` or `Validation` loader
+/// routes a failure to the nearest error page.
+gen fn uiEmitLoadDispatch(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorIdx: Int64, loadCall: String) -> String {
+    if p.loadKind == "plain" {
+        return "    let d = " + loadCall + "\n    return " + uiSuccessResponse(p, idx, layoutIdxs) + "\n}\n"
+    }
+    let okVar = if p.loadKind == "result" { "Ok" } else { "Valid" }
+    let mut out = "    return match " + loadCall + " {\n"
+    out = out + "        " + okVar + "(d) => " + uiSuccessResponse(p, idx, layoutIdxs) + ",\n"
+    if p.loadKind == "result" {
+        out = out + "        Err(uiPe) => uiErrDoc" + idx + "(uiPe),\n"
+    } else if errorIdx >= 0 {
+        out = out + "        Invalid(issues) => uiErrDoc" + idx + "(uiIssuesToError(issues)),\n"
+    } else {
+        out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)), vary: \"\", headers: [:] },\n"
+    }
+    out = out + "    }\n}\n"
+    return out
+}
+
+/// Wraps the body in the page's layouts and threads the head.
+gen fn uiEmitRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
+    let mut params: Array<String> = []
+    let mut ai = 0
+    while ai < p.dynNames.length {
+        params.push("v" + ai.toString() + ": " + p.dynTypes[ai])
+        ai = ai + 1
+    }
+    let mut out = "fn uiRender" + idx + "(" + joinWith(params, ", ") + ") -> Response {\n"
+
+    if p.dynNames.length == 0 && p.hasLoad == false {
+        if p.hasRespond {
+            out = out + "    return p" + idx + ".respond()\n}\n"
+        } else {
+            out = out + "    return " + uiSuccessResponse(p, idx, layoutIdxs) + "\n}\n"
+        }
+        return out
+    }
+
+    if p.dynNames.length == 0 && p.hasLoad {
+        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, uiLoadCall(p, idx, ""))
+        if uiUsesErrDoc(p, errorIdx) {
+            out = out + uiEmitErrDoc(p, idx, layoutIdxs, errorIdx)
+        }
+        return out
+    }
+
+    // A foreign `Params` is built through its `uiParams<idx>` alias.
+    let paramsCtor = if p.paramsModule != "" { "uiParams" + idx } else { "p" + idx + ".Params" }
+    out = out + "    let p = " + paramsCtor + " { " + uiParamFieldInits(p.segs) + " }\n"
+    if p.hasRespond {
+        out = out + "    return p" + idx + ".respond(p)\n}\n"
+        return out
+    }
+    if p.hasLoad {
+        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, uiLoadCall(p, idx, "p"))
+        if uiUsesErrDoc(p, errorIdx) {
+            out = out + uiEmitErrDoc(p, idx, layoutIdxs, errorIdx)
+        }
+        return out
+    }
+    out = out + "    return " + uiSuccessResponse(p, idx, layoutIdxs) + "\n}\n"
+    return out
+}
+
+/// `uiDataResponse(uiPayload(...))` with the title SSR would use, `props` as
+/// `toJson(d)` and `params` as `toJson(p)`, each `null` when absent.
+gen fn uiDataSuccessBody(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>) -> String {
+    let args = uiPageCallArgs(p)
+    let pageTitleCall = if p.isVyx { "p" + idx + ".headTitle(" + args + ")" } else { "" }
+    let titleE = uiTitleExpr(layoutIdxs, pageTitleCall, p.urlPattern)
+    // Through the page's typed `encodeProps`, so a match-bound result keeps
+    // its type for `toJson`.
+    let propsE = if p.hasLoad { "p" + idx + ".encodeProps(d)" } else { "\"null\"" }
+    let paramsE = if p.dynNames.length > 0 { "toJson(p)" } else { "\"null\"" }
+    return "uiDataResponse(uiPayload(" + uiStrLit(uiPageId(p)) + ", " + titleE + ", " + propsE + ", " + paramsE + "))"
+}
+
+gen fn uiEmitDataLoadDispatch(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, loadCall: String) -> String {
+    if p.loadKind == "plain" {
+        return "    let d = " + loadCall + "\n    return " + uiDataSuccessBody(p, idx, layoutIdxs) + "\n}\n"
+    }
+    let okVar = if p.loadKind == "result" { "Ok" } else { "Valid" }
+    let mut out = "    return match " + loadCall + " {\n"
+    out = out + "        " + okVar + "(d) => " + uiDataSuccessBody(p, idx, layoutIdxs) + ",\n"
+    if p.loadKind == "result" {
+        out = out + "        Err(uiPe) => uiErrorResponseOf(uiPe),\n"
+    } else {
+        // The issue list stays on the document channel.
+        out = out + "        Invalid(issues) => uiDataResponse(uiErrorPayload(422, \"{\\\"status\\\":422,\\\"message\\\":\\\"Unable to load this page\\\"}\")),\n"
+    }
+    out = out + "    }\n}\n"
+    return out
+}
+
+/// `uiRenderData<idx>`; never for a `respond` page.
+gen fn uiEmitDataRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
+    let mut params: Array<String> = []
+    let mut ai = 0
+    while ai < p.dynNames.length {
+        params.push("v" + ai.toString() + ": " + p.dynTypes[ai])
+        ai = ai + 1
+    }
+    let mut out = "fn uiRenderData" + idx + "(" + joinWith(params, ", ") + ") -> Response {\n"
+
+    if p.dynNames.length == 0 && p.hasLoad == false {
+        out = out + "    return " + uiDataSuccessBody(p, idx, layoutIdxs) + "\n}\n"
+        return out
+    }
+    if p.dynNames.length == 0 && p.hasLoad {
+        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, uiLoadCall(p, idx, ""))
+        return out
+    }
+    let paramsCtor = if p.paramsModule != "" { "uiParams" + idx } else { "p" + idx + ".Params" }
+    out = out + "    let p = " + paramsCtor + " { " + uiParamFieldInits(p.segs) + " }\n"
+    if p.hasLoad {
+        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, uiLoadCall(p, idx, "p"))
+        return out
+    }
+    out = out + "    return " + uiDataSuccessBody(p, idx, layoutIdxs) + "\n}\n"
+    return out
+}
+
+/// `id: v0, slug: v1`.
+gen fn uiParamFieldInits(segs: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    let mut k = 0
+    for s in segs {
+        if uiIsDynSeg(s) {
+            // The render function observes the segment and does not keep it;
+            // copying a scalar is free.
+            parts.push(uiDynName(s) + ": v" + k.toString() + ".copy()")
+            k = k + 1
+        }
+    }
+    return joinWith(parts, ", ")
+}
+
+/// A namespace import binding `p<idx>`, so pages that all export
+/// `page`, `Params` and `data` never collide.
+gen fn uiEmitImport(p: UiPageInfo, idx: String, themed: Bool, theme: String) -> String {
+    if p.isVyx {
+        // A `.vyx` page is synthesized through a nested generator import.
+        if themed {
+            return "import * as p" + idx + " from vyxPageThemed(" + uiStrLit(p.modPath + ".vyx") + ", " + uiStrLit(theme) + ")\n"
+        }
+        return "import * as p" + idx + " from vyxPage(" + uiStrLit(p.modPath + ".vyx") + ")\n"
+    }
+    let mut out = "import * as p" + idx + " from " + uiStrLit(p.modPath) + "\n"
+    // A foreign `Params` is not reachable as `p<idx>.Params`.
+    if p.paramsModule != "" {
+        out = out + "import { Params as uiParams" + idx + " } from " + uiStrLit(p.paramsModule) + "\n"
+    }
+    return out
+}
+
+/// `href<Route>(...)` for a dynamic route, `<route>Path()` for a static one.
+gen fn uiEmitTypedUrl(p: UiPageInfo) -> String {
+    if p.dynNames.length > 0 {
+        let mut params: Array<String> = []
+        let mut k = 0
+        for s in p.segs {
+            if uiIsDynSeg(s) {
+                params.push(uiDynName(s) + ": " + p.dynTypes[k])
+                k = k + 1
+            }
+        }
+        return "export fn " + uiHelperNameOf(p) + "(" + joinWith(params, ", ") + ") -> RoutePath {\n    return " + uiDynHelperBody(p.segs, p.dynTypes) + "\n}\n"
+    }
+    return "export fn " + uiHelperNameOf(p) + "() -> RoutePath {\n    return " + uiStrLit(uiUrlPatternOf(p.segs)) + "\n}\n"
+}
+
+/// A `String` segment puts `urlEncode` in the helper and `urlDecode` in the try fn.
+gen fn uiAnyStrSeg(pages: Array<UiPageInfo>) -> Bool {
+    for p in pages {
+        for t in p.dynTypes {
+            if t == "String" {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+gen fn uiAnyVyx(pages: Array<UiPageInfo>) -> Bool {
+    for p in pages {
+        if p.isVyx {
+            return true
+        }
+    }
+    return false
+}
+
+/// `""` when the router needs no `std/vyx` generator.
+gen fn uiVyxGenImports(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Array<UiChrome>, themed: Bool) -> String {
+    let mut gens: Array<String> = []
+    if uiAnyVyx(pages) {
+        gens.push(if themed { "vyxPageThemed" } else { "vyxPage" })
+    }
+    if layouts.length > 0 {
+        gens.push(if themed { "vyxLayoutThemed" } else { "vyxLayout" })
+    }
+    if errors.length > 0 {
+        gens.push(if themed { "vyxErrorThemed" } else { "vyxError" })
+    }
+    if gens.length == 0 {
+        return ""
+    }
+    return "import { " + joinWith(gens, ", ") + " } from \"std/vyx\"\n"
+}
+
+/// Binds a layout as `uiLay<n>` or an error page as `uiErrPg<n>`.
+gen fn uiEmitChromeImport(alias: String, modPath: String, gen: String, themed: Bool, theme: String) -> String {
+    let arg = uiStrLit(modPath + ".vyx")
+    if themed {
+        return "import * as " + alias + " from " + gen + "(" + arg + ", " + uiStrLit(theme) + ")\n"
+    }
+    return "import * as " + alias + " from " + gen + "(" + arg + ")\n"
+}
+
+/// The router module. With `themed`, `.vyx` pages, layouts and error pages
+/// check their classes against `theme`.
+gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Array<UiChrome>, themed: Bool, theme: String) -> String {
+    let mut out = "/// Generated by std/ui `pages` — do not edit.\n"
+    out = out + "import { el, text, empty, document, toHtmlString, Html, Attr } from \"std/html\"\n"
+    out = out + "import { Route, httpRoute, GET } from \"std/http\"\n"
+    out = out + uiVyxGenImports(pages, layouts, errors, themed)
+
+    let mut i = 0
+    while i < pages.length {
+        out = out + uiEmitImport(pages[i], i.toString(), themed, theme)
+        i = i + 1
+    }
+    let layGen = if themed { "vyxLayoutThemed" } else { "vyxLayout" }
+    let errGen = if themed { "vyxErrorThemed" } else { "vyxError" }
+    let mut li = 0
+    while li < layouts.length {
+        out = out + uiEmitChromeImport("uiLay" + li.toString(), layouts[li].modPath, layGen, themed, theme)
+        li = li + 1
+    }
+    let mut ei = 0
+    while ei < errors.length {
+        out = out + uiEmitChromeImport("uiErrPg" + ei.toString(), errors[ei].modPath, errGen, themed, theme)
+        ei = ei + 1
+    }
+
+    // These flags gate the shared helpers and imports, so a router without a
+    // feature carries none of its code.
+    let mut anyThreading = false
+    let mut anyErrDoc = false
+    // A router with no `.vyx` page has no data channel.
+    let mut anyClientPage = false
+    // A page exports `data` itself, so the router runs its query.
+    let mut anyQuery = false
+    // The runners the pages' query types name, in first-use order.
+    let mut runners: Array<String> = []
+    i = 0
+    while i < pages.length {
+        let lidx = uiLayoutChain(pages[i], layouts)
+        let eidx = uiErrorIndex(pages[i], errors)
+        if uiNeedsThreading(pages[i], lidx) {
+            anyThreading = true
+        }
+        if uiUsesErrDoc(pages[i], eidx) {
+            anyErrDoc = true
+        }
+        if uiClientRenderable(pages[i]) {
+            anyClientPage = true
+        }
+        if pages[i].hasData {
+            anyQuery = true
+            if includes(runners, pages[i].dataRunner) == false {
+                runners.push(pages[i].dataRunner.copy())
+            }
+        }
+        i = i + 1
+    }
+    if anyErrDoc {
+        out = out + "import { PageError } from \"std/ui\"\n"
+    }
+    if anyQuery {
+        out = out + "import { " + joinWith(runners, ", ") + " } from \"std/ui\"\n"
+    }
+    if anyClientPage {
+        out = out + "import { uiWantsData, uiPayload, uiErrorPayload, uiDataResponse, uiDataMiss, uiErrorResponseOf } from \"std/ui\"\n"
+    }
+    // The URL codec, only for a `String` segment or a static segment the wire
+    // carries percent-encoded.
+    if uiAnyStrSeg(pages) || uiAnyEncodedStatic(pages) {
+        out = out + "import { urlDecode, urlEncode } from \"std/codecs\"\n"
+    }
+
+    out = out + "type UiRouteInt = Int64\n"
+
+    out = out + "export type RoutePath = String where value =~ \"("
+    i = 0
+    while i < pages.length {
+        if i > 0 {
+            out = out + "|"
+        }
+        out = out + uiRoutePathBranch(pages[i].segs, pages[i].dynTypes)
+        i = i + 1
+    }
+    out = out + ")\"\n"
+
+    i = 0
+    while i < pages.length {
+        out = out + uiEmitTypedUrl(pages[i])
+        i = i + 1
+    }
+
+    out = out + uiFixedRuntime()
+    if anyThreading {
+        out = out + uiHeadRuntime()
+    }
+    if anyErrDoc {
+        out = out + uiErrorRuntime()
+    }
+    i = 0
+    while i < pages.length {
+        let lidx = uiLayoutChain(pages[i], layouts)
+        let eidx = uiErrorIndex(pages[i], errors)
+        out = out + uiEmitRoute(pages[i], i, lidx, eidx)
+        i = i + 1
+    }
+    // The data channel, for client-renderable pages only.
+    if anyClientPage {
+        i = 0
+        while i < pages.length {
+            if uiClientRenderable(pages[i]) {
+                let lidx = uiLayoutChain(pages[i], layouts)
+                let eidx = uiErrorIndex(pages[i], errors)
+                out = out + uiEmitDataRoute(pages[i], i, lidx, eidx)
+            }
+            i = i + 1
+        }
+    }
+
+    // Static routes first, first hit wins. Only a request that negotiated JSON
+    // consults the data channel.
+    out = out + "export fn route(req: Request) -> Response {\n"
+    out = out + "    let segs = uiRouteSegments(req.path)\n"
+    out = out + "    let mut hit: Option<Response> = None\n"
+    for order in uiDispatchOrder(pages) {
+        out = out + "    if uiRouteNone(hit) {\n        hit = uiTry" + order.toString() + "(segs)\n    }\n"
+    }
+    if anyClientPage {
+        out = out + "    if uiWantsData(req) {\n"
+        out = out + "        let mut dhit: Option<Response> = None\n"
+        for order in uiDispatchOrder(pages) {
+            if uiClientRenderable(pages[order]) {
+                out = out + "        if uiRouteNone(dhit) {\n            dhit = uiTryData" + order.toString() + "(segs)\n        }\n"
+            }
+        }
+        // A client page answers JSON; another route its real Response, so the
+        // client hard-navs; a miss the `@error` payload.
+        out = out + "        return match consume dhit {\n            Some(r) => r,\n            None => match consume hit {\n                Some(r) => r,\n                None => uiDataMiss(),\n            },\n        }\n    }\n"
+    }
+    out = out + "    return match consume hit {\n        Some(r) => r,\n        None => uiRouteNotFound(),\n    }\n}\n"
+    return out + uiEmitMountable(pages)
+}
+
+/// The page tree as routes `mount` takes and rows `vyrn routes`
+/// prints. Each route matches one pattern and delegates to `route`, so
+/// negotiation, layouts and the error page stay in one place; the tree's 404
+/// is the mount's `None` arm. Routes follow `uiDispatchOrder`, so `mount` and
+/// `route` agree on precedence. The `//@route` directives assume the tree is
+/// mounted whole; `convention` says the file tree derived the path.
+gen fn uiEmitMountable(pages: Array<UiPageInfo>) -> String {
+    let mut out = ""
+    for order in uiDispatchOrder(pages) {
+        out = out + "//@route GET " + uiWirePatternOf(pages[order].segs) + " " + uiPageKeyOf(pages[order].segs) + " convention\n"
+    }
+    out = out + render(vyrn"""fn uiPageRun(req: Request, ps: Map<String, String>) -> Option<Response> {
+    return Some(route(req))
+}
+""")
+    out = out + "export fn routes() -> Array<Route> {\n    return [\n"
+    for order in uiDispatchOrder(pages) {
+        let pat = uiStrLit(uiWirePatternOf(pages[order].segs))
+        out = out + "        GET(httpRoute(" + pat + ", uiPageRun, " + uiStrLit(uiPageKeyOf(pages[order].segs)) + ")),\n"
+    }
+    return out + "    ]\n}\n"
+}
+
+/// Fewer dynamic segments first, so a static route beats a dynamic one at the
+/// same depth.
+fn uiDispatchOrder(pages: Array<UiPageInfo>) -> Array<Int64> {
+    let mut order: Array<Int64> = []
+    let mut want = 0
+    let mut maxDyn = 0
+    for p in pages {
+        if p.dynNames.length > maxDyn {
+            maxDyn = p.dynNames.length
+        }
+    }
+    while want <= maxDyn {
+        let mut i = 0
+        while i < pages.length {
+            if pages[i].dynNames.length == want {
+                order.push(i)
+            }
+            i = i + 1
+        }
+        want = want + 1
+    }
+    return order
+}
+
+/// Scans `dir` for `.vyrn` and `.vyx` pages and returns the router module.
+export gen fn pages(dir: String) -> String {
+    let scan = uiScanAll(dir, [])
+    let infos = scan.pages
+    if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
+    }
+    let mut err = scan.err
+    for p in infos {
+        err = err + p.err
+    }
+    err = err + uiCollisionErrors(infos)
+    if err != "" {
+        return err
+    }
+    return uiBuildModule(infos, scan.layouts, scan.errors, false, "")
+}
+
+/// [`pages`], with every `.vyx` page's classes checked against `theme`.
+/// `theme` resolves relative to the importing module.
+export gen fn pagesThemed(dir: String, theme: String) -> String {
+    let scan = uiScanAll(dir, [])
+    let infos = scan.pages
+    if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
+    }
+    let mut err = scan.err
+    for p in infos {
+        err = err + p.err
+    }
+    err = err + uiCollisionErrors(infos)
+    if err != "" {
+        return err
+    }
+    return uiBuildModule(infos, scan.layouts, scan.errors, true, theme)
+}
+
+// The client page bundle: one client module per `.vyx`
+// page, a route table, and `renderPage(payloadJson) -> String`, which returns
+// the page's `std/html` tree as JSON. Any miss returns `"__vyrn_fallback__"`
+// and the host falls back to an HTML swap. The layout is not bundled: a soft
+// nav swaps only `<main>`.
+
+/// A page's client id, its url pattern (`/p/:id`). The server's payload uses
+/// the same id, so no registry is needed.
+gen fn uiPageId(p: UiPageInfo) -> String {
+    return p.urlPattern.copy()
+}
+
+/// A `.vyrn` page or a `respond` page is not in the client bundle.
+gen fn uiClientRenderable(p: UiPageInfo) -> Bool {
+    return p.isVyx && p.hasRespond == false
+}
+
+gen fn uiClientPageImport(p: UiPageInfo, idx: String, themed: Bool, theme: String) -> String {
+    if themed {
+        return "import * as p" + idx + " from vyxPageClientThemed(" + uiStrLit(p.modPath + ".vyx") + ", " + uiStrLit(theme) + ")\n"
+    }
+    return "import * as p" + idx + " from vyxPageClient(" + uiStrLit(p.modPath + ".vyx") + ")\n"
+}
+
+gen fn uiClientRuntime() -> String {
+    return render(vyrn"""fn uiClientFieldIn(fs: Array<JsonField>, key: String) -> Json {
+    for f in fs {
+        if f.key == key {
+            return copyJson(f.value)
+        }
+    }
+    return JNull
+}
+fn uiClientField(j: Json, key: String) -> Json {
+    return match j {
+        JObj(fs) => uiClientFieldIn(fs, key),
+        JNull => JNull,
+        JBool(uiB) => JNull,
+        JNum(uiN) => JNull,
+        JStr(uiS) => JNull,
+        JArr(uiA) => JNull,
+    }
+}
+fn uiClientStr(j: Json, key: String) -> String {
+    return match uiClientField(j, key) {
+        JStr(uiS) => uiS,
+        JNull => "",
+        JBool(uiB) => "",
+        JNum(uiN) => "",
+        JArr(uiA) => "",
+        JObj(uiO) => "",
+    }
+}
+fn uiClientSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut acc: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        acc.push(ba[i])
+        i = i + 1
+    }
+    return match stringFromBytes(acc) {
+        Ok(v) => v,
+        Err(err) => "",
+    }
+}
+fn uiClientSegments(path: String) -> Array<String> {
+    let ba = bytes(path)
+    let mut segs: Array<String> = []
+    let mut start = 0
+    let mut i = 0
+    let mut stop = ba.length
+    while i < ba.length {
+        if ba[i] == '?' {
+            stop = i
+            i = ba.length
+        } else {
+            i = i + 1
+        }
+    }
+    i = 0
+    while i < stop {
+        if ba[i] == '/' {
+            if i > start {
+                segs.push(uiClientSlice(ba, start, i))
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if stop > start {
+        segs.push(uiClientSlice(ba, start, stop))
+    }
+    return segs
+}
+type UiResolved = { found: Bool, hasData: Bool, lazy: Bool, page: String, title: String }
+fn uiResolveHit(hasData: Bool, lazy: Bool, page: String, title: String) -> String {
+    return toJson(UiResolved { found: true, hasData: hasData, lazy: lazy, page: page.copy(), title: title.copy() })
+}
+fn uiResolveMiss() -> String {
+    return toJson(UiResolved { found: false, hasData: false, lazy: false, page: "", title: "" })
+}
+fn uiClientBool(j: Json, key: String) -> Bool {
+    return match uiClientField(j, key) {
+        JBool(uiB) => uiB,
+        JNull => false,
+        JNum(uiN) => false,
+        JStr(uiS) => false,
+        JArr(uiA) => false,
+        JObj(uiO) => false,
+    }
+}
+fn uiClientIsLoading(uiJ: Json) -> Bool {
+    return uiClientBool(uiClientField(uiJ, "props"), "__loading__")
+}
+""")
+}
+
+/// `uiClientMatch<idx>(segs) -> Bool`: the segment count and every literal.
+/// A dynamic segment accepts any value: a data page's fetch re-runs the
+/// server's typed routing, and a dataless page has nothing to disagree on.
+gen fn uiClientMatchFn(p: UiPageInfo, idx: String) -> String {
+    let mut out = "fn uiClientMatch" + idx + "(segs: Array<String>) -> Bool {\n"
+    out = out + "    if segs.length != " + p.segs.length.toString() + " {\n        return false\n    }\n"
+    let mut i = 0
+    for s in p.segs {
+        if uiIsDynSeg(s) == false {
+            out = out + "    if segs[" + i.toString() + "] != " + uiStrLit(s) + " {\n        return false\n    }\n"
+        }
+        i = i + 1
+    }
+    out = out + "    return true\n}\n"
+    return out
+}
+
+/// `headTitle()` for a static dataless page. A data page's title travels in
+/// its payload, and a dynamic dataless page would need its Params first, so
+/// both resolve to `""`.
+gen fn uiResolveTitleExpr(p: UiPageInfo, idx: String) -> String {
+    if p.hasLoad == false && p.dynNames.length == 0 {
+        return "p" + idx + ".headTitle()"
+    }
+    return "\"\""
+}
+
+/// `resolvePage(path) -> String`: `{found, hasData, lazy, page, title}` JSON
+/// without a round trip. A dataless page renders at once, a data page
+/// fetches, and a miss falls back to the HTML swap.
+gen fn uiEmitResolvePage(pages: Array<UiPageInfo>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < pages.length {
+        if uiClientRenderable(pages[i]) {
+            out = out + uiClientMatchFn(pages[i], i.toString())
+        }
+        i = i + 1
+    }
+    out = out + "export fn resolvePage(path: String) -> String {\n"
+    out = out + "    let segs = uiClientSegments(path)\n"
+    // The server's order, or a `[slug].vyx` listed before `about.vyx` would
+    // answer a soft nav to /about.
+    for order in uiDispatchOrder(pages) {
+        if uiClientRenderable(pages[order]) {
+            let idx = order.toString()
+            let hd = if pages[order].hasLoad { "true" } else { "false" }
+            // A lazy page paints its skeleton before the fetch.
+            let lz = if pages[order].loadLazy { "true" } else { "false" }
+            out = out + "    if uiClientMatch" + idx + "(segs) {\n        return uiResolveHit(" + hd + ", " + lz + ", " + uiStrLit(uiPageId(pages[order])) + ", " + uiResolveTitleExpr(pages[order], idx) + ")\n    }\n"
+        }
+    }
+    out = out + "    return uiResolveMiss()\n}\n"
+    return out
+}
+
+gen fn uiBuildClientModule(pages: Array<UiPageInfo>, errors: Array<UiChrome>, themed: Bool, theme: String) -> String {
+    let mut out = "/// Generated by std/ui `pagesClient` — do not edit.\n"
+    out = out + "import { emit, Json, JsonField, copyJson } from \"std/json\"\n"
+    out = out + "import { parseJson } from \"std/jsonread\"\n"
+    out = out + "import { " + (if themed { "vyxPageClientThemed" } else { "vyxPageClient" }) + " } from \"std/vyx\"\n"
+    let hasErr = errors.length > 0
+    if hasErr {
+        out = out + "import { " + (if themed { "vyxErrorThemed" } else { "vyxError" }) + " } from \"std/vyx\"\n"
+        out = out + "import { PageError } from \"std/ui\"\n"
+    }
+
+    let mut i = 0
+    while i < pages.length {
+        if uiClientRenderable(pages[i]) {
+            out = out + uiClientPageImport(pages[i], i.toString(), themed, theme)
+        }
+        i = i + 1
+    }
+    // Only the root `error.vyx` is bundled; the payload does not name one.
+    if hasErr {
+        out = out + uiEmitChromeImport("uiErrPg0", errors[0].modPath, if themed { "vyxErrorThemed" } else { "vyxError" }, themed, theme)
+    }
+
+    out = out + uiClientRuntime()
+
+    out = out + "export fn renderPage(payloadJson: String) -> String {\n"
+    out = out + "    return match parseJson(payloadJson) {\n        Ok(uiJ) => uiClientDispatch(uiJ),\n        Err(uiE) => \"__vyrn_fallback__\",\n    }\n}\n"
+    out = out + "fn uiClientDispatch(uiJ: Json) -> String {\n"
+    out = out + "    let uiPage = uiClientStr(uiJ, \"page\")\n"
+    out = out + "    let uiProps = emit(uiClientField(uiJ, \"props\"))\n"
+    out = out + "    let uiPrms = emit(uiClientField(uiJ, \"params\"))\n"
+    if hasErr {
+        out = out + "    if uiPage == \"@error\" {\n"
+        out = out + "        return match fromJson<PageError>(uiProps) {\n            Valid(uiPe) => toJson(uiErrPg0.errorPage(uiPe)),\n            Invalid(uiI) => \"__vyrn_fallback__\",\n        }\n    }\n"
+    }
+    i = 0
+    while i < pages.length {
+        if uiClientRenderable(pages[i]) {
+            let pidx = i.toString()
+            out = out + "    if uiPage == " + uiStrLit(uiPageId(pages[i])) + " {\n"
+            // The `{"__loading__":true}` props sentinel renders the `Loading` view.
+            if pages[i].loadLazy {
+                out = out + "        if uiClientIsLoading(uiJ) {\n            return p" + pidx + ".clientRenderLoading(uiPrms)\n        }\n"
+            }
+            out = out + "        return p" + pidx + ".clientRender(uiProps, uiPrms)\n    }\n"
+        }
+        i = i + 1
+    }
+    out = out + "    return \"__vyrn_fallback__\"\n}\n"
+
+    out = out + uiEmitResolvePage(pages)
+    return out
+}
+
+/// The client page bundle for `dir`.
+export gen fn pagesClient(dir: String) -> String {
+    let scan = uiScanAll(dir, [])
+    let infos = scan.pages
+    if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
+    }
+    let mut err = scan.err
+    for p in infos {
+        err = err + p.err
+    }
+    err = err + uiCollisionErrors(infos)
+    if err != "" {
+        return err
+    }
+    return uiBuildClientModule(infos, scan.errors, false, "")
+}
+
+/// [`pagesClient`] with a theme; the server side is [`pagesThemed`].
+export gen fn pagesClientThemed(dir: String, theme: String) -> String {
+    let scan = uiScanAll(dir, [])
+    let infos = scan.pages
+    if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
+    }
+    let mut err = scan.err
+    for p in infos {
+        err = err + p.err
+    }
+    err = err + uiCollisionErrors(infos)
+    if err != "" {
+        return err
+    }
+    return uiBuildClientModule(infos, scan.errors, true, theme)
+}
+
+test "route segments and dynamic detection" {
+    assertEq(uiUrlPatternOf(["users", "[id]"]), "/users/:id")
+    assertEq(uiCollisionKey(["users", "[id]"]), "/users/:")
+    assert(uiIsDynSeg("[id]"))
+    assertEq(uiDynName("[id]"), "id")
+    assertEq(uiRoutePathBranch(["users", "[id]"], ["Int64"]), "/users/(0|-?[1-9][0-9]*)")
+    assertEq(uiRoutePathBranch(["p", "[id]"], ["String"]), "/p/([A-Za-z0-9._~-]|%[0-9A-Fa-f][0-9A-Fa-f])+")
+    assertEq(uiRoutePathBranch([], []), "/")
+    assertEq(uiWirePatternOf(["users", "[id]"]), "/users/{id}")
+    assertEq(uiWirePatternOf(["raw", "[id]"]), "/raw/{id}")
+    assertEq(uiWirePatternOf([]), "/")
+    assertEq(uiPageKeyOf(["p", "[id]"]), "p/[id]")
+    assertEq(uiPageKeyOf([]), "index")
+}
+
+test "String param types are supported and shape their segment regex" {
+    assert(uiSupportedParamType("String"))
+    assert(uiSupportedParamType("Int64"))
+    assertEq(uiSupportedParamType("Float64"), false)
+    // `urlEncode`'s output alphabet: a raw space or a bare `%` fails.
+    assertEq(uiSegRegex("String"), "([A-Za-z0-9._~-]|%[0-9A-Fa-f][0-9A-Fa-f])+")
+    assertEq(uiSegRegex("Int64"), "(0|-?[1-9][0-9]*)")
+}
+
+test "uiSplitFields is brace-aware for nested-record field types" {
+    let f = uiParseFields("type Params = { id: String, meta: { x: Int64, y: Int64 } }")
+    assertEq(f.names.length, 2)
+    assertEq(f.names[0], "id")
+    assertEq(f.names[1], "meta")
+    assertEq(f.types[1], "{ x: Int64, y: Int64 }")
+}
+
+test "typed-URL helper names and bodies" {
+    assertEq(uiStaticHelperName([]), "rootPath")
+    assertEq(uiStaticHelperName(["items"]), "itemsPath")
+    assertEq(uiDynHelperName(["users", "[id]"]), "hrefUsers")
+    assertEq(uiDynHelperBody(["users", "[id]"], ["Int64"]), "\"/users/" + uiHole("id") + "\"")
+    assertEq(uiDynHelperBody(["tags", "[name]"], ["String"]), "\"/tags/" + uiHole("urlEncode(name)") + "\"")
+}
+
+test "a slug converts to an identifier, and an alphanumeric slug is unchanged" {
+    assertEq(uiSegIdent("about-us"), "aboutUs")
+    assertEq(uiSegIdent("sign-in"), "signIn")
+    assertEq(uiSegIdent("terms-of-service"), "termsOfService")
+    assertEq(uiSegIdent("a.b"), "aB")
+    assertEq(uiSegIdent("2fa"), "2fa")
+    assertEq(uiSegIdent("items"), "items")
+    assertEq(uiSegIdent("philosophy"), "philosophy")
+    assertEq(uiSegIdent("guide"), "guide")
+}
+
+test "an awkward slug still makes a legal helper name" {
+    assertEq(uiStaticHelperName(["about-us"]), "aboutUsPath")
+    assertEq(uiStaticHelperName(["items", "sub-page"]), "itemsSubPagePath")
+    assertEq(uiStaticHelperName(["2fa"]), "_2faPath")
+    assertEq(uiStaticHelperName(["return"]), "returnPath")
+    assertEq(uiDynHelperName(["sign-in", "[token]"]), "hrefSignIn")
+}
+
+test "two slugs may reach one helper name — that is the collision to report" {
+    assertEq(uiStaticHelperName(["about-us"]), uiStaticHelperName(["aboutUs"]))
+}
+
+test "record-field parsing pulls names and types" {
+    let f = uiParseFields("export type Params = { id: Int64, slug: String }")
+    assertEq(f.names.length, 2)
+    assertEq(f.names[0], "id")
+    assertEq(f.types[0], "Int64")
+    assertEq(f.names[1], "slug")
+    assertEq(f.types[1], "String")
+    assert(uiSupportedParamType("Int64"))
+    assert(uiSupportedParamType("String"))
+    assertEq(uiSupportedParamType("Float64"), false)
+}
+
+test "uiStem and route mapping" {
+    assertEq(uiStem("index.vyrn"), "index")
+    assertEq(uiStem("[id].vyrn"), "[id]")
+    assertEq(uiRouteSegsFor(["items"], "index").length, 1)
+    assertEq(uiRouteSegsFor(["items"], "[id]").length, 2)
+}
+
+test "dispatch order answers a static route before a catch-all at the same depth" {
+    // `[slug].vyx` often lists before `about.vyx`; listing order would let it
+    // shadow /about.
+    let about = UiPageInfo { modPath: "routes/about", segs: ["about"], urlPattern: "/about", dynNames: [], dynTypes: [], hasLoad: false, hasData: false, dataRunner: "", loadHasParams: false, loadLazy: false, hasRespond: false, isVyx: true, pageArity: 0, paramsModule: "", dirPrefix: [], loadKind: "", layoutNone: false, err: "" }
+    let catchAll = UiPageInfo { modPath: "routes/[slug]", segs: ["[slug]"], urlPattern: "/:slug", dynNames: ["slug"], dynTypes: ["String"], hasLoad: false, hasData: false, dataRunner: "", loadHasParams: false, loadLazy: false, hasRespond: false, isVyx: true, pageArity: 0, paramsModule: "", dirPrefix: [], loadKind: "", layoutNone: false, err: "" }
+    let order = uiDispatchOrder([catchAll, about])
+    assertEq(order.length, 2)
+    assertEq(order[0], 1)
+    assertEq(order[1], 0)
+}
+
+test "a static segment with reserved bytes is matched decoded, a plain one raw" {
+    // Browsers send `my page` as `my%20page`.
+    assert(uiSegNeedsDecode("about") == false)
+    assert(uiSegNeedsDecode("my-page") == false)
+    assert(uiSegNeedsDecode("my page"))
+    assert(uiSegNeedsDecode("café"))
+    let p = UiPageInfo { modPath: "routes/my page", segs: ["about", "my page"], urlPattern: "/about/my page", dynNames: [], dynTypes: [], hasLoad: false, hasData: false, dataRunner: "", loadHasParams: false, loadLazy: false, hasRespond: false, isVyx: false, pageArity: 0, paramsModule: "", dirPrefix: [], loadKind: "", layoutNone: false, err: "" }
+    let out = uiEmitTryFn(p, "0", "uiTry", "uiRender")
+    assert(match indexOf(out, "if segs[0] != ") { Some(_) => true, None => false })
+    assert(match indexOf(out, "urlDecode(segs[1])") { Some(_) => true, None => false })
+}
