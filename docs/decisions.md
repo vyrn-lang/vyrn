@@ -155,6 +155,13 @@ pull request.
 - A whole-program analysis over the call graph runs on `fixpoint::solve` in `vyrn-lower`: components bottom-up, a join the analysis supplies, widening by round number. No analysis writes its own fixpoint loop.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
 - What one analysis decided about a program (the kernel's placement, the checker's record) lives on that program's `own::Ownership`, and a pass reads the one it is handed. A thread-local keyed by a program's address answered for another program.
+- Program state lives in one value, the World, owned above the front end by `vyrn-lower`. The front end declares no slot for lowering to fill, and no thread-local or global holds a program's state.
+- A table is keyed by a resolved id (function, type, declaration, name), never by a spelling; two bindings that share a name merged their facts. A node id is a function id and a local index, so an edit to one function renumbers nothing else.
+- An id is a storage index, never an order. Diagnostics and emitted functions follow source order, so an incremental check and a fresh one print the same bytes.
+- Each relation has one writer, which sets both directions and deletes in a batch. No hooks and no second storage shape for one relation.
+- A recheck pulls: each result records what it read (a signature, a summary, a name lookup in a scope, misses included), and a cache that records no reads is off in incremental mode.
+- Function bodies check in parallel in callee-first waves. Workers create no ids; a serial merge does. Output is byte-identical on one thread, many threads and a shuffled order.
+- The World has no query engine, runtime scheduler, archetype storage or on-disk snapshot. Each pass is a function over the tables it borrows.
 - A rule stays in the checker when no other pass refuses the program on the same line. A moved rule keeps its surviving home's sentence.
 - The generation fence stays in the checker, because it is the only judgment that runs before a generator executes.
 - A surface form that another form can state is a parser desugar, so each walker states one form. `if let` and `while let` are a statement `match` with a `Pattern::Other` arm, and take their scrutinee at its last use as `match` does.
