@@ -56,60 +56,46 @@ fn too_big(what: &str, bytes: u64, line: usize) -> String {
     )
 }
 
-/// The `wasi_snapshot_preview1` calls a directly-emitted module makes.
+/// The function index of each [`crate::WASI_IMPORTS`] call, in the table's order.
 ///
 /// All are declared before the first body, because imports share the function index space and
 /// nothing knows which a program reaches until the bodies are walked. A pre-scan would be a
 /// second traversal that must agree with lowering. [`wasm::Module::sweep`] drops the unused ones
 /// afterwards, so a program pays only for what it calls.
-///
-/// `web/wasi-min.js` implements exactly this set for the browser, degraded:
-/// no argv, EOF on stdin, no preopens, every `path_open` NOENT.
 #[derive(Clone, Copy, Default)]
-struct Wasi {
-    fd_write: u32,
-    fd_read: u32,
-    fd_close: u32,
-    proc_exit: u32,
-    path_open: u32,
-    path_rename: u32,
-    fd_sync: u32,
-    fd_prestat_get: u32,
-    args_sizes_get: u32,
-    args_get: u32,
-    environ_sizes_get: u32,
-    environ_get: u32,
-    clock_time_get: u32,
-    random_get: u32,
-    /// `listDir`'s entries, in the host's order; `list_dir` sorts them.
-    fd_readdir: u32,
-}
+struct Wasi([u32; crate::WASI_IMPORTS.len()]);
 
-fn wasi_imports(m: &mut Module) -> Wasi {
-    use ValType::{I32, I64};
-    let mut im = |name: &str, params: &[ValType], results: &[ValType]| {
-        m.import("wasi_snapshot_preview1", name, params, results)
-    };
-    Wasi {
-        fd_write: im("fd_write", &[I32, I32, I32, I32], &[I32]),
-        fd_read: im("fd_read", &[I32, I32, I32, I32], &[I32]),
-        fd_close: im("fd_close", &[I32], &[I32]),
-        proc_exit: im("proc_exit", &[I32], &[]),
-        path_open: im(
-            "path_open",
-            &[I32, I32, I32, I32, I32, I64, I64, I32, I32],
-            &[I32],
-        ),
-        path_rename: im("path_rename", &[I32, I32, I32, I32, I32, I32], &[I32]),
-        fd_sync: im("fd_sync", &[I32], &[I32]),
-        fd_prestat_get: im("fd_prestat_get", &[I32, I32], &[I32]),
-        args_sizes_get: im("args_sizes_get", &[I32, I32], &[I32]),
-        args_get: im("args_get", &[I32, I32], &[I32]),
-        environ_sizes_get: im("environ_sizes_get", &[I32, I32], &[I32]),
-        environ_get: im("environ_get", &[I32, I32], &[I32]),
-        clock_time_get: im("clock_time_get", &[I32, I64, I32], &[I32]),
-        random_get: im("random_get", &[I32, I32], &[I32]),
-        fd_readdir: im("fd_readdir", &[I32, I32, I32, I64, I32], &[I32]),
+impl Wasi {
+    fn declare(m: &mut Module) -> Wasi {
+        let mut w = Wasi::default();
+        for (at, (name, params, results)) in w.0.iter_mut().zip(crate::WASI_IMPORTS) {
+            *at = m.import("wasi_snapshot_preview1", name, params, results);
+        }
+        w
+    }
+
+    /// Returns the index and signature of the call `name` spells, in the table's snake_case or
+    /// in `std/mem`'s lowerCamelCase.
+    fn find(&self, name: &str) -> Option<(u32, &'static [ValType], &'static [ValType])> {
+        let snake: String = name
+            .chars()
+            .flat_map(|c| {
+                [
+                    c.is_ascii_uppercase().then_some('_'),
+                    Some(c.to_ascii_lowercase()),
+                ]
+            })
+            .flatten()
+            .collect();
+        let at = crate::WASI_IMPORTS.iter().position(|(n, ..)| *n == snake)?;
+        let (_, params, results) = crate::WASI_IMPORTS[at];
+        Some((self.0[at], params, results))
+    }
+
+    /// The index of a call the emitter makes by name. A name that leaves the table panics on
+    /// every compile.
+    fn at(&self, name: &str) -> u32 {
+        self.find(name).expect("a `WASI_IMPORTS` name").0
     }
 }
 
@@ -273,7 +259,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
-    let wasi = wasi_imports(&mut m);
+    let wasi = Wasi::declare(&mut m);
     let gen = crate::gen_host().then(|| gen_imports(&mut m));
     // Every `extern fn` is one import from the `vyrn` namespace, which `web/wasi-min.js` fills
     // from the page's hooks. This is not a pre-scan: an `extern fn` is its import, one for one,
@@ -638,7 +624,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         if let Some((at, ..)) = log_open {
             b.ins(&Instruction::I32Const(at as i32))
                 .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::Call(wasi.fd_close))
+                .ins(&Instruction::Call(wasi.at("fd_close")))
                 .ins(&Instruction::Drop);
         }
         // After the flush, so a leaking program's output precedes the report, and before the
@@ -652,7 +638,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         b.ins(&Instruction::I64Const(255))
             .ins(&Instruction::I64And)
             .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::Call(wasi.proc_exit));
+            .ins(&Instruction::Call(wasi.at("proc_exit")));
     });
     m.export("_start", start);
     // An `export extern fn`, under its own name. An export is also a sweep root.
@@ -1475,7 +1461,7 @@ struct PartAt {
     ty: Type,
 }
 
-/// How one `std/mem` primitive lowers: a `call` of a `wasi_imports` host import, or one of this
+/// How one `std/mem` primitive lowers: a `call` of a [`Wasi`] host import, or one of this
 /// emitter's instructions. A host import the build does not declare is `unreachable`, as the
 /// `vyrn_gen` pair is outside a generation.
 #[derive(Clone, Copy)]
@@ -4586,44 +4572,18 @@ impl<'p> Fn_<'_, 'p> {
         // A host import is one `call` with the witx signature. The `vyrn_gen` pair exists only
         // under a generation (`Cx::gen`); elsewhere a call to either is `unreachable`, and its
         // callers (`readFileGen`, `listDirGen`) are unreachable and swept.
-        let w = self.cx.rt.wasi;
         let host: Option<(Option<u32>, Vec<Type>, Type)> = match prim {
-            "fdWrite" => Some((Some(w.fd_write), vec![INT32; 4], INT32)),
-            "fdRead" => Some((Some(w.fd_read), vec![INT32; 4], INT32)),
-            "fdClose" => Some((Some(w.fd_close), vec![INT32], INT32)),
-            "procExit" => Some((Some(w.proc_exit), vec![INT32], Type::Unit)),
-            "pathOpen" => Some((
-                Some(w.path_open),
-                vec![
-                    INT32,
-                    INT32,
-                    INT32,
-                    INT32,
-                    INT32,
-                    Type::Int,
-                    Type::Int,
-                    INT32,
-                    INT32,
-                ],
-                INT32,
-            )),
-            "pathRename" => Some((Some(w.path_rename), vec![INT32; 6], INT32)),
-            "fdSync" => Some((Some(w.fd_sync), vec![INT32], INT32)),
-            "fdPrestatGet" => Some((Some(w.fd_prestat_get), vec![INT32; 2], INT32)),
-            "argsSizesGet" => Some((Some(w.args_sizes_get), vec![INT32; 2], INT32)),
-            "argsGet" => Some((Some(w.args_get), vec![INT32; 2], INT32)),
-            "environSizesGet" => Some((Some(w.environ_sizes_get), vec![INT32; 2], INT32)),
-            "environGet" => Some((Some(w.environ_get), vec![INT32; 2], INT32)),
-            "clockTimeGet" => Some((Some(w.clock_time_get), vec![INT32, Type::Int, INT32], INT32)),
-            "randomGet" => Some((Some(w.random_get), vec![INT32; 2], INT32)),
-            "fdReaddir" => Some((
-                Some(w.fd_readdir),
-                vec![INT32, INT32, INT32, Type::Int, INT32],
-                INT32,
-            )),
             "genRead" => Some((self.cx.gen.map(|g| g.read), vec![INT32, INT32], Type::Int)),
             "genFetch" => Some((self.cx.gen.map(|g| g.fetch), vec![INT32], Type::Unit)),
-            _ => None,
+            _ => self.cx.rt.wasi.find(prim).map(|(index, params, results)| {
+                // `WASI_IMPORTS` holds `i32` and `i64` alone: `Int32` and `Int64`.
+                let ty = |v: &ValType| match v {
+                    ValType::I64 => Type::Int,
+                    _ => INT32,
+                };
+                let ret = results.first().map_or(Type::Unit, ty);
+                (Some(index), params.iter().map(ty).collect(), ret)
+            }),
         };
         if let Some((index, params, ret)) = host {
             return Ok((Mem::Host(index), params, ret));
@@ -9426,7 +9386,7 @@ fn cap_at() -> MemArg {
 }
 
 fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
-    let proc_exit = wasi.proc_exit;
+    let proc_exit = wasi.at("proc_exit");
     // Every field is an index `VyrnRt` reserved or an interned address. No wasm function is
     // emitted here, so nothing needs numbering.
     let mut rt = Rt {

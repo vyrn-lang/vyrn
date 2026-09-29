@@ -222,7 +222,7 @@ pub fn simde_from(start: &Path) -> Option<(PathBuf, &'static str)> {
     Some((dir, "discovered: tools/"))
 }
 
-/// The WASI host the wasm2c route links: the imports `direct.rs` declares, each
+/// The WASI host the wasm2c route links: the imports [`crate::WASI_IMPORTS`] lists, each
 /// doing what the embedded engine does in `wasmrun.rs`. The driver defines
 /// `VYRN_W2C_HEADER` to the header wasm2c wrote.
 pub const WASI_HOST_C: &str = include_str!("wasi_host.c");
@@ -442,6 +442,42 @@ mod tests {
         assert!(some.contains("    exit(1);\n}"), "void does not");
         // A forward declaration is not a prototype and must not become a stub.
         assert!(!some.contains("struct w2c_vyrn; {"));
+    }
+
+    /// The C host defines each `crate::WASI_IMPORTS` call once, with its signature, and no other.
+    /// wasm2c's header declares only the imports a program reaches, so the C compiler alone
+    /// catches a missing or mistyped call only in a program that makes it.
+    #[test]
+    fn the_c_host_defines_exactly_the_declared_wasi_calls() {
+        use crate::wasm::ValType;
+        use std::collections::BTreeMap;
+        let ty = |c: &str| match c {
+            "uint32_t" => Some(ValType::I32),
+            "uint64_t" => Some(ValType::I64),
+            _ => None,
+        };
+        let prefix = "w2c_wasi__snapshot__preview1_";
+        let mut defined = BTreeMap::new();
+        for (head, rest) in WASI_HOST_C
+            .split(prefix)
+            .zip(WASI_HOST_C.split(prefix).skip(1))
+        {
+            let (name, rest) = rest.split_once('(').expect("a definition");
+            let (params, _) = rest.split_once(") {").expect("a definition");
+            let ret = head.rsplit('\n').next().unwrap_or_default().trim();
+            let params: Vec<ValType> = params
+                .split(',')
+                .skip(1)
+                .map(|p| ty(p.split_whitespace().next().unwrap_or_default()).expect(p))
+                .collect();
+            let old = defined.insert(name, (params, ty(ret).into_iter().collect()));
+            assert!(old.is_none(), "{name} is defined twice");
+        }
+        let want: BTreeMap<_, (Vec<_>, Vec<_>)> = crate::WASI_IMPORTS
+            .iter()
+            .map(|(n, p, r)| (*n, (p.to_vec(), r.to_vec())))
+            .collect();
+        assert_eq!(defined, want);
     }
 
     /// A non-ASCII `extern fn` name is escaped by wasm2c, and the refusal must

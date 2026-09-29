@@ -1,11 +1,11 @@
 //! The WASI host that `vyrn run` runs a program's own wasm under, in this
 //! process by the embedded wasmtime. It answers the `wasi_snapshot_preview1`
-//! imports `vyrn_codegen::direct` declares and nothing else: an `extern`
+//! imports `vyrn_codegen::WASI_IMPORTS` lists and nothing else: an `extern`
 //! import gets the terminal's refusal (see [`open`]), any other import traps.
-//! Hand-written rather than `wasmtime-wasi`, which brings an async runtime for
-//! fifteen calls. The setup matches `wasmtime run --dir . --env ..`: argv,
-//! this process's environment, stdio passed through, and the working
-//! directory preopened as fd 3; `tests/fixtures.rs` checks the two agree.
+//! Hand-written rather than `wasmtime-wasi`, which brings an async runtime.
+//! The setup matches `wasmtime run --dir . --env ..`: argv, this process's
+//! environment, stdio passed through, and the working directory preopened as
+//! fd 3; `tests/fixtures.rs` checks the two agree.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -1160,6 +1160,49 @@ fn main() -> Int64 {
             capture_stderr: true,
             meter: false,
         }
+    }
+
+    /// `link_wasi` defines each `vyrn_codegen::WASI_IMPORTS` call once, with its signature, and
+    /// no other. `open` answers an import it lacks with a trap, so a run fails only at the call.
+    #[test]
+    fn the_host_links_exactly_the_declared_wasi_calls() {
+        use std::collections::BTreeMap;
+        use vyrn_codegen::wasm::ValType;
+        let (mut store, _) = open(
+            &compile(&probe_bytes(), false).expect("compile"),
+            &quiet(),
+            None,
+        )
+        .expect("open");
+        let mut linker = Linker::new(engine(false));
+        link_wasi(&mut linker).expect("link");
+        let defs: Vec<(String, wasmtime::Extern)> = linker
+            .iter(&mut store)
+            .map(|(_, name, e)| (name.to_string(), e))
+            .collect();
+        let enc = |t: wasmtime::ValType| match t {
+            wasmtime::ValType::I32 => ValType::I32,
+            wasmtime::ValType::I64 => ValType::I64,
+            t => panic!("no WASI call takes {t}"),
+        };
+        let linked: BTreeMap<_, _> = defs
+            .into_iter()
+            .map(|(name, e)| {
+                let ty = e.ty(&store).unwrap_func().clone();
+                (
+                    name,
+                    (
+                        ty.params().map(enc).collect(),
+                        ty.results().map(enc).collect(),
+                    ),
+                )
+            })
+            .collect();
+        let want: BTreeMap<_, (Vec<_>, Vec<_>)> = vyrn_codegen::WASI_IMPORTS
+            .iter()
+            .map(|(n, p, r)| (n.to_string(), (p.to_vec(), r.to_vec())))
+            .collect();
+        assert_eq!(linked, want);
     }
 
     /// Prints the resident and fresh per-answer costs with `--nocapture`; asserts

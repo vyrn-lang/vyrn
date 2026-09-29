@@ -317,6 +317,39 @@ pub mod observe {
     }
 }
 
+/// Every `wasi_snapshot_preview1` call a module imports, with its witx signature, in import
+/// order. `std/mem` names each in lowerCamelCase: `fd_write` is `fdWrite`.
+///
+/// Each host implements exactly this set, and a test on each side compares its set with this
+/// table: `vyrn-cli/src/wasmrun.rs` for the embedded engine, `wasi_host.c` for the wasm2c
+/// route. `web/wasi-min.js` implements it for the browser, degraded: no argv, EOF on stdin,
+/// no preopens, every `path_open` NOENT.
+pub const WASI_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
+    use wasm::ValType::{I32, I64};
+    &[
+        ("fd_write", &[I32, I32, I32, I32], &[I32]),
+        ("fd_read", &[I32, I32, I32, I32], &[I32]),
+        ("fd_close", &[I32], &[I32]),
+        ("proc_exit", &[I32], &[]),
+        (
+            "path_open",
+            &[I32, I32, I32, I32, I32, I64, I64, I32, I32],
+            &[I32],
+        ),
+        ("path_rename", &[I32, I32, I32, I32, I32, I32], &[I32]),
+        ("fd_sync", &[I32], &[I32]),
+        ("fd_prestat_get", &[I32, I32], &[I32]),
+        ("args_sizes_get", &[I32, I32], &[I32]),
+        ("args_get", &[I32, I32], &[I32]),
+        ("environ_sizes_get", &[I32, I32], &[I32]),
+        ("environ_get", &[I32, I32], &[I32]),
+        ("clock_time_get", &[I32, I64, I32], &[I32]),
+        ("random_get", &[I32, I32], &[I32]),
+        // `listDir`'s entries, in the host's order; `list_dir` sorts them.
+        ("fd_readdir", &[I32, I32, I32, I64, I32], &[I32]),
+    ]
+};
+
 /// Every `vyrn_gen` import a generator module makes: a signature in LLVM's
 /// spelling and its import name. [`wasm::declare_sig`] turns each into a wasm
 /// signature through [`wasm::abi`], so `i1`, `i8` and `ptr` widen in one place.
