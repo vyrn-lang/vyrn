@@ -1,0 +1,1 @@
+a_derived_record_cannot_have_a_where_clause.vyrn:2:0: a record type cannot have a `where` clause

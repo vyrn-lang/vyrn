@@ -175,7 +175,8 @@ pull request.
 - Diagnostics speak intent: what you asked for, what blocks it, how to fix it. They say read, modify and consume, never "borrow" or "lifetime".
 - The runtime (allocator, strings, maps, arrays, I/O, traps, regions) is Vyrn in `std/runtime`. The raw memory and WASI primitives are declarations in `std/mem`, importable only by `std/runtime`.
 - The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`wasmrun.rs`, `wasi_host.c`) to exactly its rows.
-- A builtin exists only for what Vyrn source cannot express, such as a syscall; a builtin's signature is a seeded row the passes read. Everything expressible is std Vyrn.
+- A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
+- Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names.
 - Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.
 - A `read` or `modify` aggregate parameter is the caller's storage, used in place, while no module state can name that storage; the checker's exclusive-`modify` rule covers the parameters. A per-callee effect gate waits until the effect judgment attributes every call.
 - Runtime modules are injected on mention under unlexable `$` names, so user names neither collide with them nor capture them.

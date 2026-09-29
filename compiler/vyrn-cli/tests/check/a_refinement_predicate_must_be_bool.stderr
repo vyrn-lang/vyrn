@@ -1,0 +1,1 @@
+a_refinement_predicate_must_be_bool.vyrn:1:0: refinement predicate for `A` must be Bool, found Int64

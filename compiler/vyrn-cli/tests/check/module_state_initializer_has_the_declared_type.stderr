@@ -1,0 +1,1 @@
+module_state_initializer_has_the_declared_type.vyrn:1:0: `g` declared Int64 but initializer is String

@@ -1,0 +1,2 @@
+type R = { a: Int64, b: Int64 }
+type O = Omit<R, a> where b > 0

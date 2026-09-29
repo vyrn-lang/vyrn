@@ -1,0 +1,1 @@
+import type { E } from "./an_enum_schema_needs_a_variant.schema.json"

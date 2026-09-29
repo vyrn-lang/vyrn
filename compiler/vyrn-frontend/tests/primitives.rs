@@ -116,6 +116,9 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("lex", Compiler, "the compiler's OWN lexer"),
     ("@codeText", Compiler, "the desugar of vyrn\"…\""),
     ("@codeSplice", Compiler, "the desugar of an interpolation inside vyrn\"…\""),
+    ("__vyrnGenReflect", Compiler, "a generator host's reflection, moved out as atoms"),
+    ("__vyrnGenNextInt", Compiler, "as `__vyrnGenReflect`: the next Int64 atom"),
+    ("__vyrnGenNextStr", Compiler, "as `__vyrnGenReflect`: the next String atom"),
     ("Some", Compiler, "a constructor of the compiler's own Option"),
     ("Ok", Compiler, "a constructor of the compiler's own Result"),
     ("Err", Compiler, "as `Ok`"),
@@ -175,15 +178,17 @@ fn the_direct_backend_carries_the_census_too() {
         "schemaOf" => Some("schema_at"),
         _ => None,
     };
-    // The core states a builtin and the emitter answers its row, so the
-    // backend is the two files together.
+    // The core states a builtin's row and the emitter answers it, so a row
+    // with a `Spec` is covered.
     let direct = [
         include_str!("../../vyrn-codegen/src/direct.rs"),
         include_str!("../../vyrn-lower/src/core.rs"),
     ]
     .concat();
     let covers = |n: &str| {
-        direct.contains(&format!("{n:?}")) || alias(n).is_some_and(|a| direct.contains(a))
+        direct.contains(&format!("{n:?}"))
+            || alias(n).is_some_and(|a| direct.contains(a))
+            || vyrn_frontend::prelude::builtin(n).is_some_and(|b| b.spec.is_some())
     };
     let missing: Vec<&str> = CENSUS
         .iter()
@@ -224,16 +229,14 @@ fn dispatched(region: &str) -> BTreeSet<&str> {
         }
     }
     // `("x", 1)`: a `match (name, args.len())` arm, told from other tuples by
-    // its literal arity. `("x", Spec::..)` or `one("x", &p, &r)`: a row of
-    // `builtin_rows`.
+    // its literal arity.
     for (i, _) in region.match_indices("(\"") {
         let Some((name, after)) = region[i + 2..].split_once('"') else {
             continue;
         };
         let arity = after.trim_start_matches([',', ' ']);
         let close = arity.trim_start_matches(|c: char| c.is_ascii_digit());
-        let row = arity.starts_with("Spec::") || arity.starts_with('&');
-        if !name.is_empty() && (row || close.len() < arity.len() && close.starts_with(')')) {
+        if !name.is_empty() && close.len() < arity.len() && close.starts_with(')') {
             out.insert(name);
         }
     }
@@ -252,14 +255,12 @@ fn dispatched(region: &str) -> BTreeSet<&str> {
 
 /// The anti-rot direction: a builtin an emitter branches on with no census row.
 ///
-/// The regions are the core's `builtin_rows` and the emitter's methods that
-/// branch on a row's name. There is no list of permitted exceptions. The scan
-/// cannot see a name spelled by a constant (`ast::PANIC_AT`,
-/// `checker::GEN_REFLECT`); the forward direction aliases `@panicAt`.
+/// The names are every builtin row with a `Spec` and every name the emitter's
+/// methods that branch on a row's name dispatch on. There is no list of
+/// permitted exceptions.
 #[test]
 fn the_backends_dispatch_on_nothing_the_census_omits() {
     let direct = include_str!("../../vyrn-codegen/src/direct.rs");
-    let core = include_str!("../../vyrn-lower/src/core.rs");
     // Located by content, so a reorganised emitter fails here rather than
     // scanning nothing and passing.
     let cut = |src: &'static str, from: &str, to: &str| -> &'static str {
@@ -271,14 +272,19 @@ fn the_backends_dispatch_on_nothing_the_census_omits() {
             .unwrap_or_else(|| panic!("the region closing `{to}`"));
         &src[i..i + from.len() + j]
     };
-    let mut regions = vec![cut(core, "pub fn builtin_rows(", "\n}\n")];
-    for f in ["asserts", "effect", "logs", "lanes"] {
-        regions.push(cut(direct, &format!("    fn {f}("), "\n    fn "));
-    }
+    let regions: Vec<&str> = ["asserts", "effect", "logs", "lanes"]
+        .iter()
+        .map(|f| cut(direct, &format!("    fn {f}("), "\n    fn "))
+        .collect();
+    let rows = vyrn_frontend::prelude::builtins()
+        .iter()
+        .filter(|b| b.spec.is_some())
+        .map(|b| b.name);
     let censused: BTreeSet<&str> = CENSUS.iter().map(|(n, ..)| *n).collect();
     let uncensused: BTreeSet<&str> = regions
         .iter()
         .flat_map(|r| dispatched(r))
+        .chain(rows)
         .filter(|n| !censused.contains(n))
         .collect();
     assert!(
@@ -296,12 +302,13 @@ fn the_backends_dispatch_on_nothing_the_census_omits() {
 /// censused arm stops being reached.
 #[test]
 fn nothing_is_both_censused_and_routed() {
-    for rt in vyrn_frontend::loader::RT_MODULES {
-        for (builtin, reserved) in rt.routes {
+    for b in vyrn_frontend::prelude::builtins() {
+        if let Some(reserved) = b.route {
             assert!(
-                !CENSUS.iter().any(|(n, ..)| n == builtin),
-                "`{builtin}` is routed to `{reserved}` AND censused as a Rust \
-                 primitive — one of the two is now dead code"
+                !CENSUS.iter().any(|(n, ..)| *n == b.name),
+                "`{}` is routed to `{reserved}` AND censused as a Rust \
+                 primitive — one of the two is now dead code",
+                b.name
             );
         }
     }

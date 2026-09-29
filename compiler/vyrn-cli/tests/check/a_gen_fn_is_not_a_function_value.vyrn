@@ -1,0 +1,7 @@
+gen fn g(x: Int64) -> Int64 {
+    return x
+}
+fn main() -> Int64 {
+    let f: fn(Int64) -> Int64 = g
+    return 0
+}

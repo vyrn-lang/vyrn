@@ -20,6 +20,7 @@ use vyrn_frontend::ast::{
 use vyrn_frontend::declared::Owned;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
+pub use vyrn_frontend::prelude::Spec;
 use vyrn_frontend::project::is_place_read;
 
 use crate::kernel::{MissingKind, Root};
@@ -1364,85 +1365,9 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
     })
 }
 
-/// What a builtin's specification row states about its operands and its
-/// result. A builtin with such a row is a `call`, not a gap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Spec {
-    /// Each operand at the stated type, in order, and a result at the stated
-    /// type. The emitter writes one instruction between them.
-    Typed(Vec<Type>, Type),
-    /// One operand, at whatever type the row put on the name it reads, and a
-    /// result of that same type.
-    OwnType,
-    /// One operand at its own type, handed back as the same value, not a
-    /// copy, behind an optimization barrier (`blackBox`).
-    Barrier,
-    /// One operand at the type the row put on its name, and a result at the
-    /// stated type (`print`, `@str`). The checker types the operand over a
-    /// union; the emitter picks the rendering by the operand's type.
-    Renders(Type),
-    /// A message at `String`, and for `@panicAt` the site as a string
-    /// literal. The call never returns; the [`St::Trap`] after it ends the
-    /// path. `serveStream`'s message is the frontend's sentence, a literal in
-    /// place of the stream, which a compiled build never pulls.
-    Traps,
-    /// `assert(c)` and `assertEq(a, b)`: a `Bool`, or two operands
-    /// at one scalar type. A failure writes the interpreter's line and traps;
-    /// the result is `Unit`.
-    Asserts,
-    /// A receiver first, rebuilt in place by the runtime; the store after the
-    /// call puts the result back into the name.
-    ///
-    /// An array receiver takes at most one operand at its name's type; the
-    /// result is the receiver's own storage. `@strAppend`'s receiver is a
-    /// String accumulator ([`NameInfo::grows`]): the runtime grows the buffer
-    /// when the ownership word says this path allocated it, and copies it
-    /// otherwise. `@tally` takes a map, a key at its key type and an `Int64`
-    /// count; it reads the key and never takes it (a miss stores a copy), so
-    /// the caller releases its key on both paths. `@tallyBytes` reads bytes
-    /// instead, and a miss stores a String built from them.
-    Rebuilds,
-    /// A SIMD operation. The vector operand's type chooses the
-    /// instruction; a lane index is a literal the checker proved in range.
-    Lanes,
-    /// A host import a compiled generator calls:
-    /// `@codeText`, `raw`, `rawAt` and `@codeSplice` answer a `Code` handle,
-    /// `render` answers a String, and `__vyrnGen*` move a value out of the
-    /// host as atoms. `@codeSplice`'s tag is its operand's type. Only a
-    /// generator reaches one.
-    Host,
-    /// A call to the named function, which the program links: an entry a
-    /// generator host synthesizes, or a `std` function a builtin routes to
-    /// (`loader::RT_MODULES`). The emitter reads it as a declared callee.
-    Routes(&'static str),
-    /// A receiver the call shrinks in its own storage. `@pop` takes an array
-    /// and hands back an `Option` of the last element, `@swapRemove` an
-    /// array and an index at `Int64` and hands back the element there.
-    /// `@remove` takes a map and a key at the map's key type, releases the
-    /// key and value the entry held, and answers whether it held one.
-    Removes,
-    /// A map and a key at the map's key type. The answer is a `Bool`: whether
-    /// the map holds an entry for the key.
-    Finds,
-    /// Operands at their names' types, and a result the call builds in its
-    /// own storage, at the stated type with parameters the operands solve.
-    Builds(Type),
-    /// One operand at its name's type, and a result at the stated type. The
-    /// call releases it (`close`), or boxes it and answers the box's address
-    /// (`boxStream`).
-    Effect(Type),
-    /// The logging facade. `logger(name)` hands its String back as the
-    /// `Logger`. A level takes a `Logger` and a message and writes the line,
-    /// or nothing below the build's threshold; both operands are evaluated
-    /// either way.
-    Logs,
-    /// The head of a `for` over a stream: advances the receiver in place and
-    /// answers whether an element came. A read of the stream at the call's
-    /// own name is that element.
-    Pulls,
-}
-
-/// Every builtin the row specifies, by name.
+/// Every builtin the row specifies, by name: each
+/// [`vyrn_frontend::prelude::Builtin::spec`], then a [`Spec::Routes`] row per
+/// route.
 ///
 /// The emitter answers each from the row alone
 /// (`vyrn_codegen::direct::Fn_::core_call`), so a name added here needs an
@@ -1451,136 +1376,15 @@ pub enum Spec {
 pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
     static ROWS: std::sync::OnceLock<Vec<(&'static str, Spec)>> = std::sync::OnceLock::new();
     ROWS.get_or_init(|| {
-        let u64_ = Type::IntN {
-            bits: 64,
-            signed: false,
-        };
-        let i32_ = Type::IntN {
-            bits: 32,
-            signed: true,
-        };
-        let u8_ = Type::IntN {
-            bits: 8,
-            signed: false,
-        };
-        let one = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone()], r.clone()));
-        let two = |n, p: &Type, r: &Type| (n, Spec::Typed(vec![p.clone(), p.clone()], r.clone()));
-        let (f4, d2) = (Type::F32x4, Type::F64x2);
-        vec![
-            // IEEE-754 bit views: the same 64 bits read at the other type, so
-            // neither is a conversion.
-            one("floatBits", &Type::Float, &u64_),
-            one("floatFromBits", &u64_, &Type::Float),
-            one("@f32x4Splat", &Type::Float32, &f4),
-            one("@i32x4Splat", &i32_, &Type::I32x4),
-            one("@f64x2Splat", &Type::Float, &d2),
-            two("@f32x4Min", &f4, &f4),
-            two("@f32x4Max", &f4, &f4),
-            one("@f32x4Sqrt", &f4, &f4),
-            one("@f32x4Ceil", &f4, &f4),
-            one("@f32x4Floor", &f4, &f4),
-            one("@f32x4Trunc", &f4, &f4),
-            one("@f32x4Nearest", &f4, &f4),
-            two("@f64x2Min", &d2, &d2),
-            two("@f64x2Max", &d2, &d2),
-            one("@f64x2Sqrt", &d2, &d2),
-            ("@copy", Spec::OwnType),
-            ("blackBox", Spec::Barrier),
-            ("print", Spec::Renders(Type::Unit)),
-            ("@str", Spec::Renders(Type::Str)),
-            ("panic", Spec::Traps),
-            ("assert", Spec::Asserts),
-            ("assertEq", Spec::Asserts),
-            (vyrn_frontend::ast::PANIC_AT, Spec::Traps),
-            ("serveStream", Spec::Traps),
-            ("close", Spec::Effect(Type::Unit)),
-            ("boxStream", Spec::Effect(Type::Int)),
-            ("logger", Spec::Logs),
-            ("@trace", Spec::Logs),
-            ("@debug", Spec::Logs),
-            ("@info", Spec::Logs),
-            ("@warn", Spec::Logs),
-            ("@error", Spec::Logs),
-            ("@push", Spec::Rebuilds),
-            ("@reserve", Spec::Rebuilds),
-            ("@clear", Spec::Rebuilds),
-            ("@append", Spec::Rebuilds),
-            ("@copyFrom", Spec::Rebuilds),
-            ("@strAppend", Spec::Rebuilds),
-            ("@tally", Spec::Rebuilds),
-            ("@tallyBytes", Spec::Rebuilds),
-            ("F32x4", Spec::Lanes),
-            ("I32x4", Spec::Lanes),
-            ("F64x2", Spec::Lanes),
-            ("@lane", Spec::Lanes),
-            ("@replaceLane", Spec::Lanes),
-            ("@anyTrue", Spec::Lanes),
-            ("@allTrue", Spec::Lanes),
-            ("@f32x4Load", Spec::Lanes),
-            ("@f32x4Store", Spec::Lanes),
-            ("@i32x4Load", Spec::Lanes),
-            ("@i32x4Store", Spec::Lanes),
-            ("@f64x2Load", Spec::Lanes),
-            ("@f64x2Store", Spec::Lanes),
-            ("@codeText", Spec::Host),
-            ("@codeSplice", Spec::Host),
-            ("raw", Spec::Host),
-            ("rawAt", Spec::Host),
-            ("render", Spec::Host),
-            (vyrn_frontend::checker::GEN_REFLECT, Spec::Host),
-            (vyrn_frontend::checker::GEN_NEXT_INT, Spec::Host),
-            (vyrn_frontend::checker::GEN_NEXT_STR, Spec::Host),
-            (
-                "moduleInterface",
-                Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_MODULE_INTERFACE),
-            ),
-            ("lex", Spec::Routes(vyrn_frontend::checker::GEN_ENTRY_LEX)),
-            ("@pull", Spec::Pulls),
-            (
-                "pullAt",
-                Spec::Builds(Type::option(Type::Param("T".into()))),
-            ),
-            ("@pop", Spec::Removes),
-            ("@swapRemove", Spec::Removes),
-            ("@remove", Spec::Removes),
-            ("@has", Spec::Finds),
-            ("bytes", Spec::Builds(Type::Array(Box::new(u8_.clone())))),
-            (
-                "stringFromBytes",
-                Spec::Builds(Type::result(Type::Str, Type::Str)),
-            ),
-            (
-                "@toArray",
-                Spec::Builds(Type::Array(Box::new(Type::Param("T".into())))),
-            ),
-            // A stream's producers build its six-word header.
-            (
-                "fromArray",
-                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
-            ),
-            (
-                "fromStep",
-                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
-            ),
-            (
-                "unboxStream",
-                Spec::Builds(Type::Stream(Box::new(Type::Param("T".into())))),
-            ),
-            // `K` is the prelude's own parameter name.
-            (
-                "@keys",
-                Spec::Builds(Type::Array(Box::new(Type::Param("K".into())))),
-            ),
-        ]
-        .into_iter()
-        .chain(
-            vyrn_frontend::loader::RT_MODULES
+        let all = prelude::builtins();
+        let specs = all.iter().filter_map(|b| Some((b.name, b.spec.clone()?)));
+        let routes = all.iter().flat_map(|b| {
+            b.route
                 .iter()
-                .flat_map(|rt| rt.routes)
-                .chain(vyrn_frontend::loader::GEN_ROUTES)
-                .map(|(builtin, f)| (*builtin, Spec::Routes(*f))),
-        )
-        .collect()
+                .chain(&b.gen_route)
+                .map(|f| (b.name, Spec::Routes(*f)))
+        });
+        specs.chain(routes).collect()
     })
 }
 
@@ -2166,7 +1970,7 @@ fn unbound(
             };
             let bounds = &signature(name)?.type_bounds;
             let written = node_solved(*e as *const Expr as usize).unwrap_or_default();
-            let shown = vyrn_frontend::parser::method_surface(name).trim_start_matches('@');
+            let shown = prelude::method_surface(name).trim_start_matches('@');
             let solved = facts.solved.get(&(*e as *const Expr as usize))?;
             solved.iter().find_map(|(tp, t)| {
                 let w = written.iter().find(|(p, _)| p == tp).map_or(t, |(_, w)| w);
@@ -2242,7 +2046,7 @@ fn fn_slot(
             .filter(|t| **t != Type::Err)
     };
     let f = program.functions.iter().find(|f| f.name == name)?;
-    let callee = vyrn_frontend::parser::method_surface(name).trim_start_matches('@');
+    let callee = prelude::method_surface(name).trim_start_matches('@');
     let subst: HashMap<String, Type> = solved.iter().cloned().collect();
     let mut slots = f.params.iter().zip(args).enumerate();
     slots.find_map(|(i, (p, arg))| {
@@ -4742,7 +4546,7 @@ impl<'a> Builder<'a> {
             return false;
         };
         !vyrn_frontend::ast::is_panic(name)
-            && (!name.starts_with('@') || matches!(builtin_row(name), Some(Spec::Removes)))
+            && (!name.starts_with('@') || prelude::removes(name))
             && !self.lends(e)
             && !self.constructs(name)
     }
@@ -6843,7 +6647,7 @@ impl<'a> Builder<'a> {
                 args,
                 line,
                 type_args: _,
-            } if name == "panic" || name == "@panicAt" || name == "serveStream" => {
+            } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
                 let r = if name == "serveStream" {
                     // A compiled build has no accept loop.
                     let msg = Lit::Str(vyrn_frontend::trap::SERVE_STREAM.into());
@@ -7603,7 +7407,9 @@ impl<'a> Builder<'a> {
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
         }
-        if let ("@pop" | "@swapRemove", Some(recv)) = (name, args.first()) {
+        let length = prelude::builtin(name).map(|b| b.length);
+        if let (Some(prelude::Length::ShrinksByOneIfNotEmpty), Some(recv)) = (length, args.first())
+        {
             self.shrinks(&name[1..], recv, line);
         }
         if let (Callee::Projection, Some(recv)) = (kind, args.first()) {
@@ -8662,14 +8468,10 @@ fn moves_out(s: &Stmt) -> bool {
 /// (`parser::hoist_mutating_receiver`), where `e` is one.
 fn removal(e: &Expr) -> Option<&String> {
     match e {
-        Expr::Call { name, args, .. }
-            if matches!(name.as_str(), "@pop" | "@swapRemove" | "@remove") =>
-        {
-            match args.first() {
-                Some(Expr::Var { name, .. }) => Some(name),
-                _ => None,
-            }
-        }
+        Expr::Call { name, args, .. } if prelude::removes(name) => match args.first() {
+            Some(Expr::Var { name, .. }) => Some(name),
+            _ => None,
+        },
         _ => None,
     }
 }

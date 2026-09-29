@@ -2483,42 +2483,13 @@ pub struct SemToken {
     pub mods: SemMods,
 }
 
-/// Compiler builtin free functions, coloured `macro` apart from user functions.
-/// The `x.method()` builtins are [`builtin_method`]'s. Contextual words (`value`,
-/// `list` in a `where` clause) are excluded. Keep in sync with the checker's
-/// `RESERVED` list.
-static MACRO_BUILTINS: &[&str] = &[
-    "print",
-    "len",
-    "concat",
-    "bytes",
-    "floatBits",
-    "floatFromBits",
-    "args",
-    "readLine",
-    "readFile",
-    "writeFile",
-    "writeFileBytes",
-    "writeStdout",
-    "renameFile",
-    "fsyncFile",
-    "readFileBytes",
-    "stringFromBytes",
-    "listDir",
-    "listDirKinds",
-    "moduleInterface",
-    "schemaOf",
-    "contractOf",
-    "jsonSchema",
-    "toJson",
-    "fromJson",
-    "assert",
-    "assertEq",
-    "array",
-    "parse",
-    "str",
-    "panic",
-];
+/// Whether `name` is a builtin free function, coloured `macro` apart from user
+/// functions: a row with a contract, no method spelling and no lending. The
+/// `x.method()` builtins are [`builtin_method`]'s.
+fn is_macro_builtin(name: &str) -> bool {
+    crate::prelude::builtin(name).is_some_and(|b| b.sig.is_some() && b.method.is_none())
+        && !crate::prelude::lends(name)
+}
 
 /// Whether `name` is a builtin `Option` or `Result` constructor, which colours
 /// as `enumMember` like a user variant. A filter over
@@ -2988,7 +2959,7 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
 
     // 5. Compiler builtins: free functions colour `macro`, option and result
     //    constructors `enumMember`, method builtins (`push`, `info`) `method`.
-    if MACRO_BUILTINS.contains(&tok.text.as_str()) {
+    if is_macro_builtin(&tok.text) {
         return Some((SemKind::Macro, mods_default_lib()));
     }
     if is_constructor_builtin(&tok.text) {
@@ -3011,147 +2982,41 @@ fn mods_default_lib() -> SemMods {
 }
 
 /// A built-in method or function the checker handles inline, such as
-/// `Array.push` or `Logger.info`. It has hover text and no definition site.
+/// `Array.push` or `Logger.info`: a [`crate::prelude::Builtin`] row with hover
+/// text, named by its method spelling. It has no definition site.
 #[derive(Clone, Copy)]
 struct BuiltinMethod {
     name: &'static str,
     detail: &'static str,
 }
 
-/// Every built-in call name valid as a method on some receiver, for hover on a
-/// bare method name. The checker checks arity and receiver type.
-static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
-    BuiltinMethod { name: "push", detail: "array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver" },
-    BuiltinMethod { name: "reserve", detail: "array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation" },
-    BuiltinMethod { name: "append", detail: "array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap" },
-    BuiltinMethod { name: "clear", detail: "array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap" },
-    BuiltinMethod { name: "copyFrom", detail: "array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap" },
-    BuiltinMethod { name: "tally", detail: "map.tally(key, n) -> Map<String, Int64> — insert-or-add on a count map, one probe" },
-    BuiltinMethod { name: "tallyBytes", detail: "map.tallyBytes(bytes, n) -> Map<String, Int64> — tally keyed by raw bytes; the String is built and validated only on a miss" },
-    BuiltinMethod { name: "at", detail: "array.at(index) -> T — read an element by index; `array[index]` is the same call" },
-    BuiltinMethod { name: "lane", detail: "vector.lane(k) -> T — read lane `k` of an `F32x4`, `I32x4`, `F64x2` or mask; `k` is a compile-time constant inside the width" },
-    BuiltinMethod { name: "replaceLane", detail: "vector.replaceLane(k, x) -> Vector — the same vector with lane `k` set to `x`; `k` is a compile-time constant inside the width" },
-    BuiltinMethod { name: "anyTrue", detail: "mask.anyTrue() -> Bool — whether any lane of a comparison mask is set" },
-    BuiltinMethod { name: "allTrue", detail: "mask.allTrue() -> Bool — whether every lane of a comparison mask is set" },
-    // `close` is offered on a `Stream<T>`. `fromArray` is here for
-    // hover only: it takes an array and produces the stream.
-    BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
-    BuiltinMethod { name: "fromStep", detail: "fromStep(slot, generation, step) -> Stream<T> — a stream that pulls from `step: fn(Int64, Int64, Bool) -> Option<T>` over a cursor its caller minted; `std/stream`'s `unfold` is the one to call" },
-    BuiltinMethod { name: "boxStream", detail: "boxStream(s) -> Int64 — move a stream into one heap box and answer its address; `std/stream` keeps a wrapper's source this way" },
-    BuiltinMethod { name: "unboxStream", detail: "unboxStream(address) -> Stream<T> — take a boxed stream back out; needs its type from the annotation: `let s: Stream<T> = unboxStream(a)`" },
-    BuiltinMethod { name: "pullAt", detail: "pullAt(address) -> Option<T> — one element from the stream in that box; needs its type from the annotation: `let x: Option<T> = pullAt(a)`" },
-    BuiltinMethod { name: "close", detail: "close(stream) -> Unit — discharge a stream's disposal obligation without consuming it" },
-    BuiltinMethod { name: "serveStream", detail: "serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call" },
-    BuiltinMethod { name: "pop", detail: "array.pop() -> Option<T> — remove and return the last element (None if empty)" },
-    BuiltinMethod { name: "swapRemove", detail: "array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot" },
-    BuiltinMethod { name: "has", detail: "map.has(key) -> Bool — whether the map contains the key" },
-    BuiltinMethod { name: "remove", detail: "map.remove(key) -> Bool — remove the entry (order-preserving); was it present?" },
-    BuiltinMethod { name: "keys", detail: "map.keys() -> Array<String> — a snapshot of the keys, in insertion order" },
-    BuiltinMethod { name: "toArray", detail: "smallArray.toArray() -> Array<T> — copy a SmallArray's elements out to a growable Array" },
-    BuiltinMethod { name: "copy", detail: "x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural. A handle copies as the value it is, so the copy names the same thing" },
-    BuiltinMethod { name: "toString", detail: "x.toString() -> String — render a number, Bool, or String" },
-    BuiltinMethod { name: "charCount", detail: "s.charCount() -> Int64 — number of Unicode scalar values (O(n); counts non-continuation bytes)" },
-    BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result. It CONSUMES the task: a task is discharged once, by this or by `drop t`, and the frame, the record and the operating-system handle go back here" },
-    BuiltinMethod { name: "trace", detail: "trace(logger, message) -> Unit — log at trace level" },
-    BuiltinMethod { name: "debug", detail: "debug(logger, message) -> Unit — log at debug level" },
-    BuiltinMethod { name: "info", detail: "info(logger, message) -> Unit — log at info level" },
-    BuiltinMethod { name: "warn", detail: "warn(logger, message) -> Unit — log at warn level" },
-    BuiltinMethod { name: "error", detail: "error(logger, message) -> Unit — log at error level" },
-];
+/// Every builtin with hover text, in the table's order.
+fn builtin_methods() -> impl Iterator<Item = (BuiltinMethod, &'static [crate::prelude::Shape])> {
+    crate::prelude::builtins().iter().filter_map(|b| {
+        let m = BuiltinMethod {
+            name: b.method.unwrap_or(b.name),
+            detail: b.hover.as_deref()?,
+        };
+        Some((m, b.on))
+    })
+}
 
 /// Hover text for a built-in call name, if `name` is one: [`resolve`]'s last
 /// fallback.
-fn builtin_method(name: &str) -> Option<&'static BuiltinMethod> {
-    ALL_BUILTIN_METHODS.iter().find(|b| b.name == name)
+fn builtin_method(name: &str) -> Option<BuiltinMethod> {
+    builtin_methods().map(|(m, _)| m).find(|m| m.name == name)
 }
 
 /// The built-in methods valid on a receiver of type `ty`, for
-/// [`member_completions`]. Mirrors the receiver-type dispatch in the checker's
-/// `call()`.
+/// [`member_completions`].
 fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
-    let by_name = |n: &str| ALL_BUILTIN_METHODS.iter().find(|b| b.name == n).copied();
-    let mut out = builtin_methods_of_shape(ty);
-    // `x.copy()` is legal on every receiver, but offered only where
-    // the type owns heap by its shape; on a scalar it is the identity.
-    if matches!(
-        ty,
-        Type::Str
-            | Type::Array(_)
-            | Type::ArrayN(..)
-            | Type::SmallArray(..)
-            | Type::Map(..)
-            | Type::Record(_)
-            | Type::Enum(_)
-    ) {
-        out.extend(by_name("copy"));
-    }
-    out
-}
-
-fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
-    let by_name = |n: &str| ALL_BUILTIN_METHODS.iter().find(|b| b.name == n).copied();
-    match ty {
-        // A growable `Array<T>`: the whole mutation surface, `pop` and
-        // `swapRemove` included.
-        Type::Array(_) => vec![
-            by_name("push"),
-            by_name("at"),
-            by_name("pop"),
-            by_name("swapRemove"),
-            by_name("reserve"),
-            by_name("clear"),
-            by_name("append"),
-            by_name("copyFrom"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-        // A `Stream<T>` offers only `close`: it is read by `for` or
-        // released.
-        Type::Stream(_) => vec![by_name("close")].into_iter().flatten().collect(),
-        // A fixed-size `Array<T, N>` cannot shrink: no `pop` or `swapRemove`.
-        Type::ArrayN(..) => vec![by_name("push"), by_name("at")]
-            .into_iter()
-            .flatten()
-            .collect(),
-        // A `SmallArray<T, N>` has a growable array's surface, plus
-        // `toArray`.
-        Type::SmallArray(..) => vec![
-            by_name("push"),
-            by_name("at"),
-            by_name("pop"),
-            by_name("swapRemove"),
-            by_name("toArray"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-        // A `Map<String, V>`; `.length` is a field, from field
-        // completion.
-        Type::Map(..) => vec![by_name("has"), by_name("remove"), by_name("keys")]
-            .into_iter()
-            .flatten()
-            .collect(),
-        // `String`; `.byteLength` is a field, from field completion.
-        Type::Str => vec![by_name("toString"), by_name("charCount")]
-            .into_iter()
-            .flatten()
-            .collect(),
-        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
-            vec![by_name("toString")].into_iter().flatten().collect()
-        }
-        Type::Logger => vec![
-            by_name("trace"),
-            by_name("debug"),
-            by_name("info"),
-            by_name("warn"),
-            by_name("error"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-        _ => Vec::new(),
-    }
+    let Some(shape) = crate::prelude::Shape::of(ty) else {
+        return Vec::new();
+    };
+    builtin_methods()
+        .filter(|(_, on)| on.contains(&shape))
+        .map(|(m, _)| m)
+        .collect()
 }
 
 #[cfg(test)]
@@ -3173,15 +3038,13 @@ mod tests {
         assert!(!is_constructor_builtin("Somewhere"));
     }
 
-    /// Every method the parser accepts after a dot has an editor entry. One
-    /// direction only: the table also holds free functions offered for hover
-    /// (`fromArray`, the logging verbs), which the parser does not route.
+    /// Every method the parser accepts after a dot has an editor entry.
     #[test]
     fn every_method_builtin_the_parser_routes_has_an_entry() {
-        let missing: Vec<&str> = crate::parser::METHOD_BUILTINS
+        let missing: Vec<&str> = crate::prelude::builtins()
             .iter()
-            .map(|(name, _)| *name)
-            .filter(|name| !ALL_BUILTIN_METHODS.iter().any(|b| b.name == *name))
+            .filter(|b| b.hover.is_none())
+            .filter_map(|b| b.method)
             .collect();
         assert!(
             missing.is_empty(),
@@ -3193,7 +3056,7 @@ mod tests {
     /// Every entry says something: a blank hover reads as a broken editor.
     #[test]
     fn every_builtin_method_entry_describes_itself() {
-        for b in ALL_BUILTIN_METHODS {
+        for (b, _) in builtin_methods() {
             assert!(
                 b.detail.contains("—") && b.detail.len() > 20,
                 "`{}` has no readable detail: {:?}",

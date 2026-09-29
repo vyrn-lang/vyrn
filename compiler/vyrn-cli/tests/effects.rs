@@ -432,16 +432,8 @@ fn run_corpus() {
                 }
             }
         }
-        // A variant constructor takes its payload and does nothing else.
         let decls = vyrn_frontend::types::decl_map(&program);
-        let variants: BTreeSet<&str> = decls
-            .values()
-            .filter_map(|d| match &d.base {
-                vyrn_frontend::ast::Type::Enum(vs) => Some(vs),
-                _ => None,
-            })
-            .flat_map(|vs| vs.iter().map(|v| v.name.as_str()))
-            .collect();
+        let pure = effects::PureNames::new(&decls);
         let externs: BTreeSet<&str> = program
             .functions
             .iter()
@@ -465,16 +457,10 @@ fn run_corpus() {
             if let Some(idx) = place_tops.get(name) {
                 return Callee::Bodies(idx.clone());
             }
-            if vyrn_frontend::prelude::signature(name).is_some()
-                || vyrn_frontend::checker::RESERVED.contains(&name)
-                || name.starts_with('@')
-                || name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
-                || name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX)
-                || program.functions.iter().any(|f| f.name == name)
-                || variants.contains(name)
-                || decls.contains_key(name)
-                || matches!(name, "Some" | "Ok" | "Err" | "logger" | "print")
-            {
+            // A program function without a judged body (a generic reached only
+            // from a `test` body, a generic declared release) is judged pure
+            // here: a hole the survey does not count.
+            if pure.contains(name) || program.functions.iter().any(|f| f.name == name) {
                 return Callee::Pure;
             }
             Callee::Unknown
@@ -897,7 +883,7 @@ fn collect_callees(stmts: &[vyrn_lower::core::St], out: &mut BTreeSet<String>) {
 }
 
 /// The effect lattice, one row per atom: its effect, and whether a generator
-/// may call it. A second statement of `effects::ATOMS` and `gen_allows` on
+/// may call it. A second statement of `effects::atoms` and `gen_allows` on
 /// purpose: an edit to either is a changed refusal, and fails here until this
 /// table moves with it.
 const LATTICE: &[(&str, &str, bool)] = &[
@@ -949,15 +935,13 @@ fn the_lattice_is_the_table() {
             (n.to_string(), effect)
         })
         .collect();
-    let from_code: BTreeSet<(String, Effect)> = effects::ATOMS
-        .iter()
-        .map(|(n, e)| (n.to_string(), *e))
-        .collect();
+    let from_code: BTreeSet<(String, Effect)> =
+        effects::atoms().map(|(n, e)| (n.to_string(), e)).collect();
     let only_table: Vec<_> = from_table.difference(&from_code).collect();
     let only_code: Vec<_> = from_code.difference(&from_table).collect();
     assert!(
         only_table.is_empty() && only_code.is_empty(),
-        "LATTICE and effects::ATOMS differ; in the table only: {only_table:?}; in the code only: {only_code:?}"
+        "LATTICE and effects::atoms() differ; in the table only: {only_table:?}; in the code only: {only_code:?}"
     );
     // The generation fence asks `gen_allows` alone, so an edited row is a changed refusal.
     let wrong: Vec<String> = LATTICE

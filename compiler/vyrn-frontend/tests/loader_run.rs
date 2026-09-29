@@ -43,30 +43,27 @@ const RT_FILES: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    /// [`RT_MODULES`] spells each route's reserved name in full so [`routed_builtin`]
-    /// returns a `&'static str`; a row naming a spelling the decl rename never produces
-    /// calls an undefined function. No builtin may be claimed by two modules.
+    /// A builtin row spells its route's reserved name in full, so [`routed_builtin`]
+    /// returns a `&'static str`; a route naming a spelling the decl rename never
+    /// produces calls an undefined function. One module's prefix claims each route.
     #[test]
     fn every_route_is_spelled_with_its_modules_prefix() {
-        let mut seen: Vec<&str> = Vec::new();
+        for b in vyrn_frontend::prelude::builtins() {
+            for reserved in b.route.iter().chain(&b.gen_route) {
+                let owners = RT_MODULES
+                    .iter()
+                    .filter(|rt| reserved.starts_with(rt.prefix))
+                    .count();
+                assert_eq!(
+                    owners, 1,
+                    "`{}` routes to `{reserved}`, which {owners} modules' prefixes claim",
+                    b.name
+                );
+            }
+            assert_eq!(routed_builtin(b.name), b.route);
+        }
         for rt in RT_MODULES {
             assert!(rt.prefix.ends_with('$'), "`{}` must end in `$`", rt.prefix);
-            for (builtin, reserved) in rt.routes {
-                assert_eq!(
-                    *reserved,
-                    format!("{}{}", rt.prefix, reserved.trim_start_matches(rt.prefix)),
-                    "`{builtin}` names `{reserved}`, which is not `{}`-prefixed",
-                    rt.prefix
-                );
-                assert!(
-                    reserved.starts_with(rt.prefix),
-                    "`{reserved}` vs `{}`",
-                    rt.prefix
-                );
-                assert!(!seen.contains(builtin), "`{builtin}` is routed twice");
-                seen.push(builtin);
-                assert_eq!(routed_builtin(builtin), Some(*reserved));
-            }
             for b in rt.desugared {
                 assert!(
                     routed_builtin(b).is_none(),
@@ -78,14 +75,12 @@ mod tests {
         // reserved; an `@`-prefixed method name is unspellable and needs no guard. Same
         // hazard as `movecheck::every_view_and_sink_name_is_reserved` and
         // `parser::every_method_builtin_is_reserved_or_shadowable`.
-        for rt in RT_MODULES {
-            for (builtin, _) in rt.routes {
-                assert!(
-                    builtin.starts_with('@') || vyrn_frontend::checker::RESERVED.contains(builtin),
-                    "`{builtin}` is routed to a std function but is not reserved, so a \
-                     user declaration of that name would be silently unreachable"
-                );
-            }
+        for (builtin, _) in RT_MODULES.iter().flat_map(|rt| rt.routes()) {
+            assert!(
+                builtin.starts_with('@') || vyrn_frontend::checker::RESERVED.contains(&builtin),
+                "`{builtin}` is routed to a std function but is not reserved, so a \
+                 user declaration of that name would be silently unreachable"
+            );
         }
         assert!(routed_builtin("print").is_none());
         // A builtin with a free spelling needs no route; an import does the same work.
@@ -99,31 +94,6 @@ mod tests {
                 gone.hint(name)
             );
         }
-        let routes: Vec<&str> = RT_MODULES
-            .iter()
-            .flat_map(|rt| rt.routes)
-            .map(|(b, _)| *b)
-            .collect();
-        assert_eq!(
-            routes,
-            vec![
-                "@charCount",
-                "lineAt",
-                "colAt",
-                "args",
-                "readLine",
-                "parse",
-                "readFile",
-                "readFileBytes",
-                "writeFile",
-                "writeFileBytes",
-                "writeStdout",
-                "renameFile",
-                "fsyncFile",
-                "listDir",
-                "listDirKinds"
-            ]
-        );
     }
 
     /// [`F64_STR`] is called by two backends, so its module must be in the table with a
