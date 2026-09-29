@@ -329,7 +329,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
-        kept: RefCell::new(Vec::new()),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -347,9 +346,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         globals: HashMap::new(),
         gappend: HashMap::new(),
         externs,
-        // The call-argument temporaries released at the call, cloned before `ownership` is
-        // moved from.
-        plan: ownership.plan.clone(),
         // The core's answers, folded once by the placer inside `own::analyze` above.
         facts: vyrn_lower::core::facts(),
         releases: ownership.releases,
@@ -953,10 +949,6 @@ struct Cx<'a> {
     /// the literal's own body instead of a clone. A hit is the program's node, since the program
     /// outlives every walk. A miss is a literal in a leaked desugar, and the caller clones it.
     lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
-    /// The nodes this backend makes or copies and then hands to a walk that
-    /// keys on their addresses, kept alive for the compile: a key built from a
-    /// node's address is sound only while the node lives (#444).
-    kept: RefCell<Vec<Rc<dyn std::any::Any>>>,
     /// Every `impl` block, for `place` projection lookup: a projection is not a function, so
     /// `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -1004,8 +996,6 @@ struct Cx<'a> {
     skipped: std::collections::HashSet<String>,
     /// Per function: every release step placed, at the exit that runs it, in run order.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
-    /// The per-node release decisions.
-    plan: vyrn_frontend::own::ReleasePlan,
     /// The core's statement of the releases this emitter emits, and their only source. `None`
     /// in a host that never installed the placer, and then no such release is emitted.
     facts: Option<vyrn_lower::core::Facts>,
@@ -1029,10 +1019,10 @@ struct Cx<'a> {
 impl<'a> Cx<'a> {
     /// Whether the container's release at this `for` walks the buffer alone, as the core states
     /// ([`vyrn_lower::core::Facts::loop_buffer_only`]).
-    fn loop_buffer_only(&self, node: usize) -> bool {
+    fn loop_buffer_only(&self, node: NodeId) -> bool {
         self.facts
             .as_ref()
-            .is_some_and(|f| f.loop_buffer_only.contains(&self.plan.key_of(node)))
+            .is_some_and(|f| f.loop_buffer_only.contains(&node))
     }
 
     /// Substitutes the monomorphization this lowering is inside.
@@ -1072,14 +1062,6 @@ impl<'a> Cx<'a> {
     /// a copy are one walk per sum, not per spelling.
     fn sum_vs(&self, ty: &Type) -> Option<Vec<EnumVariant>> {
         crate::sum_variants_of(&self.sub(ty), &self.types)
-    }
-
-    /// `node`, moved where it lives as long as this `Cx`, so its address keys
-    /// nothing else for the whole compile.
-    fn keep<T: 'static>(&self, node: T) -> Rc<T> {
-        let kept = Rc::new(node);
-        self.kept.borrow_mut().push(kept.clone());
-        kept
     }
 
     /// Whether a narrow scalar load of `ty` sign-extends: [`load_of`]'s second argument, read off
@@ -1616,10 +1598,10 @@ struct Fn_<'a, 'p> {
     /// What each owned binding is released with, keyed by `own`'s key: the `Stmt::Let`'s node
     /// address, or the construct's for a temporary it owns. The order is
     /// [`vyrn_frontend::own::Ownership::releases`]'; this is a lookup table.
-    rel_slots: HashMap<usize, RelSlot>,
+    rel_slots: HashMap<NodeId, RelSlot>,
     /// The release steps placed at every exit of this body, keyed by the node the exit is at.
     /// Read, never derived.
-    placed: HashMap<(ExitKind, usize), Vec<(usize, Option<Vec<String>>)>>,
+    placed: HashMap<(ExitKind, NodeId), Vec<(NodeId, Option<Vec<String>>)>>,
     /// Lexical `region` depth in this body, so an exit edge knows how many arena scopes it leaves.
     /// The runtime counter is dynamic; this is the part this body's own `br`s unwind past.
     region_depth: u32,
@@ -1888,7 +1870,7 @@ fn lower_body(
             let name = (cx_fn.fn_binds.iter())
                 .find(|(_, bnd)| bnd.cap_srcs == [p.name.as_str()])
                 .map_or(&p.name, |(n, _)| n);
-            let key = cx.declared_param(f, name, p) as *const vyrn_frontend::ast::Param as usize;
+            let key = cx.declared_param(f, name, p).id();
             if cx_fn.releases_whole(key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
                     cx_fn.register_rel(key, place, r);
@@ -2418,7 +2400,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Record how one owned binding is released; the placement decides where and when.
-    fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {
+    fn register_rel(&mut self, key: NodeId, place: Place, rel: Rel) {
         self.rel_slots.insert(key, RelSlot { place, rel });
     }
 
@@ -2613,7 +2595,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The release a value of `ty` bound at node `key` owes: [`Fn_::rel_for`]'s, or the buffer
     /// alone where `key` is a `for` whose elements all left through the loop variable
     /// ([`Cx::loop_buffer_only`]).
-    fn rel_owed(&mut self, key: usize, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
+    fn rel_owed(&mut self, key: NodeId, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
         let buffer = self.cx.loop_buffer_only(key);
         Ok(self
             .rel_for(ty, line)?
@@ -3278,7 +3260,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// It starts owned only when this `let` owns its initializer: `let mut s = r.name` is a
     /// borrow, and a `literal` initializer is a data-segment address that must not grow.
-    fn str_append_shadow(&mut self, b: &mut Frame, l: u32, at: u32, site: usize, literal: bool) {
+    fn str_append_shadow(&mut self, b: &mut Frame, l: u32, at: u32, site: NodeId, literal: bool) {
         let owns = !literal && self.releases_whole(site);
         self.str_append.insert(l, at);
         b.slot(at)
@@ -4856,10 +4838,11 @@ impl<'p> Fn_<'_, 'p> {
         caps: Option<&[(String, Type)]>,
         line: usize,
     ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
-        // The key is the literal's address. A literal outside the program dies with its tree
-        // and its address can be reused, so the key names a copy this `Cx` keeps.
-        let kept = self.lambda(at).is_none().then(|| self.cx.keep(at.clone()));
-        let at = kept.as_deref().unwrap_or(at);
+        assert_ne!(
+            at.id(),
+            NodeId::NONE,
+            "a lambda lifted from an unnumbered tree"
+        );
         let Expr::Lambda {
             params,
             body,
@@ -4958,30 +4941,7 @@ impl<'p> Fn_<'_, 'p> {
                 },
             };
         }
-        // A shell's body is a clone, so its nodes are aliased to the source's for plan queries.
-        // Statements live in the Vec's buffer and expressions behind boxes, so the addresses
-        // survive the move into the queue's `Rc`.
-        if let Body::Shell = queued {
-            let (mut orig, mut clone) = (Vec::new(), Vec::new());
-            match body {
-                LambdaBody::Block(src) => {
-                    vyrn_frontend::ast::node_addrs(src, &mut orig);
-                    vyrn_frontend::ast::node_addrs(&sf.body, &mut clone);
-                }
-                LambdaBody::Expr(src) => {
-                    vyrn_frontend::ast::node_addrs_val(src, &mut orig);
-                    match sf.body.stmts.first() {
-                        Some(Stmt::Expr(e, _)) | Some(Stmt::Return { value: Some(e), .. }) => {
-                            vyrn_frontend::ast::node_addrs_val(e, &mut clone)
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let pairs: Vec<(usize, usize)> = clone.into_iter().zip(orig).collect();
-            self.cx.plan.alias_clones(&pairs);
-        }
-        // Keyed by address, shape and substitution: a literal in a generic body lifts once per
+        // Keyed by node, shape and substitution: a literal in a generic body lifts once per
         // instantiation, even when the type parameter appears only in a statement.
         let mut shape: Vec<Type> = cap_tys.clone();
         shape.extend(ptys.iter().cloned());
@@ -7490,7 +7450,7 @@ impl<'p> Fn_<'_, 'p> {
     /// a release exists; only a row says one runs here. A construct that took its scrutinee
     /// has no row, so it frees the boxes its binders came out of (`releaseacrossexit`'s
     /// `overIfLet`).
-    fn releases_whole(&self, key: usize) -> bool {
+    fn releases_whole(&self, key: NodeId) -> bool {
         self.placed
             .values()
             .any(|rows| rows.iter().any(|(binding, _)| *binding == key))
@@ -10437,9 +10397,15 @@ impl<'p> Fn_<'_, 'p> {
                     cond,
                     then,
                     els,
-                    site: 0,
+                    site: NodeId::NONE,
                 } if then.is_empty()
-                    && matches!(els.as_slice(), [St::Break { site: 0, .. }])
+                    && matches!(
+                        els.as_slice(),
+                        [St::Break {
+                            site: NodeId::NONE,
+                            ..
+                        }]
+                    )
                     && !self.loops.is_empty() =>
                 {
                     self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
@@ -10645,7 +10611,7 @@ impl<'p> Fn_<'_, 'p> {
         w: &mut Walked,
         n: vyrn_lower::core::Name,
         l: u32,
-        site: usize,
+        site: NodeId,
         literal: bool,
     ) {
         let from = b.mark();
@@ -12904,11 +12870,11 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The annotation of each annotated `let` `walk` reaches, keyed as the plan keys a binding.
-    fn annotations(&self, walk: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<(usize, Type)> {
+    fn annotations(&self, walk: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<(NodeId, Type)> {
         let mut out = Vec::new();
         walk(&mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = self.cx.plan.key_of(s as *const Stmt as usize);
+                let at = s.id();
                 out.push((at, t.clone()));
             }
         });
@@ -12919,7 +12885,7 @@ impl<'p> Fn_<'_, 'p> {
     /// as is ([`Fn_::core_as_is`]). The row then does not state the annotation's layout.
     fn annotated_apart(
         &self,
-        annotated: &[(usize, Type)],
+        annotated: &[(NodeId, Type)],
         info: &vyrn_lower::core::NameInfo,
     ) -> bool {
         info.binding.is_some_and(|at| {
@@ -12935,7 +12901,7 @@ impl<'p> Fn_<'_, 'p> {
         let mut found = false;
         each_block(blk, &mut |_| {}, &mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = s as *const Stmt as usize;
+                let at = s.id();
                 found |= self.checks(t)
                     && !body
                         .names
@@ -14154,11 +14120,9 @@ mod tests {
 
     fn cx() -> Cx<'static> {
         Cx {
-            plan: Default::default(),
             facts: None,
             types: HashMap::new(),
             lambdas: HashMap::new(),
-            kept: RefCell::new(Vec::new()),
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,

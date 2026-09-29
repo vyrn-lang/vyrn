@@ -34,7 +34,7 @@
 //!   of the global. Every other unowned name is invisible here.
 
 use crate::core::{Arg, Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Val, Walk};
-use vyrn_frontend::ast::Capability;
+use vyrn_frontend::ast::{Capability, NodeId};
 use vyrn_frontend::own::Exit;
 
 /// A release the plan owes and did not place: `name` is still held where the
@@ -43,7 +43,7 @@ use vyrn_frontend::own::Exit;
 #[derive(Debug, Clone)]
 pub struct Missing {
     pub exit: Exit,
-    pub site: usize,
+    pub site: NodeId,
     pub name: Name,
     pub kind: MissingKind,
     /// The holes in `name` where the release runs, each as `.f.g` or `.[]`, so
@@ -483,7 +483,7 @@ struct Kernel<'b> {
     /// index, binders. A binder still held at an exit inside the arm is the
     /// arm's row too: the emitters key that table by the arm, and no exit row
     /// can name an arm binder.
-    arms: Vec<(usize, u32, Vec<Name>)>,
+    arms: Vec<(NodeId, u32, Vec<Name>)>,
     /// The binders an arm binds as a read out of its scrutinee
     /// ([`crate::core::Arm::reads`]): an alias whether or not the value owns
     /// heap, because the emitter holds the payload's address.
@@ -616,7 +616,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
         // The plan releases the parameters at the body's own block.
         let site = match body.stmts.first() {
             Some(St::Block { site, .. }) => *site,
-            _ => 0,
+            _ => NodeId::NONE,
         };
         let ended = k.scope_end(&mut st, &all_names(body), Exit::Block, site);
         k.also(ended);
@@ -1370,7 +1370,7 @@ impl<'b> Kernel<'b> {
         st: &mut State,
         names: &[Name],
         exit: Exit,
-        site: usize,
+        site: NodeId,
     ) -> Result<(), Refusal> {
         self.ending.set(true);
         let mark = self.missing.len();
@@ -1389,7 +1389,7 @@ impl<'b> Kernel<'b> {
         st: &mut State,
         names: &[Name],
         exit: Exit,
-        site: usize,
+        site: NodeId,
     ) -> Result<(), Refusal> {
         for n in names {
             if self.owned(*n) && st.own[*n as usize] == Own::Static {
@@ -1416,11 +1416,11 @@ impl<'b> Kernel<'b> {
                     // `gqlResolve`) takes the exit row instead, as
                     // [`Kernel::equalize`] rules one level down.
                     let (exit, site, kind) = match self.arms.last() {
-                        Some((s, arm, binds)) if *s != 0 && binds.contains(n) => {
+                        Some((s, arm, binds)) if *s != NodeId::NONE && binds.contains(n) => {
                             (Exit::Block, *s, MissingKind::ArmBinder { arm: *arm })
                         }
                         Some((s, arm, _))
-                            if *s != 0
+                            if *s != NodeId::NONE
                                 && !self.body.names[*n as usize].source.starts_with('@')
                                 && self.body.names[*n as usize].holes.is_empty() =>
                         {
@@ -1466,7 +1466,7 @@ impl<'b> Kernel<'b> {
         st: &mut State,
         n: Name,
         holes: &[String],
-        at: Option<(Exit, usize)>,
+        at: Option<(Exit, NodeId)>,
     ) -> Result<(), Refusal> {
         if !self.owned(n) {
             // A release is a take, so releasing a borrow is refused.
@@ -1829,7 +1829,10 @@ impl<'b> Kernel<'b> {
             return;
         };
         if std::env::var("VYRN_KERNEL_TRACE").is_ok() {
-            eprintln!("owe-store: {} line {} site {at}", self.body.name, self.here);
+            eprintln!(
+                "owe-store: {} line {} site {}",
+                self.body.name, self.here, at.0
+            );
         }
         self.missing.push(Missing {
             exit: Exit::Block,
@@ -1950,7 +1953,7 @@ impl<'b> Kernel<'b> {
     /// A statement list that is not a source block: what it binds ends with
     /// it, at site 0.
     fn stmts(&mut self, stmts: &[St], st: &mut State) -> Result<(), Refusal> {
-        self.stmts_at(stmts, st, 0)
+        self.stmts_at(stmts, st, NodeId::NONE)
     }
 
     fn also(&mut self, r: Result<(), Refusal>) {
@@ -1959,7 +1962,7 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    fn stmts_at(&mut self, stmts: &[St], st: &mut State, site: usize) -> Result<(), Refusal> {
+    fn stmts_at(&mut self, stmts: &[St], st: &mut State, site: NodeId) -> Result<(), Refusal> {
         let mut bound_here: Vec<Name> = Vec::new();
         for s in stmts {
             if st.ended {
@@ -2383,7 +2386,7 @@ impl<'b> Kernel<'b> {
                     outs.push(a);
                 }
                 self.mirror_payloads(st, on, arms, &mut outs);
-                let site = arms.first().map(|a| a.site).unwrap_or(0);
+                let site = arms.first().map(|a| a.site).unwrap_or(NodeId::NONE);
                 self.equalize(&mut outs, site);
                 *st = self.join(&outs)?;
             }
@@ -2495,7 +2498,7 @@ impl<'b> Kernel<'b> {
         &mut self,
         st: &mut State,
         binds: &[Name],
-        site: usize,
+        site: NodeId,
         arm: u32,
     ) -> Result<(), Refusal> {
         for n in binds {
@@ -2508,7 +2511,7 @@ impl<'b> Kernel<'b> {
             }
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
                 // The arm row carries the binder's holes.
-                if self.mode == Mode::Place && site != 0 {
+                if self.mode == Mode::Place && site != NodeId::NONE {
                     let holes = self.holes_owned(st, *n);
                     self.owe(
                         st,
@@ -2535,8 +2538,8 @@ impl<'b> Kernel<'b> {
     /// Rule N in placement mode: where one live edge of a join took
     /// a name another holds, the holding edges release it into the plan's
     /// edge table. In judging mode `join` refuses the disagreement.
-    fn equalize(&mut self, edges: &mut [State], site: usize) {
-        if self.mode != Mode::Place || site == 0 {
+    fn equalize(&mut self, edges: &mut [State], site: NodeId) {
+        if self.mode != Mode::Place || site == NodeId::NONE {
             return;
         }
         for n in 0..self.body.names.len() as Name {
@@ -2643,7 +2646,7 @@ impl<'b> Kernel<'b> {
     }
 
     fn back_edge(&mut self, at: &mut State, ctx: &LoopCtx) -> Result<(), Refusal> {
-        self.scope_end(at, &ctx.bound_inside, Exit::Block, 0)?;
+        self.scope_end(at, &ctx.bound_inside, Exit::Block, NodeId::NONE)?;
         self.same_outside(at, &ctx.entry, &ctx.bound_inside)
     }
 

@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
-    ArmBody, BinOp, Binder, Block, Capability, Expr, Function, LambdaBody, MatchArm, NodeId,
+    ArmBody, BinOp, Binder, Block, Capability, Expr, Function, Id, LambdaBody, MatchArm, NodeId,
     Pattern, Program, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::Owned;
@@ -52,20 +52,20 @@ pub struct NameInfo {
     pub line: usize,
     /// The node the plan keys this binding by (a `Stmt::Let`, a parameter).
     /// `None` for a temporary this pass minted.
-    pub binding: Option<usize>,
+    pub binding: Option<NodeId>,
     /// For the unnamed receiver of a field read (`parse(q).sels`): the
     /// `Expr::Field` node that keys the plan's receiver-free row. The placer
     /// frees the receiver right after the read, minus the field it took.
-    pub receiver: Option<usize>,
+    pub receiver: Option<NodeId>,
     /// For the unnamed receiver of a heap field or element read the consumer
     /// borrows (`f(x).rhs.startsWith("{")`): the producing node, which keys
     /// the argument-temporary drop. Set only where the consumer is a call or
     /// an operator, the two sites the compiled backends drain temporaries at.
-    pub producer: Option<usize>,
+    pub producer: Option<NodeId>,
     /// For a call-argument temporary the caller releases after the call: the
     /// argument's node, the key of the plan's `arg_drops` row. The release is
     /// the `St::Drop` the binding after the call queues.
-    pub arg_drop: Option<usize>,
+    pub arg_drop: Option<NodeId>,
     /// The holes the plan's release walk skips for this binding, spelled
     /// `.f.g`. A `Drop` of the name walks around exactly these; a placed row
     /// may carry its own.
@@ -268,10 +268,10 @@ impl BorrowKind {
 pub enum Site {
     #[default]
     None,
-    Node(usize),
+    Node(NodeId),
     /// The join whose edge owes this release, and the edge: 0/1 for an
     /// `if`'s then/else, the arm's source index for a `match`.
-    Edge(usize, u32),
+    Edge(NodeId, u32),
 }
 
 /// The value of a literal. The width is not here: an integer literal's type
@@ -599,7 +599,7 @@ pub enum St {
         name: Name,
         holes: Vec<String>,
         exit: Exit,
-        site: usize,
+        site: NodeId,
     },
     If {
         cond: Val,
@@ -607,18 +607,18 @@ pub enum St {
         els: Vec<St>,
         /// The `if` statement, the plan's key for its edge releases; 0 for
         /// an `if` this pass made up.
-        site: usize,
+        site: NodeId,
     },
     /// A loop, and the `while` or `for` it came from; `0` for a loop this pass
     /// made up. A `while`'s exit is a two-way branch at the head.
     Loop {
         body: Vec<St>,
-        site: usize,
+        site: NodeId,
     },
     /// A source block: its own scope, and the site the plan keys its
     /// fall-through release rows by.
     Block {
-        site: usize,
+        site: NodeId,
         body: Vec<St>,
         /// `region { .. }`: an arena scope whose values the exit
         /// frees together. The kernel judges it as a plain block; an emitter
@@ -628,17 +628,17 @@ pub enum St {
     /// `site` is the statement's node and `line` its line; both 0 for a break
     /// this pass made up.
     Break {
-        site: usize,
+        site: NodeId,
         line: usize,
     },
     Continue {
-        site: usize,
+        site: NodeId,
         line: usize,
     },
     Return {
         value: Option<Val>,
         /// The `return` statement, or the `?` expression when `is_try`.
-        site: usize,
+        site: NodeId,
         is_try: bool,
         line: usize,
     },
@@ -662,7 +662,7 @@ pub enum St {
         /// The node the plan keys this switch and its [`Arm`]s by: the `if
         /// let` statement, or the `match` or `?` expression. `0` for a switch
         /// this pass made up.
-        site: usize,
+        site: NodeId,
         line: usize,
     },
     /// An expression for its effect, its line, and the statement it came
@@ -671,7 +671,7 @@ pub enum St {
     Do {
         rhs: Rhs,
         line: usize,
-        site: usize,
+        site: NodeId,
     },
     /// A refusal or a `panic`: the path ends here and owes nothing.
     Trap,
@@ -690,7 +690,7 @@ pub struct Arm {
     pub test: Test,
     /// The `match`, `if let` or `?` this arm belongs to, and which arm: the
     /// plan's key for an arm payload free and an edge release.
-    pub site: usize,
+    pub site: NodeId,
     pub index: u32,
 }
 
@@ -765,12 +765,12 @@ pub struct Body {
     /// Every construct that may take the value it was handed: its node, the
     /// value's name here, and its shape. [`last_owner`] decides whether it
     /// does, and the second build acts on that.
-    pub(crate) cands: Vec<(usize, Name, Cand)>,
+    pub(crate) cands: Vec<(NodeId, Name, Cand)>,
     /// The `for` statements whose container release frees the buffer alone,
     /// keyed by the loop's node: every element left through the loop
     /// variable ([`Cand::Elem`]), so a deep walk would free values somebody
     /// else owns. The buffer is field 0 of the growable array's triple.
-    pub(crate) loop_buffers: Vec<usize>,
+    pub(crate) loop_buffers: Vec<NodeId>,
     /// A `drop` whose name no binding in scope answers: the name and the
     /// line. The core has no row for it; [`crate::typed::drops`] refuses it.
     pub unbound_drops: Vec<(String, usize)>,
@@ -1108,7 +1108,7 @@ fn borrow_root(sv: &Val, owns: bool) -> Option<Name> {
 /// A release row is not a read. The rows are derived from the take; letting
 /// a row decide the take made the answer depend on rows the placer had just
 /// added, and the second build then seeded a different take.
-fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
+fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
     let mut out = std::collections::HashSet::new();
     for f in top.frames() {
         if f.cands.is_empty() {
@@ -1166,7 +1166,7 @@ struct Reads {
     bound: Vec<usize>,
     /// Whether the name was handed on rather than only read ([`Cand::Elem`]).
     handed: Vec<bool>,
-    switches: Vec<(usize, Name, usize, usize)>,
+    switches: Vec<(NodeId, Name, usize, usize)>,
     order: usize,
     depth: usize,
 }
@@ -2189,7 +2189,7 @@ fn build_seeded(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
-    seed: &std::collections::HashSet<usize>,
+    seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     let (types, produced, solved) = (
         inst.facts.types.clone(),
@@ -2207,7 +2207,7 @@ fn build_seeded(
     // rows [`augment`] places. The copy adds only the substituted type a
     // `Deep` walks, and nothing below reads a kind.
     let no_steps: Vec<Release> = Vec::new();
-    let mut placed: HashMap<(Exit, usize), Vec<&Release>> = HashMap::new();
+    let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
     for r in own.releases.get(&inst.func.name).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
@@ -2284,7 +2284,7 @@ fn build_seeded(
         b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
         b.body.names[n as usize].mutable = p.capability == Capability::Modify;
         b.scope.push((p.name.clone(), n));
-        b.keyed(n, p as *const _ as usize);
+        b.keyed(n, p.id());
         b.body.params.push(n);
     }
     b.appends = crate::append::append_candidates(&f.body);
@@ -2373,12 +2373,12 @@ fn build_outside_seeded<'a>(
     file: Option<String>,
     block: &Block,
     facts: &NodeTypes<'a>,
-    seed: &std::collections::HashSet<usize>,
+    seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     // No substitution: the body has no type parameters.
     let no_steps: Vec<Release> = Vec::new();
     let steps = own.releases.get(name).unwrap_or(&no_steps);
-    let mut placed: HashMap<(Exit, usize), Vec<&Release>> = HashMap::new();
+    let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
     for r in steps {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
@@ -2419,13 +2419,13 @@ pub fn build_root<'a>(
 ) -> Result<Body, Gap> {
     // `facts` holds every root's; a refusal belongs to the root it is in.
     let mut mine = Vec::new();
-    vyrn_frontend::ast::node_addrs_val(e, &mut mine);
-    let mine: std::collections::HashSet<usize> = mine.into_iter().collect();
+    vyrn_frontend::ast::node_ids(e, &mut mine);
+    let mine: std::collections::HashSet<NodeId> = mine.into_iter().collect();
     let facts = NodeTypes {
         exprs: facts
             .exprs
             .iter()
-            .filter(|(x, _)| mine.contains(&(*x as *const Expr as usize)))
+            .filter(|(x, _)| mine.contains(&x.id()))
             .copied()
             .collect(),
         ..facts.clone()
@@ -2467,17 +2467,17 @@ struct Builder<'a> {
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
     produced: HashMap<NodeId, Type>,
     solved: HashMap<NodeId, Vec<(String, Type)>>,
-    placed: HashMap<(Exit, usize), Vec<&'a Release>>,
+    placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     body: Body,
     scope: Vec<(String, Name)>,
     /// The plan keys a release by the node that owns the value: a `Stmt::Let`,
     /// a parameter, or the construct that owns a temporary.
-    by_binding: HashMap<usize, Name>,
+    by_binding: HashMap<NodeId, Name>,
     temps: u32,
     /// An unnamed receiver minted for a field or element read, with the node
     /// that produced it, so the read can release it when the plan says the
     /// frame owns it.
-    pending_receiver: Option<(Name, usize, bool)>,
+    pending_receiver: Option<(Name, NodeId, bool)>,
     /// How many non-lending calls and operators enclose the expression being
     /// built. The compiled backends drain argument temporaries at each, so a
     /// receiver borrowed under one can be freed there.
@@ -2500,7 +2500,7 @@ struct Builder<'a> {
     walks: Vec<Option<Unreached>>,
     /// The constructs this build may take their named scrutinee at, as
     /// [`last_owner`] decided over the previous build. Empty on the first.
-    seed: &'a std::collections::HashSet<usize>,
+    seed: &'a std::collections::HashSet<NodeId>,
     /// One entry per enclosing loop: the name count when its body opened. A
     /// name below the innermost entry is bound outside the loop, so handing
     /// it out of a join arm frees it once per turn ([`Builder::alias_out`]).
@@ -2550,10 +2550,10 @@ impl<'a> Builder<'a> {
         program: &'a Program,
         own: &'a Ownership,
         facts: &NodeTypes<'a>,
-        seed: &'a std::collections::HashSet<usize>,
+        seed: &'a std::collections::HashSet<NodeId>,
         name: String,
         file: Option<String>,
-        placed: HashMap<(Exit, usize), Vec<&'a Release>>,
+        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     ) -> Self {
         let (types, produced, solved) = (
             facts.types.clone(),
@@ -2658,13 +2658,14 @@ impl<'a> Builder<'a> {
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
     fn keyed_let(&mut self, n: Name, s: &Stmt) {
-        self.keyed(n, s as *const Stmt as usize);
+        self.keyed(n, s.id());
         self.body.names[n as usize].bound_by_let = true;
         self.body.names[n as usize].mutable = matches!(s, Stmt::Let { mutable: true, .. });
     }
 
     /// Records the plan's key for a name, and the name for the key.
-    fn keyed(&mut self, n: Name, binding: usize) {
+    fn keyed(&mut self, n: Name, binding: NodeId) {
+        assert_ne!(binding, NodeId::NONE, "a binding keyed by no node");
         self.body.names[n as usize].binding = Some(binding);
         self.by_binding.insert(binding, n);
     }
@@ -2897,7 +2898,7 @@ impl<'a> Builder<'a> {
         scrutinee: &'a Expr,
         then_block: &'a Block,
         else_block: Option<&'a Block>,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<bool, Gap> {
@@ -2953,7 +2954,7 @@ impl<'a> Builder<'a> {
         pattern: &Pattern,
         then_block: &'a Block,
         else_block: Option<&'a Block>,
-        sid: usize,
+        sid: NodeId,
         name: &str,
         line: usize,
         out: &mut Vec<St>,
@@ -3131,7 +3132,7 @@ impl<'a> Builder<'a> {
                     targets: Vec::new(),
                 },
                 line,
-                site: 0,
+                site: NodeId::NONE,
             });
         }
         for t in std::mem::take(&mut self.after_of_rhs) {
@@ -3188,7 +3189,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The releases the plan placed at one exit, as drops, in the plan's order.
-    fn drops_at(&self, exit: Exit, site: usize, out: &mut Vec<St>) -> Result<(), Gap> {
+    fn drops_at(&self, exit: Exit, site: NodeId, out: &mut Vec<St>) -> Result<(), Gap> {
         self.drops_at_but(exit, site, None, out)
     }
 
@@ -3197,7 +3198,7 @@ impl<'a> Builder<'a> {
     fn drops_at_but(
         &self,
         exit: Exit,
-        site: usize,
+        site: NodeId,
         keep: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3248,7 +3249,7 @@ impl<'a> Builder<'a> {
     fn return_exit(
         &mut self,
         v: Option<Val>,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3284,7 +3285,7 @@ impl<'a> Builder<'a> {
     fn return_through(
         &mut self,
         e: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<bool, Gap> {
@@ -3296,7 +3297,7 @@ impl<'a> Builder<'a> {
                 line: at,
                 id: _,
             } => {
-                let site = e as *const Expr as usize;
+                let site = e.id();
                 let c = self.condition(cond, "if", *at, out)?;
                 let mut t = Vec::new();
                 self.arm_returns(then_branch, sid, line, &mut t)?;
@@ -3317,7 +3318,7 @@ impl<'a> Builder<'a> {
                 ..
             } if arms.iter().all(|a| matches!(a.body, ArmBody::Expr(_))) => {
                 let sty = self.ty_of(scrutinee)?;
-                let mid = e as *const Expr as usize;
+                let mid = e.id();
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
@@ -3374,7 +3375,7 @@ impl<'a> Builder<'a> {
     fn arm_returns(
         &mut self,
         e: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3394,7 +3395,7 @@ impl<'a> Builder<'a> {
     /// the block's site and a row for it can be keyed there.
     fn block_with(&mut self, blk: &'a Block, head: Vec<St>, out: &mut Vec<St>) -> Result<(), Gap> {
         let mark = self.scope.len();
-        let site = blk as *const Block as usize;
+        let site = blk.id();
         let mut body = head;
         self.stmt_list(&blk.stmts, &mut body)?;
         self.drops_at(Exit::Block, site, &mut body)?;
@@ -3452,7 +3453,7 @@ impl<'a> Builder<'a> {
             return gap("an `Iterate` expansion that is no loop", 0);
         };
         let mark = self.scope.len();
-        let site = blk as *const Block as usize;
+        let site = blk.id();
         let mut rows = Vec::new();
         let lent = match iter {
             Expr::Var { name, .. } => self.lookup(name).map(|n| {
@@ -3469,8 +3470,11 @@ impl<'a> Builder<'a> {
         l.push(St::If {
             cond: c,
             then: Vec::new(),
-            els: vec![St::Break { site: 0, line: 0 }],
-            site: 0,
+            els: vec![St::Break {
+                site: NodeId::NONE,
+                line: 0,
+            }],
+            site: NodeId::NONE,
         });
         self.loop_marks.push(self.body.names.len());
         self.walks.push(None);
@@ -3487,7 +3491,7 @@ impl<'a> Builder<'a> {
         self.hoist_headers(&mut l, *line, &mut rows);
         rows.push(St::Loop {
             body: l,
-            site: w as *const Stmt as usize,
+            site: w.id(),
         });
         self.drops_at(Exit::Block, site, &mut rows)?;
         self.scope.truncate(mark);
@@ -3586,7 +3590,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         let store = &ss[lets];
-        let sid = store as *const Stmt as usize;
+        let sid = store.id();
         match store {
             Stmt::SetField {
                 field, value, line, ..
@@ -3833,7 +3837,7 @@ impl<'a> Builder<'a> {
     }
 
     fn stmt_rows(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
-        let sid = s as *const Stmt as usize;
+        let sid = s.id();
         match s {
             Stmt::Let {
                 name,
@@ -4029,8 +4033,7 @@ impl<'a> Builder<'a> {
                 let mentions = vyrn_frontend::ast::mentions_place(value, name);
                 let fresh_str = self.fresh_str(&ty, value);
                 let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
-                let key = self.store_key(sid);
-                let releases = !handed_back && placed_store(key);
+                let releases = !handed_back && placed_store(sid);
                 // Module state owns what it holds and nothing may `consume`
                 // it, so a store into one releases what it replaces whenever
                 // that owns heap.
@@ -4065,10 +4068,10 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
-                    site: Site::Node(key),
+                    site: Site::Node(sid),
                     releases,
                     holes: if releases {
-                        store_holes(key)
+                        store_holes(sid)
                     } else {
                         Vec::new()
                     },
@@ -4242,8 +4245,11 @@ impl<'a> Builder<'a> {
                 l.push(St::If {
                     cond: c,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0, line: 0 }],
-                    site: 0,
+                    els: vec![St::Break {
+                        site: NodeId::NONE,
+                        line: 0,
+                    }],
+                    site: NodeId::NONE,
                 });
                 self.loop_marks.push(self.body.names.len());
                 self.walks.push(None);
@@ -4414,8 +4420,11 @@ impl<'a> Builder<'a> {
                 l.push(St::If {
                     cond,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0, line: 0 }],
-                    site: 0,
+                    els: vec![St::Break {
+                        site: NodeId::NONE,
+                        line: 0,
+                    }],
+                    site: NodeId::NONE,
                 });
                 // Each turn owns its element where the element type owns heap
                 // and either the container is a stream (a pulled element has
@@ -4424,7 +4433,7 @@ impl<'a> Builder<'a> {
                 // this frame owns. A named container outlives the loop, so
                 // `for r in ns` only borrows; a lender's result is somebody
                 // else's buffer.
-                let ekey = vyrn_frontend::own::for_var_key(var);
+                let ekey = body.id();
                 let ic = &self.body.names[owner.unwrap_or(it) as usize];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 let owned =
@@ -4462,9 +4471,9 @@ impl<'a> Builder<'a> {
                         .unwrap_or_default();
                     self.body.names[x as usize].loop_var = Some(of);
                 }
-                // The variable has no `let` node; the plan keys it by its
-                // spelling's buffer, which is one address per loop.
-                self.keyed(x, vyrn_frontend::own::for_var_key(var));
+                // The variable has no node of its own; the body that binds it
+                // keys it.
+                self.keyed(x, ekey);
                 let mut head = vec![St::Let(
                     x,
                     Rhs::Read(Place::Elem(Box::new(Place::Name(it)), index)),
@@ -4636,13 +4645,6 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// The node a store's row is keyed by, which is the node its readers key
-    /// it by: the statement itself, except for a user container's `c[h] = v`,
-    /// whose store statements the `place at` rewrite builds.
-    fn store_key(&self, sid: usize) -> usize {
-        self.own.plan.key_of(sid)
-    }
-
     fn old_for(&self, ty: &Type, releases: bool) -> Old {
         if !self.owns(ty) {
             Old::Nothing
@@ -4659,7 +4661,13 @@ impl<'a> Builder<'a> {
     /// arm ends. The first build states none, so [`crate::kernel::placement`]
     /// reports every held binder, and the second build reads the rows back
     /// out of [`Placed`].
-    fn arm_frees(&mut self, site: usize, arm: u32, binds: &[Name], out: &mut Vec<St>) -> Vec<Name> {
+    fn arm_frees(
+        &mut self,
+        site: NodeId,
+        arm: u32,
+        binds: &[Name],
+        out: &mut Vec<St>,
+    ) -> Vec<Name> {
         let mut frees: Vec<Name> = Vec::new();
         let Some(rows) = placed_arm(site, arm) else {
             return frees;
@@ -4714,8 +4722,11 @@ impl<'a> Builder<'a> {
             St::If {
                 cond: Val::Name(c),
                 then: Vec::new(),
-                els: vec![St::Break { site: 0, line: 0 }],
-                site: 0,
+                els: vec![St::Break {
+                    site: NodeId::NONE,
+                    line: 0,
+                }],
+                site: NodeId::NONE,
             },
         ];
         let e = self.temp(u.elem.clone(), u.line);
@@ -4725,11 +4736,14 @@ impl<'a> Builder<'a> {
         ));
         self.step(u.i, &mut l);
         l.push(St::Drop(e, Site::None, 0, None));
-        out.push(St::Loop { body: l, site: 0 });
+        out.push(St::Loop {
+            body: l,
+            site: NodeId::NONE,
+        });
     }
 
     /// Rule N: the drops one edge of a join owes.
-    fn edge_drops(&mut self, join: usize, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
+    fn edge_drops(&mut self, join: NodeId, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
         let Some(ers) = placed_edges(join) else {
             return Ok(());
         };
@@ -4777,7 +4791,7 @@ impl<'a> Builder<'a> {
         name: &str,
         field: &str,
         value: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -4789,8 +4803,7 @@ impl<'a> Builder<'a> {
         // `s.dense = s.dense.push(i)` releases nothing.
         let handed_back =
             vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
-        let key = self.store_key(sid);
-        let releases = !handed_back && placed_store(key);
+        let releases = !handed_back && placed_store(sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
@@ -4800,10 +4813,10 @@ impl<'a> Builder<'a> {
                 self.old_for(&fty, releases)
             },
             line,
-            site: Site::Node(key),
+            site: Site::Node(sid),
             releases,
             holes: if releases {
-                store_holes(key)
+                store_holes(sid)
             } else {
                 Vec::new()
             },
@@ -4941,7 +4954,7 @@ impl<'a> Builder<'a> {
         name: &str,
         index: &'a Expr,
         value: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -4976,15 +4989,14 @@ impl<'a> Builder<'a> {
             Some(to) => Val::Name(self.checked_temp(&to, stored, line, out)?),
             None => self.val(stored, out)?,
         };
-        let key = self.store_key(sid);
-        let site = Site::Node(key);
+        let site = Site::Node(sid);
         // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
         // `xs[xs.length - 1] = v` read the buffer the store writes into.
         // `xs[i] = xs[j].copy()` hands nothing back.
         let handed_back = (vyrn_frontend::ast::mentions_place(value, name)
             && !self.store_is_fresh(value, name))
             || vyrn_frontend::ast::mentions_place(index, name);
-        let releases = !handed_back && placed_store(key);
+        let releases = !handed_back && placed_store(sid);
         out.push(St::Store {
             place,
             value: v,
@@ -4997,7 +5009,7 @@ impl<'a> Builder<'a> {
             site,
             releases,
             holes: if releases {
-                store_holes(key)
+                store_holes(sid)
             } else {
                 Vec::new()
             },
@@ -5334,7 +5346,7 @@ impl<'a> Builder<'a> {
     fn scrutinee(
         &mut self,
         e: &'a Expr,
-        construct: usize,
+        construct: NodeId,
         lines: Option<(usize, usize)>,
         out: &mut Vec<St>,
     ) -> Result<(Val, bool), Gap> {
@@ -5413,7 +5425,7 @@ impl<'a> Builder<'a> {
     /// moved into the arms' binders and the boxes were freed there. Where it
     /// did not, the binders borrowed and the value is released whole. Records
     /// the candidate; only a site [`last_owner`] seeded takes.
-    fn taken_by(&mut self, t: Name, construct: usize) -> bool {
+    fn taken_by(&mut self, t: Name, construct: NodeId) -> bool {
         if !self.body.names[t as usize].releases {
             return false;
         }
@@ -5423,7 +5435,7 @@ impl<'a> Builder<'a> {
 
     /// [`Builder::taken_by`] at a `for`: whether the loop is the last owner of
     /// its container, so it releases it where it ends ([`Cand::Loop`]).
-    fn taken_by_loop(&mut self, it: Name, sid: usize) -> bool {
+    fn taken_by_loop(&mut self, it: Name, sid: NodeId) -> bool {
         self.body.cands.push((sid, it, Cand::Loop));
         self.seed.contains(&sid)
     }
@@ -5507,9 +5519,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Vec<Name>, Gap> {
         let decls = self.proto.types();
         let rt = vyrn_frontend::types::resolve(sty, &decls);
-        // Each binder's key is the address of the name the reader wrote: one
-        // per binder, the same on every build.
-        let (payloads, variant): (Vec<(String, Type, usize)>, String) = match p {
+        let (payloads, variant): (Vec<(String, Type, NodeId)>, String) = match p {
             Pattern::Other => (Vec::new(), String::new()),
             // `??`'s pair names a tag: variant 1 succeeds, 0 fails.
             Pattern::Success(n) | Pattern::Failure(n) => match &rt {
@@ -5518,13 +5528,7 @@ impl<'a> Builder<'a> {
                     let ps = vs[at]
                         .payload
                         .first()
-                        .map(|t| {
-                            vec![(
-                                n.name.clone(),
-                                t.clone(),
-                                vyrn_frontend::own::binder_key(&n.name),
-                            )]
-                        })
+                        .map(|t| vec![(n.name.clone(), t.clone(), n.id())])
                         .unwrap_or_default();
                     (ps, vs[at].name.clone())
                 }
@@ -5541,7 +5545,7 @@ impl<'a> Builder<'a> {
                     let ps = names
                         .iter()
                         .zip(var.payload.iter().cloned())
-                        .map(|(n, t)| (n.name.clone(), t, vyrn_frontend::own::binder_key(&n.name)))
+                        .map(|(n, t)| (n.name.clone(), t, n.id()))
                         .collect();
                     (ps, var.name.clone())
                 }
@@ -5648,7 +5652,7 @@ impl<'a> Builder<'a> {
         if let (Val::Name(t), Some((callee, ix))) = (&v, at) {
             let t = *t;
             if self.arg_released(e, t, callee, ix) {
-                self.body.names[t as usize].arg_drop = Some(e as *const Expr as usize);
+                self.body.names[t as usize].arg_drop = Some(e.id());
             }
         }
         Ok(v)
@@ -5789,7 +5793,7 @@ impl<'a> Builder<'a> {
                     | Type::Stream(ref et) if !self.proto.owns_heap(et)
             );
         let s = mc::ArgTemp {
-            id: e as *const Expr as usize,
+            id: e.id(),
             callee: callee.to_string(),
             ix,
             line: e.line(),
@@ -5926,7 +5930,7 @@ impl<'a> Builder<'a> {
         let Some((r, producer, malloc)) = self.pending_receiver.take() else {
             return;
         };
-        let node = e as *const Expr as usize;
+        let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
             if placed_producer(producer) {
@@ -6225,7 +6229,7 @@ impl<'a> Builder<'a> {
             LambdaBody::Expr(x) => self.val(x, &mut stmts).map(|v| {
                 stmts.push(St::Return {
                     value: Some(v),
-                    site: 0,
+                    site: NodeId::NONE,
                     is_try: false,
                     line: *line,
                 })
@@ -6567,7 +6571,7 @@ impl<'a> Builder<'a> {
             cond,
             then,
             els,
-            site: 0,
+            site: NodeId::NONE,
         });
         Ok(Rhs::Val(Val::Name(res)))
     }
@@ -6647,7 +6651,7 @@ impl<'a> Builder<'a> {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
-                    self.body.names[r as usize].receiver = Some(e as *const Expr as usize);
+                    self.body.names[r as usize].receiver = Some(e.id());
                 }
                 if self.owns(&fty) {
                     // `let sels = parse(q).sels`: the binding takes the field
@@ -6683,7 +6687,7 @@ impl<'a> Builder<'a> {
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
-                    site: 0,
+                    site: NodeId::NONE,
                 });
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
@@ -6865,7 +6869,7 @@ impl<'a> Builder<'a> {
             } => {
                 let ty = self.ty_of(e)?;
                 // The plan keys an if-expression's edge rows by the expression.
-                let site = e as *const Expr as usize;
+                let site = e.id();
                 let res = self.temp(ty, *line);
                 let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
@@ -6922,7 +6926,7 @@ impl<'a> Builder<'a> {
             } => {
                 let ty = self.ty_of(e)?;
                 let sty = self.ty_of(scrutinee)?;
-                let mid = e as *const Expr as usize;
+                let mid = e.id();
                 let res = self.temp(ty, *line);
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
@@ -6989,7 +6993,7 @@ impl<'a> Builder<'a> {
             Expr::Try { expr, line, id: _ } => {
                 let ty = self.ty_of(e)?;
                 let ity = self.ty_of(expr)?;
-                let tid = e as *const Expr as usize;
+                let tid = e.id();
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
                 let owns = self.owns_boxes(expr, consuming);
@@ -7007,8 +7011,13 @@ impl<'a> Builder<'a> {
                 // Failure: the exit's drops, then the propagated value leaves.
                 let mut fail = Vec::new();
                 let mark = self.scope.len();
+                // Each binder is keyed by a node of the `?`: the error by the
+                // `?` itself, the value by its operand.
                 let fb = self.bind_pattern(
-                    &Pattern::Failure(Binder::synthetic("@err")),
+                    &Pattern::Failure(Binder {
+                        id: Id(tid.0),
+                        ..Binder::synthetic("@err")
+                    }),
                     &ity,
                     consuming,
                     *line,
@@ -7050,7 +7059,10 @@ impl<'a> Builder<'a> {
                 let mut ok = Vec::new();
                 let mark = self.scope.len();
                 let ob = self.bind_pattern(
-                    &Pattern::Success(Binder::synthetic("@ok")),
+                    &Pattern::Success(Binder {
+                        id: Id(expr.id().0),
+                        ..Binder::synthetic("@ok")
+                    }),
                     &ity,
                     consuming,
                     *line,
@@ -7120,7 +7132,7 @@ impl<'a> Builder<'a> {
         sv: Val,
         owns: bool,
         res: Name,
-        tid: usize,
+        tid: NodeId,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         let line = self.body.names[res as usize].line;
@@ -7263,7 +7275,7 @@ impl<'a> Builder<'a> {
                                 e,
                                 Expr::Call { name, .. } if !name.starts_with('@')
                             );
-                            self.pending_receiver = Some((t, e as *const Expr as usize, malloc));
+                            self.pending_receiver = Some((t, e.id(), malloc));
                         }
                         Ok(Place::Name(t))
                     }
@@ -7543,7 +7555,7 @@ impl<'a> Builder<'a> {
                 // checks it again.
                 let t = self.checked_temp(&to, a, line, out)?;
                 if self.arg_released(a, t, name, k) {
-                    self.body.names[t as usize].arg_drop = Some(a as *const Expr as usize);
+                    self.body.names[t as usize].arg_drop = Some(a.id());
                 }
                 Val::Name(t)
             } else if *cap == Capability::Consume {
@@ -7962,50 +7974,51 @@ pub fn join_ty(node: NodeId) -> Option<Type> {
 pub struct Facts {
     /// The `Expr::Field` node of an unnamed receiver the core releases after
     /// the read, and the holes the release walks around.
-    pub receivers: std::collections::HashMap<usize, Vec<String>>,
+    pub receivers: std::collections::HashMap<NodeId, Vec<String>>,
     /// `(match, arm) -> [(binder, holes, kind)]`: the payload binders the
     /// arm's body releases at its end. The kind is the binder type's release
     /// rule, which the interpreter needs; the compiled backends read the type.
-    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>, Option<DropKind>)>>,
+    pub arms:
+        std::collections::HashMap<(NodeId, u32), Vec<(String, Vec<String>, Option<DropKind>)>>,
     /// The store statements and whether each releases its old value: a
     /// `St::Store`'s `releases` at a [`Site::Node`]. An absent site has no
     /// answer here, and a reader falls back to the plan.
-    pub stores: std::collections::HashMap<usize, bool>,
+    pub stores: std::collections::HashMap<NodeId, bool>,
     /// The stores the core stands down at whatever the judgment says: the
     /// value hands the place back (`xs = xs.push(v)`), or the place owns no
     /// heap (`w = 2`). No emitter reads it (`stores` folds both in); the
     /// corpus test uses it to check that every plan row is either released
     /// or stood down.
-    pub stood_down: std::collections::HashSet<usize>,
+    pub stood_down: std::collections::HashSet<NodeId>,
     /// The statement-position calls whose unbound owned result the core
     /// releases: a `St::Drop` at the statement's [`Site::Node`].
-    pub discarded: std::collections::HashSet<usize>,
+    pub discarded: std::collections::HashSet<NodeId>,
     /// The `for x in consume xs` loops that release their container where the
     /// loop ends: a `St::Drop` of a `for_consume` name at the loop's
     /// [`Site::Node`]. No row names this release, and it excludes an exit row
     /// for the container.
-    pub loop_gives_back: std::collections::HashSet<usize>,
+    pub loop_gives_back: std::collections::HashSet<NodeId>,
     /// The `for` statements whose container release frees the buffer alone
     /// ([`Body::loop_buffers`]), keyed by the loop's node. The release is a
     /// placed row at the loop, or [`Facts::loop_gives_back`].
-    pub loop_buffer_only: std::collections::HashSet<usize>,
+    pub loop_buffer_only: std::collections::HashSet<NodeId>,
     /// The call-argument nodes whose temporary the caller releases after the
     /// call ([`NameInfo::arg_drop`]).
-    pub arg_drops: std::collections::HashSet<usize>,
+    pub arg_drops: std::collections::HashSet<NodeId>,
     /// Per join node, the `(name, edge, holes)` releases one edge owes
     /// because another edge took the name: a `St::Drop` at
     /// a [`Site::Edge`].
-    pub edges: std::collections::HashMap<usize, Vec<EdgeRow>>,
+    pub edges: std::collections::HashMap<NodeId, Vec<EdgeRow>>,
     /// The receivers a callee allocated ([`NameInfo::receiver_malloc`]). An
     /// emitter still asks its own region depth.
-    pub receiver_malloc: std::collections::HashSet<usize>,
+    pub receiver_malloc: std::collections::HashSet<NodeId>,
     /// Per `match`, `if let` or `?` node: whether the construct took its
     /// scrutinee ([`St::Switch`]'s `consuming`). An absent site has no
     /// answer here.
-    pub consuming: std::collections::HashMap<usize, bool>,
+    pub consuming: std::collections::HashMap<NodeId, bool>,
     /// The `match`, `if let` or `?` nodes that own the boxes their binders
     /// come out of ([`St::Switch`]'s `owns`, [`Builder::owns_boxes`]).
-    pub owns_scrutinee: std::collections::HashSet<usize>,
+    pub owns_scrutinee: std::collections::HashSet<NodeId>,
 }
 
 /// One edge release: the name, the edge, and the holes the release walks
@@ -8020,43 +8033,43 @@ pub type EdgeRow = (String, u32, Vec<String>);
 pub(crate) struct Placed {
     /// `(switch site, arm) -> [(binder, holes)]`: the payload binders still
     /// held where their arm ends.
-    arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+    arms: std::collections::HashMap<(NodeId, u32), Vec<(String, Vec<String>)>>,
     /// Per join node, the releases one edge owes because another edge took
     /// the name. A sub-place row is spelled `d.line`.
-    edges: std::collections::HashMap<usize, Vec<EdgeRow>>,
+    edges: std::collections::HashMap<NodeId, Vec<EdgeRow>>,
     /// The store nodes the kernel found a held place at: the stores that
     /// release what they displace, with the holes each release walks around.
-    stores: std::collections::HashMap<usize, Vec<String>>,
+    stores: std::collections::HashMap<NodeId, Vec<String>>,
     /// The nodes that produced a borrowed receiver still held, whose free
     /// rides as an argument-temporary drop.
-    producers: std::collections::HashSet<usize>,
+    producers: std::collections::HashSet<NodeId>,
 }
 
 /// Whether the kernel found this store's place still holding. Empty on the
 /// first build, where every store says [`Old::Pending`].
-fn placed_store(site: usize) -> bool {
+fn placed_store(site: NodeId) -> bool {
     PLACED.with(|p| p.borrow().stores.contains_key(&site))
 }
 
 /// The holes the release at a placed store walks around.
-fn store_holes(site: usize) -> Vec<String> {
+fn store_holes(site: NodeId) -> Vec<String> {
     PLACED.with(|p| p.borrow().stores.get(&site).cloned().unwrap_or_default())
 }
 
 /// The binders the kernel found held at the end of one arm. Empty on the
 /// first build.
-fn placed_arm(site: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
+fn placed_arm(site: NodeId, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
     PLACED.with(|p| p.borrow().arms.get(&(site, arm)).cloned())
 }
 
 /// Whether the placer wrote an argument-temporary drop for the receiver this
 /// node produced. Empty on the first build.
-fn placed_producer(node: usize) -> bool {
+fn placed_producer(node: NodeId) -> bool {
     PLACED.with(|p| p.borrow().producers.contains(&node))
 }
 
 /// Rule N's rows for one join, as the kernel equalized its edges.
-fn placed_edges(join: usize) -> Option<Vec<EdgeRow>> {
+fn placed_edges(join: NodeId) -> Option<Vec<EdgeRow>> {
     PLACED.with(|p| p.borrow().edges.get(&join).cloned())
 }
 
@@ -8747,7 +8760,7 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
 
 type Typed = (
     Vec<vyrn_frontend::diagnostics::Diagnostic>,
-    std::collections::HashSet<usize>,
+    std::collections::HashSet<NodeId>,
 );
 
 thread_local! {
@@ -9604,7 +9617,7 @@ fn place_frames(
                 });
                 if fresh {
                     if trace {
-                        eprintln!("placer: {} store at {} releases", body.name, m.site);
+                        eprintln!("placer: {} store at {} releases", body.name, m.site.0);
                     }
                     touched.insert(owner.to_string());
                 }
@@ -9615,7 +9628,7 @@ fn place_frames(
             if trace {
                 eprintln!(
                     "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
-                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
+                    body.name, info.source, info.line, m.kind, m.exit, m.site.0, kind, m.holes
                 );
             }
             // A receiver a consumer borrowed out of ([`NameInfo::producer`]):
@@ -9627,7 +9640,7 @@ fn place_frames(
                 }
                 continue;
             }
-            if m.site == 0 {
+            if m.site == NodeId::NONE {
                 continue;
             }
             let Some(kind) = kind else {

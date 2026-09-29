@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use vyrn_frontend::ast::{Block, EnumVariant, Field, Program, Stmt, Type};
+use vyrn_frontend::ast::{Block, EnumVariant, Field, NodeId, Program, Stmt, Type};
 use vyrn_frontend::own::{analyze, DropKind, Ownership};
 
 /// Parses, then analyses with the placer installed, so the rows are the core's.
@@ -24,7 +24,7 @@ fn analyze_src(src: &str) -> (Ownership, Program) {
 
 /// The kind each binding of `which` is released with, by binding key. A
 /// binding released at several exits carries one kind.
-fn placed(o: &Ownership, which: &str) -> HashMap<usize, DropKind> {
+fn placed(o: &Ownership, which: &str) -> HashMap<NodeId, DropKind> {
     o.releases
         .get(which)
         .map(|rows| rows.iter().map(|r| (r.binding, r.kind.clone())).collect())
@@ -50,12 +50,7 @@ fn kepts(src: &str, which: &str) -> Vec<Option<DropKind>> {
     let d = placed(&o, which);
     let mut lets = Vec::new();
     let_stmts(&f.body, &mut lets);
-    lets.iter()
-        .map(|s| {
-            let k = *s as *const Stmt as usize;
-            d.get(&k).cloned()
-        })
-        .collect()
+    lets.iter().map(|s| d.get(&s.id()).cloned()).collect()
 }
 
 /// `Option<T>`'s release row, as `release_kind` records it.
@@ -82,8 +77,7 @@ fn reclaims(src: &str, name: &str) -> bool {
         .iter()
         .find(|s| matches!(s, Stmt::Let { name: n, .. } if n == name))
         .unwrap();
-    let k = *s as *const Stmt as usize;
-    placed(&o, "main").contains_key(&k)
+    placed(&o, "main").contains_key(&s.id())
 }
 
 /// Every `let` in `body`, in source order, nested blocks included.
