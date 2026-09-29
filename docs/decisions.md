@@ -156,6 +156,7 @@ pull request.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
 - A rule stays in the checker when no other pass refuses the program on the same line. A moved rule keeps its surviving home's sentence.
 - The generation fence stays in the checker, because it is the only judgment that runs before a generator executes.
+- A surface form that another form can state is a parser desugar, so each walker states one form. `if let` and `while let` are a statement `match` with a `Pattern::Other` arm, and take their scrutinee at its last use as `match` does.
 - The interpreter is deleted and there is no `--engine` flag. It was a third value model, and a flag with one legal value is a rule stated twice.
 - The oracle is recorded output (`examples/expected/`) and the per-example wasm SHA-256 manifest checked on every CI platform.
 - Wasm is emitted directly with `wasm-encoder`. No LLVM, clang or sysroot is needed to build or test the compiler.

@@ -123,14 +123,16 @@ fn overHandover()
 
 fn overIfLet()
   {
-    let @t1! = fn maybeRing(read lit true)
-    switch @t1! (taken)
+    let @t2! = fn maybeRing(read lit true)
+    switch @t2! (taken)
       arm(r!)
         {
           do builtin print(read lit "bound")
         }
         drop r!
       arm()
+        {
+        }
     return lit 2
   }
 

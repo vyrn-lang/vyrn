@@ -3866,8 +3866,6 @@ impl BodyVisitMut for Renamer<'_> {
                     *name = ren(self.map, name);
                 }
             }
-            // The variant name follows the rename, as in a `match` arm.
-            Stmt::IfLet { pattern, .. } => self.rename_variant(pattern),
             _ => {}
         }
     }

@@ -143,7 +143,6 @@ fn sections() -> Vec<Section> {
         sec("struct StoredSource", Shared),
         sec("fn module_state_use", Shared),
         sec("fn touches_globals", Surface),
-        sec("fn sum_arm_arity", Refusal),
         sec("struct GlobalRef", Shared),
         sec("struct InitRules", Refusal),
         sec("crate::body_scope_descent!", Shared),

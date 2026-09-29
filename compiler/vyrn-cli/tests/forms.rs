@@ -127,7 +127,7 @@ fn code_only(src: &str) -> String {
 }
 
 /// How many times `code` names `needle` as itself: the next character must not
-/// continue the identifier, or `Stmt::If` would count every `Stmt::IfLet`.
+/// continue the identifier, or `Expr::Try` would count every `Expr::TryConstruct`.
 fn mentions(code: &str, needle: &str) -> usize {
     let bytes = code.as_bytes();
     let mut n = 0usize;

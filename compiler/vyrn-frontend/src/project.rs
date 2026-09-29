@@ -662,18 +662,11 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
                     collect_bindings(e, tag, out);
                 }
             }
-            Stmt::IfLet {
-                pattern,
-                then_block,
-                else_block,
-                ..
-            } => {
-                for n in pattern.binders() {
-                    out.insert(n.name.clone(), format!("@b{tag}.{n}"));
-                }
-                collect_bindings(then_block, tag, out);
-                if let Some(e) = else_block {
-                    collect_bindings(e, tag, out);
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                for arm in arms {
+                    if let crate::ast::ArmBody::Block(b) = &mut arm.body {
+                        collect_bindings(b, tag, out);
+                    }
                 }
             }
             Stmt::While { body, .. } | Stmt::Region { body, .. } => {
@@ -740,11 +733,6 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
                 | Stmt::IndexSet { name, .. }
                 | Stmt::SetField { name, .. }
                 | Stmt::Drop { name, .. } => self.put(name),
-                Stmt::IfLet { pattern, .. } => {
-                    for n in pattern.binders_mut() {
-                        self.put(&mut n.name);
-                    }
-                }
                 Stmt::ForIn { var, .. } => self.put(var),
                 _ => {}
             }
@@ -815,31 +803,14 @@ fn is_under_loop(b: &Block, name: &str) -> bool {
                         return true;
                     }
                 }
-                Stmt::If {
-                    then_block,
-                    else_block,
-                    ..
-                }
-                | Stmt::IfLet {
-                    then_block,
-                    else_block,
-                    ..
-                } => {
-                    if go(then_block, name, in_loop) {
-                        return true;
-                    }
-                    if let Some(e) = else_block {
-                        if go(e, name, in_loop) {
-                            return true;
-                        }
-                    }
-                }
-                Stmt::Region { body, .. } => {
-                    if go(body, name, in_loop) {
+                _ => {
+                    if crate::ast::sub_blocks(s)
+                        .into_iter()
+                        .any(|b| go(b, name, in_loop))
+                    {
                         return true;
                     }
                 }
-                _ => {}
             }
         }
         false
