@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Block, Capability, Function, Param, Stmt, Type, TypeDecl};
+use crate::ast::{Block, Capability, Function, Id, Param, Stmt, Type, TypeDecl};
 use crate::codec::Wire;
 
 /// Placeholder prefix for a name in the injected `std/json`.
@@ -334,6 +334,7 @@ impl Walk<'_> {
             params: crate::types::predicate_binds(decl)
                 .into_iter()
                 .map(|(name, ty, _)| Param {
+                    id: Id::NEW,
                     name,
                     capability: Capability::Read,
                     ty,
@@ -343,7 +344,9 @@ impl Walk<'_> {
                 .collect(),
             ret: Type::Bool,
             body: Block {
+                id: Id::NEW,
                 stmts: vec![Stmt::Return {
+                    id: Id::NEW,
                     value: Some(decl.predicate.clone().expect("predicate present")),
                     line: 0,
                 }],

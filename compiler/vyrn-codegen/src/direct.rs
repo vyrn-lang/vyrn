@@ -1563,7 +1563,10 @@ fn f_shell(line: usize) -> Function {
         type_bounds: HashMap::new(),
         params: Vec::new(),
         ret: Type::Unit,
-        body: Block { stmts: Vec::new() },
+        body: Block {
+            id: Id::NEW,
+            stmts: Vec::new(),
+        },
         line,
         col: 0,
         is_extern: false,
@@ -1715,7 +1718,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
         // The accumulator owns its buffer unless the initializer is a literal, which lives in
         // the data segment.
         if let Some(&at) = cx.gappend.get(&g.name) {
-            let owns = !matches!(g.init, Expr::Str(_));
+            let owns = !matches!(g.init, Expr::Str(_, _));
             b.ins(&Instruction::I32Const(at as i32))
                 .ins(&Instruction::I32Const(owns as i32))
                 .ins(&Instruction::I32Store(word()));
@@ -3797,10 +3800,10 @@ impl<'p> Fn_<'_, 'p> {
     /// dispatched call. Any other kind is a gap, not a guess.
     fn peek_inner(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
         Ok(match e {
-            Expr::Int(_) | Expr::Byte(_) => Type::Int,
-            Expr::Float(_) => Type::Float,
-            Expr::Bool(_) => Type::Bool,
-            Expr::Str(_) => Type::Str,
+            Expr::Int(_, _) | Expr::Byte(_, _) => Type::Int,
+            Expr::Float(_, _) => Type::Float,
+            Expr::Bool(_, _) => Type::Bool,
+            Expr::Str(_, _) => Type::Str,
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
                 let base = self.peek(expr, line)?;
@@ -3810,7 +3813,12 @@ impl<'p> Fn_<'_, 'p> {
                     None => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
                 }
             }
-            Expr::StructLit { name, fields, line } => self.applied_record(name, fields, *line)?,
+            Expr::StructLit {
+                name,
+                fields,
+                line,
+                id: _,
+            } => self.applied_record(name, fields, *line)?,
             Expr::Call { name, args, .. } => match name.as_str() {
                 "blackBox" if args.len() == 1 => self.peek(&args[0], line)?,
                 // `vyrn_frontend::project::AT` and `ELEM`; a match pattern cannot name a path.
@@ -4862,6 +4870,7 @@ impl<'p> Fn_<'_, 'p> {
             body,
             line: at_line,
             col: at_col,
+            id: _,
         } = at
         else {
             return unsupported("a lambda lifted from another expression", line);
@@ -4918,6 +4927,7 @@ impl<'p> Fn_<'_, 'p> {
             .iter()
             .zip(&cap_tys)
             .map(|(n, t)| Param {
+                id: Id::NEW,
                 name: n.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
@@ -4925,6 +4935,7 @@ impl<'p> Fn_<'_, 'p> {
                 col: 0,
             })
             .chain(params.iter().zip(ptys).map(|(n, t)| Param {
+                id: Id::NEW,
                 name: n.name.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
@@ -4939,10 +4950,13 @@ impl<'p> Fn_<'_, 'p> {
             sf.body = match body {
                 LambdaBody::Block(b) => b.clone(),
                 LambdaBody::Expr(e) if self.cx.repr(&ret, line)? == Repr::Unit => Block {
-                    stmts: vec![Stmt::Expr((**e).clone())],
+                    id: Id::NEW,
+                    stmts: vec![Stmt::Expr((**e).clone(), Id::NEW)],
                 },
                 LambdaBody::Expr(e) => Block {
+                    id: Id::NEW,
                     stmts: vec![Stmt::Return {
+                        id: Id::NEW,
                         value: Some((**e).clone()),
                         line,
                     }],
@@ -4962,7 +4976,7 @@ impl<'p> Fn_<'_, 'p> {
                 LambdaBody::Expr(src) => {
                     vyrn_frontend::ast::node_addrs_val(src, &mut orig);
                     match sf.body.stmts.first() {
-                        Some(Stmt::Expr(e)) | Some(Stmt::Return { value: Some(e), .. }) => {
+                        Some(Stmt::Expr(e, _)) | Some(Stmt::Return { value: Some(e), .. }) => {
                             vyrn_frontend::ast::node_addrs_val(e, &mut clone)
                         }
                         _ => {}
@@ -4997,6 +5011,7 @@ impl<'p> Fn_<'_, 'p> {
         let srcs = cap_names
             .iter()
             .map(|n| Expr::Var {
+                id: Id::NEW,
                 name: n.clone(),
                 line,
             })
@@ -13883,6 +13898,7 @@ fn instance_shell(f: &Function, subst: &HashMap<String, Type>) -> Function {
     let mut sf = shell_of(f);
     for p in &f.params {
         sf.params.push(Param {
+            id: Id::NEW,
             name: p.name.clone(),
             capability: p.capability,
             ty: ftypes::substitute(&p.ty, subst),
@@ -13925,6 +13941,7 @@ fn ho_shell(
     for p in &f.params {
         if !matches!(p.ty, Type::Fn(..)) {
             sf.params.push(Param {
+                id: Id::NEW,
                 name: p.name.clone(),
                 capability: p.capability,
                 ty: ftypes::substitute(&p.ty, subst),
@@ -13941,6 +13958,7 @@ fn ho_shell(
         for t in &target.sig.params[..target.ncaps] {
             let n = format!("@cap{}", sf.params.len());
             sf.params.push(Param {
+                id: Id::NEW,
                 name: n.clone(),
                 capability: match p.capability {
                     Capability::Consume if value => Capability::Consume,

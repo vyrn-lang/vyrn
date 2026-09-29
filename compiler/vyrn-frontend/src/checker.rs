@@ -1610,7 +1610,10 @@ fn check_named_blocks(
             type_bounds: Default::default(),
             params: Vec::new(),
             ret: Type::Unit,
-            body: Block { stmts: Vec::new() },
+            body: Block {
+                id: Id::NEW,
+                stmts: Vec::new(),
+            },
             line: t.line,
             col: 0,
             is_extern: false,
@@ -3256,6 +3259,7 @@ impl<'a> Checker<'a> {
                 value,
                 line,
                 col,
+                id: _,
             } => {
                 if let Some(declared) = ty {
                     self.ensure_type_exists(declared, *line)?;
@@ -3284,7 +3288,12 @@ impl<'a> Checker<'a> {
                 );
                 Ok(())
             }
-            Stmt::Assign { name, value, line } => {
+            Stmt::Assign {
+                name,
+                value,
+                line,
+                id: _,
+            } => {
                 let Some(b) = self.lookup(scope, name) else {
                     self.unknown.set(true);
                     return Ok(());
@@ -3304,6 +3313,7 @@ impl<'a> Checker<'a> {
                 field,
                 value,
                 line,
+                id: _,
             } => {
                 let Some(b) = self.lookup(scope, name) else {
                     self.unknown.set(true);
@@ -3339,6 +3349,7 @@ impl<'a> Checker<'a> {
                 index,
                 value,
                 line,
+                id: _,
             } => {
                 let Some(b) = self.lookup(scope, name) else {
                     self.unknown.set(true);
@@ -3405,7 +3416,7 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
-            Stmt::Return { value, line } => {
+            Stmt::Return { value, line, id: _ } => {
                 let vty = match value {
                     Some(e) => self.expr(e, scope, Some(ret), Some(ret))?,
                     None => Type::Unit,
@@ -3446,6 +3457,7 @@ impl<'a> Checker<'a> {
                 then_block,
                 else_block,
                 line,
+                id: _,
             } => {
                 // An optional projection's one legal position,
                 // typed before `place_result` can refuse it.
@@ -3551,7 +3563,7 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             Stmt::Drop { .. } => Ok(()),
-            Stmt::Expr(e) => self.expr(e, scope, None, Some(ret)).map(|_| ()),
+            Stmt::Expr(e, _) => self.expr(e, scope, None, Some(ret)).map(|_| ()),
             Stmt::Region { body, .. } => {
                 self.region_floor.borrow_mut().push(scope.len());
                 self.block(body, ret, scope);
@@ -3674,7 +3686,7 @@ impl<'a> Checker<'a> {
             if matches!(self.base(exp), Type::Fn(..)) {
                 match expr {
                     Expr::Lambda { .. } => return self.stored_fn_lambda(expr, exp, scope, fn_ret),
-                    Expr::Var { name, line }
+                    Expr::Var { name, line, id: _ }
                         if self.lookup(scope, name).is_none()
                             && self.sigs.contains_key(name.as_str()) =>
                     {
@@ -3690,7 +3702,7 @@ impl<'a> Checker<'a> {
             // An integer literal takes the expected sized type, else `Int`. The
             // lexer wraps literals above i64::MAX into the i64 bit pattern, so a
             // negative `n` here is one, valid only as a `UInt64`.
-            Expr::Int(n) => match expected.map(|t| self.base(t)) {
+            Expr::Int(n, _) => match expected.map(|t| self.base(t)) {
                 Some(t @ Type::IntN { .. }) => Ok(t),
                 _ => {
                     // An expansion's `Expr::Int(-1)` (`project::iterate_loop`)
@@ -3710,7 +3722,7 @@ impl<'a> Checker<'a> {
             },
             // A byte literal takes the expected integer type, else
             // `UInt8`.
-            Expr::Byte(_) => match expected.map(|t| self.base(t)) {
+            Expr::Byte(_, _) => match expected.map(|t| self.base(t)) {
                 Some(Type::Int) => Ok(Type::Int),
                 Some(t @ Type::IntN { .. }) => Ok(t),
                 _ => Ok(Type::IntN {
@@ -3718,13 +3730,13 @@ impl<'a> Checker<'a> {
                     signed: false,
                 }),
             },
-            Expr::Float(_) => Ok(match expected.map(|t| self.base(t)) {
+            Expr::Float(_, _) => Ok(match expected.map(|t| self.base(t)) {
                 Some(Type::Float32) => Type::Float32,
                 _ => Type::Float,
             }),
-            Expr::Bool(_) => Ok(Type::Bool),
-            Expr::Str(_) => Ok(Type::Str),
-            Expr::Var { name, line } => {
+            Expr::Bool(_, _) => Ok(Type::Bool),
+            Expr::Str(_, _) => Ok(Type::Str),
+            Expr::Var { name, line, id: _ } => {
                 if name == "None" {
                     // The expectation is resolved to find the Option, but the
                     // written type is returned, so an alias keeps its name.
@@ -3786,7 +3798,7 @@ impl<'a> Checker<'a> {
                 // although `128` does not, and `-1` fits no unsigned type. It
                 // takes the expected sized type, and the typed judgment checks
                 // its value whole (`checker::misfit`).
-                if *op == UnOp::Neg && matches!(**expr, Expr::Int(_)) {
+                if *op == UnOp::Neg && matches!(**expr, Expr::Int(_, _)) {
                     return Ok(match expected.map(|t| self.base(t)) {
                         Some(t @ Type::IntN { .. }) => t,
                         _ => Type::Int,
@@ -3831,7 +3843,13 @@ impl<'a> Checker<'a> {
                     UnOp::Neg | UnOp::Not | UnOp::BitNot => self.judged(),
                 }
             }
-            Expr::Binary { op, lhs, rhs, line } => {
+            Expr::Binary {
+                op,
+                lhs,
+                rhs,
+                line,
+                id: _,
+            } => {
                 let mut l = self.base(&self.expr(lhs, scope, None, fn_ret)?);
                 let mut r = self.base(&self.expr(rhs, scope, None, fn_ret)?);
                 if l == Type::Int {
@@ -3851,10 +3869,10 @@ impl<'a> Checker<'a> {
                     r = t;
                 }
                 // A float literal adapts to a `Float32` sibling.
-                if l == Type::Float && r == Type::Float32 && matches!(**lhs, Expr::Float(_)) {
+                if l == Type::Float && r == Type::Float32 && matches!(**lhs, Expr::Float(_, _)) {
                     l = Type::Float32;
                 }
-                if r == Type::Float && l == Type::Float32 && matches!(**rhs, Expr::Float(_)) {
+                if r == Type::Float && l == Type::Float32 && matches!(**rhs, Expr::Float(_, _)) {
                     r = Type::Float32;
                 }
                 self.binop_type(*op, l, r, *line)
@@ -3865,6 +3883,7 @@ impl<'a> Checker<'a> {
                 args,
                 type_args,
                 line,
+                id: _,
             } => {
                 let t = self.call(name, args, type_args, *line, scope, expected, fn_ret)?;
                 // `schemaOf<T>()` lowers through the literal it stands for, so
@@ -3889,12 +3908,14 @@ impl<'a> Checker<'a> {
                 arms,
                 stmt_pos,
                 line,
+                id: _,
             } => self.check_match(scrutinee, arms, *stmt_pos, *line, scope, expected, fn_ret),
             Expr::IfExpr {
                 cond,
                 then_branch,
                 else_branch,
                 line,
+                id: _,
             } => self.check_if_expr(
                 cond,
                 then_branch,
@@ -3904,10 +3925,13 @@ impl<'a> Checker<'a> {
                 expected,
                 fn_ret,
             ),
-            Expr::Try { expr, line } => self.check_try(expr, *line, scope, fn_ret),
-            Expr::StructLit { name, fields, line } => {
-                self.check_struct_lit(expr, name, fields, *line, scope, expected, fn_ret)
-            }
+            Expr::Try { expr, line, id: _ } => self.check_try(expr, *line, scope, fn_ret),
+            Expr::StructLit {
+                name,
+                fields,
+                line,
+                id: _,
+            } => self.check_struct_lit(expr, name, fields, *line, scope, expected, fn_ret),
             Expr::Field { expr, field, .. } => {
                 let ety = self.expr(expr, scope, None, fn_ret)?;
                 match self.base(&ety) {
@@ -3945,7 +3969,7 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Type::option(Type::Named(name.clone())))
             }
-            Expr::ArrayLit { elems, line } => {
+            Expr::ArrayLit { elems, line, id: _ } => {
                 // Match the resolved expectation: it may be an alias.
                 let written = expected;
                 let expected = expected.map(|t| self.base(t));
@@ -4006,7 +4030,11 @@ impl<'a> Checker<'a> {
                     Ok(Type::ArrayN(Box::new(elem_ty), elems.len()))
                 }
             }
-            Expr::MapLit { entries, line } => {
+            Expr::MapLit {
+                entries,
+                line,
+                id: _,
+            } => {
                 // Match the resolved expectation: it may be an alias.
                 let written = expected;
                 let expected = expected.map(|t| self.base(t));
@@ -6790,7 +6818,7 @@ impl<'a> Checker<'a> {
                              binding `{name}` (line {line})"
                         ));
                     }
-                    Stmt::Drop { name, line } if self.is_capture(name, locals) => {
+                    Stmt::Drop { name, line, id: _ } if self.is_capture(name, locals) => {
                         self.fail(format!(
                             "a lambda cannot `drop` the captured binding `{name}` (line {line})"
                         ));
@@ -6810,6 +6838,7 @@ impl<'a> Checker<'a> {
                         args,
                         line,
                         type_args: _,
+                        id: _,
                     } => {
                         // Each argument is checked before it is walked, so the
                         // first violation in source order is reported.
@@ -7133,11 +7162,11 @@ impl<'a> Checker<'a> {
 /// A one-line rendering of a predicate for diagnostics.
 pub(crate) fn pred_summary(expr: &Expr) -> String {
     match expr {
-        Expr::Int(n) => n.to_string(),
-        Expr::Byte(b) => b.to_string(),
-        Expr::Float(x) => x.to_string(),
-        Expr::Bool(b) => b.to_string(),
-        Expr::Str(s) => format!("{s:?}"),
+        Expr::Int(n, _) => n.to_string(),
+        Expr::Byte(b, _) => b.to_string(),
+        Expr::Float(x, _) => x.to_string(),
+        Expr::Bool(b, _) => b.to_string(),
+        Expr::Str(s, _) => format!("{s:?}"),
         Expr::Var { name, .. } => name.clone(),
         Expr::Unary { op, expr, .. } => {
             let s = pred_summary(expr);
@@ -7215,13 +7244,13 @@ pub fn misfit(kind: &str, v: i128, bits: u8, signed: bool) -> Option<String> {
 /// as `Neg(Int(5))`), or `None` for any other expression.
 pub fn int_literal_value(e: &Expr) -> Option<i128> {
     match e {
-        Expr::Int(n) => Some(literal_value(*n)),
+        Expr::Int(n, _) => Some(literal_value(*n)),
         Expr::Unary {
             op: UnOp::Neg,
             expr,
             ..
         } => match &**expr {
-            Expr::Int(n) => Some(-literal_value(*n)),
+            Expr::Int(n, _) => Some(-literal_value(*n)),
             _ => None,
         },
         _ => None,
@@ -7252,7 +7281,7 @@ fn adapt_int_literal(lit: &Expr, sibling: &Type) -> Option<Type> {
 /// The type a byte literal (a `UInt8` by default) takes from an integer
 /// sibling it fits, or `None` when the operator's own arm answers.
 fn adapt_byte_literal(lit: &Expr, sibling: &Type) -> Option<Type> {
-    let Expr::Byte(b) = lit else {
+    let Expr::Byte(b, _) = lit else {
         return None;
     };
     match sibling {

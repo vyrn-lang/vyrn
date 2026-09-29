@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type, TypeDecl, UnOp};
+use crate::ast::{Block, Capability, Expr, Function, Id, Param, Stmt, Type, TypeDecl, UnOp};
 
 /// The reserved prefix of both generated names. `$` is no identifier
 /// character, so no program can spell or shadow one.
@@ -46,6 +46,7 @@ pub fn pred_args(decl: &TypeDecl, value: Expr) -> Vec<Expr> {
         .into_iter()
         .map(|(name, _, field)| match field {
             Some(_) => Expr::Field {
+                id: Id::NEW,
                 expr: Box::new(value.clone()),
                 field: name,
                 line: 0,
@@ -87,6 +88,7 @@ fn predicate_fn(decl: &TypeDecl) -> Function {
         crate::types::predicate_binds(decl)
             .into_iter()
             .map(|(name, ty, _)| Param {
+                id: Id::NEW,
                 name,
                 capability: Capability::Read,
                 ty,
@@ -96,6 +98,7 @@ fn predicate_fn(decl: &TypeDecl) -> Function {
             .collect(),
         Type::Bool,
         vec![Stmt::Return {
+            id: Id::NEW,
             value: Some(decl.predicate.clone().expect("predicate present")),
             line: 0,
         }],
@@ -105,26 +108,33 @@ fn predicate_fn(decl: &TypeDecl) -> Function {
 /// `fn where$c<Name>(value: Base) { if !where$p<Name>(..) { panic("..") } }`.
 fn constructor_fn(decl: &TypeDecl) -> Function {
     let value = Expr::Var {
+        id: Id::NEW,
         name: "value".to_string(),
         line: 0,
     };
     let holds = Expr::Call {
+        id: Id::NEW,
         dot: false,
         type_args: Vec::new(),
         name: pred_name(&decl.name),
         args: pred_args(decl, value),
         line: 0,
     };
-    let fail = Stmt::Expr(Expr::Call {
-        dot: false,
-        type_args: Vec::new(),
-        name: "panic".to_string(),
-        args: vec![Expr::Str(crate::trap::validation_of(decl))],
-        line: 0,
-    });
+    let fail = Stmt::Expr(
+        Expr::Call {
+            id: Id::NEW,
+            dot: false,
+            type_args: Vec::new(),
+            name: "panic".to_string(),
+            args: vec![Expr::Str(crate::trap::validation_of(decl), Id::NEW)],
+            line: 0,
+        },
+        Id::NEW,
+    );
     synth(
         ctor_name(&decl.name),
         vec![Param {
+            id: Id::NEW,
             name: "value".to_string(),
             capability: Capability::Read,
             ty: decl.base.clone(),
@@ -133,12 +143,17 @@ fn constructor_fn(decl: &TypeDecl) -> Function {
         }],
         Type::Unit,
         vec![Stmt::If {
+            id: Id::NEW,
             cond: Expr::Unary {
+                id: Id::NEW,
                 op: UnOp::Not,
                 expr: Box::new(holds),
                 line: 0,
             },
-            then_block: Block { stmts: vec![fail] },
+            then_block: Block {
+                id: Id::NEW,
+                stmts: vec![fail],
+            },
             else_block: None,
             line: 0,
         }],
@@ -157,7 +172,7 @@ fn synth(name: String, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Funct
         type_bounds: HashMap::new(),
         params,
         ret,
-        body: Block { stmts },
+        body: Block { id: Id::NEW, stmts },
         line: 0,
         col: 0,
         is_extern: false,

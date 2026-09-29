@@ -154,6 +154,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         }
     }
     program.functions.extend(flat);
+    program.number();
     (program, errors)
 }
 
@@ -263,11 +264,14 @@ pub fn place_receiver(
             // symbol index filters it out, and it reads naturally in a diagnostic.
             let tmp = format!("{parent}.{field}[]");
             pre.push(Stmt::Let {
+                id: Id::NEW,
                 name: tmp.clone(),
                 mutable: true,
                 ty: None,
                 value: Expr::Field {
+                    id: Id::NEW,
                     expr: Box::new(Expr::Var {
+                        id: Id::NEW,
                         name: parent.clone(),
                         line,
                     }),
@@ -280,9 +284,11 @@ pub fn place_receiver(
             post.insert(
                 0,
                 Stmt::SetField {
+                    id: Id::NEW,
                     name: parent,
                     field: field.clone(),
                     value: Expr::Var {
+                        id: Id::NEW,
                         name: tmp.clone(),
                         line,
                     },
@@ -298,6 +304,7 @@ pub fn place_receiver(
             let tmp = format!("{parent}[]");
             let idx = format!("{tmp}idx");
             hoists.push(Stmt::Let {
+                id: Id::NEW,
                 name: idx.clone(),
                 mutable: false,
                 ty: None,
@@ -305,13 +312,19 @@ pub fn place_receiver(
                 line,
                 col: 0,
             });
-            let index = Expr::Var { name: idx, line };
+            let index = Expr::Var {
+                id: Id::NEW,
+                name: idx,
+                line,
+            };
             let load = Expr::Call {
+                id: Id::NEW,
                 dot: false,
                 type_args: Vec::new(),
                 name: "@at".to_string(),
                 args: vec![
                     Expr::Var {
+                        id: Id::NEW,
                         name: parent.clone(),
                         line,
                     },
@@ -320,6 +333,7 @@ pub fn place_receiver(
                 line,
             };
             pre.push(Stmt::Let {
+                id: Id::NEW,
                 name: tmp.clone(),
                 mutable: true,
                 ty: None,
@@ -330,9 +344,11 @@ pub fn place_receiver(
             post.insert(
                 0,
                 Stmt::IndexSet {
+                    id: Id::NEW,
                     name: parent,
                     index,
                     value: Expr::Var {
+                        id: Id::NEW,
                         name: tmp.clone(),
                         line,
                     },
@@ -353,11 +369,11 @@ pub fn place_receiver(
 /// call is assumed to reach a place, since it can read a module-level record.
 fn reads_place(e: &Expr) -> bool {
     match e {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
+        Expr::Int(_, _)
+        | Expr::Byte(_, _)
+        | Expr::Float(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Str(_, _)
         | Expr::Var { .. } => false,
         Expr::Unary { expr, .. } => reads_place(expr),
         Expr::Binary { lhs, rhs, .. } => reads_place(lhs) || reads_place(rhs),
@@ -376,6 +392,7 @@ pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize)
         return e;
     }
     hoists.push(Stmt::Let {
+        id: Id::NEW,
         name: name.clone(),
         mutable: false,
         ty: None,
@@ -383,7 +400,11 @@ pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize)
         line,
         col: 0,
     });
-    Expr::Var { name, line }
+    Expr::Var {
+        id: Id::NEW,
+        name,
+        line,
+    }
 }
 
 /// Rewrites the receiver of a mutating method (`r.a.pop()`,
@@ -410,10 +431,14 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
     // the other arguments run first.
     for (n, arg) in args.iter_mut().enumerate().skip(1) {
         let tmp = format!("{recv}[]arg{n}");
-        let taken = std::mem::replace(arg, Expr::Int(0));
+        let taken = std::mem::replace(arg, Expr::Int(0, Id::NEW));
         *arg = hoist_operand(taken, tmp, &mut hoists, line);
     }
-    args[0] = Expr::Var { name: recv, line };
+    args[0] = Expr::Var {
+        id: Id::NEW,
+        name: recv,
+        line,
+    };
     hoists.extend(pre);
     Some((hoists, post))
 }
@@ -431,6 +456,7 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
 pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
     match place {
         Expr::Var { name, .. } => Some(vec![Stmt::Assign {
+            id: Id::NEW,
             name: name.clone(),
             value: value.clone(),
             line,
@@ -444,6 +470,7 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
             };
             out.extend(moves);
             out.push(Stmt::SetField {
+                id: Id::NEW,
                 name: recv,
                 field: field.clone(),
                 value,
@@ -471,6 +498,7 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
             };
             out.extend(moves);
             out.push(Stmt::IndexSet {
+                id: Id::NEW,
                 name: recv,
                 index,
                 value,
@@ -929,6 +957,7 @@ impl Parser {
                 log_sink,
                 // The loader fills this once every module is linked.
                 surface_shadows: std::collections::HashSet::new(),
+                nodes: 0,
             },
             errors,
         )
@@ -1507,6 +1536,7 @@ impl Parser {
         let (self_line, self_col) = self.binder_pos();
         self.eat(&Tok::Vself)?;
         let mut params = vec![Param {
+            id: Id::NEW,
             name: "self".to_string(),
             capability,
             ty: self_ty.clone(),
@@ -1521,6 +1551,7 @@ impl Parser {
             let capability = self.parse_capability();
             let ty = self.type_()?;
             params.push(Param {
+                id: Id::NEW,
                 name: pname,
                 capability,
                 ty,
@@ -2111,6 +2142,7 @@ impl Parser {
             let capability = self.parse_capability();
             let ty = self.type_()?;
             params.push(Param {
+                id: Id::NEW,
                 name: pname,
                 capability,
                 ty,
@@ -2222,6 +2254,7 @@ impl Parser {
             let capability = self.parse_capability();
             let ty = self.type_()?;
             params.push(Param {
+                id: Id::NEW,
                 name: pname,
                 capability,
                 ty,
@@ -2291,7 +2324,10 @@ impl Parser {
             type_bounds: Default::default(),
             params,
             ret,
-            body: Block { stmts: Vec::new() },
+            body: Block {
+                id: Id::NEW,
+                stmts: Vec::new(),
+            },
             line,
             col,
             is_extern: true,
@@ -2673,7 +2709,7 @@ impl Parser {
             }
         }
         self.eat(&Tok::RBrace)?;
-        Ok(Block { stmts })
+        Ok(Block { id: Id::NEW, stmts })
     }
 
     /// Skips a failed statement's tokens to the next statement boundary: a token on
@@ -2764,6 +2800,7 @@ impl Parser {
         let then_block = self.block()?;
         let else_block = self.else_tail()?;
         Ok(Stmt::If {
+            id: Id::NEW,
             cond,
             then_block,
             else_block,
@@ -2789,6 +2826,7 @@ impl Parser {
                 let then_block = self.block()?;
                 let else_block = self.else_tail()?;
                 Stmt::If {
+                    id: Id::NEW,
                     cond,
                     then_block,
                     else_block,
@@ -2796,6 +2834,7 @@ impl Parser {
                 }
             };
             Ok(Some(Block {
+                id: Id::NEW,
                 stmts: vec![nested],
             }))
         } else {
@@ -2813,6 +2852,7 @@ impl Parser {
         let then_block = self.block()?;
         let else_block = self.else_tail()?;
         Ok(Stmt::IfLet {
+            id: Id::NEW,
             pattern,
             scrutinee,
             then_block,
@@ -2899,12 +2939,14 @@ impl Parser {
                 })
                 .collect();
             let m = Expr::Match {
+                id: Id::NEW,
                 stmt_pos: false,
                 scrutinee: Box::new(scrut.clone()),
                 arms: vec![
                     MatchArm {
                         pattern: Pattern::Variant(variant.clone(), arm_binds),
                         body: ArmBody::Expr(Expr::Var {
+                            id: Id::NEW,
                             name: b.name.clone(),
                             line,
                         }),
@@ -2912,10 +2954,11 @@ impl Parser {
                     MatchArm {
                         pattern: Pattern::Other,
                         body: ArmBody::Expr(Expr::Call {
+                            id: Id::NEW,
                             dot: false,
                             type_args: Vec::new(),
                             name: "panic".to_string(),
-                            args: vec![Expr::Str(msg.clone())],
+                            args: vec![Expr::Str(msg.clone(), Id::NEW)],
                             line,
                         }),
                     },
@@ -2923,6 +2966,7 @@ impl Parser {
                 line,
             };
             stmts.push(Stmt::Let {
+                id: Id::NEW,
                 name: b.name.clone(),
                 mutable: false,
                 ty: None,
@@ -2967,6 +3011,7 @@ impl Parser {
                 // container in between.
                 if let Some((mut pre, post)) = hoist_mutating_receiver(&mut value, line) {
                     pre.push(Stmt::Let {
+                        id: Id::NEW,
                         name,
                         mutable,
                         ty,
@@ -2978,6 +3023,7 @@ impl Parser {
                     return Ok(self.spliced(pre));
                 }
                 Ok(Stmt::Let {
+                    id: Id::NEW,
                     name,
                     mutable,
                     ty,
@@ -2995,17 +3041,21 @@ impl Parser {
                     Some(self.expr()?)
                 };
                 self.eat_semi();
-                Ok(Stmt::Return { value, line })
+                Ok(Stmt::Return {
+                    id: Id::NEW,
+                    value,
+                    line,
+                })
             }
             Tok::Break => {
                 self.advance();
                 self.eat_semi();
-                Ok(Stmt::Break { line })
+                Ok(Stmt::Break { id: Id::NEW, line })
             }
             Tok::Continue => {
                 self.advance();
                 self.eat_semi();
-                Ok(Stmt::Continue { line })
+                Ok(Stmt::Continue { id: Id::NEW, line })
             }
             Tok::If => self.if_stmt(line),
             Tok::While => {
@@ -3019,17 +3069,21 @@ impl Parser {
                     let scrutinee = self.cond_expr()?;
                     let body = self.block()?;
                     let if_let = Stmt::IfLet {
+                        id: Id::NEW,
                         pattern,
                         scrutinee,
                         then_block: body,
                         else_block: Some(Block {
-                            stmts: vec![Stmt::Break { line }],
+                            id: Id::NEW,
+                            stmts: vec![Stmt::Break { id: Id::NEW, line }],
                         }),
                         line,
                     };
                     return Ok(Stmt::While {
-                        cond: Expr::Bool(true),
+                        id: Id::NEW,
+                        cond: Expr::Bool(true, Id::NEW),
                         body: Block {
+                            id: Id::NEW,
                             stmts: vec![if_let],
                         },
                         line,
@@ -3037,7 +3091,12 @@ impl Parser {
                 }
                 let cond = self.cond_expr()?;
                 let body = self.block()?;
-                Ok(Stmt::While { cond, body, line })
+                Ok(Stmt::While {
+                    id: Id::NEW,
+                    cond,
+                    body,
+                    line,
+                })
             }
             Tok::For => {
                 self.advance();
@@ -3055,6 +3114,7 @@ impl Parser {
                 let iter = self.cond_expr()?;
                 let body = self.block()?;
                 Ok(Stmt::ForIn {
+                    id: Id::NEW,
                     var,
                     iter,
                     body,
@@ -3066,21 +3126,34 @@ impl Parser {
             Tok::Region => {
                 self.advance();
                 let body = self.block()?;
-                Ok(Stmt::Region { body, line })
+                Ok(Stmt::Region {
+                    id: Id::NEW,
+                    body,
+                    line,
+                })
             }
             // `drop name`: reclaim a heap value explicitly. It consumes `name`.
             Tok::Drop => {
                 self.advance();
                 let name = self.expect_ident()?;
                 self.eat_semi();
-                Ok(Stmt::Drop { name, line })
+                Ok(Stmt::Drop {
+                    id: Id::NEW,
+                    name,
+                    line,
+                })
             }
             Tok::Ident(_) | Tok::Vself if self.tokens[self.pos + 1].tok == Tok::Eq => {
                 let name = self.place_root()?;
                 self.eat(&Tok::Eq)?;
                 let value = self.expr()?;
                 self.eat_semi();
-                Ok(Stmt::Assign { name, value, line })
+                Ok(Stmt::Assign {
+                    id: Id::NEW,
+                    name,
+                    value,
+                    line,
+                })
             }
             Tok::Ident(_) | Tok::Vself
                 if self.tokens[self.pos + 1].tok == Tok::Dot
@@ -3094,6 +3167,7 @@ impl Parser {
                 let value = self.expr()?;
                 self.eat_semi();
                 Ok(Stmt::SetField {
+                    id: Id::NEW,
                     name,
                     field,
                     value,
@@ -3178,7 +3252,7 @@ impl Parser {
                 // they move the receiver out and back below.
                 let mut e = e;
                 if let Some((mut pre, post)) = hoist_mutating_receiver(&mut e, line) {
-                    pre.push(Stmt::Expr(e));
+                    pre.push(Stmt::Expr(e, Id::NEW));
                     pre.extend(post);
                     return Ok(self.spliced(pre));
                 }
@@ -3187,6 +3261,7 @@ impl Parser {
                         match args.first() {
                             Some(Expr::Var { name: recv, .. }) => {
                                 return Ok(Stmt::Assign {
+                                    id: Id::NEW,
                                     name: recv.clone(),
                                     value: e,
                                     line,
@@ -3200,6 +3275,7 @@ impl Parser {
                                     unreachable!()
                                 };
                                 return Ok(Stmt::SetField {
+                                    id: Id::NEW,
                                     name: recv.clone(),
                                     field: field.clone(),
                                     value: e,
@@ -3222,6 +3298,7 @@ impl Parser {
                                 let recv = recv.clone();
                                 let index = iargs[1].clone();
                                 return Ok(Stmt::IndexSet {
+                                    id: Id::NEW,
                                     name: recv,
                                     index,
                                     value: e,
@@ -3250,7 +3327,7 @@ impl Parser {
                 if let Expr::Match { stmt_pos, .. } = &mut e {
                     *stmt_pos = true;
                 }
-                Ok(Stmt::Expr(e))
+                Ok(Stmt::Expr(e, Id::NEW))
             }
         }
     }
@@ -3338,6 +3415,7 @@ impl Parser {
             self.advance();
             let rhs = self.binary(bp + 1)?;
             lhs = Expr::Binary {
+                id: Id::NEW,
                 op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
@@ -3352,12 +3430,14 @@ impl Parser {
     /// nesting shadows harmlessly because only the `Success` arm reads one.
     fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {
         Expr::Match {
+            id: Id::NEW,
             stmt_pos: false,
             scrutinee: Box::new(lhs),
             arms: vec![
                 MatchArm {
                     pattern: Pattern::Success(Binder::synthetic("@v")),
                     body: ArmBody::Expr(Expr::Var {
+                        id: Id::NEW,
                         name: "@v".to_string(),
                         line,
                     }),
@@ -3387,6 +3467,7 @@ impl Parser {
             Tok::Minus => {
                 self.advance();
                 Ok(Expr::Unary {
+                    id: Id::NEW,
                     op: UnOp::Neg,
                     expr: Box::new(self.unary()?),
                     line,
@@ -3395,6 +3476,7 @@ impl Parser {
             Tok::Bang => {
                 self.advance();
                 Ok(Expr::Unary {
+                    id: Id::NEW,
                     op: UnOp::Not,
                     expr: Box::new(self.unary()?),
                     line,
@@ -3404,6 +3486,7 @@ impl Parser {
             Tok::Tilde => {
                 self.advance();
                 Ok(Expr::Unary {
+                    id: Id::NEW,
                     op: UnOp::BitNot,
                     expr: Box::new(self.unary()?),
                     line,
@@ -3419,6 +3502,7 @@ impl Parser {
             {
                 self.advance();
                 Ok(Expr::Consume {
+                    id: Id::NEW,
                     place: Box::new(self.postfix()?),
                     line,
                 })
@@ -3463,6 +3547,7 @@ impl Parser {
             Tok::Question => {
                 self.advance();
                 return Ok(Expr::Try {
+                    id: Id::NEW,
                     expr: Box::new(e),
                     line,
                 });
@@ -3529,6 +3614,7 @@ impl Parser {
                     // Method form takes no explicit type arguments: the receiver is the first one
                     // and it is always concrete.
                     return Ok(Expr::Call {
+                        id: Id::NEW,
                         dot: args.len() > n,
                         name,
                         args,
@@ -3549,6 +3635,7 @@ impl Parser {
                     return self.struct_lit(format!("{ns}.{name}"), line);
                 } else {
                     return Ok(Expr::Field {
+                        id: Id::NEW,
                         expr: Box::new(e),
                         field: name,
                         line,
@@ -3564,6 +3651,7 @@ impl Parser {
                 self.no_struct = saved;
                 self.eat(&Tok::RBracket)?;
                 return Ok(Expr::Call {
+                    id: Id::NEW,
                     dot: false,
                     type_args: Vec::new(),
                     name: "@at".to_string(),
@@ -3634,6 +3722,7 @@ impl Parser {
             LambdaBody::Expr(Box::new(e?))
         };
         Ok(Expr::Lambda {
+            id: Id::NEW,
             params,
             body,
             line,
@@ -3665,17 +3754,18 @@ impl Parser {
             ));
         }
         match self.advance() {
-            Tok::Int(v) => Ok(Expr::Int(v)),
-            Tok::Byte(v) => Ok(Expr::Byte(v)),
-            Tok::Float(v) => Ok(Expr::Float(v)),
-            Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::Int(v) => Ok(Expr::Int(v, Id::NEW)),
+            Tok::Byte(v) => Ok(Expr::Byte(v, Id::NEW)),
+            Tok::Float(v) => Ok(Expr::Float(v, Id::NEW)),
+            Tok::Str(s) => Ok(Expr::Str(s, Id::NEW)),
             Tok::Vself => Ok(Expr::Var {
+                id: Id::NEW,
                 name: "self".to_string(),
                 line,
             }),
             Tok::TemplateStr { parts, exprs } => self.template(parts, exprs, line, col),
-            Tok::True => Ok(Expr::Bool(true)),
-            Tok::False => Ok(Expr::Bool(false)),
+            Tok::True => Ok(Expr::Bool(true, Id::NEW)),
+            Tok::False => Ok(Expr::Bool(false, Id::NEW)),
             Tok::LParen => {
                 let saved = self.no_struct;
                 self.no_struct = false;
@@ -3695,6 +3785,7 @@ impl Parser {
                     self.no_struct = saved;
                     self.eat(&Tok::RBracket)?;
                     return Ok(Expr::MapLit {
+                        id: Id::NEW,
                         entries: Vec::new(),
                         line,
                     });
@@ -3703,6 +3794,7 @@ impl Parser {
                     self.no_struct = saved;
                     self.advance();
                     return Ok(Expr::ArrayLit {
+                        id: Id::NEW,
                         elems: Vec::new(),
                         line,
                     });
@@ -3724,7 +3816,11 @@ impl Parser {
                     }
                     self.no_struct = saved;
                     self.eat(&Tok::RBracket)?;
-                    return Ok(Expr::MapLit { entries, line });
+                    return Ok(Expr::MapLit {
+                        id: Id::NEW,
+                        entries,
+                        line,
+                    });
                 }
                 let mut elems = vec![first];
                 if *self.peek() == Tok::Comma {
@@ -3740,7 +3836,11 @@ impl Parser {
                 }
                 self.no_struct = saved;
                 self.eat(&Tok::RBracket)?;
-                Ok(Expr::ArrayLit { elems, line })
+                Ok(Expr::ArrayLit {
+                    id: Id::NEW,
+                    elems,
+                    line,
+                })
             }
             Tok::Match => self.match_expr(line),
             // An `if` in expression position; `stmt` dispatches the statement
@@ -3827,9 +3927,15 @@ impl Parser {
                         }
                     }
                     Ok(if fallible {
-                        Expr::TryConstruct { name, args, line }
+                        Expr::TryConstruct {
+                            id: Id::NEW,
+                            name,
+                            args,
+                            line,
+                        }
                     } else {
                         Expr::Call {
+                            id: Id::NEW,
                             dot: false,
                             name,
                             args,
@@ -3840,7 +3946,11 @@ impl Parser {
                 } else if *self.peek() == Tok::LBrace && !self.no_struct {
                     self.struct_lit(name, line)
                 } else {
-                    Ok(Expr::Var { name, line })
+                    Ok(Expr::Var {
+                        id: Id::NEW,
+                        name,
+                        line,
+                    })
                 }
             }
             other => Err(Diagnostic::error(
@@ -3864,13 +3974,14 @@ impl Parser {
     ) -> Result<Expr, Diagnostic> {
         let mut pieces: Vec<Expr> = Vec::new();
         if !parts[0].is_empty() {
-            pieces.push(Expr::Str(parts[0].clone()));
+            pieces.push(Expr::Str(parts[0].clone(), Id::NEW));
         }
         for (k, src) in exprs.iter().enumerate() {
             let e = self.parse_hole(src, line, col)?;
             // `@str` and `@concat` are unlexable, so a user call to `str` or `concat`
             // gets the migration hint.
             pieces.push(Expr::Call {
+                id: Id::NEW,
                 dot: false,
                 type_args: Vec::new(),
                 name: "@str".to_string(),
@@ -3878,7 +3989,7 @@ impl Parser {
                 line,
             });
             if !parts[k + 1].is_empty() {
-                pieces.push(Expr::Str(parts[k + 1].clone()));
+                pieces.push(Expr::Str(parts[k + 1].clone(), Id::NEW));
             }
         }
         // There is at least one hole, so `pieces` is non-empty; a lone piece is
@@ -3887,6 +3998,7 @@ impl Parser {
         let mut acc = iter.next().unwrap();
         for p in iter {
             acc = Expr::Call {
+                id: Id::NEW,
                 dot: false,
                 type_args: Vec::new(),
                 name: "@concat".to_string(),
@@ -3965,13 +4077,15 @@ impl Parser {
             return self.code_quote(parts, exprs, line, col);
         }
         let parts_lit = Expr::ArrayLit {
-            elems: parts.into_iter().map(Expr::Str).collect(),
+            id: Id::NEW,
+            elems: parts.into_iter().map(|s| Expr::Str(s, Id::NEW)).collect(),
             line,
         };
         let mut values = Vec::new();
         for src in &exprs {
             let e = self.parse_hole(src, line, col)?;
             values.push(Expr::Call {
+                id: Id::NEW,
                 dot: false,
                 type_args: Vec::new(),
                 name: "value".to_string(),
@@ -3980,11 +4094,13 @@ impl Parser {
             });
         }
         let values_lit = Expr::ArrayLit {
+            id: Id::NEW,
             elems: values,
             line,
         };
         // `@list` is unlexable, like `@str`.
         let wrap = |e| Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: "@list".to_string(),
@@ -3995,6 +4111,7 @@ impl Parser {
         // call `tag(parts, values)`.
         if tag == "template" {
             return Ok(Expr::StructLit {
+                id: Id::NEW,
                 name: "Template".to_string(),
                 fields: vec![
                     ("parts".to_string(), wrap(parts_lit)),
@@ -4004,6 +4121,7 @@ impl Parser {
             });
         }
         Ok(Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: tag,
@@ -4045,6 +4163,7 @@ impl Parser {
             *acc = Some(match acc.take() {
                 None => e,
                 Some(prev) => Expr::Binary {
+                    id: Id::NEW,
                     op: BinOp::Add,
                     lhs: Box::new(prev),
                     rhs: Box::new(e),
@@ -4053,10 +4172,11 @@ impl Parser {
             });
         };
         let code_text = |s: &str| Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: "@codeText".to_string(),
-            args: vec![Expr::Str(s.to_string())],
+            args: vec![Expr::Str(s.to_string(), Id::NEW)],
             line,
         };
         for (i, part) in parts.iter().enumerate() {
@@ -4067,10 +4187,11 @@ impl Parser {
                 let ctx = self.hole_context(&parts, &exprs, i);
                 let value = self.parse_hole(&exprs[i], line, col)?;
                 let splice = Expr::Call {
+                    id: Id::NEW,
                     dot: false,
                     type_args: Vec::new(),
                     name: "@codeSplice".to_string(),
-                    args: vec![value, Expr::Int(ctx)],
+                    args: vec![value, Expr::Int(ctx, Id::NEW)],
                     line,
                 };
                 add(&mut acc, splice);
@@ -4203,6 +4324,7 @@ impl Parser {
         }
         self.eat(&Tok::RBrace)?;
         Ok(Expr::Match {
+            id: Id::NEW,
             scrutinee: Box::new(scrutinee),
             arms,
             stmt_pos: false,
@@ -4227,6 +4349,7 @@ impl Parser {
     /// helpers need no import.
     fn storage_desugar(name: &str, args: &[Expr], line: usize) -> Option<Expr> {
         let call = |n: &str, a: Vec<Expr>| Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: n.to_string(),
@@ -4236,6 +4359,7 @@ impl Parser {
         // `load(TypeName, path)` takes a type name as an argument; the desugar turns it
         // into the type argument `fromJson<T>(s)` takes.
         let decode = |t: &Expr, text: Expr| Expr::Call {
+            id: Id::NEW,
             dot: false,
             name: "fromJson".to_string(),
             args: vec![text],
@@ -4246,6 +4370,7 @@ impl Parser {
             line,
         };
         let var = |n: &str| Expr::Var {
+            id: Id::NEW,
             name: n.to_string(),
             line,
         };
@@ -4256,6 +4381,7 @@ impl Parser {
             )),
             ("load", 2) => {
                 let decoded = Expr::Match {
+                    id: Id::NEW,
                     stmt_pos: false,
                     scrutinee: Box::new(decode(&args[0], var("@t"))),
                     arms: vec![
@@ -4277,6 +4403,7 @@ impl Parser {
                     line,
                 };
                 Some(Expr::Match {
+                    id: Id::NEW,
                     stmt_pos: false,
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
@@ -4295,6 +4422,7 @@ impl Parser {
             ("loadOr", 3) => {
                 let default = args[2].clone();
                 let decoded = Expr::Match {
+                    id: Id::NEW,
                     stmt_pos: false,
                     scrutinee: Box::new(decode(&args[0], var("@t"))),
                     arms: vec![
@@ -4316,6 +4444,7 @@ impl Parser {
                     line,
                 };
                 Some(Expr::Match {
+                    id: Id::NEW,
                     stmt_pos: false,
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
@@ -4367,6 +4496,7 @@ impl Parser {
             None
         };
         Ok(Expr::IfExpr {
+            id: Id::NEW,
             cond: Box::new(cond),
             then_branch: Box::new(then_branch),
             else_branch,
@@ -4442,7 +4572,12 @@ impl Parser {
         }
         self.no_struct = saved;
         self.eat(&Tok::RBrace)?;
-        Ok(Expr::StructLit { name, fields, line })
+        Ok(Expr::StructLit {
+            id: Id::NEW,
+            name,
+            fields,
+            line,
+        })
     }
 
     fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
@@ -4496,6 +4631,35 @@ mod tests {
 
     fn parse_src(s: &str) -> Program {
         parse(lex(s).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn parse_numbers_every_node_once_from_one() {
+        let p = parse_src(
+            r#"type P = { x: Int64 }
+impl Show for P { fn show(self) -> String { "p" } }
+fn main() -> Int64 {
+  let mut a = [1, 2]
+  a[0] = a[0] + 1
+  let f = (y) -> { return y }
+  while let Some(x) = a.pop() { print("{x}") }
+  return 0
+}"#,
+        );
+        let dbg = format!("{p:#?}");
+        let mut ids: Vec<u32> = dbg
+            .split('#')
+            .skip(1)
+            .map(|t| {
+                t.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        ids.sort();
+        assert_eq!(ids, (1..=p.nodes).collect::<Vec<_>>());
     }
 
     fn first_call(p: &Program) -> String {
@@ -4658,7 +4822,7 @@ mod tests {
             panic!("expected the panic arm");
         };
         assert!(crate::ast::is_panic(name));
-        assert!(matches!(&args[0], Expr::Str(s) if s == "let `Circle(..)` did not match"));
+        assert!(matches!(&args[0], Expr::Str(s, _) if s == "let `Circle(..)` did not match"));
     }
 
     #[test]
@@ -4717,7 +4881,7 @@ mod tests {
         let Stmt::While { cond, body, .. } = &p.functions[0].body.stmts[0] else {
             panic!("expected a while loop");
         };
-        assert_eq!(*cond, Expr::Bool(true));
+        assert_eq!(*cond, Expr::Bool(true, Id::NEW));
         let Stmt::IfLet {
             else_block: Some(eb),
             ..
@@ -4930,8 +5094,8 @@ mod tests {
             ImportSource::Generator { name, args, .. } => {
                 assert_eq!(name, "i18n");
                 assert_eq!(args.len(), 2);
-                assert!(matches!(&args[0], Expr::Str(s) if s == "./locales"));
-                assert!(matches!(&args[1], Expr::Int(3)));
+                assert!(matches!(&args[0], Expr::Str(s, _) if s == "./locales"));
+                assert!(matches!(&args[1], Expr::Int(3, _)));
             }
             other => panic!("expected a generator source, got {other:?}"),
         }

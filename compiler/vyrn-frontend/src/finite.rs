@@ -75,7 +75,7 @@ fn collect_match_clauses(pred: &Expr, out: &mut Vec<String>) -> Option<()> {
             rhs,
             ..
         } => match (&**lhs, &**rhs) {
-            (Expr::Var { name, .. }, Expr::Str(pat)) if name == "value" => {
+            (Expr::Var { name, .. }, Expr::Str(pat, _)) if name == "value" => {
                 out.push(pat.clone());
                 Some(())
             }
@@ -110,7 +110,7 @@ pub enum Piece<'a> {
 pub fn flatten_template(expr: &Expr) -> Option<Vec<Piece<'_>>> {
     fn walk<'a>(e: &'a Expr, out: &mut Vec<Piece<'a>>) -> Option<()> {
         match e {
-            Expr::Str(s) => {
+            Expr::Str(s, _) => {
                 out.push(Piece::Lit(s.clone()));
                 Some(())
             }

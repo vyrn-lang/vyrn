@@ -249,11 +249,11 @@ pub mod observe {
     pub fn kind_of(e: &vyrn_frontend::ast::Expr) -> &'static str {
         use vyrn_frontend::ast::Expr as E;
         match e {
-            E::Int(_) => "int",
-            E::Byte(_) => "byte",
-            E::Float(_) => "float",
-            E::Bool(_) => "bool",
-            E::Str(_) => "str",
+            E::Int(_, _) => "int",
+            E::Byte(_, _) => "byte",
+            E::Float(_, _) => "float",
+            E::Bool(_, _) => "bool",
+            E::Str(_, _) => "str",
             E::Var { name, .. } => intern(format!("var[{name}]")),
             E::Unary { .. } => "unary",
             E::Binary { .. } => "binary",

@@ -172,7 +172,7 @@ pub fn discovered_roles(
             let ImportSource::Generator { name, args, .. } = &imp.source else {
                 continue;
             };
-            let Some(Expr::Str(dir_spec)) = args.first() else {
+            let Some(Expr::Str(dir_spec, _)) = args.first() else {
                 continue;
             };
             let Some(gen_module) = generator_module(&program, name) else {

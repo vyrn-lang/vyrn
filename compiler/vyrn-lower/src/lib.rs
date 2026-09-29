@@ -67,11 +67,11 @@ pub struct NodeTypes<'a> {
 /// classified on.
 pub fn kind(e: &Expr) -> &'static str {
     match e {
-        Expr::Int(_) => "int",
-        Expr::Byte(_) => "byte",
-        Expr::Float(_) => "float",
-        Expr::Bool(_) => "bool",
-        Expr::Str(_) => "str",
+        Expr::Int(_, _) => "int",
+        Expr::Byte(_, _) => "byte",
+        Expr::Float(_, _) => "float",
+        Expr::Bool(_, _) => "bool",
+        Expr::Str(_, _) => "str",
         Expr::Var { .. } => "var",
         Expr::Unary { .. } => "unary",
         Expr::Binary { .. } => "binary",
@@ -592,8 +592,8 @@ fn has_of<'e>(e: &'e Expr, kid: impl Fn(&'e Expr) -> Option<Type>) -> Option<Typ
         // A numeric literal is its own width, and the destination is a coercion
         // away. `Byte` too: both backends spell `'a'` as an `i64` immediate and
         // narrow at the use, which the checker does not; it answers `UInt8`.
-        Expr::Int(_) | Expr::Byte(_) => Type::Int,
-        Expr::Float(_) => Type::Float,
+        Expr::Int(_, _) | Expr::Byte(_, _) => Type::Int,
+        Expr::Float(_, _) => Type::Float,
         // A pass-through: the node emits its child's value.
         Expr::Consume { place: inner, .. } | Expr::Unary { expr: inner, .. } => kid(inner)?,
         // A join carries the type of a branch, not of its destination. `panic`
@@ -1129,7 +1129,7 @@ mod tests {
         let pairs: Vec<(String, String)> = f
             .exprs
             .iter()
-            .filter(|(e, _)| matches!(e, Expr::Int(_)))
+            .filter(|(e, _)| matches!(e, Expr::Int(_, _)))
             .map(|(e, _)| {
                 let key = *e as *const Expr as usize;
                 (f.produced[&key].to_string(), f.types[&key].to_string())

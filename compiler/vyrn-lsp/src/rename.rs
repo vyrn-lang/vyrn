@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use vyrn_frontend::ast::{Expr, ImportDecl, ImportSource};
+use vyrn_frontend::ast::{Expr, Id, ImportDecl, ImportSource};
 
 use crate::contracts::vyx_script;
 use lsp_types::{Position, PrepareRenameResponse, Range, TextEdit, Url, WorkspaceEdit};
@@ -297,7 +297,7 @@ fn reaches(
             ImportSource::Generator { args, .. } => args
                 .iter()
                 .filter_map(|a| match a {
-                    Expr::Str(s) => resolve(s),
+                    Expr::Str(s, _) => resolve(s),
                     _ => None,
                 })
                 .collect(),
@@ -732,7 +732,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
     fn gen(name: &str, arg: &str) -> ImportSource {
         ImportSource::Generator {
             name: name.to_string(),
-            args: vec![Expr::Str(arg.to_string())],
+            args: vec![Expr::Str(arg.to_string(), Id::NEW)],
             line: 1,
         }
     }

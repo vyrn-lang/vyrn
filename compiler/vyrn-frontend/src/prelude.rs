@@ -10,7 +10,7 @@
 //! `value`, `@list` and `pullAt` allocate but have no contract, because their
 //! result type is one no signature spells.
 
-use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type, TypeDecl};
+use crate::ast::{Block, Capability, Expr, Function, Id, Param, Stmt, Type, TypeDecl};
 use crate::effects::Effect;
 use crate::project::ELEM;
 use std::sync::OnceLock;
@@ -60,6 +60,7 @@ fn row(
         params: params
             .iter()
             .map(|(n, c, t)| Param {
+                id: Id::NEW,
                 name: n.to_string(),
                 capability: *c,
                 ty: t.clone(),
@@ -69,18 +70,22 @@ fn row(
             .collect(),
         ret,
         body: Block {
+            id: Id::NEW,
             stmts: match place.is_empty() {
                 true => Vec::new(),
                 false => vec![Stmt::Return {
+                    id: Id::NEW,
                     value: Some(Expr::Call {
+                        id: Id::NEW,
                         dot: false,
                         type_args: Vec::new(),
                         name: ELEM.to_string(),
                         args: place
                             .iter()
                             .map(|a| match a.parse::<i64>() {
-                                Ok(n) => Expr::Int(n),
+                                Ok(n) => Expr::Int(n, Id::NEW),
                                 Err(_) => Expr::Var {
+                                    id: Id::NEW,
                                     name: (*a).to_string(),
                                     line: 0,
                                 },

@@ -311,11 +311,11 @@ pub enum Opaque {
 /// exhaustive on purpose, and asks here for the answer.
 fn lit_of(e: &Expr) -> Option<Lit> {
     Some(match e {
-        Expr::Int(v) => Lit::Int(*v),
-        Expr::Byte(v) => Lit::Byte(*v),
-        Expr::Float(v) => Lit::Float(*v),
-        Expr::Bool(v) => Lit::Bool(*v),
-        Expr::Str(s) => Lit::Str(s.clone()),
+        Expr::Int(v, _) => Lit::Int(*v),
+        Expr::Byte(v, _) => Lit::Byte(*v),
+        Expr::Float(v, _) => Lit::Float(*v),
+        Expr::Bool(v, _) => Lit::Bool(*v),
+        Expr::Str(s, _) => Lit::Str(s.clone()),
         _ => return None,
     })
 }
@@ -1330,7 +1330,11 @@ fn arms_span(line: usize, arms: &[MatchArm]) -> (usize, usize) {
 /// the five literals answer as one and a builtin call is named apart.
 fn expr_kind(e: &Expr) -> &'static str {
     match e {
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => "literal",
+        Expr::Int(_, _)
+        | Expr::Byte(_, _)
+        | Expr::Float(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Str(_, _) => "literal",
         Expr::Call { name, .. } if name.starts_with('@') => "builtin call",
         _ => crate::kind(e),
     }
@@ -1707,22 +1711,24 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
             _ => None,
         };
         match e {
-            Expr::Int(n) => sized(e).and_then(|(b, s)| misfit("integer", literal_value(*n), b, s)),
+            Expr::Int(n, _) => {
+                sized(e).and_then(|(b, s)| misfit("integer", literal_value(*n), b, s))
+            }
             Expr::Unary {
                 op: vyrn_frontend::ast::UnOp::Neg,
                 expr,
                 ..
-            } if matches!(**expr, Expr::Int(_)) => {
+            } if matches!(**expr, Expr::Int(_, _)) => {
                 let v = int_literal_value(e)?;
                 sized(e).and_then(|(b, s)| misfit("integer", v, b, s))
             }
-            Expr::Byte(v) => sized(e).and_then(|(b, s)| misfit("byte", i128::from(*v), b, s)),
+            Expr::Byte(v, _) => sized(e).and_then(|(b, s)| misfit("byte", i128::from(*v), b, s)),
             Expr::Binary {
                 op: BinOp::Match,
                 rhs,
                 ..
             } => Some(match &**rhs {
-                Expr::Str(pat) => {
+                Expr::Str(pat, _) => {
                     let err = vyrn_frontend::regex::compile(pat).err()?;
                     format!("invalid regex `{pat}`: {err}")
                 }
@@ -3297,6 +3303,7 @@ impl<'a> Builder<'a> {
                 then_branch,
                 else_branch: Some(else_branch),
                 line: at,
+                id: _,
             } => {
                 let site = e as *const Expr as usize;
                 let c = self.condition(cond, "if", *at, out)?;
@@ -3446,6 +3453,7 @@ impl<'a> Builder<'a> {
                 cond,
                 body: inner,
                 line,
+                id: _,
             },
             head,
         )) = blk.stmts.split_last()
@@ -3667,7 +3675,7 @@ impl<'a> Builder<'a> {
         };
         let into = match store {
             Stmt::SetField { name, .. } | Stmt::IndexSet { name, .. } => Some(name),
-            Stmt::Expr(e) | Stmt::Let { value: e, .. } => removal(e),
+            Stmt::Expr(e, _) | Stmt::Let { value: e, .. } => removal(e),
             _ => None,
         };
         if into != Some(last) {
@@ -3708,6 +3716,7 @@ impl<'a> Builder<'a> {
                         index,
                         value,
                         line,
+                        id: _,
                     } = &ss[2 * lets]
                     else {
                         return Ok(None);
@@ -3948,7 +3957,12 @@ impl<'a> Builder<'a> {
                 self.scope.push((name.clone(), n));
                 self.keyed_let(n, s);
             }
-            Stmt::Assign { name, value, line } => {
+            Stmt::Assign {
+                name,
+                value,
+                line,
+                id: _,
+            } => {
                 if !self.known(name, *line, "assignment to unknown variable") {
                     return Ok(());
                 }
@@ -4079,6 +4093,7 @@ impl<'a> Builder<'a> {
                 field,
                 value,
                 line,
+                id: _,
             } => {
                 if !self.known(name, *line, "assignment to field of unknown variable") {
                     return Ok(());
@@ -4091,6 +4106,7 @@ impl<'a> Builder<'a> {
                 index,
                 value,
                 line,
+                id: _,
             } => {
                 if !self.known(name, *line, "index-assignment to unknown variable") {
                     return Ok(());
@@ -4098,7 +4114,7 @@ impl<'a> Builder<'a> {
                 let base = self.named_place(name, *line)?;
                 self.index_set(base, name, index, value, sid, *line, out)?;
             }
-            Stmt::Return { value, line } => {
+            Stmt::Return { value, line, id: _ } => {
                 let vty = match value {
                     Some(e) => node_ty(e as *const Expr as usize),
                     None => Some(Type::Unit),
@@ -4121,7 +4137,7 @@ impl<'a> Builder<'a> {
                 };
                 self.return_exit(v, sid, *line, out)?;
             }
-            Stmt::Break { line } => {
+            Stmt::Break { line, id: _ } => {
                 if let Some(Some(u)) = self.walks.last().cloned() {
                     self.release_unreached(&u, out);
                 }
@@ -4131,7 +4147,7 @@ impl<'a> Builder<'a> {
                     line: *line,
                 });
             }
-            Stmt::Continue { line } => {
+            Stmt::Continue { line, id: _ } => {
                 self.drops_at(Exit::Continue, sid, out)?;
                 out.push(St::Continue {
                     site: sid,
@@ -4143,6 +4159,7 @@ impl<'a> Builder<'a> {
                 then_block,
                 else_block,
                 line,
+                id: _,
             } => {
                 let c = self.condition(cond, "if", *line, out)?;
                 let mut t = Vec::new();
@@ -4166,6 +4183,7 @@ impl<'a> Builder<'a> {
                 then_block,
                 else_block,
                 line,
+                id: _,
             } => {
                 if self.optional_if_let(
                     pattern,
@@ -4222,7 +4240,12 @@ impl<'a> Builder<'a> {
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
-            Stmt::While { cond, body, line } => {
+            Stmt::While {
+                cond,
+                body,
+                line,
+                id: _,
+            } => {
                 let mut l = Vec::new();
                 let c = self.condition(cond, "while", *line, &mut l)?;
                 l.push(St::If {
@@ -4247,6 +4270,7 @@ impl<'a> Builder<'a> {
                 line,
                 consuming,
                 col: _,
+                id: _,
             } => {
                 let ity = self.ty_of(iter)?;
                 // A user container's element is what its `nth` projection
@@ -4481,7 +4505,7 @@ impl<'a> Builder<'a> {
                 }
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
-            Stmt::Drop { name, line } => {
+            Stmt::Drop { name, line, id: _ } => {
                 let Some(n) = self.lookup(name) else {
                     self.body.unbound_drops.push((name.clone(), *line));
                     return Ok(());
@@ -4492,10 +4516,10 @@ impl<'a> Builder<'a> {
             }
             // An unaudited build states neither the audit hook nor its operand;
             // `p + 8` alone costs four instructions per allocation.
-            Stmt::Expr(Expr::Call { name, .. })
+            Stmt::Expr(Expr::Call { name, .. }, _)
                 if vyrn_frontend::loader::audit_hook(name)
                     && !vyrn_frontend::loader::audit_build() => {}
-            Stmt::Expr(e) => {
+            Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
                 if self.owns(&ty) || self.owed.is_some() {
@@ -5031,7 +5055,7 @@ impl<'a> Builder<'a> {
     /// module state answers, or `T?(..)` of an undeclared type.
     fn unknown_of(&self, e: &Expr) -> Option<(usize, String)> {
         match e {
-            Expr::Var { name, line } if !self.answers(name) && !self.is_variant(name) => {
+            Expr::Var { name, line, id: _ } if !self.answers(name) && !self.is_variant(name) => {
                 Some((*line, format!("unknown variable `{name}`")))
             }
             Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
@@ -5353,7 +5377,7 @@ impl<'a> Builder<'a> {
                 self.keyed(t, construct);
                 Ok((Val::Name(t), true))
             }
-            Expr::Consume { place, line } => match &**place {
+            Expr::Consume { place, line, id: _ } => match &**place {
                 Expr::Var { name, .. } => {
                     let Some(n) = self.lookup(name) else {
                         // `consume` of module state: the same read and refusal.
@@ -5977,7 +6001,7 @@ impl<'a> Builder<'a> {
             return Ok(Val::Lit(l));
         }
         match e {
-            Expr::Var { name, line } => match self.lookup(name) {
+            Expr::Var { name, line, id: _ } => match self.lookup(name) {
                 Some(n) => Ok(Val::Name(n)),
                 // A nullary constructor (`None`, a fieldless variant) parses
                 // as a bare name. Like a literal, it owns and borrows nothing.
@@ -6027,7 +6051,7 @@ impl<'a> Builder<'a> {
                 // is a borrow in any position.
                 None => self.global_read(e, name, *line, out),
             },
-            Expr::Consume { place, line } => match &**place {
+            Expr::Consume { place, line, id: _ } => match &**place {
                 Expr::Var { name, .. } => match self.lookup(name) {
                     Some(n) => Ok(Val::Name(n)),
                     // `consume <module state>`: a borrow whose take the
@@ -6121,6 +6145,7 @@ impl<'a> Builder<'a> {
             body,
             line,
             col,
+            id: _,
         } = e
         else {
             return gap("a lambda frame of no lambda literal", e.line());
@@ -6570,15 +6595,19 @@ impl<'a> Builder<'a> {
         match e {
             // Named again because this match is exhaustive on purpose: a new
             // `Expr` variant must fail to compile. `lit_of` says what each is.
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
-                match lit_of(e) {
-                    Some(l) => Ok(Rhs::Val(Val::Lit(l))),
-                    None => gap("a literal form `lit_of` does not answer", e.line()),
-                }
-            }
+            Expr::Int(_, _)
+            | Expr::Byte(_, _)
+            | Expr::Float(_, _)
+            | Expr::Bool(_, _)
+            | Expr::Str(_, _) => match lit_of(e) {
+                Some(l) => Ok(Rhs::Val(Val::Lit(l))),
+                None => gap("a literal form `lit_of` does not answer", e.line()),
+            },
             // A `let` builds a nullary constructor in its own slot, as it
             // builds `Some(v)`; [`Builder::nullary`] names one elsewhere.
-            Expr::Var { name, line } if self.lookup(name).is_none() && self.is_nullary(name) => {
+            Expr::Var { name, line, id: _ }
+                if self.lookup(name).is_none() && self.is_nullary(name) =>
+            {
                 let ty = self.ty_of(e)?;
                 self.call(name, &[], *line, Some(ty), out)
             }
@@ -6588,7 +6617,13 @@ impl<'a> Builder<'a> {
                 vec![self.read_val(expr, out)?],
                 self.produced(e),
             )),
-            Expr::Binary { op, lhs, rhs, line } => {
+            Expr::Binary {
+                op,
+                lhs,
+                rhs,
+                line,
+                id: _,
+            } => {
                 // `&&` and `||` are control flow: the right operand may not run.
                 if matches!(op, BinOp::And | BinOp::Or) {
                     return self.short_circuit(*op, lhs, rhs, *line, out);
@@ -6647,6 +6682,7 @@ impl<'a> Builder<'a> {
                 args,
                 line,
                 type_args: _,
+                id: _,
             } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
                 let r = if name == "serveStream" {
                     // A compiled build has no accept loop.
@@ -6679,6 +6715,7 @@ impl<'a> Builder<'a> {
                 args,
                 line,
                 type_args,
+                id: _,
             } => {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
@@ -6778,7 +6815,7 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Make(Ctor::Try(name.clone()), vs))
             }
             // A part crosses into its slot's type as a stored value does.
-            Expr::ArrayLit { elems, line } => {
+            Expr::ArrayLit { elems, line, id: _ } => {
                 let ety = self
                     .ty_of(e)
                     .ok()
@@ -6789,7 +6826,12 @@ impl<'a> Builder<'a> {
                 }
                 Ok(Rhs::Make(Ctor::Array, vs))
             }
-            Expr::StructLit { name, fields, line } => {
+            Expr::StructLit {
+                name,
+                fields,
+                line,
+                id: _,
+            } => {
                 let ty = self.ty_of(e).ok();
                 let mut vs = Vec::new();
                 for (f, a) in fields {
@@ -6814,7 +6856,11 @@ impl<'a> Builder<'a> {
                     vs,
                 ))
             }
-            Expr::MapLit { entries, line } => {
+            Expr::MapLit {
+                entries,
+                line,
+                id: _,
+            } => {
                 let (kty, vty) = match self
                     .ty_of(e)
                     .map(|t| vyrn_frontend::types::resolve(&t, self.proto.types()))
@@ -6834,6 +6880,7 @@ impl<'a> Builder<'a> {
                 then_branch,
                 else_branch,
                 line,
+                id: _,
             } => {
                 let ty = self.ty_of(e)?;
                 // The plan keys an if-expression's edge rows by the expression.
@@ -6958,7 +7005,7 @@ impl<'a> Builder<'a> {
                 self.drops_at(Exit::Scrutinee, mid, out)?;
                 Ok(Rhs::Val(Val::Name(res)))
             }
-            Expr::Try { expr, line } => {
+            Expr::Try { expr, line, id: _ } => {
                 let ty = self.ty_of(e)?;
                 let ity = self.ty_of(expr)?;
                 let tid = e as *const Expr as usize;
@@ -8543,7 +8590,7 @@ fn rebound(b: &Block, out: &mut std::collections::HashSet<String>) {
             Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
                 rebound(body, out)
             }
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 for a in arms {
                     if let ArmBody::Block(b) = &a.body {
                         rebound(b, out);

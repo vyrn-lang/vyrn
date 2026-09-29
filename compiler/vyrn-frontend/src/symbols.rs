@@ -1269,7 +1269,7 @@ fn css_constant(program: &ast::Program) -> Option<String> {
         .find(|f| f.name == "css" && f.params.is_empty())?;
     for stmt in &f.body.stmts {
         if let Stmt::Return {
-            value: Some(Expr::Str(s)),
+            value: Some(Expr::Str(s, _)),
             ..
         } = stmt
         {
@@ -2139,15 +2139,15 @@ fn global_detail(g: &GlobalDecl) -> String {
 /// authoritative. Covers scalars and homogeneous array literals of scalars.
 fn infer_literal_type(e: &Expr) -> Option<Type> {
     match e {
-        Expr::Int(_) => Some(Type::Int),
+        Expr::Int(_, _) => Some(Type::Int),
         // A byte literal defaults to `UInt8`.
-        Expr::Byte(_) => Some(Type::IntN {
+        Expr::Byte(_, _) => Some(Type::IntN {
             bits: 8,
             signed: false,
         }),
-        Expr::Float(_) => Some(Type::Float),
-        Expr::Bool(_) => Some(Type::Bool),
-        Expr::Str(_) => Some(Type::Str),
+        Expr::Float(_, _) => Some(Type::Float),
+        Expr::Bool(_, _) => Some(Type::Bool),
+        Expr::Str(_, _) => Some(Type::Str),
         Expr::Unary { expr, .. } => infer_literal_type(expr),
         Expr::ArrayLit { elems, .. } => elems
             .first()

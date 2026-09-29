@@ -15,6 +15,49 @@ pub fn is_panic(name: &str) -> bool {
     name == "panic" || name == PANIC_AT
 }
 
+/// Names one syntax node for the side tables that passes key by node.
+///
+/// [`Program::number`] gives every `Expr`, `Stmt`, `Block` and `Param` of a
+/// program its id: dense from 1, in declaration order and then pre-order, so
+/// no two nodes of one program share an id and none is 0. An id survives a
+/// clone and a move of the tree. A projection expansion is not in the program:
+/// [`crate::project`] numbers it from [`NodeId::EXPANDED`] up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(pub u32);
+
+impl NodeId {
+    /// The first id of the expansion range, above every program's own ids.
+    pub const EXPANDED: u32 = 1 << 31;
+}
+
+/// A node's slot for its [`NodeId`]; 0 until numbered. Any two slots compare
+/// equal, so two trees compare by structure alone. `{:?}` prints every slot
+/// alike, so a fingerprint over a tree's debug text ignores ids too; `{:#?}`
+/// prints the id.
+#[derive(Clone, Copy, Default)]
+pub struct Id(pub u32);
+
+impl Id {
+    /// The slot a node is built with.
+    pub const NEW: Id = Id(0);
+}
+
+impl PartialEq for Id {
+    fn eq(&self, _: &Id) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if f.alternate() {
+            write!(f, "#{}", self.0)
+        } else {
+            f.write_str("_")
+        }
+    }
+}
+
 /// A whole program. `main` is the entry point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -50,6 +93,8 @@ pub struct Program {
     /// Kept out of `functions`, like [`Program::tests`]. `vyrn bench` lowers
     /// them to functions and a synthesized harness `main`.
     pub benches: Vec<NamedBlock>,
+    /// The largest [`NodeId`] the program holds.
+    pub nodes: u32,
 }
 
 /// A `test "name" { body }` or `bench "name" { body }` declaration.
@@ -609,6 +654,7 @@ pub struct Param {
     pub line: usize,
     /// See [`Binder::col`].
     pub col: usize,
+    pub id: Id,
 }
 
 /// A type. A validated type is a [`Type::Named`] whose [`TypeDecl`] carries the
@@ -910,6 +956,7 @@ impl std::fmt::Display for Type {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
+    pub id: Id,
 }
 
 /// A statement. `if` also has an expression form, [`Expr::IfExpr`]; `match` is
@@ -925,12 +972,14 @@ pub enum Stmt {
         line: usize,
         /// See [`Binder::col`].
         col: usize,
+        id: Id,
     },
     /// Legal only for a `mut` binding.
     Assign {
         name: String,
         value: Expr,
         line: usize,
+        id: Id,
     },
     /// `name.field = value` on a `mut` record binding.
     SetField {
@@ -938,6 +987,7 @@ pub enum Stmt {
         field: String,
         value: Expr,
         line: usize,
+        id: Id,
     },
     /// `name[index] = value` on a `mut` array binding; the read `a[i]` is
     /// `@at(a, i)`.
@@ -946,21 +996,27 @@ pub enum Stmt {
         index: Expr,
         value: Expr,
         line: usize,
+        id: Id,
     },
     /// `return [expr]`.
-    Return { value: Option<Expr>, line: usize },
+    Return {
+        value: Option<Expr>,
+        line: usize,
+        id: Id,
+    },
     /// Exits the innermost loop. Unlabeled; the checker refuses it outside a
     /// loop.
-    Break { line: usize },
+    Break { line: usize, id: Id },
     /// Skips to the innermost loop's next iteration. Unlabeled; the checker
     /// refuses it outside a loop.
-    Continue { line: usize },
+    Continue { line: usize, id: Id },
     /// `if cond { .. } [else { .. }]`.
     If {
         cond: Expr,
         then_block: Block,
         else_block: Option<Block>,
         line: usize,
+        id: Id,
     },
     /// `if let PAT = e { .. } [else { .. }]`. The pattern's binders are in scope
     /// in `then_block` only. The parser desugars `while let` to `while true {
@@ -971,12 +1027,14 @@ pub enum Stmt {
         then_block: Block,
         else_block: Option<Block>,
         line: usize,
+        id: Id,
     },
     /// `while cond { .. }`.
     While {
         cond: Expr,
         body: Block,
         line: usize,
+        id: Id,
     },
     /// `for var in iter { .. }` over an array; `var` is immutable and scoped to
     /// the body.
@@ -991,15 +1049,16 @@ pub enum Stmt {
         /// is dead after the loop. A loop over a temporary,
         /// such as `for o in diff(..)`, consumes without the word.
         consuming: bool,
+        id: Id,
     },
     /// `drop name`: frees a heap value the compiler cannot prove dead and
     /// consumes the binding.
-    Drop { name: String, line: usize },
+    Drop { name: String, line: usize, id: Id },
     /// An expression evaluated for its effects.
-    Expr(Expr),
+    Expr(Expr, Id),
     /// `region { .. }`: an arena scope. Its allocations are freed when the block
     /// exits, and the checker refuses a value that escapes it.
-    Region { body: Block, line: usize },
+    Region { body: Block, line: usize, id: Id },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1040,28 +1099,31 @@ pub enum UnOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Int(i64),
+    Int(i64, Id),
     /// A byte literal `'c'`: an integer literal the checker defaults to `UInt8`.
     /// Backends treat it as [`Expr::Int`].
-    Byte(u8),
-    Float(f64),
-    Bool(bool),
+    Byte(u8, Id),
+    Float(f64, Id),
+    Bool(bool, Id),
     /// Already decoded.
-    Str(String),
+    Str(String, Id),
     Var {
         name: String,
         line: usize,
+        id: Id,
     },
     Unary {
         op: UnOp,
         expr: Box<Expr>,
         line: usize,
+        id: Id,
     },
     Binary {
         op: BinOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
         line: usize,
+        id: Id,
     },
     /// A call. `None` is an [`Expr::Var`].
     Call {
@@ -1076,6 +1138,7 @@ pub enum Expr {
         /// them only where the arguments cannot answer.
         type_args: Vec<Type>,
         line: usize,
+        id: Id,
     },
     /// An arm is a single expression, or a block when `stmt_pos` holds.
     Match {
@@ -1086,6 +1149,7 @@ pub enum Expr {
         /// false.
         stmt_pos: bool,
         line: usize,
+        id: Id,
     },
     /// `if` in expression position; each branch is one expression, and an
     /// `else if` is a nested `IfExpr`. `else_branch` is `None` only when the
@@ -1096,40 +1160,47 @@ pub enum Expr {
         then_branch: Box<Expr>,
         else_branch: Option<Box<Expr>>,
         line: usize,
+        id: Id,
     },
     /// `expr?`: unwraps an `Option` or `Result`, or returns its `None` or `Err`
     /// from the enclosing function.
     Try {
         expr: Box<Expr>,
         line: usize,
+        id: Id,
     },
     /// `User { name: 1, age: 30 }`.
     StructLit {
         name: String,
         fields: Vec<(String, Expr)>,
         line: usize,
+        id: Id,
     },
     Field {
         expr: Box<Expr>,
         field: String,
         line: usize,
+        id: Id,
     },
     /// `Age?(n)`: yields `None` when the refinement fails instead of aborting.
     TryConstruct {
         name: String,
         args: Vec<Expr>,
         line: usize,
+        id: Id,
     },
     /// `[a, b, c]`, typed `Array<T, N>`.
     ArrayLit {
         elems: Vec<Expr>,
         line: usize,
+        id: Id,
     },
     /// `[:]` or `["a": 1, "b": 2]`, entries in written order. The value type
     /// comes from the expected `Map` type.
     MapLit {
         entries: Vec<(Expr, Expr)>,
         line: usize,
+        id: Id,
     },
     /// `x -> expr`, `(x, y) -> expr` or `x -> { block }`. The parameter types
     /// come from the expected `fn` type; outer locals are captured by read.
@@ -1140,6 +1211,7 @@ pub enum Expr {
         /// The column of the first token. With `line` it keys the lifted
         /// function, so two lambdas on one line are two functions (#459).
         col: usize,
+        id: Id,
     },
     /// `consume place`: moves the value out; the place is dead from here.
     /// `movecheck` refuses a `place` that is not a `Var` or a
@@ -1147,6 +1219,7 @@ pub enum Expr {
     Consume {
         place: Box<Expr>,
         line: usize,
+        id: Id,
     },
 }
 
@@ -1229,6 +1302,269 @@ impl Pattern {
     }
 }
 
+macro_rules! slot {
+    ($e:expr, $($ref_:tt)+) => {
+        match $e {
+            Expr::Int(_, id)
+            | Expr::Byte(_, id)
+            | Expr::Float(_, id)
+            | Expr::Bool(_, id)
+            | Expr::Str(_, id)
+            | Expr::Var { id, .. }
+            | Expr::Unary { id, .. }
+            | Expr::Binary { id, .. }
+            | Expr::Call { id, .. }
+            | Expr::Match { id, .. }
+            | Expr::IfExpr { id, .. }
+            | Expr::Try { id, .. }
+            | Expr::StructLit { id, .. }
+            | Expr::Field { id, .. }
+            | Expr::TryConstruct { id, .. }
+            | Expr::ArrayLit { id, .. }
+            | Expr::MapLit { id, .. }
+            | Expr::Lambda { id, .. }
+            | Expr::Consume { id, .. } => $($ref_)+ *id,
+        }
+    };
+}
+
+macro_rules! stmt_slot {
+    ($s:expr, $($ref_:tt)+) => {
+        match $s {
+            Stmt::Let { id, .. }
+            | Stmt::Assign { id, .. }
+            | Stmt::SetField { id, .. }
+            | Stmt::IndexSet { id, .. }
+            | Stmt::Return { id, .. }
+            | Stmt::Break { id, .. }
+            | Stmt::Continue { id, .. }
+            | Stmt::If { id, .. }
+            | Stmt::IfLet { id, .. }
+            | Stmt::While { id, .. }
+            | Stmt::ForIn { id, .. }
+            | Stmt::Drop { id, .. }
+            | Stmt::Expr(_, id)
+            | Stmt::Region { id, .. } => $($ref_)+ *id,
+        }
+    };
+}
+
+impl Expr {
+    pub fn id(&self) -> NodeId {
+        NodeId(slot!(self, &).0)
+    }
+}
+
+impl Stmt {
+    pub fn id(&self) -> NodeId {
+        NodeId(stmt_slot!(self, &).0)
+    }
+}
+
+impl Block {
+    pub fn id(&self) -> NodeId {
+        NodeId(self.id.0)
+    }
+}
+
+impl Param {
+    pub fn id(&self) -> NodeId {
+        NodeId(self.id.0)
+    }
+}
+
+impl Program {
+    /// Numbers every node of the program from 1, overwriting any id it held.
+    /// The parser and the loader call it once the tree is whole; a side table
+    /// built before it is stale.
+    pub fn number(&mut self) {
+        let mut n = Numbering(0);
+        for t in &mut self.type_decls {
+            if let Some(p) = &mut t.predicate {
+                n.expr(p);
+            }
+        }
+        for f in &mut self.functions {
+            n.function(f);
+        }
+        for i in &mut self.impls {
+            for f in i.methods.iter_mut().chain(&mut i.places) {
+                n.function(f);
+            }
+        }
+        for g in &mut self.globals {
+            n.expr(&mut g.init);
+        }
+        for m in self.contracts.iter_mut().flat_map(|c| &mut c.members) {
+            if let ContractMemberKind::Value {
+                default: Some(d), ..
+            }
+            | ContractMemberKind::Fn {
+                default: Some(d), ..
+            } = &mut m.kind
+            {
+                n.expr(d);
+            }
+        }
+        for b in self.tests.iter_mut().chain(&mut self.benches) {
+            n.block(&mut b.body);
+        }
+        self.nodes = n.0;
+    }
+
+    /// Numbers `functions[from..]` on from [`Program::nodes`], for a synthesis
+    /// that appends functions to a numbered program.
+    pub fn number_appended(&mut self, from: usize) {
+        let mut n = Numbering(self.nodes);
+        for f in &mut self.functions[from..] {
+            n.function(f);
+        }
+        self.nodes = n.0;
+    }
+}
+
+/// The walk behind [`Program::number`]: `.0` is the last id given.
+pub struct Numbering(pub u32);
+
+impl Numbering {
+    fn next(&mut self, slot: &mut Id) {
+        self.0 += 1;
+        *slot = Id(self.0);
+    }
+
+    pub fn function(&mut self, f: &mut Function) {
+        for p in &mut f.params {
+            self.next(&mut p.id);
+        }
+        self.block(&mut f.body);
+    }
+
+    pub fn block(&mut self, b: &mut Block) {
+        self.next(&mut b.id);
+        for s in &mut b.stmts {
+            self.stmt(s);
+        }
+    }
+
+    pub fn stmt(&mut self, s: &mut Stmt) {
+        self.next(stmt_slot!(s, &mut));
+        match s {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
+                self.expr(value)
+            }
+            Stmt::IndexSet { index, value, .. } => {
+                self.expr(index);
+                self.expr(value);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    self.expr(v);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(cond);
+                self.block(then_block);
+                if let Some(b) = else_block {
+                    self.block(b);
+                }
+            }
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(scrutinee);
+                self.block(then_block);
+                if let Some(b) = else_block {
+                    self.block(b);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                self.expr(cond);
+                self.block(body);
+            }
+            Stmt::ForIn { iter, body, .. } => {
+                self.expr(iter);
+                self.block(body);
+            }
+            Stmt::Expr(e, _) => self.expr(e),
+            Stmt::Region { body, .. } => self.block(body),
+        }
+    }
+
+    pub fn expr(&mut self, e: &mut Expr) {
+        self.next(slot!(e, &mut));
+        match e {
+            Expr::Int(..)
+            | Expr::Byte(..)
+            | Expr::Float(..)
+            | Expr::Bool(..)
+            | Expr::Str(..)
+            | Expr::Var { .. } => {}
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                self.expr(expr)
+            }
+            Expr::Consume { place, .. } => self.expr(place),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            Expr::Call { args, .. }
+            | Expr::TryConstruct { args, .. }
+            | Expr::ArrayLit { elems: args, .. } => {
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee);
+                for a in arms {
+                    match &mut a.body {
+                        ArmBody::Expr(x) => self.expr(x),
+                        ArmBody::Block(b) => self.block(b),
+                    }
+                }
+            }
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expr(cond);
+                self.expr(then_branch);
+                if let Some(x) = else_branch {
+                    self.expr(x);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, x) in fields {
+                    self.expr(x);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
+            Expr::Lambda { body, .. } => match body {
+                LambdaBody::Expr(x) => self.expr(x),
+                LambdaBody::Block(b) => self.block(b),
+            },
+        }
+    }
+}
+
 impl Stmt {
     /// Returns the line the statement starts on. `Stmt::Expr` over a literal
     /// answers 0, as [`Expr::line`] does.
@@ -1239,15 +1575,15 @@ impl Stmt {
             | Stmt::SetField { line, .. }
             | Stmt::IndexSet { line, .. }
             | Stmt::Return { line, .. }
-            | Stmt::Break { line }
-            | Stmt::Continue { line }
+            | Stmt::Break { line, id: _ }
+            | Stmt::Continue { line, id: _ }
             | Stmt::If { line, .. }
             | Stmt::IfLet { line, .. }
             | Stmt::While { line, .. }
             | Stmt::ForIn { line, .. }
             | Stmt::Drop { line, .. }
             | Stmt::Region { line, .. } => *line,
-            Stmt::Expr(e) => e.line(),
+            Stmt::Expr(e, _) => e.line(),
         }
     }
 }
@@ -1257,7 +1593,11 @@ impl Expr {
     /// carries no line.
     pub fn line(&self) -> usize {
         match self {
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => 0,
+            Expr::Int(_, _)
+            | Expr::Byte(_, _)
+            | Expr::Float(_, _)
+            | Expr::Bool(_, _)
+            | Expr::Str(_, _) => 0,
             Expr::Var { line, .. }
             | Expr::Unary { line, .. }
             | Expr::Binary { line, .. }
@@ -1481,7 +1821,7 @@ macro_rules! body_scope_descent {
                     $blk(body, &mut inner, v);
                 }
                 Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-                Stmt::Expr(e) => $ex(e, locals, v),
+                Stmt::Expr(e, _) => $ex(e, locals, v),
                 Stmt::Region { body, .. } => {
                     let mut inner = locals.clone();
                     $blk(body, &mut inner, v);
@@ -1594,11 +1934,11 @@ macro_rules! body_scope_descent {
                     }
                 }
                 Expr::Var { .. }
-                | Expr::Int(_)
-                | Expr::Byte(_)
-                | Expr::Float(_)
-                | Expr::Bool(_)
-                | Expr::Str(_) => {}
+                | Expr::Int(_, _)
+                | Expr::Byte(_, _)
+                | Expr::Float(_, _)
+                | Expr::Bool(_, _)
+                | Expr::Str(_, _) => {}
             }
             v.after_expr(&$($mut_)? *e, locals);
         }
@@ -1817,7 +2157,7 @@ pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
         Stmt::Let { value, .. }
         | Stmt::Assign { value, .. }
         | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => mentions(value, name),
+        | Stmt::Expr(value, _) => mentions(value, name),
         Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
         Stmt::If { cond: e, .. }
         | Stmt::While { cond: e, .. }
@@ -1850,9 +2190,11 @@ pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
     let all = |m: bool| (m, m);
     match e {
         Expr::Var { name: n, .. } => all(n == name),
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
-            (false, false)
-        }
+        Expr::Int(_, _)
+        | Expr::Byte(_, _)
+        | Expr::Float(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Str(_, _) => (false, false),
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
             paths(expr, name)
         }

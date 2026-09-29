@@ -66,7 +66,7 @@ fn scan_append_block(
                 }
                 _ => ban_append_expr(value, banned, strict),
             },
-            Stmt::SetField { value, .. } | Stmt::Expr(value) => {
+            Stmt::SetField { value, .. } | Stmt::Expr(value, _) => {
                 ban_append_expr(value, banned, strict)
             }
             Stmt::IndexSet { index, value, .. } => {
@@ -241,7 +241,11 @@ fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, str
                 scan_append_block(b, &mut std::collections::HashSet::new(), banned, true)
             }
         },
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+        Expr::Int(_, _)
+        | Expr::Byte(_, _)
+        | Expr::Float(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Str(_, _) => {}
     }
 }
 

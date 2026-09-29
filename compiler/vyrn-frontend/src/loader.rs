@@ -349,11 +349,12 @@ fn stamp_panic_sites(program: &mut Program, file: &str) {
             args,
             line,
             type_args: _,
+            id: _,
         } = e
         {
             if name == "panic" && args.len() == 1 {
                 *name = PANIC_AT.to_string();
-                args.push(Expr::Str(format!("{file}:{line}")));
+                args.push(Expr::Str(format!("{file}:{line}"), Id::NEW));
             }
         }
     };
@@ -1235,6 +1236,7 @@ fn load_modules(
                     log_level: DEFAULT_LOG_LEVEL,
                     surface_shadows: std::collections::HashSet::new(),
                     log_sink: LogSink::Stderr,
+                    nodes: 0,
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
@@ -2957,6 +2959,7 @@ impl BodyVisitMut for NsResolver<'_> {
                 args,
                 type_args,
                 line,
+                id: _,
             } => {
                 let l = *line;
                 // A type argument resolves like any other type spelling:
@@ -3011,14 +3014,23 @@ impl BodyVisitMut for NsResolver<'_> {
                     }
                 }
             }
-            Expr::Field { expr, field, line } => {
+            Expr::Field {
+                expr,
+                field,
+                line,
+                id: _,
+            } => {
                 let l = *line;
                 // `ns.member`: a type name, a function value or a nullary access.
                 if let Expr::Var { name: head, .. } = expr.as_ref() {
                     if self.is_ns(head, locals) {
                         let head = head.clone();
                         if let Some(sym) = self.resolve_member(&head, field, l) {
-                            *e = Expr::Var { name: sym, line: l };
+                            *e = Expr::Var {
+                                id: Id::NEW,
+                                name: sym,
+                                line: l,
+                            };
                         }
                         return false;
                     }
@@ -3042,6 +3054,7 @@ impl BodyVisitMut for NsResolver<'_> {
                             if is_variant {
                                 let _ = self.resolve_member(&head, &enum_name, l);
                                 *e = Expr::Var {
+                                    id: Id::NEW,
                                     name: variant,
                                     line: l,
                                 };
@@ -3059,7 +3072,7 @@ impl BodyVisitMut for NsResolver<'_> {
                     }
                 }
             }
-            Expr::Var { name, line } => {
+            Expr::Var { name, line, id: _ } => {
                 if self.is_ns(name, locals) {
                     let (name, line) = (name.clone(), *line);
                     self.err(line, format!("namespace `{name}` is not a value"));
@@ -3492,6 +3505,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.tests.extend(extra_tests);
     program.benches.extend(extra_benches);
     program.imports.clear(); // consumed
+    program.number();
     Ok(program)
 }
 
@@ -3694,6 +3708,7 @@ impl BodyVisit<'_> for RefNames {
                 args,
                 line,
                 type_args: _,
+                id: _,
             } => {
                 let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
@@ -3720,7 +3735,7 @@ impl BodyVisit<'_> for RefNames {
             }
             Expr::StructLit { name, line, .. }
             | Expr::TryConstruct { name, line, .. }
-            | Expr::Var { name, line } => {
+            | Expr::Var { name, line, id: _ } => {
                 if !locals.contains(name) {
                     self.out.push((name.clone(), *line));
                 }

@@ -4,7 +4,7 @@
 //! the generation engine through. Nothing here walks a tree: each function
 //! takes a resolver, a path or a source, and returns an `Expr` or a `String`.
 
-use crate::ast::{Expr, Program};
+use crate::ast::{Expr, Id, Program};
 use std::collections::HashMap;
 
 /// One piece of a `Code` fragment: plain rendered text (from a
@@ -210,15 +210,17 @@ fn is_bare_identifier(s: &str) -> bool {
 /// wasm generation engine encodes for the guest.
 pub fn gen_lex_tokens_lit(source: &str) -> Expr {
     Expr::ArrayLit {
+        id: Id::NEW,
         elems: lexed(source)
             .into_iter()
             .map(|(kind, text, line, col)| Expr::StructLit {
+                id: Id::NEW,
                 name: "Token".to_string(),
                 fields: vec![
-                    ("kind".to_string(), Expr::Str(kind)),
-                    ("text".to_string(), Expr::Str(text)),
-                    ("line".to_string(), Expr::Int(line)),
-                    ("col".to_string(), Expr::Int(col)),
+                    ("kind".to_string(), Expr::Str(kind, Id::NEW)),
+                    ("text".to_string(), Expr::Str(text, Id::NEW)),
+                    ("line".to_string(), Expr::Int(line, Id::NEW)),
+                    ("col".to_string(), Expr::Int(col, Id::NEW)),
                 ],
                 line: 0,
             })

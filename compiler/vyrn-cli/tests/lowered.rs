@@ -77,11 +77,11 @@ fn inst_key(name: &str, args: &[Type], decls: &HashMap<String, TypeDecl>) -> Str
 /// The axis a disagreement is classified on.
 fn kind(e: &Expr) -> &'static str {
     match e {
-        Expr::Int(_) => "Int",
-        Expr::Byte(_) => "Byte",
-        Expr::Float(_) => "Float",
-        Expr::Bool(_) => "Bool",
-        Expr::Str(_) => "Str",
+        Expr::Int(_, _) => "Int",
+        Expr::Byte(_, _) => "Byte",
+        Expr::Float(_, _) => "Float",
+        Expr::Bool(_, _) => "Bool",
+        Expr::Str(_, _) => "Str",
         Expr::Var { .. } => "Var",
         Expr::Unary { .. } => "Unary",
         Expr::Binary { .. } => "Binary",

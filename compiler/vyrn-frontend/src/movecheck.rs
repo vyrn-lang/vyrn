@@ -138,6 +138,7 @@ impl<'a> LetsVisit<'a> for Lets<'_> {
             index,
             value,
             line,
+            id: _,
         } = s
         else {
             return;

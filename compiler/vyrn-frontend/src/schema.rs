@@ -543,14 +543,16 @@ fn convert(
                 }
                 let k = num_expr(*k, is_int, module, name, "multipleOf")?;
                 clauses.push(Expr::Binary {
+                    id: Id::NEW,
                     op: BinOp::Eq,
                     lhs: Box::new(Expr::Binary {
+                        id: Id::NEW,
                         op: BinOp::Rem,
                         lhs: Box::new(value_var()),
                         rhs: Box::new(k),
                         line: 1,
                     }),
-                    rhs: Box::new(Expr::Int(0)),
+                    rhs: Box::new(Expr::Int(0, Id::NEW)),
                     line: 1,
                 });
             }
@@ -596,9 +598,10 @@ fn convert(
                     )
                 })?;
                 clauses.push(Expr::Binary {
+                    id: Id::NEW,
                     op: BinOp::Match,
                     lhs: Box::new(value_var()),
-                    rhs: Box::new(Expr::Str(inner.to_string())),
+                    rhs: Box::new(Expr::Str(inner.to_string(), Id::NEW)),
                     line: 1,
                 });
                 Ok(())
@@ -880,6 +883,7 @@ fn convert_payload_type(
 
 fn value_var() -> Expr {
     Expr::Var {
+        id: Id::NEW,
         name: "value".to_string(),
         line: 1,
     }
@@ -887,6 +891,7 @@ fn value_var() -> Expr {
 
 fn cmp(op: BinOp, rhs: Expr) -> Expr {
     Expr::Binary {
+        id: Id::NEW,
         op,
         lhs: Box::new(value_var()),
         rhs: Box::new(rhs),
@@ -896,13 +901,15 @@ fn cmp(op: BinOp, rhs: Expr) -> Expr {
 
 fn len_cmp(op: BinOp, n: i64) -> Expr {
     Expr::Binary {
+        id: Id::NEW,
         op,
         lhs: Box::new(Expr::Field {
+            id: Id::NEW,
             expr: Box::new(value_var()),
             field: "byteLength".to_string(),
             line: 1,
         }),
-        rhs: Box::new(Expr::Int(n)),
+        rhs: Box::new(Expr::Int(n, Id::NEW)),
         line: 1,
     }
 }
@@ -917,24 +924,28 @@ fn num_expr(n: f64, is_int: bool, module: &str, name: &str, key: &str) -> Result
         // Negate in Rust, not through the AST: `-n as i64` saturates at `i64::MAX`,
         // and a `Unary::Neg` hides the literal from `predicate_bounds`. `i64::MIN` is
         // the one value whose negation overflows.
-        Ok(Expr::Int(if n < 0.0 {
-            let a = -n;
-            if a >= 9223372036854775808.0 {
-                i64::MIN
+        Ok(Expr::Int(
+            if n < 0.0 {
+                let a = -n;
+                if a >= 9223372036854775808.0 {
+                    i64::MIN
+                } else {
+                    -(a as i64)
+                }
             } else {
-                -(a as i64)
-            }
-        } else {
-            n as i64
-        }))
+                n as i64
+            },
+            Id::NEW,
+        ))
     } else if n < 0.0 {
         Ok(Expr::Unary {
+            id: Id::NEW,
             op: UnOp::Neg,
-            expr: Box::new(Expr::Float(-n)),
+            expr: Box::new(Expr::Float(-n, Id::NEW)),
             line: 1,
         })
     } else {
-        Ok(Expr::Float(n))
+        Ok(Expr::Float(n, Id::NEW))
     }
 }
 
@@ -945,6 +956,7 @@ fn conjoin(mut clauses: Vec<Expr>) -> Option<Expr> {
         clauses.remove(0)
     };
     Some(clauses.into_iter().fold(first, |acc, c| Expr::Binary {
+        id: Id::NEW,
         op: BinOp::And,
         lhs: Box::new(acc),
         rhs: Box::new(c),
