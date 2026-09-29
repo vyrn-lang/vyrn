@@ -132,10 +132,18 @@ function the type errors do not reach and adds the typed judgment's refusals,
 so one run reports both kinds. A generator's own program gets steps 1, 2 and
 4 and the must-use judgment alone (`lib::check_generator`).
 
-`symbols::analyze` and `analyze_linked` run the same pipeline for the editor
-and return diagnostics with columns, the symbol index and the tokens.
-`vyrn-lsp` serves hover, definition, completion, references and rename from
-that `Analysis`, and holds no rule of its own.
+The editor runs a shorter pipeline. `symbols::analyze_judged` loads the
+document's imports as `vyrn_lower::load` does (an untitled buffer is checked
+alone), then runs `checker::check_accum_recording` and, for a program that
+type-checks, the `Judge` it is given (`vyrn_lower::JUDGE`:
+`vyrn_lower::refusals` and the placed analysis's memory rows). It runs no
+`derive`, no synthesis, no `lower_typed` and no `floor::settle`. So the editor
+shows no error in a function a `derive` wrote, no typed refusal beside a type
+error, and no floor refusal the load deferred to the effect judgment.
+`symbols::analyze` and `analyze_linked` also skip the judgments. Each returns
+diagnostics with columns, the symbol index and the tokens. `vyrn-lsp` serves
+hover, definition, completion, references and rename from that `Analysis`,
+and holds no rule of its own.
 
 ## The lowered form and the named core
 
