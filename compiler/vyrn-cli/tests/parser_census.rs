@@ -7,6 +7,8 @@
 //! delete. `ast.rs` and `fmt.rs` are not tiled: `surface.rs` and `forms.rs` price the
 //! AST a constructor at a time, and `fmt.rs` names no form and no keyword.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// What a section is.
@@ -42,7 +44,7 @@ impl Kind {
     }
 }
 
-/// The exact source line that starts a section, and its kind.
+/// The head of the item that starts a section, and its kind.
 struct Section {
     at: &'static str,
     kind: Kind,
@@ -56,78 +58,78 @@ const fn sec(at: &'static str, kind: Kind) -> Section {
 fn parser_sections() -> Vec<Section> {
     use Kind::*;
     vec![
-        sec("pub fn is_member_type_param(name: &str) -> bool {", Grammar),
-        sec("fn mark_member_type_params(ty: &mut Type) {", Desugar),
-        sec("fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {", Grammar),
-        sec("pub const METHOD_BUILTINS: &[(&str, &str)] = &[", Twice),
-        sec("pub fn method_surface(internal: &str) -> &str {", Shared),
-        sec("pub fn method_builtin(name: &str) -> Option<&'static str> {", Shared),
-        sec("fn unshadow_method_builtins(program: &mut Program) {", Desugar),
-        sec("pub(crate) fn parse_bare(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {", Shared),
+        sec("fn is_member_type_param", Grammar),
+        sec("fn mark_member_type_params", Desugar),
+        sec("fn at_contract_decl", Grammar),
+        sec("const METHOD_BUILTINS", Twice),
+        sec("fn method_surface", Shared),
+        sec("fn method_builtin", Shared),
+        sec("fn unshadow_method_builtins", Desugar),
+        sec("fn parse_bare", Shared),
         sec("    let mut flat = Vec::new();", Desugar),
-        sec("struct Parser {", Shared),
-        sec("fn as_fn_body(src: &str) -> String {", Desugar),
-        sec("fn is_index_field_chain(e: &Expr) -> bool {", Desugar),
-        sec("pub fn place_receiver(", Desugar),
-        sec("fn reads_place(e: &Expr) -> bool {", Desugar),
-        sec("pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize) -> Expr {", Desugar),
-        sec("fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<Stmt>)> {", Desugar),
-        sec("pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {", Desugar),
-        sec("impl Parser {", Shared),
-        sec("fn peek(&self) -> &Tok {", Shared),
-        sec("fn take_docs(&mut self) -> Option<String> {", Grammar),
-        sec("fn col(&self) -> usize {", Shared),
-        sec("fn eat(&mut self, expected: &Tok) -> Result<(), Diagnostic> {", Recovery),
-        sec("fn place_root(&mut self) -> Result<String, Diagnostic> {", Grammar),
-        sec("fn expect_ident(&mut self) -> Result<String, Diagnostic> {", Recovery),
-        sec("fn program_accum(&mut self) -> (Program, Vec<Diagnostic>) {", Grammar),
-        sec("fn sync_to_decl(&mut self) {", Recovery),
-        sec("fn protocol_decl(&mut self) -> Result<ProtocolDecl, Diagnostic> {", Grammar),
-        sec("fn contract_decl(&mut self) -> Result<ContractDecl, Diagnostic> {", Grammar),
-        sec("fn contract_member_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
-        sec("fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {", Grammar),
-        sec("fn parse_self_capability(&mut self) -> Capability {", Grammar),
-        sec("fn parse_result_capability(&mut self) -> Result<Option<Capability>, Diagnostic> {", Grammar),
-        sec("fn impl_method(", Grammar),
-        sec("fn logging_config(&mut self) -> Result<(usize, LogSink), Diagnostic> {", Grammar),
-        sec("fn import_decl(&mut self) -> Result<ImportDecl, Diagnostic> {", Grammar),
-        sec("fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {", Grammar),
-        sec("fn parse_capability(&mut self) -> Capability {", Grammar),
-        sec("fn enum_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
-        sec("fn record_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
-        sec("fn type_param_binder(", Grammar),
-        sec("fn function(&mut self, is_gen: bool) -> Result<Function, Diagnostic> {", Grammar),
-        sec("fn named_block(&mut self, word: &str) -> Result<NamedBlock, Diagnostic> {", Grammar),
-        sec("fn extern_function(&mut self, exported: bool) -> Result<Function, Diagnostic> {", Grammar),
-        sec("fn type_(&mut self) -> Result<Type, Diagnostic> {", Grammar),
-        sec("const MAX_NEST: u32 = 1024;", Shared),
-        sec("fn block(&mut self) -> Result<Block, Diagnostic> {", Grammar),
-        sec("fn sync_to_stmt(&mut self) {", Recovery),
-        sec("fn global_decl(&mut self) -> Result<GlobalDecl, Diagnostic> {", Grammar),
-        sec("fn if_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {", Grammar),
-        sec("fn else_tail(&mut self) -> Result<Option<Block>, Diagnostic> {", Desugar),
-        sec("fn if_let_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {", Grammar),
-        sec("fn spliced(&mut self, mut stmts: Vec<Stmt>) -> Stmt {", Desugar),
-        sec("fn refutable_let(&mut self, line: usize, mutable: bool) -> Result<Stmt, Diagnostic> {", Desugar),
-        sec("fn stmt(&mut self) -> Result<Stmt, Diagnostic> {", Grammar),
-        sec("fn expr(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn binop(tok: &Tok) -> Option<(BinOp, u8)> {", Grammar),
-        sec("const NULLISH_BP: u8 = 5;", Grammar),
-        sec("fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {", Desugar),
-        sec("fn unary(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn postfix(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn at_lambda(&self) -> bool {", Grammar),
-        sec("fn primary(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn template(", Desugar),
-        sec("fn tagged_template(", Desugar),
-        sec("fn code_quote(", Desugar),
-        sec("fn skeleton_error_detail(&self, skel: &str) -> (String, usize, usize) {", Recovery),
-        sec("fn match_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn storage_desugar(name: &str, args: &[Expr], line: usize) -> Option<Expr> {", Desugar),
-        sec("fn if_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn struct_lit(&mut self, name: String, line: usize) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn pattern(&mut self) -> Result<Pattern, Diagnostic> {", Grammar),
-        sec("mod tests {", Tests),
+        sec("struct Parser", Shared),
+        sec("fn as_fn_body", Desugar),
+        sec("fn is_index_field_chain", Desugar),
+        sec("fn place_receiver", Desugar),
+        sec("fn reads_place", Desugar),
+        sec("fn hoist_operand", Desugar),
+        sec("fn hoist_mutating_receiver", Desugar),
+        sec("fn store_stmts", Desugar),
+        sec("impl Parser", Shared),
+        sec("fn peek", Shared),
+        sec("fn take_docs", Grammar),
+        sec("fn col", Shared),
+        sec("fn eat", Recovery),
+        sec("fn place_root", Grammar),
+        sec("fn expect_ident", Recovery),
+        sec("fn program_accum", Grammar),
+        sec("fn sync_to_decl", Recovery),
+        sec("fn protocol_decl", Grammar),
+        sec("fn contract_decl", Grammar),
+        sec("fn contract_member_type", Grammar),
+        sec("fn impl_block", Grammar),
+        sec("fn parse_self_capability", Grammar),
+        sec("fn parse_result_capability", Grammar),
+        sec("fn impl_method", Grammar),
+        sec("fn logging_config", Grammar),
+        sec("fn import_decl", Grammar),
+        sec("fn type_decl", Grammar),
+        sec("fn parse_capability", Grammar),
+        sec("fn enum_type", Grammar),
+        sec("fn record_type", Grammar),
+        sec("fn type_param_binder", Grammar),
+        sec("fn function", Grammar),
+        sec("fn named_block", Grammar),
+        sec("fn extern_function", Grammar),
+        sec("fn type_", Grammar),
+        sec("const MAX_NEST", Shared),
+        sec("fn block", Grammar),
+        sec("fn sync_to_stmt", Recovery),
+        sec("fn global_decl", Grammar),
+        sec("fn if_stmt", Grammar),
+        sec("fn else_tail", Desugar),
+        sec("fn if_let_stmt", Grammar),
+        sec("fn spliced", Desugar),
+        sec("fn refutable_let", Desugar),
+        sec("fn stmt", Grammar),
+        sec("fn expr", Grammar),
+        sec("fn binop", Grammar),
+        sec("const NULLISH_BP", Grammar),
+        sec("fn nullish", Desugar),
+        sec("fn unary", Grammar),
+        sec("fn postfix", Grammar),
+        sec("fn at_lambda", Grammar),
+        sec("fn primary", Grammar),
+        sec("fn template", Desugar),
+        sec("fn tagged_template", Desugar),
+        sec("fn code_quote", Desugar),
+        sec("fn skeleton_error_detail", Recovery),
+        sec("fn match_expr", Grammar),
+        sec("fn storage_desugar", Desugar),
+        sec("fn if_expr", Grammar),
+        sec("fn struct_lit", Grammar),
+        sec("fn pattern", Grammar),
+        sec("mod tests", Tests),
     ]
 }
 
@@ -135,23 +137,14 @@ fn parser_sections() -> Vec<Section> {
 fn lexer_sections() -> Vec<Section> {
     use Kind::*;
     vec![
-        sec("pub struct Token {", Shared),
-        sec(
-            "pub fn token_name_and_text(tok: &Tok) -> (String, String) {",
-            Shared,
-        ),
-        sec("pub struct Triv {", Shared),
-        sec("macro_rules! tokens {", Grammar),
-        sec(
-            "pub fn scan(src: &str) -> Result<Scan, Diagnostic> {",
-            Grammar,
-        ),
-        sec("fn parse_unicode_escape(", Shared),
-        sec(
-            "pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {",
-            Shared,
-        ),
-        sec("mod tests {", Tests),
+        sec("struct Token", Shared),
+        sec("fn token_name_and_text", Shared),
+        sec("struct Triv", Shared),
+        sec("macro_rules! tokens", Grammar),
+        sec("fn scan", Grammar),
+        sec("fn parse_unicode_escape", Shared),
+        sec("fn lex", Shared),
+        sec("mod tests", Tests),
     ]
 }
 
@@ -179,64 +172,8 @@ fn source(file: &str) -> Vec<String> {
         .collect()
 }
 
-/// Where a section's doc comment starts: the run of comment and attribute lines
-/// straight above the anchor.
-fn doc_start(lines: &[String], anchor: usize) -> usize {
-    let mut i = anchor;
-    while i > 0 {
-        let t = lines[i - 1].trim_start();
-        if t.starts_with("//") || t.starts_with("#[") {
-            i -= 1;
-        } else {
-            break;
-        }
-    }
-    i
-}
-
-/// Each section's span as `(index, first line, last line)`, one-based and inclusive.
-/// Every line of the file is in exactly one span.
 fn spans(file: &str, lines: &[String], secs: &[Section]) -> Vec<(usize, usize, usize)> {
-    let mut anchors = Vec::new();
-    for s in secs {
-        let want: String = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
-        let hits: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.split_whitespace().collect::<Vec<_>>().join(" ") == want)
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(
-            hits.len(),
-            1,
-            "the anchor `{}` names {} lines of {file}; a section's anchor must name one",
-            s.at,
-            hits.len()
-        );
-        // An anchor that IS a comment line starts its own section: walking up
-        // from it would swallow the run it belongs to.
-        anchors.push(if s.at.trim_start().starts_with("//") {
-            hits[0]
-        } else {
-            doc_start(lines, hits[0])
-        });
-    }
-    let mut out = Vec::new();
-    for i in 0..secs.len() {
-        let first = if i == 0 { 0 } else { anchors[i] };
-        let last = if i + 1 == secs.len() {
-            lines.len()
-        } else {
-            anchors[i + 1]
-        };
-        assert!(
-            first < last,
-            "section `{}` of {file} is empty or out of order",
-            secs[i].at
-        );
-        out.push((i, first + 1, last));
-    }
-    out
+    common::census_spans(file, lines, secs.iter().map(|s| s.at))
 }
 
 fn diags(lines: &[String], a: usize, b: usize) -> usize {

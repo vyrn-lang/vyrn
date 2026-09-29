@@ -83,7 +83,7 @@ impl Reads {
     }
 }
 
-/// `at` is the exact source line that starts the section.
+/// `at` is the head of the item that starts the section.
 struct Section {
     at: &'static str,
     kind: Kind,
@@ -100,74 +100,74 @@ fn sections() -> Vec<Section> {
     #[allow(clippy::enum_glob_use)]
     use Reads::{Both, Core, Neither, Source};
     vec![
-        sec("fn unsupported<T>(what: &str, line: usize) -> Result<T, String> {", Shared, Neither),
-        sec("struct Wasi {", Encoding, Neither),
-        sec("struct Ext {", Encoding, Neither),
-        sec("pub fn compile(program: &Program, _memo: &Memo) -> Result<Vec<u8>, String> {", Shared, Neither),
-        sec("fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {", Shared, Core),
-        sec("fn abi_kind(ty: &Type) -> &'static str {", Encoding, Neither),
-        sec("enum MapKey {", Shared, Neither),
-        sec("struct Sig {", Shared, Neither),
-        sec("struct Cx<'a> {", Shared, Neither),
-        sec("fn loop_buffer_only(&self, node: usize) -> bool {", Mapping, Core),
-        sec("fn sub(&self, ty: &Type) -> Type {", Shared, Neither),
-        sec("fn wasm_sig(&self, sig: &Sig, line: usize) -> Result<(Vec<ValType>, Vec<ValType>), String> {", Encoding, Neither),
-        sec("enum Place {", Shared, Neither),
-        sec("impl Place {", Mapping, Neither),
-        sec("const LAMBDA: &str = \"@lambda\";", Shared, Neither),
-        sec("struct Fn_<'a, 'p> {", Shared, Neither),
-        sec("fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {", Shared, Both),
-        sec("fn lower_body(", Mapping, Core),
-        sec("fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {", Decision, Neither),
-        sec("fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {", Mapping, Neither),
-        sec("fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {", Shared, Neither),
-        sec("fn scratch(&mut self, b: &mut Frame, t: ValType, n: u8) -> u32 {", Shared, Neither),
-        sec("fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {", Mapping, Core),
-        sec("fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {", Mapping, Neither),
-        sec("fn addr_local(&mut self, b: &mut Frame, p: Place, off: u32) -> u32 {", Mapping, Neither),
-        sec("fn region_enter(&mut self, b: &mut Frame) {", Mapping, Neither),
-        sec("fn lookup(&self, name: &str, line: usize) -> Result<(Place, Type), String> {", Shared, Neither),
-        sec("fn place_for(&mut self, b: &mut Frame, r: &Repr, line: usize) -> Result<Place, String> {", Mapping, Neither),
-        sec("fn coerce(", Mapping, Neither),
-        sec("fn proven(&self, e: &Expr, to: &Type) -> bool {", Decision, Source),
-        sec("fn emit_validation(", Mapping, Neither),
-        sec("fn applied_record(", Mapping, Core),
-        sec("fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {", Shared, Both),
-        sec("fn regex_dfa(", Builtin, Neither),
-        sec("fn free_arg_temp(", Mapping, Neither),
-        sec("fn str_bin(&mut self, b: &mut Frame, op: BinOp, line: usize) -> Result<Type, String> {", Mapping, Neither),
-        sec("fn host(", Builtin, Neither),
-        sec("fn is_extern(&self, name: &str) -> bool {", Mapping, Neither),
-        sec("fn print_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {", Builtin, Neither),
-        sec("fn core_mem(", Mapping, Neither),
-        sec("fn log_write(", Builtin, Neither),
-        sec("fn out_ptr(", Builtin, Neither),
-        sec("fn emit_call_with(", Mapping, Source),
-        sec("fn length_of(", Builtin, Neither),
-        sec("struct Walk {", Builtin, Source),
-        sec("fn walk(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<Walk, String> {", Mapping, Neither),
-        sec("fn trap_row(&mut self, b: &mut Frame, rule: vyrn_frontend::trap::Rule, val: Option<u32>) {", Mapping, Neither),
-        sec("fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, string: bool) {", Decision, Neither),
-        sec("fn load_elem(&mut self, b: &mut Frame, w: &Walk, line: usize) -> Result<(), String> {", Mapping, Neither),
-        sec("fn fixed_elems(", Builtin, Neither),
-        sec("type Sum = Vec<EnumVariant>;", Shared, Source),
-        sec("fn owns_heap(&self, ty: &Type) -> bool {", Decision, Neither),
-        sec("fn copy_word(", Mapping, Neither),
-        sec("fn try_construct(", Decision, Neither),
-        sec("fn tag_test(", Mapping, Neither),
-        sec("fn map_into(", Builtin, Neither),
-        sec("fn sa_parts(&mut self, b: &mut Frame, hdr: u32, l: &Layout, n: usize) -> (u32, u32, u32) {", Builtin, Neither),
-        sec("fn at(off: u32) -> MemArg {", Encoding, Neither),
-        sec("struct Num {", Mapping, Neither),
-        sec("fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {", Mapping, Neither),
-        sec("vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);", Shared, Source),
-        sec("fn store_of(ll: &str) -> Instruction<'static> {", Mapping, Neither),
-        sec("macro_rules! runtime_fns {", Runtime, Neither),
-        sec("struct Rt {", Runtime, Neither),
-        sec("const SHDR: u32 = 8;", Runtime, Neither),
-        sec("fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {", Runtime, Neither),
-        sec("const RIGHT_FD_WRITE: i64 = 1 << 6;", Shared, Neither),
-        sec("fn builtin_spec(", Mapping, Both),
+        sec("fn unsupported", Shared, Neither),
+        sec("struct Wasi", Encoding, Neither),
+        sec("struct Ext", Encoding, Neither),
+        sec("fn compile", Shared, Neither),
+        sec("fn compile_inner", Shared, Core),
+        sec("fn abi_kind", Encoding, Neither),
+        sec("enum MapKey", Shared, Neither),
+        sec("struct Sig", Shared, Neither),
+        sec("struct Cx", Shared, Neither),
+        sec("fn loop_buffer_only", Mapping, Core),
+        sec("fn sub", Shared, Neither),
+        sec("fn wasm_sig", Encoding, Neither),
+        sec("enum Place", Shared, Neither),
+        sec("impl Place", Mapping, Neither),
+        sec("const LAMBDA", Shared, Neither),
+        sec("struct Fn_", Shared, Neither),
+        sec("fn lower_globals_init", Shared, Both),
+        sec("fn lower_body", Mapping, Core),
+        sec("fn frame_fits", Decision, Neither),
+        sec("fn call_depth_enter", Mapping, Neither),
+        sec("fn lower_fnval_copy", Shared, Neither),
+        sec("fn scratch", Shared, Neither),
+        sec("fn register_rel", Mapping, Core),
+        sec("fn rel_for", Mapping, Neither),
+        sec("fn addr_local", Mapping, Neither),
+        sec("fn region_enter", Mapping, Neither),
+        sec("fn lookup", Shared, Neither),
+        sec("fn place_for", Mapping, Neither),
+        sec("fn coerce", Mapping, Neither),
+        sec("fn proven", Decision, Source),
+        sec("fn emit_validation", Mapping, Neither),
+        sec("fn applied_record", Mapping, Core),
+        sec("fn peek", Shared, Both),
+        sec("fn regex_dfa", Builtin, Neither),
+        sec("fn free_arg_temp", Mapping, Neither),
+        sec("fn str_bin", Mapping, Neither),
+        sec("fn host", Builtin, Neither),
+        sec("fn is_extern", Mapping, Neither),
+        sec("fn print_value", Builtin, Neither),
+        sec("fn core_mem", Mapping, Neither),
+        sec("fn log_write", Builtin, Neither),
+        sec("fn out_ptr", Builtin, Neither),
+        sec("fn emit_call_with", Mapping, Source),
+        sec("fn length_of", Builtin, Neither),
+        sec("struct Walk", Builtin, Source),
+        sec("fn walk", Mapping, Neither),
+        sec("fn trap_row", Mapping, Neither),
+        sec("fn bounds_check", Decision, Neither),
+        sec("fn load_elem", Mapping, Neither),
+        sec("fn fixed_elems", Builtin, Neither),
+        sec("type Sum", Shared, Source),
+        sec("fn owns_heap", Decision, Neither),
+        sec("fn copy_word", Mapping, Neither),
+        sec("fn try_construct", Decision, Neither),
+        sec("fn tag_test", Mapping, Neither),
+        sec("fn map_into", Builtin, Neither),
+        sec("fn sa_parts", Builtin, Neither),
+        sec("fn at", Encoding, Neither),
+        sec("struct Num", Mapping, Neither),
+        sec("fn load_of", Mapping, Neither),
+        sec("vyrn_frontend::body_scope_descent!", Shared, Source),
+        sec("fn store_of", Mapping, Neither),
+        sec("macro_rules! runtime_fns", Runtime, Neither),
+        sec("struct Rt", Runtime, Neither),
+        sec("const SHDR", Runtime, Neither),
+        sec("fn runtime", Runtime, Neither),
+        sec("const RIGHT_FD_WRITE", Shared, Neither),
+        sec("fn builtin_spec", Mapping, Both),
         sec("#[cfg(test)]", Tests, Neither),
     ]
 }
@@ -189,57 +189,8 @@ fn emitter() -> Vec<String> {
         .collect()
 }
 
-/// The first line of the comment and attribute run straight above the anchor.
-fn doc_start(lines: &[String], anchor: usize) -> usize {
-    let mut i = anchor;
-    while i > 0 {
-        let t = lines[i - 1].trim_start();
-        if t.starts_with("//") || t.starts_with("#[") {
-            i -= 1;
-        } else {
-            break;
-        }
-    }
-    i
-}
-
-/// `(index, first line, last line)` per section, one-based and inclusive.
 fn spans(lines: &[String]) -> Vec<(usize, usize, usize)> {
-    let secs = sections();
-    let mut anchors = Vec::new();
-    for s in &secs {
-        let want: String = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
-        let hits: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.split_whitespace().collect::<Vec<_>>().join(" ") == want)
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(
-            hits.len(),
-            1,
-            "the anchor `{}` names {} lines of direct.rs; a section's anchor must name one",
-            s.at,
-            hits.len()
-        );
-        anchors.push(doc_start(lines, hits[0]));
-    }
-    let mut out = Vec::new();
-    for i in 0..secs.len() {
-        let first = if i == 0 { 0 } else { anchors[i] };
-        let last = if i + 1 == secs.len() {
-            lines.len()
-        } else {
-            anchors[i + 1]
-        };
-        assert!(
-            first < last,
-            "section `{}` of direct.rs is empty or out of order",
-            secs[i].at
-        );
-        out.push((i, first + 1, last));
-    }
-    out
+    common::census_spans("direct.rs", lines, sections().iter().map(|s| s.at))
 }
 
 fn instructions(lines: &[String], a: usize, b: usize) -> usize {
