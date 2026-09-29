@@ -157,6 +157,11 @@ pub fn judge(
             memo_ty: &mut memo_ty,
         };
         w.stmts(&b.stmts);
+        for info in b.names.iter().filter(|i| !i.borrow) {
+            for r in &info.runs {
+                w.call(r, None, info.line);
+            }
+        }
         own.push(w.own);
         let mut e = w.edges;
         // The body that builds a lambda value can run its frame.
@@ -278,14 +283,11 @@ impl Walk<'_> {
                 }
                 self.place(place)
             }
-            // A release runs the declared `release` bodies its type reaches.
-            St::Drop(n, ..) | St::Row { name: n, .. } => {
-                let info = &self.body.names[*n as usize];
-                for r in &info.runs {
-                    self.call(r, None, info.line);
-                }
-            }
-            St::Break { .. } | St::Continue { .. } | St::Return { .. } => {}
+            St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. } => {}
         }
     }
 

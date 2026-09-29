@@ -136,7 +136,9 @@ pub struct NameInfo {
     pub not_owned: Option<NotOwned>,
     /// The declared `release` bodies a release of this name may call
     /// ([`vyrn_frontend::declared::Owned::declared_releases`]). The effect
-    /// judgment and the kernel read a `St::Drop` of the name as calls to them.
+    /// judgment joins them for every name the frame does not borrow, since a
+    /// row the placer has yet to write may release it; the kernel reads them
+    /// where a row releases the name ([`runs`]).
     pub runs: Vec<String>,
 }
 
@@ -8477,6 +8479,22 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
             _ => {}
         }
     }
+}
+
+/// The declared `release` bodies the row `s` runs where it stands: a drop or
+/// a release row runs its name's, and a store runs those of the value it
+/// displaces, which has the stored value's type.
+pub fn runs<'a>(s: &St, names: &'a [NameInfo]) -> &'a [String] {
+    let n = match s {
+        St::Drop(n, ..) | St::Row { name: n, .. } => *n,
+        St::Store {
+            value: Val::Name(n),
+            old: Old::Released | Old::Pending | Old::Unreleased,
+            ..
+        } => *n,
+        _ => return &[],
+    };
+    &names[n as usize].runs
 }
 
 /// Every name a statement names, itself and everything under it: what it binds
