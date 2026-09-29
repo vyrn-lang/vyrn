@@ -155,6 +155,10 @@ pub struct Ownership {
     /// which every later build of this program writes down. Empty without a
     /// placer.
     pub placed: Placed,
+    /// The checker's record the placer lowered this program against, which
+    /// the core's builds and the emitters read a node's type off. `None`
+    /// without a placer.
+    pub record: Option<std::rc::Rc<crate::checker::Recorded>>,
 }
 
 /// One edge release: the name, the edge, and the holes the release walks
@@ -305,6 +309,7 @@ fn analyze_now(program: &Program) -> Ownership {
         fnval_clear: facts.fnval_clear.clone(),
         arg_caps: crate::declared::arg_caps(program),
         placed: Placed::default(),
+        record: None,
     };
     // The placer runs the lowering, which runs this analysis, so it is not
     // re-entered.

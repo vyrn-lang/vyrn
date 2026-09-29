@@ -245,11 +245,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // The core is built through the lowering's slots; this installs them for a host that has
     // none (a generator run inside a load, a test). Idempotent.
     vyrn_lower::install();
-    // This emitter reads every expression's type off the checker's record. A host that compiles
-    // a program the lowering never walked (a generator, a probe, a test) asks for it here; a
-    // program the core already holds costs one key comparison. The guard lives as long as the
-    // emit, so its record does not outlive this `Program`'s address.
-    let _decided = vyrn_lower::core::decide(program);
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -336,6 +331,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     }
 
     let ownership = vyrn_frontend::own::analyze(program);
+    // An analysis the placer did not run over (one inside the placer's own) carries no record.
+    let recorded =
+        (ownership.record.clone()).unwrap_or_else(|| vyrn_frontend::checker::recorded(program));
     // The leak instrument; a generator host never carries it.
     let audited = vyrn_frontend::loader::audit_build();
     let mut cx = Cx {
@@ -364,6 +362,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         externs,
         // The core's answers, folded once by the placer inside `own::analyze` above.
         facts: vyrn_lower::core::facts(),
+        recorded,
         releases: ownership.releases,
         // Flattened across functions: the key is the `let`'s node address, unique in the program.
         owned: ownership.proto,
@@ -1048,6 +1047,8 @@ struct Cx<'a> {
     /// The core's statement of the releases this emitter emits, and their only source. `None`
     /// in a host that never installed the placer, and then no such release is emitted.
     facts: Option<vyrn_lower::core::Facts>,
+    /// The checker's record of this program; [`Fn_::peek`] reads an expression's type off it.
+    recorded: std::rc::Rc<vyrn_frontend::checker::Recorded>,
     /// The `Owned` table `own` decided with, so a declared `release` needs no second
     /// list.
     owned: vyrn_frontend::declared::Owned,
@@ -3802,7 +3803,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The checker's type for `e`, read by node. [`Fn_::peek_inner`] answers for the AST this
     /// backend builds itself.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        let t = match vyrn_lower::core::node_ty(e.id()) {
+        let t = match self.cx.recorded.node_types.get(&e.id()).cloned() {
             Some(t) => self.cx.sub(&t),
             None => self.peek_inner(e, line)?,
         };
@@ -13943,6 +13944,7 @@ mod tests {
     fn cx() -> Cx<'static> {
         Cx {
             facts: None,
+            recorded: Default::default(),
             types: HashMap::new(),
             lambdas: HashMap::new(),
             layouts: RefCell::default(),

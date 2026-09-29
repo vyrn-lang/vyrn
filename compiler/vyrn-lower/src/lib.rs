@@ -211,6 +211,8 @@ pub struct Lowered<'a> {
     /// the core lowers an access site as a call by the projection's name. Not
     /// followed into the worklist: a projection is inlined at its site.
     pub places: Vec<PlaceBody<'a>>,
+    /// The checker's record every [`NodeTypes`] here was read off.
+    pub recorded: std::rc::Rc<checker::Recorded>,
 }
 
 #[derive(Debug, Clone)]
@@ -258,7 +260,7 @@ pub fn render(program: &Program, source: &str) -> String {
     for inst in lowered.root() {
         out.push('\n');
         match core::build(program, inst, &own) {
-            Ok(body) => out.push_str(&core::checked(program, own.proto.types(), &body).render()),
+            Ok(body) => out.push_str(&core::checked(program, &own, &body).render()),
             Err(g) => out.push_str(&format!(
                 "; {}: not lowered at line {}: {} {}\n",
                 inst.spelling(),
@@ -294,8 +296,6 @@ pub fn lower_with<'a>(
     // twice.
     let recorded = checker::recorded(program);
     drop(rec_span);
-    // The emitters read an expression's type off this record, by node.
-    core::set_decided(program, &recorded);
     let build_span = vyrn_frontend::prof::phase("lower: build");
     let mut lowered = build(program, &recorded, ownership);
     drop(build_span);
@@ -653,7 +653,7 @@ fn has_of<'e>(e: &'e Expr, kid: impl Fn(&'e Expr) -> Option<Type>) -> Option<Typ
 
 fn build<'a>(
     program: &'a Program,
-    recorded: &checker::Recorded,
+    recorded: &std::rc::Rc<checker::Recorded>,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
     let no_steps: Vec<Release> = Vec::new();
@@ -848,6 +848,7 @@ fn build<'a>(
         lambda_bodies,
         bodies: outside,
         places,
+        recorded: recorded.clone(),
     }
 }
 
