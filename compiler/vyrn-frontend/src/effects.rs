@@ -1,6 +1,6 @@
 //! The effect lattice as data.
 //!
-//! [`ATOMS`] is the table's second column and [`Effect::gen`] its last;
+//! [`atoms`] is the table's second column and [`Effect::gen`] its last;
 //! `tests/effects.rs` holds both equal to the table it reads. The judgment that joins a body's atoms with its callees' sets is
 //! `vyrn_lower::effects`, which walks the named core. The table lives here for
 //! two readers that cannot see `vyrn-lower`: the generation fence
@@ -134,58 +134,42 @@ impl std::fmt::Display for Effects {
     }
 }
 
-/// The atoms: `(callee name, effect)`, the table's second column. A callee
-/// that is neither here nor a user function is pure.
+/// The atoms that are no builtin: `(callee name, effect)`. Every builtin's
+/// atom is its row's [`crate::prelude::Builtin::effect`]; [`atoms`] is the
+/// table's second column. A callee that is neither an atom nor a user function
+/// is pure.
 ///
 /// `extern` has no row: whoever builds the call graph resolves an `extern fn`
 /// declaration ([`Callee::Atom`]). The three host-boundary externs
 /// are rows, because the runtime implements them on every target: a clock and
 /// a seed, not an import.
-pub const ATOMS: &[(&str, Effect)] = &[
+const RUNTIME_ATOMS: &[(&str, Effect)] = &[
     ("runtime$malloc", Effect::Alloc),
     ("mem$grow", Effect::Alloc),
-    ("readLine", Effect::ReadInput),
-    ("print", Effect::WriteOutput),
-    ("writeStdout", Effect::WriteOutput),
-    // Log levels under the spelling a call site carries: `log.info(m)` becomes
-    // `@info(log, m)`, and the surface word is an ordinary identifier.
-    ("@trace", Effect::WriteOutput),
-    ("@debug", Effect::WriteOutput),
-    ("@info", Effect::WriteOutput),
-    ("@warn", Effect::WriteOutput),
-    ("@error", Effect::WriteOutput),
-    ("readFile", Effect::FsRead),
-    ("readFileBytes", Effect::FsRead),
-    ("writeFile", Effect::FsWrite),
-    ("writeFileBytes", Effect::FsWrite),
-    ("renameFile", Effect::FsWrite),
-    ("fsyncFile", Effect::FsWrite),
-    ("listDir", Effect::FsList),
-    ("listDirKinds", Effect::FsList),
-    ("args", Effect::Args),
     ("hostNowMillis", Effect::Clock),
     ("hostMonotonicNanos", Effect::Clock),
     ("hostRandomSeed", Effect::Random),
-    ("serveStream", Effect::Serve),
-    ("panic", Effect::Trap),
-    ("@panicAt", Effect::Trap),
-    ("assert", Effect::Trap),
-    ("assertEq", Effect::Trap),
     ("runtime$trap", Effect::Trap),
     ("mem$trap", Effect::Trap),
-    ("moduleInterface", Effect::GenOnly),
-    ("contractOf", Effect::GenOnly),
-    ("lex", Effect::GenOnly),
-    ("render", Effect::GenOnly),
-    ("raw", Effect::GenOnly),
-    ("rawAt", Effect::GenOnly),
-    ("@codeText", Effect::GenOnly),
-    ("@codeSplice", Effect::GenOnly),
 ];
+
+/// Every atom and its effect.
+pub fn atoms() -> impl Iterator<Item = (&'static str, Effect)> {
+    crate::prelude::builtins()
+        .iter()
+        .filter_map(|b| Some((b.name, b.effect?)))
+        .chain(RUNTIME_ATOMS.iter().copied())
+}
 
 /// Returns the effect of the atom `name`.
 pub fn atom(name: &str) -> Option<Effect> {
-    ATOMS.iter().find(|(n, _)| *n == name).map(|(_, e)| *e)
+    match crate::prelude::builtin(name) {
+        Some(b) => b.effect,
+        None => RUNTIME_ATOMS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, e)| *e),
+    }
 }
 
 impl Effect {
@@ -246,7 +230,7 @@ pub fn gen_refusal(name: &str) -> Option<String> {
         Some(Effect::Random) => "reads entropy".to_string(),
         // Name the word the source wrote: `@info` is the sugar's internal spelling of
         // `log.info(..)`, and no source can lex it.
-        _ => format!("calls `{}`", crate::parser::method_surface(name)),
+        _ => format!("calls `{}`", crate::prelude::method_surface(name)),
     })
 }
 
@@ -256,11 +240,8 @@ mod tests {
 
     #[test]
     fn every_atom_names_one_effect_once() {
-        for (i, (n, _)) in ATOMS.iter().enumerate() {
-            assert!(
-                ATOMS[..i].iter().all(|(m, _)| m != n),
-                "`{n}` is in ATOMS twice"
-            );
+        for (n, _) in RUNTIME_ATOMS {
+            assert!(crate::prelude::builtin(n).is_none(), "`{n}` is a builtin");
         }
         for e in Effect::ALL {
             assert_eq!(Effect::parse(e.name()), Some(e));

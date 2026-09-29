@@ -143,8 +143,8 @@ to right, and the naming fixes it.
 
 `core::build_module_state` lowers the module-state initializers,
 `core::build_outside` a `test` or `bench` body, and `core::build_root` a
-module-state initializer or a `where` predicate for the typed judgment alone. `core::builtin_rows` is the table of
-builtins the core states as calls, `Prim` rows or rebuilds (`core::Spec`).
+module-state initializer or a `where` predicate for the typed judgment alone. `core::builtin_rows` collects the
+`prelude::Builtin` rows the core states as calls, `Prim` rows or rebuilds (`core::Spec`).
 
 A construct `core::build` cannot state returns a `Gap`. The instance is then
 unlowered: the kernel reports "internal error: the core cannot state ..." and
@@ -385,10 +385,12 @@ spent its time, per phase (`prof.rs`).
   row in `refusals.rs`. The checker states no ownership rule.
 - A new refusal or acceptance test: a program in `tests/check/` and its
   `.stderr`, never a program in a Rust string.
-- A new builtin: its signature in `prelude.rs`, with a capability per
-  parameter; its row in `core::builtin_rows`; its body in `std/runtime` when
-  it can be Vyrn, otherwise a lowering in `direct.rs`.
+- A new builtin: one `prelude::Builtin` row, with its contract (a capability
+  per parameter), method spelling, `Spec`, effect, route, length effect and
+  editor text; its body in `std/runtime` when it can be Vyrn, otherwise a
+  lowering in `direct.rs`.
 - A new trap wording: `vyrn_frontend::trap`, and nowhere else.
-- A new effect: `vyrn_frontend::effects::ATOMS`, then the floor's table.
+- A new effect: the builtin row's `effect`, or `effects::RUNTIME_ATOMS` for a
+  runtime function, then the floor's table.
 - A change to emitted bytes: rewrite the wasm manifest and explain every
   moved row.
