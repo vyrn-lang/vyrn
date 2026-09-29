@@ -163,6 +163,7 @@ pull request.
 - The emitter never optimizes; the engine that runs the wasm does. No shared emitter trait or instruction-builder abstraction.
 - Native code is the same wasm through `wasm2c` and clang `-O2`. No Cranelift route for `build`: against an LLVM baseline it measured 2 to 3x, and `wasm2c` 1.5 to 1.9x.
 - `run`, `test`, `bench --check`, `serve` and `dev` run the module in embedded wasmtime.
+- A trapped call into a resident instance (`serve`, `dev`, `test`) keeps the instance. The host restores the stack pointer, call depth and region nesting it read before the call; module state and heap blocks stay as the call left them. Re-instantiating would drop the state every earlier request built.
 - Control flow stays structured in every intermediate form, because wasm accepts only structured control flow.
 - Monomorphization happens once, above the emitter, and an instance is identified by its type arguments, never a mangled string. A mangle collision once miscompiled silently.
 - Monomorphization has two bounds: 64 levels of nesting and 65,536 parts. `vyrn check` runs them, so a passing `check` means `build` terminates.

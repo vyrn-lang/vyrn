@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use wasmtime::{Caller, Engine, Linker, Memory, Module, Store};
+use wasmtime::{Caller, Engine, Global, Linker, Memory, Module, Store, WasmParams, WasmResults};
 
 /// What one run produced. The exit code is `proc_exit`'s argument, or 1 when
 /// the module trapped.
@@ -331,6 +331,9 @@ pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
 pub struct Resident {
     store: Store<Host>,
     inst: wasmtime::Instance,
+    /// The stack pointer and the nesting words' address, which a module with
+    /// a door exports (`vyrn_codegen::wasm::Module::export_entry_state`).
+    entry: Option<(Global, usize)>,
 }
 
 /// The eight-byte `{ len, cap }` header in front of every Vyrn String.
@@ -363,10 +366,46 @@ pub fn start_on(
             None => return Err(host_trap(&e)),
         },
     };
-    Ok((Resident { store, inst }, code))
+    let sp = inst.get_global(&mut store, vyrn_codegen::wasm::SP_EXPORT);
+    let nesting = inst
+        .get_global(&mut store, vyrn_codegen::wasm::NESTING_EXPORT)
+        .and_then(|g| g.get(&mut store).i32());
+    let entry = sp.zip(nesting.map(|at| at as usize));
+    Ok((Resident { store, inst, entry }, code))
 }
 
 impl Resident {
+    /// Calls export `name`. The outer error is a missing or mistyped export,
+    /// the inner one a trap. A trap abandons the frames and regions the call
+    /// took, so after one this restores the stack pointer and the nesting words
+    /// it read before. A trapped call's heap blocks stay allocated.
+    fn call<P: WasmParams, R: WasmResults>(
+        &mut self,
+        name: &str,
+        args: P,
+    ) -> Result<wasmtime::Result<R>, String> {
+        let f = self
+            .inst
+            .get_typed_func::<P, R>(&mut self.store, name)
+            .map_err(|e| format!("{name}: {e}"))?;
+        let Some((sp, at)) = self.entry else {
+            return Ok(f.call(&mut self.store, args));
+        };
+        // The words lie in the statics, which memory always covers.
+        let words = at..at + 8;
+        let mem = self.store.data().mem.expect("memory is set before _start");
+        let top = sp.get(&mut self.store);
+        let mut nesting = [0u8; 8];
+        nesting.copy_from_slice(&mem.data(&self.store)[words.clone()]);
+        let out = f.call(&mut self.store, args);
+        if out.is_err() {
+            sp.set(&mut self.store, top)
+                .map_err(|e| format!("{name}: {e}"))?;
+            mem.data_mut(&mut self.store)[words].copy_from_slice(&nesting);
+        }
+        Ok(out)
+    }
+
     /// Takes what the guest wrote to standard error since the last drain. A
     /// trap inside a door writes its `error: ..` line there before it exits.
     pub fn drain_err(&mut self) -> String {
@@ -379,13 +418,9 @@ impl Resident {
     /// Writes a String argument into guest memory: header, bytes, NUL. Returns
     /// the string's address; the block starts eight bytes before.
     fn alloc(&mut self, s: &str) -> Result<i32, String> {
-        let malloc = self
-            .inst
-            .get_typed_func::<i64, i32>(&mut self.store, "__vyrn_malloc")
-            .map_err(|e| format!("__vyrn_malloc: {e}"))?;
         let n = s.len() as i32;
-        let base = malloc
-            .call(&mut self.store, (STR_HDR + n + 1) as i64)
+        let base = self
+            .call::<i64, i32>("__vyrn_malloc", (STR_HDR + n + 1) as i64)?
             .map_err(|e| format!("__vyrn_malloc: {e}"))?;
         let mem = self.store.data().mem.expect("memory is set before _start");
         let data = mem.data_mut(&mut self.store);
@@ -404,11 +439,7 @@ impl Resident {
 
     /// Frees a String argument; the block starts at its header.
     fn release(&mut self, ptr: i32) -> Result<(), String> {
-        let free = self
-            .inst
-            .get_typed_func::<i32, ()>(&mut self.store, "__vyrn_free")
-            .map_err(|e| format!("__vyrn_free: {e}"))?;
-        free.call(&mut self.store, ptr - STR_HDR)
+        self.call::<i32, ()>("__vyrn_free", ptr - STR_HDR)?
             .map_err(|e| format!("__vyrn_free: {e}"))
     }
 
@@ -451,21 +482,9 @@ impl Resident {
             ptrs.push(self.alloc(a)?);
         }
         let out = match ptrs.len() {
-            0 => self
-                .inst
-                .get_typed_func::<(), ()>(&mut self.store, door)
-                .map_err(|e| format!("{door}: {e}"))?
-                .call(&mut self.store, ()),
-            1 => self
-                .inst
-                .get_typed_func::<i32, ()>(&mut self.store, door)
-                .map_err(|e| format!("{door}: {e}"))?
-                .call(&mut self.store, ptrs[0]),
-            2 => self
-                .inst
-                .get_typed_func::<(i32, i32), ()>(&mut self.store, door)
-                .map_err(|e| format!("{door}: {e}"))?
-                .call(&mut self.store, (ptrs[0], ptrs[1])),
+            0 => self.call(door, ())?,
+            1 => self.call(door, ptrs[0])?,
+            2 => self.call(door, (ptrs[0], ptrs[1]))?,
             n => return Err(format!("{door}: {n} arguments is not a door shape")),
         };
         // The caller owns a String argument, so it is freed even after a trap.
@@ -479,18 +498,15 @@ impl Resident {
     /// before its last `error: ..` line, and that line if it refused. A test
     /// body's output passes through whether the body passed or failed.
     pub fn call_body(&mut self, door: &str) -> (String, Option<String>) {
-        let outcome: Result<(), String> =
-            match self.inst.get_typed_func::<(), ()>(&mut self.store, door) {
-                Err(e) => Err(format!("{door}: {e}")),
-                Ok(f) => match f.call(&mut self.store, ()) {
-                    Ok(()) => Ok(()),
-                    Err(e) => match e.downcast_ref::<Exit>() {
-                        Some(Exit(0)) => Ok(()),
-                        Some(Exit(code)) => Err(format!("exit {code}")),
-                        None => Err(host_trap(&e)),
-                    },
-                },
-            };
+        let outcome = match self.call::<(), ()>(door, ()) {
+            Err(e) => Err(e),
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => match e.downcast_ref::<Exit>() {
+                Some(Exit(0)) => Ok(()),
+                Some(Exit(code)) => Err(format!("exit {code}")),
+                None => Err(host_trap(&e)),
+            },
+        };
         let said = self.drain_err();
         let Err(host) = outcome else {
             return (said, None);
@@ -505,22 +521,14 @@ impl Resident {
     }
 
     pub fn ask_bool(&mut self, door: &str) -> Result<bool, String> {
-        let f = self
-            .inst
-            .get_typed_func::<(), i32>(&mut self.store, door)
-            .map_err(|e| format!("{door}: {e}"))?;
-        match f.call(&mut self.store, ()) {
+        match self.call::<(), i32>(door, ())? {
             Ok(v) => Ok(v != 0),
             Err(e) => Err(self.trapped(door, e)),
         }
     }
 
     pub fn ask_int(&mut self, door: &str) -> Result<i64, String> {
-        let f = self
-            .inst
-            .get_typed_func::<(), i64>(&mut self.store, door)
-            .map_err(|e| format!("{door}: {e}"))?;
-        match f.call(&mut self.store, ()) {
+        match self.call::<(), i64>(door, ())? {
             Ok(v) => Ok(v),
             Err(e) => Err(self.trapped(door, e)),
         }
@@ -529,16 +537,8 @@ impl Resident {
     /// A door that answers a `String`, called with an index or with nothing.
     pub fn ask_text(&mut self, door: &str, at: Option<i64>) -> Result<String, String> {
         let got = match at {
-            None => self
-                .inst
-                .get_typed_func::<(), i32>(&mut self.store, door)
-                .map_err(|e| format!("{door}: {e}"))?
-                .call(&mut self.store, ()),
-            Some(i) => self
-                .inst
-                .get_typed_func::<i64, i32>(&mut self.store, door)
-                .map_err(|e| format!("{door}: {e}"))?
-                .call(&mut self.store, i),
+            None => self.call::<(), i32>(door, ())?,
+            Some(i) => self.call::<i64, i32>(door, i)?,
         };
         match got {
             Ok(p) => self.text(p),

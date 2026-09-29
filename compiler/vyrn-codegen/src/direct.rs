@@ -644,6 +644,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             m.export(&f.name, cx.sigs[&f.name].index);
         }
     }
+    if user.iter().any(|f| f.is_export_extern) {
+        m.export_entry_state(cx.rt.region_sp);
+    }
     // A `String` argument to an export is a pointer into this module's memory, so the JS caller
     // must allocate in it first. The emitted `malloc` takes an `i64`, the BigInt `wasi-min.js`
     // passes, so it is exported as itself.
@@ -9424,12 +9427,13 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
         table.extend_from_slice(&post.to_le_bytes());
     }
     rt.trap_table = m.data(&table, 4);
-    // The region limit and its wording match the other engines; the depth counter stays
-    // inline (see [`Fn_::region_enter`]).
-    rt.region_sp = m.reserve(4, 4);
-    // The trap row uses the constant the prologue compares against, so the limit in the
-    // message and the one enforced agree.
-    rt.call_depth = m.reserve(4, 4);
+    // The region nesting word, then the call-depth word: one reservation, because a host
+    // restores both after a trap ([`Module::export_entry_state`]). The region limit and its
+    // wording match the other engines; the region counter stays inline (see
+    // [`Fn_::region_enter`]). The call-depth trap row uses the constant the prologue compares
+    // against, so the limit in the message and the one enforced agree.
+    rt.region_sp = m.reserve(8, 4);
+    rt.call_depth = rt.region_sp + 4;
     // After the reserves, so the trap table and the fixed cells keep their
     // addresses.
     rt.io = m.data(&io, 4);

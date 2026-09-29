@@ -121,7 +121,8 @@ pub struct Module {
     /// In index order. [`Module::reserve_func`] hands out an index whose body
     /// arrives later.
     bodies: Vec<Defined>,
-    /// Function exports only; [`Module::finish`] adds the memory export.
+    /// Function exports only; [`Module::finish`] adds the memory export and
+    /// [`Module::export_entry_state`]'s.
     exports: Vec<(String, u32)>,
     sweep: bool,
     /// The single data segment, packed at [`DATA_BASE`]; `pool_at` deduplicates
@@ -136,6 +137,8 @@ pub struct Module {
     /// Function names for a `name` section, by index as handed out. Empty
     /// unless the lowering asked for them (`VYRN_WASM_NAMES`).
     names: Vec<(u32, String)>,
+    /// The nesting words' address, when [`Module::export_entry_state`] asked.
+    nesting: Option<u32>,
 }
 
 impl Default for Module {
@@ -157,7 +160,17 @@ impl Module {
             spans: Vec::new(),
             custom: Vec::new(),
             names: Vec::new(),
+            nesting: None,
         }
+    }
+
+    /// Exports the stack pointer as [`SP_EXPORT`] and the address `nesting` of
+    /// the region nesting and call-depth words as [`NESTING_EXPORT`]. A trap
+    /// abandons the guest's frames and regions without giving them back, so a
+    /// host that calls this module again after a trap restores all three to
+    /// what it read before the call.
+    pub fn export_entry_state(&mut self, nesting: u32) {
+        self.nesting = Some(nesting);
     }
 
     /// Adds a custom section, emitted after every defined section.
@@ -513,12 +526,21 @@ impl Module {
         // Export names are one namespace across kinds, and nothing downstream
         // validates the bytes, so a duplicate is refused here.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for (name, _) in &self.exports {
-            if !seen.insert(name.as_str()) {
+        let state = match self.nesting {
+            Some(_) => &[SP_EXPORT, NESTING_EXPORT][..],
+            None => &[],
+        };
+        for name in self
+            .exports
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .chain(state.iter().copied())
+        {
+            if !seen.insert(name) {
                 return Err(format!(
                     "duplicate export `{name}`\n  \
-                     note: `_start`, `__vyrn_malloc` and `__vyrn_free` are taken by the \
-                     runtime; rename the function"
+                     note: `_start`, `__vyrn_malloc`, `__vyrn_free`, `{SP_EXPORT}` and \
+                     `{NESTING_EXPORT}` are taken by the runtime; rename the function"
                 ));
             }
         }
@@ -568,6 +590,18 @@ impl Module {
             },
             &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
         );
+        if let Some(at) = self.nesting {
+            globals.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: false,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(at as i32),
+            );
+            exports.export(SP_EXPORT, ExportKind::Global, SP);
+            exports.export(NESTING_EXPORT, ExportKind::Global, NESTING);
+        }
 
         // Runs of zeros are not written, because wasm memory arrives zeroed. A
         // segment costs about nine bytes, so only a wider gap splits one.
@@ -673,10 +707,20 @@ fn encode(f: Frame) -> Function {
 /// The global index of the module's `__stack_pointer`.
 pub const SP: u32 = 0;
 
+/// The export name of [`SP`]; see [`Module::export_entry_state`].
+pub const SP_EXPORT: &str = "__stack_pointer";
+
+/// The export name of an immutable global holding the address of two `i32`
+/// words: the open regions, then the calls in flight.
+pub const NESTING_EXPORT: &str = "__vyrn_nesting";
+
 /// The global index of the first heap byte, 16-aligned past the statics.
 /// Immutable, so `free` of an address below it, such as a `String` literal in
 /// the data segment, is a no-op.
 pub const HEAP_BASE: u32 = 1;
+
+/// The global index of [`NESTING_EXPORT`], in a module that has it.
+const NESTING: u32 = 2;
 
 /// A function body under construction and its shadow-stack frame. The
 /// instructions are buffered because the prologue depends on the final frame
