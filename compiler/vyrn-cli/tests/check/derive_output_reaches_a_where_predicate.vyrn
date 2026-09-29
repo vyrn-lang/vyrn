@@ -1,0 +1,17 @@
+type Age = Int64 where value >= 0
+
+export gen fn holds(t: TypeArg) -> String {
+    let mut out = ""
+    for r in t.roots {
+        let n = t.nodes[r]
+        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
+        out = out + "    return VyrnWp_" + n.spelling + "(v)\n}\n"
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    let a: Age = 3
+    print(derive(holds, a))
+    return 0
+}

@@ -120,13 +120,17 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     let (mut diags, mut json_dec_types, derived, mut refused) =
         checker::check_accum_with_json_types(program);
     // What a `derive` generator writes joins the program and is checked
-    // against it, so the second check's answers stand.
+    // against it, so the second check's answers stand. The `where`
+    // constructors join with it: written code may call the predicates.
     if diags.is_empty() && !derived.is_empty() {
         match gen::derive(program, &derived) {
             Ok((fns, decls)) => {
                 let at = program.functions.len();
                 program.functions.extend(fns);
                 program.type_decls.extend(decls);
+                program
+                    .functions
+                    .extend(ctor::constructors(&types::decl_map(program)));
                 // Parsed apart, so numbered from 1: renumbered, or their ids
                 // would key the second check's types over the program's own.
                 program.number_appended(at);
@@ -164,7 +168,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
             }
             Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
         }
-        // One constructor per `where` type, here for the JSON walks' reason.
+        // One constructor per `where` type, unless the `derive` join added it.
         let have: std::collections::HashSet<&str> =
             program.functions.iter().map(|f| f.name.as_str()).collect();
         let fresh: Vec<_> = ctor::constructors(&types)

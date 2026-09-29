@@ -452,6 +452,10 @@ export gen fn jsonEncoders(t: TypeArg) -> String {
 }
 
 gen fn jsonEncoderBody(t: TypeArg, n: TypeNode) -> String {
+    // A `where` type encodes as its base.
+    if n.kind == "where" {
+        return jsonEncoderBody(t, t.nodes[n.args[0]])
+    }
     let fs = "    let mut fs: Array<VyrnRt_JsonField> = []\n"
     if n.kind == "record" {
         let mut out = fs

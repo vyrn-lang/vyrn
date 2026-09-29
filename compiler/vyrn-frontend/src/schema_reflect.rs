@@ -522,9 +522,18 @@ pub fn type_arg_lit(roots: &[Type], types: &HashMap<String, TypeDecl>) -> (Expr,
 }
 
 /// The placeholder prefix a spelling writes for a name of `std/json`'s, which
-/// source cannot spell; [`crate::gen::derive`] folds it onto
-/// [`crate::loader::RT_PREFIX`].
-pub(crate) const PH: &str = "VyrnRt_";
+/// source cannot spell.
+const PH: &str = "VyrnRt_";
+
+/// Each placeholder prefix generated source writes for a reserved name it
+/// cannot spell, and the prefix [`crate::gen::derive`] folds it onto:
+/// `std/json`'s names, `std/jsondec`'s, and a `where` type's predicate
+/// ([`crate::ctor::pred_name`]).
+pub(crate) const PLACEHOLDERS: &[(&str, &str)] = &[
+    (PH, crate::loader::RT_PREFIX),
+    ("VyrnRd_", crate::loader::JSONDEC_PREFIX),
+    ("VyrnWp_", crate::ctor::PRED_PREFIX),
+];
 
 /// Spells a type as generated source, with `std/json`'s `$` names folded onto
 /// [`PH`].
@@ -568,13 +577,23 @@ impl ArgWalk<'_> {
         let i = self.nodes.len();
         self.nodes.push(none());
         self.at.insert(key.clone(), (i, ty.clone()));
-        let ints = |ix: Vec<usize>| {
-            array_lit(
-                ix.into_iter()
-                    .map(|i| Expr::Int(i as i64, Id::NEW))
-                    .collect(),
-            )
-        };
+        if let Some(decl) = self.refined(ty) {
+            let base = self.node(&decl.base)?;
+            let binds = crate::types::predicate_binds(&decl)
+                .into_iter()
+                .filter(|(_, _, field)| field.is_some())
+                .map(|(n, _, _)| member(n, Vec::new()))
+                .collect();
+            self.nodes[i] = type_node(
+                "where",
+                &key,
+                ty,
+                vec![base],
+                binds,
+                crate::trap::validation_of(&decl),
+            );
+            return Some(i);
+        }
         let scalar = |t: Type| (t.to_string(), Vec::new(), Vec::new());
         let (kind, args, members): (String, Vec<usize>, Vec<(String, Vec<usize>)>) =
             match crate::codec::wire(ty, self.types, false).ok()? {
@@ -618,28 +637,55 @@ impl ArgWalk<'_> {
                     ("enum".into(), Vec::new(), ms)
                 }
             };
-        let members = members
-            .into_iter()
-            .map(|(n, ix)| {
-                struct_lit(
-                    "TypeMember",
-                    vec![("name", Expr::Str(n, Id::NEW)), ("args", ints(ix))],
-                )
-            })
-            .collect();
-        self.nodes[i] = struct_lit(
-            "TypeNode",
-            vec![
-                ("kind", Expr::Str(kind, Id::NEW)),
-                ("name", Expr::Str(format!("t{key}"), Id::NEW)),
-                ("spelling", Expr::Str(spell(ty), Id::NEW)),
-                ("args", ints(args)),
-                ("members", array_lit(members)),
-                ("predicate", Expr::Str(String::new(), Id::NEW)),
-            ],
-        );
+        let members = members.into_iter().map(|(n, ix)| member(n, ix)).collect();
+        self.nodes[i] = type_node(&kind, &key, ty, args, members, String::new());
         Some(i)
     }
+
+    /// The declaration of `ty` when it names a `where` type, which reflects as
+    /// its own node over its base.
+    fn refined(&self, ty: &Type) -> Option<TypeDecl> {
+        match ty {
+            Type::Named(n) => self.types.get(n).filter(|d| d.predicate.is_some()).cloned(),
+            _ => None,
+        }
+    }
+}
+
+fn ints(ix: Vec<usize>) -> Expr {
+    array_lit(
+        ix.into_iter()
+            .map(|i| Expr::Int(i as i64, Id::NEW))
+            .collect(),
+    )
+}
+
+fn member(name: String, args: Vec<usize>) -> Expr {
+    struct_lit(
+        "TypeMember",
+        vec![("name", Expr::Str(name, Id::NEW)), ("args", ints(args))],
+    )
+}
+
+fn type_node(
+    kind: &str,
+    key: &str,
+    ty: &Type,
+    args: Vec<usize>,
+    members: Vec<Expr>,
+    predicate: String,
+) -> Expr {
+    struct_lit(
+        "TypeNode",
+        vec![
+            ("kind", Expr::Str(kind.to_string(), Id::NEW)),
+            ("name", Expr::Str(format!("t{key}"), Id::NEW)),
+            ("spelling", Expr::Str(spell(ty), Id::NEW)),
+            ("args", ints(args)),
+            ("members", array_lit(members)),
+            ("predicate", Expr::Str(predicate, Id::NEW)),
+        ],
+    )
 }
 
 /// Returns a `Schema` literal for any type: a declared type reflects through

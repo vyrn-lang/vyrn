@@ -695,6 +695,9 @@ pub const RT_JSON_SPEC: &str = "std/json";
 /// name. `toJson(x)` is `derive(jsonEncoders, x)`.
 pub const JSON_ENCODERS: &str = "json$jsonEncoders";
 
+/// The reserved prefix of `std/jsondec`'s declarations.
+pub const JSONDEC_PREFIX: &str = "jsondec$";
+
 /// A Vyrn module a builtin's implementation lives in, and the reserved prefix
 /// its declarations are renamed to.
 pub struct RtModule {
@@ -777,7 +780,7 @@ pub const RT_MODULES: &[RtModule] = &[
     // per target type, and it calls in here.
     RtModule {
         spec: "std/jsondec",
-        prefix: "jsondec$",
+        prefix: JSONDEC_PREFIX,
         desugared: &["fromJson"],
         always: false,
     },

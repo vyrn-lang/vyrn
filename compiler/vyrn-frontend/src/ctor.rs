@@ -2,9 +2,8 @@
 //! exists only through its producer.
 //!
 //! The predicate becomes ordinary Vyrn, generated per declaration and injected
-//! into the linked program as [`crate::jsondec`] injects its walks, so every
-//! backend compiles one body. Each declaration gets two
-//! functions:
+//! into the linked program, so every backend compiles one body. Each
+//! declaration gets two functions:
 //!
 //! - [`pred_name`]: `fn(binds..) -> Bool`, whose body is the `where` clause,
 //!   with [`crate::types::predicate_binds`] as parameters (a record base binds
@@ -28,9 +27,12 @@ use crate::ast::{Block, Capability, Expr, Function, Id, Param, Stmt, Type, TypeD
 /// character, so no program can spell or shadow one.
 pub const PREFIX: &str = "where$";
 
+/// The prefix of every predicate function's name.
+pub const PRED_PREFIX: &str = "where$p";
+
 /// Returns the name of `decl`'s predicate function: `fn(binds..) -> Bool`.
 pub fn pred_name(name: &str) -> String {
-    format!("{PREFIX}p{name}")
+    format!("{PRED_PREFIX}{name}")
 }
 
 /// Returns the name of `decl`'s constructor: `fn(value: Base)`, which traps.
@@ -57,9 +59,9 @@ pub fn pred_args(decl: &TypeDecl, value: Expr) -> Vec<Expr> {
 }
 
 /// Returns the predicate and constructor of every declaration with a `where`,
-/// to append to a linked program. `check_and_synthesize` calls it beside the
-/// JSON walks, after checking and before any backend builds its function
-/// table; afterwards they are ordinary functions to every pass.
+/// to append to a linked program. `check_and_synthesize` calls it before any
+/// backend builds its function table; afterwards they are ordinary functions
+/// to every pass.
 pub fn constructors(types: &HashMap<String, TypeDecl>) -> Vec<Function> {
     let mut names: Vec<&String> = types.keys().collect();
     names.sort();
@@ -160,8 +162,7 @@ fn constructor_fn(decl: &TypeDecl) -> Function {
     )
 }
 
-/// One synthesized function, its source-less fields set as [`crate::jsondec`]
-/// sets them.
+/// One synthesized function, with no source position.
 fn synth(name: String, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function {
     Function {
         name,
