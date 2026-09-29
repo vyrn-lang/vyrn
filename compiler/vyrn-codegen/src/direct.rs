@@ -9831,23 +9831,21 @@ impl<'p> Fn_<'_, 'p> {
     /// screen.
     fn core_lift_targets(&mut self, m: &mut Module, rows: &[St]) {
         let mut lambdas = Vec::new();
-        for r in rows {
-            core_leaf_rows(r, &mut |x| {
-                let (St::Let(_, rhs) | St::Do { rhs, .. }) = x else {
-                    return;
-                };
-                if let Rhs::Call {
-                    targets,
-                    kind: Callee::Fn,
-                    ..
-                } = rhs
-                {
-                    lambdas.extend(targets.iter().filter_map(|t| match t {
-                        Target::Lambda(key, caps, slot) => Some((key, caps, slot)),
-                        _ => None,
-                    }));
-                }
-            });
+        for (x, _) in rows.iter().flat_map(St::rows) {
+            let (St::Let(_, rhs) | St::Do { rhs, .. }) = x else {
+                continue;
+            };
+            if let Rhs::Call {
+                targets,
+                kind: Callee::Fn,
+                ..
+            } = rhs
+            {
+                lambdas.extend(targets.iter().filter_map(|t| match t {
+                    Target::Lambda(key, caps, slot) => Some((key, caps, slot)),
+                    _ => None,
+                }));
+            }
         }
         for (key, caps, slot) in lambdas {
             let Type::Fn(ptys, ret) = slot else { continue };
@@ -12816,13 +12814,10 @@ impl<'p> Fn_<'_, 'p> {
         // A result checked where it is returned is refused, because the row states no check;
         // a value of the result's own validated type was checked where it was made.
         if matches!(self.ret, Repr::Agg(_)) && self.checks(&self.ret_ty) {
-            let mut crosses = false;
-            for st in &body.stmts {
-                core_leaf_rows(st, &mut |x| {
-                    crosses |= matches!(x, St::Return { value: Some(v), .. }
-                        if !matches!(v, Val::Name(r) if body.names[*r as usize].ty == self.ret_ty));
-                });
-            }
+            let crosses = body.stmts.iter().flat_map(St::rows).any(|(x, _)| {
+                matches!(x, St::Return { value: Some(v), .. }
+                    if !matches!(v, Val::Name(r) if body.names[*r as usize].ty == self.ret_ty))
+            });
             if crosses {
                 return false;
             }
@@ -13972,39 +13967,14 @@ fn around(rel: Rel, holes: &[String]) -> Rel {
     }
 }
 
-/// Whether a run leaves the FUNCTION anywhere under it.
-fn core_returns(s: &St) -> bool {
-    let mut out = false;
-    core_leaf_rows(s, &mut |r| out |= matches!(r, St::Return { .. }));
-    out
-}
-
-/// Every row under `s` that holds no rows of its own, `s` itself included,
-/// in row order.
-fn core_leaf_rows<'r>(s: &'r St, f: &mut dyn FnMut(&'r St)) {
-    match s {
-        St::If { then, els, .. } => then.iter().chain(els).for_each(|s| core_leaf_rows(s, f)),
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_leaf_rows(s, f))
-        }
-        St::Switch { arms, .. } => arms
-            .iter()
-            .flat_map(|a| &a.body)
-            .for_each(|s| core_leaf_rows(s, f)),
-        _ => f(s),
-    }
-}
-
 /// Whether a run leaves the list it stands in anywhere under it: a `return`,
 /// or a `break` or a `continue` outside a loop of its own.
 fn core_leaves(s: &St) -> bool {
-    match s {
-        St::Break { .. } | St::Continue { .. } => true,
-        St::If { then, els, .. } => then.iter().chain(els).any(core_leaves),
-        St::Block { body: inner, .. } => inner.iter().any(core_leaves),
-        St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_leaves)),
-        s => core_returns(s),
-    }
+    s.rows().any(|(r, depth)| match r {
+        St::Return { .. } => true,
+        St::Break { .. } | St::Continue { .. } => depth == 0,
+        _ => false,
+    })
 }
 
 /// Push the address of the payload at `off` in the sum at `addr`: inside the
