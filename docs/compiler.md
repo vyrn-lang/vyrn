@@ -108,8 +108,10 @@ the playground serves an embedded `std/`. The loader:
    from this record and derives none of its own.
    If the program calls `derive(g, x)`, `gen::derive` runs each generator
    once over a `TypeArg` of the types its sites need, and the functions it
-   writes join the program, which is checked again with them. `toJson(x)` is
-   a `derive` site of `std/json`'s `jsonEncoders`.
+   writes join the program. `checker::check_appended` types their bodies
+   against the joined program's declarations, and a whole check runs only in
+   the two cases its doc names. `toJson(x)` is a `derive` site of
+   `std/json`'s `jsonEncoders`.
 2. Synthesis, only for a program that type-checks: `jsondec::decoders`
    generates the per-type JSON decoders as Vyrn functions, and
    `ctor::constructors` generates one constructor per `where` type. These are

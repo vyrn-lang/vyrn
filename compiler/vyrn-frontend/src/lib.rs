@@ -119,8 +119,8 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     let check_span = prof::phase("check");
     let (mut diags, mut json_dec_types, derived, mut refused) =
         checker::check_accum_with_json_types(program);
-    // What a `derive` generator writes joins the program and is checked with
-    // it, so the second check's answers stand.
+    // What a `derive` generator writes joins the program and is checked
+    // against it, so the second check's answers stand.
     if diags.is_empty() && !derived.is_empty() {
         match gen::derive(program, &derived) {
             Ok(fns) => {
@@ -129,10 +129,17 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
                 // Parsed apart, so numbered from 1: renumbered, or their ids
                 // would key the second check's types over the program's own.
                 program.number_appended(at);
-                let again;
-                (diags, json_dec_types, again, refused) =
-                    checker::check_accum_with_json_types(program);
-                if diags.is_empty() && again.len() != derived.len() {
+                // Only a whole check counts the program's own sites again.
+                let (again, old_sites);
+                (diags, again, refused, old_sites) = match checker::check_appended(program, at) {
+                    Some((d, again, r)) => (d, again, r, 0),
+                    None => {
+                        let (d, j, again, r) = checker::check_accum_with_json_types(program);
+                        json_dec_types = j;
+                        (d, again, r, derived.len())
+                    }
+                };
+                if diags.is_empty() && again.len() != old_sites {
                     diags.push(diagnostics::Diagnostic::error(
                         0,
                         0,
