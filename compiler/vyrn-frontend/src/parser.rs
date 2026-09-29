@@ -222,6 +222,27 @@ pub fn binop_text(op: BinOp) -> &'static str {
 /// quote. [`Parser::parses_as_stmts`] and
 /// [`Parser::skeleton_error_detail`] share it: the detail's line is the wrapped
 /// line minus the wrapper's.
+/// `if let P = e { A } else { B }` as the statement `match e { P => { A },
+/// _ => { B } }`, which [`Expr::as_if_let`] reads back.
+fn if_let(pattern: Pattern, scrutinee: Expr, then: Block, els: Option<Block>, line: usize) -> Stmt {
+    let arm = |pattern, b| MatchArm {
+        pattern,
+        body: ArmBody::Block(b),
+    };
+    let els = els.unwrap_or(Block {
+        id: Id::NEW,
+        stmts: Vec::new(),
+    });
+    let m = Expr::Match {
+        id: Id::NEW,
+        stmt_pos: true,
+        scrutinee: Box::new(scrutinee),
+        arms: vec![arm(pattern, then), arm(Pattern::Other, els)],
+        line,
+    };
+    Stmt::Expr(m, Id::NEW)
+}
+
 fn as_fn_body(src: &str) -> String {
     format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
@@ -2856,14 +2877,7 @@ impl Parser {
         let scrutinee = self.cond_expr()?;
         let then_block = self.block()?;
         let else_block = self.else_tail()?;
-        Ok(Stmt::IfLet {
-            id: Id::NEW,
-            pattern,
-            scrutinee,
-            then_block,
-            else_block,
-            line,
-        })
+        Ok(if_let(pattern, scrutinee, then_block, else_block, line))
     }
 
     /// Returns a desugar's first statement and queues the rest in
@@ -3073,23 +3087,16 @@ impl Parser {
                     self.eat(&Tok::Eq)?;
                     let scrutinee = self.cond_expr()?;
                     let body = self.block()?;
-                    let if_let = Stmt::IfLet {
+                    let brk = Block {
                         id: Id::NEW,
-                        pattern,
-                        scrutinee,
-                        then_block: body,
-                        else_block: Some(Block {
-                            id: Id::NEW,
-                            stmts: vec![Stmt::Break { id: Id::NEW, line }],
-                        }),
-                        line,
+                        stmts: vec![Stmt::Break { id: Id::NEW, line }],
                     };
                     return Ok(Stmt::While {
                         id: Id::NEW,
                         cond: Expr::Bool(true, Id::NEW),
                         body: Block {
                             id: Id::NEW,
-                            stmts: vec![if_let],
+                            stmts: vec![if_let(pattern, scrutinee, body, Some(brk), line)],
                         },
                         line,
                     });
@@ -4857,56 +4864,40 @@ fn main() -> Int64 {
         assert_eq!(f.ret, Type::Named("read".into()));
     }
 
+    fn if_let(s: &Stmt) -> (&Pattern, &Expr, &Block, &Block) {
+        let Stmt::Expr(m, _) = s else {
+            panic!("expected a statement match, found {s:?}");
+        };
+        m.as_if_let().expect("an if-let match")
+    }
+
     #[test]
-    fn if_let_parses_with_pattern_scrutinee_and_else() {
-        let src = "fn main() -> Int64 { \
-                   if let Some(v) = f() { return v } else { return 0 } }";
+    fn if_let_parses_to_a_match_with_a_default_arm() {
+        let src = "fn main() -> Int64 {                    if let Some(v) = f() { return v } else { return 0 } }";
         let p = parse_src(src);
-        let f = &p.functions[0];
-        assert!(matches!(
-            f.body.stmts[0],
-            Stmt::IfLet {
-                else_block: Some(_),
-                ..
-            }
-        ));
+        let (pat, _, _, els) = if_let(&p.functions[0].body.stmts[0]);
+        assert!(matches!(pat, Pattern::Variant(v, _) if v == "Some"));
+        assert!(matches!(els.stmts[0], Stmt::Return { .. }));
     }
 
     #[test]
     fn while_let_desugars_to_while_true_with_if_let_else_break() {
-        // `while let PAT = e { body }` becomes
-        // `while true { if let PAT = e { body } else { break } }`.
         let src = "fn main() -> Int64 { while let Some(v) = f() { print(v) } return 0 }";
         let p = parse_src(src);
         let Stmt::While { cond, body, .. } = &p.functions[0].body.stmts[0] else {
             panic!("expected a while loop");
         };
         assert_eq!(*cond, Expr::Bool(true, Id::NEW));
-        let Stmt::IfLet {
-            else_block: Some(eb),
-            ..
-        } = &body.stmts[0]
-        else {
-            panic!("expected an if-let as the while body");
-        };
-        assert!(matches!(eb.stmts[0], Stmt::Break { .. }));
+        let (_, _, _, els) = if_let(&body.stmts[0]);
+        assert!(matches!(els.stmts[0], Stmt::Break { .. }));
     }
 
     #[test]
     fn else_if_let_chains() {
-        let src = "fn main() -> Int64 { \
-                   if let Some(a) = f() { return a } \
-                   else if let Ok(b) = g() { return b } \
-                   else { return 0 } }";
+        let src = "fn main() -> Int64 {                    if let Some(a) = f() { return a }                    else if let Ok(b) = g() { return b }                    else { return 0 } }";
         let p = parse_src(src);
-        let Stmt::IfLet {
-            else_block: Some(eb),
-            ..
-        } = &p.functions[0].body.stmts[0]
-        else {
-            panic!("expected an if-let");
-        };
-        assert!(matches!(eb.stmts[0], Stmt::IfLet { .. }));
+        let (_, _, _, els) = if_let(&p.functions[0].body.stmts[0]);
+        if_let(&els.stmts[0]);
     }
 
     #[test]

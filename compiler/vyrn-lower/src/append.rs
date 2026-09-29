@@ -66,6 +66,12 @@ fn scan_append_block(
                 }
                 _ => ban_append_expr(value, banned, strict),
             },
+            Stmt::Expr(
+                Expr::Match {
+                    scrutinee, arms, ..
+                },
+                _,
+            ) => scan_arms(scrutinee, arms, targets, banned, strict),
             Stmt::SetField { value, .. } | Stmt::Expr(value, _) => {
                 ban_append_expr(value, banned, strict)
             }
@@ -91,18 +97,6 @@ fn scan_append_block(
                     scan_append_block(eb, targets, banned, strict);
                 }
             }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                ban_append_expr(scrutinee, banned, strict);
-                scan_append_block(then_block, targets, banned, strict);
-                if let Some(eb) = else_block {
-                    scan_append_block(eb, targets, banned, strict);
-                }
-            }
             Stmt::While { cond, body, .. } => {
                 ban_append_expr(cond, banned, strict);
                 scan_append_block(body, targets, banned, strict);
@@ -113,6 +107,22 @@ fn scan_append_block(
             }
             Stmt::Region { body, .. } => scan_append_block(body, targets, banned, strict),
             Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+}
+
+fn scan_arms(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    targets: &mut std::collections::HashSet<String>,
+    banned: &mut std::collections::HashSet<String>,
+    strict: bool,
+) {
+    ban_append_expr(scrutinee, banned, strict);
+    for arm in arms {
+        match &arm.body {
+            ArmBody::Expr(e) => ban_append_expr(e, banned, strict),
+            ArmBody::Block(b) => scan_append_block(b, targets, banned, strict),
         }
     }
 }
@@ -197,21 +207,11 @@ fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, str
                 ban_append_read(rhs, banned, strict);
             }
         }
+        // Only a statement `match` has a block arm, and its arms are scanned
+        // there with their targets.
         Expr::Match {
             scrutinee, arms, ..
-        } => {
-            ban_append_expr(scrutinee, banned, strict);
-            for arm in arms {
-                match &arm.body {
-                    ArmBody::Expr(e) => ban_append_expr(e, banned, strict),
-                    // A self-append in a block arm keeps the copying path: its
-                    // targets are thrown away.
-                    ArmBody::Block(b) => {
-                        scan_append_block(b, &mut std::collections::HashSet::new(), banned, strict)
-                    }
-                }
-            }
-        }
+        } => scan_arms(scrutinee, arms, &mut Default::default(), banned, strict),
         Expr::IfExpr {
             cond,
             then_branch,
@@ -332,7 +332,6 @@ impl BodyVisit<'_> for BoundNames<'_> {
             Stmt::ForIn { var, .. } => {
                 self.0.insert(var.clone());
             }
-            Stmt::IfLet { pattern, .. } => self.0.extend(pattern_names(pattern)),
             _ => {}
         }
     }

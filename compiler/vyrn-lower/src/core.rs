@@ -2949,20 +2949,19 @@ impl<'a> Builder<'a> {
     ///
     /// Answers whether this site is one, under [`Builder::inlined`]'s
     /// conditions.
-    #[allow(clippy::too_many_arguments)]
     fn optional_if_let(
         &mut self,
-        pattern: &Pattern,
-        scrutinee: &'a Expr,
-        then_block: &'a Block,
-        else_block: Option<&'a Block>,
+        e: &'a Expr,
         sid: NodeId,
-        line: usize,
         out: &mut Vec<St>,
     ) -> Result<bool, Gap> {
+        let Some((pattern, scrutinee, then_block, else_block)) = e.as_if_let() else {
+            return Ok(false);
+        };
         if !vyrn_frontend::project::memo_open() {
             return Ok(false);
         }
+        let line = e.line();
         let Expr::Call { name, args, .. } = scrutinee else {
             return Ok(false);
         };
@@ -3011,7 +3010,7 @@ impl<'a> Builder<'a> {
         p: &'a vyrn_frontend::project::OptionalProjection,
         pattern: &Pattern,
         then_block: &'a Block,
-        else_block: Option<&'a Block>,
+        else_block: &'a Block,
         sid: NodeId,
         name: &str,
         line: usize,
@@ -3023,9 +3022,7 @@ impl<'a> Builder<'a> {
         let cond = self.read_val(&p.miss, out)?;
         // The true edge is the miss: the source's `else`, the plan's edge 1.
         let mut miss = Vec::new();
-        if let Some(blk) = else_block {
-            self.block(blk, &mut miss)?;
-        }
+        self.block(else_block, &mut miss)?;
         self.edge_drops(sid, 1, &mut miss)?;
         let mut hit = Vec::new();
         let mark = self.scope.len();
@@ -4229,69 +4226,6 @@ impl<'a> Builder<'a> {
                     site: sid,
                 });
             }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                line,
-                id: _,
-            } => {
-                if self.optional_if_let(
-                    pattern,
-                    scrutinee,
-                    then_block,
-                    else_block.as_ref(),
-                    sid,
-                    *line,
-                    out,
-                )? {
-                    return Ok(());
-                }
-                let sty = self.ty_of(scrutinee)?;
-                let (sv, consuming) = self.scrutinee(scrutinee, sid, None, out)?;
-                let owns = self.owns_boxes(scrutinee, consuming);
-                let mut t = Vec::new();
-                let mark = self.scope.len();
-                let from = borrow_root(&sv, owns);
-                let binds = self.bind_pattern(pattern, &sty, consuming, *line, from, &mut t)?;
-                self.block(then_block, &mut t)?;
-                let frees = self.arm_frees(sid, 0, &binds, &mut t);
-                self.edge_drops(sid, 0, &mut t)?;
-                self.scope.truncate(mark);
-                let mut e = Vec::new();
-                if let Some(blk) = else_block {
-                    self.block(blk, &mut e)?;
-                }
-                self.edge_drops(sid, 1, &mut e)?;
-                out.push(St::Switch {
-                    on: sv,
-                    arms: vec![
-                        Arm {
-                            frees: Some(frees),
-                            binds,
-                            body: t,
-                            test: self.arm_test(pattern, &sty, *line)?,
-                            site: sid,
-                            index: 0,
-                        },
-                        Arm {
-                            frees: Some(Vec::new()),
-                            binds: Vec::new(),
-                            body: e,
-                            test: Test::Else,
-                            site: sid,
-                            index: 1,
-                        },
-                    ],
-                    consuming,
-                    carries: false,
-                    owns,
-                    site: sid,
-                    line: *line,
-                });
-                self.drops_at(Exit::Scrutinee, sid, out)?;
-            }
             Stmt::While {
                 cond,
                 body,
@@ -4577,6 +4511,7 @@ impl<'a> Builder<'a> {
             Stmt::Expr(Expr::Call { name, .. }, _)
                 if vyrn_frontend::loader::audit_hook(name)
                     && !vyrn_frontend::loader::audit_build() => {}
+            Stmt::Expr(e, _) if self.optional_if_let(e, sid, out)? => {}
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
@@ -8505,11 +8440,6 @@ fn rebound(b: &Block, out: &mut std::collections::HashSet<String>) {
                 out.insert(name.clone());
             }
             Stmt::If {
-                then_block,
-                else_block,
-                ..
-            }
-            | Stmt::IfLet {
                 then_block,
                 else_block,
                 ..

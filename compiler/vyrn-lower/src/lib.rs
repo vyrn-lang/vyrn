@@ -453,7 +453,10 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
 
     fn stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
         self.lines.push(s.line() as u32);
-        if let Stmt::IfLet { scrutinee, .. } = s {
+        if let Some((_, scrutinee, ..)) = match s {
+            Stmt::Expr(e, _) => e.as_if_let(),
+            _ => None,
+        } {
             self.scrutinees.push(scrutinee.id());
         }
     }

@@ -1023,17 +1023,6 @@ pub enum Stmt {
         line: usize,
         id: Id,
     },
-    /// `if let PAT = e { .. } [else { .. }]`. The pattern's binders are in scope
-    /// in `then_block` only. The parser desugars `while let` to `while true {
-    /// if let PAT = e { body } else { break } }`.
-    IfLet {
-        pattern: Pattern,
-        scrutinee: Expr,
-        then_block: Block,
-        else_block: Option<Block>,
-        line: usize,
-        id: Id,
-    },
     /// `while cond { .. }`.
     While {
         cond: Expr,
@@ -1149,9 +1138,9 @@ pub enum Expr {
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
-        /// Set only by `Stmt::Expr`: the `match` stands directly in statement
-        /// position, where a block arm is legal. Every synthesized `match` is
-        /// false.
+        /// Set by `Stmt::Expr` and the `if let` desugar: the `match` stands
+        /// directly in statement position, where a block arm is legal. Every
+        /// other synthesized `match` is false.
         stmt_pos: bool,
         line: usize,
         id: Id,
@@ -1273,8 +1262,9 @@ pub enum Pattern {
     /// The tag-0 arm: `None` or `Err`. The binder takes a `Result`'s error; on
     /// an `Option` the checker binds nothing.
     Failure(Binder),
-    /// Matches any value and binds nothing. The refutable-`let` desugar places
-    /// it last, because the parser cannot see the enum's variants.
+    /// Matches any value and binds nothing. The refutable-`let` and `if let`
+    /// desugars place it last, because the parser cannot see the enum's
+    /// variants.
     Other,
 }
 
@@ -1344,7 +1334,6 @@ macro_rules! stmt_slot {
             | Stmt::Break { id, .. }
             | Stmt::Continue { id, .. }
             | Stmt::If { id, .. }
-            | Stmt::IfLet { id, .. }
             | Stmt::While { id, .. }
             | Stmt::ForIn { id, .. }
             | Stmt::Drop { id, .. }
@@ -1357,6 +1346,30 @@ macro_rules! stmt_slot {
 impl Expr {
     pub fn id(&self) -> NodeId {
         NodeId(slot!(self, &).0)
+    }
+
+    /// The pattern, scrutinee and two blocks of a parsed `if let`: a statement
+    /// `match` whose last arm is [`Pattern::Other`], which no source writes.
+    pub fn as_if_let(&self) -> Option<(&Pattern, &Expr, &Block, &Block)> {
+        let Expr::Match {
+            scrutinee,
+            arms,
+            stmt_pos: true,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        match &arms[..] {
+            [MatchArm {
+                pattern,
+                body: ArmBody::Block(then),
+            }, MatchArm {
+                pattern: Pattern::Other,
+                body: ArmBody::Block(els),
+            }] => Some((pattern, scrutinee, then, els)),
+            _ => None,
+        }
     }
 }
 
@@ -1491,20 +1504,6 @@ impl Numbering {
                     self.block(b);
                 }
             }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.binders(pattern.binders_mut());
-                self.expr(scrutinee);
-                self.block(then_block);
-                if let Some(b) = else_block {
-                    self.block(b);
-                }
-            }
             Stmt::While { cond, body, .. } => {
                 self.expr(cond);
                 self.block(body);
@@ -1601,7 +1600,6 @@ impl Stmt {
             | Stmt::Break { line, id: _ }
             | Stmt::Continue { line, id: _ }
             | Stmt::If { line, .. }
-            | Stmt::IfLet { line, .. }
             | Stmt::While { line, .. }
             | Stmt::ForIn { line, .. }
             | Stmt::Drop { line, .. }
@@ -1787,35 +1785,6 @@ macro_rules! body_scope_descent {
                 } => {
                     $ex(cond, locals, v);
                     let mut inner = locals.clone();
-                    $blk(then_block, &mut inner, v);
-                    if let Some(eb) = else_block {
-                        let mut inner2 = locals.clone();
-                        $blk(eb, &mut inner2, v);
-                    }
-                }
-                Stmt::IfLet {
-                    scrutinee,
-                    then_block,
-                    else_block,
-                    pattern,
-                    ..
-                } => {
-                    $ex(scrutinee, locals, v);
-                    for b in pattern.binders() {
-                        v.bind(
-                            b.name.as_str(),
-                            b.line,
-                            b.col,
-                            $crate::ast::LocalKind::Let { mutable: false },
-                            None,
-                        );
-                    }
-                    let mut inner = locals.clone();
-                    if V::SCOPED {
-                        for b in pattern.bindings() {
-                            inner.insert(b.to_string());
-                        }
-                    }
                     $blk(then_block, &mut inner, v);
                     if let Some(eb) = else_block {
                         let mut inner2 = locals.clone();
@@ -2145,11 +2114,6 @@ pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
             then_block,
             else_block,
             ..
-        }
-        | Stmt::IfLet {
-            then_block,
-            else_block,
-            ..
         } => {
             let mut v = vec![then_block];
             v.extend(else_block.as_ref());
@@ -2158,6 +2122,13 @@ pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
         Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
             vec![body]
         }
+        Stmt::Expr(Expr::Match { arms, .. }, _) => arms
+            .iter()
+            .filter_map(|a| match &a.body {
+                ArmBody::Block(b) => Some(b),
+                ArmBody::Expr(_) => None,
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -2170,9 +2141,7 @@ pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
         | Stmt::SetField { value, .. }
         | Stmt::Expr(value, _) => mentions(value, name),
         Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
-        Stmt::If { cond: e, .. }
-        | Stmt::While { cond: e, .. }
-        | Stmt::IfLet { scrutinee: e, .. } => mentions(e, name),
+        Stmt::If { cond: e, .. } | Stmt::While { cond: e, .. } => mentions(e, name),
         Stmt::ForIn { iter, .. } => mentions(iter, name),
         Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| mentions(e, name)),
         Stmt::Drop { name: n, .. } => n == name,
@@ -2231,11 +2200,12 @@ pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
             if arms.is_empty() {
                 return s;
             }
-            // A block arm exists only in statement position; if one is met,
-            // (true, false) is conservative both ways.
-            let any = arms
-                .iter()
-                .any(|a| a.body.as_expr().is_none_or(|e| paths(e, name).0));
+            // A block arm exists only in statement position; `every` is
+            // conservatively false for it.
+            let any = arms.iter().any(|a| match &a.body {
+                ArmBody::Expr(e) => paths(e, name).0,
+                ArmBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
+            });
             let every = arms
                 .iter()
                 .all(|a| a.body.as_expr().is_some_and(|e| paths(e, name).1));
