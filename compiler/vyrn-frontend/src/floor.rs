@@ -310,7 +310,7 @@ fn locate<'a>(
 ///
 /// The effect judgment lives in `vyrn-lower`, which depends on this crate, so
 /// the CLI installs it as a function pointer at start-up, as with
-/// [`crate::own::Placer`]. The module key is the load's, `""` for the root.
+/// [`crate::own::MustUse`]. The module key is the load's, `""` for the root.
 pub type Judge = fn(&Program) -> Vec<(String, Capability)>;
 
 static JUDGE: std::sync::OnceLock<Judge> = std::sync::OnceLock::new();

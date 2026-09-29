@@ -1,6 +1,6 @@
 //! A census of the core's side tables over the whole corpus.
 //!
-//! The ignored test runs the analysis with the placer installed on every corpus program, folds
+//! The ignored test runs the placed analysis on every corpus program, folds
 //! `vyrn_lower::core::facts` and prints how many rows of each kind the core states, so a change
 //! shows a row appear or vanish. A wrong row fails the residue ratchet, the memory suite and
 //! the recorded wasm hashes, not this test. It asserts one fact: every `Rhs` names the type its
@@ -41,7 +41,7 @@ fn core_body(src: &str, which: &str) -> vyrn_lower::core::Body {
         Memo::load(|| vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver))
             .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let lowered = vyrn_lower::lower(&program);
-    let own = vyrn_frontend::own::analyze(&program);
+    let own = vyrn_lower::analyze(&program);
     let inst = lowered
         .instances
         .iter()
@@ -82,7 +82,7 @@ fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
     let analyzed = |src: &str| {
         let program = vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver)
             .unwrap_or_else(|d| panic!("{}", d[0].render()));
-        let own = vyrn_frontend::own::analyze(&program);
+        let own = vyrn_lower::analyze(&program);
         (program, own)
     };
     let main_of = |program: &Program, own: &vyrn_frontend::own::Ownership| {
@@ -166,8 +166,6 @@ fn an_if_let_over_a_parameter_owes_no_release() {
 /// caller reclaims storage the lender's own caller still owns.
 #[test]
 fn a_lender_forwarded_through_an_aggregate_lends_still() {
-    // The refusal is the kernel's, through the slot `install` fills; nextest runs each test in
-    // its own process.
     vyrn_lower::install();
     let src = "type R = { name: String }                fn pick(xs: Array<String>) -> String                { for x in xs { return x } return \"\" }                fn g(a: Array<String>) -> R { return R { name: pick(a) } }                fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]                let r = g(arr) return r.name.byteLength }";
     let program = vyrn_lower::load(src, "lend.vyrn", &Default::default(), &DiskResolver);
@@ -315,7 +313,7 @@ fn run() {
         };
         programs += 1;
         let lowered = vyrn_lower::lower(&program);
-        let own = vyrn_frontend::own::analyze(&program);
+        let own = vyrn_lower::analyze(&program);
         let facts = vyrn_lower::core::facts().expect("the placer fills the core's facts");
 
         for core_says in facts.arms.values() {

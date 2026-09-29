@@ -28,7 +28,7 @@ fn analyze(src: &str) -> vyrn_frontend::ast::Program {
     let program = vyrn_lower::load(src, &root, &opts, &DiskResolver)
         .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let _lowered = vyrn_lower::lower(&program);
-    vyrn_frontend::own::analyze(&program);
+    vyrn_lower::analyze(&program);
     program
 }
 

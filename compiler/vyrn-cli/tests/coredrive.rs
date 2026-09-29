@@ -209,7 +209,7 @@ fn run() {
         ours.push(name.clone());
         {
             let lowered = vyrn_lower::lower(&program);
-            let own = vyrn_frontend::own::analyze(&program);
+            let own = vyrn_lower::analyze(&program);
             for inst in &lowered.instances {
                 let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
                     continue;

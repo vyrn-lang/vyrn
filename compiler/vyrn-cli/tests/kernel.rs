@@ -82,7 +82,6 @@ fn run_corpus() {
     // that import through a generator fail to load and the gate silently measures
     // a smaller corpus.
     vyrn_genwasm::install();
-    // The placer.
     vyrn_lower::install();
     let mut accepted = 0usize;
     let mut refused: Vec<String> = Vec::new();
@@ -113,7 +112,7 @@ fn run_corpus() {
         };
         programs += 1;
         let lowered = vyrn_lower::lower(&program);
-        let own = vyrn_frontend::own::analyze(&program);
+        let own = vyrn_lower::analyze(&program);
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         // The module-state initializer is a body but no instance: every `let` at
         // module scope is a store into the global it names.

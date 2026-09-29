@@ -294,7 +294,7 @@ fn main() -> Int64 {
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "s");
     assert_eq!(r.target_line, 2);
-    // The memory line is the core's, and this crate installs no placer, so
+    // The memory line is the core's, and `analyze` judges no ownership, so
     // the hover carries the type alone; `vyrn-lsp`'s suite pins the memory line.
     assert_eq!(r.hover, "let s: String");
 }

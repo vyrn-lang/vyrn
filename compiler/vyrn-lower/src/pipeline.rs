@@ -117,7 +117,7 @@ pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
     // refusals there with no file.
     let _ = core::refusal_diagnostics();
     let _ = core::typed_diagnostics();
-    let ownership = movecheck::judging(|| own::analyze(program));
+    let ownership = movecheck::judging(|| crate::analyze(program));
     own::hand_on(program, &ownership);
     // A program the typed judgment refuses gets those refusals alone.
     let mut typed = core::typed_diagnostics();
@@ -154,7 +154,7 @@ fn subject(message: &str) -> Option<&str> {
 /// diagnostics, and the placed analysis's memory rows on hover.
 pub const JUDGE: symbols::Judge = symbols::Judge {
     refusals,
-    ownership: own::analyze,
+    ownership: crate::analyze,
 };
 
 /// Builds the core of every body the checker typed in a refused program, and
@@ -168,7 +168,7 @@ pub const JUDGE: symbols::Judge = symbols::Judge {
 fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diagnostic> {
     // A generator's own program is judged by the checker alone, as in
     // [`refusals`].
-    if !own::placer_installed() || movecheck::in_comptime() {
+    if movecheck::in_comptime() {
         return Vec::new();
     }
     // A method of a refused impl is reached by name, or by a call the checker
@@ -269,7 +269,7 @@ fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diag
     checker::hold_forget();
     let _ = core::refusal_diagnostics();
     let _ = core::typed_diagnostics();
-    let _ = own::analyze(program);
+    let _ = crate::analyze(program);
     let _ = core::refusal_diagnostics();
     let typed = core::typed_diagnostics();
     let kept = std::mem::take(&mut program.functions);

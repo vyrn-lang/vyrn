@@ -350,9 +350,6 @@ fn gate() {
     // Without this every generator example fails to link and the gate silently
     // measures a smaller corpus.
     vyrn_genwasm::install();
-    // Without this the placer never runs, `core::BODIES` stays empty and the
-    // backend answers from the AST alone: the gate measures one compiler against
-    // itself.
     vyrn_lower::install();
     let mut t = Tally::default();
     // The residue by engine and expression kind. Reported, never asserted: the

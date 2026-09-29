@@ -262,8 +262,8 @@ fn the_structural_census_matches_its_pin() {
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1162, 0),
-        ("shared machinery", 1271, 19),
-        ("tests", 798, 2),
+        ("shared machinery", 1270, 19),
+        ("tests", 796, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

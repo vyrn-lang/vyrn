@@ -9,8 +9,8 @@ pub fn run_compiled(
     program: &vyrn_frontend::ast::Program,
     memo: &vyrn_frontend::project::Memo,
 ) -> Result<i64, String> {
-    // Installs what `vyrn run` installs: the placer, the kernel's refusals, the
-    // must-use and effect judgments. Here, not in each caller, because a caller
+    // Installs what `vyrn run` installs: the must-use, typed and effect
+    // judgments. Here, not in each caller, because a caller
     // can forget one, and `tests/hosts.rs` counts a host per file and cannot see it.
     vyrn_lower::install();
     let bytes = vyrn_codegen::direct::compile(program, memo)?;

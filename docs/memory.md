@@ -279,9 +279,9 @@ Each rule has one home. The names below are the entry points.
   same rule as user code.
 - `vyrn-frontend/src/own.rs`: the release vocabulary (`Release`, `Exit`,
   `DropKind`), the `vyrn why --memory` rows (`MemoryRow`), and the slots
-  through which `vyrn-lower` installs the placer and its judgments.
-  `own::analyze` makes one `Ownership` per program and memoizes it for the
-  command.
+  through which `vyrn-lower` installs the must-use judgment and the typed
+  judgment's drain. `own::analyze` makes one `Ownership` per program, hands it
+  to the placer it is given, and memoizes it for the command.
 - `vyrn-lower/src/core.rs`: `core::build` lowers a body into the named core.
   Every value has a name, every access is a place, and every release is a
   `St::Drop`. `core::augment` is the placer.
@@ -289,15 +289,15 @@ Each rule has one home. The names below are the entry points.
   body; `kernel::placement` reports the releases it is missing.
 - `vyrn-lower/src/typed.rs`: the typed judgment, and `typed::obligation`, the
   must-use rule.
-- `vyrn-frontend/src/movecheck.rs`: the driver. `movecheck::refusals` merges
-  the kernel's and the typed judgment's refusals into one list in source
-  order. It states no rule itself.
+- `vyrn-lower/src/pipeline.rs`: the driver. `vyrn_lower::refusals` merges
+  the must-use judgment's, the kernel's and the typed judgment's refusals into
+  one list in source order. It states no rule itself.
 - `vyrn-codegen/src/direct.rs`: the emitter reads each `St::Drop` and each
   placed `Release` row and emits a call. It places nothing.
 
 ## How a release is placed
 
-`core::augment` runs inside `own::analyze`. It builds the core of every
+`core::augment` runs inside `vyrn_lower::analyze`. It builds the core of every
 instance, `test` and `bench` body, then asks `kernel::placement` of each
 frame. The kernel walks the body in placement mode. Where an owned name is
 still held at an exit and no release stands there, it records a `Missing` row

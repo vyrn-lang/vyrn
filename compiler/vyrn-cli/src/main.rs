@@ -198,7 +198,6 @@ fn main() -> ExitCode {
 /// tests included (`tests/hosts.rs`).
 fn install() {
     vyrn_genwasm::install();
-    // The placer over the named core, into every plan this process makes.
     vyrn_lower::install();
 }
 
@@ -1110,7 +1109,7 @@ fn why_memory(file: &str) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let own = vyrn_frontend::own::analyze(&program);
+    let own = vyrn_lower::analyze(&program);
 
     println!("{path}");
     println!("  memory: every binding, whether it is reclaimed, and the reason when it is not");

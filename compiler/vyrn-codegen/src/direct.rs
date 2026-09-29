@@ -242,8 +242,8 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
 }
 
 fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
-    // The core is built through the lowering's slots; this installs them for a host that has
-    // none (a generator run inside a load, a test). Idempotent.
+    // A generator's failure reads the typed judgment's drain (`own::typed_refusals`); this
+    // installs it for a host that has none (a generator run inside a load, a test). Idempotent.
     vyrn_lower::install();
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
@@ -330,8 +330,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         user.push(f);
     }
 
-    let ownership = vyrn_frontend::own::analyze(program);
-    // An analysis the placer did not run over (one inside the placer's own) carries no record.
+    let ownership = vyrn_lower::analyze(program);
     let recorded =
         (ownership.record.clone()).unwrap_or_else(|| vyrn_frontend::checker::recorded(program));
     // The leak instrument; a generator host never carries it.
@@ -360,7 +359,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         args_in_place: false,
         gappend: HashMap::new(),
         externs,
-        // The core's answers, folded once by the placer inside `own::analyze` above.
+        // The core's answers, folded once by the placer inside `vyrn_lower::analyze` above.
         facts: vyrn_lower::core::facts(),
         recorded,
         releases: ownership.releases,
@@ -1044,8 +1043,7 @@ struct Cx<'a> {
     mem: HashMap<&'a str, &'a Function>,
     /// Per function: every release step placed, at the exit that runs it, in run order.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
-    /// The core's statement of the releases this emitter emits, and their only source. `None`
-    /// in a host that never installed the placer, and then no such release is emitted.
+    /// The core's statement of the releases this emitter emits, and their only source.
     facts: Option<vyrn_lower::core::Facts>,
     /// The checker's record of this program; [`Fn_::peek`] reads an expression's type off it.
     recorded: std::rc::Rc<vyrn_frontend::checker::Recorded>,
@@ -13841,7 +13839,7 @@ fn core_scalar(t: &Type) -> bool {
 mod tests {
     use super::*;
 
-    /// A single-source program loaded as the CLI loads it, with the core installed and the
+    /// A single-source program loaded as the CLI loads it, with the judgments installed and the
     /// `std/runtime` the loader injects into every program.
     fn linked(src: &str) -> Result<(Program, Memo), String> {
         vyrn_lower::install();

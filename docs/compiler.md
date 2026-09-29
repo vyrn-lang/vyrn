@@ -54,18 +54,22 @@ Test and format the first two with `--manifest-path`. Build `vyrn-play` from
 its own directory, so its `.cargo/config.toml` sets the linker stack size.
 
 The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
-front end cannot call the lowering, so it declares slots and the lowering
-fills them. `vyrn_lower::install` installs the placer (`own::install_placer`),
-the kernel's refusals (`own::install_refusals`), the must-use judgment
-(`own::install_must_use`), the typed judgment's refusals
-(`own::install_typed`) and the effect judgment into the floor
-(`floor::install_judge`). `vyrn_genwasm::install` installs the generation
-engine (`gen::set_gen_engine`); the playground installs its own, which runs
-the module in the page. Every process that compiles calls both first: the
-CLI's `install`, the language server's `main`, the playground's `load`, and
-any test that asserts a refusal. A process that skips `vyrn_lower::install`
-runs a different compiler: the core stays empty and the emitter refuses every
-body. A process with no engine fails every `derive` and generator import.
+front end cannot call the lowering. A host enters through `vyrn-lower`
+(`load`, `check_and_synthesize`, `analyze`), which calls the front end and
+then its own judgments. The editor passes the ownership judgments into
+`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). Where the front
+end still needs a judgment, it declares a slot and the lowering fills it:
+`vyrn_lower::install` installs the must-use judgment
+(`own::install_must_use`) and the typed judgment's drain
+(`own::install_typed`) for a generator's own check and run, and the effect
+judgment into the floor (`floor::install_judge`). `vyrn_genwasm::install`
+installs the generation engine (`gen::set_gen_engine`); the playground
+installs its own, which runs the module in the page. Every process that
+compiles calls both first: the CLI's `install`, the language server's `main`,
+the playground's `load`, and any test that asserts a refusal. A process that
+skips `vyrn_lower::install` runs a different compiler: the floor refuses every
+carrier it scans, reached or not. A process with no engine fails every
+`derive` and generator import.
 `tests/hosts.rs` holds each host to both, and names the hosts without an
 engine with the reason.
 
@@ -118,7 +122,7 @@ the playground serves an embedded `std/`. The loader:
 2. Synthesis, only for a program that type-checks: `ctor::constructors`
    generates one constructor per `where` type the `derive` join did not add.
    These are ordinary functions, so every backend compiles one body.
-3. `movecheck::refusals`: `own::analyze`, which runs the installed placer and
+3. `vyrn_lower::refusals`: `vyrn_lower::analyze`, which runs the placer and
    the judgments, then one list of ownership refusals in source order.
 4. `floor::decide`: whether each artifact's target provides what its code
    reaches.

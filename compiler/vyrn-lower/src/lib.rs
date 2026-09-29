@@ -20,16 +20,21 @@ pub mod typed;
 pub use pipeline::{check_and_synthesize, load, load_warned, refusals, JUDGE};
 
 /// Installs this crate's judgments into the slots `vyrn-frontend` declares,
-/// because the frontend sits below this crate and cannot call into it. The
-/// placer adds the release rows the kernel found missing to every consumer of
-/// `own::analyze`. Idempotent; the CLI calls it at start-up, and a test that
-/// asserts a refusal calls it itself.
+/// because the frontend sits below this crate and cannot call into it: the
+/// must-use judgment and the typed judgment's drain for a generator's own
+/// check and run, and the effect judgment for the floor. Idempotent; the CLI
+/// calls it at start-up, and a test that asserts a refusal calls it itself.
 pub fn install() {
-    vyrn_frontend::own::install_placer(core::augment);
     vyrn_frontend::own::install_must_use(typed::obligation::judge);
-    // `vyrn check` reads the typed judgment's refusals before the kernel's.
     vyrn_frontend::own::install_typed(core::typed_diagnostics);
     vyrn_frontend::floor::install_judge(effects::reaches);
+}
+
+/// Analyses ownership across `program` and places the releases the plan did
+/// not place ([`core::augment`]), so every consumer reads the same rows.
+/// Served from the open `own::Memo` when it holds one for `program`.
+pub fn analyze(program: &Program) -> vyrn_frontend::own::Ownership {
+    vyrn_frontend::own::analyze(program, core::augment)
 }
 pub use core::{refuses as kernel_refuses, take_refusals};
 
@@ -254,7 +259,7 @@ impl<'a> Lowered<'a> {
 /// gap that stopped it. Root-module only, `vyrn why --memory`'s rule: a linked
 /// program's imports are another file's answer.
 pub fn render(program: &Program, source: &str) -> String {
-    let own = vyrn_frontend::own::analyze(program);
+    let own = analyze(program);
     let lowered = lower_with(program, &own);
     let mut out = format!("; vyrn lowered {VERSION} -- {source}\n");
     for inst in lowered.root() {
@@ -280,13 +285,13 @@ pub fn render(program: &Program, source: &str) -> String {
 pub fn lower(program: &Program) -> Lowered<'_> {
     let _p = vyrn_frontend::prof::phase("lower");
     let own_span = vyrn_frontend::prof::phase("lower: own::analyze");
-    let ownership = vyrn_frontend::own::analyze(program);
+    let ownership = analyze(program);
     drop(own_span);
     lower_with(program, &ownership)
 }
 
 /// The lowered form against an ownership analysis already made, for the
-/// placer, which runs inside `own::analyze`.
+/// placer, which runs inside [`analyze`].
 pub fn lower_with<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
@@ -1094,7 +1099,9 @@ mod tests {
 
     fn program(src: &str) -> Program {
         let mut p = vyrn_frontend::check(src).expect("the fixture checks");
-        let diags = check_and_synthesize(&mut p);
+        // The type check alone: the kernel refuses `id`'s return of a `read`
+        // parameter, and these tests are about the lowering.
+        let (diags, _) = vyrn_frontend::check_and_synthesize(&mut p);
         assert!(diags.is_empty(), "{diags:?}");
         p
     }
