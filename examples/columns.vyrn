@@ -1,0 +1,138 @@
+/// One field of many records, read row-wise and column-wise.
+///
+/// `gen_columns` lays `Particle` out as one array per field. The `sum` kernel
+/// reads `mass` alone, the case a column layout wins by construction: a row
+/// walk strides 64 bytes for 8 useful ones. The `move` kernel reads two fields
+/// and writes one.
+///
+///     vyrn run examples/columns.vyrn rows sum 1000000 20
+///     vyrn run examples/columns.vyrn columns sum 1000000 20
+///
+/// Both layouts print the same checksum; with no arguments the program checks
+/// that on a small size.
+
+import { Particle } from "./lib/bodies"
+import { columns } from "./lib/gen_columns"
+import { ParticleColumns, particleColumns, pushParticle, particleAt, particleCount } from columns("./lib/bodies")
+import { parseInt64 } from "std/num"
+
+fn particle(i: Int64) -> Particle {
+    let f = Float64(i % 1000)
+    return Particle { x: f, y: f + 1.0, z: f + 2.0, vx: 0.5, vy: 0.25, vz: 0.125, mass: f * 0.001, id: i }
+}
+
+fn rowsOf(n: Int64) -> Array<Particle> {
+    let mut ps: Array<Particle> = []
+    ps.reserve(n)
+    let mut i = 0
+    while i < n {
+        ps.push(particle(i))
+        i = i + 1
+    }
+    return ps
+}
+
+fn columnsOf(n: Int64) -> ParticleColumns {
+    let mut c = particleColumns(n)
+    let mut i = 0
+    while i < n {
+        pushParticle(c, particle(i))
+        i = i + 1
+    }
+    return c
+}
+
+fn sumRows(ps: Array<Particle>, passes: Int64) -> Float64 {
+    let mut total = 0.0
+    let mut p = 0
+    while p < passes {
+        let mut i = 0
+        while i < ps.length {
+            total = total + ps[i].mass
+            i = i + 1
+        }
+        p = p + 1
+    }
+    return total
+}
+
+fn sumColumns(c: ParticleColumns, passes: Int64) -> Float64 {
+    let mut total = 0.0
+    let mut p = 0
+    while p < passes {
+        let mut i = 0
+        while i < c.mass.length {
+            total = total + c.mass[i]
+            i = i + 1
+        }
+        p = p + 1
+    }
+    return total
+}
+
+fn moveRows(ps: modify Array<Particle>, passes: Int64) -> Float64 {
+    let mut p = 0
+    while p < passes {
+        let mut i = 0
+        while i < ps.length {
+            ps[i].x = ps[i].x + 0.01 * ps[i].vx
+            i = i + 1
+        }
+        p = p + 1
+    }
+    return ps[ps.length - 1].x
+}
+
+fn moveColumns(c: modify ParticleColumns, passes: Int64) -> Float64 {
+    let mut p = 0
+    while p < passes {
+        let mut i = 0
+        while i < c.x.length {
+            c.x[i] = c.x[i] + 0.01 * c.vx[i]
+            i = i + 1
+        }
+        p = p + 1
+    }
+    return c.x[c.x.length - 1]
+}
+
+fn run(layout: String, kernel: String, n: Int64, passes: Int64) -> Float64 {
+    if layout == "rows" {
+        let mut ps = rowsOf(n)
+        return if kernel == "sum" { sumRows(ps, passes) } else { moveRows(ps, passes) }
+    }
+    let mut c = columnsOf(n)
+    return if kernel == "sum" { sumColumns(c, passes) } else { moveColumns(c, passes) }
+}
+
+fn numberAt(argv: Array<String>, i: Int64) -> Int64 {
+    return match parseInt64(argv[i]) {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+fn main() -> Int64 {
+    let argv = args()
+    if argv.length == 4 {
+        print(run(argv[0], argv[1], numberAt(argv, 2), numberAt(argv, 3)))
+        return 0
+    }
+    for kernel in ["sum", "move"] {
+        let rows = run("rows", kernel, 1000, 3)
+        let cols = run("columns", kernel, 1000, 3)
+        print("\{kernel}: \{rows} \{cols}")
+        if rows != cols {
+            return 1
+        }
+    }
+    return 0
+}
+
+test "a row read back from the columns is the row pushed" {
+    let c = columnsOf(10)
+    assertEq(particleCount(c), 10)
+    let p = particleAt(c, 7)
+    assertEq(p.id, 7)
+    assertEq(p.z, 9.0)
+}
