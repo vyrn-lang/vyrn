@@ -154,11 +154,12 @@ pub fn renders(t: &Type) -> bool {
 }
 
 /// The refusal of `shown` at `t`, a type that does not render.
-pub fn needs_show(shown: &str, t: &Type) -> String {
-    format!(
-        "`{shown}` needs a number, Bool, or String, found {t}{}",
-        show_hint(t)
-    )
+pub fn needs_show(shown: &str, t: &Type) -> crate::rules::Rule {
+    crate::rules::Rule::NeedsShow {
+        shown: shown.to_string(),
+        found: t.to_string(),
+        hint: show_hint(t),
+    }
 }
 
 /// The hint to add `impl Show` to a refusal. A module-prefixed type has no
