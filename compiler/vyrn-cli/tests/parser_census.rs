@@ -111,7 +111,7 @@ fn parser_sections() -> Vec<Section> {
         sec("fn refutable_let(&mut self, line: usize, mutable: bool) -> Result<Stmt, Diagnostic> {", Desugar),
         sec("fn stmt(&mut self) -> Result<Stmt, Diagnostic> {", Grammar),
         sec("fn expr(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn binop(tok: &Tok) -> Option<(BinOp, u8)> {", Twice),
+        sec("fn binop(tok: &Tok) -> Option<(BinOp, u8)> {", Grammar),
         sec("const NULLISH_BP: u8 = 5;", Grammar),
         sec("fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {", Desugar),
         sec("fn unary(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
@@ -294,9 +294,9 @@ fn the_parser_census_matches_its_pin() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3172, 52),
+        ("parser.rs", "the grammar's own arm", 3204, 52),
         ("parser.rs", "a desugar the parser states", 963, 7),
-        ("parser.rs", "a table stated a second time", 87, 0),
+        ("parser.rs", "a table stated a second time", 55, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
         ("parser.rs", "shared machinery", 199, 1),
         ("parser.rs", "tests", 1877, 0),
