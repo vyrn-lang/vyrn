@@ -50,10 +50,13 @@ const FRAME_ALIGN: u32 = 16;
 /// `None` for `void`.
 ///
 /// `i1`, `i8`, `i16` and `ptr` are `i32`. An aggregate is `i32` too: the
-/// address of its shadow-stack slot.
+/// address of its shadow-stack slot. Every vector is wasm's one `v128`: the
+/// instruction decides the lane interpretation, and a mask is all-ones or
+/// all-zeros lanes.
 pub fn abi(ll: &str) -> Option<ValType> {
     Some(match ll.trim() {
         "void" => return None,
+        v if v.starts_with('<') => ValType::V128,
         "double" => ValType::F64,
         "float" => ValType::F32,
         "i64" => ValType::I64,
@@ -678,6 +681,12 @@ pub const SP: u32 = 0;
 /// the data segment, is a no-op.
 pub const HEAP_BASE: u32 = 1;
 
+/// `memory.copy` within the one memory: pops the length, the source and the destination.
+pub const MEMORY_COPY: Instruction<'static> = Instruction::MemoryCopy {
+    src_mem: 0,
+    dst_mem: 0,
+};
+
 /// A function body under construction and its shadow-stack frame. The
 /// instructions are buffered because the prologue depends on the final frame
 /// size.
@@ -790,6 +799,13 @@ impl Frame {
             self.body.push(Instruction::I32Const(off as i32));
             self.body.push(Instruction::I32Add);
         }
+        self
+    }
+
+    /// Copies `n` bytes from the address on top of the stack to the address under it.
+    pub fn copy(&mut self, n: u32) -> &mut Self {
+        self.body.push(Instruction::I32Const(n as i32));
+        self.body.push(MEMORY_COPY);
         self
     }
 

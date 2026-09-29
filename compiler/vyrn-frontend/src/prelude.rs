@@ -1123,7 +1123,7 @@ mod tests {
     /// reordered prelude moves every declaration index. Anything but a type
     /// here would enter every program.
     #[test]
-    fn the_prelude_declares_fifteen_types_and_nothing_else() {
+    fn the_prelude_declares_seventeen_types_and_nothing_else() {
         let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1143,6 +1143,8 @@ mod tests {
                 "ContractInfo",
                 "Request",
                 "Response",
+                "TypeNode",
+                "TypeMember",
             ]
         );
         assert!(

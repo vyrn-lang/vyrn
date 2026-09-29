@@ -182,6 +182,7 @@ pull request.
 - Generator budgets use wasmtime fuel, never wall clock, so a limit is deterministic.
 - A generator is comptime-pure: no `extern`, module state, file writes, stdin, `args` or logging. It reads files only under its constant path arguments, and every file it reads joins its cache key.
 - The generator cache is keyed by everything a generation observed and authenticated with a per-user secret. It is never restored across CI runs: a restored cache is untrusted compiler input.
+- Type reflection is a flat array of `TypeNode`s whose edges are indices, so no recursive Vyrn type and no new decoder shape is needed. A declared name is a leaf; kinds are strings, like `Schema.base`.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
 - Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.

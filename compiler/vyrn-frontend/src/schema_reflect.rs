@@ -8,13 +8,15 @@
 //! ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
 //! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema, retUncodable: String, mutates: Bool, origin: Origin }
 //! ParamInfo{ name: String, spelling: String, schema: Schema, uncodable: String }
-//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin }
+//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin, shape: Array<TypeNode> }
+//! TypeNode { kind: String, name: String, spelling: String, args: Array<Int64>, members: Array<TypeMember>, predicate: String }
 //! Origin   { file: String, line: Int64, col: Int64, name: String }
 //! ```
 //! `ret` and `spelling` are type spellings; `TypeInfo.source` is the canonical
 //! `type` declaration text; `uncodable` and `retUncodable` are
 //! [`crate::codec`]'s verdict on crossing a JSON wire; `mutates` is the
-//! author's `mut fn` marker; `origin` is where the declaration is written.
+//! author's `mut fn` marker; `origin` is where the declaration is written;
+//! `shape` is the declaration's base as a tree (`push_node`).
 //!
 //! `contractOf(Name)` reflects a `contract` declaration the same
 //! way, so `std/contract:checkContract` compares expectation against reality
@@ -342,8 +344,129 @@ fn type_info_lit(
             ("module", Expr::Str(module_spec.to_string())),
             ("schema", crate::types::schema_struct_lit(t)),
             ("origin", origins.lit(&t.module, &t.name, t.line)),
+            ("shape", shape_lit(t, types)),
         ],
     )
+}
+
+/// Builds `TypeInfo.shape`: the declaration's base flattened into `TypeNode`s,
+/// parents before children, node 0 the root.
+fn shape_lit(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Expr {
+    let mut nodes = Vec::new();
+    let pred = t.predicate.as_ref().map(crate::checker::pred_summary);
+    push_node(&t.base, pred, types, &mut nodes);
+    array_lit(nodes)
+}
+
+/// Appends the node for `ty` and its descendants to `nodes`, and returns its
+/// index and its spelling. `pred` is the `where` written on `ty`.
+///
+/// Recursion follows the written type expression, never a declaration, so it
+/// ends: a declared name is a `named` leaf. The one declaration it enters is
+/// the synthetic `Parent.field` of an inline field refinement, whose base is
+/// part of the written expression. A record or enum spells itself from its
+/// members, so such a field spells as written, not as `Parent.field`.
+fn push_node(
+    ty: &Type,
+    pred: Option<String>,
+    types: &HashMap<String, TypeDecl>,
+    nodes: &mut Vec<Expr>,
+) -> (i64, String) {
+    if let Type::Named(n) = ty {
+        if let Some(d) = types.get(n).filter(|_| n.contains('.')) {
+            let pred = d.predicate.as_ref().map(crate::checker::pred_summary);
+            return push_node(&d.base, pred, types, nodes);
+        }
+    }
+    let fields = |fs: Vec<Field>| fs.into_iter().map(|f| (f.name, vec![f.ty])).collect();
+    let (kind, name, args, members): (&str, &str, Vec<Type>, Vec<(String, Vec<Type>)>) = match ty {
+        Type::Int
+        | Type::IntN { .. }
+        | Type::Float
+        | Type::Float32
+        | Type::Bool
+        | Type::Str
+        | Type::Unit => ("", "", Vec::new(), Vec::new()),
+        Type::Named(n) => ("named", n, Vec::new(), Vec::new()),
+        Type::App(n, ts) => ("named", n, ts.clone(), Vec::new()),
+        Type::Param(n) => ("param", n, Vec::new(), Vec::new()),
+        Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => {
+            ("array", "", vec![(**e).clone()], Vec::new())
+        }
+        Type::Map(k, v) => ("map", "", vec![(**k).clone(), (**v).clone()], Vec::new()),
+        Type::Record(fs) => ("record", "", Vec::new(), fields(fs.clone())),
+        Type::Omit(..) | Type::Pick(..) | Type::Merge(..) | Type::Partial(..) => {
+            let fs = crate::types::record_fields(ty, types).unwrap_or_default();
+            ("record", "", Vec::new(), fields(fs))
+        }
+        Type::Enum(vs) => match (
+            crate::types::option_payload(ty),
+            crate::types::result_payloads(ty),
+        ) {
+            (Some(t), _) => ("option", "", vec![t.clone()], Vec::new()),
+            (_, Some((ok, err))) => ("result", "", vec![ok.clone(), err.clone()], Vec::new()),
+            _ => {
+                let vs = vs.iter().map(|v| (v.name.clone(), v.payload.clone()));
+                ("enum", "", Vec::new(), vs.collect())
+            }
+        },
+        _ => ("other", "", Vec::new(), Vec::new()),
+    };
+    let at = nodes.len();
+    nodes.push(none());
+    let mut kids = |ts: &[Type]| -> (Expr, Vec<String>) {
+        let (ix, spelled): (Vec<Expr>, Vec<String>) = ts
+            .iter()
+            .map(|t| {
+                let (i, s) = push_node(t, None, types, nodes);
+                (Expr::Int(i), s)
+            })
+            .unzip();
+        (array_lit(ix), spelled)
+    };
+    let (args, _) = kids(&args);
+    let mut lits = Vec::new();
+    let mut spelled = Vec::new();
+    for (m, ts) in members {
+        let (margs, s) = kids(&ts);
+        lits.push(struct_lit(
+            "TypeMember",
+            vec![("name", Expr::Str(m.clone())), ("args", margs)],
+        ));
+        spelled.push(match (kind, s.is_empty()) {
+            ("record", _) => format!("{m}: {}", s.join("")),
+            (_, true) => m,
+            (_, false) => format!("{m}({})", s.join(", ")),
+        });
+    }
+    let written = match kind {
+        "record" => format!("{{ {} }}", spelled.join(", ")),
+        "enum" => format!("| {}", spelled.join(" | ")),
+        _ => ty.to_string(),
+    };
+    let spelling = match &pred {
+        Some(p) => format!("{written} where {p}"),
+        None => written.clone(),
+    };
+    nodes[at] = struct_lit(
+        "TypeNode",
+        vec![
+            (
+                "kind",
+                Expr::Str(if kind.is_empty() {
+                    written
+                } else {
+                    kind.to_string()
+                }),
+            ),
+            ("name", Expr::Str(name.to_string())),
+            ("spelling", Expr::Str(spelling.clone())),
+            ("args", args),
+            ("members", array_lit(lits)),
+            ("predicate", Expr::Str(pred.unwrap_or_default())),
+        ],
+    );
+    (at as i64, spelling)
 }
 
 /// Returns a `Schema` literal for any type: a declared type reflects through
@@ -568,6 +691,70 @@ mod tests {
             Expr::ArrayLit { elems, .. } => elems,
             other => panic!("expected an array literal, got {other:?}"),
         }
+    }
+
+    /// One row per node: kind, name, spelling, args, and the members' names.
+    fn shape_rows(e: &Expr) -> Vec<String> {
+        let ints = |e: &Expr| -> Vec<i64> {
+            elems(e)
+                .iter()
+                .map(|x| match x {
+                    Expr::Int(n) => *n,
+                    other => panic!("expected an int, got {other:?}"),
+                })
+                .collect()
+        };
+        elems(e)
+            .iter()
+            .map(|n| {
+                let ms: Vec<String> = elems(field(n, "members"))
+                    .iter()
+                    .map(|m| format!("{}{:?}", str_of(field(m, "name")), ints(field(m, "args"))))
+                    .collect();
+                format!(
+                    "{} {} `{}` {:?} {}",
+                    str_of(field(n, "kind")),
+                    str_of(field(n, "name")),
+                    str_of(field(n, "spelling")),
+                    ints(field(n, "args")),
+                    ms.join(" ")
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shape_flattens_the_written_type_and_stops_at_names() {
+        let (d, t) = decl(
+            "type Id = Int64\n\
+             type R = { a: Array<Option<Id>>, b: Int64 where value > 0, \
+             c: Map<String, Result<Bool, String>> }\n",
+            "R",
+        );
+        assert_eq!(
+            shape_rows(&shape_lit(&d, &t)),
+            [
+                "record  `{ a: Array<Option<Id>>, b: Int64 where value > 0, c: Map<String, Result<Bool, String>> }` [] a[1] b[4] c[5]",
+                "array  `Array<Option<Id>>` [2] ",
+                "option  `Option<Id>` [3] ",
+                "named Id `Id` [] ",
+                "Int64  `Int64 where value > 0` [] ",
+                "map  `Map<String, Result<Bool, String>>` [6, 7] ",
+                "String  `String` [] ",
+                "result  `Result<Bool, String>` [8, 9] ",
+                "Bool  `Bool` [] ",
+                "String  `String` [] ",
+            ]
+        );
+        let (d, t) = decl("type Id = Int64\ntype E = | X | Y(Id, UInt8)\n", "E");
+        assert_eq!(
+            shape_rows(&shape_lit(&d, &t)),
+            [
+                "enum  `| X | Y(Id, UInt8)` [] X[] Y[1, 2]",
+                "named Id `Id` [] ",
+                "UInt8  `UInt8` [] ",
+            ]
+        );
     }
 
     #[test]
