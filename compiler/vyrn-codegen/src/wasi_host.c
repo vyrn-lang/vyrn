@@ -1,7 +1,8 @@
 /* The WASI host of the wasm2c route. `vyrn build --route wasm2c` translates
    the program's wasm to C with wasm2c and links it with this file, wasm-rt and
-   a C compiler. The host is the fifteen `wasi_snapshot_preview1` imports
-   `vyrn_codegen::direct` declares and nothing else.
+   a C compiler. The host is the `wasi_snapshot_preview1` imports
+   `vyrn_codegen::WASI_IMPORTS` lists and nothing else; a test in
+   `toolchain.rs` compares the two.
 
    Each import does what `vyrn-cli/src/wasmrun.rs` does, byte for byte, because
    `tests/route.rs` compares this binary's stdout, stderr and exit code with the

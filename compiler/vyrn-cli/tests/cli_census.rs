@@ -263,7 +263,7 @@ fn the_structural_census_matches_its_pin() {
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1073, 0),
         ("shared machinery", 1271, 19),
-        ("tests", 755, 2),
+        ("tests", 798, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
