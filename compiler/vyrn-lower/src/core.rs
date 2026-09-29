@@ -1501,7 +1501,16 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// them, and `VYRN_GAP_TALLY` tables them.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
-    gaps_of(body, &body.stmts, &mut out);
+    for (s, _) in rows(&body.stmts) {
+        if let St::Let(_, r) | St::Do { rhs: r, .. } = s {
+            gaps_rhs(body, r, &mut out);
+        }
+        s.operands(&mut |v, _| {
+            if let Val::Lit(Lit::Opaque(k)) = v {
+                out.push(format!("Opaque:{k:?}"));
+            }
+        });
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|t| seen.insert(t.clone()));
     out
@@ -1579,58 +1588,12 @@ fn falls_through(body: &mut Body, owes: &Type, line: usize, what: impl FnOnce() 
     }
 }
 
-fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
-    for s in ss {
-        match s {
-            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(body, r, out),
-            St::Store { place, value, .. } => {
-                gaps_place(place, out);
-                gaps_val(value, out);
-            }
-            St::Drop(..) | St::Row { .. } => {}
-            St::If {
-                cond, then, els, ..
-            } => {
-                gaps_val(cond, out);
-                gaps_of(body, then, out);
-                gaps_of(body, els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(body, b, out),
-            St::Break { .. } | St::Continue { .. } | St::Trap => {}
-            St::Return { value, .. } => {
-                if let Some(v) = value {
-                    gaps_val(v, out);
-                }
-            }
-            St::Switch { on, arms, .. } => {
-                gaps_val(on, out);
-                for a in arms {
-                    gaps_of(body, &a.body, out);
-                }
-            }
-        }
-    }
-}
-
+/// The tags of a right-hand side the emitter has no reader for.
 fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
-    let vals = |vs: &[Val], out: &mut Vec<String>| {
-        for v in vs {
-            gaps_val(v, out);
-        }
-    };
     match r {
-        Rhs::Val(v) => gaps_val(v, out),
         // A take of a key has no reader; every other place read or take has.
-        Rhs::Read(p) => gaps_place(p, out),
-        Rhs::Take(p) => {
-            if matches!(p, Place::Key(..)) {
-                out.push("Take:Key".into());
-            }
-            gaps_place(p, out);
-        }
-        Rhs::Call {
-            callee, args, kind, ..
-        } => {
+        Rhs::Take(Place::Key(..)) => out.push("Take:Key".into()),
+        Rhs::Call { callee, kind, .. } => {
             // The emitter reads a declared function, a constructor, a builtin
             // with a row, and a call through a stored value (one call to its
             // signature's dispatcher). A call through a `fn`-typed parameter
@@ -1647,37 +1610,10 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
                 };
                 out.push(format!("Call:{tag}:{callee}"));
             }
-            for (a, _) in args {
-                match a {
-                    Arg::Val(v) => gaps_val(v, out),
-                    Arg::Place(p) => gaps_place(p, out),
-                }
-            }
         }
-        Rhs::Prim(Op::Closure(_), vs, _) => {
-            out.push("Lambda".into());
-            vals(vs, out);
-        }
-        Rhs::Prim(_, vs, _) => vals(vs, out),
+        Rhs::Prim(Op::Closure(_), ..) => out.push("Lambda".into()),
         // A part the emitter cannot place is the emitter's own screen, not a gap.
-        Rhs::Make(_, vs) => vals(vs, out),
-    }
-}
-
-fn gaps_val(v: &Val, out: &mut Vec<String>) {
-    if let Val::Lit(Lit::Opaque(k)) = v {
-        out.push(format!("Opaque:{k:?}"));
-    }
-}
-
-fn gaps_place(p: &Place, out: &mut Vec<String>) {
-    match p {
-        Place::Name(_) | Place::Global(_) => {}
-        Place::Field(b, _) => gaps_place(b, out),
-        Place::Elem(b, v) | Place::Key(b, v) => {
-            gaps_place(b, out);
-            gaps_val(v, out);
-        }
+        Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) | Rhs::Prim(..) | Rhs::Make(..) => {}
     }
 }
 
