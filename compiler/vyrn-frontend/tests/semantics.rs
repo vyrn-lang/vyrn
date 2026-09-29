@@ -1112,6 +1112,29 @@ fn pull_at_an_address_with_no_stream_traps() {
 }
 
 #[test]
+fn a_box_address_past_the_32_bit_range_traps_rather_than_wrapping() {
+    // The address is an `Int64`; `h + 2^32` names no box, although its low 32 bits
+    // are `h`'s.
+    let src = "fn main() -> Int64 { let h = boxStream(fromArray([7, 8])) \
+                 let x: Option<Int64> = pullAt(h + 4294967296) \
+                 let s: Stream<Int64> = unboxStream(h) close(s) return 0 }";
+    match run(src) {
+        Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
+        other => panic!("expected a trap, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_byte_range_past_the_32_bit_range_traps_rather_than_wrapping() {
+    let src = "fn main() -> Int64 { let b = bytes(\"abc\", 4294967296, 4294967297) \
+                 return b.length }";
+    match run(src) {
+        Err(e) => assert!(e.contains("out of bounds"), "unexpected trap: {e}"),
+        other => panic!("expected a trap, got {other:?}"),
+    }
+}
+
+#[test]
 fn every_released_stream_asks_its_step_to_close_exactly_once() {
     // 10 000 open-then-abandon cycles: the release is the step's
     // closing call, so counting those counts releases. A missed `close` leaves the count
