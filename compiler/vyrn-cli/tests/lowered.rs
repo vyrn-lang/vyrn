@@ -962,7 +962,7 @@ fn coercion_census() -> Vec<CoercionSite> {
     vec![
         site("vyrn-codegen/src/lib.rs", "pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {", "shared", true, true, 54),
         site("vyrn-codegen/src/direct.rs", "fn coerce(", "wasm", true, false, 178),
-        site("vyrn-frontend/src/checker.rs", "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {", "checker", false, false, 25),
+        site("vyrn-frontend/src/checker.rs", "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {", "checker", false, false, 26),
     ]
 }
 

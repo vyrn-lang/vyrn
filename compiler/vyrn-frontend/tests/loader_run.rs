@@ -91,7 +91,7 @@ mod tests {
                 routed_builtin(name).is_none(),
                 "{}; a route for it would shadow what the hint sends the \
                  reader to",
-                gone.hint(name)
+                gone.rule(name).render()
             );
         }
     }
