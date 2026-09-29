@@ -31,23 +31,25 @@ macro_rules! rules {
     };
 }
 
-/// Builds the error that states `Rule::$rule` for `$stage` at `($line, $col)`.
-/// A hole is filled by the variable of its name or by `hole = expr`, either
-/// through `Display`.
-macro_rules! refuse {
+/// Builds `Rule::$rule`. A hole is filled by the variable of its name or by
+/// `hole = expr`, either through `Display`.
+macro_rules! rule {
     (@hole $h:ident) => {
         $h.to_string()
     };
     (@hole $h:ident $e:expr) => {
         $e.to_string()
     };
-    ($stage:expr, $line:expr, $col:expr, $rule:ident $(, $h:ident $(= $e:expr)?)* $(,)?) => {
-        $crate::diagnostics::Diagnostic::refusal(
-            $line,
-            $col,
-            $stage,
-            $crate::rules::Rule::$rule { $($h: $crate::rules::refuse!(@hole $h $($e)?)),* },
-        )
+    ($rule:ident $(, $h:ident $(= $e:expr)?)* $(,)?) => {
+        $crate::rules::Rule::$rule { $($h: $crate::rules::rule!(@hole $h $($e)?)),* }
+    };
+}
+pub(crate) use rule;
+
+/// Builds the error that states `Rule::$rule` for `$stage` at `($line, $col)`.
+macro_rules! refuse {
+    ($stage:expr, $line:expr, $col:expr, $($rule:tt)*) => {
+        $crate::diagnostics::Diagnostic::refusal($line, $col, $stage, $crate::rules::rule!($($rule)*))
     };
 }
 pub(crate) use refuse;
@@ -746,4 +748,49 @@ rules! {
         fix "{fix}";
     SkeletonDetail { detail } "`vyrn\"…\"` skeleton does not parse: {detail}";
     SkeletonUnparsable {} "`vyrn\"…\"` skeleton does not parse as Vyrn code";
+    ImportNamespaceBuiltin { spec }
+        "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
+        are builtins; import them by name or use them directly";
+    ImportNoExport { spec, name } "{spec} has no export `{name}`";
+    GenImportConstArgs { name }
+        "generator import `{name}(..)` needs compile-time-constant arguments (v1: \
+        string / integer / boolean literals)";
+    GenImportNotGen { name }
+        "`{name}` is not an imported `gen fn` — a generator import target must be an \
+        exported `gen fn` in a module this file imports";
+    GenImportArity { name, want, got } "generator `{name}` takes {want} argument(s), got {got}";
+    GenModuleReread { module, why } "cannot re-read generator module `{module}`: {why}";
+    GenFailed { name, args, trap } "generator `{name}({args})` failed: {trap}";
+    NamespaceBoundTwice { ns } "namespace `{ns}` is bound twice in this module";
+    NamespaceCollides { ns }
+        "namespace `{ns}` collides with a top-level declaration or import \
+        of the same name in this module";
+    ImportedTwice { local } "`{local}` is imported twice into this module";
+    AliasClashes { local }
+        "import alias `{local}` clashes with a top-level declaration of \
+        the same name in this module";
+    ImportedUnderAlias { orig, local }
+        "`{orig}` is not in scope — it was imported as `{local}`; use \
+        that name (or import `{orig}` too)";
+    NamespaceNoMember { ns, target, member }
+        "namespace `{ns}` (module `{target}`) has no exported member `{member}` — \
+        namespaces reach exported declarations only, one level deep";
+    NotNamespace { ns } "`{ns}` is not an in-scope namespace";
+    NamespacedVariant { head, enum_name, variant }
+        "`{head}.{enum_name}.{variant}` is not a namespaced enum \
+        variant (namespaces are one level deep)";
+    NamespaceNotValue { name } "namespace `{name}` is not a value";
+    NotExported { name, target }
+        "`{name}` exists in `{target}` but is not exported — \
+        add `export` to its declaration";
+    NotDefinedIn { name, target, def_module }
+        "`{name}` is not defined in `{target}` (it lives in \
+        `{def_module}`)";
+    TargetLacks { target, name } "`{target}` does not define `{name}`";
+    NotImported { what, name, def_module }
+        "{what} `{name}` is defined in `{def_module}` but not \
+        imported here — add it to an `import {{ .. }} from` list";
+    NotImportedList { what, name, list }
+        "{what} `{name}` is defined in `{list}` but not imported here — add \
+        it to an `import {{ .. }} from` list";
 }
