@@ -2535,6 +2535,7 @@ impl<'b> Kernel<'b> {
             }
             St::Do { rhs, .. } => self.rhs(st, rhs)?,
             St::Trap => st.ended = true,
+            St::Check(_) => {}
         }
         Ok(())
     }

@@ -169,6 +169,9 @@ pull request.
 - Monomorphization happens once, above the emitter, and an instance is identified by its type arguments, never a mangled string. A mangle collision once miscompiled silently.
 - Monomorphization has two bounds: 64 levels of nesting and 65,536 parts. `vyrn check` runs them, so a passing `check` means `build` terminates.
 - Every trap wording lives in one table (`vyrn_frontend::trap`), and a test fails on a re-spelled wording. An engine chooses how to raise a trap, never what it says.
+- Every runtime check is its own core row, stated once before the row it guards; one runtime check is one row. The emitter runs no check without a row, and a row no construct runs is an error.
+- A change that proves checks is licensed by the check oracle (`VYRN_CHECKS`, `scripts/check-elision.sh`): no proved row fails a run, and the elided, kept and oracle builds print the same.
+- A check row is proved only with a certificate that a checker sharing no code with the search accepts. Until builtin rows state length effects (#12), every `modify` or `consume` argument forgets its name.
 - Every limit is one constant, derived where it is used, and a test checks the derivations.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
