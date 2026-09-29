@@ -3463,3 +3463,32 @@ fn main() -> Int64 {
         "`check` said {text}"
     );
 }
+
+/// A declared `release` frees `self`'s parts, so taking one part twice frees it
+/// twice. Accepted, the free audit reported a double free.
+#[test]
+fn a_release_that_takes_a_part_twice_is_refused() {
+    let src = "type Bag = { slots: Array<Int64>, n: Int64 }
+impl Owned for Bag {
+    fn release(consume self) {
+        let a = consume self.slots
+        drop a
+        let b = consume self.slots
+        drop b
+    }
+}
+fn main() -> Int64 {
+    let g = Bag { slots: [1, 2, 3], n: 3 }
+    drop g
+    return 0
+}
+";
+    let dir = common::scratch("release-twice");
+    std::fs::write(dir.join("release.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "release.vyrn", false);
+    let want = "release.vyrn:4:0: `self.slots` was moved here into `consume`";
+    assert!(
+        !ok && text.lines().next().is_some_and(|l| l.ends_with(want)),
+        "`check` said {text}"
+    );
+}

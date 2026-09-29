@@ -2453,8 +2453,8 @@ fn build_seeded(
     let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
     b.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
     // A declared release (`impl Owned for T { fn release(consume self) }`)
-    // frees `self`'s parts, and nothing releases `self` again, so the kernel
-    // does not own it there.
+    // frees `self`'s parts, and nothing releases `self` again: the kernel owns
+    // `self` there, so a part taken twice is refused, but owes no release of it.
     let is_release = b.proto.is_release_fn(&f.name);
     for p in &f.params {
         let pty = vyrn_frontend::types::substitute(&p.ty, &subst);
@@ -2462,6 +2462,7 @@ fn build_seeded(
         let n = b.name(&p.name, pty, owned, f.line);
         if is_release {
             b.released = Some(n);
+            b.body.names[n as usize].borrow = false;
         }
         // A `read` or `modify` parameter is never taken; the
         // kernel needs the capability to word the refusal. A must-use
