@@ -1155,47 +1155,27 @@ fn httpBasePath(module: String) -> String {
 /// One field of a procedure's input type, and whether it is a number on the wire.
 type HttpField = { name: String, numeric: Bool }
 
-/// The fields of the record type `name`, in declaration order: at brace depth 1,
-/// an identifier followed by `:`. Read with the compiler's lexer.
+/// The fields of the record type `name`, in declaration order.
 gen fn httpFields(name: String, iface: ModuleInterface) -> Array<HttpField> {
     let mut out: Array<HttpField> = []
     for t in iface.types {
-        if t.name == name {
-            let toks = lex(t.source)
-            let mut depth = 0
-            let mut i = 0
-            while i < toks.length {
-                let tk = toks[i]
-                if tk.kind == "punct" && tk.text == "{" {
-                    depth = depth + 1
-                }
-                if tk.kind == "punct" && tk.text == "}" {
-                    depth = depth - 1
-                }
-                if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
-                    let nx = toks[i + 1]
-                    if nx.kind == "punct" && nx.text == ":" {
-                        out.push(HttpField { name: tk.text.copy(), numeric: httpIsNumeric(toks[i + 2], iface) })
-                    }
-                }
-                i = i + 1
+        if t.name == name && t.shape[0].kind == "record" {
+            for f in t.shape[0].members {
+                out.push(HttpField { name: f.name.copy(), numeric: httpIsNumeric(t.shape[f.args[0]], iface) })
             }
         }
     }
     return out
 }
 
-/// Whether a field whose type begins with `ty` is a JSON number. One alias hop
-/// (`Age` => `Int64`); a longer chain reads as text and decodes as a 422.
-gen fn httpIsNumeric(ty: Token, iface: ModuleInterface) -> Bool {
-    if ty.kind != "ident" {
-        return false
-    }
-    if httpIsNumericBase(ty.text) {
-        return true
+/// Whether a field of this type is a JSON number. One alias hop (`Age` =>
+/// `Int64`); a longer chain reads as text and decodes as a 422.
+gen fn httpIsNumeric(n: TypeNode, iface: ModuleInterface) -> Bool {
+    if n.kind != "named" {
+        return httpIsNumericBase(n.kind)
     }
     for t in iface.types {
-        if t.name == ty.text {
+        if t.name == n.name {
             return httpIsNumericBase(t.schema.base)
         }
     }
