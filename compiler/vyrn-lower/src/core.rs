@@ -8309,54 +8309,14 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
 }
 
 fn count_reads(ss: &[St], out: &mut [u32]) {
-    fn hit(v: &Val, out: &mut [u32]) {
-        if let Val::Name(n) = v {
-            out[*n as usize] += 1;
-        }
-    }
-    for s in ss {
-        match s {
-            St::Let(_, rhs) | St::Do { rhs, .. } => match rhs {
-                Rhs::Val(v) => hit(v, out),
-                Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
-                    vs.iter().for_each(|v| hit(v, out));
-                }
-                Rhs::Call { args, kind, .. } => {
-                    kind.value().iter().for_each(|f| hit(&Val::Name(*f), out));
-                    args.iter().for_each(|(a, _)| {
-                        if let Arg::Val(v) = a {
-                            hit(v, out)
-                        }
-                    })
-                }
-                Rhs::Read(_) | Rhs::Take(_) => {}
-            },
-            St::Store { value, .. } => hit(value, out),
-            St::Return { value: Some(v), .. } => hit(v, out),
-            St::If { cond, .. } => hit(cond, out),
-            St::Switch { on, arms, .. } => {
-                hit(on, out);
-                arms.iter()
-                    .filter_map(|a| a.test.reads())
-                    .for_each(|n| out[n as usize] += 1);
+    // A release reads the name, so the name holds a place until then. A
+    // release row (`St::Row`) and a place's names are not counted.
+    for (s, _) in rows(ss).filter(|(s, _)| !matches!(s, St::Row { .. })) {
+        s.operands(&mut |v, u| {
+            if let (Val::Name(n), Use::Read | Use::Hand | Use::Release) = (v, u) {
+                out[*n as usize] += 1;
             }
-            // A release reads the name, so the name holds a place until then.
-            St::Drop(n, ..) => out[*n as usize] += 1,
-            _ => {}
-        }
-        match s {
-            St::If { then, els, .. } => {
-                count_reads(then, out);
-                count_reads(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => count_reads(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    count_reads(&a.body, out);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 }
 
