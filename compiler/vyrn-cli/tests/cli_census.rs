@@ -261,7 +261,7 @@ fn the_structural_census_matches_its_pin() {
         ("a rule another pass also states", 0, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
-        ("the WASI host and the wasmtime embedding", 1073, 0),
+        ("the WASI host and the wasmtime embedding", 1162, 0),
         ("shared machinery", 1271, 19),
         ("tests", 798, 2),
     ];

@@ -118,6 +118,9 @@ struct Host {
     /// generator host (`vyrn test` over `test` bodies that reach a `gen fn`).
     /// Empty for every other module.
     gen: vyrn_genwasm::GenState,
+    /// The check oracle's rows ([`check_rows`]) and each one's count of runs.
+    checks: std::sync::Arc<Vec<String>>,
+    counts: Vec<u64>,
 }
 
 /// Served by `vyrn_genwasm`, so a `test` block's generator meets the same
@@ -197,6 +200,9 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         fuel: u64::MAX - store.get_fuel().unwrap_or(u64::MAX),
     });
     let host = store.into_data();
+    if let vyrn_lower::check::Mode::Count(log) = vyrn_lower::check::mode() {
+        log_checks(log, run.argv.first().map_or("", |a| a.as_str()), &host)?;
+    }
     Ok(Outcome {
         code,
         stdout: host.stdout.unwrap_or_default(),
@@ -215,6 +221,7 @@ fn open(
     let engine = engine(module.meter);
     let translate = module.translate;
     let meter = module.meter;
+    let checks = module.checks.clone();
     let module = &module.module;
     let mut linker: Linker<Host> = Linker::new(engine);
     link_wasi(&mut linker).map_err(|e| e.to_string())?;
@@ -243,6 +250,33 @@ fn open(
             })
             .map_err(|e| e.to_string())?;
     }
+    // The check oracle's imports ([`vyrn_lower::check::Mode::Count`]).
+    linker
+        .func_wrap("vyrn_check", "hit", |mut c: Caller<'_, Host>, id: i32| {
+            if let Some(n) = c.data_mut().counts.get_mut(id as usize) {
+                *n += 1;
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    linker
+        .func_wrap(
+            "vyrn_check",
+            "fail",
+            |mut c: Caller<'_, Host>, id: i32| -> wasmtime::Result<()> {
+                let row = c
+                    .data()
+                    .checks
+                    .get(id as usize)
+                    .map_or(String::new(), |r| r.replace('\t', " "));
+                let msg = format!(
+                    "error: {}: {row}\n",
+                    vyrn_frontend::trap::PROVED_CHECK_FAILED
+                );
+                write_err(c.data_mut(), msg.as_bytes());
+                Err(Exit(1).into())
+            },
+        )
+        .map_err(|e| e.to_string())?;
     // Anything else is neither WASI nor an `extern`: trap.
     linker
         .define_unknown_imports_as_traps(&module)
@@ -275,6 +309,8 @@ fn open(
         mem: None,
         translate,
         gen: gen.unwrap_or_default(),
+        counts: vec![0; checks.len()],
+        checks,
     };
     let mut store = Store::new(engine, host);
     // A budget nothing exhausts: the counter is read, never a stop.
@@ -297,6 +333,7 @@ pub struct Compiled {
     module: Module,
     meter: bool,
     translate: std::time::Duration,
+    checks: std::sync::Arc<Vec<String>>,
 }
 
 pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
@@ -317,6 +354,7 @@ pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
         module,
         meter,
         translate: clock.elapsed(),
+        checks: std::sync::Arc::new(check_rows(bytes)),
     })
 }
 
@@ -560,6 +598,57 @@ fn write_err(host: &mut Host, bytes: &[u8]) {
             let _ = e.flush();
         }
     }
+}
+
+/// The rows of a module's `vyrn:checks` section, one per check the oracle counts; empty for a
+/// module without one. The walk trusts the bytes, which the engine has already validated.
+fn check_rows(bytes: &[u8]) -> Vec<String> {
+    fn leb(b: &[u8], at: &mut usize) -> usize {
+        let (mut v, mut shift) = (0usize, 0);
+        while let Some(&x) = b.get(*at) {
+            *at += 1;
+            v |= usize::from(x & 0x7f) << shift;
+            shift += 7;
+            if x & 0x80 == 0 {
+                break;
+            }
+        }
+        v
+    }
+    let mut at = 8;
+    while at < bytes.len() {
+        let id = bytes[at];
+        at += 1;
+        let size = leb(bytes, &mut at);
+        let end = at + size;
+        if id == 0 {
+            let mut p = at;
+            let n = leb(bytes, &mut p);
+            if bytes.get(p..p + n) == Some(b"vyrn:checks".as_slice()) {
+                let payload = String::from_utf8_lossy(&bytes[p + n..end]);
+                return payload.split('\n').map(str::to_string).collect();
+            }
+        }
+        at = end;
+    }
+    Vec::new()
+}
+
+/// Appends each check row's count to `log`: the program, then the row, tab-separated.
+fn log_checks(log: &Path, program: &str, host: &Host) -> Result<(), String> {
+    if host.checks.is_empty() {
+        return Ok(());
+    }
+    let mut out = String::new();
+    for (row, n) in host.checks.iter().zip(&host.counts) {
+        out.push_str(&format!("{program}\t{row}\t{n}\n"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .and_then(|mut f| f.write_all(out.as_bytes()))
+        .map_err(|e| format!("{}: {e}", log.display()))
 }
 
 fn guest<'a>(caller: &'a mut Caller<'_, Host>) -> (&'a mut [u8], &'a mut Host) {

@@ -255,6 +255,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // `wasm::Module` panics if one arrives late.
     let wasi = Wasi::declare(&mut m);
     let gen = crate::gen_host().then(|| gen_imports(&mut m));
+    let oracle = (matches!(vyrn_lower::check::mode(), vyrn_lower::check::Mode::Count(_))
+        && gen.is_none())
+    .then(|| Oracle {
+        hit: m.import("vyrn_check", "hit", &[ValType::I32], &[]),
+        fail: m.import("vyrn_check", "fail", &[ValType::I32], &[]),
+        labels: RefCell::new(Vec::new()),
+        ids: RefCell::new(HashMap::new()),
+    });
     // Every `extern fn` is one import from the `vyrn` namespace, which `web/wasi-min.js` fills
     // from the page's hooks. This is not a pre-scan: an `extern fn` is its import, one for one,
     // and `Module::sweep` drops the ones a program never calls.
@@ -335,6 +343,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         lambdas: vyrn_frontend::ast::lambdas(program),
         kept: RefCell::new(Vec::new()),
         layouts: RefCell::default(),
+        oracle,
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -663,6 +672,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // interned data.
     m.sweep();
     abi_section(&mut m, &user, program);
+    if let Some(o) = &cx.oracle {
+        m.custom("vyrn:checks", o.labels.borrow().join("\n").into_bytes());
+    }
     m.finish()
 }
 
@@ -953,6 +965,16 @@ struct FnBinding {
     cap_srcs: Vec<String>,
 }
 
+/// The oracle's side of a module: `vyrn_check.hit(id)` counts a row, `vyrn_check.fail(id)`
+/// ends the run where a proved row would have trapped. Row `id` is line `id` of the custom
+/// section `vyrn:checks`: body, line, ordinal, rule and verdict, tab-separated.
+struct Oracle {
+    hit: u32,
+    fail: u32,
+    labels: RefCell<Vec<String>>,
+    ids: RefCell<HashMap<(String, usize, u32), i32>>,
+}
+
 struct Cx<'a> {
     types: HashMap<String, TypeDecl>,
     /// Every lambda literal the program holds, by node address, so [`Fn_::lift_lambda`] can queue
@@ -965,6 +987,9 @@ struct Cx<'a> {
     kept: RefCell<Vec<Rc<dyn std::any::Any>>>,
     /// Every layout, parsed once, keyed by `llt_of`'s string: a layout is a function of it alone.
     layouts: RefCell<HashMap<String, Rc<Layout>>>,
+    /// The check oracle's host imports and its row labels, under
+    /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
+    oracle: Option<Oracle>,
     /// Every `impl` block, for `place` projection lookup: a projection is not a function, so
     /// `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -4016,7 +4041,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.trap_row(b, row.rule, None);
+        self.check_trap(b, row, None);
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -4161,11 +4186,12 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The minimum over -1 has no representable answer. `%` is exempt: wasm's `rem_s`
             // gives 0 there, as the interpreter does.
-            if let Some(Check {
-                rule,
-                guard: Guard::NoOverflow(_, _, bits),
-                ..
-            }) = over
+            if let Some(
+                over @ Check {
+                    guard: Guard::NoOverflow(_, _, bits),
+                    ..
+                },
+            ) = over
             {
                 let min = i64::MIN >> (64 - bits);
                 b.ins(&Instruction::LocalGet(d));
@@ -4182,7 +4208,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32And);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.trap_row(b, rule, None);
+                self.check_trap(b, &over, None);
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
@@ -5876,14 +5902,54 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// The check a construct runs for `c`: the row when it is kept, `None` when a pass proved
+    /// it. The oracle ([`vyrn_lower::check::Mode::Count`]) counts every row here and runs a
+    /// proved one too, which [`Fn_::check_trap`] turns into a failed run.
+    fn row(&mut self, b: &mut Frame, c: Check) -> Option<Check> {
+        let Some(o) = &self.cx.oracle else {
+            return (c.verdict == Verdict::Kept).then_some(c);
+        };
+        let key = (self.core_key.clone(), c.site.line, c.site.ordinal);
+        let mut labels = o.labels.borrow_mut();
+        let id = labels.len() as i32;
+        let verdict = match c.verdict {
+            Verdict::Kept => "kept",
+            Verdict::Proved => "proved",
+        };
+        labels.push(format!(
+            "{}\t{}\t{}\t{}\t{verdict}",
+            key.0,
+            key.1,
+            key.2,
+            c.rule.census()
+        ));
+        o.ids.borrow_mut().insert(key, id);
+        b.ins(&Instruction::I32Const(id));
+        b.ins(&Instruction::Call(o.hit));
+        Some(c)
+    }
+
+    /// The failing branch of `row`'s check: its trap, or under the oracle the failure of a
+    /// proved row.
+    fn check_trap(&mut self, b: &mut Frame, row: &Check, val: Option<u32>) {
+        match &self.cx.oracle {
+            Some(o) if row.verdict == Verdict::Proved => {
+                let key = (self.core_key.clone(), row.site.line, row.site.ordinal);
+                b.ins(&Instruction::I32Const(o.ids.borrow()[&key]));
+                b.ins(&Instruction::Call(o.fail));
+            }
+            _ => self.trap_row(b, row.rule, val),
+        }
+    }
+
     /// Traps unless `idx` is in `0..len`; the compare is unsigned, so it catches a negative.
-    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, rule: vyrn_frontend::trap::Rule) {
+    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.trap_row(b, rule, Some(idx));
+        self.check_trap(b, row, Some(idx));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -5891,14 +5957,10 @@ impl<'p> Fn_<'_, 'p> {
     /// Traps unless all of `idx..idx+span-1` are in `0..len`, with one branch per vector.
     /// `span` is 4 for the four-lane shapes and 2 for `@f64x2`. It needs two compares:
     /// `idx + span` wraps for a huge `idx`, but `len - span` cannot, because `len >= 0`.
-    fn bounds_check_span(
-        &mut self,
-        b: &mut Frame,
-        w: &Walk,
-        idx: u32,
-        span: i64,
-        rule: vyrn_frontend::trap::Rule,
-    ) {
+    fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
+        let Guard::Span(_, _, span) = row.guard else {
+            unreachable!("`core_check` matched a span row")
+        };
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
@@ -5921,7 +5983,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64LtS);
         b.ins(&Instruction::Select);
         b.ins(&Instruction::LocalSet(at));
-        self.trap_row(b, rule, Some(at));
+        self.check_trap(b, row, Some(at));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -6356,7 +6418,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         slot: u32,
         aty: &Type,
-        rule: Option<vyrn_frontend::trap::Rule>,
+        row: Option<Check>,
         index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
@@ -6372,8 +6434,8 @@ impl<'p> Fn_<'_, 'p> {
         index(self, m, b)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
-        if let Some(rule) = rule {
-            self.bounds_check(b, &w, idx, rule);
+        if let Some(row) = row {
+            self.bounds_check(b, &w, idx, &row);
         }
         let elem = w.elem.clone();
         // Take the removed element before the last one overwrites it; they can be one address.
@@ -8264,13 +8326,8 @@ impl<'p> Fn_<'_, 'p> {
                 operand(self, m, b, 1, Some(&Type::Int))?;
                 let idx = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(idx));
-                if let Some(Check {
-                    rule,
-                    guard: Guard::Span(_, _, span),
-                    ..
-                }) = span
-                {
-                    self.bounds_check_span(b, &w, idx, span, rule);
+                if let Some(row) = span {
+                    self.bounds_check_span(b, &w, idx, &row);
                 }
                 if name.ends_with("Load") {
                     self.elem_addr(b, &w, idx);
@@ -10711,7 +10768,8 @@ impl<'p> Fn_<'_, 'p> {
                         w,
                         line,
                         |g| matches!(g, Guard::Span(vyrn_lower::core::Place::Name(p), v, _) if p == x && v == i),
-                    ),
+                    )
+                    .map(|c| self.row(b, c)),
                     _ => unsupported("a runtime check the core did not state", line),
                 };
                 let mut operand =
@@ -10778,17 +10836,20 @@ impl<'p> Fn_<'_, 'p> {
             // destination.
             Some(Spec::Builds(_)) => {
                 let range = match (callee, args) {
-                    ("bytes", [(s, _), (from, _), (to, _)]) => Some(
-                        core_check(
+                    ("bytes", [(s, _), (from, _), (to, _)]) => {
+                        let c = core_check(
                             w,
                             line,
                             |g| matches!(g, Guard::Range(x, y, z) if (x, y, z) == (s, from, to)),
-                        )?
-                        .ok_or_else(|| {
-                            gap("a proved `bytes` range: `bytesOf` checks inside", line)
-                        })?
-                        .rule,
-                    ),
+                        )?;
+                        if c.verdict == Verdict::Proved {
+                            return Err(gap(
+                                "a proved `bytes` range: `bytesOf` checks inside",
+                                line,
+                            ));
+                        }
+                        self.row(b, c).map(|c| c.rule)
+                    }
                     _ => None,
                 };
                 let mut operand =
@@ -11076,12 +11137,12 @@ impl<'p> Fn_<'_, 'p> {
         match (callee, rest) {
             ("@pop", []) => self.pop_at(b, slot, aty, line),
             ("@swapRemove", [(i, _)]) => {
-                let rule = core_check(w, line, |g| matches!(g, Guard::Index(_, v) if v == i))?
-                    .map(|c| c.rule);
+                let row = core_check(w, line, |g| matches!(g, Guard::Index(_, v) if v == i))?;
+                let row = self.row(b, row);
                 let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
                     s.core_val(m, b, body, w, i, &Type::Int, line)
                 };
-                self.swap_remove_at(m, b, slot, aty, rule, &mut index, line)
+                self.swap_remove_at(m, b, slot, aty, row, &mut index, line)
             }
             ("@remove", [(k, _)]) => {
                 let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
@@ -11164,11 +11225,12 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     |g| matches!(g, Guard::Index(p, v) if p == &**base && v == i),
                 )?;
+                let row = self.row(b, row);
                 self.core_val(m, b, body, w, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
                 if let Some(row) = row {
-                    self.bounds_check(b, &walk, ix, row.rule);
+                    self.bounds_check(b, &walk, ix, &row);
                 }
                 self.elem_addr(b, &walk, ix);
                 let byte = Type::IntN {
@@ -12488,7 +12550,7 @@ impl<'p> Fn_<'_, 'p> {
                             w.checks.get_mut(j).filter(|(c, _)| j == k || quotient(c))
                         {
                             *ran = true;
-                            *row = (c.verdict == Verdict::Kept).then(|| c.clone());
+                            *row = self.row(b, c.clone());
                         }
                     }
                 }
@@ -13857,18 +13919,14 @@ fn next_row(ss: &[St], i: usize) -> Option<&St> {
 }
 
 /// The latest check row walked whose guard `hit` accepts: the row a check the
-/// emitter is about to run stands for, or `None` where a pass proved it. A row
+/// emitter is about to run stands for ([`Fn_::row`] says whether it runs). A row
 /// stands before the row it guards, and a store that puts a taken element back
 /// follows the take's row.
-fn core_check(
-    w: &mut Walked,
-    line: usize,
-    hit: impl Fn(&Guard) -> bool,
-) -> Result<Option<Check>, String> {
+fn core_check(w: &mut Walked, line: usize, hit: impl Fn(&Guard) -> bool) -> Result<Check, String> {
     match w.checks.iter_mut().rev().find(|(c, _)| hit(&c.guard)) {
         Some((c, ran)) => {
             *ran = true;
-            Ok((c.verdict == Verdict::Kept).then(|| c.clone()))
+            Ok(c.clone())
         }
         None => unsupported("a runtime check the core did not state", line),
     }
@@ -13977,6 +14035,7 @@ mod tests {
             lambdas: HashMap::new(),
             kept: RefCell::new(Vec::new()),
             layouts: RefCell::default(),
+            oracle: None,
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,

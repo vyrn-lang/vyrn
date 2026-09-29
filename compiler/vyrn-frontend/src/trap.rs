@@ -71,6 +71,10 @@ pub const ARRAY_LIT_LIMIT: usize = FRAME_LIMIT as usize / 16;
 /// constant reaches. Memory64 would move both.
 pub const LENGTH_LIMIT: u32 = i32::MAX as u32;
 
+/// What the check oracle (`vyrn_lower::check::Mode::Count`) says where a check
+/// the compiler proved would have trapped: a compiler defect, never a program's.
+pub const PROVED_CHECK_FAILED: &str = "a check the compiler proved failed";
+
 /// How many `region` scopes may be open at once, on every engine: the size of
 /// the backends' fixed region stack, and the number in the trap wording.
 pub const REGION_MAX: u32 = 64;

@@ -62,6 +62,32 @@ pub enum Guard {
     Shift(Val, u8),
 }
 
+/// What a build does with its check rows, from the environment variable
+/// `VYRN_CHECKS`, which this function alone reads.
+///
+/// Unset, a pass decides the rows and the emitter removes the proved ones.
+/// `keep` runs no pass, so every row stays [`Verdict::Kept`]: the build a
+/// differential run compares against. A path is the oracle: the rows are
+/// decided and removed as unset does, and the emitter also counts each row's
+/// executions and fails the run where a proved row would have trapped. The
+/// wasm host appends the counts to that file, one row per line.
+pub fn mode() -> &'static Mode {
+    static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
+    MODE.get_or_init(|| match std::env::var_os("VYRN_CHECKS") {
+        None => Mode::Elide,
+        Some(v) if v == "keep" => Mode::Keep,
+        Some(v) => Mode::Count(v.into()),
+    })
+}
+
+/// See [`mode`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mode {
+    Elide,
+    Keep,
+    Count(std::path::PathBuf),
+}
+
 /// Where a check stands in the source: the line of the row it guards and the
 /// check's position among the checks of that line in its body, from 0.
 ///

@@ -138,7 +138,11 @@ structured. The statements (`core::St`) are `Let`, `Store`, `Drop`, `Row`,
 `Trap` and `Check`. A `Check` row (`vyrn_lower::check`) states one runtime
 check of the row after it: its trap rule, what it compares, and its line and
 ordinal. `core::checked` adds them to the bodies the emitter reads, and the
-emitter runs a check only from its row. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
+emitter runs a check only from its row. `check::mode` reads `VYRN_CHECKS`:
+`keep` keeps every row, and a file path is the oracle, which counts each row's
+runs into that file and fails a run where a proved row would have trapped.
+`scripts/check-elision.sh` runs the examples, the benchmarks and the site
+export in all three modes. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left
