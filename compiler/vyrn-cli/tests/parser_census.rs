@@ -65,6 +65,7 @@ fn parser_sections() -> Vec<Section> {
         sec("fn parse_bare", Shared),
         sec("    let mut flat = Vec::new();", Desugar),
         sec("struct Parser", Shared),
+        sec("fn if_let(", Desugar),
         sec("fn as_fn_body", Desugar),
         sec("fn is_index_field_chain", Desugar),
         sec("fn place_receiver", Desugar),
@@ -225,12 +226,12 @@ fn the_parser_census_matches_its_pin() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3278, 52),
-        ("parser.rs", "a desugar the parser states", 1015, 7),
+        ("parser.rs", "the grammar's own arm", 3264, 52),
+        ("parser.rs", "a desugar the parser states", 1036, 7),
         ("parser.rs", "a table stated a second time", 0, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
         ("parser.rs", "shared machinery", 181, 1),
-        ("parser.rs", "tests", 1672, 0),
+        ("parser.rs", "tests", 1656, 0),
         ("lexer.rs", "the grammar's own arm", 595, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
         ("lexer.rs", "a table stated a second time", 0, 0),
