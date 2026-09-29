@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use vyrn_frontend::ast::{Type, TypeDecl};
 use vyrn_frontend::floor;
 
-use crate::core::{Body, Place, Rhs, St};
+use crate::core::{rows, Body, Place, Rhs, St};
 
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
@@ -188,7 +188,7 @@ pub fn judge(
             memo: &mut memo,
             memo_ty: &mut memo_ty,
         };
-        w.stmts(&b.stmts);
+        rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
         for info in b.names.iter().filter(|i| !i.borrow) {
             for r in &info.runs {
                 w.call(r, None, info.line);
@@ -266,12 +266,6 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    fn stmts(&mut self, stmts: &[St]) {
-        for s in stmts {
-            self.stmt(s);
-        }
-    }
-
     fn stmt(&mut self, s: &St) {
         match s {
             St::Let(n, rhs) => {
@@ -294,16 +288,6 @@ impl Walk<'_> {
                 self.rhs(rhs, *line);
             }
             St::Trap => self.own = self.own.with(Effect::Trap),
-            St::If { then, els, .. } => {
-                self.stmts(then);
-                self.stmts(els);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => self.stmts(body),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    self.stmts(&a.body);
-                }
-            }
             St::Store { place, .. } => {
                 if let Some(g) = global_root(place) {
                     self.writes.insert(g.clone());
@@ -312,6 +296,10 @@ impl Walk<'_> {
             }
             St::Drop(..)
             | St::Row { .. }
+            | St::If { .. }
+            | St::Loop { .. }
+            | St::Block { .. }
+            | St::Switch { .. }
             | St::Break { .. }
             | St::Continue { .. }
             | St::Return { .. } => {}
