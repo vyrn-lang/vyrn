@@ -161,6 +161,7 @@ pull request.
 - Wasm is emitted directly with `wasm-encoder`. No LLVM, clang or sysroot is needed to build or test the compiler.
 - A replaced path is deleted, not kept behind a flag. Gated multiplicity stays true and ungated multiplicity rots.
 - The emitter never optimizes; the engine that runs the wasm does. No shared emitter trait or instruction-builder abstraction.
+- The sweep never moves a datum. A data address is an untyped constant, so relocating by value could rewrite a user's integer. A dead datum costs no module byte, and the static area ends at the last live datum or reservation.
 - Native code is the same wasm through `wasm2c` and clang `-O2`. No Cranelift route for `build`: against an LLVM baseline it measured 2 to 3x, and `wasm2c` 1.5 to 1.9x.
 - `run`, `test`, `bench --check`, `serve` and `dev` run the module in embedded wasmtime.
 - A trapped call into a resident instance (`serve`, `dev`, `test`) keeps the instance. The host restores the stack pointer, call depth and region nesting it read before the call; module state and heap blocks stay as the call left them. Re-instantiating would drop the state every earlier request built.

@@ -132,6 +132,8 @@ pub struct Module {
     /// Every [`Module::data`] entry as `(address, length)`, in increasing
     /// address order. A [`Module::reserve`] is not here: its bytes are zeros.
     spans: Vec<(u32, u32)>,
+    /// The end of the last [`Module::reserve`]; the sweep never cuts below it.
+    reserved: u32,
     /// Emitted last, in the order added.
     custom: Vec<(String, Vec<u8>)>,
     /// Function names for a `name` section, by index as handed out. Empty
@@ -158,6 +160,7 @@ impl Module {
             pool: Vec::new(),
             pool_at: HashMap::new(),
             spans: Vec::new(),
+            reserved: DATA_BASE,
             custom: Vec::new(),
             names: Vec::new(),
             nesting: None,
@@ -236,6 +239,7 @@ impl Module {
         debug_assert!(align.is_power_of_two());
         let at = DATA_BASE + round_up(self.pool.len() as u32, align);
         self.pool.resize((at - DATA_BASE + size) as usize, 0);
+        self.reserved = at + size;
         at
     }
 
@@ -410,7 +414,9 @@ impl Module {
         self.sweep_pool();
     }
 
-    /// Zeroes every pool entry no surviving body reaches. Addresses do not move.
+    /// Zeroes every pool entry no surviving body reaches, then ends the pool at
+    /// the last live entry or reservation. Addresses do not move, so a dead
+    /// entry below that end keeps its address space and costs no module byte.
     ///
     /// An entry is live when a surviving body pushes an address inside it, or a
     /// live entry holds one: the trap table is addresses, and only its bytes
@@ -459,12 +465,16 @@ impl Module {
                 }
             }
         }
+        let mut end = self.reserved;
         for (i, &(at, len)) in self.spans.iter().enumerate() {
-            if !live[i] {
+            if live[i] {
+                end = end.max(at + len);
+            } else {
                 let lo = (at - DATA_BASE) as usize;
                 self.pool[lo..lo + len as usize].fill(0);
             }
         }
+        self.pool.truncate((end - DATA_BASE) as usize);
     }
 
     /// Returns the module's bytes, sections in the order the format fixes. No
@@ -479,6 +489,9 @@ impl Module {
     ///
     /// If a kept reservation was never filled.
     pub fn finish(mut self) -> Result<Vec<u8>, String> {
+        if self.sweep {
+            self.prune();
+        }
         if self.data_end() > STATICS_LIMIT {
             let room = STATICS_LIMIT - DATA_BASE;
             return Err(format!(
@@ -491,9 +504,6 @@ impl Module {
                 self.data_end() - DATA_BASE,
                 crate::STATICS_LIMIT_NEEDLE,
             ));
-        }
-        if self.sweep {
-            self.prune();
         }
 
         // Types are interned after the sweep, so a pruned function's signature
@@ -939,6 +949,21 @@ mod tests {
             "a later string packs after the reservation"
         );
         assert_eq!(m.reserve(4, 4), b + 12);
+    }
+
+    #[test]
+    fn the_sweep_cuts_a_dead_tail_from_the_statics() {
+        let mut m = Module::new();
+        let live = m.data(b"live", 1);
+        let cell = m.reserve(4, 4);
+        m.data(b"dead", 1);
+        let f = m.func(&[], &[], &[], 0, |b| {
+            b.ins(&Instruction::I32Const(live as i32))
+                .ins(&Instruction::Drop);
+        });
+        m.export("_start", f);
+        m.prune();
+        assert_eq!(m.data_end(), cell + 4);
     }
 
     /// An empty frame emits no prologue but still takes its base local.

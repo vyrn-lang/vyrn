@@ -233,8 +233,10 @@ The module's shape:
 - Boundaries: `coerce_plan` picks the rung a value takes into a declared type
   (`Rung`): validate, resize, cross the float line, rebuild a record, reshape
   a sum, and the rest. `Rung::Validate` runs the type's `where` predicate.
-- `Module::sweep` drops every import, function and datum the program never
-  reaches, so a program pays only for what it calls.
+- `Module::sweep` drops every import and function the program never reaches,
+  writes no byte of a datum it never reaches, and ends the static area at the
+  last live datum or reservation. Addresses do not move, so a dead datum below
+  that end keeps its address space.
 
 `std/runtime.vyrn` is the runtime: allocator, arena, strings, arrays, maps,
 UTF-8, number formatting, file and console I/O, and the trap printer. It is
