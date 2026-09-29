@@ -1242,19 +1242,10 @@ impl<'a> Cx<'a> {
             return unsupported(&why, line);
         }
         let ll = self.ll(ty);
-        Ok(match ll.as_str() {
-            "void" => Repr::Unit,
-            // wasm's one 128-bit vector type. Matched before the aggregate test
-            // because a vector is a wasm value. The instruction decides the lane interpretation,
-            // so all four spellings read `V128`; a mask is all-ones or all-zeros lanes.
-            "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => {
-                Repr::Scalar(ValType::V128)
-            }
+        Ok(match wasm::abi(&ll) {
             _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(self.layout_ll(ll, line)?),
-            _ => match wasm::abi(&ll) {
-                Some(v) => Repr::Scalar(v),
-                None => Repr::Unit,
-            },
+            Some(v) => Repr::Scalar(v),
+            None => Repr::Unit,
         })
     }
 
@@ -3709,15 +3700,11 @@ impl<'p> Fn_<'_, 'p> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<u32, String> {
-        let v = match self.cx.repr(&decl.base, line)? {
-            Repr::Scalar(v) => v,
-            Repr::Agg(_) => ValType::I32,
-            Repr::Unit => {
-                return unsupported(
-                    &format!("a `where` clause over the Unit base `{}`", decl.base),
-                    line,
-                )
-            }
+        let Some(v) = self.cx.repr(&decl.base, line)?.val() else {
+            return unsupported(
+                &format!("a `where` clause over the Unit base `{}`", decl.base),
+                line,
+            );
         };
         let held = b.local(v);
         b.ins(&Instruction::LocalSet(held));
@@ -7630,11 +7617,10 @@ impl<'p> Fn_<'_, 'p> {
                 k
             }
         };
-        let v = b.local(match &r {
-            Repr::Scalar(t) => *t,
-            Repr::Agg(_) => ValType::I32,
-            Repr::Unit => return unsupported("a Map of Unit", line),
-        });
+        let Some(v) = r.val() else {
+            return unsupported("a Map of Unit", line);
+        };
+        let v = b.local(v);
         self.part(m, b, parts, key + 1, val, line)?;
         b.ins(&Instruction::LocalSet(v));
 
