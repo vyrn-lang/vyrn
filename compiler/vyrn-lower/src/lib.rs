@@ -329,7 +329,7 @@ struct Walk<'a, 'r> {
     impls: &'a [vyrn_frontend::ast::ImplBlock],
     facts: NodeTypes<'a>,
     /// `(callee, its solved type arguments by name)`, already concrete.
-    calls: Vec<(&'r str, HashMap<String, Type>)>,
+    calls: Vec<(String, HashMap<String, Type>)>,
     lambda_bodies: std::collections::HashSet<NodeId>,
     chain: Chain,
     /// Per open expression: its recorded type, and whether it pushed a
@@ -408,6 +408,10 @@ impl<'a, 'r> Walk<'a, 'r> {
         ) else {
             return;
         };
+        self.projection(p);
+    }
+
+    fn projection(&mut self, p: &'static vyrn_frontend::project::Projection) {
         for s in &p.prologue {
             facts_stmt(s, &mut Default::default(), self);
         }
@@ -472,25 +476,21 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                     facts_block(blk, &mut Default::default(), self);
                 }
             }
-            // A `for` over a user container is `place nth` inlined per turn
-            // around a copy of the body.
-            Stmt::ForIn {
-                var, iter, body, ..
-            } if !self.impls.is_empty() => {
-                let expansion = self.recorded(iter).and_then(|ty| {
-                    let (size_fn, nth) = vyrn_frontend::types::iterate_impl(self.impls, &ty)?;
-                    vyrn_frontend::project::iterate_loop(
-                        &size_fn,
-                        nth,
-                        var,
-                        iter,
-                        body,
-                        iter.line(),
-                    )
-                    .ok()
-                });
-                if let Some(blk) = expansion {
-                    facts_block(blk, &mut Default::default(), self);
+            // A `for` over a user container calls its `size` and reads each
+            // element through its `place nth`.
+            Stmt::ForIn { iter, line, .. } if !self.impls.is_empty() => {
+                if let Some(ty) = self.recorded(iter) {
+                    let impls = self.impls;
+                    if let Some((imp, size, _)) = vyrn_frontend::types::iterate_impl(impls, &ty) {
+                        let mut solved = HashMap::new();
+                        vyrn_frontend::types::solve_param(&imp.ty, &ty, &mut solved);
+                        self.calls.push((size, solved));
+                    }
+                    if let Ok(Some(p)) =
+                        vyrn_frontend::project::for_element(impls, &ty, iter, *line)
+                    {
+                        self.projection(p);
+                    }
                 }
             }
             _ => {}
@@ -520,7 +520,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                 // checker types as a call of `Fallible__Key__success`, adds an
                 // instance to the worklist.
                 if matches!(e, Expr::Call { .. } | Expr::Try { .. }) {
-                    self.calls.push((callee.as_str(), solved.clone()));
+                    self.calls.push((callee.clone(), solved.clone()));
                     if !at.is_empty() {
                         self.facts.solved.insert(key, at);
                     }
@@ -752,7 +752,7 @@ fn build<'a>(
     // teardown drops by; an unannotated global of such a type fails the gate
     // as a missing instantiation. Only an audited build emits the teardown.
     if vyrn_frontend::loader::audit_build() {
-        let mut teardown_calls: Vec<(&str, HashMap<String, Type>)> = Vec::new();
+        let mut teardown_calls: Vec<(String, HashMap<String, Type>)> = Vec::new();
         for g in &program.globals {
             let Some(gty) = &g.ty else { continue };
             let Some(vyrn_frontend::own::DropKind::Release(f, _)) =
@@ -770,7 +770,7 @@ fn build<'a>(
             if let Some(p) = target.params.first() {
                 vyrn_frontend::types::solve_param(&p.ty, gty, &mut solved);
             }
-            teardown_calls.push((target.name.as_str(), solved));
+            teardown_calls.push((target.name.clone(), solved));
         }
         follow(
             "<teardown>",
@@ -815,7 +815,11 @@ fn build<'a>(
             .collect();
 
         let mut calls = std::mem::take(&mut w.calls);
-        calls.extend(dispatched(&releases, &by_name));
+        calls.extend(
+            dispatched(&releases, &by_name)
+                .into_iter()
+                .map(|(f, s)| (f.to_string(), s)),
+        );
         follow(
             &func.name,
             calls,
@@ -925,7 +929,7 @@ pub(crate) fn dispatched<'f>(
 /// `Fallible` emits both, and the checker records only `success`. Both are the
 /// same impl at the same instantiation.
 fn fallible_twins(
-    calls: Vec<(&str, HashMap<String, Type>)>,
+    calls: Vec<(String, HashMap<String, Type>)>,
 ) -> Vec<(String, HashMap<String, Type>)> {
     let mut out = Vec::with_capacity(calls.len());
     for (callee, solved) in calls {
@@ -942,7 +946,7 @@ fn fallible_twins(
                 solved.clone(),
             ));
         }
-        out.push((callee.to_string(), solved));
+        out.push((callee, solved));
     }
     out
 }
@@ -952,7 +956,7 @@ fn fallible_twins(
 #[allow(clippy::too_many_arguments)]
 fn follow<'a>(
     caller: &str,
-    calls: Vec<(&str, HashMap<String, Type>)>,
+    calls: Vec<(String, HashMap<String, Type>)>,
     by_name: &HashMap<&str, &'a Function>,
     decls: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
     seen: &mut Vec<(String, String)>,

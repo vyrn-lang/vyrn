@@ -3463,120 +3463,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The loop `for var in iter` over a user container expands to
-    /// ([`vyrn_frontend::project::iterate_loop`]), the block the
-    /// checker types and every emitter walks. `None` for a container no
-    /// `impl Iterate` answers for, one read out of a path or module state
-    /// (which [`Builder::iterate`] cannot hold), and outside a compile scope.
-    fn iterated(&self, var: &str, iter: &Expr, body: &Block, ity: &Type) -> Option<&'static Block> {
-        let held = match iter {
-            Expr::Var { name, .. } => self.lookup(name).is_some(),
-            e => !is_place_read(e),
-        };
-        if !held || !vyrn_frontend::project::memo_open() {
-            return None;
-        }
-        let (size_fn, nth) = vyrn_frontend::types::iterate_impl(&self.program.impls, ity)?;
-        vyrn_frontend::project::iterate_loop(&size_fn, nth, var, iter, body, iter.line()).ok()
-    }
-
-    /// [`Builder::iterated`]'s block, with the source's `body` in place of the
-    /// expansion's copy; [`vyrn_frontend::project::iterate_aliases`] maps the
-    /// copy's nodes to the source's, so either tree finds the body's rows.
-    ///
-    /// The scaffolding reads a named container through a borrow taken before
-    /// the loop, as the `Array` loop does, so the kernel refuses a store into
-    /// the container inside the body.
-    fn iterate(
-        &mut self,
-        blk: &'a Block,
-        iter: &'a Expr,
-        ity: Type,
-        body: &'a Block,
-        out: &mut Vec<St>,
-    ) -> Result<(), Gap> {
-        let Some((
-            w @ Stmt::While {
-                cond,
-                body: inner,
-                line,
-                id: _,
-            },
-            head,
-        )) = blk.stmts.split_last()
-        else {
-            return gap("an `Iterate` expansion that is no loop", 0);
-        };
-        let mark = self.scope.len();
-        let site = blk.id();
-        let mut rows = Vec::new();
-        let lent = match iter {
-            Expr::Var { name, .. } => self.lookup(name).map(|n| {
-                let t = self.borrow_name(iter, ity, *line);
-                self.body.names[t as usize].walked = Some(Walk::For);
-                rows.push(St::Let(t, Rhs::Read(Place::Name(n))));
-                (name.clone(), t)
-            }),
-            _ => None,
-        };
-        self.scaffold(head, &lent, &mut rows)?;
-        let mut l = Vec::new();
-        let c = self.read_val(cond, &mut l)?;
-        l.push(St::If {
-            cond: c,
-            then: Vec::new(),
-            els: vec![St::Break {
-                site: NodeId::NONE,
-                line: 0,
-            }],
-            site: NodeId::NONE,
-        });
-        self.loop_marks.push(self.body.names.len());
-        self.walks.push(None);
-        let turn = self.scope.len();
-        let scaffold = &inner.stmts[..inner.stmts.len() - body.stmts.len()];
-        let mut h = Vec::new();
-        let r = self
-            .scaffold(scaffold, &lent, &mut h)
-            .and_then(|()| self.block_with(body, h, &mut l));
-        self.scope.truncate(turn);
-        self.walks.pop();
-        self.loop_marks.pop();
-        r?;
-        self.hoist_headers(&mut l, *line, &mut rows);
-        rows.push(St::Loop {
-            body: l,
-            site: w.id(),
-        });
-        self.drops_at(Exit::Block, site, &mut rows)?;
-        self.scope.truncate(mark);
-        out.push(St::Block {
-            site,
-            body: rows,
-            region: false,
-        });
-        Ok(())
-    }
-
-    /// Statements of [`Builder::iterate`]'s scaffolding, with the container's
-    /// name bound to the loop's borrow of it while they are stated.
-    fn scaffold(
-        &mut self,
-        ss: &'a [Stmt],
-        lent: &Option<(String, Name)>,
-        out: &mut Vec<St>,
-    ) -> Result<(), Gap> {
-        let at = self.scope.len();
-        if let Some(l) = lent {
-            self.scope.push(l.clone());
-        }
-        let r = self.stmt_list(ss, out);
-        if lent.is_some() {
-            self.scope.remove(at);
-        }
-        r
-    }
-
     /// The statements of a list, where a store into a nested place is one
     /// store into the place's path.
     ///
@@ -4268,6 +4154,7 @@ impl<'a> Builder<'a> {
                     .elem_ty(&ity, *line)
                     .ok()
                     .filter(|_| !self.is_map(&ity));
+                let projected = elem.is_none();
                 let Some(ety) = elem.or_else(|| self.projected_elem(&ity)) else {
                     let t = vyrn_frontend::types::resolve(&ity, self.proto.types());
                     if t != Type::Err {
@@ -4282,9 +4169,6 @@ impl<'a> Builder<'a> {
                 };
                 if *consuming {
                     take_names_a_place(iter, *line, true)?;
-                }
-                if let Some(blk) = self.iterated(var, iter, body, &ity).filter(|_| !*consuming) {
-                    return self.iterate(blk, iter, ity, body, out);
                 }
                 // `owner` is the name the element rule below asks about: the
                 // named container where the loop borrows it.
@@ -4428,8 +4312,11 @@ impl<'a> Builder<'a> {
                 let ekey = body.id();
                 let ic = &self.body.names[owner.unwrap_or(it) as usize];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
-                let owned =
-                    self.owns(&ety) && (streaming || loops_alone && self.seed.contains(&ekey));
+                // A projection yields a place in the container, never its own
+                // element.
+                let owned = self.owns(&ety)
+                    && !projected
+                    && (streaming || loops_alone && self.seed.contains(&ekey));
                 // Where every element left through the variable, the
                 // container's release frees the buffer alone (field 0 of a
                 // growable array's triple; other containers have no such
@@ -4456,8 +4343,10 @@ impl<'a> Builder<'a> {
                 let x = self.name(var, ety, owned, *line);
                 self.body.cands.push((ekey, x, Cand::Elem));
                 // The container outlives the loop, so a refusal names the
-                // variable as a loop variable, as the checker does.
-                if !*consuming && self.body.names[x as usize].borrow {
+                // variable as a loop variable, as the checker does. A projected
+                // element is refused as the place it is: `consume` cannot hand
+                // it over.
+                if !*consuming && !projected && self.body.names[x as usize].borrow {
                     let of = vyrn_frontend::ast::place_path(iter)
                         .map(|(r, _)| r)
                         .unwrap_or_default();
@@ -4466,10 +4355,14 @@ impl<'a> Builder<'a> {
                 // The variable has no node of its own; the body that binds it
                 // keys it.
                 self.keyed(x, ekey);
-                let mut head = vec![St::Let(
-                    x,
-                    Rhs::Read(Place::Elem(Box::new(Place::Name(it)), index)),
-                )];
+                let mut head = Vec::new();
+                let place = match counter {
+                    Some((_, i)) if projected => {
+                        self.for_element(iter, &ity, it, i, *line, &mut head)?
+                    }
+                    _ => Place::Elem(Box::new(Place::Name(it)), index),
+                };
+                head.push(St::Let(x, Rhs::Read(place)));
                 if let Some((_, i)) = counter {
                     self.step(i, &mut head);
                 }
@@ -5161,6 +5054,40 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The element place a `for` over the user container `it` reads at the
+    /// counter `i`: its `place nth` stated at the site, as
+    /// [`Builder::inlined`] states any projection.
+    fn for_element(
+        &mut self,
+        iter: &Expr,
+        ity: &Type,
+        it: Name,
+        i: Name,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Place, Gap> {
+        if !vyrn_frontend::project::memo_open() {
+            return Ok(Place::Elem(Box::new(Place::Name(it)), Val::Name(i)));
+        }
+        let p = match vyrn_frontend::project::for_element(&self.program.impls, ity, iter, line) {
+            Ok(Some(p)) => p,
+            Ok(None) => return gap("a `for` over a container with no `nth`", line),
+            Err(e) => return gap_d("a projection this site cannot inline", &e, line),
+        };
+        let mark = self.scope.len();
+        self.scope
+            .push((vyrn_frontend::project::FOR_RECV.to_string(), it));
+        self.scope
+            .push((vyrn_frontend::project::FOR_INDEX.to_string(), i));
+        let r = p
+            .prologue
+            .iter()
+            .try_for_each(|s| self.stmt(s, out))
+            .and_then(|()| self.place(&p.place, out));
+        self.scope.truncate(mark);
+        r
+    }
+
     /// The length a `for` over `it` walks to: a header read for a built-in
     /// container, the `Iterate` impl's `size` for a user one.
     fn length_of(&self, it: Name, ity: &Type, line: usize) -> Result<Rhs, Gap> {
@@ -5172,7 +5099,7 @@ impl<'a> Builder<'a> {
                 field("length")
             }
             _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
-                Some((size, _)) => {
+                Some((_, size, _)) => {
                     let solved = self.impl_args(&size, ity);
                     Rhs::Call {
                         kind: if solved.is_some() {

@@ -8,8 +8,8 @@
 //! each expansion is numbered anew.
 
 use crate::ast::{
-    BinOp, Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt,
-    Type, TypeDecl,
+    Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt, Type,
+    TypeDecl,
 };
 use std::collections::HashMap;
 
@@ -217,10 +217,6 @@ struct Expansion {
 }
 
 thread_local! {
-    #[allow(clippy::type_complexity)]
-    static LOOPS: std::cell::RefCell<
-        Option<HashMap<(NodeId, String, String), (Expr, Block, &'static Block)>>,
-    > = const { std::cell::RefCell::new(None) };
     static MEMO: std::cell::RefCell<Option<HashMap<Key, Expansion>>> =
         const { std::cell::RefCell::new(None) };
     /// [`MEMO`] for optional projections.
@@ -267,7 +263,6 @@ impl Memo {
     pub fn load<P, E>(load: impl FnOnce() -> Result<P, E>) -> Result<(P, Self), E> {
         MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         OPT_MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
-        LOOPS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         STORES.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         SCHEMAS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         let memo = Memo(());
@@ -279,7 +274,6 @@ impl Drop for Memo {
     fn drop(&mut self) {
         MEMO.with(|m| *m.borrow_mut() = None);
         OPT_MEMO.with(|m| *m.borrow_mut() = None);
-        LOOPS.with(|m| *m.borrow_mut() = None);
         STORES.with(|m| *m.borrow_mut() = None);
         SCHEMAS.with(|m| *m.borrow_mut() = None);
     }
@@ -618,155 +612,35 @@ pub fn store_node(blk: &Block) -> Option<&Stmt> {
     })
 }
 
-/// Returns what `for x in xs` becomes when `xs` is a user container, built
-/// from its `size` and `place nth` and expanded once like [`site`]:
-///
-/// ```text
-/// let @i.n = size(xs)
-/// let mut @i.i = -1
-/// while @i.i + 1 < @i.n {
-///     @i.i = @i.i + 1
-///     <the projection's prologue>
-///     let x = <the place it yields>
-///     <the body>
-/// }
-/// ```
-///
-/// The increment comes first so a `continue` cannot skip it. The `@` names are
-/// unspellable, so no source name collides and a nested loop shadows its outer
-/// one.
-pub fn iterate_loop(
-    size_fn: &str,
-    nth: &Function,
-    var: &str,
+/// The receiver and the counter a `for` over a user container binds for its
+/// element read ([`for_element`]). Unspellable, so no source name collides.
+pub const FOR_RECV: &str = "@i.c";
+pub const FOR_INDEX: &str = "@i.i";
+
+/// Returns the element read of `for x in iter` over a user container: its
+/// `place nth` at [`FOR_RECV`] and [`FOR_INDEX`], expanded once per loop like
+/// [`site`]. The loop is the index walk every container takes; only this read
+/// is the container's own.
+pub fn for_element(
+    impls: &[ImplBlock],
+    ty: &Type,
     iter: &Expr,
-    body: &Block,
     line: usize,
-) -> Result<&'static Block, String> {
-    let key = (iter.id(), size_fn.to_string(), var.to_string());
-    let hit = LOOPS.with(|m| {
-        let m = m.borrow();
-        let (i, b, blk) = m.as_ref()?.get(&key)?;
-        (i == iter && b == body).then_some(*blk)
-    });
-    if let Some(b) = hit {
-        return Ok(b);
-    }
-    let mut built = iterate_loop_build(size_fn, nth, var, iter, body, line)?;
-    numbered(|n| n.block(&mut built));
-    let blk: &'static Block = Box::leak(Box::new(built));
-    LOOPS.with(|m| {
-        if let Some(m) = m.borrow_mut().as_mut() {
-            m.insert(key, (iter.clone(), body.clone(), blk));
-        }
-    });
-    Ok(blk)
-}
-
-fn iterate_loop_build(
-    size_fn: &str,
-    nth: &Function,
-    var: &str,
-    iter: &Expr,
-    body: &Block,
-    line: usize,
-) -> Result<Block, String> {
-    const IDX: &str = "@i.i";
-    const LEN: &str = "@i.n";
-    const RECV: &str = "@i.c";
-    let var_of = |n: &str| Expr::Var {
-        id: Id::NEW,
-        name: n.to_string(),
+) -> Result<Option<&'static Projection>, String> {
+    let var = |name: &str| Expr::Var {
+        id: Id(iter.id().0),
+        name: name.to_string(),
         line,
     };
-    let bump = |e: Expr| Expr::Binary {
-        id: Id::NEW,
-        op: BinOp::Add,
-        lhs: Box::new(e),
-        rhs: Box::new(Expr::Int(1, Id::NEW)),
+    let nth = crate::types::ITERATE_NTH;
+    site(
+        impls,
+        Some(ty),
+        nth,
+        &var(FOR_RECV),
+        &[var(FOR_INDEX)],
         line,
-    };
-
-    let mut out = Vec::new();
-    // A place is read where it lives, so the loop variable borrows it. Anything
-    // else binds once, or its side effects would run n+1 times.
-    let recv = if is_place(iter) {
-        iter.clone()
-    } else {
-        out.push(Stmt::Let {
-            id: Id::NEW,
-            name: RECV.to_string(),
-            mutable: false,
-            ty: None,
-            value: iter.clone(),
-            line,
-            col: 0,
-        });
-        var_of(RECV)
-    };
-    out.push(Stmt::Let {
-        id: Id::NEW,
-        name: LEN.to_string(),
-        mutable: false,
-        ty: None,
-        value: Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: size_fn.to_string(),
-            args: vec![recv.clone()],
-            line,
-        },
-        line,
-        col: 0,
-    });
-    out.push(Stmt::Let {
-        id: Id::NEW,
-        name: IDX.to_string(),
-        mutable: true,
-        ty: None,
-        value: Expr::Int(-1, Id::NEW),
-        line,
-        col: 0,
-    });
-
-    let mut inner = vec![Stmt::Assign {
-        id: Id::NEW,
-        name: IDX.to_string(),
-        value: bump(var_of(IDX)),
-        line,
-    }];
-    let p = inline(nth, &recv, &[var_of(IDX)], line)?;
-    inner.extend(p.prologue);
-    inner.push(Stmt::Let {
-        id: Id::NEW,
-        name: var.to_string(),
-        mutable: false,
-        ty: None,
-        value: p.place,
-        line,
-        col: 0,
-    });
-    inner.extend(body.stmts.iter().cloned());
-    out.push(Stmt::While {
-        id: Id::NEW,
-        cond: Expr::Binary {
-            id: Id::NEW,
-            op: BinOp::Lt,
-            lhs: Box::new(bump(var_of(IDX))),
-            rhs: Box::new(var_of(LEN)),
-            line,
-        },
-        body: Block {
-            id: Id::NEW,
-            stmts: inner,
-        },
-        line,
-    });
-    Ok(Block {
-        id: Id::NEW,
-        stmts: out,
-    })
+    )
 }
 
 /// Maps every binding a projection body introduces to an unspellable name.
@@ -1247,81 +1121,6 @@ mod tests {
             }
         }
         assert!(site(&[], None, "at", &recv, &args, 3).unwrap().is_none());
-    }
-
-    #[test]
-    fn an_iterate_loop_increments_before_it_reads() {
-        let p = parse(
-            "type Ring = { data: Array<Int64> }\n\
-             impl Iterate for Ring {\n\
-                 fn size(self) -> Int64 { return self.data.length }\n\
-                 fn nth(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
-             }\n\
-             fn main() { print(1) }\n",
-        );
-        let (size, nth) =
-            crate::types::iterate_impl(&p.impls, &Type::Named("Ring".into())).unwrap();
-        assert_eq!(size, "Iterate__Ring__size");
-        let blk = iterate_loop(
-            &size,
-            nth,
-            "x",
-            &Expr::Var {
-                id: Id::NEW,
-                name: "r".into(),
-                line: 9,
-            },
-            &Block {
-                id: Id::NEW,
-                stmts: Vec::new(),
-            },
-            9,
-        )
-        .unwrap();
-        assert_eq!(
-            blk.stmts.len(),
-            3,
-            "size, index, loop — and no receiver copy"
-        );
-        let Some(Stmt::While { body, .. }) = blk.stmts.last() else {
-            panic!("expected a while loop")
-        };
-        assert!(matches!(&body.stmts[0], Stmt::Assign { name, .. } if name == "@i.i"));
-        assert!(matches!(&body.stmts[1], Stmt::Let { name, .. } if name == "x"));
-    }
-
-    #[test]
-    fn an_iterate_loop_binds_a_temporary_once() {
-        let p = parse(
-            "type Ring = { data: Array<Int64> }\n\
-             impl Iterate for Ring {\n\
-                 fn size(self) -> Int64 { return self.data.length }\n\
-                 fn nth(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
-             }\n\
-             fn main() { print(1) }\n",
-        );
-        let (size, nth) =
-            crate::types::iterate_impl(&p.impls, &Type::Named("Ring".into())).unwrap();
-        let blk = iterate_loop(
-            &size,
-            nth,
-            "x",
-            &Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "makeRing".into(),
-                args: Vec::new(),
-                line: 9,
-            },
-            &Block {
-                id: Id::NEW,
-                stmts: Vec::new(),
-            },
-            9,
-        )
-        .unwrap();
-        assert!(matches!(&blk.stmts[0], Stmt::Let { name, .. } if name == "@i.c"));
     }
 
     #[test]
