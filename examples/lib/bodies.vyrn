@@ -1,0 +1,25 @@
+/// The record types `examples/columns.vyrn` and `examples/nbodycols.vyrn` lay
+/// out as columns with `gen_columns`.
+
+/// One body of `nbody`.
+export type Body = {
+    x: Float64,
+    y: Float64,
+    z: Float64,
+    vx: Float64,
+    vy: Float64,
+    vz: Float64,
+    mass: Float64,
+}
+
+/// A 64-byte row, so a walk over one field touches one byte in eight.
+export type Particle = {
+    x: Float64,
+    y: Float64,
+    z: Float64,
+    vx: Float64,
+    vy: Float64,
+    vz: Float64,
+    mass: Float64,
+    id: Int64,
+}

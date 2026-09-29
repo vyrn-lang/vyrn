@@ -1,0 +1,79 @@
+/// A column layout for a record type: one array per field instead of one array
+/// of records. `columns(module)` writes, for each exported record type `T` of
+/// `module`:
+///
+/// - `type TColumns`, one `Array<F>` per field `f: F` of `T`, under the same
+///   field name. `c.f[i]` reads a field and `c.f[i] = v` writes one.
+/// - `tColumns(capacity)`, empty columns with room for `capacity` rows.
+/// - `pushT(c, v)`, `tAt(c, i)` and `tCount(c)`: append a row, read one back
+///   as a `T`, and count the rows.
+///
+/// Every column has `tCount(c)` elements as long as rows go in through `pushT`
+/// only; a push or pop on one column breaks the layout. The prover does not
+/// know that invariant, so a loop bounded by one column's length keeps the
+/// bounds check on every other column.
+///
+/// `derive` cannot write this: its call answers `String`, and the types it
+/// writes are renamed out of the program's reach. So this is an import-target
+/// generator, like `std/cli`'s `cli`.
+
+import { includes } from "std/arrays"
+import { joinWith, substring, toLower } from "std/strings"
+
+export gen fn columns(module: String) -> String {
+    let iface = moduleInterface(module)
+    let mut specs: Array<String> = []
+    for t in iface.types {
+        if !includes(specs, t.module) {
+            specs.push(t.module.copy())
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name.copy())
+            }
+        }
+        out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
+    }
+    for t in iface.types {
+        if t.module == module && t.shape[0].kind == "record" {
+            out = out + columnsOf(t)
+        }
+    }
+    return out
+}
+
+gen fn columnsOf(t: TypeInfo) -> String {
+    let name = t.name
+    let cols = name + "Columns"
+    let lower = lowerFirst(name)
+    let mut decl: Array<String> = []
+    let mut empty: Array<String> = []
+    let mut reserve = ""
+    let mut push = ""
+    let mut row: Array<String> = []
+    for m in t.shape[0].members {
+        let f = m.name
+        decl.push(f + ": Array<" + t.shape[m.args[0]].spelling + ">")
+        empty.push(f + ": []")
+        reserve = reserve + "    c." + f + ".reserve(capacity)\n"
+        push = push + "    c." + f + ".push(v." + f + ".copy())\n"
+        row.push(f + ": c." + f + "[i].copy()")
+    }
+    let first = t.shape[0].members[0].name
+    let mut out = "export type " + cols + " = { " + joinWith(decl, ", ") + " }\n"
+    out = out + "export fn " + lower + "Columns(capacity: Int64) -> " + cols + " {\n"
+    out = out + "    let mut c = " + cols + " { " + joinWith(empty, ", ") + " }\n" + reserve + "    return c\n}\n"
+    out = out + "export fn push" + name + "(c: modify " + cols + ", v: " + name + ") {\n" + push + "}\n"
+    out = out + "export fn " + lower + "At(c: " + cols + ", i: Int64) -> " + name + " {\n"
+    out = out + "    return " + name + " { " + joinWith(row, ", ") + " }\n}\n"
+    out = out + "export fn " + lower + "Count(c: " + cols + ") -> Int64 {\n    return c." + first + ".length\n}\n"
+    return out
+}
+
+gen fn lowerFirst(s: String) -> String {
+    return toLower(substring(s, 0, 1)) + substring(s, 1, s.byteLength)
+}

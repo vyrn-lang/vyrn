@@ -198,6 +198,7 @@ pull request.
 - The playground runs a generator in the page: `vyrn-genwasm` without `host` builds the module and the `TypeArg` atoms, and `play-wasm.js` runs it. The page serves no read, no module reflection and no code quote, so only a `derive` generator runs there.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
+- No column layout (one array per field of a record) in std or the language. On 10^6 64-byte records it reads one field 2.0x to 2.9x faster and updates one from another 3.0x to 3.5x faster on both engines, but nbody runs 43% to 59% slower: the prover proves no index into one column from another column's length. `derive` cannot write the container, because its call answers `String`; `examples/lib/gen_columns.vyrn` is an import-target generator that does. Reopen it with a program that pays.
 - Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.
 - A generator reports a diagnostic by writing `//@diag <severity> <anchor> <message>` into its output, so the report survives the cache. Two severities; an unknown word is a warning.
 - The compiler knows no lint rule names, codes, registry or suppression syntax.
