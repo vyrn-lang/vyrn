@@ -13829,22 +13829,10 @@ fn value_scalar(t: &Type) -> Option<&'static str> {
 
 /// Every `let` a statement's rows bind, itself and everything under it.
 fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
-    match s {
-        St::Let(n, rhs) => out.push((*n, rhs)),
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_lets(s, out));
-            els.iter().for_each(|s| core_lets(s, out));
-        }
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_lets(s, out));
-        }
-        St::Switch { arms, .. } => {
-            for a in arms {
-                a.body.iter().for_each(|s| core_lets(s, out));
-            }
-        }
-        _ => {}
-    }
+    out.extend(s.rows().filter_map(|(r, _)| match r {
+        St::Let(n, rhs) => Some((*n, rhs)),
+        _ => None,
+    }));
 }
 
 /// `ss` and every list of rows inside it, each before the lists inside it.
