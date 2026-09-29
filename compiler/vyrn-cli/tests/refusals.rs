@@ -1791,6 +1791,32 @@ fn a_failed_generator_says_its_typed_refusal_cold_and_warm() {
     assert!(cold.contains("cannot assign to `n`"), "{cold}");
 }
 
+/// A generator program's must-use refusal names the generator's module and
+/// line, not the importer's.
+#[test]
+fn a_generator_programs_must_use_refusal_names_its_module() {
+    let dir = common::scratch("gen-must-use");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export gen fn g() -> String {\n\
+         \x20   let xs: Array<Int64> = [1, 2]\n\
+         \x20   let s = fromArray(xs)\n\
+         \x20   return \"export fn f() -> Int64 { return 1 }\"\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { g } from \"./lib\"\n\
+         import { f } from g()\n\
+         \n\
+         fn main() -> Int64 { return f() }\n",
+    )
+    .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, "host.vyrn");
+    assert!(cold.starts_with("lib.vyrn:3:"), "{cold}");
+}
+
 /// Checks `root` in `dir` twice over one generator cache, cold then warm, and
 /// returns the refusal's stderr, which must not depend on the cache.
 fn refused_cold_and_warm(dir: &Path, root: &str) -> String {
