@@ -5169,7 +5169,7 @@ impl<'a> Builder<'a> {
     /// call that stores into it counts as a write.
     fn hoist_headers(&mut self, l: &mut [St], line: usize, out: &mut Vec<St>) {
         let mut read = Vec::new();
-        l.iter_mut().for_each(|s| header_reads(s, None, &mut read));
+        header_reads(l, None, &mut read);
         read.sort_unstable_by(|a, b| match (a, b) {
             (Root::N(x), Root::N(y)) => x.cmp(y),
             (Root::G(x), Root::G(y)) => x.cmp(y),
@@ -5212,8 +5212,7 @@ impl<'a> Builder<'a> {
             self.body.names[h as usize].walked = Some(Walk::While);
             self.body.names[h as usize].path = Some(path);
             out.push(St::Let(h, Rhs::Read(from)));
-            l.iter_mut()
-                .for_each(|s| header_reads(s, Some((&r, h)), &mut Vec::new()));
+            header_reads(l, Some((&r, h)), &mut Vec::new());
         }
     }
 
@@ -8392,12 +8391,12 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
     out
 }
 
-/// The names and the module state whose header a read in `s` walks: an
+/// The names and the module state whose header a read in `ss` walks: an
 /// element read, or a length read, straight off one. With `rebase`, each
 /// such read of the first reads the name instead. A store and a take keep
 /// their place, so a store into an element writes the container and not its
 /// header.
-fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
+fn header_reads(ss: &mut [St], rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
     fn place(p: &mut Place, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
         let header = match p {
             Place::Elem(b, _) => Some(b),
@@ -8424,22 +8423,15 @@ fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) 
             Place::Name(_) | Place::Global(_) => {}
         }
     }
-    let each = |ss: &mut Vec<St>, out: &mut Vec<Root>| {
-        ss.iter_mut().for_each(|s| header_reads(s, rebase, out))
-    };
-    match s {
-        St::Let(_, Rhs::Read(p))
+    each_row_mut(ss, &mut |s| {
+        if let St::Let(_, Rhs::Read(p))
         | St::Do {
             rhs: Rhs::Read(p), ..
-        } => place(p, rebase, out),
-        St::If { then, els, .. } => {
-            each(then, out);
-            each(els, out);
+        } = s
+        {
+            place(p, rebase, out);
         }
-        St::Loop { body, .. } | St::Block { body, .. } => each(body, out),
-        St::Switch { arms, .. } => arms.iter_mut().for_each(|a| each(&mut a.body, out)),
-        _ => {}
-    }
+    });
 }
 
 /// Every name `s` binds, at any depth: a `let` and a switch arm's binders.
