@@ -11313,7 +11313,7 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<&'b vyrn_lower::core::Place> {
         let info = &body.names[n as usize];
-        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
+        if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
         // A take a rebuild hands back is the place it was taken from: the arm rebuilds the
@@ -11414,7 +11414,7 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<vyrn_lower::core::Place> {
         let info = &body.names[n as usize];
-        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
+        if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
         // A name this pass minted (a `for` head's borrow or a scrutinee) is read by address
@@ -11459,7 +11459,7 @@ impl<'p> Fn_<'_, 'p> {
         n: vyrn_lower::core::Name,
     ) -> Option<vyrn_lower::core::Name> {
         let info = &body.names[n as usize];
-        if self.checks(&info.ty) || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
+        if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
         let mut lets = Vec::new();
@@ -11505,7 +11505,6 @@ impl<'p> Fn_<'_, 'p> {
         let info = &body.names[n as usize];
         if !info.source.starts_with('@')
             || body.params.contains(&n)
-            || self.checks(&info.ty)
             || !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))
         {
             return false;
@@ -11536,8 +11535,7 @@ impl<'p> Fn_<'_, 'p> {
     /// the kernel refuses a write to the scrutinee while the binder lives. Any other
     /// layout moves out.
     fn core_payload(&self, ty: &Type) -> bool {
-        self.core_framed(ty)
-            || (matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_))) && !self.checks(ty))
+        self.core_framed(ty) || matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
     }
 
     /// Builds a made layout into the binding's own slot. The two drops at the end stand
@@ -11823,8 +11821,7 @@ impl<'p> Fn_<'_, 'p> {
         matches!(v, Val::Name(n) if {
             let nt = &body.names[*n as usize].ty;
             matches!(self.cx.repr(nt, 0), Ok(Repr::Agg(_)))
-                && !self.checks(nt)
-                && !self.checks(t)
+                && self.core_unchecked(nt, t)
                 && self.cx.ll(nt) == self.cx.ll(t)
         })
     }
@@ -11833,12 +11830,12 @@ impl<'p> Fn_<'_, 'p> {
     /// part, parts this walk emits, and no construction check the row does not carry.
     /// [`Fn_::core_built`] decides where a layout part's bytes come from.
     fn core_made(&self, body: &vyrn_lower::core::Body, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
-        let layout = |t: &Type| matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_))) && !self.checks(t);
+        let agg = |t: &Type| matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_)));
         // A record of a validated type is its own: the constructor row after it checks its
         // cross-field `where`, or the checker proved it.
         let own =
             matches!(ctor, Ctor::Record(name, _) if self.cx.sub(ty) == Type::Named(name.clone()));
-        if !(layout(ty) || own && matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))) {
+        if !(agg(ty) && (own || !self.checks(ty))) {
             return false;
         }
         if let Ctor::Closure(t) = ctor {
@@ -11847,8 +11844,10 @@ impl<'p> Fn_<'_, 'p> {
         self.core_part_tys(ty, ctor, vs.len()).is_some_and(|tys| {
             vs.iter().zip(&tys).all(|(v, t)| {
                 (self.core_val_readable(body, v) && self.core_part_ty(t))
-                    || (layout(t)
-                        && matches!(v, Val::Name(n) if layout(&body.names[*n as usize].ty)))
+                    || (agg(t)
+                        && matches!(v, Val::Name(n)
+                            if agg(&body.names[*n as usize].ty)
+                                && self.core_unchecked(&body.names[*n as usize].ty, t)))
             })
         })
     }
@@ -11974,12 +11973,11 @@ impl<'p> Fn_<'_, 'p> {
         // A literal is made at the part's type, and a call's result or a
         // taken field must already have its layout.
         let fits = |part: &Type| {
-            !self.checks(part)
-                && if made {
-                    self.core_makes(body, part, rhs)
-                } else {
-                    self.core_payload_layout(body, &Val::Name(*t), part)
-                }
+            if made {
+                !self.checks(part) && self.core_makes(body, part, rhs)
+            } else {
+                self.core_payload_layout(body, &Val::Name(*t), part)
+            }
         };
         // A literal a `@list` row takes is a part under the name that row
         // binds ([`Fn_::core_lists`]).
@@ -12065,7 +12063,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_take_part(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> bool {
         matches!(rhs, Rhs::Take(p @ vyrn_lower::core::Place::Field(..))
         if self.core_place_ty(body, p).is_some_and(|t| {
-            !self.checks(&t) && matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_)))
+            matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_)))
         }))
     }
 
@@ -12768,6 +12766,12 @@ impl<'p> Fn_<'_, 'p> {
         found
     }
 
+    /// Whether a value of `from` lands in a place of `to` with no check: `to` has no `where`
+    /// clause, or it is `from`, whose value was checked where it was made.
+    fn core_unchecked(&self, from: &Type, to: &Type) -> bool {
+        !self.checks(to) || self.cx.sub(from) == self.cx.sub(to)
+    }
+
     /// Whether `t`, under this instance's type arguments, names a declaration with a `where`
     /// clause, so a value of it is checked where it is made or stored.
     fn checks(&self, t: &Type) -> bool {
@@ -12889,8 +12893,10 @@ impl<'p> Fn_<'_, 'p> {
                         }
                         _ => false,
                     };
-                    fits && (!self.checks(&t)
-                        || matches!(value, Val::Name(n) if body.names[*n as usize].ty == t))
+                    fits && match value {
+                        Val::Name(n) => self.core_unchecked(&body.names[*n as usize].ty, &t),
+                        _ => !self.checks(&t),
+                    }
                 })
             }
             St::If {
@@ -12990,9 +12996,9 @@ impl<'p> Fn_<'_, 'p> {
                 // as a layout name does; a scalar one has no local to reload.
                 Arg::Place(p) => {
                     return *c == Cap::Modify
-                        && self.core_place_ty(body, p).is_some_and(|t| {
-                            matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_))) && !self.checks(&t)
-                        });
+                        && self
+                            .core_place_ty(body, p)
+                            .is_some_and(|t| matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_))));
                 }
             };
             let layout = self.core_layout_name(body, v);

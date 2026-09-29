@@ -151,7 +151,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
                     ));
                 }
             }
-            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
+            Err(d) => diags.push(d),
         }
     }
     drop(check_span);

@@ -468,7 +468,7 @@ fn check_accum_full(
     Vec<Diagnostic>,
     Vec<LocalBinding>,
     StoredFnEffects,
-    Vec<(String, Type)>,
+    Vec<crate::gen::Site>,
     Option<HashSet<String>>,
 ) {
     let (out, binders, effects, derived, typed, _) = check_accum_inner(program, false, 0);
@@ -498,7 +498,7 @@ pub fn check_appended(program: &Program, at: usize) -> Option<Appended> {
 
 pub type Appended = (
     Vec<Diagnostic>,
-    Vec<(String, Type)>,
+    Vec<crate::gen::Site>,
     Option<HashSet<String>>,
 );
 
@@ -585,7 +585,7 @@ fn check_accum_inner(
     Vec<Diagnostic>,
     Vec<LocalBinding>,
     StoredFnEffects,
-    Vec<(String, Type)>,
+    Vec<crate::gen::Site>,
     Option<HashSet<String>>,
     Option<Recorded>,
 ) {
@@ -1789,8 +1789,7 @@ struct Checker<'a> {
     /// Each call through a stored function value, as (enclosing function,
     /// signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
-    /// Every `derive(g, x)` site: the generator and `x`'s type.
-    derive_sites: RefCell<Vec<(String, Type)>>,
+    derive_sites: RefCell<Vec<crate::gen::Site>>,
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
     record: Option<RefCell<Recorded>>,
@@ -5144,9 +5143,12 @@ impl<'a> Checker<'a> {
             if let Err(off) = crate::codec::encodable(&at, self.types) {
                 return Err(cerr!(line, ToJsonUncodable, off));
             }
-            self.derive_sites
-                .borrow_mut()
-                .push((crate::loader::JSON_ENCODERS.to_string(), at));
+            self.derive_sites.borrow_mut().push(crate::gen::Site {
+                g: crate::loader::JSON_ENCODERS.to_string(),
+                entry: Type::Fn(vec![at.clone()], Box::new(Type::Str)),
+                ty: at,
+                line,
+            });
             return Ok(Type::Str);
         }
         // `derive(g, x)`: generator `g` writes a function for `x`'s type after
@@ -5168,7 +5170,12 @@ impl<'a> Checker<'a> {
             if let Err(off) = crate::codec::encodable(&at, self.types) {
                 return Err(cerr!(line, DeriveUncodable, g, off));
             }
-            self.derive_sites.borrow_mut().push((g.clone(), at));
+            self.derive_sites.borrow_mut().push(crate::gen::Site {
+                g: g.clone(),
+                entry: Type::Fn(vec![at.clone()], Box::new(Type::Str)),
+                ty: at,
+                line,
+            });
             return Ok(Type::Str);
         }
         // A tagged template's hole desugars to `value(x)`.
@@ -5733,16 +5740,25 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            let rty = crate::types::substitute(ret, &subst);
             // `fromJson<T>(s)` calls what `std/jsondec`'s generator writes for
             // `T`, and the solve is the one place `T` is known.
             if d.key == "fromJson" {
                 if let Some(t) = subst.get("T") {
-                    self.derive_sites
-                        .borrow_mut()
-                        .push((crate::loader::JSON_DECODERS.to_string(), t.clone()));
+                    self.derive_sites.borrow_mut().push(crate::gen::Site {
+                        g: crate::loader::JSON_DECODERS.to_string(),
+                        ty: t.clone(),
+                        line,
+                        entry: Type::Fn(
+                            params
+                                .iter()
+                                .map(|p| crate::types::substitute(p, &subst))
+                                .collect(),
+                            Box::new(rty.clone()),
+                        ),
+                    });
                 }
             }
-            let rty = crate::types::substitute(ret, &subst);
             // The one place a generic call's type arguments exist; recorded
             // for the backends.
             if self.recording() {

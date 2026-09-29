@@ -109,7 +109,8 @@ the playground serves an embedded `std/`. The loader:
    If the program calls `derive(g, x)`, `gen::derive` runs each generator
    once over a `TypeArg` of the types its sites need, and the functions it
    writes join the program with the type declarations it writes and the
-   `where` constructors. `checker::check_appended` types their bodies
+   `where` constructors. Each site's entry must have the signature its call
+   needs. `checker::check_appended` types their bodies
    against the joined program's declarations, and a whole check runs only in
    the case its doc names. `toJson(x)` is a `derive` site of `std/json`'s
    `jsonEncoders`, and `fromJson<T>(s)` of `std/jsondec`'s `jsonDecoders`.

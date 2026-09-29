@@ -1,0 +1,12 @@
+export gen fn wrong(t: TypeArg) -> String {
+    let mut out = ""
+    for r in t.roots {
+        out = out + "fn " + t.nodes[r].name + "(v: Bool) -> Int64 {\n    return 7\n}\n"
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    print(derive(wrong, 1))
+    return 0
+}

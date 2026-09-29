@@ -1,0 +1,1 @@
+a_derive_entry_must_match_its_call.vyrn:10:0: generator `wrong` wrote the entry `fn(Bool) -> Int64`, and this call needs `fn(Int64) -> String`
