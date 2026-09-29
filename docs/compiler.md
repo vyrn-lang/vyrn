@@ -109,7 +109,9 @@ the playground serves an embedded `std/`. The loader:
    all-paths return, and each `where` predicate against constant arguments
    (`consteval.rs`). The checker records every expression's type in
    `checker::Recorded`, keyed by node address. Every later pass reads types
-   from this record and derives none of its own.
+   from this record and derives none of its own. The bodies a `derive` or the
+   synthesis appends add their types to it (`Recorded::extend`), so the
+   judgments read the one record this check made.
    If the program calls `derive(g, x)`, `gen::derive` runs each generator
    once over a `TypeArg` of the types its sites need, and the functions it
    writes join the program with the type declarations it writes and the

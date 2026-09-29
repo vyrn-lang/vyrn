@@ -98,9 +98,11 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
 }
 
 /// Type-checks `program` and synthesizes what its builtins need into it.
-/// Returns the check's diagnostics, the refused set and the root's bindings
-/// ([`checker::check_accum_with_sites`]). The judgments that follow are
-/// `vyrn_lower::check_and_synthesize`'s.
+/// Returns the check's diagnostics, the refused set, the root's bindings
+/// ([`checker::check_accum_with_sites`]) and the record of every body,
+/// synthesized ones included, for the judgments to hold. The record is `None`
+/// where an appended signature widens a capability, so a reader checks again.
+/// The judgments that follow are `vyrn_lower::check_and_synthesize`'s.
 ///
 /// An ordinary load and a generator re-loaded as its own root both
 /// call it, so neither misses the synthesis. The synthesis sits here because
@@ -112,9 +114,12 @@ pub fn check_and_synthesize(
     Vec<diagnostics::Diagnostic>,
     Option<std::collections::HashSet<String>>,
     Vec<checker::LocalBinding>,
+    Option<checker::Recorded>,
 ) {
     let check_span = prof::phase("check");
-    let ((mut diags, derived, mut refused), binders) = checker::check_accum_with_sites(program);
+    let ((mut diags, derived, mut refused), binders, record) =
+        checker::check_accum_with_sites(program);
+    let mut record = Some(record);
     // What a `derive` generator writes joins the program and is checked
     // against it, so the second check's answers stand. The `where`
     // constructors join with it: `fromJson`'s decoders call the predicates.
@@ -133,9 +138,15 @@ pub fn check_and_synthesize(
                 // Only a whole check counts the program's own sites again.
                 let (again, old_sites);
                 (diags, again, refused, old_sites) = match checker::check_appended(program, at) {
-                    Some((d, again, r)) => (d, again, r, 0),
+                    Some(((d, again, r), tail)) => {
+                        if let Some(rec) = record.as_mut() {
+                            rec.extend(tail);
+                        }
+                        (d, again, r, 0)
+                    }
                     None => {
-                        let ((d, again, r), _) = checker::check_accum_with_sites(program);
+                        let ((d, again, r), _, whole) = checker::check_accum_with_sites(program);
+                        record = Some(whole);
                         (d, again, r, derived.len())
                     }
                 };
@@ -161,8 +172,16 @@ pub fn check_and_synthesize(
         program.functions.extend(fresh);
     }
     program.number_appended(from);
+    // The constructors are typed for the record alone: they are generated
+    // from declarations that checked.
+    if program.functions.len() > from {
+        match (checker::check_appended(program, from), record.as_mut()) {
+            (Some((_, tail)), Some(rec)) => rec.extend(tail),
+            _ => record = None,
+        }
+    }
     drop(synth_span);
-    (diags, refused, binders)
+    (diags, refused, binders, record)
 }
 
 /// Checks a generator's own program: [`check_and_synthesize`] and the must-use
@@ -171,8 +190,11 @@ pub fn check_and_synthesize(
 /// nested, so it refuses inside the load.
 pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     movecheck::comptime(|| {
-        let (mut diags, _, _) = check_and_synthesize(program);
+        let (mut diags, _, _, record) = check_and_synthesize(program);
         let _held = checker::Held::open(program);
+        if let Some(record) = record {
+            checker::hold(program, std::rc::Rc::new(record));
+        }
         if diags.is_empty() {
             let _p = prof::phase("movecheck");
             let mut owed = own::must_use_refusals(program);

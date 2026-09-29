@@ -64,11 +64,14 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
 /// [`check_and_synthesize`] with the floor decision the load returned, if any.
 /// The editor runs it as [`JUDGE`].
 fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> symbols::Judged {
-    let (mut diags, refused, binders) = vyrn_frontend::check_and_synthesize(program);
-    // One type record for the readers below. The synthesis is over, so no node
-    // moves under its keys, and the guard closes before the caller can extend
-    // the program again.
+    let (mut diags, refused, binders, record) = vyrn_frontend::check_and_synthesize(program);
+    // One type record for the readers below: the check's own. The synthesis is
+    // over, so no node moves under its keys, and the guard closes before the
+    // caller can extend the program again.
     let _held = checker::Held::open(program);
+    if let Some(record) = record {
+        checker::hold(program, std::rc::Rc::new(record));
+    }
     // The checker's ownership refusals and the kernel's form one list, in
     // source order. The core builds bodies only for a program that type-checks.
     let mut ownership = None;
