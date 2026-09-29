@@ -51,7 +51,7 @@ The compiler injects these declarations into every program, so a file names them
 | `LoadResult<T> = Missing \| Corrupt(Array<Issue>) \| Loaded(T)` | The result of `load`. |
 | `Value`, `Template` | Tagged-template holes and `template"..."`. |
 | `Schema` | What `schemaOf<T>()` answers. |
-| `ModuleInterface`, `FnInfo`, `ParamInfo`, `TypeInfo`, `Origin` | What `moduleInterface(path)` answers in a generator. |
+| `ModuleInterface`, `FnInfo`, `ParamInfo`, `TypeInfo`, `Origin`, `TypeNode`, `TypeMember` | What `moduleInterface(path)` answers in a generator. `TypeInfo.shape` is the declaration as a tree of nodes. |
 | `ContractInfo`, `MemberInfo` | What `contractOf(Name)` answers in a generator. |
 | `Request`, `Response` | The HTTP surface `vyrn serve` and `std/ui` use. Request header names are lowercase; `Response.headers` holds every header but `Vary`, which has its own field. |
 
