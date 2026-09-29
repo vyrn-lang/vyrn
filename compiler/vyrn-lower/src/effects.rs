@@ -179,31 +179,26 @@ pub fn judge(
         calls.push(w.calls);
         writes.push(w.writes);
     }
-    // Monotone over a finite lattice, so the fixpoint ends.
-    let mut effects = own.clone();
-    loop {
-        let mut changed = false;
-        for i in 0..bodies.len() {
-            let mut e = effects[i];
+    // Effect sets and the program's globals are finite, so the joins end.
+    let solved = crate::fixpoint::solve(
+        own.into_iter().zip(writes).collect(),
+        &edges,
+        |i, v| {
+            let mut out = (Effects::PURE, std::collections::BTreeSet::new());
             for &j in &edges[i] {
-                e = e.join(effects[j]);
+                out.0 = out.0.join(v[j].0);
+                out.1.extend(v[j].1.iter().cloned());
             }
-            if e != effects[i] {
-                effects[i] = e;
-                changed = true;
-            }
-            for &j in &edges[i] {
-                if j != i && !writes[j].is_subset(&writes[i]) {
-                    let more: Vec<String> = writes[j].difference(&writes[i]).cloned().collect();
-                    writes[i].extend(more);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+            out
+        },
+        |old, (e, w), _| {
+            let before = (old.0, old.1.len());
+            old.0 = old.0.join(e);
+            old.1.extend(w);
+            (old.0, old.1.len()) != before
+        },
+    );
+    let (effects, writes) = solved.into_iter().unzip();
     Judged {
         effects,
         unknown,

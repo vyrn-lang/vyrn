@@ -152,6 +152,7 @@ pull request.
 - One pipeline: the loader, the checker, the lowering to a named core, a kernel that judges the core, and one wasm emitter. Each rule lives in one place instead of once per engine.
 - The core binds every intermediate value and makes every memory access a place. A field read is one load, never a record copy; the copy made wasm 13x slower than native.
 - The kernel re-checks every body on every compile with three judgments: ownership, effects and types.
+- A whole-program analysis over the call graph runs on `fixpoint::solve` in `vyrn-lower`: components bottom-up, a join the analysis supplies, widening by round number. No analysis writes its own fixpoint loop.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
 - A rule stays in the checker when no other pass refuses the program on the same line. A moved rule keeps its surviving home's sentence.
 - The generation fence stays in the checker, because it is the only judgment that runs before a generator executes.
