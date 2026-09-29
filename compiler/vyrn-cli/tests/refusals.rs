@@ -3431,3 +3431,35 @@ fn a_name_yielded_out_of_a_join_arm_is_moved() {
         assert!(text.contains(needle), "wanted `{needle}`, got {text}");
     }
 }
+
+/// A drop runs the declared `release` of its type, so a release that stores
+/// into module state writes it at the drop. Accepted, the loop would read the
+/// freed array.
+#[test]
+fn a_drop_whose_release_writes_the_iterated_global_is_refused() {
+    let src = "let mut gs: Array<Int64> = [1, 2, 3, 4]
+type Ow = { d: Array<Int64>, tag: Int64 }
+impl Owned for Ow {
+    fn release(consume self) {
+        gs = [70, 71, 72, 73]
+        let d = consume self.d
+        drop d
+    }
+}
+fn main() -> Int64 {
+    for x in gs {
+        let o = Ow { d: [x], tag: x }
+        drop o
+    }
+    return 0
+}
+";
+    let dir = common::scratch("release-state");
+    std::fs::write(dir.join("release.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "release.vyrn", false);
+    let want = "release.vyrn:13:0: `gs` is written here while `gs` still reads out of it";
+    assert!(
+        !ok && text.lines().next().is_some_and(|l| l.ends_with(want)),
+        "`check` said {text}"
+    );
+}

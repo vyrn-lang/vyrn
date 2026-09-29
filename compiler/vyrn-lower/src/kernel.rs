@@ -233,7 +233,18 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<
             }
             w
         }
-        St::Drop(n, ..) | St::Row { name: n, .. } => vec![Write::Release(*n)],
+        St::Drop(n, ..) | St::Row { name: n, .. } => {
+            let mut state: Vec<String> = (names[*n as usize].runs.iter())
+                .flat_map(|r| crate::effects::writes_state(body, r))
+                .collect();
+            state.sort();
+            state.dedup();
+            let mut w = vec![Write::Release(*n)];
+            if !state.is_empty() {
+                w.push(Write::State(state));
+            }
+            w
+        }
         St::Return { value: Some(v), .. } => vec![Write::Hand(v, false)],
         St::Switch { on, consuming, .. } if *consuming => vec![Write::Hand(on, false)],
         _ => vec![],
