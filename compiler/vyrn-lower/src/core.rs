@@ -134,6 +134,10 @@ pub struct NameInfo {
     /// every temporary. Only the memory report reads it, so the report and
     /// the ownership rule are one statement.
     pub not_owned: Option<NotOwned>,
+    /// The declared `release` bodies a release of this name may call
+    /// ([`vyrn_frontend::declared::Owned::declared_releases`]). The effect
+    /// judgment and the kernel read a `St::Drop` of the name as calls to them.
+    pub runs: Vec<String>,
 }
 
 /// A loop that reads its container through a borrow ([`NameInfo::walked`]).
@@ -2801,6 +2805,7 @@ impl<'a> Builder<'a> {
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
         let heap = self.proto.owns_heap(&ty);
         let linear = self.proto.linear_kind(&ty).is_some();
+        let runs = self.proto.declared_releases(&ty);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
@@ -2828,6 +2833,7 @@ impl<'a> Builder<'a> {
             mutable: false,
             closure_reads: None,
             not_owned: None,
+            runs,
         });
         (self.body.names.len() - 1) as Name
     }

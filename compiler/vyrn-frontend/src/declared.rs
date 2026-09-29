@@ -149,6 +149,49 @@ impl Owned {
         self.impls.values().any(|f| f == name)
     }
 
+    /// Returns the declared `release` bodies a release of `ty` may call, sorted:
+    /// the row of every type the release walk reaches, which stops at a row. A
+    /// function value, a lazy value or a stream may hold a value of any type, so
+    /// each answers every row.
+    pub fn declared_releases(&self, ty: &Type) -> Vec<String> {
+        fn go(o: &Owned, ty: &Type, seen: &mut Vec<String>, out: &mut Vec<String>) {
+            if let Some(f) = crate::types::type_key(ty).and_then(|k| o.impls.get(&k)) {
+                out.push(f.clone());
+                return;
+            }
+            if let Type::Named(n) | Type::App(n, _) = ty {
+                if !seen.contains(n) && o.types.contains_key(n) {
+                    seen.push(n.clone());
+                    go(o, &crate::types::resolve(ty, &o.types), seen, out);
+                }
+                return;
+            }
+            match ty {
+                Type::Fn(..) | Type::Lazy(_) | Type::Stream(_) => {
+                    out.extend(o.impls.values().cloned())
+                }
+                Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) => go(o, t, seen, out),
+                Type::Map(a, b) => {
+                    go(o, a, seen, out);
+                    go(o, b, seen, out);
+                }
+                Type::Record(fs) => fs.iter().for_each(|f| go(o, &f.ty, seen, out)),
+                Type::Enum(vs) => vs
+                    .iter()
+                    .flat_map(|v| &v.payload)
+                    .for_each(|p| go(o, p, seen, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        if !self.impls.is_empty() {
+            go(self, ty, &mut Vec::new(), &mut out);
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Returns how a value of `ty` is reclaimed, or `None` when it owns no heap
     /// or cannot be walked. A declared row wins; otherwise the resolved type
     /// answers. The match has no `_` arm, so a new [`Type`] variant must decide.

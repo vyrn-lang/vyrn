@@ -278,11 +278,14 @@ impl Walk<'_> {
                 }
                 self.place(place)
             }
-            St::Drop(..)
-            | St::Row { .. }
-            | St::Break { .. }
-            | St::Continue { .. }
-            | St::Return { .. } => {}
+            // A release runs the declared `release` bodies its type reaches.
+            St::Drop(n, ..) | St::Row { name: n, .. } => {
+                let info = &self.body.names[*n as usize];
+                for r in &info.runs {
+                    self.call(r, None, info.line);
+                }
+            }
+            St::Break { .. } | St::Continue { .. } | St::Return { .. } => {}
         }
     }
 
@@ -343,9 +346,15 @@ impl Walk<'_> {
                 self.place(p);
             }
         }
-        let c = self.callee(callee, kind.value());
-        self.calls.push((callee.clone(), c.clone()));
-        let atom = match c {
+        self.call(callee, kind.value(), line)
+    }
+
+    /// Joins a call to `callee` (through `value` when it is a function value);
+    /// true when the callee is not a user body.
+    fn call(&mut self, callee: &str, value: Option<crate::core::Name>, line: usize) -> bool {
+        let c = self.callee(callee, value);
+        self.calls.push((callee.to_string(), c.clone()));
+        match c {
             Callee::Atom(e) => {
                 self.own = self.own.join(e);
                 true
@@ -356,15 +365,14 @@ impl Walk<'_> {
             }
             Callee::Pure => true,
             Callee::Empty => {
-                self.empty.push((callee.clone(), line));
+                self.empty.push((callee.to_string(), line));
                 true
             }
             Callee::Unknown => {
-                self.unknown.push((callee.clone(), line));
+                self.unknown.push((callee.to_string(), line));
                 true
             }
-        };
-        atom
+        }
     }
 }
 
