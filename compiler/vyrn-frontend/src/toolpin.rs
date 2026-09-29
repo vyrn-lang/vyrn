@@ -607,11 +607,13 @@ mod tests {
         let gate = dir.join("x.gate");
         std::fs::write(&gate, "").unwrap();
         let held = gate.clone();
+        // Taken before the spawn: a delay between the spawn and this line
+        // would otherwise shorten the measured wait below 300 ms.
+        let start = std::time::Instant::now();
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(300));
             std::fs::remove_file(held).unwrap();
         });
-        let start = std::time::Instant::now();
         assert!(hold_gate(&gate));
         assert!(start.elapsed() >= std::time::Duration::from_millis(300));
         release.join().unwrap();
