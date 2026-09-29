@@ -41,7 +41,7 @@ fn load(path: &Path, project: Option<&Path>) -> Result<(Program, Memo), String> 
         artifacts: project.and_then(manifest).and_then(|m| m.artifacts),
         ..Default::default()
     };
-    Memo::load(|| vyrn_frontend::load(&src, &slash(path), &opts, &DiskResolver))
+    Memo::load(|| vyrn_lower::load(&src, &slash(path), &opts, &DiskResolver))
         .map_err(|d| d.first().map(|d| d.render()).unwrap_or_default())
 }
 

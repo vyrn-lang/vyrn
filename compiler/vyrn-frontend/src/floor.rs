@@ -306,20 +306,6 @@ fn locate<'a>(
     None
 }
 
-/// A judgment of which capability each module of a checked program reaches.
-///
-/// The effect judgment lives in `vyrn-lower`, which depends on this crate, so
-/// the CLI installs it as a function pointer at start-up, as with
-/// [`crate::own::Placer`]. The module key is the load's, `""` for the root.
-pub type Judge = fn(&Program) -> Vec<(String, Capability)>;
-
-static JUDGE: std::sync::OnceLock<Judge> = std::sync::OnceLock::new();
-
-/// Installs the judgment. The first installation wins.
-pub fn install_judge(f: Judge) {
-    let _ = JUDGE.set(f);
-}
-
 /// `VYRN_NO_JUDGE=1` is a bisect knob that sets the judgments aside: the floor
 /// refuses every scanned carrier, reached or not, inside the load and before
 /// every type error. `tests/floor.rs` pins it.
@@ -328,83 +314,42 @@ pub fn no_judge() -> bool {
     *OFF.get_or_init(|| std::env::var("VYRN_NO_JUDGE").is_ok_and(|v| v == "1"))
 }
 
-/// The installed judgment, unless [`no_judge`] set it aside.
-fn judge() -> Option<Judge> {
-    if no_judge() {
-        return None;
-    }
-    JUDGE.get().copied()
-}
-
-/// Returns whether an installed judgment answers for this carrier.
+/// Returns whether the load defers this carrier's refusal to [`decide`].
 ///
 /// It asks per carrier, not per capability: `fs` has calls the judgment
 /// decides and the `logging` declaration, which it does not. Judging by
 /// capability would defer the declaration's refusal for no gain.
 pub fn is_judged(c: &Carried) -> bool {
-    judge().is_some() && c.judged
+    c.judged && !no_judge()
 }
 
-/// A floor decision the load could not make, held until the program is checked.
-struct Pending {
-    graph: Graph,
-    root: String,
-    map: ArtifactMap,
-    origins: crate::origin::OriginMaps,
+/// A floor decision the load could not make: the scan of the linked program,
+/// held until the program is checked. The outermost load returns it beside the
+/// program; [`decide`] answers it.
+pub struct Pending {
+    pub(crate) graph: Graph,
+    pub(crate) root: String,
+    pub(crate) map: ArtifactMap,
+    pub(crate) origins: crate::origin::OriginMaps,
 }
 
-thread_local! {
-    static PENDING: std::cell::RefCell<Option<Pending>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
-/// Holds this load's floor decision for [`decide`]. The loader calls it in
-/// place of the refusal when the objection is on a judged row.
-pub fn defer(graph: Graph, root: String, map: ArtifactMap, origins: crate::origin::OriginMaps) {
-    PENDING.with(|p| {
-        *p.borrow_mut() = Some(Pending {
-            graph,
-            root,
-            map,
-            origins,
-        })
-    });
-}
-
-/// Forgets a held decision. The loader calls it at the start of every
-/// outermost load, so a stale deferral cannot answer for the next program.
-pub fn forget() {
-    PENDING.with(|p| *p.borrow_mut() = None);
-}
-
-/// Runs `f` with this load's held decision set aside, so a nested check (a
-/// derived-code generator's program, `gen::derive`) neither answers it nor
-/// drops it.
-pub fn aside<R>(f: impl FnOnce() -> R) -> R {
-    let held = PENDING.with(|p| p.borrow_mut().take());
-    let r = f();
-    PENDING.with(|p| *p.borrow_mut() = held);
-    r
-}
-
-/// Returns the floor's objection to a checked program whose objection was
-/// deferred; `None` for every load that decided for itself.
+/// Returns the floor's objection to a checked program, or `None`.
 ///
-/// The judgment only clears a row: a module keeps a judged carrier when some
-/// instance of it reaches the capability. The refusal still quotes the scan's
-/// carrier and line.
-pub fn decide(program: &Program) -> Option<Diagnostic> {
-    let mut p = PENDING.with(|p| p.borrow_mut().take())?;
-    let judge = judge()?;
-    let reached = judge(program);
-    for (key, _, carried) in &mut p.graph {
-        carried.retain(|c| {
-            !c.judged
-                || reached
-                    .iter()
-                    .any(|(m, rc)| *rc == c.cap && (m == key || (m.is_empty() && *key == p.root)))
-        });
+/// `reached` is the effect judgment's answer for the program: which capability
+/// each module reaches, by the load's module key, `""` for the root. It only
+/// clears a row: a module keeps a judged carrier when some instance of it
+/// reaches the capability. With no judgment, `None`, every scanned carrier
+/// stands. The refusal quotes the scan's carrier and line.
+pub fn decide(mut p: Pending, reached: Option<&[(String, Capability)]>) -> Option<Diagnostic> {
+    if let Some(reached) = reached {
+        for (key, _, carried) in &mut p.graph {
+            carried.retain(|c| {
+                !c.judged
+                    || reached.iter().any(|(m, rc)| {
+                        *rc == c.cap && (m == key || (m.is_empty() && *key == p.root))
+                    })
+            });
+        }
     }
     let mut d = objection(&p.graph, &p.root, &p.map)?;
     if d.file.as_deref() == Some(p.root.as_str()) {

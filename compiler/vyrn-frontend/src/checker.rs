@@ -1657,7 +1657,7 @@ pub(crate) fn hold_open(program: &Program) {
 
 /// Drops the held record and keeps the slot open, for a caller that changes
 /// the program the record typed.
-pub(crate) fn hold_forget() {
+pub fn hold_forget() {
     HELD.with(|h| *h.borrow_mut() = None);
 }
 
@@ -1667,13 +1667,13 @@ pub(crate) fn hold_close() {
     hold_forget();
 }
 
-/// The record slot as `crate::check_and_synthesize` holds it, from synthesis
-/// to the last judgment, so its three readers share one record. It stands
-/// aside where another holder has the slot, so it never closes theirs.
-pub(crate) struct Held(bool);
+/// The record slot as `vyrn_lower::check_and_synthesize` holds it, from
+/// synthesis to the last judgment, so its three readers share one record. It
+/// stands aside where another holder has the slot, so it never closes theirs.
+pub struct Held(bool);
 
 impl Held {
-    pub(crate) fn open(program: &Program) -> Held {
+    pub fn open(program: &Program) -> Held {
         if HOLDING.with(|h| h.get()) != 0 {
             return Held(false);
         }

@@ -32,7 +32,7 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    Memo::load(|| vyrn_frontend::load(&src, &root, &opts, &DiskResolver)).map_err(|d| {
+    Memo::load(|| vyrn_lower::load(&src, &root, &opts, &DiskResolver)).map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())

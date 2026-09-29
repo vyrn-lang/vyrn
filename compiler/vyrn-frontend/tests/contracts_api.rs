@@ -403,7 +403,7 @@ fn edit_distance_matches_the_vyrn_one() {
     write(&root, &body);
     let path = root.to_string_lossy().replace('\\', "/");
     let (program, memo) = vyrn_frontend::project::Memo::load(|| {
-        vyrn_frontend::load(&body, &path, &opts(), &DiskResolver)
+        vyrn_lower::load(&body, &path, &opts(), &DiskResolver)
     })
     .unwrap_or_else(|d| panic!("the cross-check program must compile: {d:?}"));
     let disagreements =

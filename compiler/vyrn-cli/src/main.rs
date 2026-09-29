@@ -833,7 +833,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     }
     // The hand-written channel. A failure is reported and survived: the derived
     // rows above are still true.
-    match Memo::load(|| vyrn_frontend::load(&source, &root_key, &opts, &resolver))
+    match Memo::load(|| vyrn_lower::load(&source, &root_key, &opts, &resolver))
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
         .and_then(|(p, dsg)| {
             let _memo = shared_desugars(&p);
@@ -2580,7 +2580,7 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
 fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
     let opts = load_options(root_key);
     let resolver = make_resolver(root_key);
-    match vyrn_frontend::load_warned(text, root_key, &opts, &resolver).0 {
+    match vyrn_lower::load_warned(text, root_key, &opts, &resolver).0 {
         Ok(_) => Vec::new(),
         Err(d) => d,
     }
@@ -2696,7 +2696,7 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
     let root_key = normalize_slashes(path);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let (result, warnings) = vyrn_frontend::load_warned(source, &root_key, &opts, &resolver);
+    let (result, warnings) = vyrn_lower::load_warned(source, &root_key, &opts, &resolver);
     // Pins are saved even when a later stage fails.
     save_lock(&resolver)?;
     match result {

@@ -14,7 +14,10 @@ pub mod elide;
 pub mod facts;
 mod fixpoint;
 pub mod kernel;
+mod pipeline;
 pub mod typed;
+
+pub use pipeline::{check_and_synthesize, load, load_warned};
 
 /// Installs this crate's judgments into the slots `vyrn-frontend` declares,
 /// because the frontend sits below this crate and cannot call into it. The
@@ -29,7 +32,6 @@ pub fn install() {
     vyrn_frontend::own::install_must_use(typed::obligation::judge);
     // `vyrn check` reads the typed judgment's refusals before the kernel's.
     vyrn_frontend::own::install_typed(core::typed_diagnostics);
-    vyrn_frontend::floor::install_judge(effects::reaches);
 }
 pub use core::{refuses as kernel_refuses, take_refusals};
 
@@ -1094,7 +1096,7 @@ mod tests {
 
     fn program(src: &str) -> Program {
         let mut p = vyrn_frontend::check(src).expect("the fixture checks");
-        let diags = vyrn_frontend::check_and_synthesize(&mut p);
+        let diags = check_and_synthesize(&mut p);
         assert!(diags.is_empty(), "{diags:?}");
         p
     }

@@ -172,7 +172,7 @@ fn a_program_compiled_after_another_in_one_process_is_the_same_bytes() {
         let src = std::fs::read_to_string(&path).expect("the example reads");
         let key = path.to_string_lossy().replace('\\', "/");
         let (program, memo) =
-            vyrn_frontend::project::Memo::load(|| vyrn_frontend::load(&src, &key, &opts, &Disk))
+            vyrn_frontend::project::Memo::load(|| vyrn_lower::load(&src, &key, &opts, &Disk))
                 .expect("the example loads");
         let _own = vyrn_frontend::own::Memo::open(&program);
         vyrn_codegen::check_instantiations(&program).expect("the example instantiates");

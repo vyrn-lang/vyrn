@@ -57,9 +57,8 @@ The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
 front end cannot call the lowering, so it declares slots and the lowering
 fills them. `vyrn_lower::install` installs the placer (`own::install_placer`),
 the kernel's refusals (`own::install_refusals`), the must-use judgment
-(`own::install_must_use`), the typed judgment's refusals
-(`own::install_typed`) and the effect judgment into the floor
-(`floor::install_judge`). `vyrn_genwasm::install` installs the generation
+(`own::install_must_use`) and the typed judgment's refusals
+(`own::install_typed`). `vyrn_genwasm::install` installs the generation
 engine (`gen::set_gen_engine`); the playground installs its own, which runs
 the module in the page. Every process that compiles calls both first: the
 CLI's `install`, the language server's `main`, the playground's `load`, and
@@ -99,7 +98,8 @@ the playground serves an embedded `std/`. The loader:
   may import `std/runtime` (`runtime_fence`). The audience (`audience.rs`)
   and the floor (`floor.rs`) fence the rest.
 
-`lib::check_and_synthesize` then runs, in order:
+`vyrn_lower::check_and_synthesize` then runs, in order, the frontend's
+`check_and_synthesize` (steps 1 and 2) and the judgments in `vyrn-lower`:
 
 1. `checker::check_accum_with_json_types`: names, types, calls, `mut`,
    all-paths return, and each `where` predicate against constant arguments
@@ -124,7 +124,8 @@ the playground serves an embedded `std/`. The loader:
 
 For a program that does not type-check, `lower_typed` still builds every
 function the type errors do not reach and adds the typed judgment's refusals,
-so one run reports both kinds.
+so one run reports both kinds. A generator's own program gets steps 1, 2 and
+4 and the must-use judgment alone (`lib::check_generator`).
 
 `symbols::analyze` and `analyze_linked` run the same pipeline for the editor
 and return diagnostics with columns, the symbol index and the tokens.

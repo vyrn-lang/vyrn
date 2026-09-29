@@ -303,7 +303,9 @@ fn analyze_inner(
     } else {
         match (&linker, program.imports.is_empty()) {
             (Some((root_path, opts, resolver)), false) => {
-                let (loaded, o, load_warnings, g) =
+                // The floor's deferred decision needs the effect judgment; the
+                // editor does not make it.
+                let (loaded, o, load_warnings, g, _) =
                     crate::loader::load_with_origins(source, root_path, opts, *resolver);
                 graph = g;
                 // The origin maps come back even from a failed load,
@@ -354,7 +356,7 @@ fn analyze_inner(
             drop(cs);
             let mut checked_diags = check_diags;
             // The editor asks the driver `vyrn check` asks, only of a program the
-            // type check accepted, as `check_and_synthesize` does: the kernel
+            // type check accepted, as `vyrn_lower::check_and_synthesize` does: the kernel
             // needs a body the core can build.
             if checked_diags.is_empty() {
                 checked_diags.extend(movecheck::refusals(prog));

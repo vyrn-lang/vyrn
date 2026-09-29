@@ -394,7 +394,7 @@ impl Walk<'_> {
 }
 
 /// Returns the floor's judged capabilities each module of a checked `program`
-/// reaches; installed as [`vyrn_frontend::floor::Judge`].
+/// reaches; the pipeline passes it to [`vyrn_frontend::floor::decide`].
 ///
 /// A module reaches a capability when an instance declared in it does. The
 /// floor keeps its own carrier and line and drops the rows this does not
