@@ -317,50 +317,6 @@ fn analyze_now(program: &Program, place: fn(&Program, &mut Ownership)) -> Owners
     ownership
 }
 
-/// The must-use judgment (`vyrn_lower::typed::obligation`). Unlike the drain,
-/// it is asked of a program and holds no state between calls.
-pub type MustUse = fn(&Program) -> Vec<crate::diagnostics::Diagnostic>;
-
-static MUST_USE: std::sync::OnceLock<MustUse> = std::sync::OnceLock::new();
-
-/// Installs the must-use judgment. The first installation wins.
-pub fn install_must_use(f: MustUse) {
-    let _ = MUST_USE.set(f);
-}
-
-/// Returns what the must-use judgment refuses about `program`; empty when
-/// nothing is installed.
-pub fn must_use_refusals(program: &Program) -> Vec<crate::diagnostics::Diagnostic> {
-    MUST_USE.get().map(|f| f(program)).unwrap_or_default()
-}
-
-/// Drains the typed judgment's refusals about the program the placer just
-/// judged.
-pub type Typed = fn() -> Vec<crate::diagnostics::Diagnostic>;
-
-static TYPED: std::sync::OnceLock<Typed> = std::sync::OnceLock::new();
-
-/// Installs the typed judgment's drain. The first installation wins.
-pub fn install_typed(f: Typed) {
-    let _ = TYPED.set(f);
-}
-
-/// Returns what the typed judgment refused about the program just analysed.
-///
-/// # Panics
-///
-/// If the must-use judgment is installed and this slot is not: the checker
-/// does not state these rules, so an empty slot would be a silent acceptance.
-pub fn typed_refusals() -> Vec<crate::diagnostics::Diagnostic> {
-    match TYPED.get() {
-        Some(f) => f(),
-        None if MUST_USE.get().is_some() => {
-            panic!("the must-use judgment is installed and the typed judgment is not")
-        }
-        None => Vec::new(),
-    }
-}
-
 /// Groups release steps by `(exit, site)`, each binding with its row's
 /// [`Release::holes`], in run order.
 pub fn placed(steps: &[Release]) -> HashMap<(Exit, NodeId), Vec<(NodeId, Option<Vec<String>>)>> {

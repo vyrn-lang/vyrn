@@ -90,7 +90,6 @@ Small:
 
 Safe:
 - A refusal is the kernel's or the checker's, stated once, witnessed in `compiler/vyrn-cli/tests/refusals.rs`.
-- A test that asserts a refusal calls `vyrn_lower::install()` itself; CI runs each test in its own process.
 - A panic in a pass is a defect in the pass; a silent acceptance is worse. The refusal driver panics on an empty slot; keep it so.
 - Never order a placement by a hash map. Order is the source's: line, column, then key. The lowering pin runs each root ten times to catch this.
 

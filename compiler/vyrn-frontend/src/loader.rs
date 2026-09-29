@@ -1727,7 +1727,7 @@ fn run_generator(
     let mut gen_program = loaded?;
     // A generator is a runnable program compiled to wasm, so it gets
     // the check and synthesis a root gets.
-    let gdiags = crate::check_generator(&mut gen_program);
+    let (gdiags, _) = crate::check_and_synthesize(&mut gen_program);
     if !gdiags.is_empty() {
         return Err(gdiags);
     }
@@ -1774,39 +1774,29 @@ fn run_generator(
         fp
     });
 
-    // Run the generator in the mediated sandbox, as comptime like the check
-    // above: the kernel and the lowering's lint are about a program a tool holds.
-    let _ = crate::own::typed_refusals();
-    let out = crate::movecheck::comptime(|| {
-        crate::gen::generate(
-            &gen_program,
-            name,
-            &consts,
-            crate::gen::GenInputs {
-                resolver,
-                opts,
-                importer_dir,
-                allowed,
-                aliased,
-                fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
-                max_output: GEN_MAX_OUTPUT_OVERRIDE
-                    .with(|c| c.get())
-                    .unwrap_or(GEN_MAX_OUTPUT),
-                sources_fingerprint: fingerprint,
-                type_arg: None,
-            },
-        )
-    })
-    .map_err(|trap| {
-        // The checker alone judged the generator above. A rule the typed
-        // judgment states reaches it through the engine's compile, which
-        // refuses the program.
-        let typed = crate::own::typed_refusals();
-        if typed.is_empty() {
-            err(rule!(GenFailed, name, args = arg_repr, trap))
-        } else {
-            typed
-        }
+    // Run the generator in the mediated sandbox. The engine judges its
+    // program with the lowering's judgments first.
+    let out = crate::gen::generate(
+        &gen_program,
+        name,
+        &consts,
+        crate::gen::GenInputs {
+            resolver,
+            opts,
+            importer_dir,
+            allowed,
+            aliased,
+            fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
+            max_output: GEN_MAX_OUTPUT_OVERRIDE
+                .with(|c| c.get())
+                .unwrap_or(GEN_MAX_OUTPUT),
+            sources_fingerprint: fingerprint,
+            type_arg: None,
+        },
+    )
+    .map_err(|e| match e {
+        crate::gen::GenError::Refused(ds) => ds,
+        crate::gen::GenError::Failed(trap) => err(rule!(GenFailed, name, args = arg_repr, trap)),
     })?;
     bump_gen_runs();
 
