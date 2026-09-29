@@ -76,7 +76,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
                 if let Rhs::Take(p) = rhs {
                     taken.push(p.clone());
                 }
-                body.names[*n as usize].line
+                body.names[n.index()].line
             }
             St::Do { rhs, line, .. } => {
                 rhs_guards(body, tys, rhs, &mut guards);
@@ -225,7 +225,7 @@ fn place_guards(body: &Body, tys: &Types<'_>, p: &Place, out: &mut Vec<(Rule, Gu
 fn place_ty(body: &Body, tys: &Types<'_>, p: &Place) -> Option<Type> {
     let resolve = |t: &Type| vyrn_frontend::types::resolve(t, tys.decls);
     Some(resolve(&match p {
-        Place::Name(n) => body.names[*n as usize].ty.clone(),
+        Place::Name(n) => body.names[n.index()].ty.clone(),
         Place::Global(g) => (tys.global)(g)?,
         Place::Field(b, f) => match place_ty(body, tys, b)? {
             Type::Record(fs) => fs.into_iter().find(|x| &x.name == f)?.ty,

@@ -455,8 +455,8 @@ fn axioms(terms: impl Iterator<Item = Term>) -> Vec<Lin> {
 mod tests {
     use super::*;
 
-    fn v(n: Name) -> Lin {
-        Lin::of(Term::Val(n))
+    fn v(n: u32) -> Lin {
+        Lin::of(Term::Val(Name(n)))
     }
 
     #[test]
@@ -470,7 +470,8 @@ mod tests {
         let mut st = State::default();
         // i >= 0, len(b) - i - 1 >= 0
         st.assume(&v(0));
-        st.assume(&Lin::of(Term::Len(1)).sub(&v(0)).unwrap().plus(-1).unwrap());
+        let len = Lin::of(Term::Len(Name(1)));
+        st.assume(&len.sub(&v(0)).unwrap().plus(-1).unwrap());
         let goal = Lin::k(1 << 40).sub(&v(0)).unwrap();
         let cert = st.ge0(&goal).expect("i < len <= LEN_MAX");
         assert!(cert.verify(&st, &goal));
@@ -491,25 +492,25 @@ mod tests {
     fn a_kill_restates_through_an_exact_definition() {
         let mut st = State::default();
         st.assume(&v(0));
-        st.define(Term::Val(1), &v(0).plus(1).unwrap());
-        st.kill(0);
+        st.define(Term::Val(Name(1)), &v(0).plus(1).unwrap());
+        st.kill(Name(0));
         assert!(st.ge0(&v(1).plus(-1).unwrap()).is_some());
     }
 
     #[test]
     fn a_kill_of_a_length_keeps_its_axioms_on_the_rename() {
         let mut st = State::default();
-        st.define(Term::Val(0), &Lin::of(Term::Len(1)));
-        st.kill(1);
+        st.define(Term::Val(Name(0)), &Lin::of(Term::Len(Name(1))));
+        st.kill(Name(1));
         assert!(st.ge0(&v(0)).is_some());
     }
 
     #[test]
     fn a_shrink_by_at_most_one_keeps_the_old_length_as_a_bound() {
         let mut st = State::default();
-        let len = Lin::of(Term::Len(1));
-        st.define(Term::Val(0), &len);
-        st.shift(1, -1, 0);
+        let len = Lin::of(Term::Len(Name(1)));
+        st.define(Term::Val(Name(0)), &len);
+        st.shift(Name(1), -1, 0);
         assert!(st.ge0(&v(0).sub(&len).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap().plus(1).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap()).is_none());

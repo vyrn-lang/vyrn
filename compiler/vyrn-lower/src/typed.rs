@@ -139,7 +139,7 @@ impl<'a> Walk<'a, '_> {
         match s {
             St::Let(n, rhs) => {
                 self.born.insert(*n, rhs);
-                let info = &self.body.names[*n as usize];
+                let info = &self.body.names[n.index()];
                 let ty = info.ty.clone();
                 self.judge_store(ty.clone(), info.source.clone(), info.line, rhs, Some(ty));
             }
@@ -166,7 +166,7 @@ impl<'a> Walk<'a, '_> {
                     };
                     let place = self.spell(place);
                     let named = match value {
-                        Val::Name(n) => Some(self.body.names[*n as usize].ty.clone()),
+                        Val::Name(n) => Some(self.body.names[n.index()].ty.clone()),
                         Val::Lit(_) => None,
                     };
                     self.judge_store(ty, place, *line, rhs, named);
@@ -264,7 +264,7 @@ impl<'a> Walk<'a, '_> {
                 Rhs::Prim(..) => "@prim".into(),
                 Rhs::Make(..) => "@make".into(),
                 Rhs::Read(p) | Rhs::Take(p) => self.spell(p),
-                Rhs::Val(Val::Name(n)) => self.body.names[*n as usize].source.clone(),
+                Rhs::Val(Val::Name(n)) => self.body.names[n.index()].source.clone(),
                 Rhs::Val(Val::Lit(_)) => "@lit".into(),
             },
             line,
@@ -276,7 +276,7 @@ impl<'a> Walk<'a, '_> {
     /// declarations name one. A literal and a record literal have none.
     fn rhs_ty(&mut self, rhs: &Rhs) -> Option<Type> {
         match rhs {
-            Rhs::Val(Val::Name(n)) => Some(self.body.names[*n as usize].ty.clone()),
+            Rhs::Val(Val::Name(n)) => Some(self.body.names[n.index()].ty.clone()),
             Rhs::Read(p) | Rhs::Take(p) => self.place_ty(p),
             Rhs::Call { ret, .. } => ret.clone(),
             Rhs::Prim(_, _, ty) => ty.clone(),
@@ -286,7 +286,7 @@ impl<'a> Walk<'a, '_> {
 
     fn place_ty(&mut self, p: &Place) -> Option<Type> {
         match p {
-            Place::Name(n) => Some(self.body.names[*n as usize].ty.clone()),
+            Place::Name(n) => Some(self.body.names[n.index()].ty.clone()),
             Place::Global(g) => (self.step)(None, Step::Global(g)),
             Place::Field(base, f) => {
                 let b = self.place_ty(base);
@@ -305,7 +305,7 @@ impl<'a> Walk<'a, '_> {
 
     fn spell(&self, p: &Place) -> String {
         match p {
-            Place::Name(n) => self.body.names[*n as usize].source.clone(),
+            Place::Name(n) => self.body.names[n.index()].source.clone(),
             Place::Global(g) => g.clone(),
             Place::Field(b, f) => format!("{}.{f}", self.spell(b)),
             Place::Elem(b, _) => format!("{}[]", self.spell(b)),
@@ -804,7 +804,7 @@ pub fn stores(
             path.reverse();
             let (source, ty) = match at {
                 Place::Name(n) => {
-                    let info = &f.names[*n as usize];
+                    let info = &f.names[n.index()];
                     (&info.source, Some(info.ty.clone()))
                 }
                 Place::Global(g) => (g, (rules.global_ty)(g)),
@@ -814,7 +814,7 @@ pub fn stores(
             let (name, elem) = match at {
                 _ if ruled.is_some() => (source, false),
                 Place::Name(n) => {
-                    let info = &f.names[*n as usize];
+                    let info = &f.names[n.index()];
                     if info.mutable || info.source.starts_with('@') {
                         return;
                     }
@@ -893,7 +893,7 @@ fn each_store(
                 modified(rhs).iter().for_each(|(p, r)| f(p, *line, key, *r))
             }
             St::Let(n, rhs) => {
-                let info = &names[*n as usize];
+                let info = &names[n.index()];
                 modified(rhs)
                     .iter()
                     .for_each(|(p, r)| f(p, info.line, info.binding, *r))
@@ -973,7 +973,7 @@ pub fn drops(
             _ => None,
         });
         for (n, line) in written {
-            let info = &f.names[n as usize];
+            let info = &f.names[n.index()];
             let owned = types::type_key(&info.ty).is_some_and(|k| {
                 program.impls.iter().any(|i| {
                     i.protocol == types::OWNED && types::type_key(&i.ty).as_ref() == Some(&k)
