@@ -8207,67 +8207,55 @@ fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: 
 }
 
 fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name>)]) {
-    for s in ss {
-        match s {
-            St::Let(_, rhs) | St::Do { rhs, .. } => {
-                let Rhs::Call {
-                    callee,
-                    args,
-                    kind,
-                    targets,
-                    ..
-                } = rhs
-                else {
-                    continue;
-                };
-                if let Some(v) = kind.value() {
-                    match bound.iter().find(|(n, _)| *n == v) {
-                        Some((_, Target::Fn(f))) => {
-                            *kind = Callee::Fn;
-                            *callee = f.clone();
-                        }
-                        Some((_, Target::Lambda(key, ..))) => {
-                            *kind = Callee::Fn;
-                            *callee = key.clone();
-                            let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
-                            let lead = names.into_iter().flatten();
-                            let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
-                            args.splice(0..0, lead.collect::<Vec<_>>());
-                        }
-                        Some((_, Target::Value(source))) => *callee = source.clone(),
-                        _ => {}
-                    }
+    each_row_mut(ss, &mut |s| {
+        let (St::Let(_, rhs) | St::Do { rhs, .. }) = s else {
+            return;
+        };
+        let Rhs::Call {
+            callee,
+            args,
+            kind,
+            targets,
+            ..
+        } = rhs
+        else {
+            return;
+        };
+        if let Some(v) = kind.value() {
+            match bound.iter().find(|(n, _)| *n == v) {
+                Some((_, Target::Fn(f))) => {
+                    *kind = Callee::Fn;
+                    *callee = f.clone();
                 }
-                for t in targets.iter_mut() {
-                    let Target::Param(p) = t else { continue };
-                    let p = *p;
-                    let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
-                        continue;
-                    };
-                    *t = to.clone();
-                    // A stored value forwards itself, the parameter that
-                    // stays under its name.
-                    if matches!(to, Target::Value(_)) {
-                        args.push((Arg::Val(Val::Name(p)), Capability::Read));
-                    }
-                    let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
-                    let forwarded = forwarded.into_iter().flatten();
-                    args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
+                Some((_, Target::Lambda(key, ..))) => {
+                    *kind = Callee::Fn;
+                    *callee = key.clone();
+                    let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
+                    let lead = names.into_iter().flatten();
+                    let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
+                    args.splice(0..0, lead.collect::<Vec<_>>());
                 }
+                Some((_, Target::Value(source))) => *callee = source.clone(),
+                _ => {}
             }
-            St::If { then, els, .. } => {
-                bind_targets(then, bound, caps);
-                bind_targets(els, bound, caps);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => bind_targets(body, bound, caps),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    bind_targets(&mut a.body, bound, caps);
-                }
-            }
-            _ => {}
         }
-    }
+        for t in targets.iter_mut() {
+            let Target::Param(p) = t else { continue };
+            let p = *p;
+            let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
+                continue;
+            };
+            *t = to.clone();
+            // A stored value forwards itself, the parameter that
+            // stays under its name.
+            if matches!(to, Target::Value(_)) {
+                args.push((Arg::Val(Val::Name(p)), Capability::Read));
+            }
+            let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
+            let forwarded = forwarded.into_iter().flatten();
+            args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
+        }
+    });
 }
 
 fn count_reads(ss: &[St], out: &mut [u32]) {
