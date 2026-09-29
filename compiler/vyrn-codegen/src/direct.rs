@@ -53,7 +53,7 @@ fn too_big(what: &str, bytes: u64, line: usize) -> String {
     format!(
         "direct backend: {what} needs {bytes} bytes at line {line}, past the {} one value may \
          occupy; a fixed array this big belongs on the heap as `Array<T>`",
-        i32::MAX
+        vyrn_frontend::trap::LENGTH_LIMIT
     )
 }
 
@@ -5269,12 +5269,12 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Returns the size in bytes of `n` elements of `elem`, for every count-times-stride
-    /// allocation and `memory.copy` length. The bound is `i32::MAX`, not `u32::MAX`: every
-    /// consumer is an `i32`, and a product in `[2^31, 2^32)` goes negative, so `malloc`
-    /// returns a small block that `memory.copy` then overruns.
+    /// allocation and `memory.copy` length. The bound is [`vyrn_frontend::trap::LENGTH_LIMIT`],
+    /// not `u32::MAX`: every consumer is an `i32`, and a product in `[2^31, 2^32)` goes
+    /// negative, so `malloc` returns a small block that `memory.copy` then overruns.
     fn extent(&self, elem: &Type, n: usize, line: usize) -> Result<u32, String> {
         let bytes = self.stride(elem, line)? as u64 * n as u64;
-        if bytes > i32::MAX as u64 {
+        if bytes > u64::from(vyrn_frontend::trap::LENGTH_LIMIT) {
             return Err(too_big(&format!("{n} × `{elem}`"), bytes, line));
         }
         Ok(bytes as u32)

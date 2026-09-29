@@ -493,7 +493,9 @@ fn statics_past_what_the_module_holds_are_a_diagnostic_not_a_panic() {
 /// a stack sized by hand fails here.
 #[test]
 fn every_limit_has_one_source() {
-    use vyrn_frontend::trap::{ARRAY_LIT_LIMIT, CALL_DEPTH_LIMIT, FRAME_LIMIT, REGION_MAX};
+    use vyrn_frontend::trap::{
+        ARRAY_LIT_LIMIT, CALL_DEPTH_LIMIT, FRAME_LIMIT, LENGTH_LIMIT, REGION_MAX,
+    };
     assert_eq!(
         vyrn_codegen::wasm::STACK_BYTES,
         FRAME_LIMIT * CALL_DEPTH_LIMIT + 65_536,
@@ -505,6 +507,13 @@ fn every_limit_has_one_source() {
         vyrn_codegen::wasm::DATA_BASE,
         vyrn_codegen::wasm::STACK_BYTES,
         "the data segments start where the stack ends, or a frame push walks into them"
+    );
+    let runtime = include_str!("../../../std/runtime.vyrn");
+    let refuses = format!("if UInt64(n) > {} {{", u64::from(LENGTH_LIMIT) + 1);
+    assert_eq!(
+        runtime.matches(&refuses).count(),
+        2,
+        "`malloc` and `arenaAlloc` trap past the length limit; a bound written by hand          is a limit the passes do not assume"
     );
     assert_eq!(
         ARRAY_LIT_LIMIT * 16,

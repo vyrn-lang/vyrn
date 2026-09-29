@@ -60,6 +60,17 @@ pub const STACK_EXHAUSTED: &str = "Call stack exhausted";
 /// table belongs in a data segment, which no backend lowers.
 pub const ARRAY_LIT_LIMIT: usize = FRAME_LIMIT as usize / 16;
 
+/// The largest length of any array or String, and the most bytes one value
+/// or allocation may occupy: every address and size on the wasm route is an
+/// `i32`, and every element takes at least one byte. A pass may assume
+/// `length <= LENGTH_LIMIT` (the check-elision length postulate).
+///
+/// Two homes enforce it. The emitter refuses a larger size it lays out
+/// (`vyrn_codegen::direct::Fn_::extent`). At run time `std/runtime`'s `malloc`
+/// traps `out of memory` past `LENGTH_LIMIT + 1` bytes, a Vyrn literal no Rust
+/// constant reaches. Memory64 would move both.
+pub const LENGTH_LIMIT: u32 = i32::MAX as u32;
+
 /// How many `region` scopes may be open at once, on every engine: the size of
 /// the backends' fixed region stack, and the number in the trap wording.
 pub const REGION_MAX: u32 = 64;
