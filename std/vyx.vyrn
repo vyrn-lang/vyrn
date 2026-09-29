@@ -241,15 +241,6 @@ fn vyxFindLast(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64) -> Int64 {
     return found
 }
 
-fn vyxHasNewline(s: String) -> Bool {
-    for b in bytes(s) {
-        if b == '\n' {
-            return true
-        }
-    }
-    return false
-}
-
 /// Collapses each run of ASCII whitespace in `s` to one space. An
 /// all-whitespace run becomes one space, which the caller drops.
 fn vyxCollapseWs(s: String) -> String {
@@ -643,7 +634,7 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, srcFile: String) -> VyxPa
             let raw = vyxSlice(ba, j, k)
             // The whitespace rule of the module doc.
             if trim(raw).byteLength == 0 {
-                if vyxHasNewline(raw) == false && raw.byteLength > 0 {
+                if contains(raw, "\n") == false && raw.byteLength > 0 {
                     nodes.push(VNText(" "))
                 }
             } else {
