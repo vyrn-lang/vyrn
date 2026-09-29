@@ -704,9 +704,7 @@ fn run_derive(
     arg: Expr,
     fingerprint: String,
 ) -> Result<Derived, String> {
-    let diags = crate::floor::aside(|| {
-        crate::movecheck::comptime(|| crate::check_and_synthesize(&mut gen_program))
-    });
+    let diags = crate::floor::aside(|| crate::check_generator(&mut gen_program));
     if let Some(d) = diags.first() {
         return Err(format!("generator `{g}` does not check: {}", d.render()));
     }

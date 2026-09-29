@@ -28,7 +28,7 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    Memo::load(|| vyrn_frontend::load(&src, &root, &opts, &DiskResolver)).map_err(|d| {
+    Memo::load(|| vyrn_lower::load(&src, &root, &opts, &DiskResolver)).map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())
@@ -38,7 +38,7 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
 fn core_body(src: &str, which: &str) -> vyrn_lower::core::Body {
     vyrn_lower::install();
     let (program, _memo) =
-        Memo::load(|| vyrn_frontend::load(src, "core.vyrn", &Default::default(), &DiskResolver))
+        Memo::load(|| vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver))
             .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let lowered = vyrn_lower::lower(&program);
     let own = vyrn_frontend::own::analyze(&program);
@@ -80,7 +80,7 @@ fn core_releases(src: &str, which: &str, binding: &str) -> bool {
 fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
     vyrn_lower::install();
     let analyzed = |src: &str| {
-        let program = vyrn_frontend::load(src, "core.vyrn", &Default::default(), &DiskResolver)
+        let program = vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver)
             .unwrap_or_else(|d| panic!("{}", d[0].render()));
         let own = vyrn_frontend::own::analyze(&program);
         (program, own)
@@ -170,7 +170,7 @@ fn a_lender_forwarded_through_an_aggregate_lends_still() {
     // its own process.
     vyrn_lower::install();
     let src = "type R = { name: String }                fn pick(xs: Array<String>) -> String                { for x in xs { return x } return \"\" }                fn g(a: Array<String>) -> R { return R { name: pick(a) } }                fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]                let r = g(arr) return r.name.byteLength }";
-    let program = vyrn_frontend::load(src, "lend.vyrn", &Default::default(), &DiskResolver);
+    let program = vyrn_lower::load(src, "lend.vyrn", &Default::default(), &DiskResolver);
     assert!(
         program.is_err(),
         "a loop variable may not be returned, so `pick` is refused before it can lend"

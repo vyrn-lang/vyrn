@@ -172,7 +172,7 @@ mod tests {
                 })?;
         // A linked program runs only once the JSON builtins' generated Vyrn is synthesized;
         // `loader::load` stops at the link, so a bare check fails with "no decoder".
-        let diags = vyrn_frontend::check_and_synthesize(&mut program);
+        let diags = vyrn_lower::check_and_synthesize(&mut program);
         if let Some(d) = diags.first() {
             return Err(d.render());
         }

@@ -354,7 +354,7 @@ fn analyze_inner(
             drop(cs);
             let mut checked_diags = check_diags;
             // The editor asks the driver `vyrn check` asks, only of a program the
-            // type check accepted, as `check_and_synthesize` does: the kernel
+            // type check accepted, as `vyrn_lower::check_and_synthesize` does: the kernel
             // needs a body the core can build.
             if checked_diags.is_empty() {
                 checked_diags.extend(movecheck::refusals(prog));

@@ -388,6 +388,18 @@ pub fn aside<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// Answers the held decision into `diags` when they are empty, and else drops
+/// it, so a type error is not answered twice and the decision cannot answer for
+/// the next program this process checks without a load.
+pub fn settle(program: &Program, diags: &mut Vec<Diagnostic>) {
+    if diags.is_empty() {
+        let _p = crate::prof::phase("floor");
+        diags.extend(decide(program));
+    } else {
+        forget();
+    }
+}
+
 /// Returns the floor's objection to a checked program whose objection was
 /// deferred; `None` for every load that decided for itself.
 ///

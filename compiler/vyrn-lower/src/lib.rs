@@ -14,7 +14,10 @@ pub mod elide;
 pub mod facts;
 mod fixpoint;
 pub mod kernel;
+mod pipeline;
 pub mod typed;
+
+pub use pipeline::{check_and_synthesize, load, load_warned};
 
 /// Installs this crate's judgments into the slots `vyrn-frontend` declares,
 /// because the frontend sits below this crate and cannot call into it. The
@@ -1094,7 +1097,7 @@ mod tests {
 
     fn program(src: &str) -> Program {
         let mut p = vyrn_frontend::check(src).expect("the fixture checks");
-        let diags = vyrn_frontend::check_and_synthesize(&mut p);
+        let diags = check_and_synthesize(&mut p);
         assert!(diags.is_empty(), "{diags:?}");
         p
     }

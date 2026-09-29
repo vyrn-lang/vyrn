@@ -1739,7 +1739,7 @@ fn run_generator(
     let mut gen_program = loaded?;
     // A generator is a runnable program compiled to wasm, so it gets
     // the check and synthesis a root gets.
-    let gdiags = crate::movecheck::comptime(|| crate::check_and_synthesize(&mut gen_program));
+    let gdiags = crate::check_generator(&mut gen_program);
     if !gdiags.is_empty() {
         return Err(gdiags);
     }

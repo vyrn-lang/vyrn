@@ -1230,13 +1230,13 @@ fn main() -> Int64 {
             ..Default::default()
         };
         let (mut program, memo) = vyrn_frontend::project::Memo::load(|| {
-            vyrn_frontend::load(PROBE, "probe.vyrn", &opts, &files)
+            vyrn_lower::load(PROBE, "probe.vyrn", &opts, &files)
         })
         .expect("the probe loads");
         // Without the lowering the placer never runs, and the instance is not
         // the one `vyrn serve` holds.
         vyrn_lower::install();
-        let diags = vyrn_frontend::check_and_synthesize(&mut program);
+        let diags = vyrn_lower::check_and_synthesize(&mut program);
         assert!(diags.is_empty(), "the probe checks: {diags:?}");
         vyrn_codegen::direct::compile(&program, &memo).expect("the probe compiles")
     }

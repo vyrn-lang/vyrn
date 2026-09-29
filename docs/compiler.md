@@ -99,7 +99,8 @@ the playground serves an embedded `std/`. The loader:
   may import `std/runtime` (`runtime_fence`). The audience (`audience.rs`)
   and the floor (`floor.rs`) fence the rest.
 
-`lib::check_and_synthesize` then runs, in order:
+`vyrn_lower::check_and_synthesize` then runs, in order, the frontend's
+`check_and_synthesize` (steps 1 and 2) and the judgments in `vyrn-lower`:
 
 1. `checker::check_accum_with_json_types`: names, types, calls, `mut`,
    all-paths return, and each `where` predicate against constant arguments
@@ -124,7 +125,8 @@ the playground serves an embedded `std/`. The loader:
 
 For a program that does not type-check, `lower_typed` still builds every
 function the type errors do not reach and adds the typed judgment's refusals,
-so one run reports both kinds.
+so one run reports both kinds. A generator's own program gets steps 1, 2 and
+4 and the must-use judgment alone (`lib::check_generator`).
 
 `symbols::analyze` and `analyze_linked` run the same pipeline for the editor
 and return diagnostics with columns, the symbol index and the tokens.

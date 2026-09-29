@@ -40,7 +40,7 @@ fn load(path: &Path, project: Option<&Path>) -> Result<(Program, Memo), String> 
         ..Default::default()
     };
     // A floor refusal names the carrier in the note.
-    Memo::load(|| vyrn_frontend::load(&src, &slash(path), &opts, &DiskResolver)).map_err(|d| {
+    Memo::load(|| vyrn_lower::load(&src, &slash(path), &opts, &DiskResolver)).map_err(|d| {
         d.first()
             .map(|d| match &d.note {
                 Some(n) => format!(

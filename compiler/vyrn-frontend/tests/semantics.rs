@@ -129,7 +129,7 @@ fn main() -> Int64 {{
     // `load_warned`, not `loader::load`, because it synthesizes validated types'
     // constructors and JSON codecs, as the CLI does.
     let (program, memo) = Memo::load(|| {
-        vyrn_frontend::load_warned(
+        vyrn_lower::load_warned(
             &wrapped,
             "main.vyrn",
             &opts,
@@ -190,7 +190,7 @@ fn run_without(missing: &str, source: &str) -> Result<i64, String> {
         ..Default::default()
     };
     let (program, memo) = Memo::load(|| {
-        vyrn_frontend::load_warned(
+        vyrn_lower::load_warned(
             source,
             "main.vyrn",
             &opts,

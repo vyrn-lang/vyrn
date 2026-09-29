@@ -292,7 +292,7 @@ fn load(
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
     );
-    vyrn_frontend::load_warned(src, "play.vyrn", &opts, &resolver)
+    vyrn_lower::load_warned(src, "play.vyrn", &opts, &resolver)
 }
 
 fn check_json(src: &str) -> String {

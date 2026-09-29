@@ -6,7 +6,7 @@
 /// How serious a diagnostic is.
 ///
 /// An `Error` fails the load; a `Warning` rides a load that succeeded.
-/// Errors travel in the `Err` arm of [`crate::load`] and warnings
+/// Errors travel in the `Err` arm of `vyrn_lower::load` and warnings
 /// beside the program, so a warning never changes an exit code or a byte of
 /// output.
 use crate::rules::Rule;
