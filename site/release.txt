@@ -11,8 +11,8 @@
 # is what a build uses when that call is unavailable — offline, rate-limited, or
 # a checkout with no network at all. The export itself never touches the network.
 #
-# The listing endpoint, not `/releases/latest`: `latest` hides pre-releases, and
-# every release so far is one.
+# The listing endpoint, not `/releases/latest`: `latest` hides pre-releases. An
+# empty listing is an answer: it clears the tag and the date.
 #
 # WHY A TAG IS ENOUGH. The release URL is the tag under `/releases/tag/`, and a
 # tag carrying a suffix is a pre-release — the same rule `release.yml` applies
@@ -23,5 +23,3 @@
 # A stale copy is not announced anywhere: the site has no run-time notice. The
 # workflow's daily run keeps this file fresh; a fork or an outage bakes the last
 # tag anyone recorded, and the pages render it without comment.
-v0.1.0-alpha.2
-2026-08-18

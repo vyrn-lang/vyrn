@@ -118,8 +118,12 @@ test("the feed is one RSS 2.0 channel with the elements a reader needs", () => {
 });
 
 test("every release the history knows is an item, newest first", () => {
+  // Any number of releases, none included: `feed.vyrn`'s own tests run the
+  // non-empty path on the fixture's release, whatever this history holds.
   const tags = history.releases.map((r) => r.t);
-  assert.ok(tags.length > 0, "the history has no releases, so this test proves nothing");
+  if (tags.length === 0) {
+    assert.match(child(channel, "description").text, /None has been published/);
+  }
   assert.deepEqual(
     items.map((it) => child(it, "title").text),
     [...tags].reverse()
@@ -133,7 +137,7 @@ test("every release the history knows is an item, newest first", () => {
     assert.equal(child(it, "guid").text, url);
     assert.equal(child(it, "guid").attrs.isPermaLink, "true");
     assert.ok(child(it, "description").text.length > 20);
-    // A pre-release is named as one. Both of this repository's tags are.
+    // A pre-release is named as one.
     const pre = tag.includes("-");
     assert.equal(child(it, "description").text.startsWith("A pre-release"), pre);
   }
