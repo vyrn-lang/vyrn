@@ -1100,7 +1100,7 @@ mod tests {
         let mut p = vyrn_frontend::check(src).expect("the fixture checks");
         // The type check alone: the kernel refuses `id`'s return of a `read`
         // parameter, and these tests are about the lowering.
-        let (diags, _) = vyrn_frontend::check_and_synthesize(&mut p);
+        let (diags, _, _) = vyrn_frontend::check_and_synthesize(&mut p);
         assert!(diags.is_empty(), "{diags:?}");
         p
     }

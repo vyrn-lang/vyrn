@@ -132,7 +132,7 @@ pub struct Analysis {
     pub symbol_maps: Vec<crate::symbolmap::MappedSymbol>,
     /// What the ownership analysis decided about every `let` in this document:
     /// reclaimed, or why not. The answer `vyrn why --memory` prints, at the
-    /// cursor. Read from [`Judge::ownership`], never re-derived, so it cannot
+    /// cursor. Read from [`Judged::ownership`], never re-derived, so it cannot
     /// disagree with the walk that decided. Empty when the checks did not run
     /// or no [`Judge`] was given.
     pub memory: Vec<MemoryNote>,
@@ -200,7 +200,7 @@ pub struct Completion {
 /// and between statements, so after a parse error the partial program is still
 /// indexed and hover, outline and completion keep working. The type check is
 /// skipped after any parse error, so `diagnostics` then holds parse errors
-/// only. [`analyze_judged`] adds the ownership judgments.
+/// only. [`analyze_judged`] runs the pipeline `vyrn check` runs instead.
 pub fn analyze(source: &str) -> Analysis {
     analyze_inner(source, None, None)
 }
@@ -220,19 +220,29 @@ pub fn analyze_linked(
     analyze_inner(source, Some((root_path, opts, resolver)), None)
 }
 
-/// The ownership judgments over a program that type-checks. They live in
-/// `vyrn-lower`, above this crate, which passes them in (`vyrn_lower::JUDGE`).
+/// The pipeline `vyrn check` runs over a loaded program. It lives in
+/// `vyrn-lower`, above this crate, which passes it in (`vyrn_lower::JUDGE`).
 #[derive(Clone, Copy)]
 pub struct Judge {
-    /// Every ownership refusal, in source order.
-    pub refusals: fn(&crate::ast::Program) -> Vec<Diagnostic>,
-    /// The analysis with the placer's memory rows.
-    pub ownership: fn(&crate::ast::Program) -> crate::own::Ownership,
+    /// Checks and synthesizes the program, judges ownership, and makes the
+    /// floor decision the load deferred.
+    pub check: fn(&mut crate::ast::Program, Option<crate::floor::Pending>) -> Judged,
 }
 
-/// Like [`analyze`], or [`analyze_linked`] with `linker`, and also shows what
-/// `judge` decides: its refusals among the diagnostics, its memory rows on
-/// hover.
+/// What [`Judge::check`] returns.
+pub struct Judged {
+    /// Every diagnostic, in the order `vyrn check` prints them.
+    pub diagnostics: Vec<Diagnostic>,
+    /// The root module's bindings, typed.
+    pub binders: Vec<LocalBinding>,
+    /// The placed analysis, for a program the kernel judged.
+    pub ownership: Option<crate::own::Ownership>,
+}
+
+/// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
+/// `judge`'s diagnostics, and its memory rows on hover. With no `linker`, the
+/// source loads as `untitled.vyrn` in the working directory, with the default
+/// std root, as `vyrn check` would load that file.
 pub fn analyze_judged(
     source: &str,
     linker: Option<(
@@ -242,7 +252,12 @@ pub fn analyze_judged(
     )>,
     judge: &Judge,
 ) -> Analysis {
-    analyze_inner(source, linker, Some(judge))
+    let opts = crate::loader::LoadOptions {
+        std_root: crate::manifest::std_root(),
+        ..Default::default()
+    };
+    let linker = linker.unwrap_or(("untitled.vyrn", &opts, &crate::loader::DiskResolver));
+    analyze_inner(source, Some(linker), Some(judge))
 }
 
 /// Rewrites a foreign-file diagnostic so it shows in the root document without
@@ -317,22 +332,23 @@ fn analyze_inner(
     let parse_failed = !parse_errors.is_empty();
     let mut diags: Vec<Diagnostic> = parse_errors;
 
-    // With a linker and imports, check the linked program; the parsed root
-    // still feeds the index. `None` means the check was skipped or the link
+    // With a linker, check the linked program, as `vyrn check` does; the
+    // parsed root still feeds the index. `pending` is the floor decision the
+    // load leaves to the judge. `None` means the check was skipped or the link
     // failed, with its diagnostics already in `diags`. `remapped` holds the
     // diagnostics that belong to a generator input file.
     let mut origins = crate::origin::OriginMaps::default();
     let mut graph: crate::loader::ModuleGraph = Vec::new();
     let mut remapped: Vec<Diagnostic> = Vec::new();
-    let checked: Option<crate::ast::Program> = if parse_failed {
+    let mut pending = None;
+    let mut checked: Option<crate::ast::Program> = if parse_failed {
         None
     } else {
-        match (&linker, program.imports.is_empty()) {
-            (Some((root_path, opts, resolver)), false) => {
-                // The floor's deferred decision needs the effect judgment; the
-                // editor does not make it.
-                let (loaded, o, load_warnings, g, _) =
+        match &linker {
+            Some((root_path, opts, resolver)) => {
+                let (loaded, o, load_warnings, g, p) =
                     crate::loader::load_with_origins(source, root_path, opts, *resolver);
+                pending = p;
                 graph = g;
                 // The origin maps come back even from a failed load,
                 // so a `.vyx` whose template stopped lexing still gets its squiggle.
@@ -363,30 +379,24 @@ fn analyze_inner(
                     }
                 }
             }
-            _ => Some(program.clone()),
+            None => Some(program.clone()),
         }
     };
-    // The ownership memo, opened around a keystroke as the CLI opens it around a
-    // command. The kernel's refusals, the floor's judgment and `memory_notes`
-    // all read it, and each unmemoized call lowers the whole program. It must
-    // outlive all three, and `Memo` clears the slot when it drops.
-    let _own = checked.as_ref().map(crate::own::Memo::open);
     // The check returns the diagnostics and every binding it made in the root
     // module, typed, so an unannotated `let x = 5` hovers as `let x: Int64`.
-    let locals = match &checked {
+    let mut ownership = None;
+    let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
-            // The lowering the placer runs needs every node's type, and this
-            // pass records it.
-            let (check_diags, binders) = checker::check_accum_recording(prog);
+            let (checked_diags, binders) = match judge {
+                Some(judge) => {
+                    let judged = (judge.check)(prog, pending);
+                    ownership = judged.ownership;
+                    (judged.diagnostics, judged.binders)
+                }
+                None => checker::check_accum_recording(prog),
+            };
             drop(cs);
-            let mut checked_diags = check_diags;
-            // The editor asks the driver `vyrn check` asks, only of a program the
-            // type check accepted, as `vyrn_lower::check_and_synthesize` does: the kernel
-            // needs a body the core can build.
-            if let Some(judge) = judge.filter(|_| checked_diags.is_empty()) {
-                checked_diags.extend((judge.refusals)(prog));
-            }
             // A diagnostic at an origin-governed line of a generated module moves
             // to its input file and is set aside for that file's URI.
             // Everything else shows in the root at line 0.
@@ -545,8 +555,8 @@ fn analyze_inner(
     let errored =
         |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
     let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
-    let memory = match (&checked, judge) {
-        (Some(prog), Some(judge)) if clean => memory_notes(prog, judge.ownership),
+    let memory = match (&checked, &ownership) {
+        (Some(prog), Some(own)) if clean => memory_notes(prog, own),
         _ => Vec::new(),
     };
 
@@ -576,11 +586,7 @@ fn analyze_inner(
 /// Every `let` in the root module, with what the ownership analysis decided.
 /// A function with no `module` tag belongs to this document, the filter
 /// `vyrn why --memory` uses.
-fn memory_notes(
-    program: &crate::ast::Program,
-    ownership: fn(&crate::ast::Program) -> crate::own::Ownership,
-) -> Vec<MemoryNote> {
-    let own = ownership(program);
+fn memory_notes(program: &crate::ast::Program, own: &crate::own::Ownership) -> Vec<MemoryNote> {
     let mut out = Vec::new();
     for f in program
         .functions

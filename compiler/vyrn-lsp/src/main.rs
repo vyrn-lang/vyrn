@@ -46,9 +46,9 @@ use vyrn_frontend::{
 
 use templates::VyxCursor;
 
-/// Analyze `text` with the ownership judgments, linking imports when the
-/// document has a filesystem path; an untitled buffer is analyzed alone.
-/// `overlays` maps every open buffer's path to its live text, read in place of
+/// Analyze `text` through the pipeline `vyrn check` runs, with the project
+/// the document's path lies in; an untitled buffer loads as
+/// [`analyze_judged`] says. `overlays` maps every open buffer's path to its live text, read in place of
 /// the file.
 fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Analysis {
     let (opts, resolver, path, manifest_error) = match load_context(uri, overlays) {

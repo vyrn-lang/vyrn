@@ -98,7 +98,7 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
 }
 
 /// Type-checks `program` and synthesizes what its builtins need into it.
-/// Returns the check's diagnostics and the refused set
+/// Returns the check's diagnostics, the refused set and the root's bindings
 /// ([`checker::check_accum_with_sites`]). The judgments that follow are
 /// `vyrn_lower::check_and_synthesize`'s.
 ///
@@ -111,9 +111,10 @@ pub fn check_and_synthesize(
 ) -> (
     Vec<diagnostics::Diagnostic>,
     Option<std::collections::HashSet<String>>,
+    Vec<checker::LocalBinding>,
 ) {
     let check_span = prof::phase("check");
-    let (mut diags, derived, mut refused) = checker::check_accum_with_sites(program);
+    let ((mut diags, derived, mut refused), binders) = checker::check_accum_with_sites(program);
     // What a `derive` generator writes joins the program and is checked
     // against it, so the second check's answers stand. The `where`
     // constructors join with it: `fromJson`'s decoders call the predicates.
@@ -134,7 +135,7 @@ pub fn check_and_synthesize(
                 (diags, again, refused, old_sites) = match checker::check_appended(program, at) {
                     Some((d, again, r)) => (d, again, r, 0),
                     None => {
-                        let (d, again, r) = checker::check_accum_with_sites(program);
+                        let ((d, again, r), _) = checker::check_accum_with_sites(program);
                         (d, again, r, derived.len())
                     }
                 };
@@ -161,7 +162,7 @@ pub fn check_and_synthesize(
     }
     program.number_appended(from);
     drop(synth_span);
-    (diags, refused)
+    (diags, refused, binders)
 }
 
 /// Checks a generator's own program: [`check_and_synthesize`] and the must-use
@@ -170,7 +171,7 @@ pub fn check_and_synthesize(
 /// nested, so it refuses inside the load.
 pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     movecheck::comptime(|| {
-        let (mut diags, _) = check_and_synthesize(program);
+        let (mut diags, _, _) = check_and_synthesize(program);
         let _held = checker::Held::open(program);
         if diags.is_empty() {
             let _p = prof::phase("movecheck");

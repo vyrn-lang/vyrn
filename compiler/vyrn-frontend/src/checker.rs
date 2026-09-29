@@ -452,12 +452,13 @@ pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
 
 use crate::types::INT32;
 
-/// Returns the diagnostics, every `derive` site, and the refused set: the
-/// functions and module state the diagnostics all belong to, so every other
-/// body is typed. The set is `None` when a refusal stands anywhere else.
-pub fn check_accum_with_sites(program: &Program) -> Appended {
-    let (out, _, _, derived, refused) = check_accum_full(program);
-    (out, derived, refused)
+/// Returns the diagnostics, every `derive` site, the refused set, and the
+/// root's bindings. The refused set holds the functions and module state the
+/// diagnostics all belong to, so every other body is typed; it is `None` when
+/// a refusal stands anywhere else.
+pub fn check_accum_with_sites(program: &Program) -> (Appended, Vec<LocalBinding>) {
+    let (out, binders, _, derived, refused) = check_accum_full(program);
+    ((out, derived, refused), binders)
 }
 
 fn check_accum_full(

@@ -56,7 +56,7 @@ its own directory, so its `.cargo/config.toml` sets the linker stack size.
 The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
 front end cannot call the lowering. A host enters through `vyrn-lower`
 (`load`, `check_and_synthesize`, `analyze`), which calls the front end and
-then its own judgments. The editor passes the ownership judgments into
+then its own judgments. The editor passes the pipeline after the load into
 `symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). Where the front
 end still needs a judgment, it declares a slot and the lowering fills it:
 `vyrn_lower::install` installs the must-use judgment
@@ -131,18 +131,17 @@ function the type errors do not reach and adds the typed judgment's refusals,
 so one run reports both kinds. A generator's own program gets steps 1, 2 and
 4 and the must-use judgment alone (`lib::check_generator`).
 
-The editor runs a shorter pipeline. `symbols::analyze_judged` loads the
-document's imports as `vyrn_lower::load` does (an untitled buffer is checked
-alone), then runs `checker::check_accum_recording` and, for a program that
-type-checks, the `Judge` it is given (`vyrn_lower::JUDGE`:
-`vyrn_lower::refusals` and the placed analysis's memory rows). It runs no
-`derive`, no synthesis, no `lower_typed` and no `floor::settle`. So the editor
-shows no error in a function a `derive` wrote, no typed refusal beside a type
-error, and no floor refusal the load deferred to the effect judgment.
-`symbols::analyze` and `analyze_linked` also skip the judgments. Each returns
-diagnostics with columns, the symbol index and the tokens. `vyrn-lsp` serves
-hover, definition, completion, references and rename from that `Analysis`,
-and holds no rule of its own.
+The editor runs the same pipeline. `symbols::analyze_judged` loads the
+document as `vyrn_lower::load` does, an untitled buffer as `untitled.vyrn` in
+the working directory, and hands the linked program and the load's pending
+floor decision to the `Judge` it is given (`vyrn_lower::JUDGE`: the steps
+above). Around it the editor keeps what only it needs: the parser's recovery,
+so a partial program is still indexed; the per-body judgment memo; the
+diagnostics' columns; and the memory rows of the placed analysis the `Judge`
+returns. `symbols::analyze` and `analyze_linked` run the checker alone. Each
+returns diagnostics with columns, the symbol index and the tokens. `vyrn-lsp`
+serves hover, definition, completion, references and rename from that
+`Analysis`, and holds no rule of its own.
 
 ## The lowered form and the named core
 
