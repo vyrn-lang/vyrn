@@ -109,6 +109,41 @@ fn literal_operands_and_masks_prove_their_checks() {
     );
 }
 
+#[test]
+fn a_push_in_a_loop_over_the_old_length_proves_its_index() {
+    let src = "fn w(xs: modify Array<Int64>) -> Int64 {
+    let n = xs.length
+                   let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+                       xs.push(i)
+        s = s + xs[i]
+        i = i + 1
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+}
+
+#[test]
+fn builtin_rows_carry_the_length_across_a_resize() {
+    let src = "fn w(xs: modify Array<Int64>, ys: Array<Int64>) -> Int64 {
+                   let n = xs.length
+    xs.push(1)
+    let a = xs[n]
+                   xs.append(ys)
+    let b = xs[n]
+    if n >= 1 {
+                       let p = xs.pop() ?? 0
+        return a + b + p + xs[n - 1]
+    }
+    return a + b
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"; 3]);
+}
+
 /// Each witness: a function `w` whose checks must all stay, and the call in
 /// `main` that makes one trap with the wording given.
 const WITNESSES: &[(&str, &str, &str)] = &[
@@ -155,6 +190,57 @@ const WITNESSES: &[(&str, &str, &str)] = &[
          return s\n}\n",
         "    print(w(xs).toString())",
         "array index 1 out of bounds",
+    ),
+    // `push` grows by one, not two.
+    (
+        "fn w(xs: modify Array<Int64>) -> Int64 {
+    let n = xs.length
+    xs.push(1)
+             return xs[n + 1]
+}
+",
+        "    print(w(xs).toString())",
+        "array index 4 out of bounds",
+    ),
+    // `pop` shrinks by one: the old last index is gone.
+    (
+        "fn w(xs: modify Array<Int64>) -> Int64 {
+    let n = xs.length
+    if n > 0 {
+                 let p = xs.pop() ?? 0
+        return p + xs[n - 1]
+    }
+    return 0
+}
+",
+        "    print(w(xs).toString())",
+        "array index 2 out of bounds",
+    ),
+    (
+        "fn w(xs: modify Array<Int64>, k: Int64) -> Int64 {
+    let n = xs.length
+    if n > 0 {
+                 let p = xs.swapRemove(k)
+        return p + xs[n - 1]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 0).toString())",
+        "array index 2 out of bounds",
+    ),
+    (
+        "fn w(xs: modify Array<Int64>) -> Int64 {
+    let n = xs.length
+    if n > 0 {
+                 xs.clear()
+        return xs[0]
+    }
+    return 0
+}
+",
+        "    print(w(xs).toString())",
+        "array index 0 out of bounds",
     ),
     // The join keeps only what both branches prove.
     (

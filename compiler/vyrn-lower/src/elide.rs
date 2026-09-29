@@ -3,8 +3,9 @@
 //!
 //! [`decide`] walks a body's rows forward. A `let` or a store of an integer
 //! defines its name; a comparison remembers the facts its truth and falsehood
-//! give, and an `if` on it assumes them; a `modify` or `consume` argument
-//! forgets its name. After a check row the path has its guard, since
+//! give, and an `if` on it assumes them; a builtin's row states how it moves
+//! its receiver's length, and any other `modify` or `consume` argument that is
+//! not a scalar forgets its name. After a check row the path has its guard, since
 //! it traps otherwise. A loop's head keeps the candidate facts that hold at
 //! entry and after every turn (Houdini): each round drops at least one
 //! candidate or stops, so the candidate count bounds the rounds.
@@ -21,9 +22,10 @@
 use std::collections::{BTreeSet, HashMap};
 
 use vyrn_frontend::ast::{BinOp, Capability, Type, TypeDecl, UnOp};
+use vyrn_frontend::prelude::{self, Length};
 
 use crate::check::{Guard, Verdict};
-use crate::core::{Arg, Body, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
+use crate::core::{Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 use crate::facts::{Lin, State, Term};
 
 /// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
@@ -354,6 +356,19 @@ impl Walk<'_> {
             Rhs::Make(Ctor::Array, parts) => {
                 st.define(Term::Len(n), &Lin::k(parts.len() as i64));
             }
+            Rhs::Call { args, .. } if matches!(self.kind(n), Kind::Seq) => {
+                if let Some((_, lo, hi)) = self.resized(rhs).filter(|_| lands_on_result(args)) {
+                    let len = Lin::of(Term::Len(n));
+                    if lo == hi {
+                        st.define(Term::Len(n), &lo);
+                    } else {
+                        len.sub(&lo)
+                            .iter()
+                            .chain(&hi.sub(&len))
+                            .for_each(|l| st.assume(l));
+                    }
+                }
+            }
             Rhs::Prim(op, vs, _) => match self.prim(st, n, op, vs) {
                 Out::Def(r) => st.define(Term::Val(n), &r),
                 Out::Cond(t, f) => {
@@ -505,16 +520,68 @@ impl Walk<'_> {
         }
     }
 
-    /// Forgets every name a call in `rhs` may write: the root of each `modify`
-    /// or `consume` argument.
+    /// The receiver of a builtin call in `rhs` whose row states its length
+    /// effect, and the bounds of its new length as sums over the old.
+    fn resized(&self, rhs: &Rhs) -> Option<(Name, Lin, Lin)> {
+        let Rhs::Call {
+            callee,
+            args,
+            kind: Callee::Builtin,
+            ..
+        } = rhs
+        else {
+            return None;
+        };
+        let len = |i: usize| match args.get(i)? {
+            (Arg::Val(Val::Name(n)) | Arg::Place(Place::Name(n)), _)
+                if matches!(self.kind(*n), Kind::Seq) =>
+            {
+                Some((*n, Lin::of(Term::Len(*n))))
+            }
+            _ => None,
+        };
+        let (r, old) = len(0)?;
+        let (lo, hi) = match prelude::builtin(callee)?.length {
+            Length::Unknown => return None,
+            Length::Keeps => (old.clone(), old),
+            Length::GrowsByOne => (old.plus(1)?, old.plus(1)?),
+            Length::ShrinksByOneIfNotEmpty => (old.plus(-1)?, old),
+            Length::SetToZero => (Lin::k(0), Lin::k(0)),
+            Length::GrowsByLenOf(i) => {
+                let sum = old.add(&len(i)?.1)?;
+                (sum.clone(), sum)
+            }
+            Length::SetToLenOf(i) => {
+                let l = len(i)?.1;
+                (l.clone(), l)
+            }
+        };
+        Some((r, lo, hi))
+    }
+
+    /// Applies what a call in `rhs` does to the names it may write. A
+    /// `modify` receiver moves its length as its row states; any other
+    /// `modify` or `consume` argument rooted at a name that is not a scalar
+    /// forgets it.
     fn effects(&self, st: &mut State, rhs: &Rhs) {
-        if let Rhs::Call { args, .. } = rhs {
-            for (a, cap) in args {
-                if *cap != Capability::Read {
-                    if let Some(n) = root(a) {
-                        st.kill(n);
+        let Rhs::Call { args, .. } = rhs else {
+            return;
+        };
+        let moved = self.resized(rhs).filter(|_| !lands_on_result(args));
+        for (a, cap) in args {
+            let Some(n) = root(a) else { continue };
+            match (cap, &moved) {
+                (Capability::Read, _) => {}
+                // A scalar argument is a copy.
+                (Capability::Consume, _) if matches!(self.kind(n), Kind::Int(..)) => {}
+                (Capability::Modify, Some((r, lo, hi))) if *r == n => {
+                    let old = Lin::of(Term::Len(n));
+                    match (lo.sub(&old), hi.sub(&old)) {
+                        (Some(a), Some(b)) if a.is_const() && b.is_const() => st.shift(n, a.c, b.c),
+                        _ => st.kill(n),
                     }
                 }
+                _ => st.kill(n),
             }
         }
     }
@@ -598,6 +665,12 @@ impl Walk<'_> {
         let (breaks, _) = self.loops.pop().expect("pushed above");
         State::join(&breaks)
     }
+}
+
+/// Whether a builtin's length effect lands on its result: its receiver is not
+/// passed `modify`, so the call hands the resized array back (`@push`).
+fn lands_on_result(args: &[(Arg, Capability)]) -> bool {
+    args.first().is_some_and(|(_, c)| *c != Capability::Modify)
 }
 
 /// Whether a proved verdict is one the emitter can honour: `bytesOf` checks
@@ -714,6 +787,14 @@ fn mark(ss: &[St], rel: &mut [bool]) {
                         _ => vec![],
                     },
                     Rhs::Prim(_, vs, _) => vs.iter().filter_map(val).collect(),
+                    Rhs::Call {
+                        callee,
+                        args,
+                        kind: Callee::Builtin,
+                        ..
+                    } if prelude::builtin(callee).is_some_and(|b| b.length != Length::Unknown) => {
+                        args.iter().filter_map(|(a, _)| root(a)).collect()
+                    }
                     _ => vec![],
                 };
                 if rel[*n as usize] || from.iter().any(|m| rel[*m as usize]) {

@@ -251,6 +251,34 @@ impl State {
             .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions_name(n)));
     }
 
+    /// Moves `n`'s length by an unknown amount in `lo..=hi`. A fact with
+    /// `k * Len(n)` holds of the new length once `-min(k*lo, k*hi)` is added;
+    /// a definition of or through the length becomes its two facts first.
+    pub fn shift(&mut self, n: Name, lo: i64, hi: i64) {
+        let t = Term::Len(n);
+        let (through, defs) = std::mem::take(&mut self.defs)
+            .into_iter()
+            .partition(|(d, v)| *d == t || v.coef(t) != 0);
+        self.defs = defs;
+        let mut facts = std::mem::take(&mut self.facts);
+        for (d, v) in through {
+            facts.extend(Lin::of(d).sub(&v));
+            facts.extend(v.sub(&Lin::of(d)));
+        }
+        self.conds
+            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.coef(t) != 0));
+        for f in facts {
+            let k = f.coef(t);
+            let moved = k
+                .checked_mul(lo)
+                .zip(k.checked_mul(hi))
+                .and_then(|(a, b)| f.plus(a.min(b).checked_neg()?));
+            if let Some(f) = moved {
+                self.assume(&f);
+            }
+        }
+    }
+
     fn restate(&mut self, x: Term) {
         let Some((d, by)) = self.defs.iter().find_map(|(d, v)| {
             let s = v.coef(x);
@@ -265,8 +293,10 @@ impl State {
         };
         self.defs.remove(&d);
         let sub = |l: &Lin| l.subst(x, &by);
+        // A length's axioms outlive the length: they bound the renamed value.
         self.facts = std::mem::take(&mut self.facts)
             .into_iter()
+            .chain(axioms([x].into_iter()))
             .filter_map(|f| sub(&f))
             .collect();
         for v in self.defs.values_mut() {
@@ -464,6 +494,25 @@ mod tests {
         st.define(Term::Val(1), &v(0).plus(1).unwrap());
         st.kill(0);
         assert!(st.ge0(&v(1).plus(-1).unwrap()).is_some());
+    }
+
+    #[test]
+    fn a_kill_of_a_length_keeps_its_axioms_on_the_rename() {
+        let mut st = State::default();
+        st.define(Term::Val(0), &Lin::of(Term::Len(1)));
+        st.kill(1);
+        assert!(st.ge0(&v(0)).is_some());
+    }
+
+    #[test]
+    fn a_shrink_by_at_most_one_keeps_the_old_length_as_a_bound() {
+        let mut st = State::default();
+        let len = Lin::of(Term::Len(1));
+        st.define(Term::Val(0), &len);
+        st.shift(1, -1, 0);
+        assert!(st.ge0(&v(0).sub(&len).unwrap()).is_some());
+        assert!(st.ge0(&len.sub(&v(0)).unwrap().plus(1).unwrap()).is_some());
+        assert!(st.ge0(&len.sub(&v(0)).unwrap()).is_none());
     }
 
     #[test]
