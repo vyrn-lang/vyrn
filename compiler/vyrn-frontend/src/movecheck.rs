@@ -412,6 +412,8 @@ pub type JudgmentKey = (String, String, String);
 thread_local! {
     /// Set by [`reuse_judgments`].
     static REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set by [`emit_nothing`].
+    static NO_EMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether the analysis running now is the one [`refusals`] asked for.
     static JUDGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The declaration fingerprint and the entries valid under it. A new
@@ -437,6 +439,19 @@ pub fn reuse_judgments() {
 /// and [`refusals`] asked for this analysis.
 pub fn reusing_judgments() -> bool {
     REUSE.with(|r| r.get()) && JUDGING.with(|j| j.get())
+}
+
+/// Declares that this host emits nothing from the program it checks (`vyrn
+/// check`), so the placer skips the facts only an emitter reads.
+pub fn emit_nothing() {
+    NO_EMIT.with(|r| r.set(true));
+}
+
+/// Whether the analysis running now feeds an emitter. Only the analysis
+/// [`refusals`] asks for can answer no: a generator compiled during the load
+/// still needs its facts.
+pub fn emitting() -> bool {
+    !(NO_EMIT.with(|r| r.get()) && JUDGING.with(|j| j.get()))
 }
 
 /// The judgment cache, open for one analysis. It copies the loader's module

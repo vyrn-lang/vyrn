@@ -356,22 +356,25 @@ fn real_main() -> ExitCode {
         "fix" => fix_cmd(path, &source),
         // `check` must predict the one thing `build` can fail to finish:
         // unbounded monomorphization, visible only while emitting (audit A5.2).
-        "check" => match loaded(path, &source) {
-            Ok((program, _dsg)) => {
-                let _memo = shared_desugars(&program);
-                match vyrn_codegen::check_instantiations(&program) {
-                    Ok(()) => {
-                        println!("ok");
-                        ExitCode::SUCCESS
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        ExitCode::FAILURE
+        "check" => {
+            vyrn_frontend::movecheck::emit_nothing();
+            match loaded(path, &source) {
+                Ok((program, _dsg)) => {
+                    let _memo = shared_desugars(&program);
+                    match vyrn_codegen::check_instantiations(&program) {
+                        Ok(()) => {
+                            println!("ok");
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            ExitCode::FAILURE
+                        }
                     }
                 }
+                Err(code) => code,
             }
-            Err(code) => code,
-        },
+        }
         "run" => {
             // Generators run in the load; its time is the first row of the
             // table `run_wasm` prints.
