@@ -214,9 +214,12 @@ The module's shape:
   statics. A frame push past address 0 wraps and traps on first
   access instead of overwriting data.
 - Values: a scalar lives in a wasm local; an aggregate lives in a frame slot
-  and travels as its `i32` address. A parameter is an address the callee
-  copies from; an aggregate result goes through a hidden leading address. A
-  `modify` parameter is copied in at entry and out at the one exit.
+  and travels as its `i32` address; an aggregate result goes through a hidden
+  leading address. A `read` or `modify` parameter is used at the caller's
+  address when no module state is an aggregate or owns heap other than a
+  `String`'s (`Cx::args_in_place`). Otherwise the callee copies it in at
+  entry, and a `modify` one back out at the one exit. A `consume` parameter
+  is always copied in.
 - Layout (`layout.rs`): sizes, alignments and offsets are read from the shape
   string `llt_of` prints, so layout cannot drift from lowering. Every size is
   a checked `u32`.

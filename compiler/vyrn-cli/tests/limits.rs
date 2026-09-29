@@ -415,7 +415,9 @@ fn a_shape_past_the_address_space_is_a_diagnostic_not_a_wrapped_number() {
 
 /// The control: a compiler that refused every fixed array would pass the test
 /// above. Both shapes are too big for a frame but not to describe, so the frame
-/// limit must answer.
+/// limit must answer. The parameter is `consume` because the callee copies it
+/// into its frame; a `read` one in a program with no module state is the
+/// caller's storage.
 #[test]
 fn a_shape_under_the_bound_is_still_measured() {
     for (name, n, bytes) in [
@@ -430,7 +432,7 @@ fn a_shape_under_the_bound_is_still_measured() {
         ("justunder", 536_870_911, None),
     ] {
         let src = format!(
-            "fn sum(xs: Array<Int64, {n}>) -> Int64 {{\n    return xs[0]\n}}\n\n\
+            "fn sum(xs: consume Array<Int64, {n}>) -> Int64 {{\n    return xs[0]\n}}\n\n\
              fn main() -> Int64 {{\n    return 0\n}}\n"
         );
         let got = text(&build_wasm(&src, name).0);

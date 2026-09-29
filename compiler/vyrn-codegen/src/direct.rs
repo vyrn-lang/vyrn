@@ -345,6 +345,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         dispatch: RefCell::new(Dispatch::default()),
         shapes: RefCell::new(Shapes::default()),
         globals: HashMap::new(),
+        args_in_place: false,
         gappend: HashMap::new(),
         externs,
         // The call-argument temporaries released at the call, cloned before `ownership` is
@@ -393,6 +394,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             (Place::Static(m.reserve(l.size, l.align)), ty),
         );
     }
+    cx.args_in_place = cx.globals.values().all(|(_, ty)| {
+        cx.resolve(ty) == Type::Str
+            || !vyrn_frontend::declared::owns_heap(&cx.sub(ty), &cx.types)
+                && matches!(cx.repr(ty, 0), Ok(Repr::Scalar(_)))
+    });
 
     // One ownership word per module-state accumulator, in static memory because the helper writes
     // it back and wasm has no pass-by-reference. Reserved zeroed; the initializer sets it.
@@ -991,6 +997,11 @@ struct Cx<'a> {
     /// Module state: name -> its fixed address and declared type. Every body sees all
     /// of them; the checker forbids an initializer reading a later global.
     globals: HashMap<String, (Place, Type)>,
+    /// Whether a `read` or `modify` aggregate parameter is the caller's storage, used in place.
+    /// It is when no module state is an aggregate or owns heap other than a `String`'s bytes:
+    /// then only the callee's own parameters name that storage during the call, and the
+    /// checker refuses a `modify` argument that overlaps another.
+    args_in_place: bool,
     /// Module-state `String` accumulators: name -> the address of its ownership word. Present only
     /// for a global [`vyrn_lower::append::global_append_candidates`] cleared, so `g = g + ...`
     /// grows in place. The local twin is [`Fn_::str_append`]; a global has no local, so its word
@@ -1829,16 +1840,20 @@ fn lower_body(
         cx_fn.core_enter(&core);
     }
 
-    // An aggregate parameter arrives as the caller's address; the prologue copies it into a
-    // slot of its own. A `modify` parameter is copy-in/copy-out: copied in here and back out at
-    // the epilogue, so the caller sees no write before the call returns.
+    // An aggregate parameter arrives as the caller's address. Under [`Cx::args_in_place`] a
+    // `read` or `modify` one is used there. Otherwise the prologue copies it into a slot of its
+    // own, and a `modify` parameter is copy-in/copy-out: copied in here and back out at the
+    // epilogue, so the caller sees no write before the call returns.
     let mut copy_out: Vec<(u32, Place, Repr, String)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
         let ty = p.ty.clone();
         let r = cx.repr(&p.ty, f.line)?;
-        let place = if p.capability == Capability::Modify {
+        let in_place = matches!(r, Repr::Agg(_)) && p.capability != Capability::Consume;
+        let place = if in_place && cx.args_in_place {
+            Place::Local(local)
+        } else if p.capability == Capability::Modify {
             let ll = cx.ll(&p.ty);
             let place = match &r {
                 Repr::Agg(l) => {
@@ -14161,6 +14176,7 @@ mod tests {
             dispatch: RefCell::new(Dispatch::default()),
             shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
+            args_in_place: false,
             gappend: HashMap::new(),
             externs: HashMap::new(),
             releases: HashMap::new(),
