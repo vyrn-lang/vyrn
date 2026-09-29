@@ -20,8 +20,9 @@
 /// `GET(pattern, proc)` could not do that: a type parameter cannot name a type to
 /// `fromJson`.
 
-import { Json, JsonField, copyJson, copyJsonFields, emit } from "std/json"
+import { Json, JsonField, copyJson, emit } from "std/json"
 import { parseJson } from "std/jsonread"
+import { fieldsOf, hasField } from "std/jsondec"
 import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
 import { fnv1aStr, sha1 } from "std/hash"
 // A path segment is wire text and a placeholder binds a value: `httpMatch`
@@ -811,7 +812,7 @@ fn httpSingle(body: String, key: String) -> Option<Json> {
 }
 
 fn httpSingleOf(j: Json, key: String) -> Option<Json> {
-    let fs = httpFieldsOf(j)
+    let fs = fieldsOf(j)
     if fs.length != 1 {
         return None
     }
@@ -826,7 +827,7 @@ fn httpSingleOf(j: Json, key: String) -> Option<Json> {
 /// payload's when the procedure returned `Ok(value)`.
 fn httpPayload(body: String) -> Array<JsonField> {
     return match httpSingle(body, "Ok") {
-        Some(inner) => httpFieldsOf(inner),
+        Some(inner) => fieldsOf(inner),
         None => httpBodyFields(body),
     }
 }
@@ -1108,22 +1109,12 @@ export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String
     }
     if body != "" {
         for f in httpBodyFields(body) {
-            if httpHasField(fs, f.key) == false {
+            if hasField(fs, f.key) == false {
                 fs.push(f)
             }
         }
     }
     return emit(JObj(fs))
-}
-
-/// Whether `key` is already bound.
-fn httpHasField(fs: Array<JsonField>, key: String) -> Bool {
-    for f in fs {
-        if f.key == key {
-            return true
-        }
-    }
-    return false
 }
 
 fn httpValue(raw: String, isNumber: Bool) -> Json {
@@ -1156,19 +1147,8 @@ fn httpAt(ps: Map<String, String>, k: String) -> String {
 /// left to `fromJson` to report.
 fn httpBodyFields(body: String) -> Array<JsonField> {
     return match parseJson(body) {
-        Ok(j) => httpFieldsOf(j),
+        Ok(j) => fieldsOf(j),
         Err(e) => [],
-    }
-}
-
-fn httpFieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyJsonFields(fs),
-        JNull => [],
-        JBool(b) => [],
-        JNum(n) => [],
-        JStr(s) => [],
-        JArr(xs) => [],
     }
 }
 

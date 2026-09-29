@@ -462,8 +462,9 @@ export gen fn rpcInProcess(contract: String) -> String {
 // procedure module, and a procedure's wire path derives from the module path and
 // the export name. `client(dir)` reads interfaces and never imports an api
 // module, so no procedure body reaches a client bundle.
-import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
+import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
+import { fieldAt, fieldsOf, tagOf } from "std/jsondec"
 import { replace, split } from "std/strings"
 
 /// One procedure module: the path a generator reflects
@@ -516,37 +517,6 @@ gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
     return out
 }
 
-fn rpcStrOf(j: Json) -> String {
-    return match j {
-        JStr(s) => s.copy(),
-        JNull => "",
-        JBool(b) => "",
-        JNum(n) => "",
-        JArr(xs) => "",
-        JObj(o) => "",
-    }
-}
-
-fn rpcFieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyJsonFields(fs),
-        JNull => [],
-        JBool(b) => [],
-        JNum(n) => [],
-        JStr(s) => [],
-        JArr(xs) => [],
-    }
-}
-
-fn rpcMember(j: Json, key: String) -> Json {
-    for f in rpcFieldsOf(j) {
-        if f.key == key {
-            return copyJson(f.value)
-        }
-    }
-    return JNull
-}
-
 /// `path` parsed as JSON, or `JNull` when it is absent or malformed; a missing config is normal.
 gen fn rpcReadJson(path: String) -> Json {
     let text = match readFile(path) {
@@ -563,12 +533,12 @@ gen fn rpcReadJson(path: String) -> Json {
 }
 
 fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
-    let p = rpcStrOf(rpcMember(doc, "prefix"))
-    let t = rpcStrOf(rpcMember(doc, "path"))
+    let p = tagOf(fieldAt(fieldsOf(doc), "prefix"))
+    let t = tagOf(fieldAt(fieldsOf(doc), "path"))
     let mut keys = cfg.pinKeys.copy()
     let mut paths = cfg.pinPaths.copy()
-    for f in rpcFieldsOf(rpcMember(doc, "pin")) {
-        let v = rpcStrOf(f.value)
+    for f in fieldsOf(fieldAt(fieldsOf(doc), "pin")) {
+        let v = tagOf(f.value)
         if v != "" {
             keys.push(consume f.key)
             paths.push(v)
@@ -589,7 +559,7 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
 gen fn rpcConfig(dir: String) -> RpcConfig {
     let cfg = RpcConfig { prefix: "/_", path: "{module}/{name}", pinKeys: [], pinPaths: [] }
     let doc = rpcReadJson(dir + "/rpc.json")
-    let nested = rpcMember(doc, "rpc")
+    let nested = fieldAt(fieldsOf(doc), "rpc")
     let applied = rpcApplyConfig(cfg, doc)
     return rpcApplyConfig(applied, nested)
 }
