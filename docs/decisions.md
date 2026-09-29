@@ -198,6 +198,7 @@ pull request.
 - `m.tally(k, n)` is one probe and never takes the key.
 - The runtime never calls a user's hash. It hashes a zeroed canonical pack of the key, so no engine can disagree.
 - `std/regex` is a Thompson NFA with no backtracking: the RE2 subset, leftmost-longest, linear time. `=~` stays an anchored compile-time match.
+- A `std/regex` search runs the NFA as a lazy DFA over byte-class runs, built per search; past `dfaCap` table entries it falls back to the Thompson simulation, so a search's memory stays bounded and its answers stay the simulation's.
 - The JSON codec is canonical: declaration order, no whitespace, `None` fields omitted. `fromJson` returns `Validation`, runs every `where`, parses integers exactly, ignores unknown fields.
 - `std/json` is the one strict JSON reader: numbers keep their text, duplicate keys and trailing commas are refused.
 - A payload enum crosses the wire externally tagged (`"Unit"`, `{"Circle":5}`, `{"Rect":[2,3]}`), one wire form per value.

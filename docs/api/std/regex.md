@@ -9,6 +9,7 @@ and counts.
 Supports literals, `.`, classes (`[abc]`, `[a-z]`, `[^>]`), alternation,
 grouping, `*` `+` `?`, and `\` escapes. A Thompson NFA with no backtracking,
 so the time is linear in the pattern size times the input for every pattern.
+A search runs it as a lazy DFA: one table read per byte.
 Refuses anchors, non-greedy repeats and counted repetition. It has no
 backreferences or lookaround: `\1` is the byte `1`.
 
@@ -22,7 +23,7 @@ a non-ASCII character is a set of its bytes.
 ## Regex
 
 ```vyrn
-type Regex = { op: Array<Int64>, a: Array<Int64>, b: Array<Int64>, cls: Array<ByteSet>, start: Int64, first: ByteSet, firstKnown: Bool }
+type Regex = { op: Array<Int64>, a: Array<Int64>, b: Array<Int64>, cls: Array<ByteSet>, start: Int64, classOf: Array<Int64>, classCount: Int64 }
 ```
 
 ## Match
