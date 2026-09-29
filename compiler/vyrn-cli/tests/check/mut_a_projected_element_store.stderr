@@ -1,0 +1,1 @@
+mut_a_projected_element_store.vyrn:6:0: cannot store into `b` (declared without `mut`)

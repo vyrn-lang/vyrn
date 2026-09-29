@@ -263,6 +263,7 @@ pull request.
 - A change that moves emitted wasm bytes rewrites the SHA-256 manifest in the same commit and names every moved row.
 - Censuses of the type constructors and syntax forms are pinned by tests, so the tables cannot drift.
 - Pins are written by gates and merged with the `pin` driver, never by hand.
+- A test of what `vyrn check` says about one program is `tests/check/<name>.vyrn` and its `.stderr`, not a Rust string.
 - A prediction is written as a program before the change lands and reported either way. Nothing is deleted until the corpus is green on its replacement.
 - A gate that is missed says so; the bar is never moved quietly.
 - A red CI run is a diagnosis. For a change to release timing, the Linux job is the gate, because glibc reuses freed memory differently.

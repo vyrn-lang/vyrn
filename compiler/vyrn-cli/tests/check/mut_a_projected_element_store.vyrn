@@ -1,0 +1,6 @@
+type P = { x: Int64 } type Bag = { items: Array<P> }
+impl Index for Bag {
+    fn at(read self, i: Int64) -> read P { return self.items[i] }
+    fn atSet(modify self, i: Int64) -> modify P { return self.items[i] }
+}
+fn main() -> Int64 { let b = Bag { items: [P { x: 1 }] } b[0] = P { x: 2 } return 0 }

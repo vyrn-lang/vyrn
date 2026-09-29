@@ -1,0 +1,3 @@
+let banner = "hi"
+fn f() -> Int64 { banner = "bye" return 0 }
+fn main() -> Int64 { return 0 }

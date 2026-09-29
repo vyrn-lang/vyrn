@@ -296,6 +296,9 @@ The refusals:
   `tests/refusals/`, with its whole sentence and the pass that states it. A
   row runs twice, with and without the kernel (`VYRN_NO_KERNEL=1`), to
   attribute the sentence.
+- `check.rs`: every `tests/check/<name>.vyrn` against `<name>.stderr`, the
+  exact output of `vyrn check`. No `.stderr` means accepted. Add a test as the
+  two files; `VYRN_PIN=write` writes the `.stderr`.
 - `scripts/check-corpus.sh <tree> <out>` runs `vyrn check` over every `.vyrn`
   file in `examples`, `std`, `site` and the test directories, and writes each
   file's stdout, stderr and exit code. `diff -r` of main's output against the
@@ -379,6 +382,8 @@ spent its time, per phase (`prof.rs`).
   existing statements.
 - A new ownership rule: `kernel.rs`, with a program in `tests/refusals/` and a
   row in `refusals.rs`. The checker states no ownership rule.
+- A new refusal or acceptance test: a program in `tests/check/` and its
+  `.stderr`, never a program in a Rust string.
 - A new builtin: its signature in `prelude.rs`, with a capability per
   parameter; its row in `core::builtin_rows`; its body in `std/runtime` when
   it can be Vyrn, otherwise a lowering in `direct.rs`.
