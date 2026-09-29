@@ -783,7 +783,8 @@ impl St {
             | St::Continue { .. }
             | St::Return { .. }
             | St::Do { .. }
-            | St::Trap => (None, None, &[]),
+            | St::Trap
+            | St::Check(_) => (None, None, &[]),
         };
         a.into_iter().chain(b).chain(arms.iter().map(|a| &a.body))
     }
@@ -802,7 +803,8 @@ impl St {
             | St::Continue { .. }
             | St::Return { .. }
             | St::Do { .. }
-            | St::Trap => (None, None, &mut []),
+            | St::Trap
+            | St::Check(_) => (None, None, &mut []),
         };
         a.into_iter()
             .chain(b)
@@ -843,6 +845,9 @@ impl St {
             | St::Break { .. }
             | St::Continue { .. }
             | St::Trap => {}
+            // A check reads what the row it guards reads, so no walker counts
+            // its guard as a second read.
+            St::Check(_) => {}
         }
     }
 }
