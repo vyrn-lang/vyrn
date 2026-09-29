@@ -2967,14 +2967,7 @@ impl<'a> Checker<'a> {
                 f.ret
             ));
         }
-        let mut errs = self.errors.borrow_mut();
-        if let Some(first) = errs.first().cloned() {
-            let rest: Vec<Diagnostic> = errs.drain(1..).collect();
-            *errs = rest;
-            Err(first)
-        } else {
-            Ok(())
-        }
+        self.first_error()
     }
 
     /// Checks every global in declaration order and records its type in
@@ -3130,14 +3123,16 @@ impl<'a> Checker<'a> {
             );
         }
         self.block(body, &f.ret, &mut scope);
-        // The first error is the `Err`; the rest stay in `errors`.
+        self.first_error()
+    }
+
+    /// Hands out the first recorded error as the `Err`; the rest stay in
+    /// `errors`.
+    fn first_error(&self) -> Result<(), Diagnostic> {
         let mut errs = self.errors.borrow_mut();
-        if let Some(first) = errs.first().cloned() {
-            let rest: Vec<Diagnostic> = errs.drain(1..).collect();
-            *errs = rest;
-            Err(first)
-        } else {
-            Ok(())
+        match errs.is_empty() {
+            true => Ok(()),
+            false => Err(errs.remove(0)),
         }
     }
 
