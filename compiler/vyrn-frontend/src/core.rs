@@ -8,7 +8,22 @@ use crate::own::{DropKind, EdgeRow, Exit, Linear};
 pub mod check;
 
 /// A name in a body: an index into [`Body::names`].
-pub type Name = u32;
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Name(pub u32);
+
+impl Name {
+    /// The name's slot in [`Body::names`] and in every table sized by it.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Prints the bare index, so a `{:?}` dump of the core shows a name as a number.
+impl std::fmt::Debug for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NameInfo {
@@ -946,7 +961,7 @@ impl Body {
     /// The holes a release row of `n` walks around: the row's own set, else
     /// the name's.
     pub fn drop_holes<'b>(&'b self, n: Name, row: &'b Option<Vec<String>>) -> &'b [String] {
-        row.as_deref().unwrap_or(&self.names[n as usize].holes)
+        row.as_deref().unwrap_or(&self.names[n.index()].holes)
     }
 
     /// How many times each name is read, which decides whether an emitter
@@ -965,7 +980,7 @@ impl Body {
         self.stmts.iter().for_each(|s| names_in(s, &mut ns));
         let mut out = vec![0u32; self.names.len()];
         for n in ns {
-            out[n as usize] += 1;
+            out[n.index()] += 1;
         }
         out
     }
@@ -989,7 +1004,7 @@ impl Body {
     }
 
     fn spell(&self, n: Name) -> String {
-        let i = &self.names[n as usize];
+        let i = &self.names[n.index()];
         if i.releases {
             format!("{}!", i.source)
         } else {
@@ -1243,7 +1258,7 @@ pub fn count_reads(ss: &[St], out: &mut [u32]) {
     for (s, _) in rows(ss).filter(|(s, _)| !matches!(s, St::Row { .. })) {
         s.operands(&mut |v, u| {
             if let (Val::Name(n), Use::Read | Use::Hand | Use::Release) = (v, u) {
-                out[*n as usize] += 1;
+                out[n.index()] += 1;
             }
         });
     }
