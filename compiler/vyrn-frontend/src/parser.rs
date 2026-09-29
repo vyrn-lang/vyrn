@@ -661,7 +661,12 @@ impl Parser {
     fn expect_binder(&mut self) -> Result<Binder, Diagnostic> {
         let (line, col) = self.binder_pos();
         let name = self.expect_ident()?;
-        Ok(Binder { name, line, col })
+        Ok(Binder {
+            id: Id::NEW,
+            name,
+            line,
+            col,
+        })
     }
 
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {

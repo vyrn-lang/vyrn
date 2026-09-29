@@ -2,9 +2,8 @@
 //! ([`Release`], [`Exit`], [`DropKind`]), the `vyrn why --memory` rows, and the
 //! slots through which `vyrn-lower`, which sits above this crate, installs the
 //! placer and its judgments. [`Owned`] answers what owns; the core's placer
-//! decides what is released where. Nodes are keyed by address, so a reader must
-//! walk the same borrowed AST the analysis walked (see [`ReleasePlan`] for
-//! clones).
+//! decides what is released where. Nodes are keyed by [`NodeId`], which a
+//! clone keeps.
 
 use std::collections::HashMap;
 
@@ -34,13 +33,12 @@ pub enum Exit {
 /// substitutes it.
 #[derive(Debug, Clone)]
 pub struct Release {
-    /// The node address the exit is at: a `Block`, the owning `match` /
-    /// `if let` / `for in`, a `Stmt::Break` / `Continue` / `Return`, or an
-    /// `Expr::Try`.
-    pub site: usize,
-    /// The owning node's address: a `Stmt::Let`, or the construct for its
-    /// temporary.
-    pub binding: usize,
+    /// The node the exit is at: a `Block`, the owning `match` / `if let` /
+    /// `for in`, a `Stmt::Break` / `Continue` / `Return`, or an `Expr::Try`.
+    pub site: NodeId,
+    /// The owning node: a `Stmt::Let`, a parameter, a pattern binder, a `for`
+    /// body for its variable, or the construct for its temporary.
+    pub binding: NodeId,
     pub name: String,
     pub kind: DropKind,
     pub exit: Exit,
@@ -136,46 +134,8 @@ pub enum Bucket {
     },
 }
 
-/// Maps a cloned node back to the node the core keyed. A user-container `for`
-/// and a `place at` rewrite clone the statements they expand, so the core's
-/// answers sit on nodes the emission never walks; [`ReleasePlan::key_of`]
-/// resolves them.
-#[derive(Clone, Default)]
-pub struct ReleasePlan {
-    /// Clone address to original address; chains for a clone of a clone.
-    alias: std::cell::RefCell<HashMap<usize, usize>>,
-}
-
-impl ReleasePlan {
-    /// Registers clone-to-original pairs for a clone that lives as long as the
-    /// compile.
-    pub fn alias_clones(&self, pairs: &[(usize, usize)]) {
-        self.alias.borrow_mut().extend(pairs.iter().copied());
-    }
-
-    fn resolve(&self, mut at: usize) -> usize {
-        let alias = self.alias.borrow();
-        // Bounded by clone nesting depth; the cap guards against a cycle a
-        // defect in the pair builder could create.
-        for _ in 0..64 {
-            match alias.get(&at) {
-                Some(next) => at = *next,
-                None => break,
-            }
-        }
-        at
-    }
-
-    /// Returns the node the core keyed for `at`: itself, or the original a
-    /// clone copies.
-    pub fn key_of(&self, at: usize) -> usize {
-        self.resolve(at)
-    }
-}
-
 #[derive(Clone, Default)]
 pub struct Ownership {
-    pub plan: ReleasePlan,
     /// Per function, every `let` in source order and its fate, written by the
     /// placer. Empty without a placer and for a body the core does not lower.
     pub memory: HashMap<String, Vec<MemoryRow>>,
@@ -311,9 +271,7 @@ fn analyze_now(program: &Program) -> Ownership {
     let fs = crate::prof::phase("own: movecheck::facts");
     let facts = crate::movecheck::facts(program);
     drop(fs);
-    let plan = ReleasePlan::default();
     let mut ownership = Ownership {
-        plan,
         memory: HashMap::new(),
         proto,
         // Only the placer writes release rows.
@@ -331,20 +289,6 @@ fn analyze_now(program: &Program) -> Ownership {
         }
     }
     ownership
-}
-
-/// The plan's key for a `for` variable, which has no `let` node: the address
-/// of its name's heap buffer. Not the `String`'s own address: it sits at offset
-/// 0 of `Stmt::ForIn`, so it equals the statement's key, the container row's.
-pub fn for_var_key(var: &str) -> usize {
-    var.as_ptr() as usize
-}
-
-/// The plan's key for a pattern binder, which has no `let` node: the address of
-/// its name's heap buffer, as in [`for_var_key`]. The core and the emitters take
-/// it off the same pattern node.
-pub fn binder_key(name: &str) -> usize {
-    name.as_ptr() as usize
 }
 
 /// A pass that adds release rows to a finished analysis: the core's placer,
@@ -431,8 +375,8 @@ pub fn typed_refusals() -> Vec<crate::diagnostics::Diagnostic> {
 
 /// Groups release steps by `(exit, site)`, each binding with its row's
 /// [`Release::holes`], in run order.
-pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> {
-    let mut out: HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> = HashMap::new();
+pub fn placed(steps: &[Release]) -> HashMap<(Exit, NodeId), Vec<(NodeId, Option<Vec<String>>)>> {
+    let mut out: HashMap<(Exit, NodeId), Vec<(NodeId, Option<Vec<String>>)>> = HashMap::new();
     for r in steps {
         out.entry((r.exit, r.site))
             .or_default()

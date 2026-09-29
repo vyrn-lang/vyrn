@@ -32,7 +32,7 @@ pub use core::{refuses as kernel_refuses, take_refusals};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use vyrn_frontend::ast::{Block, Expr, Function, LambdaBody, NodeId, Program, Stmt, Type};
+use vyrn_frontend::ast::{Expr, Function, LambdaBody, NodeId, Program, Stmt, Type};
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types::{
@@ -197,9 +197,9 @@ pub struct Lowered<'a> {
     /// Its calls are not followed into the worklist: that would add instances
     /// the backends' own worklists do not have.
     pub predicates: NodeTypes<'a>,
-    /// Every `Block` that is a lambda's body, by node address, so an engine
+    /// Every `Block` that is a lambda's body, by node, so an engine
     /// can tell those blocks apart without a second AST walk.
-    pub lambda_bodies: std::collections::HashSet<usize>,
+    pub lambda_bodies: std::collections::HashSet<NodeId>,
     /// The `test` and `bench` bodies, in declaration order. Not followed into
     /// the worklist, like [`Lowered::predicates`]: a generic only a test calls
     /// is an instantiation no backend emits.
@@ -327,7 +327,7 @@ struct Walk<'a, 'r> {
     facts: NodeTypes<'a>,
     /// `(callee, its solved type arguments by name)`, already concrete.
     calls: Vec<(&'r str, HashMap<String, Type>)>,
-    lambda_bodies: std::collections::HashSet<usize>,
+    lambda_bodies: std::collections::HashSet<NodeId>,
     chain: Chain,
     /// Per open expression: its recorded type, and whether it pushed a
     /// substitution onto `chain`.
@@ -530,7 +530,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                 body: LambdaBody::Block(b),
                 ..
             } => {
-                self.lambda_bodies.insert(b as *const Block as usize);
+                self.lambda_bodies.insert(b.id());
             }
             // `schemaOf<T>()` lowers through the literal the checker expanded
             // for it, and has no arguments of its own to walk.
@@ -678,7 +678,7 @@ fn build<'a>(
 
     let mut instances: Vec<Instance<'a>> = Vec::new();
     let mut unresolved: Vec<Unresolved> = Vec::new();
-    let mut lambda_bodies: std::collections::HashSet<usize> = Default::default();
+    let mut lambda_bodies: std::collections::HashSet<NodeId> = Default::default();
 
     // Module state is the second root: an initializer instantiates generics
     // like any body. It is an expression, so it has no exit to place a release

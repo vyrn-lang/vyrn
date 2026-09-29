@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use vyrn_frontend::ast::Type;
+use vyrn_frontend::ast::{NodeId, Type};
 
 use crate::core::{Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Val};
 use vyrn_frontend::ast::Capability;
@@ -800,7 +800,7 @@ pub struct StoreRules<'a> {
 pub fn stores(
     body: &Body,
     rules: &StoreRules,
-    seen: &mut std::collections::HashSet<usize>,
+    seen: &mut std::collections::HashSet<NodeId>,
 ) -> Vec<(usize, String)> {
     let mut out: Vec<(usize, String)> = Vec::new();
     for f in body.frames() {
@@ -867,7 +867,7 @@ pub fn stores(
 fn each_store(
     stmts: &[St],
     names: &[NameInfo],
-    f: &mut dyn FnMut(&Place, usize, Option<usize>, Option<&str>),
+    f: &mut dyn FnMut(&Place, usize, Option<NodeId>, Option<&str>),
 ) {
     fn modified(rhs: &Rhs) -> Vec<(Place, Option<&str>)> {
         match rhs {
@@ -902,7 +902,7 @@ fn each_store(
                 f(place, *line, key, None)
             }
             St::Do { rhs, line, site } => {
-                let key = Some(*site).filter(|k| *k != 0);
+                let key = Some(*site).filter(|k| *k != NodeId::NONE);
                 modified(rhs).iter().for_each(|(p, r)| f(p, *line, key, *r))
             }
             St::Let(n, rhs) => {
@@ -926,11 +926,11 @@ fn each_store(
 /// the sentence `vyrn check` gives and its line. A lambda's body is a frame of
 /// its own, so a loop outside the lambda does not count. `seen` is as in
 /// [`stores`].
-pub fn loops(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(usize, String)> {
+pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<(usize, String)> {
     fn walk(
         stmts: &[St],
         in_loop: bool,
-        seen: &mut std::collections::HashSet<usize>,
+        seen: &mut std::collections::HashSet<NodeId>,
         out: &mut Vec<(usize, String)>,
     ) {
         for s in stmts {

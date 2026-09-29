@@ -17,7 +17,7 @@ pub fn is_panic(name: &str) -> bool {
 
 /// Names one syntax node for the side tables that passes key by node.
 ///
-/// [`Program::number`] gives every `Expr`, `Stmt`, `Block` and `Param` of a
+/// [`Program::number`] gives every `Expr`, `Stmt`, `Block`, `Param` and `Binder` of a
 /// program its id: dense from 1, in declaration order and then pre-order, so
 /// no two nodes of one program share an id and none is 0. An id survives a
 /// clone and a move of the tree. A projection expansion is not in the program:
@@ -26,6 +26,9 @@ pub fn is_panic(name: &str) -> bool {
 pub struct NodeId(pub u32);
 
 impl NodeId {
+    /// No node: the site of a row the core synthesizes.
+    pub const NONE: NodeId = NodeId(0);
+
     /// The first id of the expansion range, above every program's own ids.
     pub const EXPANDED: u32 = 1 << 31;
 }
@@ -606,6 +609,7 @@ pub struct Binder {
     pub name: String,
     pub line: usize,
     pub col: usize,
+    pub id: Id,
 }
 
 /// The kind of a binding, as the editor shows it. `body_scope_descent!` reports
@@ -624,6 +628,7 @@ impl Binder {
     /// Returns a binder no source token spells.
     pub fn synthetic(name: impl Into<String>) -> Self {
         Binder {
+            id: Id::NEW,
             name: name.into(),
             line: 0,
             col: 0,
@@ -1373,6 +1378,12 @@ impl Param {
     }
 }
 
+impl Binder {
+    pub fn id(&self) -> NodeId {
+        NodeId(self.id.0)
+    }
+}
+
 impl Program {
     /// Numbers every node of the program from 1, overwriting any id it held.
     /// The parser and the loader call it once the tree is whole; a side table
@@ -1439,6 +1450,12 @@ impl Numbering {
         self.block(&mut f.body);
     }
 
+    fn binders(&mut self, bs: Vec<&mut Binder>) {
+        for b in bs {
+            self.next(&mut b.id);
+        }
+    }
+
     pub fn block(&mut self, b: &mut Block) {
         self.next(&mut b.id);
         for s in &mut b.stmts {
@@ -1475,11 +1492,13 @@ impl Numbering {
                 }
             }
             Stmt::IfLet {
+                pattern,
                 scrutinee,
                 then_block,
                 else_block,
                 ..
             } => {
+                self.binders(pattern.binders_mut());
                 self.expr(scrutinee);
                 self.block(then_block);
                 if let Some(b) = else_block {
@@ -1528,6 +1547,7 @@ impl Numbering {
             } => {
                 self.expr(scrutinee);
                 for a in arms {
+                    self.binders(a.pattern.binders_mut());
                     match &mut a.body {
                         ArmBody::Expr(x) => self.expr(x),
                         ArmBody::Block(b) => self.block(b),
@@ -1557,10 +1577,13 @@ impl Numbering {
                     self.expr(v);
                 }
             }
-            Expr::Lambda { body, .. } => match body {
-                LambdaBody::Expr(x) => self.expr(x),
-                LambdaBody::Block(b) => self.block(b),
-            },
+            Expr::Lambda { params, body, .. } => {
+                self.binders(params.iter_mut().collect());
+                match body {
+                    LambdaBody::Expr(x) => self.expr(x),
+                    LambdaBody::Block(b) => self.block(b),
+                }
+            }
         }
     }
 }
@@ -1979,27 +2002,19 @@ pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<NodeId, (&'a str
     v.1
 }
 
-struct Addrs<'o>(&'o mut Vec<usize>);
+struct Ids<'o>(&'o mut Vec<NodeId>);
 
-impl AstVisit<'_> for Addrs<'_> {
+impl AstVisit<'_> for Ids<'_> {
     const SCOPED: bool = false;
 
     fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
-        self.0.push(s as *const Stmt as usize);
+        self.0.push(s.id());
     }
 
     fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
-        self.0.push(e as *const Expr as usize);
+        self.0.push(e.id());
         true
     }
-}
-
-/// Appends every statement and expression address in `b`, in the walk order of
-/// [`body_scope_descent`]. Two structurally equal trees give lists of equal
-/// length, so the emitter zips a lambda shell's source with its clone to map a
-/// release planned on one to the other.
-pub fn node_addrs(b: &Block, out: &mut Vec<usize>) {
-    ast_block(b, &mut std::collections::HashSet::new(), &mut Addrs(out));
 }
 
 /// Returns whether `b` calls, reads, stores into or drops one of `names` where
@@ -2057,10 +2072,9 @@ pub fn exprs_one(s: &Stmt, f: &mut dyn FnMut(&Expr, &std::collections::HashSet<S
     ast_stmt(s, &mut std::collections::HashSet::new(), &mut Exprs(f));
 }
 
-/// [`node_addrs`] for one expression: a lambda shell's wrapper statement is
-/// synthesized and has no original, but the expression inside does.
-pub fn node_addrs_val(e: &Expr, out: &mut Vec<usize>) {
-    ast_expr(e, &std::collections::HashSet::new(), &mut Addrs(out));
+/// Appends the id of every statement and expression in `e`.
+pub fn node_ids(e: &Expr, out: &mut Vec<NodeId>) {
+    ast_expr(e, &std::collections::HashSet::new(), &mut Ids(out));
 }
 
 // Places and mentions: questions about the shape of the AST, not rules.

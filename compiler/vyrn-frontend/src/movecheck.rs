@@ -19,8 +19,8 @@ use crate::own::DropKind;
 /// the argument's node address.
 #[derive(Clone, Debug)]
 pub struct ArgTemp {
-    /// The argument expression's node address, in the AST the backend lowers.
-    pub id: usize,
+    /// The argument expression's node, in the AST the backend lowers.
+    pub id: NodeId,
     pub callee: String,
     /// The parameter index it fills.
     pub ix: usize,
