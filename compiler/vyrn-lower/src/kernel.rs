@@ -983,6 +983,36 @@ impl<'b> Kernel<'b> {
         }
     }
 
+    /// Refuses an argument that reads a global `gs` names. The callee reads
+    /// its arguments until it returns, so its store into the global ends the
+    /// borrow while it is still read, as it does for a `for` over the global.
+    fn state_args(
+        &self,
+        st: &State,
+        args: &[(Arg, Capability)],
+        gs: &[String],
+    ) -> Result<(), Refusal> {
+        let mut after = st.clone();
+        self.end_state(&mut after, gs);
+        let what = format!("read by {}", self.by);
+        for (a, _) in args.iter().filter(|(_, c)| *c != Capability::Consume) {
+            let n = match a {
+                Arg::Val(Val::Name(n)) => *n,
+                Arg::Place(p) => match root(p) {
+                    (Root::N(n), _) => n,
+                    (Root::G(g), _) if gs.contains(&g) => {
+                        let s = self.place_text(p);
+                        return self.read_after_write(self.here, &g, &s, &what, vec![]);
+                    }
+                    (Root::G(_), _) => continue,
+                },
+                Arg::Val(_) => continue,
+            };
+            self.alias_read(&after, n, &what)?;
+        }
+        Ok(())
+    }
+
     fn ends(&self, st: &mut State, s: &St) {
         for w in writes_of(s, &self.body.names, &self.body.name) {
             self.end(st, w);
@@ -995,20 +1025,32 @@ impl<'b> Kernel<'b> {
         let Some((l, place)) = &st.dead[n as usize] else {
             return Ok(());
         };
-        let (s, here) = (self.src(n), self.here);
+        let s = self.src(n);
         // The way out copies the place the alias reads, where it was bound.
         let src = self.src_text(st, n);
         let at = self.body.names[n as usize].line;
+        let fix = format!("`{src}.copy()` on line {at}, so `{s}` is a value of its own");
+        self.read_after_write(*l, place, s, what, vec![fix])
+    }
+
+    /// Refuses a read of `s` after a write on line `l` to the place it reads.
+    fn read_after_write(
+        &self,
+        l: usize,
+        place: &str,
+        s: &str,
+        what: &str,
+        fixes: Vec<String>,
+    ) -> Result<(), Refusal> {
+        let here = self.here;
         self.refuse_at(
-            *l,
+            l,
             menu(
                 format!(
                     "`{place}` is written here while `{s}` still reads out of it\nline {here}: \
                      ... and `{s}` is {what} again here"
                 ),
-                vec![format!(
-                    "`{src}.copy()` on line {at}, so `{s}` is a value of its own"
-                )],
+                fixes,
             ),
         )
     }
@@ -1889,6 +1931,7 @@ impl<'b> Kernel<'b> {
             Rhs::Read(p) => self.place(st, p),
             Rhs::Take(p) => self.take_place(st, p),
             Rhs::Call {
+                callee,
                 args,
                 write_back,
                 kind,
@@ -1918,6 +1961,10 @@ impl<'b> Kernel<'b> {
                             r?;
                         }
                     }
+                }
+                let gs = crate::effects::writes_state(&self.body.name, callee);
+                if !gs.is_empty() {
+                    self.state_args(st, args, &gs)?;
                 }
                 for (i, (a, cap)) in args.iter().enumerate() {
                     if let (Arg::Val(v), Capability::Consume) = (a, cap) {

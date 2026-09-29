@@ -172,7 +172,7 @@ The kernel knows no surface syntax. It judges core bodies.
   and generation-only. The floor asks it what an artifact reaches
   (`effects::reaches`), and the kernel asks it which globals a call may
   write (`effects::writes_state`), because such a call ends every borrow of
-  those globals.
+  those globals, its own arguments' too.
 - Typed (`typed.rs`). A value of a validated type is produced only by that
   type's constructor, a name already of that type, or a literal the checker
   proved. `typed::judge` walks each store into a validated place and judges

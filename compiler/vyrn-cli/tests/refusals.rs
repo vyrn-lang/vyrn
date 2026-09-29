@@ -1557,6 +1557,112 @@ fn a_call_that_writes_module_state_ends_its_borrows() {
     assert!(bad.is_empty(), "{}", bad.join("\n  "));
 }
 
+/// A callee reads its arguments until it returns, so an argument that reads a
+/// global the call stores into, by the effect judgment, is refused at the
+/// call, as a `for` over the global is. Accepted, the callee would read the
+/// array the store freed. The fix copies the argument, where there is one.
+#[test]
+fn an_argument_that_reads_a_global_the_call_writes_is_refused() {
+    let push = "fn fill() {\n  let mut i = 0\n  while i < 100 {\n    g.push(i)\n    \
+                i = i + 1\n  }\n}\n";
+    let cases = [
+        (
+            "read",
+            format!(
+                "let mut g: Array<Int64> = [1, 2, 3]\n{push}\
+                 fn f(xs: Array<Int64>) -> Int64 {{\n  fill()\n  return xs[0] + xs[2]\n}}\n\
+                 fn main() -> Int64 {{\n  print(f(g))\n  return 0\n}}\n"
+            ),
+            "`g` is written here while `g` still reads out of it",
+            Some(("f(g)", "f(g.copy())", "4")),
+        ),
+        (
+            "binding",
+            format!(
+                "let mut g: Array<Int64> = [1, 2, 3]\n{push}\
+                 fn f(xs: Array<Int64>) -> Int64 {{\n  fill()\n  return xs[0] + xs[2]\n}}\n\
+                 fn main() -> Int64 {{\n  let a = g\n  print(f(a))\n  return 0\n}}\n"
+            ),
+            "`g` is written here while `a` still reads out of it",
+            Some(("let a = g", "let a = g.copy()", "4")),
+        ),
+        (
+            "field",
+            "type R = { xs: Array<Int64>, n: Int64 }\n\
+             let mut g: R = R { xs: [1, 2, 3], n: 3 }\n\
+             fn grow() { g.xs = [4, 5, 6, 7] }\n\
+             fn f(xs: Array<Int64>) -> Int64 {\n  grow()\n  return xs[0]\n}\n\
+             fn main() -> Int64 {\n  print(f(g.xs))\n  return 0\n}\n"
+                .to_string(),
+            "`g` is written here while `g.xs` still reads out of it",
+            Some(("f(g.xs)", "f(g.xs.copy())", "1")),
+        ),
+        (
+            "modify",
+            format!(
+                "let mut g: Array<Int64> = [1, 2, 3]\n{push}\
+                 fn f(xs: modify Array<Int64>) {{\n  fill()\n  xs.push(9)\n}}\n\
+                 fn main() -> Int64 {{\n  f(g)\n  print(g.length)\n  return 0\n}}\n"
+            ),
+            "`g` is written here while `g` still reads out of it",
+            None,
+        ),
+        (
+            "binder",
+            "let mut pending: Map<String, fn(Int64)> = [:]\n\
+             fn deliver(key: String, cb: fn(Int64), res: Int64) {\n  \
+             pending.remove(key)\n  cb(res)\n}\n\
+             fn main() -> Int64 {\n  let name = \"a\" + \"b\"\n  \
+             pending[\"k\"] = x -> print(name + x.toString())\n  \
+             match pending[\"k\"] {\n    Some(cb) => deliver(\"k\", cb, 7),\n    \
+             None => {}\n  }\n  return 0\n}\n"
+                .to_string(),
+            "`pending` is written here while `cb` still reads out of it",
+            Some((
+                "deliver(\"k\", cb, 7)",
+                "deliver(\"k\", cb.copy(), 7)",
+                "ab7",
+            )),
+        ),
+    ];
+    let dir = common::scratch("state-arg");
+    let mut bad: Vec<String> = Vec::new();
+    for (name, src, want, fix) in cases {
+        let file = format!("{name}.vyrn");
+        std::fs::write(dir.join(&file), &src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &file, false);
+        if ok || !text.lines().next().is_some_and(|l| l.ends_with(want)) {
+            bad.push(format!("`check {file}` said {text}"));
+        }
+        let out = vyrn()
+            .current_dir(&dir)
+            .args(["run", &file])
+            .output()
+            .expect("vyrn");
+        let err = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() || !out.stdout.is_empty() || !err.contains(want) {
+            bad.push(format!("`run {file}` ran or said {err}"));
+        }
+        let Some((from, to, prints)) = fix else {
+            continue;
+        };
+        let copy = format!("{name}-copy.vyrn");
+        std::fs::write(dir.join(&copy), src.replace(from, to)).expect("write the program");
+        let out = vyrn()
+            .current_dir(&dir)
+            .args(["run", &copy])
+            .output()
+            .expect("vyrn run");
+        if String::from_utf8_lossy(&out.stdout).trim() != prints {
+            bad.push(format!(
+                "`run {copy}` printed {:?}",
+                String::from_utf8_lossy(&out.stdout)
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n  "));
+}
+
 /// A payload binder of a value whose type declares `release` may not be handed
 /// to a `consume` parameter, because the declared release reads every payload;
 /// the hand-off would free it twice or leak the node. Both ways out run clean

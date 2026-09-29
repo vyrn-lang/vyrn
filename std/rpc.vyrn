@@ -361,7 +361,7 @@ fn clientProcFns(f: FnInfo) -> String {
     out = out + "export extern fn vyrnRpcDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
     out = out + "    let key = id.toString()\n"
     out = out + "    match rpcPending" + cap + "[key] {\n"
-    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb, rpcUnify" + cap + "(status, body)),\n"
+    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb.copy(), rpcUnify" + cap + "(status, body)),\n"
     out = out + "        None => rpcIgnoreReply(),\n"
     out = out + "    }\n}\n"
     return out
@@ -987,7 +987,7 @@ fn rpcDirClientFns(f: FnInfo, qual: String, path: String) -> String {
     out = out + "export extern fn vyrnRpcDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
     out = out + "    let key = id.toString()\n"
     out = out + "    match rpcPending" + cap + "[key] {\n"
-    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb, rpcUnify" + cap + "(status, body)),\n"
+    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb.copy(), rpcUnify" + cap + "(status, body)),\n"
     out = out + "        None => rpcIgnoreReply(),\n"
     out = out + "    }\n}\n"
     return out
