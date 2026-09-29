@@ -413,15 +413,25 @@ pub fn gen_module_interface_lit(
     ))
 }
 
-/// The generation engine. Compiling a generator to wasm needs
-/// codegen, which only the driver has, so the driver installs the engine
-/// here. `None` means the engine declined the generator.
+/// Why a generation run failed.
+pub enum GenError {
+    /// The lowering's judgments refused the generator's own program; never
+    /// empty.
+    Refused(Vec<Diagnostic>),
+    /// The run failed: a trap, a decline, or no engine.
+    Failed(String),
+}
+
+/// The generation engine. It judges the generator's type-checked program
+/// with the lowering's judgments, then compiles and runs it. Both need the
+/// lowering and codegen, which only the driver has, so the driver installs the
+/// engine here. `None` means the engine declined the generator.
 pub type GenEngine = dyn Fn(
         &Program,
         &str,
         &[crate::consteval::ConstVal],
         &GenInputs<'_>,
-    ) -> Option<Result<GenOutput, String>>
+    ) -> Option<Result<GenOutput, GenError>>
     + Send
     + Sync;
 
@@ -460,23 +470,24 @@ pub fn set_gen_engine(engine: Box<GenEngine>) {
 
 /// Runs `fn_name` in `program` as a generation target under the
 /// sandbox in `inputs`, with the compile-time constants `args`. Returns the
-/// module source and the recorded reads, or a trap message.
+/// module source and the recorded reads, or why the run failed. `program`
+/// has passed [`crate::check_and_synthesize`]; the engine judges the rest.
 pub fn generate(
     program: &Program,
     fn_name: &str,
     args: &[crate::consteval::ConstVal],
     inputs: GenInputs<'_>,
-) -> Result<GenOutput, String> {
+) -> Result<GenOutput, GenError> {
     // Without an installed engine no `gen fn` can run, and the error says so.
     let Some(engine) = GEN_ENGINE.get() else {
-        return Err(format!(
+        return Err(GenError::Failed(format!(
             "cannot run the generator `{fn_name}`: no generation engine is installed"
-        ));
+        )));
     };
     engine(program, fn_name, args, &inputs).unwrap_or_else(|| {
-        Err(format!(
+        Err(GenError::Failed(format!(
             "cannot run the generator `{fn_name}`: the installed generation engine declined it"
-        ))
+        )))
     })
 }
 
@@ -704,34 +715,38 @@ fn run_derive(
     arg: Expr,
     fingerprint: String,
 ) -> Result<Derived, String> {
-    let diags = crate::check_generator(&mut gen_program);
-    if let Some(d) = diags.first() {
-        return Err(format!("generator `{g}` does not check: {}", d.render()));
+    // The first refusal alone, for the checker and the engine's judgments alike.
+    let refused = |ds: &[Diagnostic]| -> String {
+        ds.iter()
+            .take(1)
+            .map(|d| format!("generator `{g}` does not check: {}", d.render()))
+            .collect()
+    };
+    let (diags, _) = crate::check_and_synthesize(&mut gen_program);
+    if !diags.is_empty() {
+        return Err(refused(&diags));
     }
     let resolver = crate::loader::MapResolver(HashMap::new());
     let opts = crate::loader::LoadOptions::default();
-    let _ = crate::own::typed_refusals();
-    let src = crate::movecheck::comptime(|| {
-        generate(
-            &gen_program,
-            g,
-            &[],
-            GenInputs {
-                resolver: &resolver,
-                opts: &opts,
-                importer_dir: String::new(),
-                allowed: Vec::new(),
-                aliased: Vec::new(),
-                fuel: crate::loader::GEN_FUEL,
-                max_output: crate::loader::GEN_MAX_OUTPUT,
-                sources_fingerprint: Some(fingerprint),
-                type_arg: Some(arg),
-            },
-        )
-    })
-    .map_err(|trap| match crate::own::typed_refusals().first() {
-        Some(d) => format!("generator `{g}` does not check: {}", d.render()),
-        None => trap,
+    let src = generate(
+        &gen_program,
+        g,
+        &[],
+        GenInputs {
+            resolver: &resolver,
+            opts: &opts,
+            importer_dir: String::new(),
+            allowed: Vec::new(),
+            aliased: Vec::new(),
+            fuel: crate::loader::GEN_FUEL,
+            max_output: crate::loader::GEN_MAX_OUTPUT,
+            sources_fingerprint: Some(fingerprint),
+            type_arg: Some(arg),
+        },
+    )
+    .map_err(|e| match e {
+        GenError::Refused(ds) => refused(&ds),
+        GenError::Failed(trap) => trap,
     })?
     .source;
     let tokens = crate::lexer::lex(&src).map_err(|d| {

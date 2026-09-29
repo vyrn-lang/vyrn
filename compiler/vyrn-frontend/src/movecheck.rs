@@ -336,8 +336,8 @@ thread_local! {
     static COMPTIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Runs `f` with the program marked as a generator's own, which
-/// `vyrn_lower::refusals` does not judge with the kernel.
+/// Runs `f` with the program marked as a generator's own, whose lowered form
+/// the core does not lint (`vyrn_lower::core`).
 pub fn comptime<T>(f: impl FnOnce() -> T) -> T {
     let was = COMPTIME.with(|c| c.replace(true));
     let out = f();

@@ -380,8 +380,8 @@ pub mod obligation {
         doubled: bool,
     }
 
-    /// Every obligation `program` breaks, for the slot
-    /// `vyrn_frontend::own::install_must_use` fills. It builds its own
+    /// Every obligation `program` breaks, for [`crate::refusals`] and a
+    /// generator's engine ([`crate::gen_engine`]). It builds its own
     /// [`Declared`] because the caller's lives inside the move check's run.
     pub fn judge(program: &Program) -> Vec<Diagnostic> {
         check(program, &Declared::new(program))

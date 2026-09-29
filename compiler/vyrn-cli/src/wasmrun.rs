@@ -1233,7 +1233,6 @@ fn main() -> Int64 {
             vyrn_lower::load(PROBE, "probe.vyrn", &opts, &files)
         })
         .expect("the probe loads");
-        vyrn_lower::install();
         let diags = vyrn_lower::check_and_synthesize(&mut program);
         assert!(diags.is_empty(), "the probe checks: {diags:?}");
         vyrn_codegen::direct::compile(&program, &memo).expect("the probe compiles")

@@ -267,16 +267,14 @@ fn gen_request(module: &[u8], argv: &[String], atoms: &[vyrn_genwasm::Atom]) -> 
 /// Loads `src` as a one-file program through `load_warned`, the CLI's entry
 /// point, with a resolver that holds `std/` alone.
 ///
-/// Installs the lowering: without it `core::BODIES` stays empty and the
-/// emitter refuses every body. The install is idempotent.
+/// Installs the playground's generation engine; the first installation wins.
 fn load(
     src: &str,
 ) -> (
     Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>,
     Vec<Diagnostic>,
 ) {
-    vyrn_lower::install();
-    vyrn_frontend::gen::set_gen_engine(Box::new(|p, f, a, i| {
+    vyrn_frontend::gen::set_gen_engine(vyrn_lower::gen_engine(|p, f, a, i| {
         vyrn_genwasm::run_pure(p, f, a, i, run_generator)
     }));
     let opts = LoadOptions {

@@ -105,7 +105,6 @@ const STD: &[(&str, &str)] = &[
 /// trapping program traps before the print and returns `Err` with the trap's wording.
 fn run(source: &str) -> Result<i64, String> {
     vyrn_genwasm::install();
-    vyrn_lower::install();
     scratch();
     let wrapped = format!(
         "{}
@@ -178,7 +177,6 @@ fn main() -> Int64 {{
 /// the refusal name it.
 fn run_without(missing: &str, source: &str) -> Result<i64, String> {
     vyrn_genwasm::install();
-    vyrn_lower::install();
     scratch();
     let files: HashMap<String, String> = STD
         .iter()
