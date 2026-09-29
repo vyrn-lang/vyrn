@@ -30,6 +30,7 @@ use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
+use vyrn_lower::check::{Check, Guard};
 use vyrn_lower::core::{Arg, Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 
 use crate::layout::{self, Layout};
@@ -3115,12 +3116,13 @@ impl<'p> Fn_<'_, 'p> {
     /// `bytes(s)` and `bytes(s, start, end)`: a call to `std/runtime`'s `bytesOf`, which checks
     /// the range and copies. The one-argument form is the range `0..s.byteLength`.
     ///
-    /// `operand` writes argument `i` at the type asked for; `ranged` is the three-argument form.
+    /// `operand` writes argument `i` at the type asked for. `rule` is the three-argument form's
+    /// check row's; `None` is the one-argument form, whose range cannot trap.
     fn bytes_of(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        ranged: bool,
+        rule: Option<vyrn_frontend::trap::Rule>,
         operand: &mut dyn FnMut(
             &mut Self,
             &mut Module,
@@ -3138,7 +3140,7 @@ impl<'p> Fn_<'_, 'p> {
         let off = b.alloc(l.size, l.align);
         b.slot(off);
         operand(self, m, b, 0, &Type::Str)?;
-        if ranged {
+        if rule.is_some() {
             operand(self, m, b, 1, &Type::Int)?;
             operand(self, m, b, 2, &Type::Int)?;
         } else {
@@ -3149,9 +3151,8 @@ impl<'p> Fn_<'_, 'p> {
             str_len(b);
             b.ins(&Instruction::I64ExtendI32U);
         }
-        b.ins(&Instruction::I32Const(
-            vyrn_frontend::trap::Rule::StringIndex.index() as i32,
-        ));
+        let rule = rule.unwrap_or(vyrn_frontend::trap::Rule::StringIndex);
+        b.ins(&Instruction::I32Const(rule.index() as i32));
         b.ins(&Instruction::I32Const(self.cx.rt.trap_table as i32));
         b.ins(&Instruction::Call(self.cx.rt.bytes_of));
         b.slot(off);
@@ -3996,13 +3997,16 @@ impl<'p> Fn_<'_, 'p> {
     /// Emits a binary operator over two operands on the stack at `opty`. `&&`, `||`, `=~` and
     /// `String` or `Code` operators are absent: they interleave work between the operands.
     ///
-    /// `spell` is the left operand's type as written, for a gap's wording.
+    /// `spell` is the left operand's type as written, for a gap's wording. `rows` are the check
+    /// rows of an integer `/`, `%`, `<<` or `>>`: the divisor's or the amount's, then the
+    /// quotient's ([`Guard::NoOverflow`]).
     fn bin_ins(
         &mut self,
         b: &mut Frame,
         op: BinOp,
         opty: &Type,
         spell: &Type,
+        rows: [Option<Check>; 2],
         line: usize,
     ) -> Result<Type, String> {
         let lt = opty.clone();
@@ -4120,24 +4124,23 @@ impl<'p> Fn_<'_, 'p> {
         // Every trap case is checked here rather than left to wasm, so stderr carries our
         // wording, not wasmtime's. The operands go to scratch so the checks can read them.
         if matches!(op, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr) {
+            let [Some(first), over] = rows else {
+                return unsupported("a runtime check the core did not state", line);
+            };
             let c = if n.wide() { ValType::I64 } else { ValType::I32 };
             let (d, num) = (self.scratch(b, c, 0), self.scratch(b, c, 1));
-            let rule = match op {
-                BinOp::Div => vyrn_frontend::trap::Rule::DivZero,
-                BinOp::Rem => vyrn_frontend::trap::Rule::RemZero,
-                _ => vyrn_frontend::trap::Rule::ShiftRange,
-            };
+            let rule = first.rule;
             b.ins(&Instruction::LocalSet(d));
             b.ins(&Instruction::LocalSet(num));
             b.ins(&Instruction::LocalGet(d));
-            if matches!(op, BinOp::Shl | BinOp::Shr) {
+            if let Guard::Shift(_, bits) = first.guard {
                 // A shift by `>= bits` or a negative amount traps. One unsigned `>=` covers
                 // both, because a negative amount reads as a huge unsigned.
                 if n.wide() {
-                    b.ins(&Instruction::I64Const(i64::from(n.bits)));
+                    b.ins(&Instruction::I64Const(i64::from(bits)));
                     b.ins(&Instruction::I64GeU);
                 } else {
-                    b.ins(&Instruction::I32Const(i32::from(n.bits)));
+                    b.ins(&Instruction::I32Const(i32::from(bits)));
                     b.ins(&Instruction::I32GeU);
                 }
             } else if n.wide() {
@@ -4150,10 +4153,15 @@ impl<'p> Fn_<'_, 'p> {
             self.trap_row(b, rule, None);
             self.depth -= 1;
             b.ins(&Instruction::End);
-            if op == BinOp::Div && n.signed {
-                // The minimum over -1 has no representable answer. `%` is exempt: wasm's
-                // `rem_s` gives 0 there, as the interpreter does.
-                let min = i64::MIN >> (64 - n.bits);
+            // The minimum over -1 has no representable answer. `%` is exempt: wasm's `rem_s`
+            // gives 0 there, as the interpreter does.
+            if let Some(Check {
+                rule,
+                guard: Guard::NoOverflow(_, _, bits),
+                ..
+            }) = over
+            {
+                let min = i64::MIN >> (64 - bits);
                 b.ins(&Instruction::LocalGet(d));
                 if n.wide() {
                     b.ins(&Instruction::I64Const(-1)).ins(&Instruction::I64Eq);
@@ -4168,7 +4176,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32And);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.trap_row(b, vyrn_frontend::trap::Rule::DivOverflow, None);
+                self.trap_row(b, rule, None);
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
@@ -5993,12 +6001,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Traps unless `idx` is in `0..len`; the compare is unsigned, so it catches a negative.
-    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, string: bool) {
-        let rule = if string {
-            vyrn_frontend::trap::Rule::StringIndex
-        } else {
-            vyrn_frontend::trap::Rule::ArrayIndex
-        };
+    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, rule: vyrn_frontend::trap::Rule) {
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64GeU);
@@ -6012,7 +6015,14 @@ impl<'p> Fn_<'_, 'p> {
     /// Traps unless all of `idx..idx+span-1` are in `0..len`, with one branch per vector.
     /// `span` is 4 for the four-lane shapes and 2 for `@f64x2`. It needs two compares:
     /// `idx + span` wraps for a huge `idx`, but `len - span` cannot, because `len >= 0`.
-    fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, span: i64) {
+    fn bounds_check_span(
+        &mut self,
+        b: &mut Frame,
+        w: &Walk,
+        idx: u32,
+        span: i64,
+        rule: vyrn_frontend::trap::Rule,
+    ) {
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
@@ -6035,7 +6045,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64LtS);
         b.ins(&Instruction::Select);
         b.ins(&Instruction::LocalSet(at));
-        self.trap_row(b, vyrn_frontend::trap::Rule::ArrayIndex, Some(at));
+        self.trap_row(b, rule, Some(at));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -6478,6 +6488,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         slot: u32,
         aty: &Type,
+        rule: vyrn_frontend::trap::Rule,
         index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
@@ -6493,7 +6504,7 @@ impl<'p> Fn_<'_, 'p> {
         index(self, m, b)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
-        self.bounds_check(b, &w, idx, false);
+        self.bounds_check(b, &w, idx, rule);
         let elem = w.elem.clone();
         // Take the removed element before the last one overwrites it; they can be one address.
         let r = self.cx.repr(&elem, line)?;
@@ -8370,6 +8381,7 @@ impl<'p> Fn_<'_, 'p> {
             Option<&Type>,
         ) -> Result<Type, String>,
         lane_at: &dyn Fn(usize, i64) -> Option<u8>,
+        span: Option<Check>,
         line: usize,
     ) -> Result<Type, String> {
         match name {
@@ -8487,19 +8499,27 @@ impl<'p> Fn_<'_, 'p> {
             | "@f64x2Store"
                 if argc == 2 + usize::from(name.ends_with("Store")) =>
             {
-                let (vec, span) = if name.starts_with("@i32x4") {
-                    (Type::I32x4, 4)
+                let Some(Check {
+                    rule,
+                    guard: Guard::Span(_, _, span),
+                    ..
+                }) = span
+                else {
+                    return unsupported("a runtime check the core did not state", line);
+                };
+                let vec = if name.starts_with("@i32x4") {
+                    Type::I32x4
                 } else if name.starts_with("@f64x2") {
-                    (Type::F64x2, 2)
+                    Type::F64x2
                 } else {
-                    (Type::F32x4, 4)
+                    Type::F32x4
                 };
                 let aty = operand(self, m, b, 0, None)?;
                 let w = self.walk(b, &aty, line)?;
                 operand(self, m, b, 1, Some(&Type::Int))?;
                 let idx = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(idx));
-                self.bounds_check_span(b, &w, idx, span);
+                self.bounds_check_span(b, &w, idx, span, rule);
                 if name.ends_with("Load") {
                     self.elem_addr(b, &w, idx);
                     // `align: 0` is a log2 exponent: one byte. Nothing guarantees 16-byte
@@ -9612,6 +9632,9 @@ struct Walked {
     /// The place a stream's pull wrote its element to, by the pull's name,
     /// until the read at that name binds it ([`Spec::Pulls`]).
     pulled: Vec<Option<(Place, Type)>>,
+    /// The check rows walked so far, in row order, and whether a construct ran each
+    /// ([`core_check`]).
+    checks: Vec<(Check, bool)>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -9806,6 +9829,7 @@ impl<'p> Fn_<'_, 'p> {
             bufs: vec![None; core.names.len()],
             over: Vec::new(),
             pulled: vec![None; core.names.len()],
+            checks: Vec::new(),
         };
     }
 
@@ -9822,8 +9846,17 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         let mut w = std::mem::take(&mut self.core_w);
         let r = self.core_stmts(m, b, body, &mut w, &body.stmts);
+        let idle = w
+            .checks
+            .iter()
+            .find(|(_, ran)| !ran)
+            .map(|(c, _)| c.site.line);
         self.core_w = w;
-        r
+        r?;
+        match idle {
+            Some(line) => unsupported("a check row no construct ran", line),
+            None => Ok(()),
+        }
     }
 
     /// Lift each lambda literal a call row in `rows` targets, at its slot's type, so the screen
@@ -9894,6 +9927,10 @@ impl<'p> Fn_<'_, 'p> {
         let mut due = Vec::new();
         let (mut last, mut mark): (Option<usize>, u32) = (None, b.mark());
         for (i, s) in ss.iter().enumerate() {
+            if let St::Check(c) = s {
+                w.checks.push((c.clone(), false));
+                continue;
+            }
             if let Some(j) = last {
                 core_row_done(b, w, &ss[j], mark);
                 self.core_give_back(b, w, &mut due, &ends[j]);
@@ -10291,7 +10328,7 @@ impl<'p> Fn_<'_, 'p> {
                     // stays on the operand stack. Every other name takes a local, in row order.
                     if info.binding.is_none()
                         && w.reads[*n as usize] == 1
-                        && self.core_first_read(body, ss.get(i + 1)) == Some(*n)
+                        && self.core_first_read(body, next_row(ss, i)) == Some(*n)
                     {
                         w.held = Some(*n);
                         continue;
@@ -10560,7 +10597,7 @@ impl<'p> Fn_<'_, 'p> {
                 St::Row { name, holes, .. } => {
                     self.core_rows.push((*name, holes.clone()));
                     if !matches!(
-                        ss.get(i + 1),
+                        next_row(ss, i),
                         Some(St::Row { .. } | St::Return { value: Some(_), .. })
                     ) {
                         self.core_releases(m, b, body)?;
@@ -10577,6 +10614,8 @@ impl<'p> Fn_<'_, 'p> {
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
+                // Pushed to `w.checks` at the head of the loop.
+                St::Check(_) => {}
                 // An expression for its effect. What it leaves on the stack
                 // is dropped, or the enclosing block's type will not check.
                 St::Do { rhs, line, .. } if self.core_checks_made(body, rhs).is_some() => {
@@ -10974,6 +11013,13 @@ impl<'p> Fn_<'_, 'p> {
             }
             // A SIMD builtin's lane index is the literal the row carries.
             Some(Spec::Lanes) => {
+                let span = match args {
+                    [(Val::Name(x), _), (i, _), ..] => core_check(w, line, |g| {
+                        matches!(g, Guard::Span(vyrn_lower::core::Place::Name(p), v, _) if p == x && v == i)
+                    })
+                    .ok(),
+                    _ => None,
+                };
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
                         let Some((v, _)) = args.get(i) else {
@@ -10987,7 +11033,7 @@ impl<'p> Fn_<'_, 'p> {
                         Ok(t)
                     };
                 let lane_at = |i: usize, lanes: i64| core_lane(args, i, lanes);
-                return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, line);
+                return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, span, line);
             }
             // A generator host import: `@codeSplice` takes its tag from the type the row put
             // on its operand.
@@ -11037,6 +11083,17 @@ impl<'p> Fn_<'_, 'p> {
             // Built in a slot of the call's own, which [`agg_landed`] copies into the
             // destination.
             Some(Spec::Builds(_)) => {
+                let range = match (callee, args) {
+                    ("bytes", [(s, _), (from, _), (to, _)]) => Some(
+                        core_check(
+                            w,
+                            line,
+                            |g| matches!(g, Guard::Range(x, y, z) if (x, y, z) == (s, from, to)),
+                        )?
+                        .rule,
+                    ),
+                    _ => None,
+                };
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
                         .get(i)
@@ -11045,7 +11102,7 @@ impl<'p> Fn_<'_, 'p> {
                         None => unsupported(&format!("`{callee}` with too few operands"), line),
                     };
                 return match (callee, args) {
-                    ("bytes", _) => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    ("bytes", _) => self.bytes_of(m, b, range, &mut operand, line),
                     ("stringFromBytes", _) => self.string_from_bytes(m, b, &mut operand, line),
                     ("@toArray", [(v, _)]) => {
                         let aty = self.core_ty(body, v, &Type::Int);
@@ -11326,10 +11383,11 @@ impl<'p> Fn_<'_, 'p> {
         match (callee, rest) {
             ("@pop", []) => self.pop_at(b, slot, aty, line),
             ("@swapRemove", [(i, _)]) => {
+                let rule = core_check(w, line, |g| matches!(g, Guard::Index(_, v) if v == i))?.rule;
                 let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
                     s.core_val(m, b, body, w, i, &Type::Int, line)
                 };
-                self.swap_remove_at(m, b, slot, aty, &mut index, line)
+                self.swap_remove_at(m, b, slot, aty, rule, &mut index, line)
             }
             ("@remove", [(k, _)]) => {
                 let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
@@ -11407,10 +11465,16 @@ impl<'p> Fn_<'_, 'p> {
                         self.walk(b, &bty, line)?
                     }
                 };
+                let rule = core_check(
+                    w,
+                    line,
+                    |g| matches!(g, Guard::Index(p, v) if p == &**base && v == i),
+                )?
+                .rule;
                 self.core_val(m, b, body, w, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
-                self.bounds_check(b, &walk, ix, walk.byte);
+                self.bounds_check(b, &walk, ix, rule);
                 self.elem_addr(b, &walk, ix);
                 let byte = Type::IntN {
                     bits: 8,
@@ -12713,7 +12777,27 @@ impl<'p> Fn_<'_, 'p> {
                     self.coerce(m, b, None, &lt, &opty, line)?;
                 }
                 self.core_val(m, b, body, w, r, &opty, line)?;
-                self.bin_ins(b, *o, &opty, &lt, line)
+                let mut rows = [None, None];
+                if matches!(o, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr)
+                    && Num::of(&opty).is_some()
+                {
+                    let Some(k) = w.checks.iter().rposition(|(c, _)| {
+                        matches!(&c.guard, Guard::NonZero(d) | Guard::Shift(d, _) if d == r)
+                    }) else {
+                        return unsupported("a runtime check the core did not state", line);
+                    };
+                    // A signed quotient's row follows its divisor's.
+                    let quotient = |c: &Check| matches!(&c.guard, Guard::NoOverflow(x, d, _) if x == l && d == r);
+                    for (j, row) in [k, k + 1].into_iter().zip(&mut rows) {
+                        if let Some((c, ran)) =
+                            w.checks.get_mut(j).filter(|(c, _)| j == k || quotient(c))
+                        {
+                            *ran = true;
+                            *row = Some(c.clone());
+                        }
+                    }
+                }
+                self.bin_ins(b, *o, &opty, &lt, rows, line)
             }
             _ => unsupported("an operator of this arity", line),
         }
@@ -13134,7 +13218,7 @@ impl<'p> Fn_<'_, 'p> {
                 let ty = &body.names[*n as usize].ty;
                 self.core_framed(ty) || matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
             }
-            St::Trap => true,
+            St::Trap | St::Check(_) => true,
         })
     }
 
@@ -13401,7 +13485,8 @@ impl<'p> Fn_<'_, 'p> {
             && reads[*n as usize] == 1
             && self.core_as_is(&info.ty, &self.ret_ty)
             && matches!(ss[i + 1..].iter().find(|s| {
-                    !matches!(s, St::Row { .. }) && !matches!(s, St::Drop(d, ..) if d != n)
+                    !matches!(s, St::Row { .. } | St::Check(_))
+                        && !matches!(s, St::Drop(d, ..) if d != n)
                 }),
                 Some(St::Return { value: Some(Val::Name(r)), .. }) if r == n)
     }
@@ -13694,7 +13779,7 @@ fn core_moves_on(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bo
         else {
             return;
         };
-        found = match ss.get(i + 1) {
+        found = match next_row(ss, i) {
             Some(St::Store {
                 place,
                 value: Val::Name(v),
@@ -14053,9 +14138,30 @@ fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
 }
 
 /// How many releases lead `ss`: the argument temporaries the builder releases
-/// between a rebuild and its store ([`Fn_::core_rebuilt`]).
+/// between a rebuild and its store ([`Fn_::core_rebuilt`]). A check row emits
+/// nothing where it stands, so it counts with them.
 fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
-    ss.take_while(|s| matches!(s, St::Drop(..))).count()
+    ss.take_while(|s| matches!(s, St::Drop(..) | St::Check(_)))
+        .count()
+}
+
+/// The row after `ss[i]` that emits where it stands: a check row runs inside
+/// the row it guards.
+fn next_row(ss: &[St], i: usize) -> Option<&St> {
+    ss[i + 1..].iter().find(|s| !matches!(s, St::Check(_)))
+}
+
+/// The latest check row walked whose guard `hit` accepts: the row a check the
+/// emitter is about to run stands for. A row stands before the row it guards,
+/// and a store that puts a taken element back follows the take's row.
+fn core_check(w: &mut Walked, line: usize, hit: impl Fn(&Guard) -> bool) -> Result<Check, String> {
+    match w.checks.iter_mut().rev().find(|(c, _)| hit(&c.guard)) {
+        Some((c, ran)) => {
+            *ran = true;
+            Ok(c.clone())
+        }
+        None => unsupported("a runtime check the core did not state", line),
+    }
 }
 
 fn core_scalar(t: &Type) -> bool {

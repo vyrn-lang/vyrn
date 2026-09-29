@@ -194,7 +194,8 @@ impl<'a> Walk<'a, '_> {
             | St::Break { .. }
             | St::Continue { .. }
             | St::Return { .. }
-            | St::Trap => {}
+            | St::Trap
+            | St::Check(_) => {}
         }
     }
 

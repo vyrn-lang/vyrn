@@ -675,6 +675,10 @@ pub enum St {
     },
     /// A refusal or a `panic`: the path ends here and owes nothing.
     Trap,
+    /// A runtime check of the row after it ([`crate::check`]). Only
+    /// [`crate::check::state`] writes one, into the bodies an emitter reads;
+    /// the kernel never judges one.
+    Check(crate::check::Check),
 }
 
 #[derive(Debug, Clone)]
@@ -886,6 +890,27 @@ impl Body {
         }
     }
 
+    fn check(&self, c: &crate::check::Check) -> String {
+        use crate::check::Guard as G;
+        let what = match &c.guard {
+            G::Index(p, i) => format!("{}[{}]", self.place(p), self.val(i)),
+            G::Span(p, i, n) => format!("{}[{} +{n}]", self.place(p), self.val(i)),
+            G::Range(s, a, b) => format!("{}[{}..{}]", self.val(s), self.val(a), self.val(b)),
+            G::NonZero(d) => format!("{} != 0", self.val(d)),
+            G::NoOverflow(n, d, bits) => {
+                format!("({}, {}) != (min{bits}, -1)", self.val(n), self.val(d))
+            }
+            G::Shift(k, bits) => format!("{} in 0..{bits}", self.val(k)),
+        };
+        let at = c.site;
+        format!(
+            "check {} {what}  (line {} #{})",
+            c.rule.census(),
+            at.line,
+            at.ordinal
+        )
+    }
+
     fn rhs(&self, r: &Rhs) -> String {
         match r {
             Rhs::Val(v) => self.val(v),
@@ -1016,6 +1041,7 @@ impl Body {
                 }
                 St::Do { rhs: r, .. } => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
                 St::Trap => out.push_str(&format!("{pad}trap\n")),
+                St::Check(c) => out.push_str(&format!("{pad}{}\n", self.check(c))),
             }
         }
     }
@@ -1435,7 +1461,8 @@ fn cut(ss: &mut Vec<St>) {
             | St::Return { .. }
             | St::Break { .. }
             | St::Continue { .. }
-            | St::Trap => {}
+            | St::Trap
+            | St::Check(_) => {}
         }
     }
     if let Some(i) = ss.iter().position(traps) {
@@ -1472,7 +1499,8 @@ fn returns(ss: &[St]) -> bool {
         | St::Row { .. }
         | St::Loop { .. }
         | St::Break { .. }
-        | St::Continue { .. } => false,
+        | St::Continue { .. }
+        | St::Check(_) => false,
     })
 }
 
@@ -1501,7 +1529,7 @@ fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
                 gaps_of(body, els, out);
             }
             St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(body, b, out),
-            St::Break { .. } | St::Continue { .. } | St::Trap => {}
+            St::Break { .. } | St::Continue { .. } | St::Trap | St::Check(_) => {}
             St::Return { value, .. } => {
                 if let Some(v) = value {
                     gaps_val(v, out);
@@ -8340,7 +8368,7 @@ pub fn names_in(s: &St, out: &mut Vec<Name>) {
             }
         }
         St::Return { value: Some(v), .. } => names_in_val(v, out),
-        St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap => {}
+        St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap | St::Check(_) => {}
     }
 }
 
@@ -8643,15 +8671,37 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
     }
 }
 
+/// The declared type of the module-state name `g`, or the checker's type for
+/// its initializer.
+fn global_ty(program: &Program, g: &str) -> Option<Type> {
+    let d = program.globals.iter().find(|d| d.name == g)?;
+    d.ty.clone()
+        .or_else(|| node_ty(&d.init as *const Expr as usize))
+}
+
+/// `body` with its check rows: the form an emitter reads.
+pub fn checked(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> Body {
+    let global = |g: &str| global_ty(program, g);
+    let mut out = body.clone();
+    crate::check::state(
+        &mut out,
+        &crate::check::Types {
+            decls,
+            global: &global,
+        },
+    );
+    out
+}
+
 /// Every frame's answers, added to the table.
-fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
+fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
     // Filled at the same site as the fold, so a body the fold does not see is
     // one no emitter may walk either.
     BODIES.with(|b| {
         b.borrow_mut()
             .entry(body.name.clone())
             .and_modify(|had| *had = None)
-            .or_insert_with(|| Some(body.clone()));
+            .or_insert_with(|| Some(checked(program, proto.types(), body)));
     });
     fold_facts(body, proto, &body.stmts, out);
     out.loop_buffer_only
@@ -8740,11 +8790,7 @@ fn typed(
     as_written: bool,
 ) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
-    let global_ty = |g: &str| {
-        let d = program.globals.iter().find(|d| d.name == g)?;
-        d.ty.clone()
-            .or_else(|| node_ty(&d.init as *const Expr as usize))
-    };
+    let global_ty = |g: &str| global_ty(program, g);
     let projected =
         |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
     let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
@@ -9213,7 +9259,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     if folds {
         if let Ok(top) = build_module_state(program, own, &lowered.globals) {
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
         for (i, inst) in lowered.instances.iter().enumerate() {
@@ -9229,7 +9275,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
         // The same for `test` and `bench` bodies, whose nodes an emitter looks up
@@ -9252,7 +9298,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
     }
@@ -9287,7 +9333,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();

@@ -7,6 +7,7 @@
 //! because the checker types every expression against its destination.
 
 pub mod append;
+pub mod check;
 pub mod core;
 pub mod effects;
 mod fixpoint;
@@ -255,7 +256,7 @@ pub fn render(program: &Program, source: &str) -> String {
     for inst in lowered.root() {
         out.push('\n');
         match core::build(program, inst, &own) {
-            Ok(body) => out.push_str(&body.render()),
+            Ok(body) => out.push_str(&core::checked(program, own.proto.types(), &body).render()),
             Err(g) => out.push_str(&format!(
                 "; {}: not lowered at line {}: {} {}\n",
                 inst.spelling(),

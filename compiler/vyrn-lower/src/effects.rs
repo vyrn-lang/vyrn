@@ -293,7 +293,7 @@ impl Walk<'_> {
             St::Do { rhs, line, .. } => {
                 self.rhs(rhs, *line);
             }
-            St::Trap => self.own = self.own.with(Effect::Trap),
+            St::Trap | St::Check(_) => self.own = self.own.with(Effect::Trap),
             St::If { then, els, .. } => {
                 self.stmts(then);
                 self.stmts(els);

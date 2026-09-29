@@ -134,8 +134,11 @@ its access site (`project::site`), an optional projection under `if let`,
 `core::build` lowers each instance into the named core. Every intermediate
 value has a name, every access is a place, and control flow stays
 structured. The statements (`core::St`) are `Let`, `Store`, `Drop`, `Row`,
-`If`, `Loop`, `Block`, `Break`, `Continue`, `Return`, `Switch`, `Do` and
-`Trap`. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
+`If`, `Loop`, `Block`, `Break`, `Continue`, `Return`, `Switch`, `Do`,
+`Trap` and `Check`. A `Check` row (`vyrn_lower::check`) states one runtime
+check of the row after it: its trap rule, what it compares, and its line and
+ordinal. `core::checked` adds them to the bodies the emitter reads, and the
+emitter runs a check only from its row. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left

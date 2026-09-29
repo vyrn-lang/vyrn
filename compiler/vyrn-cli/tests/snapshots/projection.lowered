@@ -25,6 +25,7 @@ fn main()
     let w! = make Window {data, start}(@t1!, lit 2)
     let @t2 = read w!.start
     let @t3 = prim add(@t2, lit 0)
+    check array-index w!.data[@t3]  (line 60 #0)
     let @borrow = read w!.data[@t3]
     let @t4! = builtin @str(read @borrow)
     let @t5! = prim add(lit "window: ", @t4!)
@@ -33,6 +34,7 @@ fn main()
     drop @t5!
     let @t7 = read w!.start
     let @t8 = prim add(@t7, lit 1)
+    check array-index w!.data[@t8]  (line 60 #1)
     let @borrow = read w!.data[@t8]
     let @t9! = builtin @str(read @borrow)
     let @t10! = prim add(@t6!, @t9!)
@@ -42,6 +44,7 @@ fn main()
     drop @t10!
     let @t12 = read w!.start
     let @t13 = prim add(@t12, lit 3)
+    check array-index w!.data[@t13]  (line 60 #2)
     let @borrow = read w!.data[@t13]
     let @t14! = builtin @str(read @borrow)
     let @t15! = prim add(@t11!, @t14!)
@@ -53,6 +56,7 @@ fn main()
     let s! = make Strided {data, stride}(@t16!, lit 3)
     let @t17 = read s!.stride
     let @b3.k = prim mul(lit 0, @t17)
+    check array-index s!.data[@b3.k]  (line 63 #0)
     let @borrow = read s!.data[@b3.k]
     let @t18! = builtin @str(read @borrow)
     let @t19! = prim add(lit "strided: ", @t18!)
@@ -61,6 +65,7 @@ fn main()
     drop @t19!
     let @t21 = read s!.stride
     let @b4.k = prim mul(lit 1, @t21)
+    check array-index s!.data[@b4.k]  (line 63 #1)
     let @borrow = read s!.data[@b4.k]
     let @t22! = builtin @str(read @borrow)
     let @t23! = prim add(@t20!, @t22!)
@@ -70,6 +75,7 @@ fn main()
     drop @t23!
     let @t25 = read s!.stride
     let @b5.k = prim mul(lit 2, @t25)
+    check array-index s!.data[@b5.k]  (line 63 #2)
     let @borrow = read s!.data[@b5.k]
     let @t26! = builtin @str(read @borrow)
     let @t27! = prim add(@t24!, @t26!)
@@ -88,6 +94,7 @@ fn main()
       let @t31 = prim sub(@b6.n, lit 1)
       @t29 = @t31  (Nothing)
     let @b6.j = @t29
+    check array-index c!.data[@b6.j]  (line 66 #0)
     let @borrow = read c!.data[@b6.j]
     let @t32! = builtin @str(read @borrow)
     let @t33! = prim add(lit "clamped: ", @t32!)
@@ -103,6 +110,7 @@ fn main()
       let @t37 = prim sub(@b7.n, lit 1)
       @t35 = @t37  (Nothing)
     let @b7.j = @t35
+    check array-index c!.data[@b7.j]  (line 66 #1)
     let @borrow = read c!.data[@b7.j]
     let @t38! = builtin @str(read @borrow)
     let @t39! = prim add(@t34!, @t38!)
@@ -119,6 +127,7 @@ fn main()
       let @t43 = prim sub(@b8.n, lit 1)
       @t41 = @t43  (Nothing)
     let @b8.j = @t41
+    check array-index c!.data[@b8.j]  (line 66 #2)
     let @borrow = read c!.data[@b8.j]
     let @t44! = builtin @str(read @borrow)
     let @t45! = prim add(@t40!, @t44!)
@@ -127,13 +136,16 @@ fn main()
     do builtin print(read @t45!)
     drop @t45!
     let a! = fn build(read lit 4)
+    check array-index a![lit 1]  (line 71 #0)
     a![lit 1] = lit 99  (Nothing)
+    check array-index a![lit 0]  (line 72 #0)
     let @borrow = read a![lit 0]
     let @t46! = builtin @str(read @borrow)
     let @t47! = prim add(lit "array: ", @t46!)
     drop @t46!
     let @t48! = prim add(@t47!, lit " ")
     drop @t47!
+    check array-index a![lit 1]  (line 72 #1)
     let @borrow = read a![lit 1]
     let @t49! = builtin @str(read @borrow)
     let @t50! = prim add(@t48!, @t49!)
@@ -141,6 +153,7 @@ fn main()
     drop @t49!
     let @t51! = prim add(@t50!, lit " ")
     drop @t50!
+    check array-index a![lit 3]  (line 72 #2)
     let @borrow = read a![lit 3]
     let @t52! = builtin @str(read @borrow)
     let @t53! = prim add(@t51!, @t52!)
