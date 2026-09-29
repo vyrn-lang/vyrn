@@ -1101,10 +1101,15 @@ impl<'a> Cx<'a> {
         kept
     }
 
-    /// Whether a narrow scalar load of `ty` sign-extends: [`load_of`]'s second argument, read off
-    /// the same type as the shape.
-    fn signed(&self, ty: &Type) -> bool {
-        Num::of(&self.resolve(ty)).is_some_and(|n| n.signed)
+    /// The load of a scalar `ty` at `off` bytes. It sign-extends as `ty` does, because `llt_of`
+    /// prints `i8` for both `Int8` and `UInt8`.
+    fn load(&self, ty: &Type, off: u32) -> Instruction<'static> {
+        let signed = Num::of(&self.resolve(ty)).is_some_and(|n| n.signed);
+        load_of(&self.ll(ty), off, signed)
+    }
+
+    fn store(&self, ty: &Type) -> Instruction<'static> {
+        store_of(&self.ll(ty))
     }
 
     /// Returns the signature of a body discovered during emission, reserving its function index
@@ -1848,14 +1853,13 @@ fn lower_body(
     // An aggregate parameter arrives as the caller's address; the prologue copies it into a
     // slot of its own. A `modify` parameter is copy-in/copy-out: copied in here and back out at
     // the epilogue, so the caller sees no write before the call returns.
-    let mut copy_out: Vec<(u32, Place, Repr, String)> = Vec::new();
+    let mut copy_out: Vec<(u32, Place, Repr, Instruction<'static>)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
         let ty = p.ty.clone();
         let r = cx.repr(&p.ty, f.line)?;
         let place = if p.capability == Capability::Modify {
-            let ll = cx.ll(&p.ty);
             let place = match &r {
                 Repr::Agg(l) => {
                     let off = b.alloc(l.size, l.align);
@@ -1871,13 +1875,13 @@ fn lower_body(
                 Repr::Scalar(v) => {
                     let own = b.local(*v);
                     b.ins(&Instruction::LocalGet(local));
-                    b.ins(&load_of(&ll, 0, cx.signed(&p.ty)));
+                    b.ins(&cx.load(&p.ty, 0));
                     b.ins(&Instruction::LocalSet(own));
                     Place::Local(own)
                 }
                 Repr::Unit => return unsupported("a `modify` parameter of Unit", f.line),
             };
-            copy_out.push((local, place, r.clone(), ll));
+            copy_out.push((local, place, r.clone(), cx.store(&p.ty)));
             place
         } else {
             match &r {
@@ -1984,12 +1988,12 @@ fn lower_body(
 
     // The `modify` copy-out, once, at the one exit. Stack-neutral, so a scalar result on the
     // stack survives it.
-    for (arg, place, r, ll) in &copy_out {
+    for (arg, place, r, store) in &copy_out {
         match (place, r) {
             (Place::Local(own), _) => {
                 b.ins(&Instruction::LocalGet(*arg));
                 b.ins(&Instruction::LocalGet(*own));
-                b.ins(&store_of(ll));
+                b.ins(store);
             }
             (Place::Slot(off), Repr::Agg(l)) => {
                 b.ins(&Instruction::LocalGet(*arg));
@@ -2344,7 +2348,7 @@ fn lower_dispatcher(
                     Repr::Scalar(vt) => {
                         let loc = b.local(vt);
                         b.slot(at_off);
-                        b.ins(&load_of(&cx.ll(ct), 0, cx.signed(ct)));
+                        b.ins(&cx.load(ct, 0));
                         b.ins(&Instruction::LocalSet(loc));
                         Place::Local(loc)
                     }
@@ -2546,7 +2550,7 @@ impl<'p> Fn_<'_, 'p> {
             Place::Static(at) => {
                 b.ins(&Instruction::I32Const(at as i32));
                 if let Repr::Scalar(_) = self.cx.repr(t, line)? {
-                    b.ins(&load_of(&self.cx.ll(t), 0, self.cx.signed(t)));
+                    b.ins(&self.cx.load(t, 0));
                 }
             }
         }
@@ -3013,7 +3017,7 @@ impl<'p> Fn_<'_, 'p> {
             Repr::Scalar(v) => {
                 let t = b.local(v);
                 b.ins(&Instruction::LocalGet(a))
-                    .ins(&load_of(&self.cx.ll(ty), 0, false))
+                    .ins(&self.cx.load(ty, 0))
                     .ins(&Instruction::LocalSet(t));
                 Place::Local(t)
             }
@@ -3577,12 +3581,8 @@ impl<'p> Fn_<'_, 'p> {
                         Repr::Scalar(_) => {
                             b.slot(off + dl.fields[i]);
                             b.ins(&Instruction::LocalGet(src));
-                            b.ins(&load_of(
-                                &self.cx.ll(&f.ty),
-                                sl.fields[j],
-                                self.cx.signed(&f.ty),
-                            ));
-                            b.ins(&store_of(&self.cx.ll(&f.ty)));
+                            b.ins(&self.cx.load(&f.ty, sl.fields[j]));
+                            b.ins(&self.cx.store(&f.ty));
                         }
                         Repr::Agg(fl) => {
                             b.slot(off + dl.fields[i]);
@@ -4821,14 +4821,13 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Scalar(_) = self.cx.repr(ty, line)? else {
             return unsupported("a `modify` argument in a local", line);
         };
-        let ll = self.cx.ll(ty);
         let l2 = self.cx.layout(ty, line)?;
         let off = b.alloc(l2.size, l2.align);
         b.slot(off);
         b.ins(&Instruction::LocalGet(l));
-        b.ins(&store_of(&ll));
+        b.ins(&self.cx.store(ty));
         b.slot(off);
-        Ok((off, l, ll, self.cx.signed(ty)))
+        Ok((off, l, self.cx.load(ty, 0)))
     }
 
     /// The program's own body for the lambda literal at `at`, or `None` if the program does
@@ -5105,7 +5104,7 @@ impl<'p> Fn_<'_, 'p> {
                         if dup {
                             self.copy_stack(m, b, ty, line)?;
                         }
-                        b.ins(&store_of(&self.cx.ll(ty)));
+                        b.ins(&self.cx.store(ty));
                     }
                     Repr::Agg(fl) => {
                         b.ins(&Instruction::I32Const(fl.size as i32));
@@ -5569,8 +5568,7 @@ impl<'p> Fn_<'_, 'p> {
             });
             return Ok(());
         }
-        let ll = self.cx.ll(t);
-        let signed = self.cx.signed(t);
+        let load = self.cx.load(t, 0);
         let push = |b: &mut Frame| -> Result<(), String> {
             match place {
                 Place::Local(l) => b.ins(&Instruction::LocalGet(l)),
@@ -5578,7 +5576,7 @@ impl<'p> Fn_<'_, 'p> {
                     place
                         .addr(b, 0)
                         .ok_or_else(|| gap("a payload with no address", line))?;
-                    b.ins(&load_of(&ll, 0, signed))
+                    b.ins(&load)
                 }
             };
             Ok(())
@@ -5750,7 +5748,7 @@ impl<'p> Fn_<'_, 'p> {
         match (place, &r) {
             (Place::Local(l), _) => {
                 b.ins(&Instruction::LocalGet(addr));
-                b.ins(&load_of(&self.cx.ll(elem), 0, self.cx.signed(elem)));
+                b.ins(&self.cx.load(elem, 0));
                 b.ins(&Instruction::LocalSet(l));
             }
             (Place::Slot(off), Repr::Agg(el)) => {
@@ -6061,7 +6059,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         match self.cx.repr(&w.elem, line)? {
             Repr::Scalar(_) => {
-                b.ins(&load_of(&self.cx.ll(&w.elem), 0, self.cx.signed(&w.elem)));
+                b.ins(&self.cx.load(&w.elem, 0));
             }
             Repr::Agg(_) => {}
             Repr::Unit => return unsupported("an array of Unit", line),
@@ -6088,7 +6086,7 @@ impl<'p> Fn_<'_, 'p> {
                 Repr::Scalar(_) => {
                     dest.addr(b, at);
                     self.part(m, b, elems, i, elem, line)?;
-                    b.ins(&store_of(&self.cx.ll(elem)));
+                    b.ins(&self.cx.store(elem));
                 }
                 Repr::Agg(_) => self.agg_part(m, b, elems, i, dest.at(at), stride, elem, line)?,
                 Repr::Unit => return unsupported("an array of Unit", line),
@@ -6117,7 +6115,7 @@ impl<'p> Fn_<'_, 'p> {
                 Repr::Scalar(_) => {
                     dest.addr(b, l.fields[i]);
                     self.part(m, b, parts, order[i], &f.ty, line)?;
-                    b.ins(&store_of(&self.cx.ll(&f.ty)));
+                    b.ins(&self.cx.store(&f.ty));
                 }
                 Repr::Agg(fl) => {
                     let at = dest.at(l.fields[i]);
@@ -6400,7 +6398,7 @@ impl<'p> Fn_<'_, 'p> {
         operand(self, m, b, elem)?;
         match &r {
             Repr::Scalar(_) => {
-                b.ins(&store_of(&self.cx.ll(elem)));
+                b.ins(&self.cx.store(elem));
             }
             Repr::Agg(_) => {
                 b.ins(&Instruction::I32Const(stride));
@@ -7090,7 +7088,6 @@ impl<'p> Fn_<'_, 'p> {
     /// the heap, leaving its address as an `i64` word.
     fn box_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
         let malloc = self.cx.rt.malloc;
-        let ll = self.cx.ll(t);
         match self.cx.repr(t, line)? {
             Repr::Scalar(v) => {
                 let size = self.cx.layout(t, line)?.size;
@@ -7104,7 +7101,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(val));
-                b.ins(&store_of(&ll));
+                b.ins(&self.cx.store(t));
                 b.ins(&Instruction::LocalGet(p));
             }
             Repr::Agg(l) => {
@@ -7405,7 +7402,6 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Place, String> {
         let off = sl.fields[self.cx.payload_slot(ptys, i)];
         let kind = self.word2(t)?;
-        let ll = self.cx.ll(t);
         Ok(match kind {
             Word::Direct => {
                 let l = b.local(ValType::I64);
@@ -7457,7 +7453,7 @@ impl<'p> Fn_<'_, 'p> {
                     Repr::Scalar(v) => {
                         let l = b.local(v);
                         b.ins(&Instruction::LocalGet(p));
-                        b.ins(&load_of(&ll, 0, self.cx.signed(t)));
+                        b.ins(&self.cx.load(t, 0));
                         b.ins(&Instruction::LocalSet(l));
                         Place::Local(l)
                     }
@@ -7876,7 +7872,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(v));
         match &r {
             Repr::Scalar(_) => {
-                b.ins(&store_of(&self.cx.ll(val)));
+                b.ins(&self.cx.store(val));
             }
             Repr::Agg(vl) => {
                 b.ins(&Instruction::I32Const(vl.size as i32));
@@ -8148,7 +8144,7 @@ impl<'p> Fn_<'_, 'p> {
             _ => {
                 b.slot(off + ol.fields[1]);
                 self.map_val_addr(b, hdr, &l, idx, esz);
-                b.ins(&load_of(&self.cx.ll(val), 0, self.cx.signed(val)));
+                b.ins(&self.cx.load(val, 0));
                 self.encode_word2(b, val, line)?;
                 b.ins(&Instruction::I64Store(word8()));
             }
@@ -9076,15 +9072,14 @@ fn store_of(ll: &str) -> Instruction<'static> {
     }
 }
 
-/// A scalar spilled for a `modify` call: its slot, its local, its LLVM type
-/// and whether it loads signed ([`Fn_::spill`]).
-type Spill = (u32, u32, String, bool);
+/// A scalar spilled for a `modify` call: its slot, its local and its load ([`Fn_::spill`]).
+type Spill = (u32, u32, Instruction<'static>);
 
 /// Write each spilled scalar back into its local after the call.
 fn reload(b: &mut Frame, spilled: &[Spill]) {
-    for (off, l, ll, signed) in spilled {
+    for (off, l, load) in spilled {
         b.slot(*off);
-        b.ins(&load_of(ll, 0, *signed));
+        b.ins(load);
         b.ins(&Instruction::LocalSet(*l));
     }
 }
@@ -10418,7 +10413,7 @@ impl<'p> Fn_<'_, 'p> {
                     match self.cx.repr(&ty, *line)? {
                         Repr::Agg(l) => agg_landed(b, l.size, false),
                         _ => {
-                            b.ins(&store_of(&self.cx.ll(&ty)));
+                            b.ins(&self.cx.store(&ty));
                         }
                     }
                     self.free_snap(m, b, snap, *line)?;
@@ -11311,11 +11306,7 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
             return unsupported("a read of a place this walk does not load", line);
         };
-        b.ins(&load_of(
-            &self.cx.ll(&ty),
-            off.unwrap_or(0),
-            self.cx.signed(&ty),
-        ));
+        b.ins(&self.cx.load(&ty, off.unwrap_or(0)));
         Ok(ty)
     }
 
