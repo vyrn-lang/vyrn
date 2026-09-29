@@ -77,16 +77,7 @@ impl Wasi {
     /// Returns the index and signature of the call `name` spells, in the table's snake_case or
     /// in `std/mem`'s lowerCamelCase.
     fn find(&self, name: &str) -> Option<(u32, &'static [ValType], &'static [ValType])> {
-        let snake: String = name
-            .chars()
-            .flat_map(|c| {
-                [
-                    c.is_ascii_uppercase().then_some('_'),
-                    Some(c.to_ascii_lowercase()),
-                ]
-            })
-            .flatten()
-            .collect();
+        let snake = crate::wasi_snake(name);
         let at = crate::WASI_IMPORTS.iter().position(|(n, ..)| *n == snake)?;
         let (_, params, results) = crate::WASI_IMPORTS[at];
         Some((self.0[at], params, results))
