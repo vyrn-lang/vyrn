@@ -397,9 +397,9 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                              // A String is NUL-terminated natively, so it cannot
                                              // hold a NUL. Refuse one at both entrances: a raw NUL
                                              // byte and `\u{0}` (there is no `\0` escape).
-            let nul = |line: usize| {
+            let nul = || {
                 Diagnostic::error(
-                    line,
+                    start_line,
                     start_col,
                     "lex",
                     "string literal contains a NUL byte; a Vyrn String is NUL-terminated and \
@@ -413,7 +413,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
             loop {
                 if i >= chars.len() {
                     return Err(Diagnostic::error(
-                        line,
+                        start_line,
                         start_col,
                         "lex",
                         "unterminated string literal".to_string(),
@@ -421,7 +421,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                 }
                 let ch = chars[i];
                 if ch == '\0' {
-                    return Err(nul(line));
+                    return Err(nul());
                 }
                 if ch == '"' {
                     if triple {
@@ -455,7 +455,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                 if ch == '\\' {
                     if i + 1 >= chars.len() {
                         return Err(Diagnostic::error(
-                            line,
+                            start_line,
                             start_col,
                             "lex",
                             "unterminated escape in string".to_string(),
@@ -491,7 +491,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                     }
                                     if i >= chars.len() {
                                         return Err(Diagnostic::error(
-                                            line,
+                                            start_line,
                                             start_col,
                                             "lex",
                                             "unterminated string in interpolation".to_string(),
@@ -507,7 +507,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                     }
                                     if i >= chars.len() || chars[i] == '\n' {
                                         return Err(Diagnostic::error(
-                                            line,
+                                            start_line,
                                             start_col,
                                             "lex",
                                             "unterminated character literal in interpolation"
@@ -539,7 +539,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                         }
                         if depth != 0 {
                             return Err(Diagnostic::error(
-                                line,
+                                start_line,
                                 start_col,
                                 "lex",
                                 "unterminated `\\{` interpolation".to_string(),
@@ -548,7 +548,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                         let hole_src: String = chars[hole..i].iter().collect();
                         if hole_src.trim().is_empty() {
                             return Err(Diagnostic::error(
-                                line,
+                                start_line,
                                 start_col,
                                 "lex",
                                 "empty `\\{ }` interpolation".to_string(),
@@ -564,10 +564,10 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                     }
                     // `\u{XXXX}`: a Unicode scalar by hex code point.
                     if chars[i + 1] == 'u' {
-                        let (ch, next) = parse_unicode_escape(&chars, i, line, start_col)?;
+                        let (ch, next) = parse_unicode_escape(&chars, i, start_line, start_col)?;
                         // `\u{0}` is the same NUL spelled another way.
                         if ch == '\0' {
-                            return Err(nul(line));
+                            return Err(nul());
                         }
                         cur.push(ch);
                         i = next;
@@ -581,7 +581,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                         '"' => '"',
                         other => {
                             return Err(Diagnostic::error(
-                                line,
+                                start_line,
                                 start_col,
                                 "lex",
                                 format!("unknown escape `\\{other}`"),
@@ -861,6 +861,23 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A string literal's error sits where the literal starts, as its token does:
+    /// the line it reports holds the column it reports.
+    #[test]
+    fn a_string_error_points_at_the_opening_quote() {
+        for (src, why) in [
+            ("  \"\n", "unterminated"),
+            ("  \"a\nb\\q\"", "unknown escape"),
+            ("  \"a\nb\\u{0}\"", "NUL"),
+            ("  \"a\nb\\{\"", "unterminated interpolation"),
+        ] {
+            let d = scan(src)
+                .err()
+                .unwrap_or_else(|| panic!("{why}: {src:?} lexes"));
+            assert_eq!((d.line, d.col), (1, 3), "{why}: {src:?}");
+        }
+    }
 
     #[test]
     fn lexes_operators_and_keywords() {

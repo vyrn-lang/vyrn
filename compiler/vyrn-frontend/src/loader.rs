@@ -3354,16 +3354,19 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 candidates.extend(ps);
             }
             let in_scope = |decl: &str| own.contains(decl) || visible.contains(decl);
+            // A declaration this module owns or imports resolves the use,
+            // whatever a variant or method elsewhere is called: a user
+            // variant `Match` does not hide `std/regex`'s own `Match`.
+            if in_scope(name) {
+                return;
+            }
             // A surface builtin this module has not declared or
             // imported means the builtin, whatever another module declared.
-            if crate::ast::is_surface_builtin(name) && !in_scope(name) {
+            if crate::ast::is_surface_builtin(name) {
                 return;
             }
             if candidates.is_empty() {
                 // A plain reference to a top-level decl.
-                if in_scope(name) {
-                    return;
-                }
                 if let Some((def_module, _)) = owner.get(name) {
                     if def_module != &m.key {
                         if gen_importer.as_deref() == Some(def_module.as_str()) {

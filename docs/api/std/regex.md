@@ -15,6 +15,10 @@ backreferences or lookaround: `\1` is the byte `1`.
 Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 backtracking engine answers `a`.
 
+Offsets are bytes, and every match starts and ends on a character boundary:
+`.` and a negated class match one whole UTF-8 character. A class that lists
+a non-ASCII character is a set of its bytes.
+
 ## Regex
 
 ```vyrn

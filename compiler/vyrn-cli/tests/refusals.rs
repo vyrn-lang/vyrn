@@ -809,8 +809,13 @@ fn the_checkers_literal_unit_tests_are_still_refused() {
         ),
         (
             "a negated slot past the minimum",
-            "integer literal 2147483649 does not fit Int32",
+            "integer literal -2147483649 does not fit Int32",
             "fn main() -> Int64 { let a: Int32 = -2147483649 return 0 }",
+        ),
+        (
+            "a negated literal in an unsigned slot",
+            "integer literal -1 does not fit UInt8",
+            "fn main() -> Int64 { let b: UInt8 = -1 return 0 }",
         ),
         (
             "a literal pattern",
@@ -3430,4 +3435,134 @@ fn a_name_yielded_out_of_a_join_arm_is_moved() {
     ] {
         assert!(text.contains(needle), "wanted `{needle}`, got {text}");
     }
+}
+
+/// A drop runs the declared `release` of its type, so a release that stores
+/// into module state writes it at the drop. Accepted, the loop would read the
+/// freed array.
+#[test]
+fn a_drop_whose_release_writes_the_iterated_global_is_refused() {
+    let src = "let mut gs: Array<Int64> = [1, 2, 3, 4]
+type Ow = { d: Array<Int64>, tag: Int64 }
+impl Owned for Ow {
+    fn release(consume self) {
+        gs = [70, 71, 72, 73]
+        let d = consume self.d
+        drop d
+    }
+}
+fn main() -> Int64 {
+    for x in gs {
+        let o = Ow { d: [x], tag: x }
+        drop o
+    }
+    return 0
+}
+";
+    let dir = common::scratch("release-state");
+    std::fs::write(dir.join("release.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "release.vyrn", false);
+    let want = "release.vyrn:13:0: `gs` is written here while `gs` still reads out of it";
+    assert!(
+        !ok && text.lines().next().is_some_and(|l| l.ends_with(want)),
+        "`check` said {text}"
+    );
+}
+
+/// A declared `release` frees `self`'s parts, so taking one part twice frees it
+/// twice. Accepted, the free audit reported a double free.
+#[test]
+fn a_release_that_takes_a_part_twice_is_refused() {
+    let src = "type Bag = { slots: Array<Int64>, n: Int64 }
+impl Owned for Bag {
+    fn release(consume self) {
+        let a = consume self.slots
+        drop a
+        let b = consume self.slots
+        drop b
+    }
+}
+fn main() -> Int64 {
+    let g = Bag { slots: [1, 2, 3], n: 3 }
+    drop g
+    return 0
+}
+";
+    let dir = common::scratch("release-twice");
+    std::fs::write(dir.join("release.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "release.vyrn", false);
+    let want = "release.vyrn:4:0: `self.slots` was moved here into `consume`";
+    assert!(
+        !ok && text.lines().next().is_some_and(|l| l.ends_with(want)),
+        "`check` said {text}"
+    );
+}
+
+/// A record's `where` rule is checked where the record is built, so no store
+/// reaches inside one: not through `atSet`, an element, or a `modify`
+/// parameter. Each was accepted and broke the rule.
+#[test]
+fn a_store_inside_a_record_with_a_where_rule_is_refused() {
+    let head = "type H = { xs: Array<Int64> } where xs[0] == 1\n";
+    let cases = [
+        (
+            "impl Index for H {
+    fn tryAt(read self, i: Int64) -> read Option<Int64> {
+        if i < 0 || i >= self.xs.length { return None }
+        return Some(self.xs[i])
+    }
+    fn at(read self, i: Int64) -> read Int64 { return self.xs[i] }
+    fn atSet(modify self, i: Int64) -> modify Int64 { return self.xs[i] }
+}
+fn main() -> Int64 { let mut h = H { xs: [1, 2] }; h[0] = 42; return 0 }
+",
+            10,
+        ),
+        (
+            "fn main() -> Int64 { let mut h = H { xs: [1, 2] }; h.xs[0] = 42; return 0 }\n",
+            2,
+        ),
+        (
+            "fn poke(h: modify H) { h.xs[0] = 42 }
+fn main() -> Int64 { let mut h = H { xs: [1, 2] }; poke(h); return 0 }
+",
+            2,
+        ),
+    ];
+    for (i, (body, line)) in cases.iter().enumerate() {
+        let dir = common::scratch(&format!("where-store-{i}"));
+        std::fs::write(dir.join("store.vyrn"), format!("{head}{body}")).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), "store.vyrn", false);
+        let want = format!(
+            "store.vyrn:{line}:0: cannot mutate a field of `H` in place (its `where` invariant \
+             could be broken mid-update); rebuild it: `h = H {{ .. }}`"
+        );
+        assert!(
+            !ok && text.lines().next().is_some_and(|l| l.ends_with(&want)),
+            "case {i}: `check` said {text}"
+        );
+    }
+}
+
+/// Type and variant names share one namespace across the linked program. A
+/// variant that takes a name std exports is refused at the variant, naming the
+/// std module; the loader used to blame std's own uses of its own type.
+#[test]
+fn a_variant_named_like_a_std_type_is_refused_at_the_variant() {
+    let src = "import { compile } from \"std/regex\"
+type Coll = | Match | Miss
+fn main() -> Int64 {
+    match compile(\"a+\") { Ok(re) => print(\"compiled\"), Err(e) => print(e) }
+    return 0
+}
+";
+    let dir = common::scratch("variant-std-type");
+    std::fs::write(dir.join("coll.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "coll.vyrn", false);
+    let want = "coll.vyrn:2:0: enum variant `Match` clashes with the type `Match` declared in \
+                `std/regex`; rename the variant";
+    assert!(
+        !ok && text.lines().next().is_some_and(|l| l.ends_with(want)),
+        "`check` said {text}"
+    );
 }

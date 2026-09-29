@@ -564,10 +564,26 @@ fn check_accum_inner(
                     out.push(cerr!(t.line, "enum variant `{}` is defined twice", v.name));
                     continue;
                 }
-                if types.contains_key(&v.name) {
+                if let Some(ty) = types.get(&v.name) {
+                    // Type and variant names share one namespace across the
+                    // linked program, so the other declaration may be in std.
+                    let from = ty
+                        .module
+                        .as_deref()
+                        .map(|m| {
+                            let std_root = crate::manifest::std_root();
+                            let spec = crate::loader::import_specifier("", m, std_root.as_deref());
+                            let shown = match spec.starts_with("std/") {
+                                true => spec,
+                                false => m.rsplit('/').next().unwrap_or(m).to_string(),
+                            };
+                            format!(" declared in `{shown}`")
+                        })
+                        .unwrap_or_default();
                     out.push(cerr!(
                         t.line,
-                        "enum variant `{}` clashes with a type name",
+                        "enum variant `{}` clashes with the type `{}`{from}; rename the variant",
+                        v.name,
                         v.name
                     ));
                     continue;
@@ -912,6 +928,42 @@ fn check_accum_inner(
                     imp.protocol
                 ));
             }
+        } else if let Some((_, sigs)) = crate::types::KNOWN_PROTOCOLS
+            .iter()
+            .find(|(p, _)| *p == imp.protocol)
+        {
+            for f in imp.methods.iter().chain(imp.places.iter()) {
+                let Some((_, recv, caps)) = sigs.iter().find(|(m, ..)| *m == f.name) else {
+                    continue;
+                };
+                let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                let got_caps: Vec<Capability> =
+                    f.params.iter().skip(1).map(|p| p.capability).collect();
+                let got_recv = f.params.first().map_or(Capability::Read, |p| p.capability);
+                if got_recv != *recv || got_caps != *caps {
+                    out.push(cerr_at!(
+                        f.line,
+                        f.name_span(),
+                        "`{}` does not match protocol `{}` — it declares `{}`, this \
+                             provides `{}`",
+                        render_impl_head(imp),
+                        imp.protocol,
+                        render_method_sig(&f.name, *recv, &got, caps, &f.ret),
+                        render_method_sig(&f.name, got_recv, &got, &got_caps, &f.ret)
+                    ));
+                }
+            }
+        } else {
+            out.push(cerr_at!(
+                imp.line,
+                imp.head_span(),
+                "`impl {} for {}`: there is no protocol named `{}` — declare it with \
+                 `protocol {} {{ .. }}` or import it",
+                imp.protocol,
+                imp.ty,
+                imp.protocol,
+                imp.protocol
+            ));
         }
 
         // A named target must be an enum or a record. A validated scalar erases
@@ -3723,24 +3775,15 @@ impl<'a> Checker<'a> {
                 self.judged()
             }
             Expr::Unary { op, expr, .. } => {
-                // `-9223372036854775808`: the lexer wraps the magnitude to
-                // i64::MIN, and negation wraps it back.
-                if *op == UnOp::Neg && matches!(**expr, Expr::Int(i64::MIN)) {
-                    return Ok(Type::Int);
-                }
-                // A signed sized type's minimum written negated
-                // (`let x: Int32 = -2147483648`): the magnitude alone does not
-                // fit, the negation does.
-                if *op == UnOp::Neg {
-                    if let Expr::Int(n) = &**expr {
-                        if let Some(Type::IntN { bits, signed: true }) =
-                            expected.map(|t| self.base(t))
-                        {
-                            if bits < 64 && *n == 1i64 << (bits - 1) {
-                                return Ok(Type::IntN { bits, signed: true });
-                            }
-                        }
-                    }
+                // A negated integer literal is one literal: `-128` fits `Int8`
+                // although `128` does not, and `-1` fits no unsigned type. It
+                // takes the expected sized type, and the typed judgment checks
+                // its value whole (`checker::misfit`).
+                if *op == UnOp::Neg && matches!(**expr, Expr::Int(_)) {
+                    return Ok(match expected.map(|t| self.base(t)) {
+                        Some(t @ Type::IntN { .. }) => t,
+                        _ => Type::Int,
+                    });
                 }
                 // Every unary operator preserves its type, so the expectation
                 // flows through: `let a: Float32 = -0.5`.
@@ -8289,6 +8332,46 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.contains("does not match protocol"), "{e}");
+    }
+
+    /// A protocol the compiler knows by name is held to its capabilities too:
+    /// `print(c)` reads `c`, so a `modify self` show would write through a read.
+    #[test]
+    fn a_known_protocols_impl_takes_the_declared_capabilities() {
+        for (imp, want) in [
+            (
+                "impl Show for C { fn show(modify self) -> String { return \"c\" } }",
+                "it declares `fn show(self) -> String`",
+            ),
+            (
+                "impl Copy for C { fn copy(consume self) -> C { return self } }",
+                "it declares `fn copy(self) -> C`",
+            ),
+            (
+                "impl Owned for C { fn release(self) {} }",
+                "it declares `fn release(consume self) -> Unit`",
+            ),
+        ] {
+            let e = check_src(&format!(
+                "type C = {{ n: Int64 }}\n{imp}\nfn main() -> Int64 {{ return 0 }}"
+            ))
+            .unwrap_err();
+            assert!(
+                e.contains("does not match protocol") && e.contains(want),
+                "{imp}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_impl_of_an_undeclared_protocol_is_refused() {
+        let e = check_src(
+            "type C = { n: Int64 }\n\
+             impl NoSuchProto for C { fn foo(self) -> Int64 { return 1 } }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("no protocol named `NoSuchProto`"), "{e}");
     }
 
     #[test]

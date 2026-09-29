@@ -80,13 +80,14 @@ export fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T> {
 }
 
 /// Whether `h` still names a live element of `s`. False for a handle from
-/// another container, an out-of-range slot, and a slot whose generation has
-/// moved on.
+/// another container, an out-of-range slot, a slot whose generation has moved
+/// on, and a free slot: `remove` sets the generation the next `insert` will
+/// issue, so a handle built by hand can match a free slot's generation.
 export fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool {
     if h.owner != s.owner || h.slot < 0 || h.slot >= s.gens.length {
         return false
     }
-    return s.gens[h.slot] == h.gen
+    return s.gens[h.slot] == h.gen && s.denseAt[h.slot] >= 0
 }
 
 /// The element `h` names, copied out, or `None` when `h` is not alive.
@@ -145,26 +146,20 @@ impl<T> Index for Slots<T> {
     /// A live handle's element as a place, a dead one as `None`; nothing is
     /// copied.
     fn tryAt(read self, h: Handle<T>) -> read Option<T> {
-        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
-        || self.gens[h.slot] != h.gen
-        {
+        if !alive(self, h) {
             return None
         }
         return Some(self.vals[h.slot])
     }
 
     fn at(read self, h: Handle<T>) -> read T {
-        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
-        || self.gens[h.slot] != h.gen
-        {
+        if !alive(self, h) {
             panic("slots: handle is not alive")
         }
         return self.vals[h.slot]
     }
     fn atSet(modify self, h: Handle<T>) -> modify T {
-        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
-        || self.gens[h.slot] != h.gen
-        {
+        if !alive(self, h) {
             panic("slots: handle is not alive")
         }
         return self.vals[h.slot]
@@ -213,4 +208,13 @@ impl<T> Copy for Slots<T> {
             owner: takeIdentity(),
         }
     }
+}
+
+test "a handle built by hand to a freed slot is not alive" {
+    let mut s: Slots<Int64> = newSlots()
+    let h = insert(s, 7)
+    assert(remove(s, h))
+    let f: Handle<Int64> = Handle { slot: h.slot, gen: h.gen + 1, owner: h.owner }
+    assert(!alive(s, f))
+    assert(!remove(s, f))
 }

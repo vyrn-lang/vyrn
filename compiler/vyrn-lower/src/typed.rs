@@ -772,18 +772,32 @@ pub mod obligation {
     }
 }
 
-/// Every store into a name the reader wrote without `mut`, as the sentence
-/// `vyrn check` gives and its line, one per source statement. A store is a
-/// `St::Store`, a place passed to a `modify` argument, or a removal's
-/// receiver. `global_mutable` answers for module state. `projected` answers
-/// whether a projection owns a type's element places, so a store through such
-/// a name is a store into its element whatever field `atSet` yields. A minted
-/// temporary (`@t`) is not the reader's. `seen` holds the statements already
-/// refused, so the instances of one generic function refuse a statement once.
+/// The facts [`stores`] reads about the program's declarations.
+pub struct StoreRules<'a> {
+    /// Whether module state `g` was declared `mut`.
+    pub global_mutable: &'a dyn Fn(&str) -> bool,
+    /// Module state `g`'s declared type.
+    pub global_ty: &'a dyn Fn(&str) -> Option<Type>,
+    /// Whether a projection owns a type's element places, so a store through
+    /// such a name is a store into its element whatever field `atSet` yields.
+    pub projected: &'a dyn Fn(&Type) -> bool,
+    /// The record type with a `where` rule that a path of places, taken from a
+    /// value of the given type, passes through; `None` when it passes through
+    /// none. The last place is the one stored into, so it does not count.
+    pub ruled_within: &'a dyn Fn(&Type, &[&Place]) -> Option<String>,
+}
+
+/// Every store the reader may not write, as the sentence `vyrn check` gives
+/// and its line, one per source statement. A store is a `St::Store`, a place
+/// passed to a `modify` argument, or a removal's receiver. A store inside a
+/// value whose record type has a `where` rule is refused, since the rule is
+/// checked where the value is built; so is a store into a name the reader
+/// wrote without `mut`. A minted temporary (`@t`) is not the reader's. `seen`
+/// holds the statements already refused, so the instances of one generic
+/// function refuse a statement once.
 pub fn stores(
     body: &Body,
-    global_mutable: &dyn Fn(&str) -> bool,
-    projected: &dyn Fn(&Type) -> bool,
+    rules: &StoreRules,
     seen: &mut std::collections::HashSet<usize>,
 ) -> Vec<(usize, String)> {
     let mut out: Vec<(usize, String)> = Vec::new();
@@ -791,23 +805,46 @@ pub fn stores(
         each_store(&f.stmts, &f.names, &mut |place, line, site, removal| {
             // The first step out of the root decides the words.
             let mut step = None;
+            let mut path = Vec::new();
             let mut at = place;
             while let Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) = at {
                 step = Some(at);
+                path.push(at);
                 at = b;
             }
+            path.reverse();
+            let (source, ty) = match at {
+                Place::Name(n) => {
+                    let info = &f.names[*n as usize];
+                    (&info.source, Some(info.ty.clone()))
+                }
+                Place::Global(g) => (g, (rules.global_ty)(g)),
+                _ => return,
+            };
+            let ruled = ty.as_ref().and_then(|t| (rules.ruled_within)(t, &path));
             let (name, elem) = match at {
+                _ if ruled.is_some() => (source, false),
                 Place::Name(n) => {
                     let info = &f.names[*n as usize];
                     if info.mutable || info.source.starts_with('@') {
                         return;
                     }
-                    (&info.source, projected(&info.ty))
+                    (source, (rules.projected)(&info.ty))
                 }
-                Place::Global(g) if !global_mutable(g) => (g, false),
+                Place::Global(g) if !(rules.global_mutable)(g) => (source, false),
                 _ => return,
             };
             if site.is_some_and(|k| !seen.insert(k)) {
+                return;
+            }
+            if let Some(n) = ruled {
+                out.push((
+                    line,
+                    format!(
+                        "cannot mutate a field of `{n}` in place (its `where` invariant could be \
+                         broken mid-update); rebuild it: `{name} = {n} {{ .. }}`"
+                    ),
+                ));
                 return;
             }
             let what = match (step, removal) {

@@ -134,6 +134,10 @@ pub struct NameInfo {
     /// every temporary. Only the memory report reads it, so the report and
     /// the ownership rule are one statement.
     pub not_owned: Option<NotOwned>,
+    /// The declared `release` bodies a release of this name may call
+    /// ([`vyrn_frontend::declared::Owned::declared_releases`]). The effect
+    /// judgment and the kernel read a `St::Drop` of the name as calls to them.
+    pub runs: Vec<String>,
 }
 
 /// A loop that reads its container through a borrow ([`NameInfo::walked`]).
@@ -1898,6 +1902,14 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
         };
         match e {
             Expr::Int(n) => sized(e).and_then(|(b, s)| misfit("integer", literal_value(*n), b, s)),
+            Expr::Unary {
+                op: vyrn_frontend::ast::UnOp::Neg,
+                expr,
+                ..
+            } if matches!(**expr, Expr::Int(_)) => {
+                let v = int_literal_value(e)?;
+                sized(e).and_then(|(b, s)| misfit("integer", v, b, s))
+            }
             Expr::Byte(v) => sized(e).and_then(|(b, s)| misfit("byte", i128::from(*v), b, s)),
             Expr::Binary {
                 op: BinOp::Match,
@@ -2449,8 +2461,8 @@ fn build_seeded(
     let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
     b.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
     // A declared release (`impl Owned for T { fn release(consume self) }`)
-    // frees `self`'s parts, and nothing releases `self` again, so the kernel
-    // does not own it there.
+    // frees `self`'s parts, and nothing releases `self` again: the kernel owns
+    // `self` there, so a part taken twice is refused, but owes no release of it.
     let is_release = b.proto.is_release_fn(&f.name);
     for p in &f.params {
         let pty = vyrn_frontend::types::substitute(&p.ty, &subst);
@@ -2458,6 +2470,7 @@ fn build_seeded(
         let n = b.name(&p.name, pty, owned, f.line);
         if is_release {
             b.released = Some(n);
+            b.body.names[n as usize].borrow = false;
         }
         // A `read` or `modify` parameter is never taken; the
         // kernel needs the capability to word the refusal. A must-use
@@ -2801,6 +2814,7 @@ impl<'a> Builder<'a> {
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
         let heap = self.proto.owns_heap(&ty);
         let linear = self.proto.linear_kind(&ty).is_some();
+        let runs = self.proto.declared_releases(&ty);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
@@ -2828,6 +2842,7 @@ impl<'a> Builder<'a> {
             mutable: false,
             closure_reads: None,
             not_owned: None,
+            runs,
         });
         (self.body.names.len() - 1) as Name
     }
@@ -4971,9 +4986,9 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The rules of a store into `name.field`, whose root has type `bty`: a
-    /// validated record is rebuilt, not mutated; the root has the field; the
-    /// field takes the value. A root without the field is a refused gap.
+    /// The rules of a store into `name.field`, whose root has type `bty`: the
+    /// root has the field, and the field takes the value. A root without the
+    /// field is a refused gap. A validated record's field is `typed::stores`'s.
     fn field_store(
         &mut self,
         bty: &Type,
@@ -4986,10 +5001,10 @@ impl<'a> Builder<'a> {
         let fields = vyrn_frontend::types::record_fields(bty, decls);
         let refusal = match bty {
             Type::Err => return Ok(()),
-            Type::Named(n) if decls.get(n).is_some_and(|d| d.predicate.is_some()) => format!(
-                "cannot mutate a field of `{n}` in place (its `where` invariant could be broken mid-update); rebuild it: `{name} = {n} {{ .. }}`"
-            ),
-            _ => match fields.as_ref().map(|fs| fs.iter().find(|f| f.name == field)) {
+            _ => match fields
+                .as_ref()
+                .map(|fs| fs.iter().find(|f| f.name == field))
+            {
                 None => format!("`{name}` is not a record, so it has no field `{field}`"),
                 Some(None) => format!("record `{name}` has no field `{field}`"),
                 Some(Some(f)) => {
@@ -8892,13 +8907,31 @@ thread_local! {
 /// refused. The judgment memo serves only the kernel's refusals, so a refused
 /// body is built and judged again next time. `as_written` is false for an
 /// instance of a generic function, whose types are the instance's.
-fn typed(program: &Program, top: &Body, file: &Option<String>, as_written: bool) -> bool {
+fn typed(
+    program: &Program,
+    own: &Ownership,
+    top: &Body,
+    file: &Option<String>,
+    as_written: bool,
+) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
+    let global_ty = |g: &str| {
+        let d = program.globals.iter().find(|d| d.name == g)?;
+        d.ty.clone()
+            .or_else(|| node_ty(&d.init as *const Expr as usize))
+    };
     let projected =
         |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
+    let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
+    let rules = crate::typed::StoreRules {
+        global_mutable: &global_mutable,
+        global_ty: &global_ty,
+        projected: &projected,
+        ruled_within: &ruled_within,
+    };
     TYPED.with(|t| {
         let (out, seen) = &mut *t.borrow_mut();
-        let mut found = crate::typed::stores(top, &global_mutable, &projected, seen);
+        let mut found = crate::typed::stores(top, &rules, seen);
         found.extend(crate::typed::loops(top, seen));
         // One sentence per line: a declaration's predicate is also the body
         // of its constructor.
@@ -8922,6 +8955,34 @@ fn typed(program: &Program, top: &Body, file: &Option<String>, as_written: bool)
         );
         refused
     })
+}
+
+/// The record type with a `where` rule that `path`, taken from a value of type
+/// `ty`, passes through before its last place ([`crate::typed::StoreRules`]).
+fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
+    let decls = own.types();
+    let mut at = ty.clone();
+    for step in path {
+        if let Type::Named(n) = &at {
+            if decls.get(n).is_some_and(|d| d.predicate.is_some())
+                && vyrn_frontend::types::record_fields(&at, decls).is_some()
+            {
+                return Some(n.clone());
+            }
+        }
+        at = match (step, vyrn_frontend::types::resolve(&at, decls)) {
+            (Place::Field(_, f), _) => {
+                vyrn_frontend::types::record_fields(&at, decls)?
+                    .into_iter()
+                    .find(|x| &x.name == f)?
+                    .ty
+            }
+            (Place::Elem(..), Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _)) => *e,
+            (Place::Key(..), Type::Map(_, v)) => *v,
+            _ => return None,
+        };
+    }
+    None
 }
 
 fn diagnostic(
@@ -9157,7 +9218,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         let refused = top
             .as_ref()
-            .is_some_and(|t| typed(program, t, &inst.func.module, inst.subst.is_empty()));
+            .is_some_and(|t| typed(program, own, t, &inst.func.module, inst.subst.is_empty()));
         let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, refused_before);
         built.push(top);
@@ -9181,7 +9242,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     eprintln!("{}", top.render());
                 }
                 place_frames(&top, &ob.name, own, &mut added, &mut touched, trace);
-                if typed(program, &top, &ob.module, true) {
+                if typed(program, own, &top, &ob.module, true) {
                     key = None;
                 }
                 outside.push(Some(top));
@@ -9203,7 +9264,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     for inst in crate::as_written(program, own) {
         match build(program, &inst, &written) {
             Ok(top) => {
-                typed(program, &top, &inst.func.module, true);
+                typed(program, own, &top, &inst.func.module, true);
                 for body in top.frames() {
                     if let Err(rs) = crate::kernel::placement(body) {
                         REFUSALS.with(|v| v.borrow_mut().extend(rs));
@@ -9225,7 +9286,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         };
         match build(program, &inst, own) {
             Ok(top) => {
-                typed(program, &top, &p.func.module, true);
+                typed(program, own, &top, &p.func.module, true);
             }
             Err(g) => {
                 refuse_gap(g, &p.func.module, &p.func.name);
@@ -9248,7 +9309,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             &g.init,
         ) {
             Ok(top) => {
-                typed(program, &top, &g.module, true);
+                typed(program, own, &top, &g.module, true);
             }
             Err(e) => {
                 refuse_gap(e, &g.module, &g.name);
@@ -9273,7 +9334,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             p,
         ) {
             Ok(top) => {
-                typed(program, &top, &d.module, true);
+                typed(program, own, &top, &d.module, true);
             }
             Err(e) => {
                 refuse_gap(e, &d.module, &d.name);

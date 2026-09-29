@@ -155,7 +155,7 @@ const WHY_FIXTURE: &str = r#"type Sizer = fn(Int64) -> Int64
 type Ticket = { id: Int64 }
 
 impl Owned for Ticket {
-    fn release(self) {
+    fn release(consume self) {
         print("released")
     }
 }

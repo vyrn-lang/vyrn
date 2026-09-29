@@ -82,6 +82,7 @@ Every number type states its width. There is no unsized `Int`.
 | `Bool` | `true`, `false`. |
 
 - Integer arithmetic wraps at the type's width, `Int64` included: `Int64` max plus one is `Int64` min.
+- A literal must fit its type, its sign included: `let x: Int8 = -128` is accepted, and `let b: UInt8 = -1` is refused.
 - Division by zero traps. `%` is the truncated remainder with the sign of the dividend, so `a == (a / b) * b + a % b`.
 - Operands of `+ - * / %`, comparisons and bitwise operators share one type. Nothing widens by itself: `Int32 + Int64` is refused.
 - A conversion is a call named after the target type: `Int64(x)` widens or sign-extends, `UInt8(300)` wraps to `44`, `Int64(2.9)` truncates to `2`, `Float64(n)` converts.

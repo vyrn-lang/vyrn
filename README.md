@@ -158,7 +158,7 @@ vyrn why --memory examples/ownership.vyrn
 The install scripts above pick the archive for your machine from the newest release, verify it against the release's `SHA256SUMS`, and unpack it under `~/.vyrn`. A checksum that does not match installs nothing.
 
 - **Platforms:** Linux x86_64, Linux arm64, macOS arm64 and Windows x86_64. On any other platform, build from source.
-- **Versions:** set `VYRN_VERSION=v0.1.0-alpha.1` for a specific tag, and `VYRN_INSTALL_DIR` for another location. The [releases page](https://github.com/vyrn-lang/vyrn/releases) has every archive and its checksums.
+- **Versions:** set `VYRN_VERSION=v0.1.0-indev` for a specific tag, and `VYRN_INSTALL_DIR` for another location. The [releases page](https://github.com/vyrn-lang/vyrn/releases) has every archive and its checksums.
 - **What needs what:** `run`, `check`, `test`, `fmt`, `doc` and `build --target wasm` need only the archive. A native `vyrn build` also needs `clang` on `PATH`, plus wabt's `wasm2c` and simde, which `vyrn update --locked` fetches in a clone of this repository.
 
 ### Build from source

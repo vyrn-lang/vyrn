@@ -305,7 +305,7 @@ fn the_parser_census_matches_its_pin() {
         ("lexer.rs", "a table stated a second time", 138, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
         ("lexer.rs", "shared machinery", 191, 2),
-        ("lexer.rs", "tests", 217, 0),
+        ("lexer.rs", "tests", 234, 0),
     ];
     assert_eq!(got, want, "the parser census has moved");
 }
