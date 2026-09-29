@@ -8379,36 +8379,12 @@ pub fn runs<'a>(s: &St, names: &'a [NameInfo]) -> &'a [String] {
 /// Every name a statement names, itself and everything under it: what it binds
 /// and what it reads.
 pub fn names_in(s: &St, out: &mut Vec<Name>) {
-    match s {
-        St::Let(n, rhs) => {
-            out.push(*n);
-            names_in_rhs(rhs, out);
-        }
-        St::Do { rhs, .. } => names_in_rhs(rhs, out),
-        St::Store { place, value, .. } => {
-            names_in_place(place, out);
-            names_in_val(value, out);
-        }
-        St::Drop(n, ..) | St::Row { name: n, .. } => out.push(*n),
-        St::If {
-            cond, then, els, ..
-        } => {
-            names_in_val(cond, out);
-            then.iter().for_each(|s| names_in(s, out));
-            els.iter().for_each(|s| names_in(s, out));
-        }
-        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
-            b.iter().for_each(|s| names_in(s, out))
-        }
-        St::Switch { on, arms, .. } => {
-            names_in_val(on, out);
-            for a in arms {
-                out.extend(a.test.reads());
-                a.body.iter().for_each(|s| names_in(s, out));
+    for (r, _) in s.rows() {
+        r.operands(&mut |v, _| {
+            if let Val::Name(n) = v {
+                out.push(*n);
             }
-        }
-        St::Return { value: Some(v), .. } => names_in_val(v, out),
-        St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap | St::Check(_) => {}
+        });
     }
 }
 
@@ -8541,39 +8517,6 @@ fn removal(e: &Expr) -> Option<&String> {
             _ => None,
         },
         _ => None,
-    }
-}
-
-fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
-    match r {
-        Rhs::Val(v) => names_in_val(v, out),
-        Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().for_each(|v| names_in_val(v, out)),
-        Rhs::Call { args, kind, .. } => {
-            out.extend(kind.value());
-            args.iter().for_each(|(a, _)| match a {
-                Arg::Val(v) => names_in_val(v, out),
-                Arg::Place(p) => names_in_place(p, out),
-            })
-        }
-        Rhs::Read(p) | Rhs::Take(p) => names_in_place(p, out),
-    }
-}
-
-fn names_in_val(v: &Val, out: &mut Vec<Name>) {
-    if let Val::Name(n) = v {
-        out.push(*n);
-    }
-}
-
-fn names_in_place(p: &Place, out: &mut Vec<Name>) {
-    match p {
-        Place::Name(n) => out.push(*n),
-        Place::Global(_) => {}
-        Place::Field(b, _) => names_in_place(b, out),
-        Place::Elem(b, v) | Place::Key(b, v) => {
-            names_in_place(b, out);
-            names_in_val(v, out);
-        }
     }
 }
 
