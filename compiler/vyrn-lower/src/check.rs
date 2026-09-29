@@ -20,12 +20,26 @@ use vyrn_frontend::trap::Rule;
 
 use crate::core::{Arg, Body, Op, Place, Rhs, St, Val};
 
-/// One runtime check: the trap it raises, what it compares, and where.
+/// One runtime check: the trap it raises, what it compares, where, and
+/// whether the emitter runs it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Check {
     pub rule: Rule,
     pub guard: Guard,
     pub site: Site,
+    pub verdict: Verdict,
+}
+
+/// What a pass decided about a check. [`state`] states every row
+/// [`Verdict::Kept`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The emitter runs the check.
+    Kept,
+    /// A pass proved the check cannot fail, and the emitter runs nothing. A
+    /// proved [`Guard::Range`] is refused: `std/runtime`'s `bytesOf` checks
+    /// its range inside and has no unchecked form.
+    Proved,
 }
 
 /// What a check compares. The check traps when the condition fails.
@@ -111,7 +125,12 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
                 ordinal: *ordinal,
             };
             *ordinal += 1;
-            out.push(St::Check(Check { rule, guard, site }));
+            out.push(St::Check(Check {
+                rule,
+                guard,
+                site,
+                verdict: Verdict::Kept,
+            }));
         }
         match &mut s {
             St::If { then, els, .. } => {

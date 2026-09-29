@@ -30,7 +30,7 @@ use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
-use vyrn_lower::check::{Check, Guard};
+use vyrn_lower::check::{Check, Guard, Verdict};
 use vyrn_lower::core::{Arg, Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 
 use crate::layout::{self, Layout};
@@ -3994,11 +3994,36 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Traps where the row's divisor `d` is zero or its shift amount is outside `0..bits`.
+    fn divisor_check(&mut self, b: &mut Frame, n: Num, d: u32, row: &Check) {
+        b.ins(&Instruction::LocalGet(d));
+        if let Guard::Shift(_, bits) = row.guard {
+            // A shift by `>= bits` or a negative amount traps. One unsigned `>=` covers
+            // both, because a negative amount reads as a huge unsigned.
+            if n.wide() {
+                b.ins(&Instruction::I64Const(i64::from(bits)));
+                b.ins(&Instruction::I64GeU);
+            } else {
+                b.ins(&Instruction::I32Const(i32::from(bits)));
+                b.ins(&Instruction::I32GeU);
+            }
+        } else if n.wide() {
+            b.ins(&Instruction::I64Eqz);
+        } else {
+            b.ins(&Instruction::I32Eqz);
+        }
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.trap_row(b, row.rule, None);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+    }
+
     /// Emits a binary operator over two operands on the stack at `opty`. `&&`, `||`, `=~` and
     /// `String` or `Code` operators are absent: they interleave work between the operands.
     ///
-    /// `spell` is the left operand's type as written, for a gap's wording. `rows` are the check
-    /// rows of an integer `/`, `%`, `<<` or `>>`: the divisor's or the amount's, then the
+    /// `spell` is the left operand's type as written, for a gap's wording. `rows` are the kept
+    /// check rows of an integer `/`, `%`, `<<` or `>>`: the divisor's or the amount's, then the
     /// quotient's ([`Guard::NoOverflow`]).
     fn bin_ins(
         &mut self,
@@ -4123,36 +4148,15 @@ impl<'p> Fn_<'_, 'p> {
         };
         // Every trap case is checked here rather than left to wasm, so stderr carries our
         // wording, not wasmtime's. The operands go to scratch so the checks can read them.
-        if matches!(op, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr) {
-            let [Some(first), over] = rows else {
-                return unsupported("a runtime check the core did not state", line);
-            };
+        if rows.iter().any(Option::is_some) {
+            let [first, over] = rows;
             let c = if n.wide() { ValType::I64 } else { ValType::I32 };
             let (d, num) = (self.scratch(b, c, 0), self.scratch(b, c, 1));
-            let rule = first.rule;
             b.ins(&Instruction::LocalSet(d));
             b.ins(&Instruction::LocalSet(num));
-            b.ins(&Instruction::LocalGet(d));
-            if let Guard::Shift(_, bits) = first.guard {
-                // A shift by `>= bits` or a negative amount traps. One unsigned `>=` covers
-                // both, because a negative amount reads as a huge unsigned.
-                if n.wide() {
-                    b.ins(&Instruction::I64Const(i64::from(bits)));
-                    b.ins(&Instruction::I64GeU);
-                } else {
-                    b.ins(&Instruction::I32Const(i32::from(bits)));
-                    b.ins(&Instruction::I32GeU);
-                }
-            } else if n.wide() {
-                b.ins(&Instruction::I64Eqz);
-            } else {
-                b.ins(&Instruction::I32Eqz);
+            if let Some(first) = first {
+                self.divisor_check(b, n, d, &first);
             }
-            b.ins(&Instruction::If(BlockType::Empty));
-            self.depth += 1;
-            self.trap_row(b, rule, None);
-            self.depth -= 1;
-            b.ins(&Instruction::End);
             // The minimum over -1 has no representable answer. `%` is exempt: wasm's `rem_s`
             // gives 0 there, as the interpreter does.
             if let Some(Check {
@@ -6488,7 +6492,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         slot: u32,
         aty: &Type,
-        rule: vyrn_frontend::trap::Rule,
+        rule: Option<vyrn_frontend::trap::Rule>,
         index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
@@ -6504,7 +6508,9 @@ impl<'p> Fn_<'_, 'p> {
         index(self, m, b)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
-        self.bounds_check(b, &w, idx, rule);
+        if let Some(rule) = rule {
+            self.bounds_check(b, &w, idx, rule);
+        }
         let elem = w.elem.clone();
         // Take the removed element before the last one overwrites it; they can be one address.
         let r = self.cx.repr(&elem, line)?;
@@ -8381,7 +8387,7 @@ impl<'p> Fn_<'_, 'p> {
             Option<&Type>,
         ) -> Result<Type, String>,
         lane_at: &dyn Fn(usize, i64) -> Option<u8>,
-        span: Option<Check>,
+        span: Result<Option<Check>, String>,
         line: usize,
     ) -> Result<Type, String> {
         match name {
@@ -8499,14 +8505,7 @@ impl<'p> Fn_<'_, 'p> {
             | "@f64x2Store"
                 if argc == 2 + usize::from(name.ends_with("Store")) =>
             {
-                let Some(Check {
-                    rule,
-                    guard: Guard::Span(_, _, span),
-                    ..
-                }) = span
-                else {
-                    return unsupported("a runtime check the core did not state", line);
-                };
+                let span = span?;
                 let vec = if name.starts_with("@i32x4") {
                     Type::I32x4
                 } else if name.starts_with("@f64x2") {
@@ -8519,7 +8518,14 @@ impl<'p> Fn_<'_, 'p> {
                 operand(self, m, b, 1, Some(&Type::Int))?;
                 let idx = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(idx));
-                self.bounds_check_span(b, &w, idx, span, rule);
+                if let Some(Check {
+                    rule,
+                    guard: Guard::Span(_, _, span),
+                    ..
+                }) = span
+                {
+                    self.bounds_check_span(b, &w, idx, span, rule);
+                }
                 if name.ends_with("Load") {
                     self.elem_addr(b, &w, idx);
                     // `align: 0` is a log2 exponent: one byte. Nothing guarantees 16-byte
@@ -11014,11 +11020,12 @@ impl<'p> Fn_<'_, 'p> {
             // A SIMD builtin's lane index is the literal the row carries.
             Some(Spec::Lanes) => {
                 let span = match args {
-                    [(Val::Name(x), _), (i, _), ..] => core_check(w, line, |g| {
-                        matches!(g, Guard::Span(vyrn_lower::core::Place::Name(p), v, _) if p == x && v == i)
-                    })
-                    .ok(),
-                    _ => None,
+                    [(Val::Name(x), _), (i, _), ..] => core_check(
+                        w,
+                        line,
+                        |g| matches!(g, Guard::Span(vyrn_lower::core::Place::Name(p), v, _) if p == x && v == i),
+                    ),
+                    _ => unsupported("a runtime check the core did not state", line),
                 };
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
@@ -11090,6 +11097,9 @@ impl<'p> Fn_<'_, 'p> {
                             line,
                             |g| matches!(g, Guard::Range(x, y, z) if (x, y, z) == (s, from, to)),
                         )?
+                        .ok_or_else(|| {
+                            gap("a proved `bytes` range: `bytesOf` checks inside", line)
+                        })?
                         .rule,
                     ),
                     _ => None,
@@ -11383,7 +11393,8 @@ impl<'p> Fn_<'_, 'p> {
         match (callee, rest) {
             ("@pop", []) => self.pop_at(b, slot, aty, line),
             ("@swapRemove", [(i, _)]) => {
-                let rule = core_check(w, line, |g| matches!(g, Guard::Index(_, v) if v == i))?.rule;
+                let rule = core_check(w, line, |g| matches!(g, Guard::Index(_, v) if v == i))?
+                    .map(|c| c.rule);
                 let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
                     s.core_val(m, b, body, w, i, &Type::Int, line)
                 };
@@ -11465,16 +11476,17 @@ impl<'p> Fn_<'_, 'p> {
                         self.walk(b, &bty, line)?
                     }
                 };
-                let rule = core_check(
+                let row = core_check(
                     w,
                     line,
                     |g| matches!(g, Guard::Index(p, v) if p == &**base && v == i),
-                )?
-                .rule;
+                )?;
                 self.core_val(m, b, body, w, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
-                self.bounds_check(b, &walk, ix, rule);
+                if let Some(row) = row {
+                    self.bounds_check(b, &walk, ix, row.rule);
+                }
                 self.elem_addr(b, &walk, ix);
                 let byte = Type::IntN {
                     bits: 8,
@@ -12793,7 +12805,7 @@ impl<'p> Fn_<'_, 'p> {
                             w.checks.get_mut(j).filter(|(c, _)| j == k || quotient(c))
                         {
                             *ran = true;
-                            *row = Some(c.clone());
+                            *row = (c.verdict == Verdict::Kept).then(|| c.clone());
                         }
                     }
                 }
@@ -14152,13 +14164,18 @@ fn next_row(ss: &[St], i: usize) -> Option<&St> {
 }
 
 /// The latest check row walked whose guard `hit` accepts: the row a check the
-/// emitter is about to run stands for. A row stands before the row it guards,
-/// and a store that puts a taken element back follows the take's row.
-fn core_check(w: &mut Walked, line: usize, hit: impl Fn(&Guard) -> bool) -> Result<Check, String> {
+/// emitter is about to run stands for, or `None` where a pass proved it. A row
+/// stands before the row it guards, and a store that puts a taken element back
+/// follows the take's row.
+fn core_check(
+    w: &mut Walked,
+    line: usize,
+    hit: impl Fn(&Guard) -> bool,
+) -> Result<Option<Check>, String> {
     match w.checks.iter_mut().rev().find(|(c, _)| hit(&c.guard)) {
         Some((c, ran)) => {
             *ran = true;
-            Ok(c.clone())
+            Ok((c.verdict == Verdict::Kept).then(|| c.clone()))
         }
         None => unsupported("a runtime check the core did not state", line),
     }

@@ -903,8 +903,12 @@ impl Body {
             G::Shift(k, bits) => format!("{} in 0..{bits}", self.val(k)),
         };
         let at = c.site;
+        let word = match c.verdict {
+            crate::check::Verdict::Kept => "check",
+            crate::check::Verdict::Proved => "proved",
+        };
         format!(
-            "check {} {what}  (line {} #{})",
+            "{word} {} {what}  (line {} #{})",
             c.rule.census(),
             at.line,
             at.ordinal
