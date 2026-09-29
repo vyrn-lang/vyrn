@@ -3543,6 +3543,29 @@ fn main() -> Int64 {
     release_refused("release-callee", rest, 16);
 }
 
+/// A generic declared `release` has no instance until its row is placed, so
+/// the effect judgment reads it as written.
+#[test]
+fn a_generic_release_that_writes_the_iterated_global_is_refused() {
+    let rest = "type Gw<T> = { d: Array<T> }
+impl<T> Owned for Gw<T> {
+    fn release(consume self) {
+        gs = [70, 71, 72, 73]
+        let d = consume self.d
+        drop d
+    }
+}
+fn main() -> Int64 {
+    for x in gs {
+        let g = Gw { d: [x] }
+        print(x.toString())
+    }
+    return 0
+}
+";
+    release_refused("release-generic", rest, 21);
+}
+
 /// A declared `release` frees `self`'s parts, so taking one part twice frees it
 /// twice. Accepted, the free audit reported a double free.
 #[test]

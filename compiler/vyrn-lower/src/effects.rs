@@ -497,6 +497,25 @@ pub(crate) fn judge_built<R>(
             place_bodies.push((pr.func.name.as_str(), b));
         }
     }
+    // Nor does a generic declared `release` until the placer writes the row
+    // that calls it, so it is judged as written.
+    let generic_release = |f: &vyrn_frontend::ast::Function| {
+        !f.type_params.is_empty() && own.proto.is_release_fn(&f.name)
+    };
+    if program.functions.iter().any(generic_release) {
+        let written = vyrn_frontend::own::Ownership {
+            proto: own.proto.as_written(),
+            ..own.clone()
+        };
+        for inst in crate::as_written(program, own) {
+            if !generic_release(inst.func) {
+                continue;
+            }
+            if let Ok(b) = crate::core::build(program, &inst, &written) {
+                place_bodies.push((inst.func.name.as_str(), b));
+            }
+        }
+    }
     // A lambda frame is keyed by its defining function and line, as a
     // lambda source is named.
     let mut refs: Vec<&crate::core::Body> = Vec::new();
