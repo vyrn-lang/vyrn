@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::core::{Arg, Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Val, Walk};
+use crate::core::{Arg, Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Use, Val, Walk};
 use vyrn_frontend::ast::{Capability, NodeId};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
@@ -504,6 +504,10 @@ struct Kernel<'b> {
     /// ([`crate::core::Arm::reads`]): an alias whether or not the value owns
     /// heap, because the emitter holds the payload's address.
     read_out: Vec<bool>,
+    /// The names whose block has ended, which lost their taker there. A
+    /// taker is read only for a row's operand ([`Kernel::stmt`]) or a name
+    /// with a fact ([`State::named`]), so the check covers every read.
+    ended: Vec<bool>,
 }
 
 /// What took one name, for the memory report.
@@ -609,6 +613,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
         took: std::cell::RefCell::new(vec![None; body.names.len()]),
         released: std::cell::RefCell::new(vec![None; body.names.len()]),
         read_out: vec![false; body.names.len()],
+        ended: vec![false; body.names.len()],
     };
     let mut st = State::default();
     for p in &body.params {
@@ -2040,6 +2045,12 @@ impl<'b> Kernel<'b> {
         }
         if !st.ended {
             self.scope_end(st, &bound_here, Exit::Block, site)?;
+            // `scope_end` left each binding gone; `stmt` panics on a row that
+            // names one before a `let` binds it again.
+            for n in &bound_here {
+                st.taker.remove(n);
+                self.ended[*n as usize] = true;
+            }
         }
         Ok(())
     }
@@ -2072,6 +2083,15 @@ impl<'b> Kernel<'b> {
     }
 
     fn stmt(&mut self, s: &St, st: &mut State, bound_here: &mut Vec<Name>) -> Result<(), Refusal> {
+        let (ended, body) = (&mut self.ended, self.body);
+        s.operands(&mut |v, how| match v {
+            Val::Name(n) if how == Use::Bind => ended[*n as usize] = false,
+            Val::Name(n) if ended[*n as usize] => panic!(
+                "kernel: a row of `{}` names `{}` (line {}) after its block ended",
+                body.name, body.names[*n as usize].source, body.names[*n as usize].line
+            ),
+            _ => {}
+        });
         // The line and taker every consumption in this statement records.
         self.how = match s {
             St::Return { .. } => TookHow::Return,
