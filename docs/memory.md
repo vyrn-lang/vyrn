@@ -331,7 +331,8 @@ a place is an alias of the place: a take of it is refused, and a write to the
 place, including a `modify` argument, ends it. A borrow with no place (a
 parameter, a second name for one, a capture) carries a `core::BorrowKind`,
 and a take of it is refused. A call that may store into module state ends
-every borrow of that global (`effects::writes_state`).
+every borrow of that global (`effects::writes_state`), including a borrow it
+takes as an argument, since the callee reads that until it returns.
 
 A body the core cannot build returns a `Gap`. The kernel reports it as
 "internal error: the core cannot state ..., so `f` is not judged", and the

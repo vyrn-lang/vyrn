@@ -350,6 +350,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         dispatch: RefCell::new(Dispatch::default()),
         shapes: RefCell::new(Shapes::default()),
         globals: HashMap::new(),
+        args_in_place: false,
         gappend: HashMap::new(),
         externs,
         // The call-argument temporaries released at the call, cloned before `ownership` is
@@ -398,6 +399,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             (Place::Static(m.reserve(l.size, l.align)), ty),
         );
     }
+    cx.args_in_place = cx.globals.values().all(|(_, ty)| {
+        cx.resolve(ty) == Type::Str
+            || !vyrn_frontend::declared::owns_heap(&cx.sub(ty), &cx.types)
+                && matches!(cx.repr(ty, 0), Ok(Repr::Scalar(_)))
+    });
 
     // One ownership word per module-state accumulator, in static memory because the helper writes
     // it back and wasm has no pass-by-reference. Reserved zeroed; the initializer sets it.
@@ -642,6 +648,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         if f.is_export_extern {
             m.export(&f.name, cx.sigs[&f.name].index);
         }
+    }
+    if user.iter().any(|f| f.is_export_extern) {
+        m.export_entry_state(cx.rt.region_sp);
     }
     // A `String` argument to an export is a pointer into this module's memory, so the JS caller
     // must allocate in it first. The emitted `malloc` takes an `i64`, the BigInt `wasi-min.js`
@@ -998,6 +1007,11 @@ struct Cx<'a> {
     /// Module state: name -> its fixed address and declared type. Every body sees all
     /// of them; the checker forbids an initializer reading a later global.
     globals: HashMap<String, (Place, Type)>,
+    /// Whether a `read` or `modify` aggregate parameter is the caller's storage, used in place.
+    /// It is when no module state is an aggregate or owns heap other than a `String`'s bytes:
+    /// then only the callee's own parameters name that storage during the call, and the
+    /// checker refuses a `modify` argument that overlaps another.
+    args_in_place: bool,
     /// Module-state `String` accumulators: name -> the address of its ownership word. Present only
     /// for a global [`vyrn_lower::append::global_append_candidates`] cleared, so `g = g + ...`
     /// grows in place. The local twin is [`Fn_::str_append`]; a global has no local, so its word
@@ -1881,16 +1895,20 @@ fn lower_body(
         cx_fn.core_enter(&core);
     }
 
-    // An aggregate parameter arrives as the caller's address; the prologue copies it into a
-    // slot of its own. A `modify` parameter is copy-in/copy-out: copied in here and back out at
-    // the epilogue, so the caller sees no write before the call returns.
+    // An aggregate parameter arrives as the caller's address. Under [`Cx::args_in_place`] a
+    // `read` or `modify` one is used there. Otherwise the prologue copies it into a slot of its
+    // own, and a `modify` parameter is copy-in/copy-out: copied in here and back out at the
+    // epilogue, so the caller sees no write before the call returns.
     let mut copy_out: Vec<(u32, Place, Repr, Instruction<'static>)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
         let ty = p.ty.clone();
         let r = cx.repr(&p.ty, f.line)?;
-        let place = if p.capability == Capability::Modify {
+        let in_place = matches!(r, Repr::Agg(_)) && p.capability != Capability::Consume;
+        let place = if in_place && cx.args_in_place {
+            Place::Local(local)
+        } else if p.capability == Capability::Modify {
             let place = match &r {
                 Repr::Agg(l) => {
                     let off = b.alloc(l.size, l.align);
@@ -9101,12 +9119,13 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
         table.extend_from_slice(&post.to_le_bytes());
     }
     rt.trap_table = m.data(&table, 4);
-    // The region limit and its wording match the other engines; the depth counter stays
-    // inline (see [`Fn_::region_enter`]).
-    rt.region_sp = m.reserve(4, 4);
-    // The trap row uses the constant the prologue compares against, so the limit in the
-    // message and the one enforced agree.
-    rt.call_depth = m.reserve(4, 4);
+    // The region nesting word, then the call-depth word: one reservation, because a host
+    // restores both after a trap ([`Module::export_entry_state`]). The region limit and its
+    // wording match the other engines; the region counter stays inline (see
+    // [`Fn_::region_enter`]). The call-depth trap row uses the constant the prologue compares
+    // against, so the limit in the message and the one enforced agree.
+    rt.region_sp = m.reserve(8, 4);
+    rt.call_depth = rt.region_sp + 4;
     // After the reserves, so the trap table and the fixed cells keep their
     // addresses.
     rt.io = m.data(&io, 4);
@@ -13870,6 +13889,7 @@ mod tests {
             dispatch: RefCell::new(Dispatch::default()),
             shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
+            args_in_place: false,
             gappend: HashMap::new(),
             externs: HashMap::new(),
             releases: HashMap::new(),

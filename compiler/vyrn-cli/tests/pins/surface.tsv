@@ -9,7 +9,7 @@ Type::F64x2	8	1	8	1	1	0	19
 Type::Mask32x4	5	1	6	1	0	0	13
 Type::Mask64x2	6	1	7	1	0	0	15
 Type::Bool	26	2	30	8	1	1	68
-Type::Str	41	2	55	10	1	2	111
+Type::Str	41	2	56	10	1	2	112
 Type::Unit	19	4	14	9	1	0	47
 Type::Named	31	3	11	15	3	6	69
 Type::Record	9	3	5	20	1	4	42
@@ -31,4 +31,4 @@ Type::Fn	22	5	20	13	1	0	61
 Type::Lazy	6	1	2	12	0	0	21
 Type::Never	2	2	2	3	0	0	9
 Type::Err	77	1	0	3	0	0	81
-all	527	74	374	255	45	28	1303
+all	527	74	375	255	45	28	1304

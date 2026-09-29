@@ -170,6 +170,40 @@ fn handler_trap_yields_500_and_server_survives() {
     assert_eq!(body, "ok");
 }
 
+/// A trap abandons the handler's frames and open regions. Each `/trap` holds
+/// about 300 of the 1,000 calls and one of the 64 regions when it traps, so a
+/// leak fails by the fourth request, or by the 65th.
+#[test]
+fn trapped_requests_give_back_their_call_depth_and_regions() {
+    let s = start_server_on(
+        r#"
+fn down(n: Int64, boom: Bool) -> Int64 {
+    if n == 0 {
+        region {
+            if boom { panic("boom") }
+        }
+        return 0
+    }
+    return down(n - 1, boom) + 1
+}
+
+fn handle(req: Request) -> Response {
+    let got = down(300, req.path == "/trap")
+    return Response { status: 200, contentType: "text/plain", body: got.toString(), vary: "", headers: [:] }
+}
+"#,
+        &[],
+    );
+    for _ in 0..65 {
+        let (status, _) = get(s.server.port, "/trap");
+        assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
+    }
+    let (status, body) = get(s.server.port, "/deep");
+    let err = s.stderr.lock().unwrap().clone();
+    assert_eq!(status, "HTTP/1.1 200 OK", "stderr:\n{err}");
+    assert_eq!(body, "300");
+}
+
 #[test]
 fn garbage_request_yields_400_without_reaching_vyrn() {
     let s = start_server();

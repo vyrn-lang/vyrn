@@ -124,7 +124,8 @@ pub struct Module {
     /// In index order. [`Module::reserve_func`] hands out an index whose body
     /// arrives later.
     bodies: Vec<Defined>,
-    /// Function exports only; [`Module::finish`] adds the memory export.
+    /// Function exports only; [`Module::finish`] adds the memory export and
+    /// [`Module::export_entry_state`]'s.
     exports: Vec<(String, u32)>,
     sweep: bool,
     /// The single data segment, packed at [`DATA_BASE`]; `pool_at` deduplicates
@@ -134,11 +135,15 @@ pub struct Module {
     /// Every [`Module::data`] entry as `(address, length)`, in increasing
     /// address order. A [`Module::reserve`] is not here: its bytes are zeros.
     spans: Vec<(u32, u32)>,
+    /// The end of the last [`Module::reserve`]; the sweep never cuts below it.
+    reserved: u32,
     /// Emitted last, in the order added.
     custom: Vec<(String, Vec<u8>)>,
     /// Function names for a `name` section, by index as handed out. Empty
     /// unless the lowering asked for them (`VYRN_WASM_NAMES`).
     names: Vec<(u32, String)>,
+    /// The nesting words' address, when [`Module::export_entry_state`] asked.
+    nesting: Option<u32>,
 }
 
 impl Default for Module {
@@ -158,9 +163,20 @@ impl Module {
             pool: Vec::new(),
             pool_at: HashMap::new(),
             spans: Vec::new(),
+            reserved: DATA_BASE,
             custom: Vec::new(),
             names: Vec::new(),
+            nesting: None,
         }
+    }
+
+    /// Exports the stack pointer as [`SP_EXPORT`] and the address `nesting` of
+    /// the region nesting and call-depth words as [`NESTING_EXPORT`]. A trap
+    /// abandons the guest's frames and regions without giving them back, so a
+    /// host that calls this module again after a trap restores all three to
+    /// what it read before the call.
+    pub fn export_entry_state(&mut self, nesting: u32) {
+        self.nesting = Some(nesting);
     }
 
     /// Adds a custom section, emitted after every defined section.
@@ -226,6 +242,7 @@ impl Module {
         debug_assert!(align.is_power_of_two());
         let at = DATA_BASE + round_up(self.pool.len() as u32, align);
         self.pool.resize((at - DATA_BASE + size) as usize, 0);
+        self.reserved = at + size;
         at
     }
 
@@ -400,7 +417,9 @@ impl Module {
         self.sweep_pool();
     }
 
-    /// Zeroes every pool entry no surviving body reaches. Addresses do not move.
+    /// Zeroes every pool entry no surviving body reaches, then ends the pool at
+    /// the last live entry or reservation. Addresses do not move, so a dead
+    /// entry below that end keeps its address space and costs no module byte.
     ///
     /// An entry is live when a surviving body pushes an address inside it, or a
     /// live entry holds one: the trap table is addresses, and only its bytes
@@ -449,12 +468,16 @@ impl Module {
                 }
             }
         }
+        let mut end = self.reserved;
         for (i, &(at, len)) in self.spans.iter().enumerate() {
-            if !live[i] {
+            if live[i] {
+                end = end.max(at + len);
+            } else {
                 let lo = (at - DATA_BASE) as usize;
                 self.pool[lo..lo + len as usize].fill(0);
             }
         }
+        self.pool.truncate((end - DATA_BASE) as usize);
     }
 
     /// Returns the module's bytes, sections in the order the format fixes. No
@@ -469,6 +492,9 @@ impl Module {
     ///
     /// If a kept reservation was never filled.
     pub fn finish(mut self) -> Result<Vec<u8>, String> {
+        if self.sweep {
+            self.prune();
+        }
         if self.data_end() > STATICS_LIMIT {
             let room = STATICS_LIMIT - DATA_BASE;
             return Err(format!(
@@ -481,9 +507,6 @@ impl Module {
                 self.data_end() - DATA_BASE,
                 crate::STATICS_LIMIT_NEEDLE,
             ));
-        }
-        if self.sweep {
-            self.prune();
         }
 
         // Types are interned after the sweep, so a pruned function's signature
@@ -516,12 +539,21 @@ impl Module {
         // Export names are one namespace across kinds, and nothing downstream
         // validates the bytes, so a duplicate is refused here.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for (name, _) in &self.exports {
-            if !seen.insert(name.as_str()) {
+        let state = match self.nesting {
+            Some(_) => &[SP_EXPORT, NESTING_EXPORT][..],
+            None => &[],
+        };
+        for name in self
+            .exports
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .chain(state.iter().copied())
+        {
+            if !seen.insert(name) {
                 return Err(format!(
                     "duplicate export `{name}`\n  \
-                     note: `_start`, `__vyrn_malloc` and `__vyrn_free` are taken by the \
-                     runtime; rename the function"
+                     note: `_start`, `__vyrn_malloc`, `__vyrn_free`, `{SP_EXPORT}` and \
+                     `{NESTING_EXPORT}` are taken by the runtime; rename the function"
                 ));
             }
         }
@@ -571,6 +603,18 @@ impl Module {
             },
             &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
         );
+        if let Some(at) = self.nesting {
+            globals.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: false,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(at as i32),
+            );
+            exports.export(SP_EXPORT, ExportKind::Global, SP);
+            exports.export(NESTING_EXPORT, ExportKind::Global, NESTING);
+        }
 
         // Runs of zeros are not written, because wasm memory arrives zeroed. A
         // segment costs about nine bytes, so only a wider gap splits one.
@@ -676,10 +720,20 @@ fn encode(f: Frame) -> Function {
 /// The global index of the module's `__stack_pointer`.
 pub const SP: u32 = 0;
 
+/// The export name of [`SP`]; see [`Module::export_entry_state`].
+pub const SP_EXPORT: &str = "__stack_pointer";
+
+/// The export name of an immutable global holding the address of two `i32`
+/// words: the open regions, then the calls in flight.
+pub const NESTING_EXPORT: &str = "__vyrn_nesting";
+
 /// The global index of the first heap byte, 16-aligned past the statics.
 /// Immutable, so `free` of an address below it, such as a `String` literal in
 /// the data segment, is a no-op.
 pub const HEAP_BASE: u32 = 1;
+
+/// The global index of [`NESTING_EXPORT`], in a module that has it.
+const NESTING: u32 = 2;
 
 /// `memory.copy` within the one memory: pops the length, the source and the destination.
 pub const MEMORY_COPY: Instruction<'static> = Instruction::MemoryCopy {
@@ -911,6 +965,21 @@ mod tests {
             "a later string packs after the reservation"
         );
         assert_eq!(m.reserve(4, 4), b + 12);
+    }
+
+    #[test]
+    fn the_sweep_cuts_a_dead_tail_from_the_statics() {
+        let mut m = Module::new();
+        let live = m.data(b"live", 1);
+        let cell = m.reserve(4, 4);
+        m.data(b"dead", 1);
+        let f = m.func(&[], &[], &[], 0, |b| {
+            b.ins(&Instruction::I32Const(live as i32))
+                .ins(&Instruction::Drop);
+        });
+        m.export("_start", f);
+        m.prune();
+        assert_eq!(m.data_end(), cell + 4);
     }
 
     /// An empty frame emits no prologue but still takes its base local.

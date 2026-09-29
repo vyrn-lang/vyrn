@@ -172,7 +172,7 @@ The kernel knows no surface syntax. It judges core bodies.
   and generation-only. The floor asks it what an artifact reaches
   (`effects::reaches`), and the kernel asks it which globals a call may
   write (`effects::writes_state`), because such a call ends every borrow of
-  those globals.
+  those globals, its own arguments' too.
 - Typed (`typed.rs`). A value of a validated type is produced only by that
   type's constructor, a name already of that type, or a literal the checker
   proved. `typed::judge` walks each store into a validated place and judges
@@ -214,9 +214,12 @@ The module's shape:
   statics. A frame push past address 0 wraps and traps on first
   access instead of overwriting data.
 - Values: a scalar lives in a wasm local; an aggregate lives in a frame slot
-  and travels as its `i32` address. A parameter is an address the callee
-  copies from; an aggregate result goes through a hidden leading address. A
-  `modify` parameter is copied in at entry and out at the one exit.
+  and travels as its `i32` address; an aggregate result goes through a hidden
+  leading address. A `read` or `modify` parameter is used at the caller's
+  address when no module state is an aggregate or owns heap other than a
+  `String`'s (`Cx::args_in_place`). Otherwise the callee copies it in at
+  entry, and a `modify` one back out at the one exit. A `consume` parameter
+  is always copied in.
 - Layout (`layout.rs`): sizes, alignments and offsets are read from the shape
   string `llt_of` prints, so layout cannot drift from lowering. Every size is
   a checked `u32`.
@@ -230,8 +233,10 @@ The module's shape:
 - Boundaries: `coerce_plan` picks the rung a value takes into a declared type
   (`Rung`): validate, resize, cross the float line, rebuild a record, reshape
   a sum, and the rest. `Rung::Validate` runs the type's `where` predicate.
-- `Module::sweep` drops every import, function and datum the program never
-  reaches, so a program pays only for what it calls.
+- `Module::sweep` drops every import and function the program never reaches,
+  writes no byte of a datum it never reaches, and ends the static area at the
+  last live datum or reservation. Addresses do not move, so a dead datum below
+  that end keeps its address space.
 
 `std/runtime.vyrn` is the runtime: allocator, arena, strings, arrays, maps,
 UTF-8, number formatting, file and console I/O, and the trap printer. It is

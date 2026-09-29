@@ -272,7 +272,9 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
         "users/byId dispatcher:\n{src}"
     );
     assert!(
-        src.contains("Some(cb) => rpcDeliverUsersById(key, cb, rpcUnifyUsersById(status, body))"),
+        src.contains(
+            "Some(cb) => rpcDeliverUsersById(key, cb.copy(), rpcUnifyUsersById(status, body))"
+        ),
         "users/byId dispatch routes to the pending callback:\n{src}"
     );
     // 2xx decodes to `Done`; 422 parses issues to `Rejected`; a decode or transport

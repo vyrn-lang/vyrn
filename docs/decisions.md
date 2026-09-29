@@ -161,8 +161,10 @@ pull request.
 - Wasm is emitted directly with `wasm-encoder`. No LLVM, clang or sysroot is needed to build or test the compiler.
 - A replaced path is deleted, not kept behind a flag. Gated multiplicity stays true and ungated multiplicity rots.
 - The emitter never optimizes; the engine that runs the wasm does. No shared emitter trait or instruction-builder abstraction.
+- The sweep never moves a datum. A data address is an untyped constant, so relocating by value could rewrite a user's integer. A dead datum costs no module byte, and the static area ends at the last live datum or reservation.
 - Native code is the same wasm through `wasm2c` and clang `-O2`. No Cranelift route for `build`: against an LLVM baseline it measured 2 to 3x, and `wasm2c` 1.5 to 1.9x.
 - `run`, `test`, `bench --check`, `serve` and `dev` run the module in embedded wasmtime.
+- A trapped call into a resident instance (`serve`, `dev`, `test`) keeps the instance. The host restores the stack pointer, call depth and region nesting it read before the call; module state and heap blocks stay as the call left them. Re-instantiating would drop the state every earlier request built.
 - Control flow stays structured in every intermediate form, because wasm accepts only structured control flow.
 - Monomorphization happens once, above the emitter, and an instance is identified by its type arguments, never a mangled string. A mangle collision once miscompiled silently.
 - Monomorphization has two bounds: 64 levels of nesting and 65,536 parts. `vyrn check` runs them, so a passing `check` means `build` terminates.
@@ -176,6 +178,7 @@ pull request.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
 - Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names.
 - Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.
+- A `read` or `modify` aggregate parameter is the caller's storage, used in place, while no module state can name that storage; the checker's exclusive-`modify` rule covers the parameters. A per-callee effect gate waits until the effect judgment attributes every call.
 - Runtime modules are injected on mention under unlexable `$` names, so user names neither collide with them nor capture them.
 - A generator runs as compiled wasm in embedded wasmtime. Each capability that needs compiler machinery (read, list, `moduleInterface`, `lex`, `contractOf`, code quotes) is a host import, so there is no second implementation.
 - Generator budgets use wasmtime fuel, never wall clock, so a limit is deterministic.
