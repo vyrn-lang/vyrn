@@ -50,8 +50,8 @@ pub fn validate_message(decl: &TypeDecl) -> String {
 /// transformers are resolved away.
 ///
 /// The checker's gate ([`codable`]), the schema emitter
-/// (`types::type_schema`) and both synthesizers (`jsonenc`, `jsondec`) read
-/// this one answer. A record transformer is the record it computes
+/// (`types::type_schema`), the `TypeArg` builder and `jsondec` read this one
+/// answer. A record transformer is the record it computes
 /// and an applied generic its substituted base, so both cross the wire.
 ///
 /// A [`Type::Named`] is presented by each caller before it gets here, and they

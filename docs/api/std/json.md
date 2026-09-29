@@ -90,3 +90,14 @@ fn jsonEq(a: Json, b: Json) -> Bool
 Deep structural equality, as equality of canonical emits: `emit` is
 injective over `Json`, because kinds have distinct delimiters, field order
 is kept and numbers keep their raw text.
+
+## jsonEncoders
+
+```vyrn
+fn jsonEncoders(t: TypeArg) -> String
+```
+
+Writes the encoders `toJson` calls: for each root, the function that renders
+its value, and for each node, the function that builds its `Json` tree.
+Generated source cannot spell this module's reserved names, so it writes
+them as `VyrnRt_` placeholders the compiler folds back.

@@ -2,8 +2,8 @@
 //! exists only through its producer.
 //!
 //! The predicate becomes ordinary Vyrn, generated per declaration and injected
-//! into the linked program as [`crate::jsonenc`] and [`crate::jsondec`] inject
-//! their walks, so every backend compiles one body. Each declaration gets two
+//! into the linked program as [`crate::jsondec`] injects its walks, so every
+//! backend compiles one body. Each declaration gets two
 //! functions:
 //!
 //! - [`pred_name`]: `fn(binds..) -> Bool`, whose body is the `where` clause,

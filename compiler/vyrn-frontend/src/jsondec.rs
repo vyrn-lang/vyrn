@@ -3,9 +3,10 @@
 //!
 //! `fromJson(T, s)` is `std/jsonread`'s `read(s)`, which needs no compiler,
 //! then `decode(tree, T)`, which this module generates: Vyrn functions that
-//! walk a `std/json` `Json` value. It is [`crate::jsonenc`] run backwards,
-//! with the same two mechanisms: generated source handed to the parser, and
-//! one function per distinct type so a self-referential type terminates.
+//! walk a `std/json` `Json` value. It is `std/json`'s `jsonEncoders` run
+//! backwards, with the same two mechanisms: generated source handed to the
+//! parser, and one function per distinct type so a self-referential type
+//! terminates.
 //!
 //! A decoder returns `Array<T>` with zero or one element, not `Option<T>`.
 //! Decode accumulates issues and constructs a composite only when
@@ -35,7 +36,7 @@ fn rd_prefix() -> &'static str {
 }
 
 /// The type's structural identity, [`crate::types::struct_key`], shared with
-/// [`crate::jsonenc`] and the codegen symbols. A readable mangle once let two
+/// the `TypeArg` nodes and the codegen symbols. A readable mangle once let two
 /// instantiations collide, and a decoder picked by a colliding name decodes
 /// the wrong shape.
 fn type_key(ty: &Type) -> String {
@@ -72,10 +73,9 @@ fn spell(ty: &Type) -> String {
 /// Generates the decoders for the `fromJson` targets `tys` and everything they
 /// reach, to append to a linked `Program`.
 ///
-/// A type the walk cannot decode is skipped, as [`crate::jsonenc::encoders`]
-/// skips one: `fromJson` refuses it at the call site
-/// (`crate::codec::decodable`), and a program that never decodes it must not
-/// fail.
+/// A type the walk cannot decode is skipped: `fromJson` refuses it at the call
+/// site (`crate::codec::decodable`), and a program that never decodes it must
+/// not fail.
 pub fn decoders(
     tys: &[Type],
     types: &HashMap<String, TypeDecl>,
@@ -202,8 +202,8 @@ impl Walk<'_> {
     }
 
     /// Returns the body of `ty`'s decoder. [`crate::codec::wire`] decides what a
-    /// type is on the wire, for the checker, the schema emitter and
-    /// [`crate::jsonenc`] alike; this spells it backwards.
+    /// type is on the wire, for the checker, the schema emitter and the
+    /// `TypeArg` builder alike; this spells it backwards.
     fn body(&mut self, ty: &Type) -> Result<String, String> {
         // A named type stays unresolved: a refinement decodes its base, then runs its
         // `where` clause.

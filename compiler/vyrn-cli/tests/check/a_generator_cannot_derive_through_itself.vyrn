@@ -1,0 +1,9 @@
+gen fn g(t: TypeArg) -> String {
+    let s: Int64 = 1
+    return derive(g, s)
+}
+
+fn main() -> Int64 {
+    print(derive(g, 2))
+    return 0
+}

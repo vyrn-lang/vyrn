@@ -691,6 +691,10 @@ pub const RT_PREFIX: &str = "json$";
 /// The module the `toJson` desugar links: `std/json`'s value tree and writer.
 pub const RT_JSON_SPEC: &str = "std/json";
 
+/// The `std/json` generator that writes `toJson`'s encoders, under its reserved
+/// name. `toJson(x)` is `derive(jsonEncoders, x)`.
+pub const JSON_ENCODERS: &str = "json$jsonEncoders";
+
 /// A Vyrn module a builtin's implementation lives in, and the reserved prefix
 /// its declarations are renamed to.
 pub struct RtModule {
@@ -861,7 +865,7 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
 /// `ty_of` answers an argument's static type.
 ///
 /// `contractOf(C)` calls the entry `vyrn-genwasm` appends for `C` and hands on
-/// nothing. `toJson(x)` calls the encoder wrapper of `x`'s type, and
+/// nothing. `toJson(x)` calls what [`JSON_ENCODERS`] wrote for `x`'s type, and
 /// `fromJson<T>(s)` the decoder of `T`, which [`crate::check_and_synthesize`]
 /// appends. The builder and the emitter treat it as a call only where the
 /// program declares it.
@@ -875,7 +879,7 @@ pub fn routed_callee<'e>(
         ("contractOf", _, [Expr::Var { name: c, .. }]) => {
             Some((crate::checker::gen_entry_contract_of(c), &[]))
         }
-        ("toJson", _, [a]) => Some((crate::jsonenc::wrap_name(&ty_of(a)?), args)),
+        ("toJson", _, [a]) => Some((crate::gen::derived_name(JSON_ENCODERS, &ty_of(a)?), args)),
         ("derive", _, [Expr::Var { name: g, .. }, a]) => {
             Some((crate::gen::derived_name(g, &ty_of(a)?), &args[1..]))
         }
@@ -3826,9 +3830,8 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
 
 /// Rewrites every reference to a declaration name in `p` through `map`.
 ///
-/// [`crate::jsonenc`] uses it: generated encoder source spells the injected
-/// module's reserved names as `VyrnRt_` placeholders, because a `$` does not
-/// lex, and this pass folds them back.
+/// Generated source spells the injected module's reserved names as `VyrnRt_`
+/// placeholders, because a `$` does not lex, and this pass folds them back.
 pub(crate) fn rewrite_names(p: &mut Program, map: &HashMap<String, String>) {
     rewrite_module_refs(p, map, &HashSet::new(), &HashSet::new());
 }

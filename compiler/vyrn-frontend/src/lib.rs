@@ -18,7 +18,6 @@ pub mod fmt;
 pub mod gen;
 pub mod hash;
 pub mod jsondec;
-pub mod jsonenc;
 pub mod lexer;
 pub mod loader;
 pub mod manifest;
@@ -114,11 +113,11 @@ pub fn load(
 ///
 /// An ordinary load and a generator re-loaded as its own root both
 /// call it, so neither misses the synthesis. The synthesis sits here because
-/// only here has the checker just typed every `toJson` argument while no
+/// only here has the checker just typed every `fromJson` target while no
 /// backend has built its function table from the program yet.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     let check_span = prof::phase("check");
-    let (mut diags, mut json_types, mut json_dec_types, derived, mut refused) =
+    let (mut diags, mut json_dec_types, derived, mut refused) =
         checker::check_accum_with_json_types(program);
     // What a `derive` generator writes joins the program and is checked with
     // it, so the second check's answers stand.
@@ -131,7 +130,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
                 // would key the second check's types over the program's own.
                 program.number_appended(at);
                 let again;
-                (diags, json_types, json_dec_types, again, refused) =
+                (diags, json_dec_types, again, refused) =
                     checker::check_accum_with_json_types(program);
                 if diags.is_empty() && again.len() != derived.len() {
                     diags.push(diagnostics::Diagnostic::error(
@@ -150,10 +149,6 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     let from = program.functions.len();
     if diags.is_empty() {
         let types = types::decl_map(program);
-        match jsonenc::encoders(&json_types, &types) {
-            Ok(fns) => program.functions.extend(fns),
-            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
-        }
         match jsondec::decoders(&json_dec_types, &types) {
             Ok((fns, aliases)) => {
                 program.functions.extend(fns);

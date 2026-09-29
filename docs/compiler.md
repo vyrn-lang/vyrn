@@ -17,8 +17,8 @@ source
   -> loader: imports, generators,     vyrn-frontend  loader.rs, gen.rs
      link into one Program                            (+ vyrn-genwasm)
   -> checker: types, predicates       vyrn-frontend  checker.rs
-  -> synthesis: JSON walks,           vyrn-frontend  jsonenc.rs, jsondec.rs,
-     `where` constructors                             ctor.rs
+  -> synthesis: JSON decoders,        vyrn-frontend  jsondec.rs, ctor.rs
+     `where` constructors
   -> lowering: instances, named core  vyrn-lower     lib.rs, core.rs
   -> kernel: linear, effect and       vyrn-lower     kernel.rs, effects.rs,
      typed judgments; the placer                      typed.rs
@@ -108,9 +108,10 @@ the playground serves an embedded `std/`. The loader:
    from this record and derives none of its own.
    If the program calls `derive(g, x)`, `gen::derive` runs each generator
    once over a `TypeArg` of the types its sites need, and the functions it
-   writes join the program, which is checked again with them.
-2. Synthesis, only for a program that type-checks: `jsonenc::encoders` and
-   `jsondec::decoders` generate the per-type JSON walks as Vyrn functions, and
+   writes join the program, which is checked again with them. `toJson(x)` is
+   a `derive` site of `std/json`'s `jsonEncoders`.
+2. Synthesis, only for a program that type-checks: `jsondec::decoders`
+   generates the per-type JSON decoders as Vyrn functions, and
    `ctor::constructors` generates one constructor per `where` type. These are
    ordinary functions, so every backend compiles one body.
 3. `movecheck::refusals`: `own::analyze`, which runs the installed placer and

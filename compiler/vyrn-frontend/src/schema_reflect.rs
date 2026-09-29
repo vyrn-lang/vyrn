@@ -521,28 +521,53 @@ pub fn type_arg_lit(roots: &[Type], types: &HashMap<String, TypeDecl>) -> (Expr,
     (lit, placed)
 }
 
+/// The placeholder prefix a spelling writes for a name of `std/json`'s, which
+/// source cannot spell; [`crate::gen::derive`] folds it onto
+/// [`crate::loader::RT_PREFIX`].
+pub(crate) const PH: &str = "VyrnRt_";
+
+/// Spells a type as generated source, with `std/json`'s `$` names folded onto
+/// [`PH`].
+fn spell(ty: &Type) -> String {
+    ty.to_string().replace(crate::loader::RT_PREFIX, PH)
+}
+
+/// Returns whether `ty`'s spelling holds a `lazy` the parser refuses: `lazy`
+/// is legal only as a named record's field. A `Type::Named` spells as its name,
+/// so the walk stops there.
+fn unspellable_lazy(ty: &Type) -> bool {
+    match ty {
+        Type::Lazy(_) => true,
+        Type::Record(fs) => fs.iter().any(|f| unspellable_lazy(&f.ty)),
+        Type::Array(t) | Type::ArrayN(t, _) => unspellable_lazy(t),
+        Type::Map(a, b) => unspellable_lazy(a) || unspellable_lazy(b),
+        Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(unspellable_lazy)),
+        _ => false,
+    }
+}
+
 struct ArgWalk<'a> {
     types: &'a HashMap<String, TypeDecl>,
     nodes: Vec<Expr>,
-    /// Node index by `struct_key`. A type is entered before its children, so a
-    /// recursive type finds its own node.
-    at: HashMap<String, usize>,
+    /// Node index by `struct_key`, with the type: the key is 64 bits, and two
+    /// types on one key reflect as neither. A type is entered before its
+    /// children, so a recursive type finds its own node.
+    at: HashMap<String, (usize, Type)>,
 }
 
 impl ArgWalk<'_> {
     fn node(&mut self, ty: &Type) -> Option<usize> {
-        if (matches!(ty, Type::Enum(_)) && !crate::types::is_sum_alias(ty))
-            || crate::jsonenc::unspellable_lazy(ty)
+        if (matches!(ty, Type::Enum(_)) && !crate::types::is_sum_alias(ty)) || unspellable_lazy(ty)
         {
             return None;
         }
         let key = crate::types::struct_key(ty);
-        if let Some(i) = self.at.get(&key) {
-            return Some(*i);
+        if let Some((i, t)) = self.at.get(&key) {
+            return (t == ty).then_some(*i);
         }
         let i = self.nodes.len();
         self.nodes.push(none());
-        self.at.insert(key.clone(), i);
+        self.at.insert(key.clone(), (i, ty.clone()));
         let ints = |ix: Vec<usize>| {
             array_lit(
                 ix.into_iter()
@@ -607,7 +632,7 @@ impl ArgWalk<'_> {
             vec![
                 ("kind", Expr::Str(kind, Id::NEW)),
                 ("name", Expr::Str(format!("t{key}"), Id::NEW)),
-                ("spelling", Expr::Str(crate::jsonenc::spell(ty), Id::NEW)),
+                ("spelling", Expr::Str(spell(ty), Id::NEW)),
                 ("args", ints(args)),
                 ("members", array_lit(members)),
                 ("predicate", Expr::Str(String::new(), Id::NEW)),
