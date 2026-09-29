@@ -29,6 +29,7 @@ pub mod prelude;
 pub mod prof;
 pub mod project;
 pub mod regex;
+pub mod rules;
 pub mod schema;
 pub mod schema_reflect;
 pub mod symbolmap;

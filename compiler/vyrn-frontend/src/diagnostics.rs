@@ -9,6 +9,8 @@
 /// Errors travel in the `Err` arm of [`crate::load`] and warnings
 /// beside the program, so a warning never changes an exit code or a byte of
 /// output.
+use crate::rules::Rule;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
@@ -40,6 +42,8 @@ pub struct Diagnostic {
     /// `"lex"` | `"parse"` | `"check"` | `"movecheck"`.
     pub stage: &'static str,
     pub message: String,
+    /// The rule a checker refusal states; `message` is its rendering.
+    pub rule: Option<Rule>,
     /// A secondary note: the generated location of a diagnostic
     /// remapped to its origin file, or why an origin directive could not be
     /// followed.
@@ -62,8 +66,18 @@ impl Diagnostic {
             severity: Severity::Error,
             stage,
             message,
+            rule: None,
             note: None,
             from_generated: false,
+        }
+    }
+
+    /// Builds the error that states `rule` for `stage` at `(line, col)`.
+    pub fn refusal(line: usize, col: usize, stage: &'static str, rule: Rule) -> Self {
+        let message = rule.render();
+        Diagnostic {
+            rule: Some(rule),
+            ..Diagnostic::error(line, col, stage, message)
         }
     }
 

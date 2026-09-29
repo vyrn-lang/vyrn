@@ -2014,7 +2014,7 @@ fn unbound(
                 .unwrap_or_else(|| t.to_string());
             format!("`{shown}` cannot decode into `{off}` (not a codable type)")
         }
-        _ => types::needs_show(shown, t),
+        _ => types::needs_show(shown, t).render(),
     };
     facts
         .exprs
