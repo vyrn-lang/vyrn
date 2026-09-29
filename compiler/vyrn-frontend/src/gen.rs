@@ -282,6 +282,9 @@ pub struct GenInputs<'a> {
     /// can re-read. An engine that caches compiled generators keys on it instead
     /// of hashing the whole program.
     pub sources_fingerprint: Option<String>,
+    /// The `TypeArg` literal a derived-code generator's one parameter
+    /// receives; `None` for an import target.
+    pub type_arg: Option<Expr>,
 }
 
 /// Resolves a mediated path argument against the importer's directory and

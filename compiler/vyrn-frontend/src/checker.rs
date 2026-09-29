@@ -101,6 +101,7 @@ pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
 /// builtin's call site is redirected to one.
 pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
 pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
+pub const GEN_ENTRY_TYPE_ARG: &str = "__vyrnGenTypeArg";
 
 /// The nullary entry `contractOf(contract)` calls, one per contract.
 pub fn gen_entry_contract_of(contract: &str) -> String {

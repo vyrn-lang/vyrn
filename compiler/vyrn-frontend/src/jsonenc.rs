@@ -43,7 +43,7 @@ fn enc_ph(ty: &Type) -> String {
 /// Returns whether `ty`'s spelling holds a `lazy` the parser refuses: `lazy`
 /// is legal only as a named record's field. A `Type::Named` spells as its name,
 /// so the walk stops there.
-fn unspellable_lazy(ty: &Type) -> bool {
+pub(crate) fn unspellable_lazy(ty: &Type) -> bool {
     match ty {
         Type::Lazy(_) => true,
         Type::Record(fs) => fs.iter().any(|f| unspellable_lazy(&f.ty)),
@@ -56,7 +56,7 @@ fn unspellable_lazy(ty: &Type) -> bool {
 
 /// Spells a type as generated source, with the injected module's `$` names
 /// folded onto placeholders.
-fn spell(ty: &Type) -> String {
+pub(crate) fn spell(ty: &Type) -> String {
     ty.to_string().replace(crate::loader::RT_PREFIX, PH)
 }
 

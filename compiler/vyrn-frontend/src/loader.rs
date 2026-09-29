@@ -1817,6 +1817,7 @@ fn run_generator(
                     .with(|c| c.get())
                     .unwrap_or(GEN_MAX_OUTPUT),
                 sources_fingerprint: fingerprint,
+                type_arg: None,
             },
         )
     })

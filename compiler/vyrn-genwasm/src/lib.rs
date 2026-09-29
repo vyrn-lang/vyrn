@@ -101,7 +101,9 @@ fn run(
     // artifact is a cache hit, and dispatching to a name the wrapper never
     // emitted traps rather than declines.
     let target = match program.functions.iter().find(|f| f.name == fn_name) {
-        Some(f) if dispatchable(f) && f.params.len() == args.len() => f,
+        Some(f) if dispatchable(f) && f.params.len() == args.len() + takes_type_arg(f) as usize => {
+            f
+        }
         _ => return Err(decline("the generator is not one this path serves")),
     };
 
@@ -109,6 +111,9 @@ fn run(
     // argv[0] is the generator's name, which `main` dispatches on: the artifact
     // is one per module, not per generator.
     let mut argv: Vec<String> = vec![fn_name.to_string()];
+    if takes_type_arg(target) && inputs.type_arg.is_none() {
+        return Err(decline("a `TypeArg` parameter with no type argument"));
+    }
     for (a, p) in args.iter().zip(&target.params) {
         argv.push(match (a, &p.ty) {
             (ConstVal::Str(s), Type::Str) => s.clone(),
@@ -222,15 +227,21 @@ fn serve(
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
 /// `String` and taking `String` or `Int64` parameters (written to argv and read
-/// back, `Int64` by `parse`). A generator returning `Code` is not served: the
-/// guest would print the handle.
+/// back, `Int64` by `parse`), or one `TypeArg` (reflected, as `moduleInterface`
+/// is). A generator returning `Code` is not served: the guest would print the
+/// handle.
 fn dispatchable(f: &Function) -> bool {
     f.is_gen
         && f.exported
         && f.ret == Type::Str
-        && f.params
-            .iter()
-            .all(|par| matches!(par.ty, Type::Str | Type::Int))
+        && (takes_type_arg(f)
+            || f.params
+                .iter()
+                .all(|par| matches!(par.ty, Type::Str | Type::Int)))
+}
+
+fn takes_type_arg(f: &Function) -> bool {
+    matches!(f.params.as_slice(), [p] if p.ty == Type::Named("TypeArg".into()))
 }
 
 /// The generator's module with `is_gen` cleared, plus a `main` that dispatches
@@ -273,26 +284,42 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                 line: 0,
             },
             then_block: Block {
-                stmts: vec![
-                    // Framed between marker lines; see `unframe_result`.
-                    Stmt::Expr(call("print", vec![Expr::Str(RESULT_BEGIN.into())])),
-                    Stmt::Expr(call(
-                        "print",
-                        vec![call(
-                            &f.name,
-                            f.params
-                                .iter()
-                                .enumerate()
-                                .map(|(i, par)| at_type(argv(i + 1), &par.ty))
-                                .collect(),
-                        )],
-                    )),
-                    Stmt::Expr(call("print", vec![Expr::Str(RESULT_END.into())])),
-                    Stmt::Return {
-                        value: Some(Expr::Int(0)),
+                stmts: takes_type_arg(f)
+                    .then(|| Stmt::Let {
+                        // Bound, not passed inline: the release of an
+                        // argument temporary is refused.
+                        name: "typeArg".into(),
+                        mutable: false,
+                        ty: None,
+                        value: call(vyrn_codegen::GEN_ENTRY_TYPE_ARG, vec![]),
                         line: 0,
-                    },
-                ],
+                        col: 0,
+                    })
+                    .into_iter()
+                    .chain([
+                        // Framed between marker lines; see `unframe_result`.
+                        Stmt::Expr(call("print", vec![Expr::Str(RESULT_BEGIN.into())])),
+                        Stmt::Expr(call(
+                            "print",
+                            vec![call(
+                                &f.name,
+                                f.params
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, par)| match takes_type_arg(f) {
+                                        true => var("typeArg"),
+                                        false => at_type(argv(i + 1), &par.ty),
+                                    })
+                                    .collect(),
+                            )],
+                        )),
+                        Stmt::Expr(call("print", vec![Expr::Str(RESULT_END.into())])),
+                        Stmt::Return {
+                            value: Some(Expr::Int(0)),
+                            line: 0,
+                        },
+                    ])
+                    .collect(),
             },
             else_block: None,
             line: 0,
@@ -476,6 +503,17 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             named("ModuleInterface"),
             vyrn_codegen::REFLECT_MODULE_INTERFACE,
             var("path"),
+            &mut dec,
+        )?;
+    }
+    // `prepare` has cleared `is_gen`, so `dispatchable` no longer answers.
+    if p.functions.iter().any(|f| f.exported && takes_type_arg(f)) {
+        entry(
+            vyrn_codegen::GEN_ENTRY_TYPE_ARG.to_string(),
+            Vec::new(),
+            named("TypeArg"),
+            vyrn_codegen::REFLECT_TYPE_ARG,
+            Expr::Str(String::new()),
             &mut dec,
         )?;
     }
@@ -780,6 +818,8 @@ pub struct GenState {
     /// this thread without the resolver.
     types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
     contracts: Vec<vyrn_frontend::ast::ContractDecl>,
+    /// What the generator's `TypeArg` parameter receives.
+    type_arg: Option<Expr>,
     /// The line to the thread that holds the resolver; `None` for a `test`
     /// door, whose `readFile` and `moduleInterface` are refused.
     caps: Option<Caps>,
@@ -1107,6 +1147,13 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
                     let lit = vyrn_frontend::schema_reflect::contract_info_lit(decl);
                     streams.stream(&Type::Named("ContractInfo".into()), &lit)
                 }
+                vyrn_codegen::REFLECT_TYPE_ARG => {
+                    let lit = streams
+                        .type_arg
+                        .clone()
+                        .ok_or_else(|| Error::msg("no type argument"))?;
+                    streams.stream(&Type::Named("TypeArg".into()), &lit)
+                }
                 vyrn_codegen::REFLECT_LEX => {
                     let lit = vyrn_frontend::gen::gen_lex_tokens_lit(&arg);
                     streams.stream(&Type::Array(Box::new(Type::Named("Token".into()))), &lit)
@@ -1385,6 +1432,7 @@ fn run_hosted(
         .map(|t| (t.name.clone(), t.clone()))
         .collect();
     let contracts = program.contracts.clone();
+    let type_arg = inputs.type_arg.clone();
     let guest = std::thread::Builder::new()
         // Compiled code runs on this stack; a deeply recursive generator would
         // overflow the default before wasmtime's own stack limit.
@@ -1395,6 +1443,7 @@ fn run_hosted(
                 &argv,
                 types,
                 contracts,
+                type_arg,
                 fuel,
                 Caps {
                     req: req_tx,
@@ -1424,6 +1473,7 @@ fn run_wasm(
     argv: &[String],
     types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
     contracts: Vec<vyrn_frontend::ast::ContractDecl>,
+    type_arg: Option<Expr>,
     fuel: u64,
     caps: Caps,
 ) -> Result<String, EngineError> {
@@ -1582,6 +1632,7 @@ fn run_wasm(
             caps: Some(caps),
             types,
             contracts,
+            type_arg,
             ..GenState::default()
         },
         ..Streams::default()
