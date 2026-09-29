@@ -749,6 +749,202 @@ impl Test {
     }
 }
 
+/// What a row does with a value it names ([`St::operands`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Use {
+    /// Reads the value and leaves it where it is.
+    Read,
+    /// Hands the value on: a `consume` argument, a part of a literal, a
+    /// stored or returned value.
+    Hand,
+    /// The key a store writes at, which the container keeps.
+    Key,
+    /// The name a place is rooted at.
+    Root,
+    /// An index or a key that selects a place.
+    Index,
+    Bind,
+    Release,
+}
+
+impl St {
+    /// The lists of rows this row holds, in program order: an `if`'s then
+    /// and else, a loop's or a block's body, each arm's body.
+    pub fn lists(&self) -> impl Iterator<Item = &Vec<St>> {
+        let (a, b, arms): (Option<&Vec<St>>, Option<&Vec<St>>, &[Arm]) = match self {
+            St::If { then, els, .. } => (Some(then), Some(els), &[]),
+            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &[]),
+            St::Switch { arms, .. } => (None, None, arms),
+            St::Let(..)
+            | St::Store { .. }
+            | St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. }
+            | St::Do { .. }
+            | St::Trap
+            | St::Check(_) => (None, None, &[]),
+        };
+        a.into_iter().chain(b).chain(arms.iter().map(|a| &a.body))
+    }
+
+    /// [`St::lists`], to write to.
+    pub fn lists_mut(&mut self) -> impl Iterator<Item = &mut Vec<St>> {
+        let (a, b, arms): (Option<&mut Vec<St>>, Option<&mut Vec<St>>, &mut [Arm]) = match self {
+            St::If { then, els, .. } => (Some(then), Some(els), &mut []),
+            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &mut []),
+            St::Switch { arms, .. } => (None, None, arms),
+            St::Let(..)
+            | St::Store { .. }
+            | St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. }
+            | St::Do { .. }
+            | St::Trap
+            | St::Check(_) => (None, None, &mut []),
+        };
+        a.into_iter()
+            .chain(b)
+            .chain(arms.iter_mut().map(|a| &mut a.body))
+    }
+
+    /// This row and every row under it, as [`rows`] walks them.
+    pub fn rows(&self) -> Rows<'_> {
+        rows(std::slice::from_ref(self))
+    }
+
+    /// Every value this row names, in the order it evaluates them, with what
+    /// it does with each. The rows it holds name their own, and an arm's
+    /// binders are the arm's ([`Arm::binds`]).
+    pub fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            St::Let(n, rhs) => {
+                rhs.operands(f);
+                f(&Val::Name(*n), Use::Bind);
+            }
+            St::Do { rhs, .. } => rhs.operands(f),
+            St::Store { place, value, .. } => {
+                place.stored(f);
+                f(value, Use::Hand);
+            }
+            St::Drop(n, ..) | St::Row { name: n, .. } => f(&Val::Name(*n), Use::Release),
+            St::If { cond, .. } => f(cond, Use::Read),
+            St::Switch { on, arms, .. } => {
+                for n in arms.iter().filter_map(|a| a.test.reads()) {
+                    f(&Val::Name(n), Use::Read);
+                }
+                f(on, Use::Read);
+            }
+            St::Return { value: Some(v), .. } => f(v, Use::Hand),
+            St::Return { value: None, .. }
+            | St::Loop { .. }
+            | St::Block { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Trap => {}
+            // A check reads what the row it guards reads, so no walker counts
+            // its guard as a second read.
+            St::Check(_) => {}
+        }
+    }
+}
+
+impl Rhs {
+    fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Rhs::Val(v) => f(v, Use::Read),
+            Rhs::Read(p) | Rhs::Take(p) => p.operands(f),
+            Rhs::Call { args, kind, .. } => {
+                if let Some(n) = kind.value() {
+                    f(&Val::Name(n), Use::Read);
+                }
+                for (a, c) in args {
+                    match a {
+                        Arg::Place(p) => p.operands(f),
+                        Arg::Val(v) if *c == Capability::Consume => f(v, Use::Hand),
+                        Arg::Val(v) => f(v, Use::Read),
+                    }
+                }
+            }
+            Rhs::Prim(_, vs, _) => vs.iter().for_each(|v| f(v, Use::Read)),
+            Rhs::Make(_, vs) => vs.iter().for_each(|v| f(v, Use::Hand)),
+        }
+    }
+}
+
+impl Place {
+    fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Place::Name(n) => f(&Val::Name(*n), Use::Root),
+            Place::Global(_) => {}
+            Place::Field(b, _) => b.operands(f),
+            Place::Elem(b, v) | Place::Key(b, v) => {
+                b.operands(f);
+                f(v, Use::Index);
+            }
+        }
+    }
+
+    /// [`Place::operands`] of a place a store writes: the key it writes at,
+    /// below any fields and elements, is [`Use::Key`].
+    fn stored(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Place::Key(b, v) => {
+                b.operands(f);
+                f(v, Use::Key);
+            }
+            Place::Field(b, _) => b.stored(f),
+            Place::Elem(b, v) => {
+                b.stored(f);
+                f(v, Use::Index);
+            }
+            Place::Name(_) | Place::Global(_) => self.operands(f),
+        }
+    }
+}
+
+/// Every row of `ss` and every row under it, in program order, each before
+/// the rows it holds, with the number of loops between the row and `ss`.
+pub fn rows(ss: &[St]) -> Rows<'_> {
+    Rows(vec![(ss.iter(), 0)])
+}
+
+/// The iterator [`rows`] returns: a stack of the lists still being walked,
+/// the innermost last, each with its loop depth.
+pub struct Rows<'a>(Vec<(std::slice::Iter<'a, St>, u32)>);
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = (&'a St, u32);
+
+    fn next(&mut self) -> Option<(&'a St, u32)> {
+        loop {
+            let (list, depth) = self.0.last_mut()?;
+            let depth = *depth;
+            let Some(s) = list.next() else {
+                self.0.pop();
+                continue;
+            };
+            let inner = depth + u32::from(matches!(s, St::Loop { .. }));
+            let at = self.0.len();
+            self.0.extend(s.lists().map(|l| (l.iter(), inner)));
+            self.0[at..].reverse();
+            return Some((s, depth));
+        }
+    }
+}
+
+/// Calls `f` on every row of `ss` and every row under it, in program order,
+/// each before the rows it holds.
+pub fn each_row_mut(ss: &mut [St], f: &mut dyn FnMut(&mut St)) {
+    for s in ss {
+        f(s);
+        s.lists_mut().for_each(|l| each_row_mut(l, f));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
@@ -1151,7 +1347,6 @@ fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
             handed: vec![false; f.names.len()],
             switches: Vec::new(),
             order: 0,
-            depth: 0,
         };
         w.stmts(&f.stmts, 0);
         for p in &f.params {
@@ -1198,148 +1393,53 @@ struct Reads {
     handed: Vec<bool>,
     switches: Vec<(NodeId, Name, usize, usize)>,
     order: usize,
-    depth: usize,
 }
 
 impl Reads {
-    /// A value in a position that transfers it: a declared `consume`
-    /// argument, a part of a literal, a stored value, a map key a store
-    /// writes at, a returned value.
-    fn hand(&mut self, v: &Val) {
-        if let Val::Name(n) = v {
-            self.handed[*n as usize] = true;
-        }
-        self.val(v);
-    }
-
-    /// The place of a store: the key it writes at is handed to the container.
-    fn store_place(&mut self, p: &Place) {
-        match p {
-            Place::Key(b, v) => {
-                self.place(b);
-                self.hand(v);
+    fn stmts(&mut self, stmts: &[St], depth: usize) {
+        for st in stmts {
+            // A row is the plan's, not the core's: see [`last_owner`].
+            if matches!(st, St::Row { .. }) {
+                continue;
             }
-            Place::Field(b, _) | Place::Elem(b, _) => self.store_place(b),
-            _ => self.place(p),
-        }
-        if let Place::Elem(_, v) = p {
-            self.val(v);
-        }
-    }
-
-    fn val(&mut self, v: &Val) {
-        self.order += 1;
-        if let Val::Name(n) = v {
-            self.last[*n as usize] = self.order;
-            self.deep[*n as usize] = self.depth;
-        }
-    }
-
-    fn place(&mut self, p: &Place) {
-        match p {
-            Place::Name(n) => {
+            st.operands(&mut |v, u| {
+                let Val::Name(n) = *v else { return };
+                let n = n as usize;
+                if u == Use::Bind {
+                    self.bound[n] = depth;
+                    return;
+                }
                 self.order += 1;
-                self.last[*n as usize] = self.order;
-                self.deep[*n as usize] = self.depth;
-            }
-            Place::Global(_) => {}
-            Place::Field(b, _) => self.place(b),
-            Place::Elem(b, v) | Place::Key(b, v) => {
-                self.place(b);
-                self.val(v);
-            }
-        }
-    }
-
-    fn rhs(&mut self, r: &Rhs) {
-        match r {
-            Rhs::Val(v) => self.val(v),
-            Rhs::Read(p) => self.place(p),
+                self.last[n] = self.order;
+                self.deep[n] = depth;
+                self.handed[n] |= matches!(u, Use::Hand | Use::Key);
+            });
             // A take out of a sub-place hands that part on, so what is left
             // is this turn's: `out.push(consume p.value)` in a `for p in ..`.
-            Rhs::Take(p) => {
-                self.place(p);
+            if let St::Let(_, Rhs::Take(p))
+            | St::Do {
+                rhs: Rhs::Take(p), ..
+            } = st
+            {
                 if let Some(Val::Name(n)) = root_name(p) {
                     self.handed[n as usize] = true;
                 }
             }
-            Rhs::Call { args, kind, .. } => {
-                if let Some(f) = kind.value() {
-                    self.val(&Val::Name(f));
-                }
-                for (a, c) in args {
-                    match a {
-                        Arg::Place(p) => self.place(p),
-                        Arg::Val(v) if *c == vyrn_frontend::ast::Capability::Consume => {
-                            self.hand(v)
-                        }
-                        Arg::Val(v) => self.val(v),
-                    }
-                }
+            let St::Switch { on, arms, .. } = st else {
+                let inner = depth + usize::from(matches!(st, St::Loop { .. }));
+                st.lists().for_each(|l| self.stmts(l, inner));
+                continue;
+            };
+            if let (Val::Name(n), Some(a)) = (on, arms.first()) {
+                self.switches.push((a.site, *n, depth, self.order));
             }
-            Rhs::Prim(_, vs, _) => {
-                for v in vs {
-                    self.val(v);
+            for a in arms {
+                for b in &a.binds {
+                    self.bound[*b as usize] = depth;
                 }
-            }
-            Rhs::Make(_, vs) => {
-                for v in vs {
-                    self.hand(v);
-                }
-            }
-        }
-    }
-
-    fn name(&mut self, n: Name) {
-        self.order += 1;
-        self.last[n as usize] = self.order;
-        self.deep[n as usize] = self.depth;
-    }
-
-    fn stmts(&mut self, stmts: &[St], depth: usize) {
-        for st in stmts {
-            self.depth = depth;
-            match st {
-                St::Let(n, r) => {
-                    self.rhs(r);
-                    self.bound[*n as usize] = depth;
-                }
-                St::Store { place, value, .. } => {
-                    self.store_place(place);
-                    self.hand(value);
-                }
-                St::Drop(n, _, _, _) => self.name(*n),
-                // A row is the plan's, not the core's: see [`last_owner`].
-                St::Row { .. } => {}
-                St::If {
-                    cond, then, els, ..
-                } => {
-                    self.val(cond);
-                    self.stmts(then, depth);
-                    self.stmts(els, depth);
-                }
-                St::Loop { body: b, .. } => self.stmts(b, depth + 1),
-                St::Block { body, .. } => self.stmts(body, depth),
-                St::Return { value: Some(v), .. } => self.hand(v),
-                St::Switch { on, arms, .. } => {
-                    arms.iter()
-                        .filter_map(|a| a.test.reads())
-                        .for_each(|n| self.val(&Val::Name(n)));
-                    self.val(on);
-                    if let (Val::Name(n), Some(a)) = (on, arms.first()) {
-                        self.switches.push((a.site, *n, depth, self.order));
-                    }
-                    for a in arms {
-                        for b in &a.binds {
-                            self.bound[*b as usize] = depth;
-                        }
-                        // The rows that read a binder out of the scrutinee
-                        // are the binder's, not a read of the scrutinee.
-                        self.stmts(&a.body[a.reads(on).len()..], depth);
-                    }
-                }
-                St::Do { rhs: r, .. } => self.rhs(r),
-                _ => {}
+                // The rows that read a binder out of the scrutinee
+                // are the binder's, not a read of the scrutinee.
+                self.stmts(&a.body[a.reads(on).len()..], depth);
             }
         }
     }
@@ -1440,7 +1540,16 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// them, and `VYRN_GAP_TALLY` tables them.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
-    gaps_of(body, &body.stmts, &mut out);
+    for (s, _) in rows(&body.stmts) {
+        if let St::Let(_, r) | St::Do { rhs: r, .. } = s {
+            gaps_rhs(body, r, &mut out);
+        }
+        s.operands(&mut |v, _| {
+            if let Val::Lit(Lit::Opaque(k)) = v {
+                out.push(format!("Opaque:{k:?}"));
+            }
+        });
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|t| seen.insert(t.clone()));
     out
@@ -1453,26 +1562,7 @@ pub fn gaps(body: &Body) -> Vec<String> {
 /// store, the call it feeds, an arm's releases), and a builder cannot cut its
 /// own list because its caller extends it afterwards.
 fn cut(ss: &mut Vec<St>) {
-    for s in ss.iter_mut() {
-        match s {
-            St::If { then, els, .. } => {
-                cut(then);
-                cut(els);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => cut(body),
-            St::Switch { arms, .. } => arms.iter_mut().for_each(|a| cut(&mut a.body)),
-            St::Let(..)
-            | St::Do { .. }
-            | St::Store { .. }
-            | St::Drop(..)
-            | St::Row { .. }
-            | St::Return { .. }
-            | St::Break { .. }
-            | St::Continue { .. }
-            | St::Trap
-            | St::Check(_) => {}
-        }
-    }
+    ss.iter_mut().flat_map(St::lists_mut).for_each(cut);
     if let Some(i) = ss.iter().position(traps) {
         ss.truncate(i + 1);
     }
@@ -1520,58 +1610,12 @@ fn falls_through(body: &mut Body, owes: &Type, line: usize, what: impl FnOnce() 
     }
 }
 
-fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
-    for s in ss {
-        match s {
-            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(body, r, out),
-            St::Store { place, value, .. } => {
-                gaps_place(place, out);
-                gaps_val(value, out);
-            }
-            St::Drop(..) | St::Row { .. } => {}
-            St::If {
-                cond, then, els, ..
-            } => {
-                gaps_val(cond, out);
-                gaps_of(body, then, out);
-                gaps_of(body, els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(body, b, out),
-            St::Break { .. } | St::Continue { .. } | St::Trap | St::Check(_) => {}
-            St::Return { value, .. } => {
-                if let Some(v) = value {
-                    gaps_val(v, out);
-                }
-            }
-            St::Switch { on, arms, .. } => {
-                gaps_val(on, out);
-                for a in arms {
-                    gaps_of(body, &a.body, out);
-                }
-            }
-        }
-    }
-}
-
+/// The tags of a right-hand side the emitter has no reader for.
 fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
-    let vals = |vs: &[Val], out: &mut Vec<String>| {
-        for v in vs {
-            gaps_val(v, out);
-        }
-    };
     match r {
-        Rhs::Val(v) => gaps_val(v, out),
         // A take of a key has no reader; every other place read or take has.
-        Rhs::Read(p) => gaps_place(p, out),
-        Rhs::Take(p) => {
-            if matches!(p, Place::Key(..)) {
-                out.push("Take:Key".into());
-            }
-            gaps_place(p, out);
-        }
-        Rhs::Call {
-            callee, args, kind, ..
-        } => {
+        Rhs::Take(Place::Key(..)) => out.push("Take:Key".into()),
+        Rhs::Call { callee, kind, .. } => {
             // The emitter reads a declared function, a constructor, a builtin
             // with a row, and a call through a stored value (one call to its
             // signature's dispatcher). A call through a `fn`-typed parameter
@@ -1588,37 +1632,10 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
                 };
                 out.push(format!("Call:{tag}:{callee}"));
             }
-            for (a, _) in args {
-                match a {
-                    Arg::Val(v) => gaps_val(v, out),
-                    Arg::Place(p) => gaps_place(p, out),
-                }
-            }
         }
-        Rhs::Prim(Op::Closure(_), vs, _) => {
-            out.push("Lambda".into());
-            vals(vs, out);
-        }
-        Rhs::Prim(_, vs, _) => vals(vs, out),
+        Rhs::Prim(Op::Closure(_), ..) => out.push("Lambda".into()),
         // A part the emitter cannot place is the emitter's own screen, not a gap.
-        Rhs::Make(_, vs) => vals(vs, out),
-    }
-}
-
-fn gaps_val(v: &Val, out: &mut Vec<String>) {
-    if let Val::Lit(Lit::Opaque(k)) = v {
-        out.push(format!("Opaque:{k:?}"));
-    }
-}
-
-fn gaps_place(p: &Place, out: &mut Vec<String>) {
-    match p {
-        Place::Name(_) | Place::Global(_) => {}
-        Place::Field(b, _) => gaps_place(b, out),
-        Place::Elem(b, v) | Place::Key(b, v) => {
-            gaps_place(b, out);
-            gaps_val(v, out);
-        }
+        Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) | Rhs::Prim(..) | Rhs::Make(..) => {}
     }
 }
 
@@ -5153,7 +5170,7 @@ impl<'a> Builder<'a> {
     /// call that stores into it counts as a write.
     fn hoist_headers(&mut self, l: &mut [St], line: usize, out: &mut Vec<St>) {
         let mut read = Vec::new();
-        l.iter_mut().for_each(|s| header_reads(s, None, &mut read));
+        header_reads(l, None, &mut read);
         read.sort_unstable_by(|a, b| match (a, b) {
             (Root::N(x), Root::N(y)) => x.cmp(y),
             (Root::G(x), Root::G(y)) => x.cmp(y),
@@ -5196,8 +5213,7 @@ impl<'a> Builder<'a> {
             self.body.names[h as usize].walked = Some(Walk::While);
             self.body.names[h as usize].path = Some(path);
             out.push(St::Let(h, Rhs::Read(from)));
-            l.iter_mut()
-                .for_each(|s| header_reads(s, Some((&r, h)), &mut Vec::new()));
+            header_reads(l, Some((&r, h)), &mut Vec::new());
         }
     }
 
@@ -8229,12 +8245,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: bool) -> bool {
     let mut reads = vec![0; names];
     for i in 0..ss.len() {
-        let nested = match &mut ss[i] {
-            St::If { then, els, .. } => vec![then, els],
-            St::Loop { body, .. } | St::Block { body, .. } => vec![body],
-            St::Switch { arms, .. } => arms.iter_mut().map(|a| &mut a.body).collect(),
-            _ => Vec::new(),
-        };
+        let nested: Vec<&mut Vec<St>> = ss[i].lists_mut().collect();
         let mut inner = 0;
         for b in &nested {
             count_reads(b, &mut reads);
@@ -8265,118 +8276,66 @@ fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: 
 }
 
 fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name>)]) {
-    for s in ss {
-        match s {
-            St::Let(_, rhs) | St::Do { rhs, .. } => {
-                let Rhs::Call {
-                    callee,
-                    args,
-                    kind,
-                    targets,
-                    ..
-                } = rhs
-                else {
-                    continue;
-                };
-                if let Some(v) = kind.value() {
-                    match bound.iter().find(|(n, _)| *n == v) {
-                        Some((_, Target::Fn(f))) => {
-                            *kind = Callee::Fn;
-                            *callee = f.clone();
-                        }
-                        Some((_, Target::Lambda(key, ..))) => {
-                            *kind = Callee::Fn;
-                            *callee = key.clone();
-                            let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
-                            let lead = names.into_iter().flatten();
-                            let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
-                            args.splice(0..0, lead.collect::<Vec<_>>());
-                        }
-                        Some((_, Target::Value(source))) => *callee = source.clone(),
-                        _ => {}
-                    }
+    each_row_mut(ss, &mut |s| {
+        let (St::Let(_, rhs) | St::Do { rhs, .. }) = s else {
+            return;
+        };
+        let Rhs::Call {
+            callee,
+            args,
+            kind,
+            targets,
+            ..
+        } = rhs
+        else {
+            return;
+        };
+        if let Some(v) = kind.value() {
+            match bound.iter().find(|(n, _)| *n == v) {
+                Some((_, Target::Fn(f))) => {
+                    *kind = Callee::Fn;
+                    *callee = f.clone();
                 }
-                for t in targets.iter_mut() {
-                    let Target::Param(p) = t else { continue };
-                    let p = *p;
-                    let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
-                        continue;
-                    };
-                    *t = to.clone();
-                    // A stored value forwards itself, the parameter that
-                    // stays under its name.
-                    if matches!(to, Target::Value(_)) {
-                        args.push((Arg::Val(Val::Name(p)), Capability::Read));
-                    }
-                    let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
-                    let forwarded = forwarded.into_iter().flatten();
-                    args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
+                Some((_, Target::Lambda(key, ..))) => {
+                    *kind = Callee::Fn;
+                    *callee = key.clone();
+                    let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
+                    let lead = names.into_iter().flatten();
+                    let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
+                    args.splice(0..0, lead.collect::<Vec<_>>());
                 }
+                Some((_, Target::Value(source))) => *callee = source.clone(),
+                _ => {}
             }
-            St::If { then, els, .. } => {
-                bind_targets(then, bound, caps);
-                bind_targets(els, bound, caps);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => bind_targets(body, bound, caps),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    bind_targets(&mut a.body, bound, caps);
-                }
-            }
-            _ => {}
         }
-    }
+        for t in targets.iter_mut() {
+            let Target::Param(p) = t else { continue };
+            let p = *p;
+            let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
+                continue;
+            };
+            *t = to.clone();
+            // A stored value forwards itself, the parameter that
+            // stays under its name.
+            if matches!(to, Target::Value(_)) {
+                args.push((Arg::Val(Val::Name(p)), Capability::Read));
+            }
+            let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
+            let forwarded = forwarded.into_iter().flatten();
+            args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
+        }
+    });
 }
 
 fn count_reads(ss: &[St], out: &mut [u32]) {
-    fn hit(v: &Val, out: &mut [u32]) {
-        if let Val::Name(n) = v {
-            out[*n as usize] += 1;
-        }
-    }
-    for s in ss {
-        match s {
-            St::Let(_, rhs) | St::Do { rhs, .. } => match rhs {
-                Rhs::Val(v) => hit(v, out),
-                Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
-                    vs.iter().for_each(|v| hit(v, out));
-                }
-                Rhs::Call { args, kind, .. } => {
-                    kind.value().iter().for_each(|f| hit(&Val::Name(*f), out));
-                    args.iter().for_each(|(a, _)| {
-                        if let Arg::Val(v) = a {
-                            hit(v, out)
-                        }
-                    })
-                }
-                Rhs::Read(_) | Rhs::Take(_) => {}
-            },
-            St::Store { value, .. } => hit(value, out),
-            St::Return { value: Some(v), .. } => hit(v, out),
-            St::If { cond, .. } => hit(cond, out),
-            St::Switch { on, arms, .. } => {
-                hit(on, out);
-                arms.iter()
-                    .filter_map(|a| a.test.reads())
-                    .for_each(|n| out[n as usize] += 1);
+    // A release reads the name, so the name holds a place until then. A
+    // release row (`St::Row`) and a place's names are not counted.
+    for (s, _) in rows(ss).filter(|(s, _)| !matches!(s, St::Row { .. })) {
+        s.operands(&mut |v, u| {
+            if let (Val::Name(n), Use::Read | Use::Hand | Use::Release) = (v, u) {
+                out[*n as usize] += 1;
             }
-            // A release reads the name, so the name holds a place until then.
-            St::Drop(n, ..) => out[*n as usize] += 1,
-            _ => {}
-        }
-        match s {
-            St::If { then, els, .. } => {
-                count_reads(then, out);
-                count_reads(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => count_reads(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    count_reads(&a.body, out);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 }
 
@@ -8399,36 +8358,12 @@ pub fn runs<'a>(s: &St, names: &'a [NameInfo]) -> &'a [String] {
 /// Every name a statement names, itself and everything under it: what it binds
 /// and what it reads.
 pub fn names_in(s: &St, out: &mut Vec<Name>) {
-    match s {
-        St::Let(n, rhs) => {
-            out.push(*n);
-            names_in_rhs(rhs, out);
-        }
-        St::Do { rhs, .. } => names_in_rhs(rhs, out),
-        St::Store { place, value, .. } => {
-            names_in_place(place, out);
-            names_in_val(value, out);
-        }
-        St::Drop(n, ..) | St::Row { name: n, .. } => out.push(*n),
-        St::If {
-            cond, then, els, ..
-        } => {
-            names_in_val(cond, out);
-            then.iter().for_each(|s| names_in(s, out));
-            els.iter().for_each(|s| names_in(s, out));
-        }
-        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
-            b.iter().for_each(|s| names_in(s, out))
-        }
-        St::Switch { on, arms, .. } => {
-            names_in_val(on, out);
-            for a in arms {
-                out.extend(a.test.reads());
-                a.body.iter().for_each(|s| names_in(s, out));
+    for (r, _) in s.rows() {
+        r.operands(&mut |v, _| {
+            if let Val::Name(n) = v {
+                out.push(*n);
             }
-        }
-        St::Return { value: Some(v), .. } => names_in_val(v, out),
-        St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap | St::Check(_) => {}
+        });
     }
 }
 
@@ -8476,12 +8411,12 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
     out
 }
 
-/// The names and the module state whose header a read in `s` walks: an
+/// The names and the module state whose header a read in `ss` walks: an
 /// element read, or a length read, straight off one. With `rebase`, each
 /// such read of the first reads the name instead. A store and a take keep
 /// their place, so a store into an element writes the container and not its
 /// header.
-fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
+fn header_reads(ss: &mut [St], rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
     fn place(p: &mut Place, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
         let header = match p {
             Place::Elem(b, _) => Some(b),
@@ -8508,42 +8443,25 @@ fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) 
             Place::Name(_) | Place::Global(_) => {}
         }
     }
-    let each = |ss: &mut Vec<St>, out: &mut Vec<Root>| {
-        ss.iter_mut().for_each(|s| header_reads(s, rebase, out))
-    };
-    match s {
-        St::Let(_, Rhs::Read(p))
+    each_row_mut(ss, &mut |s| {
+        if let St::Let(_, Rhs::Read(p))
         | St::Do {
             rhs: Rhs::Read(p), ..
-        } => place(p, rebase, out),
-        St::If { then, els, .. } => {
-            each(then, out);
-            each(els, out);
+        } = s
+        {
+            place(p, rebase, out);
         }
-        St::Loop { body, .. } | St::Block { body, .. } => each(body, out),
-        St::Switch { arms, .. } => arms.iter_mut().for_each(|a| each(&mut a.body, out)),
-        _ => {}
-    }
+    });
 }
 
 /// Every name `s` binds, at any depth: a `let` and a switch arm's binders.
 pub fn names_bound(s: &St, out: &mut Vec<Name>) {
-    match s {
-        St::Let(n, _) => out.push(*n),
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| names_bound(s, out));
-            els.iter().for_each(|s| names_bound(s, out));
+    for (r, _) in s.rows() {
+        match r {
+            St::Let(n, _) => out.push(*n),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| out.extend(&a.binds)),
+            _ => {}
         }
-        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
-            b.iter().for_each(|s| names_bound(s, out))
-        }
-        St::Switch { arms, .. } => {
-            for a in arms {
-                out.extend(&a.binds);
-                a.body.iter().for_each(|s| names_bound(s, out));
-            }
-        }
-        _ => {}
     }
 }
 
@@ -8561,39 +8479,6 @@ fn removal(e: &Expr) -> Option<&String> {
             _ => None,
         },
         _ => None,
-    }
-}
-
-fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
-    match r {
-        Rhs::Val(v) => names_in_val(v, out),
-        Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().for_each(|v| names_in_val(v, out)),
-        Rhs::Call { args, kind, .. } => {
-            out.extend(kind.value());
-            args.iter().for_each(|(a, _)| match a {
-                Arg::Val(v) => names_in_val(v, out),
-                Arg::Place(p) => names_in_place(p, out),
-            })
-        }
-        Rhs::Read(p) | Rhs::Take(p) => names_in_place(p, out),
-    }
-}
-
-fn names_in_val(v: &Val, out: &mut Vec<Name>) {
-    if let Val::Name(n) = v {
-        out.push(*n);
-    }
-}
-
-fn names_in_place(p: &Place, out: &mut Vec<Name>) {
-    match p {
-        Place::Name(n) => out.push(*n),
-        Place::Global(_) => {}
-        Place::Field(b, _) => names_in_place(b, out),
-        Place::Elem(b, v) | Place::Key(b, v) => {
-            names_in_place(b, out);
-            names_in_val(v, out);
-        }
     }
 }
 
@@ -8654,14 +8539,9 @@ fn plan_holes(holes: &[String]) -> Vec<String> {
 
 /// Folds one frame's statements into the side table. Called after the placer
 /// has added every row, so this is the core the emitters run.
-fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
-    for s in stmts {
+fn fold_facts(body: &Body, proto: &Owned, out: &mut Facts) {
+    for (s, _) in rows(&body.stmts) {
         match s {
-            St::If { then, els, .. } => {
-                fold_facts(body, proto, then, out);
-                fold_facts(body, proto, els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => fold_facts(body, proto, b, out),
             St::Store {
                 releases,
                 site: Site::Node(at),
@@ -8723,7 +8603,6 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
                         // "not stated".
                         out.arms.entry((a.site, a.index)).or_default().extend(rows);
                     }
-                    fold_facts(body, proto, &a.body, out);
                 }
             }
             _ => {}
@@ -8781,11 +8660,15 @@ fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
                 Some(stated(program, proto.types(), body))
             });
     });
-    fold_facts(body, proto, &body.stmts, out);
+    fold_facts(body, proto, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
-    let mut released = std::collections::HashSet::new();
-    collect_drops(&body.stmts, &mut released);
+    let released: std::collections::HashSet<Name> = (rows(&body.stmts))
+        .filter_map(|(s, _)| match s {
+            St::Drop(n, ..) => Some(*n),
+            _ => None,
+        })
+        .collect();
     for (i, info) in body.names.iter().enumerate() {
         if !released.contains(&(i as Name)) {
             continue;
@@ -8802,27 +8685,6 @@ fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
         // binds a borrow, and the caller still frees the value.
         if let Some(node) = info.arg_drop {
             out.arg_drops.insert(node);
-        }
-    }
-}
-
-fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
-    for s in stmts {
-        match s {
-            St::Drop(n, _, _, _) => {
-                out.insert(*n);
-            }
-            St::If { then, els, .. } => {
-                collect_drops(then, out);
-                collect_drops(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => collect_drops(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    collect_drops(&a.body, out);
-                }
-            }
-            _ => {}
         }
     }
 }

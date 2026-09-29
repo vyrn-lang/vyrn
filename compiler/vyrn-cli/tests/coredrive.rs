@@ -164,20 +164,9 @@ fn projection_calls(ss: &[St], out: &mut Vec<String>) {
             out.push(callee.clone());
         }
     }
-    for s in ss {
-        match s {
-            St::Let(_, r) | St::Do { rhs: r, .. } => of(r, out),
-            St::If { then, els, .. } => {
-                projection_calls(then, out);
-                projection_calls(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => projection_calls(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    projection_calls(&a.body, out);
-                }
-            }
-            _ => {}
+    for (s, _) in vyrn_lower::core::rows(ss) {
+        if let St::Let(_, r) | St::Do { rhs: r, .. } = s {
+            of(r, out);
         }
     }
 }

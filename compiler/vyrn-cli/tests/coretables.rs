@@ -178,7 +178,7 @@ fn producers(
     out: &mut BTreeMap<(&'static str, bool), usize>,
     ops: &mut BTreeMap<String, usize>,
 ) {
-    for s in stmts {
+    for (s, _) in vyrn_lower::core::rows(stmts) {
         match s {
             St::Let(_, rhs) => {
                 let row = match rhs {
@@ -195,17 +195,7 @@ fn producers(
             St::Do { rhs, .. } => operation(rhs, ops),
             St::Store { value, .. } => literal(value, ops),
             St::Return { value: Some(v), .. } => literal(v, ops),
-            St::Switch { on, arms, .. } => {
-                literal(on, ops);
-                for a in arms {
-                    producers(&a.body, out, ops);
-                }
-            }
-            St::If { then, els, .. } => {
-                producers(then, out, ops);
-                producers(els, out, ops);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => producers(b, out, ops),
+            St::Switch { on, .. } => literal(on, ops),
             _ => {}
         }
     }

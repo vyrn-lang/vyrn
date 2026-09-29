@@ -858,26 +858,14 @@ fn run_corpus() {
 
 fn collect_callees(stmts: &[vyrn_lower::core::St], out: &mut BTreeSet<String>) {
     use vyrn_lower::core::{Rhs, St};
-    for s in stmts {
-        match s {
-            St::Let(_, Rhs::Call { callee, .. })
-            | St::Do {
-                rhs: Rhs::Call { callee, .. },
-                ..
-            } => {
-                out.insert(callee.clone());
-            }
-            St::If { then, els, .. } => {
-                collect_callees(then, out);
-                collect_callees(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => collect_callees(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    collect_callees(&a.body, out);
-                }
-            }
-            _ => {}
+    for (s, _) in vyrn_lower::core::rows(stmts) {
+        if let St::Let(_, Rhs::Call { callee, .. })
+        | St::Do {
+            rhs: Rhs::Call { callee, .. },
+            ..
+        } = s
+        {
+            out.insert(callee.clone());
         }
     }
 }
