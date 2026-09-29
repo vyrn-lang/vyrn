@@ -245,19 +245,15 @@ fn prim_guards(op: BinOp, l: &Val, r: &Val, ty: &Type, out: &mut Vec<(Rule, Guar
     let Some((bits, signed)) = vyrn_frontend::validate::width(ty) else {
         return;
     };
-    match op {
-        BinOp::Div => {
-            out.push((Rule::DivZero, Guard::NonZero(r.clone())));
-            if signed {
-                out.push((
-                    Rule::DivOverflow,
-                    Guard::NoOverflow(l.clone(), r.clone(), bits),
-                ));
-            }
-        }
-        BinOp::Rem => out.push((Rule::RemZero, Guard::NonZero(r.clone()))),
-        BinOp::Shl | BinOp::Shr => out.push((Rule::ShiftRange, Guard::Shift(r.clone(), bits))),
-        _ => {}
+    for &rule in op.row().traps {
+        let guard = match rule {
+            Rule::DivZero | Rule::RemZero => Guard::NonZero(r.clone()),
+            // Only a signed type has a minimum whose negation overflows.
+            Rule::DivOverflow if signed => Guard::NoOverflow(l.clone(), r.clone(), bits),
+            Rule::ShiftRange => Guard::Shift(r.clone(), bits),
+            _ => continue,
+        };
+        out.push((rule, guard));
     }
 }
 

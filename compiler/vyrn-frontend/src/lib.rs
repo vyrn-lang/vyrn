@@ -25,6 +25,7 @@ pub mod origin;
 pub mod own;
 pub mod parser;
 pub mod prelude;
+pub mod prim;
 pub mod prof;
 pub mod project;
 pub mod regex;

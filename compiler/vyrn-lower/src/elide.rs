@@ -23,6 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use vyrn_frontend::ast::{BinOp, Capability, Type, TypeDecl, UnOp};
 use vyrn_frontend::prelude::{self, Length};
+use vyrn_frontend::prim::Cmp;
 
 use crate::check::{Guard, Verdict};
 use crate::core::{Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
@@ -454,18 +455,23 @@ impl Walk<'_> {
                 if wide(a) || wide(b) {
                     return Out::Nothing;
                 }
-                let one = Lin::k(1);
-                // `gt(x, y)` is `x - y - 1 >= 0`: x > y.
-                let gt = |x: &Lin, y: &Lin| x.sub(y).and_then(|d| d.sub(&one));
-                let ge = |x: &Lin, y: &Lin| x.sub(y);
-                let (t, f) = match o {
-                    BinOp::Lt => (vec![gt(&lb, &la)], vec![ge(&la, &lb)]),
-                    BinOp::LtEq => (vec![ge(&lb, &la)], vec![gt(&la, &lb)]),
-                    BinOp::Gt => (vec![gt(&la, &lb)], vec![ge(&lb, &la)]),
-                    BinOp::GtEq => (vec![ge(&la, &lb)], vec![gt(&lb, &la)]),
-                    BinOp::Eq => (vec![ge(&la, &lb), ge(&lb, &la)], vec![]),
-                    BinOp::NotEq => (vec![], vec![ge(&la, &lb), ge(&lb, &la)]),
-                    _ => return self.bound(pre, n, *o, &la, &lb),
+                let (t, f) = match o.compare() {
+                    // `x > y` is `x - y - 1 >= 0`, and `x >= y` is `x - y >= 0`.
+                    Some(Cmp::Order { strict, flipped }) => {
+                        let (x, y) = if flipped { (&lb, &la) } else { (&la, &lb) };
+                        let s = i64::from(strict);
+                        let holds = x.sub(y).and_then(|d| d.plus(-s));
+                        (vec![holds], vec![y.sub(x).and_then(|d| d.plus(s - 1))])
+                    }
+                    Some(Cmp::Equal { negated }) => {
+                        let both = vec![la.sub(&lb), lb.sub(&la)];
+                        if negated {
+                            (vec![], both)
+                        } else {
+                            (both, vec![])
+                        }
+                    }
+                    None => return self.bound(pre, n, *o, &la, &lb),
                 };
                 let norm = |ls: Vec<Option<Lin>>| {
                     ls.into_iter()

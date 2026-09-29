@@ -4074,7 +4074,7 @@ impl<'p> Fn_<'_, 'p> {
         // wasm's `f32x4.lt`..`ge` and `eq` are ordered (false on NaN) and `ne` is unordered,
         // the pairing scalar floats use.
         if lt == Type::F32x4 {
-            let mask = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+            let mask = op.compare().is_some();
             b.ins(&match op {
                 BinOp::Add => Instruction::F32x4Add,
                 BinOp::Sub => Instruction::F32x4Sub,
@@ -4091,7 +4091,7 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(if mask { Type::Mask32x4 } else { lt });
         }
         if lt == Type::F64x2 {
-            let mask = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+            let mask = op.compare().is_some();
             b.ins(&match op {
                 BinOp::Add => Instruction::F64x2Add,
                 BinOp::Sub => Instruction::F64x2Sub,
@@ -4121,10 +4121,7 @@ impl<'p> Fn_<'_, 'p> {
         // No `Div`: wasm has no SIMD integer divide. Comparisons are signed, for the `Int32`
         // lane. Arithmetic wraps, as scalar `Int32` does.
         if lt == Type::I32x4 {
-            let mask = matches!(
-                op,
-                BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq
-            );
+            let mask = op.compare().is_some();
             b.ins(&match op {
                 BinOp::Add => Instruction::I32x4Add,
                 BinOp::Sub => Instruction::I32x4Sub,
@@ -4169,9 +4166,10 @@ impl<'p> Fn_<'_, 'p> {
                 _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
             };
             b.ins(&ins);
-            return Ok(match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => lt,
-                _ => Type::Bool,
+            return Ok(if op.compare().is_some() {
+                Type::Bool
+            } else {
+                lt
             });
         }
         let Some(n) = Num::of(opty) else {
@@ -4220,24 +4218,13 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalGet(d));
         }
         b.ins(&int_op(op, n).ok_or_else(|| gap(&format!("`{op:?}` on `{opty}`"), line))?);
-        Ok(match op {
-            // `&`, `|`, `^` and `>>` keep the carrier normalized, but `<<` shifts foreign bits
-            // in, so the whole group renormalizes as one rule.
-            BinOp::Add
-            | BinOp::Sub
-            | BinOp::Mul
-            | BinOp::Div
-            | BinOp::Rem
-            | BinOp::BitAnd
-            | BinOp::BitOr
-            | BinOp::BitXor
-            | BinOp::Shl
-            | BinOp::Shr => {
-                renorm(b, n);
-                lt
-            }
-            _ => Type::Bool,
-        })
+        if op.compare().is_some() {
+            return Ok(Type::Bool);
+        }
+        // `&`, `|`, `^` and `>>` keep the carrier normalized, but `<<` shifts foreign bits in, so
+        // every operator that yields an integer renormalizes as one rule.
+        renorm(b, n);
+        Ok(lt)
     }
 
     /// Calls a generator host import ([`Spec::Host`]). `ty` returns operand `i`'s type without
@@ -8766,15 +8753,14 @@ fn int_op(op: BinOp, n: Num) -> Option<Instruction<'static>> {
 
 /// The comparison instruction for an `i32`-shaped operand pair.
 fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
-    Some(match op {
-        BinOp::Eq => Instruction::I32Eq,
-        BinOp::NotEq => Instruction::I32Ne,
-        BinOp::Lt => Instruction::I32LtS,
-        BinOp::LtEq => Instruction::I32LeS,
-        BinOp::Gt => Instruction::I32GtS,
-        BinOp::GtEq => Instruction::I32GeS,
-        _ => return None,
-    })
+    op.compare()?;
+    int_op(
+        op,
+        Num {
+            bits: 32,
+            signed: true,
+        },
+    )
 }
 
 /// The load for a scalar of LLVM shape `ll` at a static offset, at its natural alignment.
@@ -12527,9 +12513,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 self.core_val(m, b, body, w, r, &opty, line)?;
                 let mut rows = [None, None];
-                if matches!(o, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr)
-                    && Num::of(&opty).is_some()
-                {
+                if !o.row().traps.is_empty() && Num::of(&opty).is_some() {
                     let Some(k) = w.checks.iter().rposition(|(c, _)| {
                         matches!(&c.guard, Guard::NonZero(d) | Guard::Shift(d, _) if d == r)
                     }) else {

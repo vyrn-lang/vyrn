@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
+use crate::prim::Cmp;
 
 /// A value known at compile time.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,65 +82,29 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
                 }
                 _ => {}
             }
-            let l = eval(lhs, env)?;
-            let r = eval(rhs, env)?;
-            match (l, r) {
-                (ConstVal::Int(a), ConstVal::Int(b)) => Some(match op {
-                    // Wrapping two's complement, as at run time: `checked_*` would refuse to
-                    // prove `value + 1 != 0` at `i64::MAX`. Division by zero and `MIN / -1` trap
-                    // at run time, so they stay unprovable.
-                    BinOp::Add => ConstVal::Int(a.wrapping_add(b)),
-                    BinOp::Sub => ConstVal::Int(a.wrapping_sub(b)),
-                    BinOp::Mul => ConstVal::Int(a.wrapping_mul(b)),
-                    BinOp::Div => ConstVal::Int(a.checked_div(b)?),
-                    // `MIN % -1 == 0` is provable; `% 0` is not.
-                    BinOp::Rem if b == -1 => ConstVal::Int(0),
-                    BinOp::Rem => ConstVal::Int(a.checked_rem(b)?),
-                    BinOp::Lt => ConstVal::Bool(a < b),
-                    BinOp::LtEq => ConstVal::Bool(a <= b),
-                    BinOp::Gt => ConstVal::Bool(a > b),
-                    BinOp::GtEq => ConstVal::Bool(a >= b),
-                    BinOp::Eq => ConstVal::Bool(a == b),
-                    BinOp::NotEq => ConstVal::Bool(a != b),
-                    // Bitwise and, or and xor on the `i64` representation agree with every
-                    // width.
-                    BinOp::BitAnd => ConstVal::Int(a & b),
-                    BinOp::BitOr => ConstVal::Int(a | b),
-                    BinOp::BitXor => ConstVal::Int(a ^ b),
-                    // Shifts and complement depend on the width, which this type-unaware
-                    // evaluator does not know, so they stay unfolded.
-                    BinOp::Shl | BinOp::Shr => return None,
-                    BinOp::And | BinOp::Or | BinOp::Match => return None,
-                }),
-                // IEEE `f64` arithmetic, as at run time: `/ 0.0` is inf or NaN, never a
-                // trap. The checker refuses `%` on floats.
-                (ConstVal::Float(a), ConstVal::Float(b)) => Some(match op {
-                    BinOp::Add => ConstVal::Float(a + b),
-                    BinOp::Sub => ConstVal::Float(a - b),
-                    BinOp::Mul => ConstVal::Float(a * b),
-                    BinOp::Div => ConstVal::Float(a / b),
-                    BinOp::Lt => ConstVal::Bool(a < b),
-                    BinOp::LtEq => ConstVal::Bool(a <= b),
-                    BinOp::Gt => ConstVal::Bool(a > b),
-                    BinOp::GtEq => ConstVal::Bool(a >= b),
-                    BinOp::Eq => ConstVal::Bool(a == b),
-                    BinOp::NotEq => ConstVal::Bool(a != b),
+            let (l, r) = (eval(lhs, env)?, eval(rhs, env)?);
+            let row = op.row();
+            if let Some(c) = row.cmp {
+                // Only equality folds on booleans and strings.
+                let equal = matches!(c, Cmp::Equal { .. });
+                let o = match (l, r) {
+                    (ConstVal::Int(a), ConstVal::Int(b)) => Some(a.cmp(&b)),
+                    (ConstVal::Float(a), ConstVal::Float(b)) => a.partial_cmp(&b),
+                    (ConstVal::Bool(a), ConstVal::Bool(b)) if equal => Some(a.cmp(&b)),
+                    (ConstVal::Str(a), ConstVal::Str(b)) if equal => Some(a.cmp(&b)),
                     _ => return None,
-                }),
-                (ConstVal::Bool(a), ConstVal::Bool(b)) => match op {
-                    BinOp::Eq => Some(ConstVal::Bool(a == b)),
-                    BinOp::NotEq => Some(ConstVal::Bool(a != b)),
-                    _ => None,
-                },
-                (ConstVal::Str(a), ConstVal::Str(b)) => match op {
-                    BinOp::Eq => Some(ConstVal::Bool(a == b)),
-                    BinOp::NotEq => Some(ConstVal::Bool(a != b)),
-                    // `s =~ "pat"` full-matches the literal pattern.
-                    BinOp::Match => crate::regex::compile(&b)
+                };
+                return Some(ConstVal::Bool(c.holds(o)));
+            }
+            match (l, r) {
+                (ConstVal::Int(a), ConstVal::Int(b)) => (row.int)(a, b).map(ConstVal::Int),
+                (ConstVal::Float(a), ConstVal::Float(b)) => (row.float)(a, b).map(ConstVal::Float),
+                // `s =~ "pat"` full-matches the literal pattern.
+                (ConstVal::Str(a), ConstVal::Str(b)) if *op == BinOp::Match => {
+                    crate::regex::compile(&b)
                         .ok()
-                        .map(|dfa| ConstVal::Bool(dfa.matches(&a))),
-                    _ => None,
-                },
+                        .map(|dfa| ConstVal::Bool(dfa.matches(&a)))
+                }
                 _ => None,
             }
         }
