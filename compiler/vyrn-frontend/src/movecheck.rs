@@ -121,9 +121,9 @@ crate::body_scope_descent!(LetsVisit, lets_block, lets_stmt, lets_expr);
 struct Lets<'a> {
     decl: &'a Declared,
     /// Lambda nodes an argument position already gave a signature.
-    typed: HashSet<usize>,
+    typed: HashSet<NodeId>,
     /// Index and value nodes a projection store's expansion stands in for.
-    skipped: HashSet<usize>,
+    skipped: HashSet<NodeId>,
     arities: HashSet<usize>,
     sigs: HashSet<String>,
     stores: Vec<String>,
@@ -146,14 +146,14 @@ impl<'a> LetsVisit<'a> for Lets<'_> {
         let Some(blk) = crate::project::stored(name, index, value) else {
             return;
         };
-        self.skipped.insert(index as *const Expr as usize);
-        self.skipped.insert(value as *const Expr as usize);
+        self.skipped.insert(index.id());
+        self.skipped.insert(value.id());
         self.stores.push(format!("store {name}:{line}"));
         lets_block(blk, &mut HashSet::new(), self);
     }
 
     fn expr(&mut self, e: &'a Expr, _: &HashSet<String>) -> bool {
-        if self.skipped.contains(&(e as *const Expr as usize)) {
+        if self.skipped.contains(&e.id()) {
             return false;
         }
         match e {
@@ -168,13 +168,13 @@ impl<'a> LetsVisit<'a> for Lets<'_> {
                         continue;
                     };
                     if let Type::Fn(ps, r) = crate::types::resolve(pt, self.decl.decls()) {
-                        self.typed.insert(a as *const Expr as usize);
+                        self.typed.insert(a.id());
                         self.sigs.insert(fn_sig_key(&ps, &r, self.decl.decls()));
                     }
                 }
             }
             Expr::Lambda { params, .. } => {
-                if !self.typed.contains(&(e as *const Expr as usize)) {
+                if !self.typed.contains(&e.id()) {
                     self.arities.insert(params.len());
                 }
             }

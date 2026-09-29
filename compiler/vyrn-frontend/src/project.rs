@@ -4,8 +4,8 @@
 //! [`store_index`] expands `a[i] = v`; a builtin container keeps its own nodes
 //! and lowers to [`ELEM`], the unspellable addressing primitive. While a
 //! [`Memo`] is open each site is expanded once and leaked, because the
-//! checker, the ownership passes and the lowering key side tables by node
-//! address.
+//! checker, the ownership passes and the lowering key side tables by node, and
+//! each expansion is numbered anew.
 
 use crate::ast::{
     BinOp, Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt,
@@ -112,7 +112,7 @@ pub fn lookup_impl_by_key<'a>(
 /// Returns the expansion an access site lowers through. `None` means the site
 /// keeps its own nodes: no user projection answers, and the seeded expansion
 /// would be the identity. `Some` is built once per site while
-/// a [`Memo`] is open, so every pass sees the same node addresses.
+/// a [`Memo`] is open, so every pass sees the same node ids.
 pub fn site(
     impls: &[ImplBlock],
     recv: Option<&Type>,
@@ -131,12 +131,7 @@ pub fn site(
         return Ok(None);
     };
     memo(
-        (
-            recv_expr as *const Expr as usize,
-            line,
-            key,
-            method.to_string(),
-        ),
+        (recv_expr.id(), line, key, method.to_string()),
         recv_expr,
         args,
         || inline(f, recv_expr, args, line),
@@ -168,12 +163,9 @@ pub fn optional_site(
     }
     let hit = OPT_MEMO.with(|m| {
         let m = m.borrow();
-        let e = m.as_ref()?.get(&(
-            recv_expr as *const Expr as usize,
-            line,
-            key.clone(),
-            method.to_string(),
-        ))?;
+        let e = m
+            .as_ref()?
+            .get(&(recv_expr.id(), line, key.clone(), method.to_string()))?;
         (e.recv == *recv_expr && e.args == args).then_some(e.tree)
     });
     if let Some(t) = hit {
@@ -190,12 +182,7 @@ pub fn optional_site(
     OPT_MEMO.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(
-                (
-                    recv_expr as *const Expr as usize,
-                    line,
-                    key,
-                    method.to_string(),
-                ),
+                (recv_expr.id(), line, key, method.to_string()),
                 OptExpansion {
                     recv: recv_expr.clone(),
                     args: args.to_vec(),
@@ -214,15 +201,15 @@ struct OptExpansion {
     tree: &'static OptionalProjection,
 }
 
-/// An access site: receiver node address, line, receiver type key, member
-/// name. The line is needed because the memo spans a load, which drops whole
-/// generator programs, so an address is reused and two equal sites can differ
-/// only in their line.
-type Key = (usize, usize, String, String);
+/// An access site: receiver node, line, receiver type key, member name. The
+/// line is needed because the memo spans a load, which checks whole generator
+/// programs, whose ids repeat the root's, so two equal sites can differ only in
+/// their line.
+type Key = (NodeId, usize, String, String);
 
 /// One expansion and the site inputs it was built from. A hit compares the
-/// inputs, because a reused address would otherwise answer with another site's
-/// expansion.
+/// inputs, because a generator program's node would otherwise answer with
+/// another site's expansion.
 struct Expansion {
     recv: Expr,
     args: Vec<Expr>,
@@ -232,7 +219,7 @@ struct Expansion {
 thread_local! {
     #[allow(clippy::type_complexity)]
     static LOOPS: std::cell::RefCell<
-        Option<HashMap<(usize, String, String), (Expr, Block, &'static Block)>>,
+        Option<HashMap<(NodeId, String, String), (Expr, Block, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
     static MEMO: std::cell::RefCell<Option<HashMap<Key, Expansion>>> =
         const { std::cell::RefCell::new(None) };
@@ -243,11 +230,11 @@ thread_local! {
     /// node, only the temporary [`store_index`] synthesizes.
     #[allow(clippy::type_complexity)]
     static STORES: std::cell::RefCell<
-        Option<HashMap<usize, (String, Expr, Expr, &'static Block)>>,
+        Option<HashMap<NodeId, (String, Expr, Expr, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
     /// The `Schema` literal each `schemaOf<T>()` node stands for, keyed by
     /// the call node, with the target's name. See [`schema`].
-    static SCHEMAS: std::cell::RefCell<Option<HashMap<usize, (String, &'static Expr)>>> =
+    static SCHEMAS: std::cell::RefCell<Option<HashMap<NodeId, (String, &'static Expr)>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -269,8 +256,9 @@ fn numbered(f: impl FnOnce(&mut Numbering)) {
 /// Shares every expansion built while it is alive, so the checker, the
 /// lowering and the emitter walk the same nodes; `direct::compile` takes it as
 /// proof (#547). The LSP opens none: it re-checks per keystroke. Expansions are
-/// leaked on purpose, because passes key side tables by their addresses; the
-/// cost is one tree per user-projection site.
+/// leaked on purpose, because passes key side tables by their node ids and a
+/// rebuilt expansion is numbered anew; the cost is one tree per
+/// user-projection site.
 pub struct Memo(());
 
 impl Memo {
@@ -304,7 +292,7 @@ pub fn schema(call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
     SCHEMAS.with(|m| {
         let mut m = m.borrow_mut();
         let m = m.as_mut()?;
-        let key = call as *const Expr as usize;
+        let key = call.id();
         if let Some((_, e)) = m.get(&key).filter(|(n, _)| *n == decl.name) {
             return Some(*e);
         }
@@ -318,7 +306,7 @@ pub fn schema(call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
 
 /// Returns the literal [`schema`] expanded for `call`.
 pub fn schema_at(call: &Expr) -> Option<&'static Expr> {
-    let key = call as *const Expr as usize;
+    let key = call.id();
     SCHEMAS.with(|m| m.borrow().as_ref()?.get(&key).map(|(_, e)| *e))
 }
 
@@ -412,7 +400,7 @@ pub fn store_index(
     STORES.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(
-                index as *const Expr as usize,
+                index.id(),
                 (name.to_string(), index.clone(), value.clone(), blk),
             );
         }
@@ -426,7 +414,7 @@ pub fn store_index(
 pub fn stored(name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> {
     STORES.with(|m| {
         let m = m.borrow();
-        let (n, i, v, blk) = m.as_ref()?.get(&(index as *const Expr as usize))?;
+        let (n, i, v, blk) = m.as_ref()?.get(&index.id())?;
         (n == name && i == index && v == value).then_some(*blk)
     })
 }
@@ -655,11 +643,7 @@ pub fn iterate_loop(
     body: &Block,
     line: usize,
 ) -> Result<&'static Block, String> {
-    let key = (
-        iter as *const Expr as usize,
-        size_fn.to_string(),
-        var.to_string(),
-    );
+    let key = (iter.id(), size_fn.to_string(), var.to_string());
     let hit = LOOPS.with(|m| {
         let m = m.borrow();
         let (i, b, blk) = m.as_ref()?.get(&key)?;
