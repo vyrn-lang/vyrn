@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use vyrn_frontend::ast::Type;
 
-use crate::core::{Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Val};
+use crate::core::{rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Val};
 use vyrn_frontend::ast::Capability;
 
 /// A step from one type into the type a place holds, for the caller that
@@ -119,7 +119,7 @@ pub fn judge(
             step,
             out: &mut out,
         };
-        w.stmts(&b.stmts);
+        rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
     }
     out
 }
@@ -135,12 +135,6 @@ struct Walk<'a, 'b> {
 }
 
 impl<'a> Walk<'a, '_> {
-    fn stmts(&mut self, stmts: &'a [St]) {
-        for s in stmts {
-            self.stmt(s);
-        }
-    }
-
     fn stmt(&mut self, s: &'a St) {
         match s {
             St::Let(n, rhs) => {
@@ -178,17 +172,11 @@ impl<'a> Walk<'a, '_> {
                     self.judge_store(ty, place, *line, rhs, named);
                 }
             }
-            St::If { then, els, .. } => {
-                self.stmts(then);
-                self.stmts(els);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => self.stmts(body),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    self.stmts(&a.body);
-                }
-            }
-            St::Do { .. }
+            St::If { .. }
+            | St::Loop { .. }
+            | St::Block { .. }
+            | St::Switch { .. }
+            | St::Do { .. }
             | St::Drop(..)
             | St::Row { .. }
             | St::Break { .. }
