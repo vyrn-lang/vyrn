@@ -8,11 +8,12 @@ branch trigger and no manual dispatch, so nothing publishes by accident.
 ## Tag format
 
 ```
-v<major>.<minor>.<patch>[-<pre>.<n>]
+v<major>.<minor>.<patch>[-<pre>[.<n>]]
 ```
 
 | Tag | Published as |
 |-----|--------------|
+| `v0.1.0-indev` | pre-release |
 | `v0.1.0-alpha.1` | pre-release |
 | `v0.1.0-rc.1` | pre-release |
 | `v0.1.0` | full release |
