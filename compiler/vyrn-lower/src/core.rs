@@ -6543,10 +6543,7 @@ impl<'a> Builder<'a> {
                             Type::Str
                         )
                     });
-                let compares = matches!(
-                    op,
-                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
-                );
+                let compares = op.compare().is_some();
                 let a = if concat || compares || matches!(op, BinOp::Match) {
                     self.read_arg(lhs, out, "@concat", 0)?
                 } else {
