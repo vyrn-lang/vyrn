@@ -2317,9 +2317,7 @@ fn lower_dispatcher(
     b.ins(&Instruction::LocalGet(fv));
     b.ins(&Instruction::I64Load(at(fl.fields[0])));
     b.ins(&Instruction::LocalSet(tag));
-    b.ins(&Instruction::LocalGet(fv));
-    b.ins(&Instruction::I64Load(at(fl.fields[1])));
-    b.ins(&Instruction::I32WrapI64);
+    load_wrapped(&mut b, fv, fl.fields[1]);
     b.ins(&Instruction::LocalSet(pl));
 
     let variants: Vec<(usize, FnVal)> = cx
@@ -2588,9 +2586,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
             for j in boxed {
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[j])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[j]);
                 b.ins(&Instruction::Call(self.cx.rt.free));
             }
             self.depth -= 1;
@@ -2746,9 +2742,7 @@ impl<'p> Fn_<'_, 'p> {
                 let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::LocalSet(n));
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
@@ -2764,9 +2758,7 @@ impl<'p> Fn_<'_, 'p> {
                 let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let n = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[0])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[0]);
                 b.ins(&Instruction::LocalSet(n));
                 let base = self.sa_base(b, a, ty, line)?;
                 self.each(m, b, true, base, n, stride, &inner, line)?;
@@ -2782,9 +2774,7 @@ impl<'p> Fn_<'_, 'p> {
                 let l = self.cx.layout(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let n = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[2])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[2]);
                 b.ins(&Instruction::LocalSet(n));
                 let kstride = mk.stride() as u32;
                 for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
@@ -2948,18 +2938,14 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         match w {
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 str_hdr(b);
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
             Word::Boxed => {
                 let p = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 b.ins(&Instruction::LocalSet(p));
                 self.rel_at(m, b, p, pty, line)?;
                 b.ins(&Instruction::LocalGet(p))
@@ -3202,9 +3188,7 @@ impl<'p> Fn_<'_, 'p> {
         b.slot(dest);
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(al.fields[1])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, src, al.fields[1]);
         b.ins(&Instruction::LocalGet(fault));
         b.ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
             .ins(&Instruction::I32Const(self.cx.rt.butf8 as i32))
@@ -5530,9 +5514,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalSet(n));
             b.ins(&Instruction::LocalGet(a));
             b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
-            b.ins(&Instruction::LocalGet(a));
-            b.ins(&Instruction::I64Load(at(sl.fields[4])));
-            b.ins(&Instruction::I32WrapI64);
+            load_wrapped(b, a, sl.fields[4]);
             b.ins(&Instruction::I32Const(stride as i32));
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::I32Add);
@@ -5610,9 +5592,7 @@ impl<'p> Fn_<'_, 'p> {
         let addr = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(s));
         b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
-        b.ins(&Instruction::LocalGet(s));
-        b.ins(&Instruction::I64Load(at(sl.fields[4])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, s, sl.fields[4]);
         b.ins(&Instruction::I32Const(stride as i32));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
@@ -6651,9 +6631,7 @@ impl<'p> Fn_<'_, 'p> {
                 let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::LocalTee(n));
                 b.ins(&Instruction::I32Const(stride as i32));
                 b.ins(&Instruction::I32Mul);
@@ -6680,9 +6658,7 @@ impl<'p> Fn_<'_, 'p> {
                 let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, base) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[0])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[0]);
                 b.ins(&Instruction::LocalSet(n));
                 // Inline while `cap == N`; the data pointer is live otherwise.
                 b.ins(&Instruction::LocalGet(a));
@@ -6699,9 +6675,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[2])));
                 b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::I32Const(stride as i32));
                 b.ins(&Instruction::I32Mul);
                 b.ins(&Instruction::LocalSet(bytes));
@@ -6727,13 +6701,9 @@ impl<'p> Fn_<'_, 'p> {
                 let l = self.cx.layout(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let (n, cap) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[2])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[2]);
                 b.ins(&Instruction::LocalSet(n));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[3])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[3]);
                 b.ins(&Instruction::LocalSet(cap));
                 let kstride = mk.stride() as u32;
                 for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
@@ -6843,9 +6813,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[0])));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::Call(self.cx.fnval_copy));
                 b.ins(&Instruction::I64ExtendI32U);
                 b.ins(&Instruction::I64Store(at(l.fields[1])));
@@ -6872,9 +6840,7 @@ impl<'p> Fn_<'_, 'p> {
         match w {
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
                 b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 self.str_dup(b);
                 b.ins(&Instruction::I64ExtendI32U);
                 b.ins(&Instruction::I64Store(at(off)));
@@ -6883,9 +6849,7 @@ impl<'p> Fn_<'_, 'p> {
             Word::Boxed => {
                 let size = self.cx.layout(pty, line)?.size;
                 let (src, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 b.ins(&Instruction::LocalSet(src));
                 b.ins(&Instruction::I32Const(size as i32));
                 b.ins(&Instruction::LocalSet(bytes));
@@ -7242,9 +7206,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             Word::Ext(v) => {
                 let l = b.local(v);
-                b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, addr, off);
                 b.ins(&Instruction::LocalSet(l));
                 Place::Local(l)
             }
@@ -7387,9 +7349,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(wsrc));
         b.ins(&Instruction::I32Load(word_at(al.fields[0])));
         b.ins(&Instruction::LocalSet(wdata));
-        b.ins(&Instruction::LocalGet(wsrc));
-        b.ins(&Instruction::I64Load(at(al.fields[1])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, wsrc, al.fields[1]);
         b.ins(&Instruction::LocalSet(wlen));
         let n = b.local(ValType::I64);
         operand(self, m, b, 1, &Type::Int)?;
@@ -7401,16 +7361,12 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(wlen));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalGet(wdata));
         b.ins(&Instruction::I64ExtendI32U);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[3]);
         b.ins(&Instruction::Call(self.cx.rt.map_find));
         b.ins(&Instruction::LocalSet(idx));
         b.ins(&Instruction::LocalGet(idx));
@@ -7446,9 +7402,7 @@ impl<'p> Fn_<'_, 'p> {
         self.map_reserve(b, hdr, &l, 8, MapKey::Str);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalTee(idx));
         b.ins(&Instruction::I32Const(4));
         b.ins(&Instruction::I32Mul);
@@ -7522,9 +7476,7 @@ impl<'p> Fn_<'_, 'p> {
         self.map_reserve(b, hdr, &l, 8, mk);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalTee(idx));
         b.ins(&Instruction::I32Const(mk.stride()));
         b.ins(&Instruction::I32Mul);
@@ -7631,9 +7583,7 @@ impl<'p> Fn_<'_, 'p> {
         // keys[len] = k, and the new entry's index IS the old length.
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalTee(idx));
         b.ins(&Instruction::I32Const(mk.stride()));
         b.ins(&Instruction::I32Mul);
@@ -7703,18 +7653,14 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Const(klen));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalGet(k));
         if mk != MapKey::I64 {
             b.ins(&Instruction::I64ExtendI32U);
         }
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[3]);
         b.ins(&Instruction::Call(self.cx.rt.map_find));
         b.ins(&Instruction::LocalSet(idx));
     }
@@ -7729,9 +7675,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[3]);
         b.ins(&Instruction::I32Const(2));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::LocalGet(idx));
@@ -8341,9 +8285,7 @@ impl<'p> Fn_<'_, 'p> {
         let aty = Type::Array(key_t);
         let al = self.cx.layout(&aty, line)?;
         let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalSet(len));
         let (kind, klen) = mk.kind();
         b.ins(&Instruction::I32Const(kind));
@@ -13783,6 +13725,15 @@ fn core_leaves(s: &St) -> bool {
         St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_leaves)),
         s => core_returns(s),
     }
+}
+
+/// Pushes the `i64` word at `off` past the address in local `a` as an `i32`: a length, a
+/// capacity or a box pointer, which memory holds as `i64` and every address computes with as
+/// `i32`.
+fn load_wrapped(b: &mut Frame, a: u32, off: u32) {
+    b.ins(&Instruction::LocalGet(a))
+        .ins(&Instruction::I64Load(at(off)))
+        .ins(&Instruction::I32WrapI64);
 }
 
 /// Push the address of the payload at `off` in the sum at `addr`: inside the
