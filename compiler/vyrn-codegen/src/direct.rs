@@ -34,7 +34,9 @@ use vyrn_lower::core::{Arg, Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
-use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE};
+use crate::wasm::{
+    self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
+};
 
 /// Refuses a construct this backend cannot lower, naming it and its line. One message shape for
 /// every gap, because the ladder groups blockers by the text after the colon.
@@ -1498,11 +1500,7 @@ fn agg_landed(b: &mut Frame, size: u32, in_place: bool) {
         b.ins(&Instruction::Drop);
         b.ins(&Instruction::Drop);
     } else {
-        b.ins(&Instruction::I32Const(size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(size);
     }
 }
 
@@ -1865,11 +1863,7 @@ fn lower_body(
                     let off = b.alloc(l.size, l.align);
                     b.slot(off);
                     b.ins(&Instruction::LocalGet(local));
-                    b.ins(&Instruction::I32Const(l.size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    b.copy(l.size);
                     Place::Slot(off)
                 }
                 Repr::Scalar(v) => {
@@ -1889,11 +1883,7 @@ fn lower_body(
                     let off = b.alloc(l.size, l.align);
                     b.slot(off);
                     b.ins(&Instruction::LocalGet(local));
-                    b.ins(&Instruction::I32Const(l.size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    b.copy(l.size);
                     Place::Slot(off)
                 }
                 _ => Place::Local(local),
@@ -1998,11 +1988,7 @@ fn lower_body(
             (Place::Slot(off), Repr::Agg(l)) => {
                 b.ins(&Instruction::LocalGet(*arg));
                 b.slot(*off);
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
             }
             _ => return unsupported("a `modify` parameter of this shape", f.line),
         }
@@ -2165,11 +2151,7 @@ fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
         b.ins(&Instruction::Call(cx.rt.malloc));
         b.ins(&Instruction::LocalTee(dst));
         b.ins(&Instruction::LocalGet(pay));
-        b.ins(&Instruction::I32Const(bl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(bl.size);
         fnval_captures(m, &mut f, &mut b, dst, &bl, &cap_tys, false)?;
         b.ins(&Instruction::LocalGet(dst));
         b.ins(&Instruction::Return);
@@ -2287,11 +2269,7 @@ fn lower_dispatcher(
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(local));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
                 Place::Slot(off)
             }
             Repr::Scalar(_) => Place::Local(local),
@@ -2337,11 +2315,7 @@ fn lower_dispatcher(
             let blk = b.alloc(bl.size, bl.align);
             b.slot(blk);
             b.ins(&Instruction::LocalGet(pl));
-            b.ins(&Instruction::I32Const(bl.size as i32));
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            b.copy(bl.size);
             for (ci, ct) in cap_tys.iter().enumerate() {
                 let at_off = blk + bl.fields[ci];
                 let place = match cx.repr(ct, 0)? {
@@ -2376,11 +2350,7 @@ fn lower_dispatcher(
             (Repr::Scalar(_), _) => f.coerce(m, &mut b, None, &got, ret, 0)?,
             (Repr::Agg(l), Repr::Agg(_)) => {
                 f.coerce(m, &mut b, None, &got, ret, 0)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
             }
             // A Unit-signature slot may hold a value-returning function; the result is dropped.
             (Repr::Unit, Repr::Scalar(_) | Repr::Agg(_)) => {
@@ -3005,13 +2975,7 @@ impl<'p> Fn_<'_, 'p> {
         let place = match self.cx.repr(ty, line)? {
             Repr::Agg(l) => {
                 let at = b.alloc(l.size, l.align);
-                b.slot(at)
-                    .ins(&Instruction::LocalGet(a))
-                    .ins(&Instruction::I32Const(l.size as i32))
-                    .ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                b.slot(at).ins(&Instruction::LocalGet(a)).copy(l.size);
                 Place::Slot(at)
             }
             Repr::Scalar(v) => {
@@ -3589,11 +3553,7 @@ impl<'p> Fn_<'_, 'p> {
                             b.ins(&Instruction::LocalGet(src));
                             b.ins(&Instruction::I32Const(sl.fields[j] as i32));
                             b.ins(&Instruction::I32Add);
-                            b.ins(&Instruction::I32Const(fl.size as i32));
-                            b.ins(&Instruction::MemoryCopy {
-                                src_mem: 0,
-                                dst_mem: 0,
-                            });
+                            b.copy(fl.size);
                         }
                         Repr::Unit => return unsupported("a Unit field", line),
                     }
@@ -3617,11 +3577,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::MemoryFill(0));
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Const(dl.size.min(sl.size) as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(dl.size.min(sl.size));
                 b.slot(off);
                 Ok(())
             }
@@ -4643,10 +4599,7 @@ impl<'p> Fn_<'_, 'p> {
             "store64" => b.ins(&Instruction::I64Store(at(3))),
             "storeF32" => b.ins(&Instruction::F32Store(at(2))),
             "storeF64" => b.ins(&Instruction::F64Store(at(3))),
-            "copy" => b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            }),
+            "copy" => b.ins(&MEMORY_COPY),
             "fill" => b.ins(&Instruction::MemoryFill(0)),
             "memorySize" => b.ins(&Instruction::MemorySize(0)),
             "grow" => b.ins(&Instruction::MemoryGrow(0)),
@@ -5107,11 +5060,7 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&self.cx.store(ty));
                     }
                     Repr::Agg(fl) => {
-                        b.ins(&Instruction::I32Const(fl.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
+                        b.copy(fl.size);
                         if dup {
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalGet(p));
@@ -5368,11 +5317,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Store(word8()));
         b.slot(off + sl.fields[2]);
         b.ins(&Instruction::LocalGet(fv));
-        b.ins(&Instruction::I32Const(fl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(fl.size);
         b.slot(off + sl.fields[4]);
         b.ins(&Instruction::LocalGet(c0));
         b.ins(&Instruction::I64Store(word8()));
@@ -5463,11 +5408,7 @@ impl<'p> Fn_<'_, 'p> {
         if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
             return unsupported(&format!("`boxStream` of `{got}`"), line);
         }
-        b.ins(&Instruction::I32Const(sl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(sl.size);
         b.ins(&Instruction::LocalGet(p));
         b.ins(&Instruction::I64ExtendI32U);
         Ok(Type::Int)
@@ -5489,11 +5430,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::I32Const(sl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(sl.size);
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64Store(word8()));
@@ -5561,11 +5498,7 @@ impl<'p> Fn_<'_, 'p> {
             place
                 .addr(b, 0)
                 .ok_or_else(|| gap("a two-word payload with no address", line))?;
-            b.ins(&Instruction::I32Const(16));
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            b.copy(16);
             return Ok(());
         }
         let load = self.cx.load(t, 0);
@@ -5754,11 +5687,7 @@ impl<'p> Fn_<'_, 'p> {
             (Place::Slot(off), Repr::Agg(el)) => {
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::I32Const(el.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(el.size);
             }
             _ => return unsupported("a stream of Unit", line),
         }
@@ -5825,11 +5754,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.slot(d);
                 src.addr(b, 0)
                     .ok_or_else(|| gap("a stream payload in a local", line))?;
-                b.ins(&Instruction::I32Const(el.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(el.size);
             }
             _ => return unsupported("a stream element of this shape", line),
         }
@@ -6245,11 +6170,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(buf));
         b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(bytes));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(bytes as u32);
         let l = self.cx.layout(want, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off + l.fields[0]);
@@ -6401,11 +6322,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&self.cx.store(elem));
             }
             Repr::Agg(_) => {
-                b.ins(&Instruction::I32Const(stride));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(stride as u32);
             }
             Repr::Unit => return unsupported("an array of Unit", line),
         }
@@ -6516,11 +6433,7 @@ impl<'p> Fn_<'_, 'p> {
             (Place::Slot(off), Repr::Agg(el)) => {
                 b.slot(off);
                 self.elem_addr(b, &w, idx);
-                b.ins(&Instruction::I32Const(el.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(el.size);
             }
             _ => return unsupported("an array of Unit", line),
         }
@@ -6535,11 +6448,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Store(word8()));
         self.elem_addr(b, &w, idx);
         self.elem_addr(b, &w, last);
-        b.ins(&Instruction::I32Const(w.stride as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(w.stride);
         match taken {
             Place::Local(l) => {
                 b.ins(&Instruction::LocalGet(l));
@@ -6645,11 +6554,7 @@ impl<'p> Fn_<'_, 'p> {
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
                 let a = b.local(ValType::I32);
                 b.slot(off);
                 b.ins(&Instruction::LocalSet(a));
@@ -6683,10 +6588,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(d));
         b.ins(&Instruction::LocalGet(s));
         b.ins(&Instruction::LocalGet(n));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.ins(&MEMORY_COPY);
         b.ins(&Instruction::LocalGet(d));
     }
 
@@ -6703,10 +6605,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(nb));
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::LocalGet(live));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.ins(&MEMORY_COPY);
         nb
     }
 
@@ -7112,11 +7011,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
                 b.ins(&Instruction::LocalGet(p));
             }
             Repr::Unit => return unsupported("a Unit payload", line),
@@ -7162,11 +7057,7 @@ impl<'p> Fn_<'_, 'p> {
                 // Two words already side by side: one copy, no encoding.
                 dest.addr(b, l.fields[at]);
                 self.part(m, b, args, i, t, line)?;
-                b.ins(&Instruction::I32Const(16));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(16);
             } else {
                 dest.addr(b, l.fields[at]);
                 match args.built(i) {
@@ -7436,11 +7327,7 @@ impl<'p> Fn_<'_, 'p> {
                 let slot = b.alloc(16, 8);
                 b.slot(slot);
                 payload_at(b, addr, off, true);
-                b.ins(&Instruction::I32Const(16));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(16);
                 Place::Slot(slot)
             }
             // The word is a heap pointer; the binding gets its own copy, so an
@@ -7461,11 +7348,7 @@ impl<'p> Fn_<'_, 'p> {
                         let slot = b.alloc(l.size, l.align);
                         b.slot(slot);
                         b.ins(&Instruction::LocalGet(p));
-                        b.ins(&Instruction::I32Const(l.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
+                        b.copy(l.size);
                         Place::Slot(slot)
                     }
                     Repr::Unit => return unsupported("a Unit payload", line),
@@ -7714,11 +7597,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             MapKey::Pack(stride) => {
                 b.ins(&Instruction::LocalGet(k));
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(stride);
             }
             MapKey::Str => {
                 b.ins(&Instruction::LocalGet(k));
@@ -7828,11 +7707,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             MapKey::Pack(stride) => {
                 b.ins(&Instruction::LocalGet(k));
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(stride);
             }
             MapKey::Str => {
                 b.ins(&Instruction::LocalGet(k));
@@ -7875,11 +7750,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&self.cx.store(val));
             }
             Repr::Agg(vl) => {
-                b.ins(&Instruction::I32Const(vl.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(vl.size);
             }
             Repr::Unit => return unsupported("a Map of Unit", line),
         }
@@ -7990,11 +7861,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I32Const(off as i32));
             b.ins(&Instruction::I32Add);
         }
-        b.ins(&Instruction::I32Const(sz as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(sz);
         Ok(())
     }
 
@@ -8125,11 +7992,7 @@ impl<'p> Fn_<'_, 'p> {
             Word::Inline2 => {
                 b.slot(off + ol.fields[1]);
                 self.map_val_addr(b, hdr, &l, idx, esz);
-                b.ins(&Instruction::I32Const(16));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(16);
             }
             // A value wider than a word (an aggregate, a vector): the payload word points
             // at the entry in the map's buffer, whose bytes are the box's. The `Option`
@@ -8710,11 +8573,7 @@ impl<'p> Fn_<'_, 'p> {
         if len > 0 {
             b.slot(off + l.fields[3]);
             b.ins(&Instruction::LocalGet(src));
-            b.ins(&Instruction::I32Const(self.extent(inner, len, line)? as i32));
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            b.copy(self.extent(inner, len, line)?);
         }
         b.slot(off);
         Ok(())
@@ -8790,10 +8649,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::I32Const(stride as i32));
         b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.ins(&MEMORY_COPY);
         let count = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::I32WrapI64);

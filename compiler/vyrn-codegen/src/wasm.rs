@@ -678,6 +678,12 @@ pub const SP: u32 = 0;
 /// the data segment, is a no-op.
 pub const HEAP_BASE: u32 = 1;
 
+/// `memory.copy` within the one memory: pops the length, the source and the destination.
+pub const MEMORY_COPY: Instruction<'static> = Instruction::MemoryCopy {
+    src_mem: 0,
+    dst_mem: 0,
+};
+
 /// A function body under construction and its shadow-stack frame. The
 /// instructions are buffered because the prologue depends on the final frame
 /// size.
@@ -790,6 +796,13 @@ impl Frame {
             self.body.push(Instruction::I32Const(off as i32));
             self.body.push(Instruction::I32Add);
         }
+        self
+    }
+
+    /// Copies `n` bytes from the address on top of the stack to the address under it.
+    pub fn copy(&mut self, n: u32) -> &mut Self {
+        self.body.push(Instruction::I32Const(n as i32));
+        self.body.push(MEMORY_COPY);
         self
     }
 

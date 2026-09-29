@@ -961,7 +961,7 @@ fn coercion_census() -> Vec<CoercionSite> {
     };
     vec![
         site("vyrn-codegen/src/lib.rs", "pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {", "shared", true, true, 54),
-        site("vyrn-codegen/src/direct.rs", "fn coerce(", "wasm", true, false, 186),
+        site("vyrn-codegen/src/direct.rs", "fn coerce(", "wasm", true, false, 178),
         site("vyrn-frontend/src/checker.rs", "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {", "checker", false, false, 25),
     ]
 }
@@ -1049,8 +1049,8 @@ fn every_coercion_site_keeps_its_pinned_code_lines() {
         }
     }
     assert_eq!(
-        ladder, 186,
-        "the rung ladder is {ladder} code lines, not 186"
+        ladder, 178,
+        "the rung ladder is {ladder} code lines, not 178"
     );
     // An engine that asks another site's statement of the rung rule is not one.
     let statements: std::collections::BTreeSet<&str> = census
