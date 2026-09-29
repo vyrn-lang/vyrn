@@ -1109,7 +1109,8 @@ fn why_memory(file: &str) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let own = vyrn_lower::analyze(&program);
+    let world = vyrn_lower::analyze(&program);
+    let own = &world.ownership;
 
     println!("{path}");
     println!("  memory: every binding, whether it is reclaimed, and the reason when it is not");
@@ -4004,7 +4005,7 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
     use vyrn_frontend::ast::Expr;
     // The renames leave `own::ident` unchanged, so the next guard would adopt
     // the load's judgment of the program before them.
-    vyrn_frontend::own::forget_loaded();
+    vyrn_lower::forget_loaded();
     let has_main = program
         .functions
         .iter()

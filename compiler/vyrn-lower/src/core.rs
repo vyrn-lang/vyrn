@@ -26,7 +26,8 @@ pub use vyrn_frontend::prelude::Spec;
 use vyrn_frontend::project::is_place_read;
 
 use crate::kernel::{MissingKind, Root};
-use crate::{Instance, NodeTypes};
+use crate::world::Stated;
+use crate::{Instance, NodeTypes, World};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Ctor, Facts, Lit, Name,
     NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
@@ -6587,53 +6588,28 @@ fn mentions_in_lambda(body: &LambdaBody) -> Vec<&Expr> {
     v.0
 }
 
-thread_local! {
-    static REFUSALS: std::cell::RefCell<Vec<Refusal>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
-    /// The core's bodies for the program last analysed on this thread, by the
-    /// name each is emitted under: what an emitter walks in place of the
-    /// source ([`Facts`] answers per node instead). `None` under a name two
-    /// bodies share.
-    static BODIES: std::cell::RefCell<HashMap<String, Option<Body>>> =
-        std::cell::RefCell::new(HashMap::new());
-    /// The type declarations of the program in [`BODIES`], and the bodies
-    /// whose check rows are not decided yet: [`body_of`] decides a body when
-    /// an emitter first reads it, so `vyrn check` decides none of its own.
-    static UNDECIDED: std::cell::RefCell<(HashMap<String, TypeDecl>, std::collections::HashSet<String>)> =
-        std::cell::RefCell::new((HashMap::new(), std::collections::HashSet::new()));
-}
-
-/// The checker's type for the expression at `node`, off the record the placer
-/// lowered `own` against. `None` for a node the checker never typed, or an
-/// analysis no placer ran over.
+/// The checker's type for the expression at `node`, off the record `own` is
+/// lowered against. `None` for a node the checker never typed.
 fn node_ty(own: &Ownership, node: NodeId) -> Option<Type> {
-    own.record.as_ref()?.node_types.get(&node).cloned()
+    own.record.node_types.get(&node).cloned()
 }
 
 /// The type arguments the checker solved at the call `node`, as it typed the
 /// body: before an instance's substitution.
 fn node_solved(own: &Ownership, node: NodeId) -> Option<Vec<(String, Type)>> {
-    let (_, s) = own.record.as_ref()?.node_substs.get(&node)?;
+    let (_, s) = own.record.node_substs.get(&node)?;
     Some(s.clone())
 }
 
 /// The declaration the checker recorded at the call `node` it typed `Err`
 /// for the typed judgment ([`vyrn_frontend::checker::Recorded::calls`]).
 fn call_decl(own: &Ownership, node: NodeId) -> Option<vyrn_frontend::checker::CallDecl> {
-    own.record.as_ref()?.calls.get(&node).cloned()
-}
-
-/// The core's answers for the program last analysed on this thread. `None`
-/// before the placer runs on this thread, and after an analysis that feeds no
-/// emitter
-/// ([`vyrn_frontend::movecheck::emitting`]).
-pub fn facts() -> Option<Facts> {
-    FACTS.with(|f| f.borrow().clone())
+    own.record.calls.get(&node).cloned()
 }
 
 /// The name a lambda literal at `line` and `col` inside the body named
-/// `outer` is built and emitted under, and so its key in [`body_of`].
+/// `outer` is built and emitted under, and so its key in
+/// [`crate::World::body_of`].
 pub fn lambda_spelling(outer: &str, line: usize, col: usize) -> String {
     format!("{outer}@lambda:{line}:{col}")
 }
@@ -6643,24 +6619,6 @@ pub fn lambda_spelling(outer: &str, line: usize, col: usize) -> String {
 pub fn lambda_line(name: &str) -> Option<usize> {
     let (_, at) = name.rsplit_once("@lambda:")?;
     at.split(':').next()?.parse().ok()
-}
-
-/// The core's body for the function emitted under `name`: [`crate::spell`] of
-/// the instance (`max<Int64>`, `main@lambda:26:13`, `test@1`, or the empty
-/// name for module state). `None` for a [`Gap`] and for a name two bodies
-/// share; a reader then walks the source.
-pub fn body_of(name: &str) -> Option<Body> {
-    BODIES.with(|b| {
-        let mut b = b.borrow_mut();
-        let body = b.get_mut(name)?.as_mut()?;
-        UNDECIDED.with(|u| {
-            let (decls, pending) = &mut *u.borrow_mut();
-            if pending.remove(name) {
-                crate::elide::decide(body, decls);
-            }
-        });
-        Some(body.clone())
-    })
 }
 
 /// The instance of `body` whose `fn`-typed parameters are bound:
@@ -7096,7 +7054,7 @@ pub fn checked(program: &Program, own: &Ownership, body: &Body) -> Body {
     out
 }
 
-fn decides() -> bool {
+pub(crate) fn decides() -> bool {
     *crate::check::mode() != crate::check::Mode::Keep
 }
 
@@ -7115,21 +7073,25 @@ fn stated(program: &Program, own: &Ownership, body: &Body) -> Body {
 }
 
 /// Every frame's answers, added to the table.
-fn fold_frame(program: &Program, body: &Body, own: &Ownership, out: &mut Facts) {
+fn fold_frame(
+    program: &Program,
+    body: &Body,
+    own: &Ownership,
+    out: &mut Facts,
+    bodies: &mut HashMap<String, Option<Stated>>,
+) {
     let proto = &own.proto;
     // Filled at the same site as the fold, so a body the fold does not see is
     // one no emitter may walk either.
-    BODIES.with(|b| {
-        b.borrow_mut()
-            .entry(body.name.clone())
-            .and_modify(|had| *had = None)
-            .or_insert_with(|| {
-                if decides() {
-                    UNDECIDED.with(|u| u.borrow_mut().1.insert(body.name.clone()));
-                }
-                Some(stated(program, own, body))
-            });
-    });
+    bodies
+        .entry(body.name.clone())
+        .and_modify(|had| *had = None)
+        .or_insert_with(|| {
+            Some(Stated {
+                body: stated(program, own, body),
+                decided: Default::default(),
+            })
+        });
     fold_facts(body, proto, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
@@ -7166,23 +7128,23 @@ pub fn refuses() -> bool {
     !std::env::var("VYRN_NO_KERNEL").is_ok_and(|v| v == "1")
 }
 
-/// The hard refusals the placer met since the last call, on this thread: a
-/// double free, a use after release, a join whose edges disagree, and a rule
-/// the core states about a construct it does lower.
-///
-/// A gap ([`Gap`] with no `rule`) is not collected here: the core has no
-/// opinion, and the command goes on with the plan. A refusal is an answer no
-/// placement repairs, and only refusals fail a command.
-pub fn take_refusals() -> Vec<Refusal> {
-    REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
+thread_local! {
+    /// The typed judgment's refusals of the generators compiled on this thread
+    /// since the last drain. A generator run reads them after a trap
+    /// (`own::typed_refusals`), because the engine answers in a string.
+    static GEN_TYPED: std::cell::RefCell<Vec<Diagnostic>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-type Typed = (Vec<Diagnostic>, std::collections::HashSet<NodeId>);
+/// Keeps a generator's typed refusals for [`typed_diagnostics`].
+pub fn hand_on_typed(world: &World) {
+    GEN_TYPED.with(|t| t.borrow_mut().extend_from_slice(&world.typed));
+}
 
-thread_local! {
-    /// What the typed judgment refused about the program last analysed on
-    /// this thread, as `vyrn check` words it, and the statements it refused.
-    static TYPED: std::cell::RefCell<Typed> = std::cell::RefCell::default();
+/// The typed refusals [`hand_on_typed`] kept, drained. Installed into `own`'s
+/// slot by [`crate::install`].
+pub fn typed_diagnostics() -> Vec<Diagnostic> {
+    GEN_TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()))
 }
 
 /// Judges one built body with the typed judgment and answers whether it
@@ -7192,6 +7154,7 @@ thread_local! {
 fn typed(
     program: &Program,
     own: &Ownership,
+    r: &mut Refused,
     top: &Body,
     file: &Option<String>,
     as_written: bool,
@@ -7207,28 +7170,28 @@ fn typed(
         projected: &projected,
         ruled_within: &ruled_within,
     };
-    TYPED.with(|t| {
-        let (out, seen) = &mut *t.borrow_mut();
-        let mut found = crate::typed::stores(top, &rules, seen);
-        found.extend(crate::typed::loops(top, seen));
-        // One sentence per line: a declaration's predicate is also the body
-        // of its constructor.
-        for u in crate::typed::refused(top, as_written) {
-            let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
-            if !out.iter().any(said) && !found.contains(&u) {
-                found.push(u);
-            }
+    let (out, seen) = (&mut r.typed, &mut r.seen);
+    let mut found = crate::typed::stores(top, &rules, seen);
+    found.extend(crate::typed::loops(top, seen));
+    // One sentence per line: a declaration's predicate is also the body
+    // of its constructor.
+    for u in crate::typed::refused(top, as_written) {
+        let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
+        if !out.iter().any(said) && !found.contains(&u) {
+            found.push(u);
         }
-        if as_written {
-            found.extend(crate::typed::drops(top, program, own.proto.types()));
-        }
-        found.sort_by_key(|(line, _)| *line);
-        let refused = !found.is_empty();
-        out.extend(found.into_iter().map(|(line, message)| {
+    }
+    if as_written {
+        found.extend(crate::typed::drops(top, program, own.proto.types()));
+    }
+    found.sort_by_key(|(line, _)| *line);
+    let refused = !found.is_empty();
+    out.extend(
+        found.into_iter().map(|(line, message)| {
             Diagnostic::error(line, 0, "check", message).in_file(file.clone())
-        }));
-        refused
-    })
+        }),
+    );
+    refused
 }
 
 /// The record type with a `where` rule that `path`, taken from a value of type
@@ -7259,52 +7222,11 @@ fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
     None
 }
 
-/// The typed judgment's refusals, drained. Installed into `own`'s slot by
-/// [`crate::install`].
-pub fn typed_diagnostics() -> Vec<Diagnostic> {
-    TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
-}
-
-/// The kernel's refusals as `movecheck`-stage diagnostics, deduplicated, for
-/// the one list a file's refusals come out in ([`crate::refusals`]); the
-/// caller orders the list.
-///
-/// Several instances of one generic body reach the same rule, and a reader
-/// is owed one sentence per mistake, so file, line and message are the
-/// identity, with the count of that sentence within one body's run:
-/// `out.push(s) out.push(s)` on one line is two mistakes. `file` is `None`
-/// for the root module, which tells `vyrn fix` the edit is its to make.
-pub fn refusal_diagnostics() -> Vec<Diagnostic> {
-    if !refuses() {
-        let _ = take_refusals();
-        return Vec::new();
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut body = String::new();
-    let mut nth: std::collections::HashMap<(Option<String>, usize, String), usize> =
-        Default::default();
-    take_refusals()
-        .into_iter()
-        .filter(|r| {
-            if r.body != body {
-                body = r.body.clone();
-                nth.clear();
-            }
-            let d = &r.diagnostic;
-            let key = (d.file.clone(), d.line, d.message.clone());
-            let n = nth.entry(key.clone()).or_default();
-            *n += 1;
-            seen.insert((key, *n))
-        })
-        .map(|r| r.diagnostic)
-        .collect()
-}
-
 /// Reports a body the core did not build. A gap with a rule is the program's
 /// refusal, in the checker's sentence. A gap without one is a defect in the
 /// builder: the checker typed the body, so every judgment over the core
 /// would otherwise pass over it in silence.
-fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
+fn refuse_gap(g: Gap, file: &Option<String>, body: &str, r: &mut Refused) {
     let Some(message) = g.rule else {
         let detail = if g.detail.is_empty() {
             String::new()
@@ -7317,15 +7239,22 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
         );
         // The typed judgment's list prints whichever pass refused.
         let d = Diagnostic::error(g.line, 0, "check", message).in_file(file.clone());
-        TYPED.with(|t| t.borrow_mut().0.push(d));
+        r.typed.push(d);
         return;
     };
-    REFUSALS.with(|v| {
-        v.borrow_mut().push(Refusal {
-            diagnostic: Diagnostic::error(g.line, 0, "movecheck", message).in_file(file.clone()),
-            body: body.to_string(),
-        })
+    r.kernel.push(Refusal {
+        diagnostic: Diagnostic::error(g.line, 0, "movecheck", message).in_file(file.clone()),
+        body: body.to_string(),
     });
+}
+
+/// The kernel's refusals and the typed judgment's, as `augment` gathers them.
+#[derive(Default)]
+struct Refused {
+    kernel: Vec<Refusal>,
+    typed: Vec<Diagnostic>,
+    /// The statements the typed judgment refused.
+    seen: std::collections::HashSet<NodeId>,
 }
 
 /// Places the releases the plan did not place. For every body the core can
@@ -7340,11 +7269,12 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
 /// rows. A body the core cannot build, or the kernel
 /// refuses for another reason (a double free, a use after release), is left
 /// as the plan had it.
-pub fn augment(program: &Program, own: &mut Ownership) {
+pub fn augment(program: &Program, w: &mut World) {
+    let own = &mut w.ownership;
+    let mut r = Refused::default();
     let _p = vyrn_frontend::prof::phase("placer");
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
-    own.record = Some(lowered.recorded.clone());
     drop(lw);
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
@@ -7449,17 +7379,17 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     for (inst, m) in lowered.instances.iter().zip(made) {
         let (key, made) = match m {
             Made::Served(rs) => {
-                REFUSALS.with(|v| v.borrow_mut().extend(rs));
+                r.kernel.extend(rs);
                 built.push(None);
                 continue;
             }
             Made::Built(key, made) => (key, made),
         };
-        let refused_before = REFUSALS.with(|v| v.borrow().len());
+        let refused_before = r.kernel.len();
         let top = match made {
             Ok(b) => Some(b),
             Err(g) => {
-                refuse_gap(g, &inst.func.module, &inst.func.name);
+                refuse_gap(g, &inst.func.module, &inst.func.name, &mut r);
                 None
             }
         };
@@ -7470,26 +7400,41 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             }
             // A lambda's rows are keyed by its own nodes under the enclosing
             // function's name, where the emitters read them.
-            place_frames(top, &inst.func.name, own, &mut added, &mut touched, trace);
+            place_frames(
+                top,
+                &inst.func.name,
+                own,
+                &mut added,
+                &mut touched,
+                &mut r.kernel,
+                trace,
+            );
         }
-        let refused = top
-            .as_ref()
-            .is_some_and(|t| typed(program, own, t, &inst.func.module, inst.subst.is_empty()));
+        let refused = top.as_ref().is_some_and(|t| {
+            typed(
+                program,
+                own,
+                &mut r,
+                t,
+                &inst.func.module,
+                inst.subst.is_empty(),
+            )
+        });
         let key = key.filter(|_| !refused);
-        remember(memo.as_ref(), key, refused_before);
+        remember(memo.as_ref(), key, &r.kernel[refused_before..]);
         built.push(top);
     }
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
     for (ob, m) in lowered.bodies.iter().zip(made_outside) {
         let (mut key, made) = match m {
             Made::Served(rs) => {
-                REFUSALS.with(|v| v.borrow_mut().extend(rs));
+                r.kernel.extend(rs);
                 outside.push(None);
                 continue;
             }
             Made::Built(key, made) => (key, made),
         };
-        let refused_before = REFUSALS.with(|v| v.borrow().len());
+        let refused_before = r.kernel.len();
         match made {
             Ok(top) => {
                 if std::env::var("VYRN_KERNEL_TRACE")
@@ -7497,18 +7442,26 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 {
                     eprintln!("{}", top.render());
                 }
-                place_frames(&top, &ob.name, own, &mut added, &mut touched, trace);
-                if typed(program, own, &top, &ob.module, true) {
+                place_frames(
+                    &top,
+                    &ob.name,
+                    own,
+                    &mut added,
+                    &mut touched,
+                    &mut r.kernel,
+                    trace,
+                );
+                if typed(program, own, &mut r, &top, &ob.module, true) {
                     key = None;
                 }
                 outside.push(Some(top));
             }
             Err(g) => {
-                refuse_gap(g, &ob.module, &ob.name);
+                refuse_gap(g, &ob.module, &ob.name, &mut r);
                 outside.push(None);
             }
         }
-        remember(memo.as_ref(), key, refused_before);
+        remember(memo.as_ref(), key, &r.kernel[refused_before..]);
     }
     // Every generic function is built once more with its parameters as
     // written, the way the checker typed it, for the judgment alone. It
@@ -7520,14 +7473,14 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     for inst in crate::as_written(program, own) {
         match build(program, &inst, &written) {
             Ok(top) => {
-                typed(program, own, &top, &inst.func.module, true);
+                typed(program, own, &mut r, &top, &inst.func.module, true);
                 for body in top.frames() {
                     if let Err(rs) = crate::kernel::placement(body) {
-                        REFUSALS.with(|v| v.borrow_mut().extend(rs));
+                        r.kernel.extend(rs);
                     }
                 }
             }
-            Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name),
+            Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name, &mut r),
         }
     }
     // Each `impl` projection's body, for the judgment alone: a projection is
@@ -7542,10 +7495,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         };
         match build(program, &inst, own) {
             Ok(top) => {
-                typed(program, own, &top, &p.func.module, true);
+                typed(program, own, &mut r, &top, &p.func.module, true);
             }
             Err(g) => {
-                refuse_gap(g, &p.func.module, &p.func.name);
+                refuse_gap(g, &p.func.module, &p.func.name, &mut r);
             }
         }
     }
@@ -7565,10 +7518,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             &g.init,
         ) {
             Ok(top) => {
-                typed(program, own, &top, &g.module, true);
+                typed(program, own, &mut r, &top, &g.module, true);
             }
             Err(e) => {
-                refuse_gap(e, &g.module, &g.name);
+                refuse_gap(e, &g.module, &g.name, &mut r);
             }
         }
     }
@@ -7590,10 +7543,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             p,
         ) {
             Ok(top) => {
-                typed(program, own, &top, &d.module, true);
+                typed(program, own, &mut r, &top, &d.module, true);
             }
             Err(e) => {
-                refuse_gap(e, &d.module, &d.name);
+                refuse_gap(e, &d.module, &d.name, &mut r);
             }
         }
     }
@@ -7604,7 +7557,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // emitted).
     debug_assert!(
         vyrn_frontend::movecheck::in_comptime()
-            || TYPED.with(|t| !t.borrow().0.is_empty())
+            || !r.typed.is_empty()
             || crate::lint(&lowered).is_empty(),
         "the lowered form failed its own lint:
   {}",
@@ -7633,19 +7586,18 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // partial, so it stops here.
     if memo.is_some() {
         crate::effects::set_state_callees(None);
+        (w.refusals, w.typed) = (r.kernel, r.typed);
         return;
     }
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
-    BODIES.with(|b| b.borrow_mut().clear());
-    UNDECIDED.with(|u| *u.borrow_mut() = (own.proto.types().clone(), Default::default()));
     // `vyrn check` emits nothing, so it folds no facts; the worklist below
     // still places its rows.
     let folds = vyrn_frontend::movecheck::emitting();
     if folds {
         if let Ok(top) = build_module_state(program, own, &lowered.globals) {
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts);
+                fold_frame(program, body, own, &mut facts, &mut w.bodies);
             }
         }
         for (i, inst) in lowered.instances.iter().enumerate() {
@@ -7661,7 +7613,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts);
+                fold_frame(program, body, own, &mut facts, &mut w.bodies);
             }
         }
         // The same for `test` and `bench` bodies, whose nodes an emitter looks up
@@ -7684,7 +7636,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts);
+                fold_frame(program, body, own, &mut facts, &mut w.bodies);
             }
         }
     }
@@ -7706,7 +7658,15 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             }
             if let Ok(top) = build(program, inst, own) {
                 let mut rows = Added::new();
-                place_frames(&top, &inst.func.name, own, &mut rows, &mut touched, trace);
+                place_frames(
+                    &top,
+                    &inst.func.name,
+                    own,
+                    &mut rows,
+                    &mut touched,
+                    &mut r.kernel,
+                    trace,
+                );
                 for (f, rows) in rows {
                     placed.extend(rows.iter().cloned());
                     own.releases.entry(f).or_default().extend(rows);
@@ -7719,12 +7679,13 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts);
+                fold_frame(program, body, own, &mut facts, &mut w.bodies);
             }
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     }
-    FACTS.with(|f| *f.borrow_mut() = folds.then_some(facts));
+    w.facts = folds.then_some(facts);
+    (w.refusals, w.typed) = (r.kernel, r.typed);
     crate::effects::set_state_callees(None);
 }
 
@@ -7747,18 +7708,17 @@ fn serve(
     memo?.get(key?)
 }
 
-/// Records one body's refusals, from `from` to the end of the list, for
-/// every body with a key. Serving skips placement too, which a host that
+/// Records one body's refusals, `refused`, for every body with a key. Serving skips placement too, which a host that
 /// armed the memo does not read ([`movecheck::reuse_judgments`]).
 fn remember(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
     key: Option<vyrn_frontend::movecheck::JudgmentKey>,
-    from: usize,
+    refused: &[Refusal],
 ) {
     let (Some(memo), Some(key)) = (memo, key) else {
         return;
     };
-    memo.put(key, REFUSALS.with(|v| v.borrow()[from..].to_vec()));
+    memo.put(key, refused.to_vec());
 }
 
 /// The memory report for one frame, read by `vyrn why --memory` and the
@@ -7955,6 +7915,7 @@ fn place_frames(
     own: &mut Ownership,
     added: &mut Added,
     touched: &mut std::collections::HashSet<String>,
+    refusals: &mut Vec<Refusal>,
     trace: bool,
 ) {
     for body in top.frames() {
@@ -7974,7 +7935,7 @@ fn place_frames(
                     }
                     // No placement repairs these. Every one the body earns is
                     // kept, so the driver can merge by binding and line.
-                    REFUSALS.with(|v| v.borrow_mut().push(r));
+                    refusals.push(r);
                 }
                 continue;
             }

@@ -209,7 +209,8 @@ fn run() {
         ours.push(name.clone());
         {
             let lowered = vyrn_lower::lower(&program);
-            let own = vyrn_lower::analyze(&program);
+            let world = vyrn_lower::analyze(&program);
+            let own = &world.ownership;
             for inst in &lowered.instances {
                 let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
                     continue;

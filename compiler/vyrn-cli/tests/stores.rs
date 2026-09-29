@@ -11,8 +11,9 @@ use vyrn_frontend::loader::DiskResolver;
 mod common;
 
 use vyrn_frontend::ast::{Block, NodeId, Stmt};
+use vyrn_frontend::core::Facts;
 
-fn analyze(src: &str) -> vyrn_frontend::ast::Program {
+fn analyze(src: &str) -> (vyrn_frontend::ast::Program, Facts) {
     vyrn_lower::install();
     let dir = common::scratch("stores");
     let path = dir.join("m.vyrn");
@@ -28,12 +29,12 @@ fn analyze(src: &str) -> vyrn_frontend::ast::Program {
     let program = vyrn_lower::load(src, &root, &opts, &DiskResolver)
         .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let _lowered = vyrn_lower::lower(&program);
-    vyrn_lower::analyze(&program);
-    program
+    let facts =
+        (vyrn_lower::analyze(&program).facts.clone()).expect("the placer fills the core's facts");
+    (program, facts)
 }
 
-fn releases(at: NodeId) -> bool {
-    let facts = vyrn_lower::core::facts().expect("the placer fills the core's facts");
+fn releases(facts: &Facts, at: NodeId) -> bool {
     facts.stores.get(&at).copied().unwrap_or(false)
 }
 
@@ -80,13 +81,13 @@ fn a_place_store_owns_what_it_displaces() {
                    b.s = b.s + \"!\"\n\
                    return b.s.byteLength\n\
                }";
-    let p = analyze(src);
+    let (p, facts) = analyze(src);
     let sets = stores_in(&p.functions[0].body, |s| matches!(s, Stmt::SetField { .. }));
     assert_eq!(sets.len(), 3);
-    assert!(releases(sets[0]), "a droppable local owns");
-    assert!(releases(sets[1]), "module state owns by rule");
+    assert!(releases(&facts, sets[0]), "a droppable local owns");
+    assert!(releases(&facts, sets[1]), "module state owns by rule");
     assert!(
-        releases(sets[2]),
+        releases(&facts, sets[2]),
         "a copying mention of the target does not stand the store down"
     );
 }
@@ -112,14 +113,14 @@ fn a_loop_local_store_owns_past_a_same_loop_take() {
                    }\n\
                    return out.length\n\
                }";
-    let p = analyze(src);
+    let (p, facts) = analyze(src);
     let assigns = stores_in(
         &p.functions[1].body,
         |s| matches!(s, Stmt::Assign { name, .. } if name == "name"),
     );
     assert_eq!(assigns.len(), 1);
     assert!(
-        releases(assigns[0]),
+        releases(&facts, assigns[0]),
         "the loop-local reassignment owns the copy it displaces"
     );
 }
@@ -143,14 +144,14 @@ fn a_lender_read_consumed_by_a_copy_does_not_stand_the_store_down() {
                    return out\n\
                }\n\
                fn main() -> Int64 { return go().byteLength }";
-    let p = analyze(src);
+    let (p, facts) = analyze(src);
     let assigns = stores_in(
         &p.functions[1].body,
         |s| matches!(s, Stmt::Assign { name, .. } if name == "out"),
     );
     assert_eq!(assigns.len(), 1);
     assert!(
-        releases(assigns[0]),
+        releases(&facts, assigns[0]),
         "a lender read consumed by a copy does not stand the store down"
     );
 }
@@ -170,11 +171,11 @@ fn an_early_exiting_take_does_not_block_a_later_field_store() {
                    return answered\n\
                }\n\
                fn main() -> Int64 { return go(true).body.byteLength }";
-    let p = analyze(src);
+    let (p, facts) = analyze(src);
     let sets = stores_in(&p.functions[1].body, |s| matches!(s, Stmt::SetField { .. }));
     assert_eq!(sets.len(), 1);
     assert!(
-        releases(sets[0]),
+        releases(&facts, sets[0]),
         "the early exiting take does not block the later field store"
     );
 }
@@ -198,14 +199,14 @@ fn a_read_call_mention_lets_the_store_release_what_it_replaces() {
                    return dec.d.length\n\
                }\n\
                fn main() -> Int64 { return go() }";
-    let p = analyze(src);
+    let (p, facts) = analyze(src);
     let assigns = stores_in(
         &p.functions[1].body,
         |s| matches!(s, Stmt::Assign { name, .. } if name == "dec"),
     );
     assert_eq!(assigns.len(), 1);
     assert!(
-        releases(assigns[0]),
+        releases(&facts, assigns[0]),
         "exactly the `dec = halve2(dec)` store"
     );
 }
@@ -233,14 +234,14 @@ fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
                    return f.holes.length\n\
                }\n\
                fn main() -> Int64 { return go() }";
-    let p = analyze(src);
+    let (p, facts) = analyze(src);
     let assigns = stores_in(
         &p.functions[1].body,
         |s| matches!(s, Stmt::Assign { name, .. } if name == "f"),
     );
     assert_eq!(assigns.len(), 2);
     assert!(
-        assigns.iter().all(|at| releases(*at)),
+        assigns.iter().all(|at| releases(&facts, *at)),
         "both frag stores release what they replace"
     );
 }

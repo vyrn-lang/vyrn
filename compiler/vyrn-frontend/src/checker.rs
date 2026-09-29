@@ -1632,7 +1632,7 @@ pub fn record(program: &Program) -> Recorded {
 /// hole in the record.
 pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
     let (diags, binders, made) = recording_check(program);
-    hold(program, std::rc::Rc::new(made));
+    hold(program, std::sync::Arc::new(made));
     (diags, binders)
 }
 
@@ -1646,7 +1646,7 @@ thread_local! {
 
 /// `(generator host, test host, record)`. The host flags change what a check
 /// decides, so a record answers only under the flags it was made with.
-pub(crate) type HeldRecord = (bool, bool, std::rc::Rc<Recorded>);
+pub(crate) type HeldRecord = (bool, bool, std::sync::Arc<Recorded>);
 
 /// Opens the record slot for `program`. Called by [`crate::own::Memo::open`],
 /// so a record lives as long as its analysis.
@@ -1690,7 +1690,7 @@ impl Drop for Held {
     }
 }
 
-fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
+fn hold(program: &Program, made: std::sync::Arc<Recorded>) {
     adopt(program, (gen_host(), test_host(), made));
 }
 
@@ -1716,7 +1716,7 @@ pub(crate) fn held(program: &Program) -> Option<HeldRecord> {
 }
 
 /// The record held for `program` under the host flags in force.
-fn held_now(program: &Program) -> Option<std::rc::Rc<Recorded>> {
+fn held_now(program: &Program) -> Option<std::sync::Arc<Recorded>> {
     held(program)
         .filter(|(g, t, _)| (*g, *t) == (gen_host(), test_host()))
         .map(|(_, _, r)| r)
@@ -1724,11 +1724,11 @@ fn held_now(program: &Program) -> Option<std::rc::Rc<Recorded>> {
 
 /// Returns the record of `program`: the held one if it matches the program
 /// and host flags, else a new one, held for the next ask.
-pub fn recorded(program: &Program) -> std::rc::Rc<Recorded> {
+pub fn recorded(program: &Program) -> std::sync::Arc<Recorded> {
     if let Some(r) = held_now(program) {
         return r;
     }
-    let made = std::rc::Rc::new(record(program));
+    let made = std::sync::Arc::new(record(program));
     hold(program, made.clone());
     made
 }

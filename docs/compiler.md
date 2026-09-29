@@ -123,6 +123,10 @@ the playground serves an embedded `std/`. The loader:
    These are ordinary functions, so every backend compiles one body.
 3. `vyrn_lower::refusals`: `vyrn_lower::analyze`, which runs the placer and
    the judgments, then one list of ownership refusals in source order.
+   `analyze` returns the World (`vyrn_lower::World`): the `Ownership` with
+   the checker's record, the core's bodies and facts, and both refusal
+   lists. The emitter reads the same World, handed on from the load through
+   `own::Memo`.
 4. `floor::decide`: whether each artifact's target provides what its code
    reaches.
 
@@ -167,7 +171,7 @@ runs into that file and fails a run where a proved row would have trapped.
 `scripts/check-elision.sh` runs the examples, the benchmarks and the site
 export in all three modes. `elide::decide` marks a row proved when linear
 facts over one body's own names (`facts`) show it cannot fail, with a
-certificate `facts::Cert::verify` checks again; `core::body_of` decides a body
+certificate `facts::Cert::verify` checks again; `World::body_of` decides a body
 when an emitter first reads it. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
@@ -228,7 +232,7 @@ text (`vyrn emit-wat`). `direct::compile_gen_host` compiles a generator: the
 same module plus the `vyrn_gen` imports, and `Code` as an `i64` handle.
 
 The emitter walks each body from the core. `lower_body` fetches the body the
-core built under the instance's key (`core::body_of`), and `Fn_::core_walkable`
+core built under the instance's key (`World::body_of`), and `Fn_::core_walkable`
 screens it; a body the screen rejects is refused with "the body of `f` the
 core did not state". The emitter places no release and derives no type: a
 `St::Drop` becomes a call, and an expression's type comes from the checker's

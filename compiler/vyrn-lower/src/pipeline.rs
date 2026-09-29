@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 
 use vyrn_frontend::diagnostics::Diagnostic;
-use vyrn_frontend::{ast, checker, floor, loader, movecheck, own, prof, symbols, types};
+use vyrn_frontend::{ast, checker, floor, loader, movecheck, prof, symbols, types};
 
-use crate::{core, typed};
+use crate::typed;
 
 /// Loads a multi-module program: parses `root_source`, resolves every
 /// `import` transitively through `resolver`, links one [`ast::Program`], and
@@ -120,19 +120,14 @@ pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
         movecheck::in_source_order(&mut diags);
         return diags;
     }
-    // The placer judges a core body for every instance, and the analysis is
+    // The placer judges a core body for every instance, and the World is
     // handed on: a command's next `own::Memo` adopts it. Only this analysis
-    // may reuse a judgment (`movecheck::reuse_judgments`). The kernel's list is
-    // emptied first because an engine's or a generator's compile may have left
-    // refusals there with no file.
-    let _ = core::refusal_diagnostics();
-    let _ = core::typed_diagnostics();
-    let ownership = movecheck::judging(|| crate::analyze(program));
-    own::hand_on(program, &ownership);
+    // may reuse a judgment (`movecheck::reuse_judgments`).
+    let world = movecheck::judging(|| crate::analyze(program));
+    crate::hand_on(program, &world);
     // A program the typed judgment refuses gets those refusals alone.
-    let mut typed = core::typed_diagnostics();
-    if !typed.is_empty() {
-        let _ = core::refusal_diagnostics();
+    if !world.typed_diagnostics().is_empty() {
+        let mut typed = world.typed_diagnostics().to_vec();
         movecheck::in_source_order(&mut typed);
         return typed;
     }
@@ -140,7 +135,7 @@ pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
     for d in &diags {
         lines.insert((d.file.clone(), d.line));
     }
-    diags.extend(core::refusal_diagnostics().into_iter().filter(|d| {
+    diags.extend(world.refusal_diagnostics().into_iter().filter(|d| {
         !lines.contains(&(d.file.clone(), d.line))
             && !subject(&d.message)
                 .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
@@ -164,7 +159,7 @@ fn subject(message: &str) -> Option<&str> {
 /// diagnostics, and the placed analysis's memory rows on hover.
 pub const JUDGE: symbols::Judge = symbols::Judge {
     refusals,
-    ownership: crate::analyze,
+    ownership: |program| crate::analyze(program).ownership.clone(),
 };
 
 /// Builds the core of every body the checker typed in a refused program, and
@@ -277,11 +272,7 @@ fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diag
     }
     // The held record typed the functions just moved out.
     checker::hold_forget();
-    let _ = core::refusal_diagnostics();
-    let _ = core::typed_diagnostics();
-    let _ = crate::analyze(program);
-    let _ = core::refusal_diagnostics();
-    let typed = core::typed_diagnostics();
+    let typed = crate::analyze(program).typed_diagnostics().to_vec();
     let kept = std::mem::take(&mut program.functions);
     let mut back: Vec<(usize, ast::Function)> = at.into_iter().zip(kept).chain(gone).collect();
     back.sort_by_key(|(i, _)| *i);
