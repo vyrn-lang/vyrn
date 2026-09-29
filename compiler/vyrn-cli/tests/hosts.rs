@@ -64,6 +64,23 @@ const GENERATES: &str = "vyrn_genwasm::install()";
 
 const INSTALL: &str = "vyrn_lower::install()";
 
+/// What fills `vyrn_frontend::gen`'s engine slot: the wasmtime engine, or a
+/// host's own (the playground's, a test's).
+const ENGINES: &[&str] = &[GENERATES, "set_gen_engine("];
+
+/// The hosts that install no generation engine, each with the reason. Any
+/// other host that compiles a `derive` or a generator import runs it.
+const NO_ENGINE: &[(&str, &str)] = &[
+    (
+        "compiler/vyrn-cli/src/wasmrun.rs",
+        "a module of the `vyrn` binary, whose `main` installs the engine",
+    ),
+    (
+        "compiler/vyrn-frontend/tests/common/mod.rs",
+        "`vyrn-frontend` cannot depend on `vyrn-genwasm`, which depends on it;          a `derive` there answers that no generation engine is installed",
+    ),
+];
+
 /// This census names every marker above and is not a host.
 const SELF: &str = "compiler/vyrn-cli/tests/hosts.rs";
 
@@ -84,7 +101,7 @@ fn the_only_thing_that_compiles_without_a_core_is_not_a_process() {
 
 #[test]
 fn the_host_table_is_what_the_sources_say() {
-    let found: Vec<(String, bool)> = hosts();
+    let found: Vec<(String, bool)> = hosts().into_iter().map(|(p, c, _)| (p, c)).collect();
     let pinned: Vec<(String, bool)> = HOSTS
         .iter()
         .map(|(p, c)| ((*p).to_string(), *c == Installed))
@@ -96,8 +113,22 @@ fn the_host_table_is_what_the_sources_say() {
     );
 }
 
-/// Every host under `compiler/`, in path order, with whether it installs.
-fn hosts() -> Vec<(String, bool)> {
+#[test]
+fn every_host_but_the_listed_ones_installs_a_generation_engine() {
+    let without: Vec<String> = hosts()
+        .into_iter()
+        .filter_map(|(p, _, engine)| (!engine).then_some(p))
+        .collect();
+    let pinned: Vec<&str> = NO_ENGINE.iter().map(|(p, _)| *p).collect();
+    assert_eq!(
+        without, pinned,
+        "a host compiles programs with no generation engine, so a `derive` or a          generator import in them fails; install one or list it with the reason"
+    );
+}
+
+/// Every host under `compiler/`, in path order, with whether it installs the
+/// lowering and whether it installs a generation engine.
+fn hosts() -> Vec<(String, bool, bool)> {
     let root = repo_root();
     let mut out = Vec::new();
     walk(&root.join("compiler"), &mut |p| {
@@ -121,7 +152,8 @@ fn hosts() -> Vec<(String, bool)> {
         if rel == SELF {
             return;
         }
-        out.push((rel, body.contains(INSTALL)));
+        let engine = ENGINES.iter().any(|e| body.contains(e));
+        out.push((rel, body.contains(INSTALL), engine));
     });
     out.sort();
     out

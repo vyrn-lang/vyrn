@@ -61,11 +61,14 @@ the kernel's refusals (`own::install_refusals`), the must-use judgment
 (`own::install_must_use`), the typed judgment's refusals
 (`own::install_typed`) and the effect judgment into the floor
 (`floor::install_judge`). `vyrn_genwasm::install` installs the generation
-engine (`gen::set_gen_engine`). Every process that compiles calls both first:
-the CLI's `install`, the language server's `main`, the playground's `load`,
-and any test that asserts a refusal. A process that skips `vyrn_lower::install`
+engine (`gen::set_gen_engine`); the playground installs its own, which runs
+the module in the page. Every process that compiles calls both first: the
+CLI's `install`, the language server's `main`, the playground's `load`, and
+any test that asserts a refusal. A process that skips `vyrn_lower::install`
 runs a different compiler: the core stays empty and the emitter refuses every
-body. `tests/hosts.rs` holds each host to this.
+body. A process with no engine fails every `derive` and generator import.
+`tests/hosts.rs` holds each host to both, and names the hosts without an
+engine with the reason.
 
 ## The front end
 
