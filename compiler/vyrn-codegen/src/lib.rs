@@ -322,8 +322,8 @@ pub mod observe {
 ///
 /// Each host implements exactly this set, and a test on each side compares its set with this
 /// table: `vyrn-cli/src/wasmrun.rs` for the embedded engine, `wasi_host.c` for the wasm2c
-/// route. `web/wasi-min.js` implements it for the browser, degraded: no argv, EOF on stdin,
-/// no preopens, every `path_open` NOENT.
+/// route. `std/mem` declares each call as a Vyrn function and `web/wasi-min.js` implements it
+/// for the browser, degraded: no argv, EOF on stdin, no preopens, every `path_open` NOENT.
 pub const WASI_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
     use wasm::ValType::{I32, I64};
     &[
@@ -349,6 +349,20 @@ pub const WASI_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         ("fd_readdir", &[I32, I32, I32, I64, I32], &[I32]),
     ]
 };
+
+/// The `WASI_IMPORTS` name of a `std/mem` host primitive: `fdWrite` is `fd_write`.
+pub(crate) fn wasi_snake(camel: &str) -> String {
+    camel
+        .chars()
+        .flat_map(|c| {
+            [
+                c.is_ascii_uppercase().then_some('_'),
+                Some(c.to_ascii_lowercase()),
+            ]
+        })
+        .flatten()
+        .collect()
+}
 
 /// Every `vyrn_gen` import a generator module makes: a signature in LLVM's
 /// spelling and its import name. [`wasm::declare_sig`] turns each into a wasm
@@ -1275,6 +1289,81 @@ mod tests {
                 check(src).is_err(),
                 "{what}: the checker accepted this, so `solve_param` now faces it — \
                  see the arms above"
+            );
+        }
+    }
+
+    /// `std/mem` declares each `WASI_IMPORTS` call, with the table's signature, and no other:
+    /// the checker reads these declarations and the emitter reads the table. A declaration is a
+    /// wasi call when its doc line opens with the call's name and a parenthesis.
+    #[test]
+    fn std_mem_declares_exactly_the_wasi_calls() {
+        use crate::wasm::ValType::{self, I32, I64};
+        use std::collections::BTreeMap;
+        let ty = |t: &str| match t.trim() {
+            "Int32" => I32,
+            "Int64" => I64,
+            t => panic!("`{t}` is not a wasi type"),
+        };
+        let mut declared: BTreeMap<String, (Vec<ValType>, Vec<ValType>)> = BTreeMap::new();
+        let mut doc = None;
+        for line in include_str!("../../../std/mem.vyrn").lines() {
+            if let Some(d) = line.strip_prefix("/// `") {
+                let name = d.split_once('(').map(|(n, _)| n);
+                doc = name.filter(|n| {
+                    n.bytes()
+                        .all(|b| b.is_ascii_lowercase() || b == b'_' || b.is_ascii_digit())
+                });
+            }
+            let Some(sig) = line.strip_prefix("export fn ") else {
+                continue;
+            };
+            let Some(wasi) = doc.take() else { continue };
+            let (name, sig) = sig.split_once('(').expect("a signature");
+            let (params, ret) = sig.split_once(')').expect("a signature");
+            assert_eq!(wasi_snake(name), wasi, "`{name}` is documented as `{wasi}`");
+            let params = params.split(',').filter(|p| !p.is_empty());
+            let params = params.map(|p| ty(p.split_once(':').expect("a parameter").1));
+            let ret = ret.trim_end_matches(" {").strip_prefix(" -> ").map(ty);
+            declared.insert(
+                wasi.to_string(),
+                (params.collect(), ret.into_iter().collect()),
+            );
+        }
+        let want: BTreeMap<_, _> = WASI_IMPORTS
+            .iter()
+            .map(|(n, p, r)| (n.to_string(), (p.to_vec(), r.to_vec())))
+            .collect();
+        assert_eq!(declared, want);
+    }
+
+    /// `web/wasi-min.js` implements every `WASI_IMPORTS` call. It also implements calls the
+    /// table omits (`fd_seek`, `fd_fdstat_get`): wasi-libc's C route imports them and no module
+    /// the direct backend emits does.
+    #[test]
+    fn the_browser_host_implements_every_wasi_call() {
+        let js = include_str!("../../../web/wasi-min.js");
+        let (_, object) = js
+            .split_once(
+                "  const wasi = {
+",
+            )
+            .expect("the wasi object");
+        let (object, _) = object
+            .split_once(
+                "
+  };",
+            )
+            .expect("the wasi object");
+        let keys: Vec<&str> = object
+            .lines()
+            .filter_map(|l| l.strip_prefix("    "))
+            .map(|l| l.split([',', ':']).next().unwrap_or_default())
+            .collect();
+        for (name, ..) in WASI_IMPORTS {
+            assert!(
+                keys.contains(name),
+                "web/wasi-min.js does not implement `{name}`"
             );
         }
     }
