@@ -388,3 +388,68 @@ fn a_placed_row_does_not_stop_a_body_being_served() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One body of `n` blocks. Each binds a `String` that one edge of an `if`
+/// consumes and a counter a `while` walks, so no fact outlives its block.
+fn copies(n: usize) -> String {
+    let mut src = String::from(
+        "fn take(v: consume String) -> Int64 {\n    drop v\n    return 0\n}\n\n\
+         fn f(flag: Bool) -> Int64 {\n    let mut acc = 0\n",
+    );
+    for k in 0..n {
+        src += &format!(
+            "    if flag {{\n        let s{k} = \"ab\" + \"cd\"\n        if flag {{\n            \
+             acc = acc + take(consume s{k})\n        }} else {{\n            \
+             acc = acc + s{k}.byteLength\n        }}\n        let mut i{k} = 0\n        \
+             while i{k} < 2 {{\n            acc = acc + i{k}\n            i{k} = i{k} + 1\n        \
+             }}\n    }}\n"
+        );
+    }
+    src + "    return acc\n}\n\nfn main() -> Int64 {\n    print(\"\\{f(true)}\")\n    return 0\n}\n"
+}
+
+/// The kernel's row of `vyrn check --profile <file>`, in seconds.
+fn kernel_secs(file: &std::path::Path) -> f64 {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["check", "--profile"])
+        .arg(file)
+        .output()
+        .expect("run vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let row = (err.lines())
+        .find(|l| l.starts_with("placer: kernel::placement"))
+        .expect("a kernel row");
+    let mut words = row.split_whitespace().rev();
+    let unit = words.next().expect("a unit");
+    let value: f64 = words.next().expect("a value").parse().expect("a number");
+    value
+        * match unit {
+            "s" => 1.0,
+            "ms" => 1e-3,
+            "\u{b5}s" => 1e-6,
+            "ns" => 1e-9,
+            u => panic!("unit {u}"),
+        }
+}
+
+/// The kernel's cost follows the facts at each join, not the names the body
+/// declares: eight times the blocks costs about eight times the time, where a
+/// state sized to every name costs sixty-four.
+#[test]
+#[ignore = "times the kernel; run explicitly: cargo test --release -p vyrn-cli --test kernel -- --ignored copies"]
+fn the_kernel_is_linear_in_copies() {
+    let dir = std::env::temp_dir().join(format!("vyrn-copies-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let best = |n: usize| {
+        let file = dir.join(format!("copies{n}.vyrn"));
+        std::fs::write(&file, copies(n)).expect("write");
+        (0..3).map(|_| kernel_secs(&file)).fold(f64::MAX, f64::min)
+    };
+    let (small, large) = (best(100), best(800));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        large < 16.0 * small,
+        "100 blocks: {small:.4} s, 800 blocks: {large:.4} s"
+    );
+}
