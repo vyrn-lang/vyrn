@@ -61,9 +61,6 @@ fn parser_sections() -> Vec<Section> {
         sec("fn is_member_type_param", Grammar),
         sec("fn mark_member_type_params", Desugar),
         sec("fn at_contract_decl", Grammar),
-        sec("const METHOD_BUILTINS", Twice),
-        sec("fn method_surface", Shared),
-        sec("fn method_builtin", Shared),
         sec("fn unshadow_method_builtins", Desugar),
         sec("fn parse_bare", Shared),
         sec("    let mut flat = Vec::new();", Desugar),
@@ -228,12 +225,12 @@ fn the_parser_census_matches_its_pin() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3204, 52),
-        ("parser.rs", "a desugar the parser states", 963, 7),
-        ("parser.rs", "a table stated a second time", 55, 0),
+        ("parser.rs", "the grammar's own arm", 3197, 52),
+        ("parser.rs", "a desugar the parser states", 961, 7),
+        ("parser.rs", "a table stated a second time", 0, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
-        ("parser.rs", "shared machinery", 199, 1),
-        ("parser.rs", "tests", 1638, 0),
+        ("parser.rs", "shared machinery", 181, 1),
+        ("parser.rs", "tests", 1643, 0),
         ("lexer.rs", "the grammar's own arm", 595, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
         ("lexer.rs", "a table stated a second time", 0, 0),

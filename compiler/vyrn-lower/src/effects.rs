@@ -1,6 +1,6 @@
 //! The effect judgment: a body's effect set is the join
 //! of its own atoms and its callees' sets, taken to a fixpoint so recursion
-//! ends. [`ATOMS`] is the second column of the effect table;
+//! ends. [`atoms`] is the second column of the effect table;
 //! `tests/effects.rs` refuses to run if the two differ. The judgment sees a
 //! call by callee name, an owned name born of a primitive or literal (an
 //! allocation), a global place (module state), and a trap. For a call through
@@ -18,7 +18,7 @@ use crate::core::{Body, Place, Rhs, St};
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
 pub use vyrn_frontend::effects::{
-    atom, gen_allows, gen_refusal, Effect, Effects, ATOMS, GEN_ATOM_OVERRIDES,
+    atom, atoms, gen_allows, gen_refusal, Effect, Effects, GEN_ATOM_OVERRIDES,
 };
 
 /// What a callee's name resolves to. The caller of [`judge`] resolves names;

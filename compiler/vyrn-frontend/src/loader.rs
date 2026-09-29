@@ -704,14 +704,6 @@ pub struct RtModule {
     /// compiler part: `toJson` needs its argument's static type, so only the
     /// serializer lives in the module.
     pub desugared: &'static [&'static str],
-    /// Builtins that are one of the module's exported functions:
-    /// `(builtin, reserved spelling of the function)`. The call is the whole
-    /// implementation.
-    ///
-    /// The prefix is written out, so [`routed_builtin`] returns a `&'static str`
-    /// without allocating on every call expression.
-    /// `every_route_is_spelled_with_its_modules_prefix` checks the spelling.
-    pub routes: &'static [(&'static str, &'static str)],
     /// Linked into every program, mentioned or not. [`RUNTIME_SPEC`] is, because
     /// the wasm emitter calls it from lowerings no builtin names (a `String`
     /// comparison calls `strCmp`). `std/text` is, because the runtime's `intStr`
@@ -775,7 +767,6 @@ pub const RT_MODULES: &[RtModule] = &[
         spec: RT_JSON_SPEC,
         prefix: RT_PREFIX,
         desugared: &["toJson", "fromJson"],
-        routes: &[],
         always: false,
     },
     // `fromJson`'s untyped half: the reader, the `Issue` vocabulary, the
@@ -785,13 +776,8 @@ pub const RT_MODULES: &[RtModule] = &[
         spec: "std/jsondec",
         prefix: "jsondec$",
         desugared: &["fromJson"],
-        routes: &[],
         always: false,
     },
-    // `@charCount` is method-only, so the AST call name carries the `@` and it
-    // has no free spelling to import; it stays routed. `lineAt` and `colAt` route
-    // to `lineAtV` and `colAtV`, which carry the prelude row's signature.
-    //
     // `stringFromBytes` is a desugar: only its check ([`STRING_FAULT`]) lives
     // here, and the backend builds the `String`, which needs `std/mem`.
     //
@@ -802,11 +788,6 @@ pub const RT_MODULES: &[RtModule] = &[
         spec: "std/text",
         prefix: "text$",
         desugared: &["stringFromBytes"],
-        routes: &[
-            ("@charCount", "text$charCountV"),
-            ("lineAt", "text$lineAtV"),
-            ("colAt", "text$colAtV"),
-        ],
         always: true,
     },
     // The float formatter. Desugared, because `@str` is type-directed and only
@@ -818,51 +799,36 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "num$",
         // `assertEq` renders a mismatched float the way `@str` does.
         desugared: &["@str", "print", "assertEq"],
-        routes: &[],
         always: false,
     },
     // The runtime, in every program. `std/mem` enters as `std/runtime`'s import;
     // its row only names its prefix.
-    // The I/O builtins route to typed functions over the untyped bodies;
-    // [`GEN_ROUTES`] names the twins a generator host calls.
     RtModule {
         spec: RUNTIME_SPEC,
         prefix: RUNTIME_PREFIX,
         desugared: &[],
-        routes: &[
-            ("args", "runtime$argsV"),
-            ("readLine", "runtime$readLineV"),
-            ("parse", "runtime$parseV"),
-            ("readFile", "runtime$readFileV"),
-            ("readFileBytes", "runtime$readFileBytesV"),
-            ("writeFile", "runtime$writeFileV"),
-            ("writeFileBytes", "runtime$writeFileBytesV"),
-            ("writeStdout", "runtime$writeStdoutV"),
-            ("renameFile", "runtime$renameFileV"),
-            ("fsyncFile", "runtime$fsyncFileV"),
-            ("listDir", "runtime$listDirV"),
-            ("listDirKinds", "runtime$listDirKindsV"),
-        ],
         always: true,
     },
     RtModule {
         spec: MEM_SPEC,
         prefix: MEM_PREFIX,
         desugared: &[],
-        routes: &[],
         always: false,
     },
 ];
 
-/// The routes a generator host takes in place of [`RT_MODULES`]':
-/// the resource comes from the loader's resolver through `vyrn_gen.read`
-/// rather than from WASI.
-pub const GEN_ROUTES: &[(&str, &str)] = &[
-    ("readFile", "runtime$readFileGenV"),
-    ("readFileBytes", "runtime$readFileBytesGenV"),
-    ("listDir", "runtime$listDirGenV"),
-    ("listDirKinds", "runtime$listDirKindsGenV"),
-];
+impl RtModule {
+    /// Builtins that are one of the module's exported functions:
+    /// `(builtin, reserved spelling of the function)`, the rows whose
+    /// [`crate::prelude::Builtin::route`] carries the module's prefix. The
+    /// call is the whole implementation.
+    pub fn routes(&self) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+        crate::prelude::builtins()
+            .iter()
+            .filter_map(|b| Some((b.name, b.route?)))
+            .filter(|(_, f)| f.starts_with(self.prefix))
+    }
+}
 
 /// The reserved spelling of `std/num`'s float formatter, reached from `@str` and
 /// `print`. `the_float_formatter_is_std_nums` checks it against the table.
@@ -881,17 +847,14 @@ pub const F64_STR: &str = "num$f64Str";
 pub const STRING_FAULT: &str = "text$stringFault";
 
 /// Returns the reserved spelling a routed builtin's call becomes, or `None` for
-/// a name no runtime module implements.
+/// a name no runtime module implements. A generator host takes the row's
+/// generation twin, which reads the resource through the loader's resolver
+/// (`vyrn_gen.read`) rather than WASI.
 pub fn routed_builtin(name: &str) -> Option<&'static str> {
-    let gen: &[_] = if crate::checker::gen_host() {
-        GEN_ROUTES
-    } else {
-        &[]
-    };
-    gen.iter()
-        .chain(RT_MODULES.iter().flat_map(|rt| rt.routes))
-        .find(|(builtin, _)| *builtin == name)
-        .map(|(_, reserved)| *reserved)
+    let b = crate::prelude::builtin(name)?;
+    b.gen_route
+        .filter(|_| crate::checker::gen_host())
+        .or(b.route)
 }
 
 /// Returns the function a builtin call calls where its argument's type or name
@@ -1499,8 +1462,9 @@ fn load_modules(
             || rt
                 .desugared
                 .iter()
-                .chain(rt.routes.iter().map(|(b, _)| b))
-                .any(|b| mentioned.contains(*b));
+                .copied()
+                .chain(rt.routes().map(|(b, _)| b))
+                .any(|b| mentioned.contains(b));
         // A missing std root is not an error here: whoever needs the runtime
         // refuses at the call.
         let Ok(target) = resolve_spec(rt.spec, &root_key, opts) else {

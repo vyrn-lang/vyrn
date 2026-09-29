@@ -123,12 +123,12 @@ fn symbols_sections() -> Vec<Section> {
         sec("fn type_to_string", Shared),
         sec("struct DocExport", Job),
         sec("enum SemKind", Job),
-        sec("static MACRO_BUILTINS", Copy),
+        sec("fn is_macro_builtin", Job),
         sec("fn is_constructor_builtin", Job),
         sec("struct InlayHint", Job),
         sec("struct RefRange", Job),
         sec("fn classify_token", Job),
-        sec("struct BuiltinMethod", Copy),
+        sec("struct BuiltinMethod", Job),
         sec("mod tests", Tests),
     ]
 }

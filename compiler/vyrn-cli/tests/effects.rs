@@ -897,7 +897,7 @@ fn collect_callees(stmts: &[vyrn_lower::core::St], out: &mut BTreeSet<String>) {
 }
 
 /// The effect lattice, one row per atom: its effect, and whether a generator
-/// may call it. A second statement of `effects::ATOMS` and `gen_allows` on
+/// may call it. A second statement of `effects::atoms` and `gen_allows` on
 /// purpose: an edit to either is a changed refusal, and fails here until this
 /// table moves with it.
 const LATTICE: &[(&str, &str, bool)] = &[
@@ -949,15 +949,13 @@ fn the_lattice_is_the_table() {
             (n.to_string(), effect)
         })
         .collect();
-    let from_code: BTreeSet<(String, Effect)> = effects::ATOMS
-        .iter()
-        .map(|(n, e)| (n.to_string(), *e))
-        .collect();
+    let from_code: BTreeSet<(String, Effect)> =
+        effects::atoms().map(|(n, e)| (n.to_string(), e)).collect();
     let only_table: Vec<_> = from_table.difference(&from_code).collect();
     let only_code: Vec<_> = from_code.difference(&from_table).collect();
     assert!(
         only_table.is_empty() && only_code.is_empty(),
-        "LATTICE and effects::ATOMS differ; in the table only: {only_table:?}; in the code only: {only_code:?}"
+        "LATTICE and effects::atoms() differ; in the table only: {only_table:?}; in the code only: {only_code:?}"
     );
     // The generation fence asks `gen_allows` alone, so an edited row is a changed refusal.
     let wrong: Vec<String> = LATTICE

@@ -292,7 +292,7 @@ pub const RESERVED: &[&str] = &[
     "colAt",
     "moduleInterface",
     // The log levels (`info`, ...) are not reserved: the sugar carries `@info`
-    // (see `crate::parser::METHOD_BUILTINS`).
+    // (see `crate::prelude::Builtin::method`).
     "value",
     "list",
     "schemaOf",
@@ -6114,9 +6114,9 @@ impl<'a> Checker<'a> {
                 .collect::<Vec<Capability>>()
         });
         // A refusal names what the reader can write: `@str` prints as
-        // `toString` (`parser::METHOD_BUILTINS`), and other `@` names lose the
+        // `toString` (`prelude::method_surface`), and other `@` names lose the
         // `@`, which no source can lex.
-        let shown = crate::parser::method_surface(name).trim_start_matches('@');
+        let shown = crate::prelude::method_surface(name).trim_start_matches('@');
         self.check_declared_call(
             &DeclaredCall {
                 key: name,
@@ -7883,29 +7883,6 @@ pub fn fn_calls(b: &Block) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
 
-    /// The method table, the seeded rows and the effect lattice each list the
-    /// log levels; this keeps the three tables equal to `ast::LOG_LEVELS`.
-    #[test]
-    fn every_log_level_is_a_method_builtin_and_an_effect() {
-        for lvl in crate::ast::LOG_LEVELS {
-            let internal = crate::parser::method_builtin(lvl)
-                .unwrap_or_else(|| panic!("`{lvl}` is not a method-form builtin"));
-            assert_eq!(
-                crate::ast::log_internal(internal),
-                crate::ast::log_level_ordinal(lvl),
-                "`{lvl}` maps to `{internal}`, which is not its internal spelling"
-            );
-            assert!(
-                crate::prelude::signature(internal).is_some(),
-                "`{internal}` has no seeded row"
-            );
-            assert!(
-                crate::effects::gen_refusal(internal).is_some(),
-                "`{lvl}` is a log level a `gen fn` may call"
-            );
-        }
-    }
-
     /// `logging { level: .. }` compares against the ordinal, so reordering the
     /// table would change which calls a threshold suppresses.
     #[test]
@@ -8271,7 +8248,7 @@ mod tests {
     /// column.
     #[test]
     fn comptime_forbidden_names_are_reserved() {
-        for (n, _) in crate::effects::ATOMS {
+        for (n, _) in crate::effects::atoms() {
             if crate::effects::gen_allows(n) {
                 continue;
             }
@@ -8281,7 +8258,7 @@ mod tests {
                 continue;
             }
             assert!(
-                RESERVED.contains(n) || crate::trap::host_boundary_extern(n).is_some(),
+                RESERVED.contains(&n) || crate::trap::host_boundary_extern(n).is_some(),
                 "`{n}` is forbidden inside a `gen fn` but is not a name the \
                  compiler owns — it now forbids any user function spelled that way"
             );

@@ -109,30 +109,21 @@ pub fn is_surface_builtin(name: &str) -> bool {
     SURFACE_BUILTINS.contains(&name)
 }
 
-/// The five log levels, lowest first. The index is the ordinal a `logging`
-/// block compares against.
-///
-/// Two sites spell the five out on purpose:
-///
-/// - `vyrn-lower/src/core.rs`'s `builtin_rows` is read as text by
-///   `vyrn-frontend/tests/primitives.rs`; a predicate is invisible to that scan.
-/// - [`crate::parser::METHOD_BUILTINS`] pairs each level with its internal
-///   spelling. `every_log_level_is_a_method_builtin_and_an_effect` compares that
-///   table to this one.
-///
-/// The words are not reserved: the sugar produces `@info`, so a module that
+/// The five log levels, lowest first, in the spelling a call carries: the sugar
+/// turns `log.info(m)` into `@info(log, m)`. The index is the ordinal a
+/// `logging` block compares against. The words are not reserved: a module that
 /// declares or imports `info` gets the word back.
-pub const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
+pub const LOG_LEVELS: [&str; 5] = ["@trace", "@debug", "@info", "@warn", "@error"];
 
 /// Returns the ordinal of a log-level name, or `None` for an unknown name.
 pub fn log_level_ordinal(name: &str) -> Option<usize> {
-    LOG_LEVELS.iter().position(|l| *l == name)
+    LOG_LEVELS.iter().position(|l| l[1..] == *name)
 }
 
 /// Returns the ordinal of a log call's internal spelling (`@info` is 2), or
 /// `None` for any other call name.
 pub fn log_internal(name: &str) -> Option<usize> {
-    log_level_ordinal(name.strip_prefix('@')?)
+    LOG_LEVELS.iter().position(|l| *l == name)
 }
 
 /// A top-level module-state binding: `let [mut] name [: Type] = init`. It lives

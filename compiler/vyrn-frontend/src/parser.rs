@@ -40,79 +40,6 @@ fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {
         && matches!(at(pos + 2), Some(Tok::LBrace))
 }
 
-/// The builtins written only as `x.m(..)`: the surface spelling and the internal
-/// name the engines dispatch on.
-///
-/// A surface name means the builtin only when nothing in the module answers to
-/// it; [`unshadow_method_builtins`] reads this table backwards to give the name
-/// back. `every_method_builtin_is_reserved_or_shadowable` checks that every
-/// intercepted name can be given back or is reserved.
-pub const METHOD_BUILTINS: &[(&str, &str)] = &[
-    ("toString", "@str"),
-    // A free call `push(xs, v)` or `at(xs, i)` is a distinct node the checker
-    // refuses. `@at` is also what `xs[i]` produces; the impl method it dispatches
-    // to keeps the name `at`, as written in `place at`.
-    ("push", "@push"),
-    ("at", "@at"),
-    ("charCount", "@charCount"),
-    ("pop", "@pop"),
-    ("swapRemove", "@swapRemove"),
-    // `reserve` and `append` rebuild like `push`, so a statement writes back
-    // through the receiver place.
-    ("reserve", "@reserve"),
-    ("clear", "@clear"),
-    ("append", "@append"),
-    // `dst.copyFrom(src)` overwrites `dst`'s elements, reusing its buffer.
-    ("copyFrom", "@copyFrom"),
-    // `m.tally(k, n)`: insert-or-add on a count map in one probe.
-    ("tally", "@tally"),
-    // `m.tallyBytes(w, n)`: keyed by raw bytes; the String is built and validated
-    // only on a miss.
-    ("tallyBytes", "@tallyBytes"),
-    // `xs.toArray()` copies a SmallArray out to a growable Array.
-    ("toArray", "@toArray"),
-    // `x.copy()` is a deep copy of an owned heap value.
-    ("copy", "@copy"),
-    ("has", "@has"),
-    ("remove", "@remove"),
-    ("keys", "@keys"),
-    // Value methods, not `F32x4.lane(v, k)`: a value-receiver method name is a
-    // global default in this table, and `min`/`max`/`abs` are `std/math` exports,
-    // so the rest of the vector surface is on the type name.
-    ("lane", "@lane"),
-    ("replaceLane", "@replaceLane"),
-    // The wasm instructions' names, which leave `any` and `all` free.
-    ("anyTrue", "@anyTrue"),
-    ("allTrue", "@allTrue"),
-    // The log levels. A seeded row is matched by name, so the unlexable `@info`
-    // keeps a user `fn info(..)` from inheriting the log contract.
-    // [`crate::ast::LOG_LEVELS`] pairs with these;
-    // `every_log_level_is_a_method_builtin_and_an_effect` holds the two equal.
-    ("trace", "@trace"),
-    ("debug", "@debug"),
-    ("info", "@info"),
-    ("warn", "@warn"),
-    ("error", "@error"),
-];
-
-/// Returns the surface spelling of an internal method-builtin name (`@push` to
-/// `push`) for a diagnostic; any other name is returned unchanged.
-pub fn method_surface(internal: &str) -> &str {
-    METHOD_BUILTINS
-        .iter()
-        .find(|(_, i)| *i == internal)
-        .map(|(surface, _)| *surface)
-        .unwrap_or(internal)
-}
-
-/// Returns the internal name `recv.name(..)` defaults to, if any.
-pub fn method_builtin(name: &str) -> Option<&'static str> {
-    METHOD_BUILTINS
-        .iter()
-        .find(|(surface, _)| *surface == name)
-        .map(|(_, internal)| *internal)
-}
-
 /// Gives a method-form builtin's name back to a declaration that answers to it.
 ///
 /// `postfix` rewrites `people.remove(h)` to `@remove` before the module's
@@ -149,19 +76,17 @@ fn unshadow_method_builtins(program: &mut Program) {
     // Impl methods are absent: `impl Copy for T { fn copy(..) }` overrides `@copy`
     // for receivers of type `T` only. Counting it here would take the builtin from
     // every other receiver in the module.
-    if !METHOD_BUILTINS
-        .iter()
-        .any(|(surface, _)| scope.contains(*surface))
-    {
+    let surfaces = || crate::prelude::builtins().iter().filter_map(|b| b.method);
+    if !surfaces().any(|surface| scope.contains(surface)) {
         return;
     }
     let mut give_back = |e: &mut Expr| {
         if let Expr::Call { name, .. } = e {
-            if let Some((surface, _)) = METHOD_BUILTINS
-                .iter()
-                .find(|(surface, internal)| name == internal && scope.contains(*surface))
+            if let Some(surface) = crate::prelude::builtin(name)
+                .and_then(|b| b.method)
+                .filter(|surface| scope.contains(*surface))
             {
-                *name = (*surface).to_string();
+                *name = surface.to_string();
             }
         }
     };
@@ -474,7 +399,7 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
     let Expr::Call { name, args, .. } = e else {
         return None;
     };
-    if !matches!(name.as_str(), "@pop" | "@swapRemove" | "@remove") {
+    if !crate::prelude::removes(name) {
         return None;
     }
     let (recv, mut hoists, pre, post) = place_receiver(args.first()?, line)?;
@@ -3258,14 +3183,7 @@ impl Parser {
                     return Ok(self.spliced(pre));
                 }
                 if let Expr::Call { name, args, .. } = &e {
-                    if name == "@push"
-                        || name == "@reserve"
-                        || name == "@clear"
-                        || name == "@append"
-                        || name == "@copyFrom"
-                        || name == "@tally"
-                        || name == "@tallyBytes"
-                    {
+                    if crate::prelude::rebuilds(name) {
                         match args.first() {
                             Some(Expr::Var { name: recv, .. }) => {
                                 return Ok(Stmt::Assign {
@@ -3568,14 +3486,14 @@ impl Parser {
                     }
                     self.no_struct = saved;
                     self.eat(&Tok::RParen)?;
-                    // Method-form builtins ([`METHOD_BUILTINS`]) map to their internal names. This
+                    // Method-form builtins ([`crate::prelude::Builtin::method`]) map to their internal names. This
                     // is a default: with no types here, [`unshadow_method_builtins`] later gives
                     // the name back to any declaration that answers to it.
                     //
                     // `wrote` keeps the written name for the type-name arm below, so
                     // `F32x4.anyTrue(m)` reports what the program wrote, not `@anyTrue`.
                     let wrote = name.clone();
-                    let name = match method_builtin(&name) {
+                    let name = match crate::prelude::method_builtin(&name) {
                         Some(internal) => internal.to_string(),
                         None => name,
                     };
@@ -4593,17 +4511,22 @@ mod tests {
         got.unwrap_or_default()
     }
 
-    // The method-form builtin table.
+    /// The method spellings of `crate::prelude::builtins`.
+    fn methods() -> impl Iterator<Item = (&'static str, &'static str)> {
+        crate::prelude::builtins()
+            .iter()
+            .filter_map(|b| Some((b.method?, b.name)))
+    }
 
-    /// [`METHOD_BUILTINS`] decides from a name, before any type is known. That is
+    /// A method spelling decides from a name, before any type is known. That is
     /// safe only while the name means the builtin alone: it is in
     /// `checker::RESERVED`, or the rewrite is given back when a declaration takes
     /// it. `movecheck::every_view_and_sink_name_is_reserved` checks the same
     /// hazard for its list.
     #[test]
     fn every_method_builtin_is_reserved_or_shadowable() {
-        for (surface, internal) in METHOD_BUILTINS {
-            if crate::checker::RESERVED.contains(surface) {
+        for (surface, internal) in methods() {
+            if crate::checker::RESERVED.contains(&surface) {
                 continue;
             }
             let p = parse_src(&format!(
@@ -4612,7 +4535,7 @@ mod tests {
             ));
             assert_eq!(
                 first_call(&p),
-                *surface,
+                surface,
                 "`{surface}` is neither reserved nor given back, so a declaration \
                  of that name is unreachable in method form and `{internal}` \
                  answers instead"
@@ -4622,18 +4545,18 @@ mod tests {
                 "import {{ {surface} }} from \"lib\"\n\
                  fn main() -> Int64 {{ let y = 1\n return y.{surface}() }}"
             ));
-            assert_eq!(first_call(&p), *surface, "an import of `{surface}`");
+            assert_eq!(first_call(&p), surface, "an import of `{surface}`");
         }
     }
 
     /// Nothing declares the name, so the builtin keeps it.
     #[test]
     fn a_method_builtin_keeps_its_name_when_nothing_else_claims_it() {
-        for (surface, internal) in METHOD_BUILTINS {
+        for (surface, internal) in methods() {
             let p = parse_src(&format!(
                 "fn main() -> Int64 {{ let y = 1\n return y.{surface}() }}"
             ));
-            assert_eq!(first_call(&p), *internal, "`{surface}` with no declaration");
+            assert_eq!(first_call(&p), internal, "`{surface}` with no declaration");
         }
     }
 
