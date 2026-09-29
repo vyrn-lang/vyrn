@@ -1169,6 +1169,7 @@ fn load_modules(
             })?,
         };
         drop(_read);
+        crate::prof::read_lines(text.lines().count());
         let is_root = key == root_key;
 
         // Register a generated module's `//@origin` table before it is lexed:

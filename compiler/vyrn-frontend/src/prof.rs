@@ -5,7 +5,7 @@
 //! ponytail: a flat table, no file format. The pprof, speedscope or
 //! own-format choice is open.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 /// Formats a duration in units a reader compares by eye.
@@ -28,6 +28,15 @@ fn ms(d: Duration) -> String {
 thread_local! {
     /// `(name, total, count)` in first-seen order, the order a build runs them.
     static PHASES: RefCell<Vec<(&'static str, Duration, u64)>> = const { RefCell::new(Vec::new()) };
+    static LINES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Adds `n` source lines to the count `phase_table` prints as `lines read`.
+/// `scripts/check-speed.sh` divides the check time by it.
+pub fn read_lines(n: usize) {
+    if phases_on() {
+        LINES.with(|l| l.set(l.get() + n as u64));
+    }
 }
 
 /// Whether build phases are timed. Read once, so the hot loader path does not
@@ -86,5 +95,7 @@ pub fn phase_table() -> String {
             ms(*total)
         ));
     }
+    let lines = LINES.with(|l| l.take());
+    out.push_str(&format!("lines read  {lines}\n"));
     out
 }
