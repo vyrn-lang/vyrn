@@ -49,6 +49,7 @@ const HOSTS: &[(&str, Core)] = &[
              the process that installed it, and that process is a host of its own",
         ),
     ),
+    ("compiler/vyrn-lsp/examples/keystroke.rs", Installed),
     ("compiler/vyrn-lsp/src/main.rs", Installed),
     ("compiler/vyrn-play/src/lib.rs", Installed),
 ];
