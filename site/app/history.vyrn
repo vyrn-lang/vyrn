@@ -101,10 +101,7 @@ fn loadHistory() {
         let f = fieldsOf(copyJson(d))
         dayRows.push(Day { date: stringAt(f, "d"), commits: numberAt(f, "c"), prs: numberAt(f, "p") })
     }
-    for r in arrayAt(fields, "releases") {
-        let f = fieldsOf(copyJson(r))
-        releases.push(Release { tag: stringAt(f, "t"), date: stringAt(f, "d") })
-    }
+    releases = releasesIn(fields)
     let tests = objectAt(fields, "tests")
     testBlocks = numberAt(tests, "blocks")
     testFiles = numberAt(tests, "files")
@@ -116,6 +113,26 @@ fn loadHistory() {
 export fn historyError() -> String {
     loadHistory()
     return corrupt.copy()
+}
+
+/// The releases a history file lists, oldest first. A history with no tags
+/// lists none.
+fn releasesIn(fields: Array<JsonField>) -> Array<Release> {
+    let mut out: Array<Release> = []
+    for r in arrayAt(fields, "releases") {
+        let f = fieldsOf(copyJson(r))
+        out.push(Release { tag: stringAt(f, "t"), date: stringAt(f, "d") })
+    }
+    return out
+}
+
+/// The fixture's releases, whatever the page draws from. A test of the
+/// non-empty path reads these, because the repository may have no tags.
+export fn fixtureReleaseRows() -> Array<Release> {
+    return match parseJson(fixtureText()) {
+        Ok(j) => releasesIn(fieldsOf(j)),
+        Err(why) => [],
+    }
 }
 
 /// The fixture's text, or nothing at all — which is a page with empty charts,
@@ -264,8 +281,9 @@ export fn testFileCount() -> Int64 {
 
 test "the history is read, and it is a run of days with work in it" {
     // What `/releases` depends on: a run of days, each a real date, and pull
-    // requests that never outnumber the commits they are part of.
-    assert(days().length > 4)
+    // requests that never outnumber the commits they are part of. A repository
+    // with one commit has one day, so the count is only bounded below by one.
+    assert(days().length > 0)
     for d in days() {
         assert(d.date.byteLength == 10)
         assert(d.commits >= 0)
@@ -275,6 +293,23 @@ test "the history is read, and it is a run of days with work in it" {
     }
     assert(testBlockCount() > 0)
     assert(testFileCount() > 0)
+    // Releases are dated days, oldest first, and there may be none.
+    let rows = releaseRows()
+    let mut i = 1
+    while i < rows.length {
+        assert(rows[i - 1].date <= rows[i].date)
+        i = i + 1
+    }
+    for r in rows {
+        assert(r.date.byteLength == 10)
+    }
+}
+
+test "the fixture has a release, so the non-empty path has data to run on" {
+    let rows = fixtureReleaseRows()
+    assertEq(rows.length, 1)
+    assertEq(rows[0].tag, "v0.0.0-fixture")
+    assertEq(rows[0].date, "2026-01-09")
 }
 
 test "a source that does not parse is refused, never drawn empty" {

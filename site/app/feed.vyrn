@@ -22,7 +22,7 @@
 /// and `listDir`, and no clock; a build date it guessed would be a wrong fact in
 /// a field aggregators read. The newest item's own date is the answer to the same
 /// question.
-import { releaseRows } from "./history"
+import { Release, releaseRows, fixtureReleaseRows } from "./history"
 import { siteOrigin, releaseUrlOf } from "./repo"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
@@ -48,22 +48,36 @@ export fn feedItemCount() -> Int64 {
 
 /// The whole feed.
 export fn feedXml() -> String {
+    return feedOf(releaseRows())
+}
+
+/// The feed for `rows`, oldest first. With no rows it is a channel with no
+/// items, and its description says that nothing has been published.
+fn feedOf(rows: Array<Release>) -> String {
     let mut out = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     out = out + "<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">\n<channel>\n"
     out = out + "<title>Vyrn releases</title>\n"
     out = out + "<link>\{siteOrigin()}\{substring(hrefOf("/releases"), 1, hrefOf("/releases").byteLength)}</link>\n"
     out = out + "<atom:link href=\"\{feedUrl()}\" rel=\"self\" type=\"application/rss+xml\"/>\n"
-    out = out + "<description>Every published Vyrn release: the tag, the day it was published, and whether it is a pre-release.</description>\n"
+    out = out + "<description>\{channelWords(rows.length)}</description>\n"
     out = out + "<language>en</language>\n"
     // Newest first, which is the order a reader's aggregator shows them in and
     // the reverse of the order the history writes them in.
-    let rows = releaseRows()
     let mut i = rows.length - 1
     while i >= 0 {
         out = out + item(rows[i].tag, rows[i].date)
         i = i - 1
     }
     return out + "</channel>\n</rss>\n"
+}
+
+/// What the channel says it holds. An aggregator shows this for an empty feed,
+/// so with no release it says so instead of promising items.
+fn channelWords(count: Int64) -> String {
+    if count == 0 {
+        return "Every published Vyrn release. None has been published, so the feed has no items."
+    }
+    return "Every published Vyrn release: the tag, the day it was published, and whether it is a pre-release."
 }
 
 /// One release, as an item.
@@ -156,7 +170,7 @@ fn number(text: String) -> Int64 {
 }
 
 test "a date becomes the RFC 822 date RSS reads" {
-    // The two releases this repository has, and their real days of the week.
+    // Two dates, and their real days of the week.
     assertEq(rfc822("2026-08-12"), "Wed, 12 Aug 2026 00:00:00 GMT")
     assertEq(rfc822("2026-08-19"), "Wed, 19 Aug 2026 00:00:00 GMT")
     // January and February are the previous year's 13th and 14th months, which is
@@ -171,46 +185,88 @@ test "a date becomes the RFC 822 date RSS reads" {
 }
 
 test "the feed is one channel with one item per release" {
-    let xml = feedXml()
-    assertEq(firstIndex(xml, "<?xml version=\"1.0\" encoding=\"utf-8\"?>"), 0)
-    assert(has(xml, "<rss version=\"2.0\""))
-    assert(has(xml, "<atom:link href=\"\{feedUrl()}\" rel=\"self\""))
-    // Every release the history knows, and each one exactly once.
-    let rows = releaseRows()
+    // The published feed, with however many releases the repository has.
+    assertEq(feedFault(releaseRows()), "")
+    // No release: a channel with no items, which says so.
+    let empty: Array<Release> = []
+    assertEq(feedFault(empty), "")
+    assert(has(feedOf(empty), "None has been published"))
+    // The fixture's release, which is a pre-release. It is named as one rather
+    // than hidden, the rule the releases page follows.
+    let rows = fixtureReleaseRows()
     assert(rows.length > 0)
-    for r in rows {
-        assertEq(countIn(xml, "<title>\{r.tag}</title>"), 1)
-        assertEq(countIn(xml, "https://github.com/vyrn-lang/vyrn/releases/tag/\{r.tag}"), 2)
-    }
-    assertEq(countIn(xml, "<item>"), rows.length)
-    assertEq(countIn(xml, "</item>"), rows.length)
-    // Newest first: the last release the history recorded is the first item.
-    let first = rows[rows.length - 1]
-    assert(has(xml, "<item>\n<title>\{first.tag}</title>"))
-    // A pre-release is named as one rather than being hidden, which is the rule
-    // the releases page follows.
-    assert(has(xml, "A pre-release, tagged"))
+    assertEq(feedFault(rows), "")
+    assert(has(feedOf(rows), "A pre-release, tagged"))
+    assert(!has(feedOf(rows), "None has been published"))
 }
 
 test "the feed carries no unescaped markup and no relative link" {
-    let xml = feedXml()
-    // Every URL in it is absolute: an aggregator has no document to resolve
-    // against. Every one of them, rather than the absence of a leading slash —
-    // `"/>` closes the `atom:link` element and is not a URL.
-    assertEq(countIn(xml, "<link>\{siteOrigin()}"), 1)
-    assertEq(countIn(xml, "href=\"\{siteOrigin()}"), 1)
-    assertEq(countIn(xml, "<link>https://"), 1 + releaseRows().length)
-    assertEq(countIn(xml, "<link>/"), 0)
-    assertEq(countIn(xml, "href=\"/"), 0)
-    assertEq(countIn(xml, "<guid isPermaLink=\"true\">https://"), releaseRows().length)
-    // The description of an item is text, and a `<` in it would end the element.
-    for r in releaseRows() {
-        assert(!has(r.tag, "<"))
-    }
-    assert(has(xml, "<description>A "))
+    let empty: Array<Release> = []
+    assertEq(linkFault(feedOf(empty), empty), "")
+    assertEq(linkFault(feedOf(fixtureReleaseRows()), fixtureReleaseRows()), "")
+    assertEq(linkFault(feedXml(), releaseRows()), "")
 }
 
-/// How many times `needle` is in `hay`. Only the tests above use it.
+/// The first fact the feed of `rows` breaks, or "": one channel, each release
+/// exactly once, newest first. A test states it for each list of releases.
+fn feedFault(rows: Array<Release>) -> String {
+    let xml = feedOf(rows)
+    if firstIndex(xml, "<?xml version=\"1.0\" encoding=\"utf-8\"?>") != 0 {
+        return "no XML declaration first"
+    }
+    if countIn(xml, "<rss version=\"2.0\"") != 1 || countIn(xml, "<channel>") != 1 {
+        return "not one RSS 2.0 channel"
+    }
+    if !has(xml, "<atom:link href=\"\{feedUrl()}\" rel=\"self\"") {
+        return "no self link"
+    }
+    for r in rows {
+        if countIn(xml, "<title>\{r.tag}</title>") != 1 {
+            return "\{r.tag} is not one title"
+        }
+        if countIn(xml, "https://github.com/vyrn-lang/vyrn/releases/tag/\{r.tag}") != 2 {
+            return "\{r.tag} is not one link and one guid"
+        }
+    }
+    if countIn(xml, "<item>") != rows.length || countIn(xml, "</item>") != rows.length {
+        return "not one item per release"
+    }
+    // Newest first: the last release the history recorded is the first item.
+    if rows.length > 0 && !has(xml, "<item>\n<title>\{rows[rows.length - 1].tag}</title>") {
+        return "the newest release is not the first item"
+    }
+    return ""
+}
+
+/// The first URL in `xml` that is not absolute, or a tag in `rows` that could
+/// end an element, or "". An aggregator has no document to resolve against.
+fn linkFault(xml: String, rows: Array<Release>) -> String {
+    // Every URL, rather than the absence of a leading slash: `"/>` closes the
+    // `atom:link` element and is not a URL.
+    if countIn(xml, "<link>\{siteOrigin()}") != 1 || countIn(xml, "href=\"\{siteOrigin()}") != 1 {
+        return "the channel does not link the site's origin once"
+    }
+    if countIn(xml, "<link>https://") != 1 + rows.length {
+        return "a link is not absolute"
+    }
+    if countIn(xml, "<link>/") != 0 || countIn(xml, "href=\"/") != 0 {
+        return "a link is relative"
+    }
+    if countIn(xml, "<guid isPermaLink=\"true\">https://") != rows.length {
+        return "a guid is not an absolute permalink"
+    }
+    for r in rows {
+        if has(r.tag, "<") {
+            return "\{r.tag} holds markup"
+        }
+    }
+    if !has(xml, "<description>Every published Vyrn release") {
+        return "the channel has no description"
+    }
+    return ""
+}
+
+/// How many times `needle` is in `hay`.
 fn countIn(hay: String, needle: String) -> Int64 {
     let mut n = 0
     let mut rest = hay.copy()

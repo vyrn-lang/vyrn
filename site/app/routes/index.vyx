@@ -222,7 +222,8 @@ fn barStyle(pct: String) -> String {
                      page's order: the command is the point and the tabs are
                      the quietest thing near it. The label above the box names
                      the version, so the hero says what today's install is. -->
-                <p class="cmdlabel">Install Vyrn <a href="/releases.html">{{ releaseTag() }}</a></p>
+                <p class="cmdlabel" v-if="hasRelease()">Install Vyrn <a href="/releases.html">{{ releaseTag() }}</a></p>
+                <p class="cmdlabel" v-else>Install Vyrn</p>
                 <fieldset class="picker">
                     <legend class="sr-only">Operating system</legend>
                     <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>

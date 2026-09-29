@@ -142,7 +142,8 @@ fn kindOf(tag: String) -> String {
 
         <section class="band" id="all">
             <p class="eyebrow">Every release</p>
-            <div class="scroller">
+            <p v-if="releaseRows().length == 0">No version has been tagged. The table lists each tag, with its archives, once one is.</p>
+            <div class="scroller" v-else>
                 <table>
                     <thead><tr><th scope="col">Version</th><th scope="col">Tagged</th><th scope="col">Kind</th><th scope="col">Archives</th></tr></thead>
                     <tbody>
