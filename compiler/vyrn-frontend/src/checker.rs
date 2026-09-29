@@ -470,7 +470,8 @@ fn check_accum_full(
     Vec<Type>,
     Option<HashSet<String>>,
 ) {
-    check_accum_inner(program)
+    let (out, binders, effects, json, jdec, typed, _) = check_accum_inner(program, false);
+    (out, binders, effects, json, jdec, typed)
 }
 
 /// An impl head as written (`impl<T> Show for Option<T>`), for the overlap
@@ -517,8 +518,10 @@ fn render_method_sig(
     format!("fn {name}({}) -> {ret}", ps.join(", "))
 }
 
+#[allow(clippy::type_complexity)]
 fn check_accum_inner(
     program: &Program,
+    recording: bool,
 ) -> (
     Vec<Diagnostic>,
     Vec<LocalBinding>,
@@ -526,6 +529,7 @@ fn check_accum_inner(
     Vec<Type>,
     Vec<Type>,
     Option<HashSet<String>>,
+    Option<Recorded>,
 ) {
     let mut out = Vec::new();
     // The functions and module state with a refusal, and how many diagnostics
@@ -1118,6 +1122,10 @@ fn check_accum_inner(
         stored_calls: RefCell::new(Vec::new()),
         json_types: RefCell::new(Vec::new()),
         json_dec_types: RefCell::new(Vec::new()),
+        record: recording.then(RefCell::default),
+        desugaring: std::cell::Cell::new(false),
+        pending_subst: RefCell::new(None),
+        pending_call: RefCell::new(None),
     };
 
     // 2b. Module state, in declaration order. A failed global still binds, as
@@ -1276,7 +1284,16 @@ fn check_accum_inner(
     let mut json_dec_types = checker.json_dec_types.borrow().clone();
     json_dec_types.dedup_by_key(|t| format!("{t:?}"));
     let typed = (in_bodies == out.len()).then_some(refused);
-    (out, binders, effects, json_types, json_dec_types, typed)
+    let record = checker.record.map(RefCell::into_inner);
+    (
+        out,
+        binders,
+        effects,
+        json_types,
+        json_dec_types,
+        typed,
+        record,
+    )
 }
 
 /// Checks every projection body as a function body, plus three rules of its
@@ -1629,25 +1646,6 @@ pub fn check(program: &Program) -> Result<(), String> {
     }
 }
 
-// The record: the type of every expression and the substitution of every
-// generic call, keyed by AST node address (the identity `own` uses). Off by
-// default, so the editor's keystroke path does not pay for it.
-
-thread_local! {
-    static RECORDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Inside [`Checker::record_desugar`]: typing AST the lexer never made.
-    static DESUGARING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static RECORD: RefCell<Recorded> = RefCell::new(Recorded::new());
-    /// The substitution the innermost generic call just solved, for the
-    /// [`Checker::expr`] wrapper that knows the call node's address. A nested
-    /// call consumes and clears it before its caller writes one.
-    static PENDING_SUBST: RefCell<Option<(String, Vec<(String, Type)>)>> =
-        const { RefCell::new(None) };
-    /// The declaration of the call [`Checker::check_declared_call`] just typed
-    /// `Err`, for the same wrapper.
-    static PENDING_CALL: RefCell<Option<CallDecl>> = const { RefCell::new(None) };
-}
-
 /// The declaration a call was checked against; the typed judgment states the
 /// call's refusal from it.
 #[derive(Debug, Clone)]
@@ -1681,21 +1679,10 @@ pub struct Recorded {
     pub calls: HashMap<usize, CallDecl>,
 }
 
-impl Recorded {
-    fn new() -> Self {
-        Self::default()
-    }
-}
-
 /// One pass that returns the diagnostics, the root's bindings and the record.
 fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
-    RECORD.with(|r| *r.borrow_mut() = Recorded::new());
-    PENDING_SUBST.with(|p| *p.borrow_mut() = None);
-    RECORDING.with(|c| c.set(true));
-    let (diags, binders, _, _, _, _) = check_accum_full(program);
-    RECORDING.with(|c| c.set(false));
-    let made = RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()));
-    (diags, binders, made)
+    let (diags, binders, _, _, _, _, made) = check_accum_inner(program, true);
+    (diags, binders, made.unwrap_or_default())
 }
 
 /// Checks `program` and returns the record. Diagnostics are dropped: the
@@ -1798,25 +1785,6 @@ pub fn recorded(program: &Program) -> std::rc::Rc<Recorded> {
     made
 }
 
-fn recording() -> bool {
-    RECORDING.with(|c| c.get())
-}
-
-/// Whether the checker is inside AST the lexer never made. [`Expr::Int`]'s arm
-/// reads it.
-fn desugaring() -> bool {
-    DESUGARING.with(|c| c.get())
-}
-
-/// Hands the solved type arguments to the [`Checker::expr`] wrapper.
-fn note_subst(name: &str, subst: &HashMap<String, Type>, type_params: &[String]) {
-    let args: Vec<(String, Type)> = type_params
-        .iter()
-        .filter_map(|p| subst.get(p).map(|t| (p.clone(), t.clone())))
-        .collect();
-    PENDING_SUBST.with(|p| *p.borrow_mut() = Some((name.to_string(), args)));
-}
-
 struct Checker<'a> {
     sigs: &'a HashMap<String, (Vec<Type>, Type)>,
     caps: &'a HashMap<String, Vec<Capability>>,
@@ -1893,6 +1861,18 @@ struct Checker<'a> {
     json_types: RefCell<Vec<Type>>,
     /// Every `fromJson<T>` target, for the decoders.
     json_dec_types: RefCell<Vec<Type>>,
+    /// The record [`record`] asks for, or `None`, so the editor's keystroke
+    /// path does not pay for it.
+    record: Option<RefCell<Recorded>>,
+    /// Inside [`Checker::record_desugar`]: typing AST the lexer never made.
+    desugaring: std::cell::Cell<bool>,
+    /// The substitution the innermost generic call just solved, for the
+    /// [`Checker::expr`] wrapper that knows the call node's address. A nested
+    /// call consumes and clears it before its caller writes one.
+    pending_subst: RefCell<Option<(String, Vec<(String, Type)>)>>,
+    /// The declaration of the call [`Checker::check_declared_call`] just typed
+    /// `Err`, for the same wrapper.
+    pending_call: RefCell<Option<CallDecl>>,
 }
 
 /// A declaration a call is checked against: a user function, a seeded builtin
@@ -1983,6 +1963,19 @@ enum Reach {
 }
 
 impl<'a> Checker<'a> {
+    fn recording(&self) -> bool {
+        self.record.is_some()
+    }
+
+    /// Hands the solved type arguments to the [`Checker::expr`] wrapper.
+    fn note_subst(&self, name: &str, subst: &HashMap<String, Type>, type_params: &[String]) {
+        let args: Vec<(String, Type)> = type_params
+            .iter()
+            .filter_map(|p| subst.get(p).map(|t| (p.clone(), t.clone())))
+            .collect();
+        *self.pending_subst.borrow_mut() = Some((name.to_string(), args));
+    }
+
     // ---- type relations -------------------------------------------------
 
     /// The representation type: a named type decays to its base.
@@ -2126,7 +2119,7 @@ impl<'a> Checker<'a> {
         }
         let subst =
             self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
-        if recording() {
+        if self.recording() {
             if let Ok(Some(p)) = crate::project::optional_site(
                 self.impl_blocks,
                 Some(&recv),
@@ -3104,7 +3097,9 @@ impl<'a> Checker<'a> {
             if !lambda.is_empty() {
                 refused.insert(g.name.clone());
                 let key = &g.init as *const Expr as usize;
-                RECORD.with(|r| r.borrow_mut().node_types.remove(&key));
+                if let Some(r) = &self.record {
+                    r.borrow_mut().node_types.remove(&key);
+                }
             }
             out.extend(lambda.into_iter().map(|mut d| {
                 d.file = g.module.clone();
@@ -3172,17 +3167,17 @@ impl<'a> Checker<'a> {
     /// else. `project` leaks each expansion once ([`crate::project::Memo`]), so
     /// its node addresses are stable keys.
     ///
-    /// Diagnostics, scope changes and [`PENDING_SUBST`] stay inside: an
+    /// Diagnostics, scope changes and [`Checker::pending_subst`] stay inside: an
     /// expansion fails only where its source already did, and the wrapper
-    /// reads `PENDING_SUBST` for the access site's own node.
+    /// reads `pending_subst` for the access site's own node.
     fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope)) {
         let mark = self.errors.borrow().len();
-        let saved = PENDING_SUBST.with(|s| s.borrow_mut().take());
-        let was = DESUGARING.with(|c| c.replace(true));
+        let saved = self.pending_subst.take();
+        let was = self.desugaring.replace(true);
         let mut sc = scope.clone();
         run(self, &mut sc);
-        DESUGARING.with(|c| c.set(was));
-        PENDING_SUBST.with(|s| *s.borrow_mut() = saved);
+        self.desugaring.set(was);
+        *self.pending_subst.borrow_mut() = saved;
         self.errors.borrow_mut().truncate(mark);
     }
 
@@ -3399,7 +3394,7 @@ impl<'a> Checker<'a> {
                 self.region_store_guard(name, &elem, scope, *line)?;
                 // Record the expansion the store lowers through: `atSet`
                 // inlined, with the move-out and move-back around it.
-                if recording() {
+                if self.recording() {
                     if let Ok(Some(blk)) =
                         crate::project::store_index(self.impl_blocks, name, index, value, &b.ty)
                     {
@@ -3534,7 +3529,7 @@ impl<'a> Checker<'a> {
                 scope.pop();
                 // A `for` over a user container lowers to `nth` inlined around
                 // a copy of the body; record that copy.
-                if recording() {
+                if self.recording() {
                     if let Some(blk) = crate::types::iterate_impl(self.impl_blocks, &ity).and_then(
                         |(size_fn, nth)| {
                             crate::project::iterate_loop(
@@ -3640,15 +3635,15 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        if !recording() {
+        let Some(record) = &self.record else {
             return self.expr_inner(expr, scope, expected, fn_ret);
-        }
+        };
         let t = self.expr_inner(expr, scope, expected, fn_ret)?;
         let key = expr as *const Expr as usize;
-        let pending = PENDING_SUBST.with(|p| p.borrow_mut().take());
-        let call = PENDING_CALL.with(|p| p.borrow_mut().take());
-        RECORD.with(|r| {
-            let mut r = r.borrow_mut();
+        let pending = self.pending_subst.take();
+        let call = self.pending_call.take();
+        {
+            let mut r = record.borrow_mut();
             if let Some(d) = call {
                 r.calls.insert(key, d);
             }
@@ -3659,7 +3654,7 @@ impl<'a> Checker<'a> {
             if let Some(call) = pending {
                 r.node_substs.insert(key, call);
             }
-        });
+        }
         Ok(t)
     }
 
@@ -3700,7 +3695,7 @@ impl<'a> Checker<'a> {
                 _ => {
                     // An expansion's `Expr::Int(-1)` (`project::iterate_loop`)
                     // never went through the lexer and means minus one.
-                    if *n < 0 && !desugaring() {
+                    if *n < 0 && !self.desugaring.get() {
                         Err(cerr!(
                             *self.stmt_line.borrow(),
                             "integer literal {} exceeds Int64's maximum \
@@ -3875,7 +3870,7 @@ impl<'a> Checker<'a> {
                 // `schemaOf<T>()` lowers through the literal it stands for, so
                 // the checker types those nodes too (`project::schema`).
                 if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
-                    (name.as_str(), type_args.as_slice(), recording())
+                    (name.as_str(), type_args.as_slice(), self.recording())
                 {
                     if let Some(lit) = self
                         .types
@@ -4186,8 +4181,8 @@ impl<'a> Checker<'a> {
             .collect();
         // A field typed before `T` was solved recorded `Array<T>`; the
         // substitution lets the record's reader replace it.
-        if recording() {
-            note_subst(name, &subst, &decl.type_params);
+        if self.recording() {
+            self.note_subst(name, &subst, &decl.type_params);
         }
         Ok(Type::App(name.to_string(), args))
     }
@@ -5385,7 +5380,7 @@ impl<'a> Checker<'a> {
                     self.refuse_chained_projection(&args[0], scope, line)?;
                     // Record the nodes the site lowers through: the
                     // projection's body inlined here ([`record_desugar`]).
-                    if recording() {
+                    if self.recording() {
                         if let Ok(Some(p)) = crate::project::site(
                             self.impl_blocks,
                             Some(&at),
@@ -6042,7 +6037,7 @@ impl<'a> Checker<'a> {
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
             if let Some(t) = self.place_result(&recv, name, args, scope, fn_ret, line)? {
                 self.refuse_chained_projection(&args[0], scope, line)?;
-                if recording() {
+                if self.recording() {
                     if let Ok(Some(p)) = crate::project::site(
                         self.impl_blocks,
                         Some(&recv),
@@ -6167,14 +6162,14 @@ impl<'a> Checker<'a> {
         // Arity, type-argument count and argument types are refused by the
         // typed judgment (`core::judged`) from the declaration recorded here.
         let refused = || {
-            if recording() {
+            if self.recording() {
                 let decl = CallDecl {
                     shown: shown.to_string(),
                     params: params.to_vec(),
                     type_params: d.type_params.map_or(0, Vec::len),
                     recv: recv.is_some(),
                 };
-                PENDING_CALL.with(|p| *p.borrow_mut() = Some(decl));
+                *self.pending_call.borrow_mut() = Some(decl);
             }
             self.judged()
         };
@@ -6244,8 +6239,8 @@ impl<'a> Checker<'a> {
                         &mut subst,
                         line,
                     )? {
-                        if recording() {
-                            note_subst(d.key, &subst, type_params);
+                        if self.recording() {
+                            self.note_subst(d.key, &subst, type_params);
                         }
                         return self.judged();
                     }
@@ -6335,8 +6330,8 @@ impl<'a> Checker<'a> {
             let rty = crate::types::substitute(ret, &subst);
             // The one place a generic call's type arguments exist; recorded
             // for the backends.
-            if recording() {
-                note_subst(d.key, &subst, type_params);
+            if self.recording() {
+                self.note_subst(d.key, &subst, type_params);
             }
             return Ok(rty);
         }
@@ -6506,9 +6501,9 @@ impl<'a> Checker<'a> {
                 self.record_arg_fn(&sig, None, Some(*lline));
                 // The core types the literal's closure from this row (a
                 // `consume` position names no target).
-                if recording() {
+                if let Some(r) = &self.record {
                     let key = arg as *const Expr as usize;
-                    RECORD.with(|r| r.borrow_mut().node_types.insert(key, sig));
+                    r.borrow_mut().node_types.insert(key, sig);
                 }
                 Ok(true)
             }
@@ -7941,9 +7936,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!recording(), "the sink is off unless `record` turns it on");
         let r = record(&p);
-        assert!(!recording(), "and off again afterwards");
 
         let types: Vec<String> = {
             let mut v: Vec<String> = r.node_types.values().map(|t| t.to_string()).collect();
