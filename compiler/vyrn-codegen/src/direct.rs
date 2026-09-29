@@ -2716,6 +2716,52 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
+    /// The fields of the record `ty` that own heap, with their offsets: what
+    /// [`Fn_::copy_body`] copies and [`Fn_::rel_body`] frees.
+    fn owning_fields(&self, ty: &Type, line: usize) -> Result<Vec<(u32, Field)>, String> {
+        let l = self.cx.layout(ty, line)?;
+        let fields =
+            (self.cx.fields(ty)).ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
+        Ok((fields.into_iter().enumerate())
+            .filter(|(_, f)| self.owns_heap(&f.ty))
+            .map(|(i, f)| (l.fields[i], f))
+            .collect())
+    }
+
+    /// Per variant of the sum `ty` that has any, its tag, its name, and the payloads that own
+    /// heap or ride in a box, as `(index, offset, type, word)`. A boxed payload is listed even
+    /// when it owns nothing (`Option<Handle<Node>>`), so this and `own::owns_heap` must agree.
+    /// [`Fn_::copy_body`] copies exactly these and [`Fn_::rel_body`] frees them.
+    #[allow(clippy::type_complexity)]
+    fn owning_payloads(
+        &self,
+        ty: &Type,
+        line: usize,
+    ) -> Result<Vec<(i64, String, Vec<(usize, u32, Type, Word)>)>, String> {
+        let l = self.cx.layout(ty, line)?;
+        let mut out = Vec::new();
+        for (tag, var) in self
+            .cx
+            .sum_vs(ty)
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+        {
+            let mut slots = Vec::new();
+            for (j, pty) in var.payload.iter().enumerate() {
+                let w = self.word2(pty)?;
+                if self.owns_heap(pty) || w == Word::Boxed {
+                    let off = l.fields[self.cx.payload_slot(&var.payload, j)];
+                    slots.push((j, off, pty.clone(), w));
+                }
+            }
+            if !slots.is_empty() {
+                out.push((tag as i64, var.name, slots));
+            }
+        }
+        Ok(out)
+    }
+
     /// The release walk of `ty`, the mirror of [`Fn_::copy_body`] with `free` for `malloc`.
     /// It frees exactly the storage the copy allocates, so the two must agree on every shape.
     fn rel_body(
@@ -2810,22 +2856,14 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Record(_) => {
-                let l = self.cx.layout(ty, line)?;
-                let fields = self
-                    .cx
-                    .fields(ty)
-                    .ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
-                for (i, f) in fields.iter().enumerate() {
-                    if !self.owns_heap(&f.ty) {
-                        continue;
-                    }
+                for (off, f) in self.owning_fields(ty, line)? {
                     // A `consume` took this field, so another owner frees it.
                     if holes.iter().any(|h| *h == f.name) {
                         continue;
                     }
                     let p = b.local(ValType::I32);
                     b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                    b.ins(&Instruction::I32Const(off as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
                     self.rel_holes = vyrn_frontend::declared::holes_under(holes, &f.name);
@@ -2841,42 +2879,23 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.each(m, b, true, a, count, stride, &inner, line)
             }
-            // Any sum: the live variant's payloads that own heap or are boxed. A boxed payload
-            // is freed even if it owns nothing (`Option<Handle<Node>>`), so this guard and
-            // `own::owns_heap` must agree; this one asks the emitter's [`Fn_::word2`].
             Type::Enum(_) => {
-                let vs = self.cx.sum_vs(ty).unwrap_or_default();
-                let l = self.cx.layout(ty, line)?;
-                for (tag, var) in vs.iter().enumerate() {
-                    let mut live = false;
-                    for p in &var.payload {
-                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
-                    }
-                    if !live {
-                        continue;
-                    }
-                    tag_eq(b, a, tag as i64);
+                for (tag, name, slots) in self.owning_payloads(ty, line)? {
+                    tag_eq(b, a, tag);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
-                    for (j, pty) in var.payload.clone().iter().enumerate() {
-                        let w = self.word2(pty)?;
-                        if !self.owns_heap(pty) && w != Word::Boxed {
-                            continue;
-                        }
-                        let slot = self.cx.payload_slot(&var.payload, j);
+                    for (j, off, pty, w) in slots {
                         // A `consume` took the payload (`Elem.1`); its box is still the sum's.
-                        let key = format!("{}.{j}", var.name);
+                        let key = format!("{name}.{j}");
                         if holes.contains(&key) {
                             if w == Word::Boxed {
-                                b.ins(&Instruction::LocalGet(a))
-                                    .ins(&Instruction::I64Load(at(l.fields[slot])))
-                                    .ins(&Instruction::I32WrapI64)
-                                    .ins(&Instruction::Call(self.cx.rt.free));
+                                load_wrapped(b, a, off);
+                                b.ins(&Instruction::Call(self.cx.rt.free));
                             }
                             continue;
                         }
                         self.rel_holes = vyrn_frontend::declared::holes_under(holes, &key);
-                        self.rel_word(m, b, a, l.fields[slot], pty, w, line)?;
+                        self.rel_word(m, b, a, off, &pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -6751,18 +6770,10 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Record(_) => {
-                let l = self.cx.layout(ty, line)?;
-                let fields = self
-                    .cx
-                    .fields(ty)
-                    .ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
-                for (i, f) in fields.iter().enumerate() {
-                    if !self.owns_heap(&f.ty) {
-                        continue;
-                    }
+                for (off, f) in self.owning_fields(ty, line)? {
                     let p = b.local(ValType::I32);
                     b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                    b.ins(&Instruction::I32Const(off as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
                     self.copy_at(m, b, p, &f.ty, line)?;
@@ -6776,30 +6787,15 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.each(m, b, false, a, count, stride, &inner, line)
             }
-            // Any sum: copy the owning payload slots of the live variant, boxes
-            // included. Mirrors `rel_body`'s arm; a copy that skipped a boxed
-            // payload would share the box, and both copies would release it.
+            // A copy that skipped a boxed payload would share the box, and both copies would
+            // release it.
             Type::Enum(_) => {
-                let vs = self.cx.sum_vs(ty).unwrap_or_default();
-                let l = self.cx.layout(ty, line)?;
-                for (tag, var) in vs.iter().enumerate() {
-                    let mut live = false;
-                    for p in &var.payload {
-                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
-                    }
-                    if !live {
-                        continue;
-                    }
-                    tag_eq(b, a, tag as i64);
+                for (tag, _, slots) in self.owning_payloads(ty, line)? {
+                    tag_eq(b, a, tag);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
-                    for (j, pty) in var.payload.clone().iter().enumerate() {
-                        let w = self.word2(pty)?;
-                        if !self.owns_heap(pty) && w != Word::Boxed {
-                            continue;
-                        }
-                        let at = self.cx.payload_slot(&var.payload, j);
-                        self.copy_word(m, b, a, l.fields[at], pty, w, line)?;
+                    for (_, off, pty, w) in slots {
+                        self.copy_word(m, b, a, off, &pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
