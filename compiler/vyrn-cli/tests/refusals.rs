@@ -3543,3 +3543,26 @@ fn main() -> Int64 { let mut h = H { xs: [1, 2] }; poke(h); return 0 }
         );
     }
 }
+
+/// Type and variant names share one namespace across the linked program. A
+/// variant that takes a name std exports is refused at the variant, naming the
+/// std module; the loader used to blame std's own uses of its own type.
+#[test]
+fn a_variant_named_like_a_std_type_is_refused_at_the_variant() {
+    let src = "import { compile } from \"std/regex\"
+type Coll = | Match | Miss
+fn main() -> Int64 {
+    match compile(\"a+\") { Ok(re) => print(\"compiled\"), Err(e) => print(e) }
+    return 0
+}
+";
+    let dir = common::scratch("variant-std-type");
+    std::fs::write(dir.join("coll.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "coll.vyrn", false);
+    let want = "coll.vyrn:2:0: enum variant `Match` clashes with the type `Match` declared in \
+                `std/regex`; rename the variant";
+    assert!(
+        !ok && text.lines().next().is_some_and(|l| l.ends_with(want)),
+        "`check` said {text}"
+    );
+}

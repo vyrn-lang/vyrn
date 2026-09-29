@@ -564,10 +564,26 @@ fn check_accum_inner(
                     out.push(cerr!(t.line, "enum variant `{}` is defined twice", v.name));
                     continue;
                 }
-                if types.contains_key(&v.name) {
+                if let Some(ty) = types.get(&v.name) {
+                    // Type and variant names share one namespace across the
+                    // linked program, so the other declaration may be in std.
+                    let from = ty
+                        .module
+                        .as_deref()
+                        .map(|m| {
+                            let std_root = crate::manifest::std_root();
+                            let spec = crate::loader::import_specifier("", m, std_root.as_deref());
+                            let shown = match spec.starts_with("std/") {
+                                true => spec,
+                                false => m.rsplit('/').next().unwrap_or(m).to_string(),
+                            };
+                            format!(" declared in `{shown}`")
+                        })
+                        .unwrap_or_default();
                     out.push(cerr!(
                         t.line,
-                        "enum variant `{}` clashes with a type name",
+                        "enum variant `{}` clashes with the type `{}`{from}; rename the variant",
+                        v.name,
                         v.name
                     ));
                     continue;
