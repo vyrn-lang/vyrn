@@ -32,7 +32,6 @@ pub fn install() {
     vyrn_frontend::own::install_must_use(typed::obligation::judge);
     // `vyrn check` reads the typed judgment's refusals before the kernel's.
     vyrn_frontend::own::install_typed(core::typed_diagnostics);
-    vyrn_frontend::floor::install_judge(effects::reaches);
 }
 pub use core::{refuses as kernel_refuses, take_refusals};
 

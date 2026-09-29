@@ -164,9 +164,10 @@ pub fn check_and_synthesize(
     (diags, refused)
 }
 
-/// Checks a generator's own program: [`check_and_synthesize`], the must-use
-/// judgment, and the floor. `movecheck::refusals` judges nothing else under
-/// [`movecheck::comptime`].
+/// Checks a generator's own program: [`check_and_synthesize`] and the must-use
+/// judgment. `movecheck::refusals` judges nothing else under
+/// [`movecheck::comptime`]. The floor does not judge it: a generator's load is
+/// nested, so it refuses inside the load.
 pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     movecheck::comptime(|| {
         let (mut diags, _) = check_and_synthesize(program);
@@ -175,7 +176,6 @@ pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Di
             let _p = prof::phase("movecheck");
             diags.extend(movecheck::refusals(program));
         }
-        floor::settle(program, &mut diags);
         diags
     })
 }

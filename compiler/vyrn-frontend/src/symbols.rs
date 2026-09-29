@@ -303,7 +303,9 @@ fn analyze_inner(
     } else {
         match (&linker, program.imports.is_empty()) {
             (Some((root_path, opts, resolver)), false) => {
-                let (loaded, o, load_warnings, g) =
+                // The floor's deferred decision needs the effect judgment; the
+                // editor does not make it.
+                let (loaded, o, load_warnings, g, _) =
                     crate::loader::load_with_origins(source, root_path, opts, *resolver);
                 graph = g;
                 // The origin maps come back even from a failed load,

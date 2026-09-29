@@ -57,9 +57,8 @@ The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
 front end cannot call the lowering, so it declares slots and the lowering
 fills them. `vyrn_lower::install` installs the placer (`own::install_placer`),
 the kernel's refusals (`own::install_refusals`), the must-use judgment
-(`own::install_must_use`), the typed judgment's refusals
-(`own::install_typed`) and the effect judgment into the floor
-(`floor::install_judge`). `vyrn_genwasm::install` installs the generation
+(`own::install_must_use`) and the typed judgment's refusals
+(`own::install_typed`). `vyrn_genwasm::install` installs the generation
 engine (`gen::set_gen_engine`); the playground installs its own, which runs
 the module in the page. Every process that compiles calls both first: the
 CLI's `install`, the language server's `main`, the playground's `load`, and
