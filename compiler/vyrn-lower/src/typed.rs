@@ -910,40 +910,18 @@ fn each_store(
 /// its own, so a loop outside the lambda does not count. `seen` is as in
 /// [`stores`].
 pub fn loops(body: &Body, seen: &mut std::collections::HashSet<usize>) -> Vec<(usize, String)> {
-    fn walk(
-        stmts: &[St],
-        in_loop: bool,
-        seen: &mut std::collections::HashSet<usize>,
-        out: &mut Vec<(usize, String)>,
-    ) {
-        for s in stmts {
-            match s {
-                St::Break { site, line } | St::Continue { site, line } if !in_loop => {
-                    if seen.insert(*site) {
-                        let what = if matches!(s, St::Break { .. }) {
-                            "break"
-                        } else {
-                            "continue"
-                        };
-                        out.push((*line, format!("`{what}` outside a loop")));
-                    }
-                }
-                St::If { then, els, .. } => {
-                    walk(then, in_loop, seen, out);
-                    walk(els, in_loop, seen, out);
-                }
-                St::Loop { body, .. } => walk(body, true, seen, out),
-                St::Block { body, .. } => walk(body, in_loop, seen, out),
-                St::Switch { arms, .. } => {
-                    arms.iter().for_each(|a| walk(&a.body, in_loop, seen, out))
-                }
-                _ => {}
-            }
-        }
-    }
     let mut out = Vec::new();
     for f in body.frames() {
-        walk(&f.stmts, false, seen, &mut out);
+        for (s, _) in rows(&f.stmts).filter(|(_, depth)| *depth == 0) {
+            let (what, site, line) = match s {
+                St::Break { site, line } => ("break", site, line),
+                St::Continue { site, line } => ("continue", site, line),
+                _ => continue,
+            };
+            if seen.insert(*site) {
+                out.push((*line, format!("`{what}` outside a loop")));
+            }
+        }
     }
     out
 }
