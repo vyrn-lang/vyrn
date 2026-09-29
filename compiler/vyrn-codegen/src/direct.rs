@@ -833,10 +833,10 @@ enum Key {
     /// A specialization over `fn`-typed parameters: the callee, its type arguments, and each `fn` parameter's
     /// target. A different lambda makes a different function.
     Ho(String, Vec<Type>, Vec<FnTarget>),
-    /// A lifted lambda: the literal's node address, its concrete shape (captures, parameters,
+    /// A lifted lambda: the literal's node, its concrete shape (captures, parameters,
     /// return), and its substitution. One literal in a generic body lifts once per
     /// instantiation, even when the shape does not differ.
-    Lambda(usize, Vec<Type>, Vec<(String, Type)>),
+    Lambda(NodeId, Vec<Type>, Vec<(String, Type)>),
 }
 
 /// The statements a queued body walks. Each is the program's own AST, because a walk over a copy
@@ -859,8 +859,8 @@ enum Body<'a> {
 struct Pending<'a> {
     key: Key,
     /// The shell: the name, line and signature the body is lowered under. It carries the
-    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Rc` because
-    /// [`Key::Lambda`] keys on a node address inside it, which a clone per drain turn would move.
+    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Rc`, so a
+    /// drain turn shares the shell instead of copying it.
     f: Rc<Function>,
     /// The statements to walk, borrowed from the checked program.
     body: Body<'a>,
@@ -952,7 +952,7 @@ struct Cx<'a> {
     /// Every lambda literal the program holds, by node address, so [`Fn_::lift_lambda`] can queue
     /// the literal's own body instead of a clone. A hit is the program's node, since the program
     /// outlives every walk. A miss is a literal in a leaked desugar, and the caller clones it.
-    lambdas: HashMap<usize, (&'a str, &'a Expr)>,
+    lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
     /// The nodes this backend makes or copies and then hands to a walk that
     /// keys on their addresses, kept alive for the compile: a key built from a
     /// node's address is sound only while the node lives (#444).
@@ -4823,7 +4823,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The program's own body for the lambda literal at `at`, or `None` if the program does
     /// not hold it ([`Cx::lambdas`]).
     fn lambda(&self, at: &Expr) -> Option<&'p LambdaBody> {
-        match self.cx.lambdas.get(&(at as *const Expr as usize))?.1 {
+        match self.cx.lambdas.get(&at.id())?.1 {
             Expr::Lambda { body, .. } => Some(body),
             _ => None,
         }
@@ -4993,7 +4993,7 @@ impl<'p> Fn_<'_, 'p> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         under.sort_by(|a, b| a.0.cmp(&b.0));
-        let key = Key::Lambda(at as *const Expr as usize, shape, under);
+        let key = Key::Lambda(at.id(), shape, under);
         let sig = self.cx.enqueue(
             m,
             key,

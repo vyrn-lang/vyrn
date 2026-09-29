@@ -1948,23 +1948,20 @@ macro_rules! body_scope_descent {
 crate::body_scope_descent!(AstVisit, ast_block, ast_stmt, ast_expr);
 
 /// Returns every lambda literal in function bodies and global initializers, by
-/// node address, with the name of the function that holds it ("" for module
-/// state).
+/// node, with the name of the function that holds it ("" for module state).
 ///
 /// A backend walk has erased the program's lifetime; this gives it a borrow a
-/// worklist can hold, without copying the body. A hit needs no verification,
-/// unlike `project::Memo`'s keys: the program outlives every walk, so nothing
-/// else can live at one of its addresses.
-pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<usize, (&'a str, &'a Expr)> {
+/// worklist can hold, without copying the body.
+pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<NodeId, (&'a str, &'a Expr)> {
     struct Lambdas<'a>(
         &'a str,
-        std::collections::HashMap<usize, (&'a str, &'a Expr)>,
+        std::collections::HashMap<NodeId, (&'a str, &'a Expr)>,
     );
     impl<'a> AstVisit<'a> for Lambdas<'a> {
         const SCOPED: bool = false;
         fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
             if let Expr::Lambda { .. } = e {
-                self.1.insert(e as *const Expr as usize, (self.0, e));
+                self.1.insert(e.id(), (self.0, e));
             }
             true
         }
