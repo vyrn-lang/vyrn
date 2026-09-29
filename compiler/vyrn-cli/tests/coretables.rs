@@ -74,6 +74,47 @@ fn core_releases(src: &str, which: &str, binding: &str) -> bool {
         .releases
 }
 
+/// A body is built from the analysis it is handed, whatever program the thread placed since:
+/// the kernel's placement and the checker's record are that analysis's, not the thread's.
+#[test]
+fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
+    vyrn_lower::install();
+    let analyzed = |src: &str| {
+        let program = vyrn_frontend::load(src, "core.vyrn", &Default::default(), &DiskResolver)
+            .unwrap_or_else(|d| panic!("{}", d[0].render()));
+        let own = vyrn_frontend::own::analyze(&program);
+        (program, own)
+    };
+    let main_of = |program: &Program, own: &vyrn_frontend::own::Ownership| {
+        let lowered = vyrn_lower::lower_with(program, own);
+        let inst = (lowered.instances.iter())
+            .find(|i| i.func.name == "main")
+            .expect("`main` is lowered");
+        vyrn_lower::core::build(program, inst, own)
+            .expect("`main` builds")
+            .render()
+    };
+    let (a, own_a) = analyzed(
+        "type P = { name: String, tags: Array<String> }
+         fn main() -> Int64 {
+             let mut p = P { name: \"a\" + \"b\", tags: [\"x\"] }
+             p.name = p.name + \"c\"
+             let n = if p.tags.length == 0 { 1 } else { 2 }
+             return n
+         }",
+    );
+    let before = main_of(&a, &own_a);
+    let (_b, _own_b) = analyzed(
+        "fn main() -> Int64 {
+             let xs = [1, 2, 3]
+             let mut s = \"q\"
+             for x in xs { s = s + \"r\" }
+             return s.byteLength
+         }",
+    );
+    assert_eq!(main_of(&a, &own_a), before);
+}
+
 /// `x.copy()` of a type with `impl Copy` is a call row to the impl, at the capability the impl
 /// declares, so a pass over the rows sees the call the language makes.
 #[test]
