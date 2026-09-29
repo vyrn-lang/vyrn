@@ -344,25 +344,7 @@ pub fn placer_installed() -> bool {
     PLACER.get().is_some()
 }
 
-/// Drains the kernel's refusals about the program the placer just judged. A
-/// generator's own load drains its refusals, so what is left is this
-/// program's.
-pub type Refusals = fn() -> Vec<crate::diagnostics::Diagnostic>;
-
-static REFUSALS: std::sync::OnceLock<Refusals> = std::sync::OnceLock::new();
-
-/// Installs the kernel's refusal drain. The first installation wins.
-pub fn install_refusals(f: Refusals) {
-    let _ = REFUSALS.set(f);
-}
-
-/// Returns what the kernel refuses about the program just analysed; empty when
-/// nothing is installed or under `VYRN_NO_KERNEL=1`.
-pub fn kernel_refusals() -> Vec<crate::diagnostics::Diagnostic> {
-    REFUSALS.get().map(|f| f()).unwrap_or_default()
-}
-
-/// The must-use judgment (`vyrn_lower::typed::obligation`). Unlike the drains,
+/// The must-use judgment (`vyrn_lower::typed::obligation`). Unlike the drain,
 /// it is asked of a program and holds no state between calls.
 pub type MustUse = fn(&Program) -> Vec<crate::diagnostics::Diagnostic>;
 
@@ -379,7 +361,8 @@ pub fn must_use_refusals(program: &Program) -> Vec<crate::diagnostics::Diagnosti
     MUST_USE.get().map(|f| f(program)).unwrap_or_default()
 }
 
-/// Drains the typed judgment's refusals, like [`Refusals`].
+/// Drains the typed judgment's refusals about the program the placer just
+/// judged.
 pub type Typed = fn() -> Vec<crate::diagnostics::Diagnostic>;
 
 static TYPED: std::sync::OnceLock<Typed> = std::sync::OnceLock::new();

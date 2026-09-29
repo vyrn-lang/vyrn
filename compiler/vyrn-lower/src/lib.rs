@@ -17,7 +17,7 @@ pub mod kernel;
 mod pipeline;
 pub mod typed;
 
-pub use pipeline::{check_and_synthesize, load, load_warned};
+pub use pipeline::{check_and_synthesize, load, load_warned, refusals, JUDGE};
 
 /// Installs this crate's judgments into the slots `vyrn-frontend` declares,
 /// because the frontend sits below this crate and cannot call into it. The
@@ -26,9 +26,6 @@ pub use pipeline::{check_and_synthesize, load, load_warned};
 /// asserts a refusal calls it itself.
 pub fn install() {
     vyrn_frontend::own::install_placer(core::augment);
-    // The kernel's refusals join the one list `vyrn check`, the editor and
-    // `vyrn fix` read.
-    vyrn_frontend::own::install_refusals(core::refusal_diagnostics);
     vyrn_frontend::own::install_must_use(typed::obligation::judge);
     // `vyrn check` reads the typed judgment's refusals before the kernel's.
     vyrn_frontend::own::install_typed(core::typed_diagnostics);

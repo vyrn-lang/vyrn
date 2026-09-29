@@ -5,7 +5,7 @@ loader.rs	a path only a deleted route reached	0	0
 loader.rs	a copy of a table another module carries	0	0
 loader.rs	shared machinery	573	1
 loader.rs	tests	128	0
-symbols.rs	the file's own job	2665	0
+symbols.rs	the file's own job	2694	0
 symbols.rs	a rule stated a second time	0	0
 symbols.rs	a path only a deleted route reached	0	0
 symbols.rs	a copy of a table another module carries	0	0
@@ -17,9 +17,9 @@ project.rs	a path only a deleted route reached	0	0
 project.rs	a copy of a table another module carries	0	0
 project.rs	shared machinery	281	0
 project.rs	tests	226	0
-movecheck.rs	the file's own job	598	0
+movecheck.rs	the file's own job	554	0
 movecheck.rs	a rule stated a second time	0	0
 movecheck.rs	a path only a deleted route reached	0	0
 movecheck.rs	a copy of a table another module carries	0	0
-movecheck.rs	shared machinery	25	0
+movecheck.rs	shared machinery	14	0
 movecheck.rs	tests	12	0

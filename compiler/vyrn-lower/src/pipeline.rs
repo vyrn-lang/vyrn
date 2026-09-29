@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 
 use vyrn_frontend::diagnostics::Diagnostic;
-use vyrn_frontend::{ast, checker, floor, loader, movecheck, own, prof, types};
+use vyrn_frontend::{ast, checker, floor, loader, movecheck, own, prof, symbols, types};
+
+use crate::{core, typed};
 
 /// Loads a multi-module program: parses `root_source`, resolves every
 /// `import` transitively through `resolver`, links one [`ast::Program`], and
@@ -65,7 +67,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
     // source order. The core builds bodies only for a program that type-checks.
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
-        diags.extend(movecheck::refusals(program));
+        diags.extend(refusals(program));
     } else if let Some(refused) = refused {
         let _p = prof::phase("lower typed");
         // Each typed refusal stands before the first of the checker's in its
@@ -85,6 +87,76 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
     diags
 }
 
+/// Returns every ownership refusal a program earns, the must-use judgment's
+/// and the kernel's, as one list in source order. `vyrn check` and the editor
+/// both call it. The caller guarantees the program type-checks.
+///
+/// A kernel refusal is dropped at a line the must-use judgment already
+/// refused, so one mistake is not said twice. It is also dropped when its
+/// subject is a binding the must-use judgment names anywhere in the file: a
+/// `Stream` closed twice is a must-use refusal and a use after a take at two
+/// lines, and still one mistake.
+pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let owed = typed::obligation::judge(program);
+    let mustuse: HashSet<(Option<String>, String)> = owed
+        .iter()
+        .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
+        .collect();
+    diags.extend(owed);
+    // A generator's program skips the kernel: nothing prints its refusals, and
+    // judging them costs the editor on every keystroke that re-runs one.
+    if movecheck::in_comptime() {
+        movecheck::in_source_order(&mut diags);
+        return diags;
+    }
+    // The placer judges a core body for every instance, and the analysis is
+    // handed on: a command's next `own::Memo` adopts it. Only this analysis
+    // may reuse a judgment (`movecheck::reuse_judgments`). The kernel's list is
+    // emptied first because an engine's or a generator's compile may have left
+    // refusals there with no file.
+    let _ = core::refusal_diagnostics();
+    let _ = core::typed_diagnostics();
+    let ownership = movecheck::judging(|| own::analyze(program));
+    own::hand_on(program, &ownership);
+    // A program the typed judgment refuses gets those refusals alone.
+    let mut typed = core::typed_diagnostics();
+    if !typed.is_empty() {
+        let _ = core::refusal_diagnostics();
+        movecheck::in_source_order(&mut typed);
+        return typed;
+    }
+    let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
+    for d in &diags {
+        lines.insert((d.file.clone(), d.line));
+    }
+    diags.extend(core::refusal_diagnostics().into_iter().filter(|d| {
+        !lines.contains(&(d.file.clone(), d.line))
+            && !subject(&d.message)
+                .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
+    }));
+    movecheck::in_source_order(&mut diags);
+    diags
+}
+
+/// Returns the binding a refusal is about: the root of the first path its
+/// message quotes in backticks. Both passes write the subject first, so no
+/// field has to be filled at every refusal site. A message that quotes nothing
+/// has no subject and is never suppressed.
+fn subject(message: &str) -> Option<&str> {
+    let rest = message.split_once('`')?.1;
+    let path = rest.split_once('`')?.0;
+    let root = ast::root_of(path);
+    (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
+}
+
+/// The ownership judgments the editor shows: [`refusals`] among the
+/// diagnostics, and the placed analysis's memory rows on hover.
+pub const JUDGE: symbols::Judge = symbols::Judge {
+    refusals,
+    ownership: own::analyze,
+};
+
 /// Builds the core of every body the checker typed in a refused program, and
 /// returns the typed judgment's refusals of those bodies.
 ///
@@ -95,7 +167,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
 /// because typing comes before the judgments.
 fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diagnostic> {
     // A generator's own program is judged by the checker alone, as in
-    // `movecheck::refusals`.
+    // [`refusals`].
     if !own::placer_installed() || movecheck::in_comptime() {
         return Vec::new();
     }
@@ -195,11 +267,11 @@ fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diag
     }
     // The held record typed the functions just moved out.
     checker::hold_forget();
-    let _ = own::kernel_refusals();
-    let _ = own::typed_refusals();
+    let _ = core::refusal_diagnostics();
+    let _ = core::typed_diagnostics();
     let _ = own::analyze(program);
-    let _ = own::kernel_refusals();
-    let typed = own::typed_refusals();
+    let _ = core::refusal_diagnostics();
+    let typed = core::typed_diagnostics();
     let kept = std::mem::take(&mut program.functions);
     let mut back: Vec<(usize, ast::Function)> = at.into_iter().zip(kept).chain(gone).collect();
     back.sort_by_key(|(i, _)| *i);

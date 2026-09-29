@@ -8518,9 +8518,8 @@ pub fn typed_diagnostics() -> Vec<Diagnostic> {
 }
 
 /// The kernel's refusals as `movecheck`-stage diagnostics, deduplicated, for
-/// the one list a file's refusals come out in
-/// (`vyrn_frontend::movecheck::refusals`). Installed into `own::analyze`'s
-/// slot by [`crate::install`]; the caller orders the list.
+/// the one list a file's refusals come out in ([`crate::refusals`]); the
+/// caller orders the list.
 ///
 /// Several instances of one generic body reach the same rule, and a reader
 /// is owed one sentence per mistake, so file, line and message are the
