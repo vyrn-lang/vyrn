@@ -13357,16 +13357,7 @@ impl<'p> Fn_<'_, 'p> {
         (1..ss.len()).any(|i| {
             matches!(ss[i], St::Store { .. })
                 && self.core_rebuilt(body, ss, i).is_some_and(|(r, _)| r == n)
-        }) || ss.iter().any(|s| match s {
-            St::If { then, els, .. } => {
-                self.core_hands_back(body, then, n) || self.core_hands_back(body, els, n)
-            }
-            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-                self.core_hands_back(body, inner, n)
-            }
-            St::Switch { arms, .. } => arms.iter().any(|a| self.core_hands_back(body, &a.body, n)),
-            _ => false,
-        })
+        }) || (ss.iter().flat_map(St::lists)).any(|l| self.core_hands_back(body, l, n))
     }
 
     /// Whether a value of `from` is one of `to` with no instruction ([`crate::coerce_plan`]):
@@ -13736,17 +13727,7 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
 /// `ss` and every list of rows inside it, each before the lists inside it.
 fn each_list(ss: &[St], f: &mut dyn FnMut(&[St])) {
     f(ss);
-    for s in ss {
-        match s {
-            St::If { then, els, .. } => {
-                each_list(then, f);
-                each_list(els, f);
-            }
-            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => each_list(inner, f),
-            St::Switch { arms, .. } => arms.iter().for_each(|a| each_list(&a.body, f)),
-            _ => {}
-        }
-    }
+    ss.iter().flat_map(St::lists).for_each(|l| each_list(l, f));
 }
 
 /// The parts of the header `base` names, when it is a borrow a loop walks.
@@ -13818,10 +13799,7 @@ fn core_after(ss: &[St], n: vyrn_lower::core::Name) -> Option<Vec<&St>> {
     ss.iter().enumerate().find_map(|(i, s)| {
         let mut after = match s {
             St::Let(b, _) if *b == n => Vec::new(),
-            St::Loop { body, .. } | St::Block { body, .. } => core_after(body, n)?,
-            St::If { then, els, .. } => core_after(then, n).or_else(|| core_after(els, n))?,
-            St::Switch { arms, .. } => arms.iter().find_map(|a| core_after(&a.body, n))?,
-            _ => return None,
+            s => s.lists().find_map(|l| core_after(l, n))?,
         };
         after.extend(&ss[i + 1..]);
         Some(after)
@@ -13840,14 +13818,7 @@ fn core_extent<'r>(ss: &'r [St], n: vyrn_lower::core::Name, occurs: &[u32]) -> O
         let end = ends.iter().position(|e| e.contains(&n))?;
         return Some(&ss[at..=end]);
     }
-    ss.iter().find_map(|s| match s {
-        St::If { then, els, .. } => {
-            core_extent(then, n, occurs).or_else(|| core_extent(els, n, occurs))
-        }
-        St::Loop { body, .. } | St::Block { body, .. } => core_extent(body, n, occurs),
-        St::Switch { arms, .. } => arms.iter().find_map(|a| core_extent(&a.body, n, occurs)),
-        _ => None,
-    })
+    (ss.iter().flat_map(St::lists)).find_map(|l| core_extent(l, n, occurs))
 }
 
 /// The signature of one instance of the generic `f`: its parameters and its
