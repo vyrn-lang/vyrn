@@ -11,7 +11,8 @@
 /// Inspect a generated module with `vyrn emit-gen <file>`, the derived table
 /// with `vyrn routes <file>`.
 
-import { fromBytesOr } from "std/strings"
+import { fromBytesOr, joinWith } from "std/strings"
+import { includes } from "std/arrays"
 import { checkContract } from "std/contract"
 import { report, reportHere, Severity } from "std/diag"
 
@@ -44,19 +45,6 @@ fn capFirst(s: String) -> String {
         i = i + 1
     }
     return fromBytesOr(out, s)
-}
-
-fn joinList(parts: Array<String>, sep: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    for p in parts {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + p
-        i = i + 1
-    }
-    return out
 }
 
 /// Whether `spelling` names one of the contract's exported types.
@@ -140,7 +128,7 @@ fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) ->
     // The contract first: its procedures always live there.
     let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
-        if rpcListContains(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
@@ -162,19 +150,10 @@ fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) ->
             }
         }
         if names.length > 0 {
-            out = out + "import { " + joinList(names, ", ") + " } from \"" + spec + "\"\n"
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
         }
     }
     return out
-}
-
-fn rpcListContains(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 /// The reply surface every client flavor exports: `RpcIssue`,
@@ -462,8 +441,9 @@ export gen fn rpcInProcess(contract: String) -> String {
 // procedure module, and a procedure's wire path derives from the module path and
 // the export name. `client(dir)` reads interfaces and never imports an api
 // module, so no procedure body reaches a client bundle.
-import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
+import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
+import { fieldAt, fieldsOf, tagOf } from "std/jsondec"
 import { replace, split } from "std/strings"
 
 /// One procedure module: the path a generator reflects
@@ -516,37 +496,6 @@ gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
     return out
 }
 
-fn rpcStrOf(j: Json) -> String {
-    return match j {
-        JStr(s) => s.copy(),
-        JNull => "",
-        JBool(b) => "",
-        JNum(n) => "",
-        JArr(xs) => "",
-        JObj(o) => "",
-    }
-}
-
-fn rpcFieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyJsonFields(fs),
-        JNull => [],
-        JBool(b) => [],
-        JNum(n) => [],
-        JStr(s) => [],
-        JArr(xs) => [],
-    }
-}
-
-fn rpcMember(j: Json, key: String) -> Json {
-    for f in rpcFieldsOf(j) {
-        if f.key == key {
-            return copyJson(f.value)
-        }
-    }
-    return JNull
-}
-
 /// `path` parsed as JSON, or `JNull` when it is absent or malformed; a missing config is normal.
 gen fn rpcReadJson(path: String) -> Json {
     let text = match readFile(path) {
@@ -563,12 +512,12 @@ gen fn rpcReadJson(path: String) -> Json {
 }
 
 fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
-    let p = rpcStrOf(rpcMember(doc, "prefix"))
-    let t = rpcStrOf(rpcMember(doc, "path"))
+    let p = tagOf(fieldAt(fieldsOf(doc), "prefix"))
+    let t = tagOf(fieldAt(fieldsOf(doc), "path"))
     let mut keys = cfg.pinKeys.copy()
     let mut paths = cfg.pinPaths.copy()
-    for f in rpcFieldsOf(rpcMember(doc, "pin")) {
-        let v = rpcStrOf(f.value)
+    for f in fieldsOf(fieldAt(fieldsOf(doc), "pin")) {
+        let v = tagOf(f.value)
         if v != "" {
             keys.push(consume f.key)
             paths.push(v)
@@ -589,7 +538,7 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
 gen fn rpcConfig(dir: String) -> RpcConfig {
     let cfg = RpcConfig { prefix: "/_", path: "{module}/{name}", pinKeys: [], pinPaths: [] }
     let doc = rpcReadJson(dir + "/rpc.json")
-    let nested = rpcMember(doc, "rpc")
+    let nested = fieldAt(fieldsOf(doc), "rpc")
     let applied = rpcApplyConfig(cfg, doc)
     return rpcApplyConfig(applied, nested)
 }
@@ -817,7 +766,7 @@ gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
     }
     let mut specs: Array<String> = []
     for s in typeMods {
-        if rpcListContains(specs, s) == false {
+        if includes(specs, s) == false {
             specs.push(s.copy())
         }
     }
@@ -831,7 +780,7 @@ gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
             i = i + 1
         }
         if names.length > 0 {
-            out = out + "import { " + joinList(names, ", ") + " } from \"" + spec + "\"\n"
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
         }
     }
     return out
@@ -1057,7 +1006,7 @@ gen fn rpcClientTypes(mods: Array<RpcModule>) -> RpcClientTypes {
     for m in mods {
         let iface = moduleInterface(m.modPath)
         for t in iface.types {
-            if rpcListContains(seen, t.name) == false {
+            if includes(seen, t.name) == false {
                 seen.push(t.name.copy())
                 out = out + t.source + "\n"
                 syms.push(symbol(t.name, t.origin, []))

@@ -33,9 +33,9 @@
 /// The tag takes `name`, and optionally `size` (a CSS length), `label` (the
 /// accessible name) and `class`; any other attribute is refused.
 
-import { Json, JsonField, copyJsonFields } from "std/json"
+import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
-import { fieldsOf } from "std/jsondec"
+import { fieldsOf, numText, tagOf } from "std/jsondec"
 import { el, toHtmlString, Html, Attr } from "std/html"
 import { splitWhitespace, editDistance, joinWith, fromBytesOr } from "std/strings"
 import { contains } from "std/strpred"
@@ -125,7 +125,7 @@ fn iconCollection(text: String, path: String) -> Collection {
 }
 
 fn collectionOf(doc: Json, path: String) -> Collection {
-    let fields = jsonFields(doc)
+    let fields = fieldsOf(doc)
     if fields.length == 0 {
         return collectionError(
             "the collection `\{path}` is \{jsonKind(doc)}, not an object of glyphs",
@@ -140,19 +140,19 @@ fn collectionOf(doc: Json, path: String) -> Collection {
     let mut license = noLicense()
     for f in fields {
         if f.key == "prefix" {
-            prefix = jsonString(f.value)
+            prefix = tagOf(f.value)
         }
         if f.key == "width" {
-            w = jsonNumber(f.value)
+            w = numText(f.value)
         }
         if f.key == "height" {
-            h = jsonNumber(f.value)
+            h = numText(f.value)
         }
         if f.key == "left" {
-            left = jsonNumber(f.value)
+            left = numText(f.value)
         }
         if f.key == "top" {
-            top = jsonNumber(f.value)
+            top = numText(f.value)
         }
         if f.key == "info" {
             license = licenseLine(f.value)
@@ -162,10 +162,10 @@ fn collectionOf(doc: Json, path: String) -> Collection {
     let mut aliases: Array<JsonField> = []
     for f in fields {
         if f.key == "icons" {
-            icons = jsonFields(f.value)
+            icons = fieldsOf(f.value)
         }
         if f.key == "aliases" {
-            aliases = jsonFields(f.value)
+            aliases = fieldsOf(f.value)
         }
     }
     if icons.length == 0 {
@@ -241,17 +241,17 @@ fn noLicense() -> String {
 fn licenseLine(info: Json) -> String {
     let mut name = ""
     let mut url = ""
-    for f in jsonFields(info) {
+    for f in fieldsOf(info) {
         if f.key == "license" {
-            for g in jsonFields(f.value) {
+            for g in fieldsOf(f.value) {
                 if g.key == "title" {
-                    name = jsonString(g.value)
+                    name = tagOf(g.value)
                 }
                 if g.key == "spdx" && name == "" {
-                    name = jsonString(g.value)
+                    name = tagOf(g.value)
                 }
                 if g.key == "url" {
-                    url = jsonString(g.value)
+                    url = tagOf(g.value)
                 }
             }
         }
@@ -424,9 +424,9 @@ fn aliasGlyph(coll: Collection, want: String, entry: Json, hop: Int64) -> Found 
     }
     let mut parent = ""
     let mut extra: Array<String> = []
-    for g in jsonFields(entry) {
+    for g in fieldsOf(entry) {
         if g.key == "parent" {
-            parent = jsonString(g.value)
+            parent = tagOf(g.value)
         }
         if g.key != "parent" && g.key != "width" && g.key != "height" && g.key != "left" && g.key != "top" {
             extra.push(g.key.copy())
@@ -453,21 +453,21 @@ fn glyphOf(coll: Collection, entry: Json) -> Found {
     let mut h = ""
     let mut left = ""
     let mut top = ""
-    for g in jsonFields(entry) {
+    for g in fieldsOf(entry) {
         if g.key == "body" {
-            body = jsonString(g.value)
+            body = tagOf(g.value)
         }
         if g.key == "width" {
-            w = jsonNumber(g.value)
+            w = numText(g.value)
         }
         if g.key == "height" {
-            h = jsonNumber(g.value)
+            h = numText(g.value)
         }
         if g.key == "left" {
-            left = jsonNumber(g.value)
+            left = numText(g.value)
         }
         if g.key == "top" {
-            top = jsonNumber(g.value)
+            top = numText(g.value)
         }
     }
     if body == "" {
@@ -482,18 +482,18 @@ fn overrideBox(coll: Collection, found: Found, entry: Json) -> Found {
     let mut h = ""
     let mut left = ""
     let mut top = ""
-    for g in jsonFields(entry) {
+    for g in fieldsOf(entry) {
         if g.key == "width" {
-            w = jsonNumber(g.value)
+            w = numText(g.value)
         }
         if g.key == "height" {
-            h = jsonNumber(g.value)
+            h = numText(g.value)
         }
         if g.key == "left" {
-            left = jsonNumber(g.value)
+            left = numText(g.value)
         }
         if g.key == "top" {
-            top = jsonNumber(g.value)
+            top = numText(g.value)
         }
     }
     if w == "" && h == "" && left == "" && top == "" {
@@ -578,13 +578,13 @@ fn iconRequest(attrs: String) -> IconAsk {
     let mut ask = IconAsk { name: "", size: "", label: "", class: "", error: "" }
     for f in fieldsOf(doc) {
         if f.key == "name" {
-            ask.name = jsonString(f.value)
+            ask.name = tagOf(f.value)
         } else if f.key == "size" {
-            ask.size = jsonString(f.value)
+            ask.size = tagOf(f.value)
         } else if f.key == "label" {
-            ask.label = jsonString(f.value)
+            ask.label = tagOf(f.value)
         } else if f.key == "class" {
-            ask.class = jsonString(f.value)
+            ask.class = tagOf(f.value)
         } else if ask.error == "" {
             ask.error = "`<Icon>` has no `\{f.key}` attribute — it takes `name`, and optionally `size` (a CSS length), `label` (the accessible name) and `class`"
         }
@@ -783,44 +783,6 @@ fn afterColon(name: String) -> String {
         i = i + 1
     }
     return fromBytesOr(out, "")
-}
-
-/// `[]` for a non-object. Copied: a payload read from a borrowed value is a
-/// read, not a move.
-fn jsonFields(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyJsonFields(fs),
-        JArr(xs) => [],
-        JStr(s) => [],
-        JNum(s) => [],
-        JBool(b) => [],
-        JNull => [],
-    }
-}
-
-/// `""` for anything but a string.
-fn jsonString(j: Json) -> String {
-    return match j {
-        JStr(s) => s.copy(),
-        JObj(fs) => "",
-        JArr(xs) => "",
-        JNum(s) => "",
-        JBool(b) => "",
-        JNull => "",
-    }
-}
-
-/// The number's raw text, `""` for anything else. Raw, because a `viewBox`
-/// keeps the collection's digits, not a float round-trip.
-fn jsonNumber(j: Json) -> String {
-    return match j {
-        JNum(s) => s.copy(),
-        JStr(s) => "",
-        JObj(fs) => "",
-        JArr(xs) => "",
-        JBool(b) => "",
-        JNull => "",
-    }
 }
 
 fn jsonKind(j: Json) -> String {

@@ -34,7 +34,8 @@
 /// construction. The graph keeps each field's `!` markers, which decide how far
 /// a `null` propagates.
 
-import { fromBytesOr } from "std/strings"
+import { fromBytesOr, joinWith, trim } from "std/strings"
+import { includes } from "std/arrays"
 import { Json, JsonField, copyJson, copyJsonArray, emit } from "std/json"
 import { parseJson } from "std/jsonread"
 import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } from "std/scan"
@@ -57,19 +58,6 @@ fn gqlSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
 
 fn gqlIsWs(b: UInt8) -> Bool {
     return b == ' ' || b == '\t' || b == '\n' || b == '\r'
-}
-
-fn gqlTrim(s: String) -> String {
-    let ba = bytes(s)
-    let mut lo = 0
-    let mut hi = ba.length
-    while lo < hi && gqlIsWs(ba[lo]) {
-        lo = lo + 1
-    }
-    while hi > lo && gqlIsWs(ba[hi - 1]) {
-        hi = hi - 1
-    }
-    return gqlSlice(ba, lo, hi)
 }
 
 /// `s` without a trailing non-null `!`.
@@ -137,7 +125,7 @@ fn gqlSplitTop(s: String, sep: UInt8) -> Array<String> {
             }
             i = i + 1
         } else if b == sep && depth == 0 {
-            let part = gqlTrim(gqlSlice(ba, start, i))
+            let part = trim(gqlSlice(ba, start, i))
             if part.byteLength > 0 {
                 out.push(part)
             }
@@ -147,7 +135,7 @@ fn gqlSplitTop(s: String, sep: UInt8) -> Array<String> {
             i = i + 1
         }
     }
-    let last = gqlTrim(gqlSlice(ba, start, ba.length))
+    let last = trim(gqlSlice(ba, start, ba.length))
     if last.byteLength > 0 {
         out.push(last)
     }
@@ -173,7 +161,7 @@ type GqlDecl = { name: String, rhs: String }
 /// `export type Name = RHS` split into name and RHS. A generic `Name<..>` keeps
 /// only `Name`; downstream it maps to a scalar.
 fn gqlSplitDecl(source: String) -> GqlDecl {
-    let s = gqlTrim(source)
+    let s = trim(source)
     let ba = bytes(s)
     let mut i = 0
     if s.startsWith("export ") {
@@ -182,12 +170,12 @@ fn gqlSplitDecl(source: String) -> GqlDecl {
     i = i + 5
     let eq = gqlIndexOf(ba, '=', i)
     if eq < 0 {
-        return GqlDecl { name: gqlTrim(gqlSlice(ba, i, ba.length)), rhs: "" }
+        return GqlDecl { name: trim(gqlSlice(ba, i, ba.length)), rhs: "" }
     }
-    let head = gqlTrim(gqlSlice(ba, i, eq))
+    let head = trim(gqlSlice(ba, i, eq))
     let lt = gqlIndexOf(bytes(head), '<', 0)
     let name = if lt < 0 { head } else { gqlSlice(bytes(head), 0, lt) }
-    let rhs = gqlTrim(gqlSlice(ba, eq + 1, ba.length))
+    let rhs = trim(gqlSlice(ba, eq + 1, ba.length))
     return GqlDecl { name: name, rhs: rhs }
 }
 
@@ -211,7 +199,7 @@ fn gqlIsRecord(name: String, iface: ModuleInterface) -> Bool {
 
 /// The GraphQL scalar for a Vyrn primitive, or "".
 fn gqlPrim(spelling: String) -> String {
-    let s = gqlTrim(spelling)
+    let s = trim(spelling)
     if s == "Int64" || s == "Int8" || s == "Int16" || s == "Int32" || s == "UInt8" || s == "UInt16" || s == "UInt32" || s == "UInt64" {
         return "Int"
     }
@@ -230,7 +218,7 @@ fn gqlPrim(spelling: String) -> String {
 /// A GraphQL type reference, with `!` markers, in output or input position.
 /// `Option<T>` is the one nullable form.
 fn gqlRef(spelling: String, inputCtx: Bool, iface: ModuleInterface) -> String {
-    let s = gqlTrim(spelling)
+    let s = trim(spelling)
     if s.startsWith("Option<") {
         return gqlStripBang(gqlRef(gqlBetweenAngles(s), inputCtx, iface))
     }
@@ -322,7 +310,7 @@ fn gqlFoldWs(s: String) -> String {
             prevWs = false
         }
     }
-    return gqlTrim(fromBytesOr(out, ""))
+    return trim(fromBytesOr(out, ""))
 }
 
 type GqlMember = { name: String, ref: String, inputRef: String }
@@ -332,7 +320,7 @@ type GqlMember = { name: String, ref: String, inputRef: String }
 /// read members only here: a record's fields, a payload enum's variants, or a
 /// `Result<A, B>` alias's `Ok` and `Err`.
 fn gqlMembers(decl: GqlDecl, iface: ModuleInterface) -> Array<GqlMember> {
-    let rhs = gqlTrim(decl.rhs)
+    let rhs = trim(decl.rhs)
     if rhs.startsWith("{") {
         return gqlRecordMembers(rhs, iface)
     }
@@ -363,8 +351,8 @@ fn gqlRecordMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
     for f in gqlSplitTop(gqlBetweenBraces(rhs), 44) {
         let colon = gqlIndexOf(bytes(f), ':', 0)
         if colon >= 0 {
-            let fname = gqlTrim(gqlSlice(bytes(f), 0, colon))
-            let ftypeRaw = gqlTrim(gqlSlice(bytes(f), colon + 1, bytes(f).length))
+            let fname = trim(gqlSlice(bytes(f), 0, colon))
+            let ftypeRaw = trim(gqlSlice(bytes(f), colon + 1, bytes(f).length))
             let ftype = gqlStripWhere(ftypeRaw)
             out.push(GqlMember {
                 name: fname,
@@ -392,9 +380,9 @@ fn gqlVariantMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
     for v in variants {
         let paren = gqlIndexOf(bytes(v), '(', 0)
         if paren < 0 {
-            out.push(GqlMember { name: gqlTrim(v), ref: "Boolean", inputRef: "Boolean" })
+            out.push(GqlMember { name: trim(v), ref: "Boolean", inputRef: "Boolean" })
         } else {
-            let vname = gqlTrim(gqlSlice(bytes(v), 0, paren))
+            let vname = trim(gqlSlice(bytes(v), 0, paren))
             let parts = gqlSplitTop(gqlBetweenParens(v), 44)
             if parts.length == 1 {
                 out.push(gqlNullableMember(vname, parts[0], iface))
@@ -407,9 +395,9 @@ fn gqlVariantMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
 }
 
 fn gqlVariantsOf(rhs: String) -> Array<String> {
-    let body = gqlTrim(rhs)
+    let body = trim(rhs)
     let stripped = if body.startsWith("|") {
-        gqlTrim(gqlSlice(bytes(body), 1, bytes(body).length))
+        trim(gqlSlice(bytes(body), 1, bytes(body).length))
     } else {
         body
     }
@@ -469,7 +457,7 @@ fn gqlStripWhere(s: String) -> String {
         let mut i = 0
         while i + 7 <= ba.length {
             if gqlSlice(ba, i, i + 7) == " where " {
-                return gqlTrim(gqlSlice(ba, 0, i))
+                return trim(gqlSlice(ba, 0, i))
             }
             i = i + 1
         }
@@ -481,7 +469,7 @@ fn gqlStripWhere(s: String) -> String {
 fn gqlEnum(decl: GqlDecl, doc: String) -> String {
     let mut out = doc + "enum " + decl.name + " {\n"
     for v in gqlVariantsOf(decl.rhs) {
-        out = out + "  " + gqlTrim(v) + "\n"
+        out = out + "  " + trim(v) + "\n"
     }
     return out + "}\n"
 }
@@ -510,7 +498,7 @@ fn gqlBetweenParens(s: String) -> String {
 /// as a custom `scalar` whose description carries the doc and the base.
 fn gqlScalar(decl: GqlDecl, iface: ModuleInterface) -> String {
     let raw = gqlRawDoc(decl.name, iface)
-    let folded = gqlFoldWs(gqlTrim(decl.rhs))
+    let folded = gqlFoldWs(trim(decl.rhs))
     let body = if raw != "" { raw + " — " + folded } else { folded }
     return gqlDescBlock(body) + "scalar " + decl.name + "\n"
 }
@@ -1546,7 +1534,7 @@ fn gqlAnswerValue(
 fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
     let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
-        if gqlHas(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
@@ -1564,30 +1552,8 @@ fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
             }
         }
         if names.length > 0 {
-            out = out + "import { " + gqlJoin(names, ", ") + " } from \"" + spec + "\"\n"
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
         }
-    }
-    return out
-}
-
-fn gqlHas(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
-}
-
-fn gqlJoin(parts: Array<String>, sep: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    for p in parts {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + p
-        i = i + 1
     }
     return out
 }

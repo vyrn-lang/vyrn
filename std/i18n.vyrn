@@ -21,7 +21,7 @@
 
 import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
-import { joinWith, substring, fromBytesOr, trim } from "std/strings"
+import { joinWith, split, substring, fromBytesOr, trim } from "std/strings"
 import { includes } from "std/arrays"
 import { contains, endsWith, startsWith } from "std/strpred"
 import { report, reportHere, Severity } from "std/diag"
@@ -73,26 +73,9 @@ gen fn upperFirst(s: String) -> String {
     return fromBytesOr(out, s)
 }
 
-/// Split a dotted key into its segments (`"nav.home.label"` -> nav, home, label).
-gen fn splitDot(s: String) -> Array<String> {
-    let ba = bytes(s)
-    let mut parts: Array<String> = []
-    let mut start = 0
-    let mut i = 0
-    while i < ba.length {
-        if ba[i] == '.' {
-            parts.push(sliceStr(ba, start, i))
-            start = i + 1
-        }
-        i = i + 1
-    }
-    parts.push(sliceStr(ba, start, ba.length))
-    return parts
-}
-
 /// The PascalCase type-name base of a dotted key: `cart.items` -> `CartItems`.
 gen fn keyTypeBase(key: String) -> String {
-    let segs = splitDot(key)
+    let segs = split(key, ".")
     let mut out = ""
     for seg in segs {
         out = out + upperFirst(seg)

@@ -13,6 +13,7 @@
 /// `line N, col M: <reason>`.
 
 import { Json, JsonField } from "std/json"
+import { repeat } from "std/strings"
 
 /// One `name: value` field of a record literal. `line` is the field name's
 /// 1-based source line, which duplicate-field errors and origin maps use.
@@ -723,13 +724,7 @@ fn firstErrorToken(p: VonP) -> String {
 
 /// `n` levels of `vyrn fmt`'s 4-space indentation.
 fn indent(n: Int64) -> String {
-    let mut out = ""
-    let mut i = 0
-    while i < n {
-        out = out + "    "
-        i = i + 1
-    }
-    return out
+    return repeat("    ", n)
 }
 
 /// The lowercase 2-digit hex of a byte value 0..255.

@@ -20,10 +20,12 @@
 /// `GET(pattern, proc)` could not do that: a type parameter cannot name a type to
 /// `fromJson`.
 
-import { Json, JsonField, copyJson, copyJsonFields, emit } from "std/json"
+import { Json, JsonField, copyJson, emit } from "std/json"
 import { parseJson } from "std/jsonread"
-import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
+import { fieldsOf, hasField } from "std/jsondec"
+import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, toLower, trim } from "std/strings"
 import { fnv1aStr, sha1 } from "std/hash"
+import { includes } from "std/arrays"
 // A path segment is wire text and a placeholder binds a value: `httpMatch`
 // decodes on the way in, `httpFill` encodes on the way out, with the RFC 3986
 // alphabet `std/ui` uses.
@@ -517,7 +519,7 @@ fn httpOpenSocket(w: Socket, req: Request, ps: Map<String, String>) -> Response 
 fn httpTokenAsOffered(value: String, token: String) -> String {
     for part in split(value, ",") {
         let t = trim(part)
-        if lowerOf(t) == lowerOf(token) {
+        if toLower(t) == toLower(token) {
             return t.copy()
         }
     }
@@ -527,19 +529,6 @@ fn httpTokenAsOffered(value: String, token: String) -> String {
 /// Whether a comma-separated header value lists `token`, case-insensitively.
 fn httpHasToken(value: String, token: String) -> Bool {
     return httpTokenAsOffered(value, token) != ""
-}
-
-/// ASCII lowercase; a header value is not folded at the edge as a name is.
-fn lowerOf(s: String) -> String {
-    let mut out: Array<UInt8> = []
-    for b in bytes(s) {
-        if b >= 'A' && b <= 'Z' {
-            out.push(b + 32)
-        } else {
-            out.push(b)
-        }
-    }
-    return fromBytesOr(out, s)
 }
 
 /// The route a socket shadows, for the mount audit.
@@ -811,7 +800,7 @@ fn httpSingle(body: String, key: String) -> Option<Json> {
 }
 
 fn httpSingleOf(j: Json, key: String) -> Option<Json> {
-    let fs = httpFieldsOf(j)
+    let fs = fieldsOf(j)
     if fs.length != 1 {
         return None
     }
@@ -826,7 +815,7 @@ fn httpSingleOf(j: Json, key: String) -> Option<Json> {
 /// payload's when the procedure returned `Ok(value)`.
 fn httpPayload(body: String) -> Array<JsonField> {
     return match httpSingle(body, "Ok") {
-        Some(inner) => httpFieldsOf(inner),
+        Some(inner) => fieldsOf(inner),
         None => httpBodyFields(body),
     }
 }
@@ -1103,27 +1092,17 @@ export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String
     }
     let mut fs: Array<JsonField> = []
     for k in ps.keys() {
-        let v = httpValue(httpAt(ps, k), httpListHas(numeric, k))
+        let v = httpValue(httpAt(ps, k), includes(numeric, k))
         fs.push(JsonField { key: k, value: v })
     }
     if body != "" {
         for f in httpBodyFields(body) {
-            if httpHasField(fs, f.key) == false {
+            if hasField(fs, f.key) == false {
                 fs.push(f)
             }
         }
     }
     return emit(JObj(fs))
-}
-
-/// Whether `key` is already bound.
-fn httpHasField(fs: Array<JsonField>, key: String) -> Bool {
-    for f in fs {
-        if f.key == key {
-            return true
-        }
-    }
-    return false
 }
 
 fn httpValue(raw: String, isNumber: Bool) -> Json {
@@ -1134,15 +1113,6 @@ fn httpValue(raw: String, isNumber: Bool) -> Json {
         }
     }
     return JStr(raw.copy())
-}
-
-fn httpListHas(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 fn httpAt(ps: Map<String, String>, k: String) -> String {
@@ -1156,19 +1126,8 @@ fn httpAt(ps: Map<String, String>, k: String) -> String {
 /// left to `fromJson` to report.
 fn httpBodyFields(body: String) -> Array<JsonField> {
     return match parseJson(body) {
-        Ok(j) => httpFieldsOf(j),
+        Ok(j) => fieldsOf(j),
         Err(e) => [],
-    }
-}
-
-fn httpFieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyJsonFields(fs),
-        JNull => [],
-        JBool(b) => [],
-        JNum(n) => [],
-        JStr(s) => [],
-        JArr(xs) => [],
     }
 }
 
@@ -1340,7 +1299,7 @@ fn httpBraced(fields: Array<String>) -> Array<String> {
 fn httpImports(iface: ModuleInterface, module: String) -> String {
     let mut specs: Array<String> = [module.copy()]
     for t in iface.types {
-        if httpContains(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
@@ -1362,15 +1321,6 @@ fn httpImports(iface: ModuleInterface, module: String) -> String {
         }
     }
     return out
-}
-
-fn httpContains(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 /// The REST projection of one procedure module: a placeholder-checked

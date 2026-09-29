@@ -35,8 +35,9 @@
 /// ```
 
 import { report, Severity } from "std/diag"
-import { Json, JsonField, copyJson, copyJsonFields, emit } from "std/json"
+import { Json, copyJson, emit } from "std/json"
 import { parseJson } from "std/jsonread"
+import { fieldsOf, tagOf } from "std/jsondec"
 import { contains } from "std/strpred"
 import { substring } from "std/strings"
 
@@ -89,7 +90,7 @@ export fn policyOf(configText: String, key: String) -> Result<HintPolicy, String
     let mut levels: Array<String> = []
     let rules = fieldsOf(section)
     for r in rules {
-        let word = stringOf(r.value)
+        let word = tagOf(r.value)
         if word == "off" || word == "warning" || word == "error" {
             codes.push(r.key.copy())
             levels.push(word.copy())
@@ -340,19 +341,6 @@ fn lineText(src: String, line: Int64) -> String {
     return ""
 }
 
-/// The fields of a JSON object, or `[]` for any other value. Copied, because a
-/// payload read out of a borrowed value is a read, not a move.
-fn fieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyJsonFields(fs),
-        JArr(xs) => [],
-        JStr(s) => [],
-        JNum(s) => [],
-        JBool(b) => [],
-        JNull => [],
-    }
-}
-
 fn isObject(j: Json) -> Bool {
     return match j {
         JObj(fs) => true,
@@ -361,19 +349,6 @@ fn isObject(j: Json) -> Bool {
         JNum(s) => false,
         JBool(b) => false,
         JNull => false,
-    }
-}
-
-/// The text of a JSON string, or `""` for any other value. `""` is no level
-/// word, so a non-string level is refused.
-fn stringOf(j: Json) -> String {
-    return match j {
-        JStr(s) => s.copy(),
-        JObj(fs) => "",
-        JArr(xs) => "",
-        JNum(s) => "",
-        JBool(b) => "",
-        JNull => "",
     }
 }
 
