@@ -19,6 +19,7 @@ use vyrn_frontend::ast::{
 };
 use vyrn_frontend::declared::Owned;
 use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
 pub use vyrn_frontend::prelude::Spec;
@@ -7810,7 +7811,7 @@ fn mentions_in_lambda(body: &LambdaBody) -> Vec<&Expr> {
 }
 
 thread_local! {
-    static REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
+    static REFUSALS: std::cell::RefCell<Vec<Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
     /// The core's bodies for the program last analysed on this thread, by the
@@ -8714,7 +8715,7 @@ pub fn refuses() -> bool {
 /// A gap ([`Gap`] with no `rule`) is not collected here: the core has no
 /// opinion, and the command goes on with the plan. A refusal is an answer no
 /// placement repairs, and only refusals fail a command.
-pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
+pub fn take_refusals() -> Vec<Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
@@ -8836,16 +8837,13 @@ pub fn refusal_diagnostics() -> Vec<Diagnostic> {
                 body = r.body.clone();
                 nth.clear();
             }
-            let key = (r.file.clone(), r.line, r.message.clone());
+            let d = &r.diagnostic;
+            let key = (d.file.clone(), d.line, d.message.clone());
             let n = nth.entry(key.clone()).or_default();
             *n += 1;
             seen.insert((key, *n))
         })
-        .map(|r| {
-            let mut d = Diagnostic::error(r.line, 0, "movecheck", r.message);
-            d.file = r.file;
-            d
-        })
+        .map(|r| r.diagnostic)
         .collect()
 }
 
@@ -8870,10 +8868,8 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
         return;
     };
     REFUSALS.with(|v| {
-        v.borrow_mut().push(crate::kernel::Refusal {
-            message,
-            line: g.line,
-            file: file.clone(),
+        v.borrow_mut().push(Refusal {
+            diagnostic: Diagnostic::error(g.line, 0, "movecheck", message).in_file(file.clone()),
             body: body.to_string(),
         })
     });
@@ -9283,7 +9279,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
 /// One body `augment` built, or served out of the memo.
 enum Made {
     /// The refusals the memo recorded for it.
-    Served(Vec<crate::kernel::Refusal>),
+    Served(Vec<Refusal>),
     Built(
         Option<vyrn_frontend::movecheck::JudgmentKey>,
         Result<Body, Gap>,
@@ -9295,18 +9291,8 @@ enum Made {
 fn serve(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
     key: Option<&vyrn_frontend::movecheck::JudgmentKey>,
-) -> Option<Vec<crate::kernel::Refusal>> {
-    let hit = memo?.get(key?)?;
-    Some(
-        hit.into_iter()
-            .map(|(file, line, message, body)| crate::kernel::Refusal {
-                message,
-                line,
-                file,
-                body,
-            })
-            .collect(),
-    )
+) -> Option<Vec<Refusal>> {
+    memo?.get(key?)
 }
 
 /// Records one body's refusals, from `from` to the end of the list, for
@@ -9320,15 +9306,7 @@ fn remember(
     let (Some(memo), Some(key)) = (memo, key) else {
         return;
     };
-    memo.put(
-        key,
-        REFUSALS.with(|v| {
-            v.borrow()[from..]
-                .iter()
-                .map(|r| (r.file.clone(), r.line, r.message.clone(), r.body.clone()))
-                .collect()
-        }),
-    );
+    memo.put(key, REFUSALS.with(|v| v.borrow()[from..].to_vec()));
 }
 
 /// The memory report for one frame, read by `vyrn why --memory` and the
@@ -9537,7 +9515,7 @@ fn place_frames(
             Err(rs) => {
                 for r in rs {
                     if trace {
-                        eprintln!("placer: refused: {}: {}", r.body, r.message);
+                        eprintln!("placer: refused: {}: {}", r.body, r.diagnostic.message);
                     }
                     // No placement repairs these. Every one the body earns is
                     // kept, so the driver can merge by binding and line.

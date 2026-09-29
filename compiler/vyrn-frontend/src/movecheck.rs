@@ -402,9 +402,19 @@ pub fn in_comptime() -> bool {
     COMPTIME.with(|c| c.get())
 }
 
-/// The kernel's refusals of one body as `(file, line, message, body)`, with no
-/// address in them. A body that earns none caches an empty list.
-pub type Verdict = Vec<(Option<String>, usize, String, String)>;
+/// The kernel's refusals of one body, with no address in them. A body that
+/// earns none caches an empty list.
+pub type Verdict = Vec<Refusal>;
+
+/// One kernel refusal, worded as the checker words it so the CLI prints it
+/// as it prints the checker's.
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    pub diagnostic: Diagnostic,
+    /// The body the refusal is in, for the per-body count and the corpus
+    /// test's tally.
+    pub body: String,
+}
 
 /// The body's module, that module's content hash, and the instance's spelling.
 pub type JudgmentKey = (String, String, String);

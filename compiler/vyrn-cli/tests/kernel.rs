@@ -140,8 +140,8 @@ fn run_corpus() {
                             Err(r) => refused.push(format!(
                                 "{file}: <module state> {}: line {}: {}",
                                 r.body,
-                                r.line,
-                                r.message.replace('\n', " / ")
+                                r.diagnostic.line,
+                                r.diagnostic.message.replace('\n', " / ")
                             )),
                         }
                     }
@@ -178,8 +178,8 @@ fn run_corpus() {
                             Err(r) => refused.push(format!(
                                 "{file}: {}: line {}: {}",
                                 r.body,
-                                r.line,
-                                r.message.replace('\n', " / ")
+                                r.diagnostic.line,
+                                r.diagnostic.message.replace('\n', " / ")
                             )),
                         }
                     }
@@ -229,8 +229,8 @@ fn run_corpus() {
                                 refused.push(format!(
                                     "{file}: {}: line {}: {}",
                                     r.body,
-                                    r.line,
-                                    r.message.replace('\n', " / ")
+                                    r.diagnostic.line,
+                                    r.diagnostic.message.replace('\n', " / ")
                                 ));
                             }
                         }
