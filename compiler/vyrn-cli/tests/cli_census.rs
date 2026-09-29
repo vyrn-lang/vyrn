@@ -94,7 +94,7 @@ fn main_sections() -> Vec<Section> {
         sec("const MAX_CHAINS: usize = 24;", Shared),
         sec("fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {", Shared),
         sec("fn rel_to(path: &str, base: &str) -> String {", Shared),
-        sec("fn project_imports(app_dir: &Path) -> Vec<(String, String)> {", Restated),
+        sec("fn project_imports(app_dir: &Path) -> Vec<(String, String)> {", Cmd("why")),
         sec("type ToolRow = (String, String, String, String);", Cmd("deps")),
         sec("fn deps(name: Option<&str>) -> ExitCode {", Cmd("deps")),
         sec("fn fmt_cmd(rest: &[String]) -> ExitCode {", Cmd("fmt")),
@@ -311,8 +311,8 @@ fn the_structural_census_matches_its_pin() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 4461, 167),
-        ("a rule another pass also states", 150, 0),
+        ("a command's own path", 4611, 167),
+        ("a rule another pass also states", 0, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1073, 0),
@@ -359,8 +359,8 @@ fn per_command() -> Vec<(&'static str, usize, usize)> {
 #[test]
 fn the_per_command_census_matches_its_pin() {
     let want = vec![
+        ("why", 654, 19),
         ("bench", 567, 17),
-        ("why", 504, 19),
         ("serve, dev", 458, 7),
         ("doc", 370, 13),
         ("routes", 303, 4),
@@ -385,7 +385,7 @@ fn the_per_command_census_matches_its_pin() {
     assert_eq!(per_command(), want, "the per-command census has moved");
     let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
     assert_eq!(
-        total, 4461,
+        total, 4611,
         "the per-command tile does not add up to its kind"
     );
 }
