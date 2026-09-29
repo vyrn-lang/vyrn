@@ -1,0 +1,1 @@
+fn_slot_an_arity.vyrn:5:0: this lambda takes 2 parameter(s), but `twice` argument 2 expects 1

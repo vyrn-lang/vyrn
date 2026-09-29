@@ -1,0 +1,1 @@
+type R = { s: String } fn mk() -> String { return "a" + "b" } fn take(r: consume R) -> Int64 { return r.s.byteLength } fn go(x: read String) -> R { return R { s: x } } fn main() -> Int64 { return 0 }

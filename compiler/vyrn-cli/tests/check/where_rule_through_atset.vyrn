@@ -1,0 +1,10 @@
+type H = { xs: Array<Int64> } where xs[0] == 1
+impl Index for H {
+    fn tryAt(read self, i: Int64) -> read Option<Int64> {
+        if i < 0 || i >= self.xs.length { return None }
+        return Some(self.xs[i])
+    }
+    fn at(read self, i: Int64) -> read Int64 { return self.xs[i] }
+    fn atSet(modify self, i: Int64) -> modify Int64 { return self.xs[i] }
+}
+fn main() -> Int64 { let mut h = H { xs: [1, 2] } h[0] = 42 return 0 }

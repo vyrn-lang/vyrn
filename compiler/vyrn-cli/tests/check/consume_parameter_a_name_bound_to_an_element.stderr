@@ -1,0 +1,3 @@
+consume_parameter_a_name_bound_to_an_element.vyrn:1:0: `n` may not be passed to a `consume` parameter via `take(..)` — it is a second name for the `read` parameter `ns`
+  fix: declare the parameter `ns: consume ..` if this function should own it
+  fix: `n.copy()` if both sides need a value

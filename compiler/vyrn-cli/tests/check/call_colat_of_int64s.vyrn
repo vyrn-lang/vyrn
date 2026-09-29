@@ -1,0 +1,2 @@
+fn main() -> Int64 { let mut a: Array<Int64> = [] a.push(1) a.push(10)
+    print(colAt(a, 2)) return 0 }

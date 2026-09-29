@@ -1,0 +1,3 @@
+join_arm_yield_moves.vyrn:1:0: `st` was moved here into a store
+line 1: ... and `st` is used again here
+  fix: `st.copy()` if both sides need a value

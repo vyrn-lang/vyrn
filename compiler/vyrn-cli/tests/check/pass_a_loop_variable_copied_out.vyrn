@@ -1,0 +1,3 @@
+fn first(xs: Array<String>) -> String { for x in xs { return x.copy() }
+    return "" }
+fn main() -> Int64 { return 0 }

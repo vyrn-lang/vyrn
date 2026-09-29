@@ -1,0 +1,2 @@
+consumed_a_methods_consume_parameter.vyrn:1:0: `s.byteLength` is used here but was already consumed by `take(..)` on line 1
+  (a `consume` parameter takes ownership; the value can't be used afterward)

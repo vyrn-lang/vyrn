@@ -1,0 +1,2 @@
+// A nullary constructor is a value with no owner, not a name to consume twice.
+fn takeO(o: consume Option<String>) -> Int64 { return 0 } fn main() -> Int64 { let a = takeO(None) let b = takeO(None) return a + b }

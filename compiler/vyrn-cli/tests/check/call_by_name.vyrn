@@ -1,0 +1,2 @@
+fn m(x: Int64, k: Int64) -> Int64 { return x + k }
+fn main() -> Int64 { return m(7, "x") }

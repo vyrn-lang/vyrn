@@ -1,0 +1,15 @@
+// Accepted, the free audit reported a double free.
+type Bag = { slots: Array<Int64>, n: Int64 }
+impl Owned for Bag {
+    fn release(consume self) {
+        let a = consume self.slots
+        drop a
+        let b = consume self.slots
+        drop b
+    }
+}
+fn main() -> Int64 {
+    let g = Bag { slots: [1, 2, 3], n: 3 }
+    drop g
+    return 0
+}

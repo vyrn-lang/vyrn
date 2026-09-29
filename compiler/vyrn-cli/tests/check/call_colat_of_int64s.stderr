@@ -1,0 +1,1 @@
+call_colat_of_int64s.vyrn:2:0: `colAt` argument 1 expects Array<UInt8>, found Array<Int64>

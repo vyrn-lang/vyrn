@@ -1,0 +1,1 @@
+literal_a_smallarray_slot.vyrn:1:0: this literal has 3 elements but the slot is SmallArray<_, 2>

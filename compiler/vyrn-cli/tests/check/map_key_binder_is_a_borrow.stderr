@@ -1,0 +1,2 @@
+map_key_binder_is_a_borrow.vyrn:2:0: `xs` may not be passed to a `consume` parameter via `keep(..)` — it is read out of a place that owns it
+  fix: `xs.copy()` if both sides need a value

@@ -1,0 +1,4 @@
+type E = { name: String, id: Int64 }
+fn main() -> Int64 { let mut out = 0
+    let xs = [E { name: "a", id: 1 }, E { name: "b", id: 2 }]
+    for u in consume xs { consume u.name } return out }

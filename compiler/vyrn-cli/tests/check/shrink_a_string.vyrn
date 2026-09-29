@@ -1,0 +1,1 @@
+fn main() -> Int64 { let mut s = "abc" let p = s.pop() return 0 }

@@ -1,0 +1,1 @@
+fn f(c: Bool) -> Int64 { let st = "a" + "b" let rel = if c { st } else { st + "/" } return rel.byteLength + st.byteLength } fn main() -> Int64 { return f(true) }

@@ -1,0 +1,3 @@
+fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) }
+fn go(q: read String) -> Int64 { return apply(n -> n + q.byteLength) }
+fn main() -> Int64 { return 0 }

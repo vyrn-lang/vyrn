@@ -1,0 +1,4 @@
+fn go() -> Int64 { let xs: Array<String> = ["a" + "b"]
+    let mut out: Array<String> = []
+    for x in consume xs { out.push(x) } return out.length }
+fn main() -> Int64 { return 0 }

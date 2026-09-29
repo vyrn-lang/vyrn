@@ -1,0 +1,2 @@
+borrow_put_into_a_constructor.vyrn:2:0: `m` may not be put into `Some(..)` — it is a loop variable
+  fix: `m.copy()` if the value should own it

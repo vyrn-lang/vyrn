@@ -1,0 +1,1 @@
+call_lineat_of_a_smallarray.vyrn:3:0: `lineAt` argument 1 expects Array<UInt8>, found SmallArray<UInt8, 4>

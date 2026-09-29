@@ -1,0 +1,3 @@
+literal_part_a_move_into_an_inline_literal.vyrn:1:0: `d` was moved here into the field `R.s`
+line 1: ... and `d` is used again here
+  fix: `d.copy()` if both sides need a value

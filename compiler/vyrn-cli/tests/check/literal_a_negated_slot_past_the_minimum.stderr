@@ -1,0 +1,1 @@
+literal_a_negated_slot_past_the_minimum.vyrn:1:0: integer literal -2147483649 does not fit Int32 (its range is -2147483648..=2147483647)

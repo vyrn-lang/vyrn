@@ -1,0 +1,6 @@
+iterate_hold_a_push.vyrn:10:0: `w.data` is written here while `w` still reads out of it
+line 6: ... and `w` is used again here
+  fix: `w.copy()` on line 10, so `w` is a value of its own
+iterate_hold_a_push.vyrn:10:0: `w.data` is written here while `w` still reads out of it
+line 10: ... and `w` is used again here
+  fix: `w.copy()` on line 10, so `w` is a value of its own

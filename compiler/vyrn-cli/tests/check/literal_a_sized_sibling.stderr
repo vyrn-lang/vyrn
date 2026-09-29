@@ -1,0 +1,1 @@
+literal_a_sized_sibling.vyrn:1:0: integer literal 300 does not fit UInt8 (its range is 0..=255)

@@ -1,0 +1,1 @@
+fn main() -> Int64 { let r = renameFile("a") return 0 }

@@ -1,0 +1,1 @@
+type P = { x: Int64 } type Q = { x: Int64, y: Int64 } fn g(v: Q) -> Int64 { return v.y } fn apply(f: fn(P) -> Int64, p: P) -> Int64 { return f(p) } fn main() -> Int64 { let h: fn(Q) -> Int64 = g return apply(h, P { x: 1 }) }

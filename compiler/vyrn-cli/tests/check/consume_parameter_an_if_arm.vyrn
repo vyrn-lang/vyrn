@@ -1,0 +1,1 @@
+type T = { title: String, id: Int64 } fn sink(s: consume String) -> Int64 { return 0 } fn main() -> Int64 { let d = T { title: "t", id: 1 } let r = sink(if 1 > 0 { d.title } else { "" }) return r }

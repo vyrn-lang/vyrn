@@ -1,0 +1,6 @@
+prefix_consume_a_consuming_loop_over_a_field_of_a_read_parameter.vyrn:1:0: `x` may not be stored into `push(..)` — it is a second name for the `read` parameter `r`
+  fix: declare the parameter `r: consume ..` if this function should own it
+  fix: `x.copy()` if both sides need a value
+prefix_consume_a_consuming_loop_over_a_field_of_a_read_parameter.vyrn:1:0: `r.xs` may not be stored into the `for .. in consume` loop — it is a `read` parameter
+  fix: declare the parameter `r: consume ..` if this function should own it
+  fix: `r.xs.copy()` if both sides need a value

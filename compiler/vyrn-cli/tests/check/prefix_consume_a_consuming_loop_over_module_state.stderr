@@ -1,0 +1,3 @@
+prefix_consume_a_consuming_loop_over_module_state.vyrn:1:0: `x` may not be stored into `push(..)` — it is module state, which nothing may take
+  fix: `x.copy()` — the callee releases what it is handed
+prefix_consume_a_consuming_loop_over_module_state.vyrn:1:0: module state `gs` may not be consumed by the `for .. in consume` loop — nothing may take ownership of module state (it lives for the whole module and is never dropped)

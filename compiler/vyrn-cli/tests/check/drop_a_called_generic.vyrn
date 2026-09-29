@@ -1,0 +1,2 @@
+fn give<T>(v: consume T) -> Int64 { drop v return 0 }
+fn main() -> Int64 { return give("a" + "b") }

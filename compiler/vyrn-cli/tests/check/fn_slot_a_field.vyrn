@@ -1,0 +1,6 @@
+fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    for x in xs { out.push(f(x)) }
+    return out }
+type B = { n: Int64 }
+fn main() -> Int64 { let b = B { n: 1 } let a = twice([1], b.n) return 0 }

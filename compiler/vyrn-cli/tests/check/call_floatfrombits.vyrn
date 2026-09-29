@@ -1,0 +1,1 @@
+fn main() -> Int64 { let f = floatFromBits(1.5) return 0 }

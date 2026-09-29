@@ -1,0 +1,2 @@
+consume_parameter_a_projection_of_module_state.vyrn:1:0: `gb.xs` may not be passed to a `consume` parameter via `take(..)` — it is module state, which nothing may take
+  fix: `gb.xs.copy()` — the callee releases what it is handed

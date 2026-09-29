@@ -1,0 +1,1 @@
+fn main() -> Int64 { let mut xs: SmallArray<Int64, 4> = [] xs.push(1) drop xs return xs.length }

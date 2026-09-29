@@ -1,0 +1,4 @@
+type R = { a: String, b: String }
+fn use2(r: R) -> Int64 { let x = r.a let y = r.b
+    return x.byteLength + y.byteLength }
+fn main() -> Int64 { return 0 }

@@ -1,0 +1,1 @@
+literal_a_literal_pattern.vyrn:1:0: the right side of `=~` must be a string-literal pattern

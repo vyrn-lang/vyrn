@@ -1,0 +1,4 @@
+type T = { id: Int64 }
+fn take(t: consume T) -> Int64 { return t.id }
+fn peek(t: read T) -> Int64 { return t.id }
+fn main() -> Int64 { let x = T { id: 1 } return take(x) }

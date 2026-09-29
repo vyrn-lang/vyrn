@@ -206,8 +206,9 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "row 24, a borrow captured by a closure that outlives the call",
     ),
     // A rule the checker never had: the core mints `@borrow`, so a refusal that
-    // quotes it is the kernel's alone. `refusals.rs`'s
-    // `the_programs_the_passs_unit_tests_read_as_accepted` pins its one program.
+    // quotes it is the kernel's alone.
+    // `tests/check/pass_a_lender_forwarded_through_an_aggregate.vyrn` pins its
+    // one program.
     (
         "`@borrow` may not be returned",
         "row 17's other half, a borrow an arm yields",

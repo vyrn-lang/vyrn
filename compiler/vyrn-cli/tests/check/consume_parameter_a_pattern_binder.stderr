@@ -1,0 +1,3 @@
+consume_parameter_a_pattern_binder.vyrn:1:0: `v` may not be passed to a `consume` parameter via `take(..)` — it is a second name for the `read` parameter `o`
+  fix: declare the parameter `o: consume ..` if this function should own it
+  fix: `v.copy()` if both sides need a value

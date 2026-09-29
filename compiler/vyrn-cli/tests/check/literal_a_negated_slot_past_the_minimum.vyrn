@@ -1,0 +1,1 @@
+fn main() -> Int64 { let a: Int32 = -2147483649 return 0 }

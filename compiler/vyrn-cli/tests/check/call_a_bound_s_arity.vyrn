@@ -1,0 +1,4 @@
+// A count starts after the dot where the call writes one (#577).
+protocol P { fn m(self, k: Int64) -> Int64 }
+impl P for Int64 { fn m(self, k: Int64) -> Int64 { return self + k } } fn go<T: P>(x: T) -> Int64 { return x.m(1, 2, 3) }
+fn main() -> Int64 { return go(4) }

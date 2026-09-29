@@ -1,0 +1,12 @@
+// A `for` holds a user container for the whole loop: `nth` reads it each turn
+// (record `0125-m7-letpay`).
+type Window = { data: Array<Int64>, start: Int64 }
+impl Iterate for Window {
+    fn size(self) -> Int64 { return self.data.length - self.start }
+    fn nth(read self, i: Int64) -> read Int64 { return self.data[self.start + i] }
+}
+fn main() -> Int64 {
+    let mut w = Window { data: [1, 2, 3], start: 0 }
+    for x in w { w = Window { data: [], start: 0 } }
+    return 0
+}

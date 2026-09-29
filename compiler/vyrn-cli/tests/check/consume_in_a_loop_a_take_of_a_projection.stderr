@@ -1,0 +1,2 @@
+consume_in_a_loop_a_take_of_a_projection.vyrn:1:0: `er.node` is consumed by `consume` inside a loop, so it would be used again on the next iteration
+  fix: `er.node.copy()` if both sides need a value

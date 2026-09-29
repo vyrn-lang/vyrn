@@ -1,0 +1,1 @@
+fn_slot_a_field.vyrn:6:0: `twice` argument 2 must be a lambda `|..| ..`, a function name, or an expression of `fn` type; found Int64

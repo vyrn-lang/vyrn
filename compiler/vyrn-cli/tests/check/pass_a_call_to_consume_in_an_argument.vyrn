@@ -1,0 +1,3 @@
+fn consume(n: Int64) -> Array<Int64> { return [n] }
+fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }
+fn main() -> Int64 { return take(consume(1)) }

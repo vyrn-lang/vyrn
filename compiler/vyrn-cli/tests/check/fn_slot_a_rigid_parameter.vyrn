@@ -1,0 +1,5 @@
+type G<T> = { width: fn(T) -> Int64 }
+fn widthOf(s: String) -> Int64 { return 1 }
+fn make<T>() -> G<T> { return G { width: widthOf } }
+fn main() -> Int64 { let g: G<String> = make()
+    return 0 }

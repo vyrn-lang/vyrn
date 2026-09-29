@@ -1,0 +1,12 @@
+// Refused before the backend finds no place to store through (record
+// `0125-m11-lazy-unify`).
+type Slice = { data: Array<Int64>, start: Int64 }
+impl Index for Slice {
+    fn at(read self, i: Int64) -> read Int64 { return self.data[self.start + i] }
+    fn atSet(modify self, i: Int64) -> modify Int64 { return i }
+}
+fn main() -> Int64 {
+    let mut s = Slice { data: [1, 2], start: 0 }
+    s[0] = 5
+    return 0
+}

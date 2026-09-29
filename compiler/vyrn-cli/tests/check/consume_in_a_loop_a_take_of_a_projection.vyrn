@@ -1,0 +1,1 @@
+type T = { node: String, rest: Int64 } fn main() -> Int64 { let er = T { node: "n", rest: 0 } for i in [1, 2] { consume er.node } return 0 }

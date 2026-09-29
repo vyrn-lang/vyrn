@@ -1,0 +1,4 @@
+type Tag = | Word(String) | Num(Int64)
+let mut tag: Tag = Num(1)
+fn text() -> String { return match tag { Word(s) => s.copy(), Num(n) => "num", } }
+fn main() -> Int64 { return 0 }

@@ -1,0 +1,3 @@
+moved_a_prefix_takes_hole.vyrn:1:0: `d.a` was moved here into `consume`
+line 1: ... and `d.a` is used again here
+  fix: `d.a.copy()` if both sides need a value

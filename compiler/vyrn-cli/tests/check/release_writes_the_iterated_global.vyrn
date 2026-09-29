@@ -1,0 +1,17 @@
+// A drop runs `release`; accepted, the loop would read the freed array.
+let mut gs: Array<Int64> = [1, 2, 3, 4]
+type Ow = { d: Array<Int64>, tag: Int64 }
+impl Owned for Ow {
+    fn release(consume self) {
+        gs = [70, 71, 72, 73]
+        let d = consume self.d
+        drop d
+    }
+}
+fn main() -> Int64 {
+    for x in gs {
+        let o = Ow { d: [x], tag: x }
+        drop o
+    }
+    return 0
+}

@@ -1,0 +1,4 @@
+type Bag = { a: String, b: String }
+fn make() -> Bag { return Bag { a: "x" + "y", b: "p" + "q" } }
+fn go() -> Int64 { let mut d = make() let mut o: Array<String> = [] o.push(consume d.a) d.a = "z" return d.a.byteLength }
+fn main() -> Int64 { return 0 }
