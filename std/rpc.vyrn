@@ -11,7 +11,7 @@
 /// Inspect a generated module with `vyrn emit-gen <file>`, the derived table
 /// with `vyrn routes <file>`.
 
-import { fromBytesOr } from "std/strings"
+import { fromBytesOr, joinWith } from "std/strings"
 import { includes } from "std/arrays"
 import { checkContract } from "std/contract"
 import { report, reportHere, Severity } from "std/diag"
@@ -45,19 +45,6 @@ fn capFirst(s: String) -> String {
         i = i + 1
     }
     return fromBytesOr(out, s)
-}
-
-fn joinList(parts: Array<String>, sep: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    for p in parts {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + p
-        i = i + 1
-    }
-    return out
 }
 
 /// Whether `spelling` names one of the contract's exported types.
@@ -163,7 +150,7 @@ fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) ->
             }
         }
         if names.length > 0 {
-            out = out + "import { " + joinList(names, ", ") + " } from \"" + spec + "\"\n"
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
         }
     }
     return out
@@ -793,7 +780,7 @@ gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
             i = i + 1
         }
         if names.length > 0 {
-            out = out + "import { " + joinList(names, ", ") + " } from \"" + spec + "\"\n"
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
         }
     }
     return out

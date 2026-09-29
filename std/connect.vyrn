@@ -16,7 +16,7 @@
 
 // The `connect`-prefixed copies of `std/rpc`'s helpers keep this generator
 // self-contained.
-import { fromBytesOr } from "std/strings"
+import { fromBytesOr, joinWith } from "std/strings"
 import { includes } from "std/arrays"
 import { endsWith, startsWith } from "std/strpred"
 
@@ -36,19 +36,6 @@ fn connectCapFirst(s: String) -> String {
         i = i + 1
     }
     return fromBytesOr(out, s)
-}
-
-fn connectJoin(parts: Array<String>, sep: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    for p in parts {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + p
-        i = i + 1
-    }
-    return out
 }
 
 fn connectIsNamedType(spelling: String, iface: ModuleInterface) -> Bool {
@@ -137,7 +124,7 @@ fn connectImportBlock(iface: ModuleInterface, contract: String) -> String {
             }
         }
         if names.length > 0 {
-            out = out + "import { " + connectJoin(names, ", ") + " } from \"" + spec + "\"\n"
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
         }
     }
     return out

@@ -34,7 +34,7 @@
 /// construction. The graph keeps each field's `!` markers, which decide how far
 /// a `null` propagates.
 
-import { fromBytesOr } from "std/strings"
+import { fromBytesOr, joinWith } from "std/strings"
 import { includes } from "std/arrays"
 import { Json, JsonField, copyJson, copyJsonArray, emit } from "std/json"
 import { parseJson } from "std/jsonread"
@@ -1565,21 +1565,8 @@ fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
             }
         }
         if names.length > 0 {
-            out = out + "import { " + gqlJoin(names, ", ") + " } from \"" + spec + "\"\n"
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
         }
-    }
-    return out
-}
-
-fn gqlJoin(parts: Array<String>, sep: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    for p in parts {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + p
-        i = i + 1
     }
     return out
 }
