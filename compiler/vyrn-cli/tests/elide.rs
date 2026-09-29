@@ -144,6 +144,41 @@ fn builtin_rows_carry_the_length_across_a_resize() {
     assert_eq!(verdicts(src, "w"), ["proved array-index"; 3]);
 }
 
+/// A length reaches `LENGTH_LIMIT + 1`, which `Int32` wraps: the conversion is
+/// not exact, and the index below the length stays checked.
+const LENGTH_PAST_INT32: &str = "fn w(xs: Array<UInt8>) -> UInt8 {
+    if xs.length > 0 {
+            let k = Int32(xs.length)
+        return xs[Int64(k) - 1]
+    }
+    return 0
+}
+";
+
+#[test]
+fn a_length_is_not_exact_in_int32() {
+    assert_eq!(verdicts(LENGTH_PAST_INT32, "w"), ["check array-index"]);
+}
+
+/// The run behind [`a_length_is_not_exact_in_int32`]; it takes 3 GiB.
+#[test]
+#[ignore]
+fn a_length_of_two_to_the_31_traps_below_itself() {
+    let calls = "    let mut ys: Array<UInt8> = [1]
+    ys.reserve(1073741823)
+                     let mut i: Int64 = 0
+    while i < 31 {
+        ys.append(ys)
+                         i = i + 1
+    }
+    print(w(ys).toString())";
+    let (err, _) = oracle(LENGTH_PAST_INT32, calls, "w");
+    assert!(
+        err.contains("array index -2147483649 out of bounds"),
+        "{err}"
+    );
+}
+
 /// Each witness: a function `w` whose checks must all stay, and the call in
 /// `main` that makes one trap with the wording given.
 const WITNESSES: &[(&str, &str, &str)] = &[
