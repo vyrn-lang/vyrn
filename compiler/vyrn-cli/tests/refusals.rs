@@ -3492,3 +3492,49 @@ fn main() -> Int64 {
         "`check` said {text}"
     );
 }
+
+/// A record's `where` rule is checked where the record is built, so no store
+/// reaches inside one: not through `atSet`, an element, or a `modify`
+/// parameter. Each was accepted and broke the rule.
+#[test]
+fn a_store_inside_a_record_with_a_where_rule_is_refused() {
+    let head = "type H = { xs: Array<Int64> } where xs[0] == 1\n";
+    let cases = [
+        (
+            "impl Index for H {
+    fn tryAt(read self, i: Int64) -> read Option<Int64> {
+        if i < 0 || i >= self.xs.length { return None }
+        return Some(self.xs[i])
+    }
+    fn at(read self, i: Int64) -> read Int64 { return self.xs[i] }
+    fn atSet(modify self, i: Int64) -> modify Int64 { return self.xs[i] }
+}
+fn main() -> Int64 { let mut h = H { xs: [1, 2] }; h[0] = 42; return 0 }
+",
+            10,
+        ),
+        (
+            "fn main() -> Int64 { let mut h = H { xs: [1, 2] }; h.xs[0] = 42; return 0 }\n",
+            2,
+        ),
+        (
+            "fn poke(h: modify H) { h.xs[0] = 42 }
+fn main() -> Int64 { let mut h = H { xs: [1, 2] }; poke(h); return 0 }
+",
+            2,
+        ),
+    ];
+    for (i, (body, line)) in cases.iter().enumerate() {
+        let dir = common::scratch(&format!("where-store-{i}"));
+        std::fs::write(dir.join("store.vyrn"), format!("{head}{body}")).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), "store.vyrn", false);
+        let want = format!(
+            "store.vyrn:{line}:0: cannot mutate a field of `H` in place (its `where` invariant \
+             could be broken mid-update); rebuild it: `h = H {{ .. }}`"
+        );
+        assert!(
+            !ok && text.lines().next().is_some_and(|l| l.ends_with(&want)),
+            "case {i}: `check` said {text}"
+        );
+    }
+}
