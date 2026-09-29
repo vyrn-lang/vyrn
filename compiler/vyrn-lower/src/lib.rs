@@ -660,7 +660,7 @@ fn build<'a>(
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
-    let decls = vyrn_frontend::types::decl_map(program);
+    let decls = ownership.proto.types();
 
     // The roots are every non-generic function with a body. A `std/mem`
     // primitive, like an `extern`, has none: it lowers to one instruction at
@@ -739,7 +739,7 @@ fn build<'a>(
         "<module state>",
         std::mem::take(&mut gw.calls),
         &by_name,
-        &decls,
+        decls,
         &mut seen,
         &mut queue,
         &mut unresolved,
@@ -774,7 +774,7 @@ fn build<'a>(
             "<teardown>",
             teardown_calls,
             &by_name,
-            &decls,
+            decls,
             &mut seen,
             &mut queue,
             &mut unresolved,
@@ -818,7 +818,7 @@ fn build<'a>(
             &func.name,
             calls,
             &by_name,
-            &decls,
+            decls,
             &mut seen,
             &mut queue,
             &mut unresolved,

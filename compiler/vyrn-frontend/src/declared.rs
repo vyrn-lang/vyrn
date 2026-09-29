@@ -441,7 +441,6 @@ pub struct Declared {
     /// The checker's type for every node, keyed by address. `None` for a
     /// program the checker never saw.
     rec: Option<std::rc::Rc<crate::checker::Recorded>>,
-    decls: HashMap<String, TypeDecl>,
     /// Declared parameter types per user function, for an argument whose own
     /// expression has no type (an array literal coerced at the call).
     params: HashMap<String, Vec<Type>>,
@@ -461,13 +460,13 @@ impl Declared {
                 f.params.iter().map(|p| p.ty.clone()).collect(),
             );
         }
-        let decls = crate::types::decl_map(program);
+        let owned = crate::declared::Owned::new(program);
         let mut variants: HashMap<String, Option<String>> =
             ["Some", "Ok", "Err", "Success", "Failure"]
                 .into_iter()
                 .map(|n| (n.to_string(), None))
                 .collect();
-        for d in decls.values() {
+        for d in owned.types().values() {
             if let Some(vs) = crate::types::declared_variants(&d.base) {
                 for v in vs {
                     let owner = (d.type_params.is_empty() && !variants.contains_key(&v.name))
@@ -478,9 +477,8 @@ impl Declared {
         }
         Declared {
             rec: None,
-            owned: crate::declared::Owned::new(program),
+            owned,
             variants,
-            decls,
             params,
         }
     }
@@ -493,11 +491,11 @@ impl Declared {
     }
 
     pub fn decls(&self) -> &HashMap<String, TypeDecl> {
-        &self.decls
+        self.owned.types()
     }
 
     pub fn owns_heap(&self, ty: &Type) -> bool {
-        crate::declared::owns_heap(ty, &self.decls)
+        crate::declared::owns_heap(ty, self.owned.types())
     }
 
     pub fn linear_kind(&self, ty: &Type) -> Option<crate::own::Linear> {

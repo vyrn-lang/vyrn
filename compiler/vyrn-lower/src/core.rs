@@ -4536,9 +4536,10 @@ impl<'a> Builder<'a> {
                 if *consuming {
                     self.body.names[it as usize].for_consume = true;
                 }
-                let decls = vyrn_frontend::types::decl_map(self.program);
-                let streaming =
-                    matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Stream(_));
+                let streaming = matches!(
+                    vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                    Type::Stream(_)
+                );
                 if streaming {
                     self.stream_loops.push(it);
                 }
@@ -4616,7 +4617,12 @@ impl<'a> Builder<'a> {
                 // growable array's triple; other containers have no such
                 // buffer). A wrong answer here frees somebody else's storage.
                 let mut unreached = None;
-                if owned && matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Array(_)) {
+                if owned
+                    && matches!(
+                        vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                        Type::Array(_)
+                    )
+                {
                     self.body.loop_buffers.push(sid);
                     unreached = counter.map(|(n, i)| Unreached {
                         it,
@@ -8962,7 +8968,7 @@ fn typed(
             }
         }
         if as_written {
-            found.extend(crate::typed::drops(top, program));
+            found.extend(crate::typed::drops(top, program, own.proto.types()));
         }
         found.sort_by_key(|(line, _)| *line);
         let refused = !found.is_empty();
