@@ -293,6 +293,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
     let mut skipped = std::collections::HashSet::new();
+    let mut mem = HashMap::new();
     for f in &program.functions {
         // An `extern` is an import (declared above); a `gen fn` runs
         // only in the compiler's own interpreter and may use builtins with no
@@ -307,9 +308,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             skipped.insert(f.name.clone());
             continue;
         }
-        // A `std/mem` declaration has no body here; `Fn_::mem_prim` lowers each call to one
-        // instruction.
-        if f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX) {
+        // A `std/mem` declaration has no body here; [`mem_ins`] lowers each call.
+        if let Some(prim) = f.name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
+            mem.insert(prim, f);
             continue;
         }
         // A function with a `fn`-typed parameter exists only as specializations; the
@@ -340,6 +341,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         generics,
         higher_order,
         skipped,
+        mem,
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
         fnvals: RefCell::new(Vec::new()),
@@ -1007,6 +1009,8 @@ struct Cx<'a> {
     /// The functions [`gen_reach`] leaves out of the module. A call to one
     /// refuses at its own site, naming it.
     skipped: std::collections::HashSet<String>,
+    /// The `std/mem` declarations by primitive name: each states the types [`mem_ins`] lowers.
+    mem: HashMap<&'a str, &'a Function>,
     /// Per function: every release step placed, at the exit that runs it, in run order.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
     /// The per-node release decisions.
@@ -1475,21 +1479,63 @@ struct PartAt {
     ty: Type,
 }
 
-/// How one `std/mem` primitive lowers: a `call` of a [`Wasi`] host import, or one of this
-/// emitter's instructions. A host import the build does not declare is `unreachable`, as the
-/// `vyrn_gen` pair is outside a generation.
-#[derive(Clone, Copy)]
-enum Mem {
-    Host(Option<u32>),
-    Ins,
-}
-
-/// What a `std/mem` primitive pushes UNDER its arguments. Only `trap` has
-/// one: the descriptor its message goes to.
-fn mem_pre(b: &mut Frame, prim: &str) {
-    if prim == "trap" {
-        b.ins(&Instruction::I32Const(2));
-    }
+/// The wasm one `std/mem` primitive lowers to: the instructions under its arguments, then the
+/// ones after them. `None` for a name with no row. `std/mem.vyrn` declares the types
+/// ([`Cx::mem`]); `every_mem_declaration_has_a_row` holds the two lists together.
+///
+/// A host import is one `call` of its [`crate::WASI_IMPORTS`] row. The `vyrn_gen` pair exists
+/// only under a generation ([`Cx::gen`]); elsewhere a call to either is `unreachable`, and its
+/// callers (`readFileGen`, `listDirGen`) are unreachable and swept.
+fn mem_ins(
+    cx: &Cx<'_>,
+    prim: &str,
+) -> Option<(Vec<Instruction<'static>>, Vec<Instruction<'static>>)> {
+    use Instruction as I;
+    let at = |align: u32| MemArg {
+        offset: 0,
+        align,
+        memory_index: 0,
+    };
+    let rt = &cx.rt;
+    let after = match prim {
+        "genRead" => cx.gen.map_or(I::Unreachable, |g| I::Call(g.read)),
+        "genFetch" => cx.gen.map_or(I::Unreachable, |g| I::Call(g.fetch)),
+        "load8" => I::I32Load8U(at(0)),
+        "load16" => I::I32Load16U(at(1)),
+        "load32" => I::I32Load(at(2)),
+        "load64" => I::I64Load(at(3)),
+        "loadF32" => I::F32Load(at(2)),
+        "loadF64" => I::F64Load(at(3)),
+        "store8" => I::I32Store8(at(0)),
+        "store16" => I::I32Store16(at(1)),
+        "store32" => I::I32Store(at(2)),
+        "store64" => I::I64Store(at(3)),
+        "storeF32" => I::F32Store(at(2)),
+        "storeF64" => I::F64Store(at(3)),
+        "copy" => MEMORY_COPY,
+        "fill" => I::MemoryFill(0),
+        "memorySize" => I::MemorySize(0),
+        "grow" => I::MemoryGrow(0),
+        "heapBase" => I::GlobalGet(HEAP_BASE),
+        "ioTable" => I::I32Const(rt.io as i32),
+        "utf8Table" => I::I32Const(rt.utf8d as i32),
+        // The descriptor under the message is stderr; `write_all` first, so stdout is flushed
+        // before the message.
+        "trap" => {
+            return Some((
+                vec![I::I32Const(2)],
+                vec![
+                    I::Call(rt.write_all),
+                    I::Drop,
+                    I::I32Const(1),
+                    I::Call(rt.proc_exit),
+                    I::Unreachable,
+                ],
+            ))
+        }
+        _ => I::Call(rt.wasi.find(prim)?.0),
+    };
+    Some((Vec::new(), vec![after]))
 }
 
 /// The end of an aggregate store, with the destination's address and the
@@ -4484,7 +4530,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Emits a `std/mem` primitive from a core row, by [`Fn_::mem_spec`]'s table.
+    /// Emits a `std/mem` primitive from a core row, by [`mem_ins`]'s table.
     fn core_mem(
         &mut self,
         m: &mut Module,
@@ -4507,114 +4553,24 @@ impl<'p> Fn_<'_, 'p> {
                 _ => unsupported("an `adopt` the checker did not type", line),
             };
         }
-        let (how, params, ret) = self.mem_spec(prim, line)?;
-        if args.len() != params.len() {
+        let (Some(decl), Some((under, after))) =
+            (self.cx.mem.get(prim).copied(), mem_ins(self.cx, prim))
+        else {
+            return unsupported(&format!("the `std/mem` primitive `{prim}`"), line);
+        };
+        if args.len() != decl.params.len() {
             return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
         }
-        mem_pre(b, prim);
-        for ((v, _), p) in args.iter().zip(&params) {
-            self.core_val(m, b, body, w, v, p, line)?;
+        for i in &under {
+            b.ins(i);
         }
-        self.mem_ins(b, prim, how);
-        Ok(ret)
-    }
-
-    /// A `std/mem` primitive's parameter types, result type, and lowering. The types restate
-    /// the module's so a caller can coerce a literal; the checker catches a mismatch first.
-    ///
-    /// # Errors
-    ///
-    /// Refuses a name `std/mem` does not declare.
-    fn mem_spec(&self, prim: &str, line: usize) -> Result<(Mem, Vec<Type>, Type), String> {
-        let u = |bits: u8| Type::IntN {
-            bits,
-            signed: false,
-        };
-        // A host import is one `call` with the witx signature. The `vyrn_gen` pair exists only
-        // under a generation (`Cx::gen`); elsewhere a call to either is `unreachable`, and its
-        // callers (`readFileGen`, `listDirGen`) are unreachable and swept.
-        let host: Option<(Option<u32>, Vec<Type>, Type)> = match prim {
-            "genRead" => Some((self.cx.gen.map(|g| g.read), vec![INT32, INT32], Type::Int)),
-            "genFetch" => Some((self.cx.gen.map(|g| g.fetch), vec![INT32], Type::Unit)),
-            _ => self.cx.rt.wasi.find(prim).map(|(index, params, results)| {
-                // `WASI_IMPORTS` holds `i32` and `i64` alone: `Int32` and `Int64`.
-                let ty = |v: &ValType| match v {
-                    ValType::I64 => Type::Int,
-                    _ => INT32,
-                };
-                let ret = results.first().map_or(Type::Unit, ty);
-                (Some(index), params.iter().map(ty).collect(), ret)
-            }),
-        };
-        if let Some((index, params, ret)) = host {
-            return Ok((Mem::Host(index), params, ret));
+        for ((v, _), p) in args.iter().zip(&decl.params) {
+            self.core_val(m, b, body, w, v, &p.ty, line)?;
         }
-        let (params, ret): (Vec<Type>, Type) = match prim {
-            "load8" => (vec![INT32], u(8)),
-            "load16" => (vec![INT32], u(16)),
-            "load32" => (vec![INT32], u(32)),
-            "load64" => (vec![INT32], u(64)),
-            "loadF32" => (vec![INT32], Type::Float32),
-            "loadF64" => (vec![INT32], Type::Float),
-            "store8" => (vec![INT32, u(8)], Type::Unit),
-            "store16" => (vec![INT32, u(16)], Type::Unit),
-            "store32" => (vec![INT32, u(32)], Type::Unit),
-            "store64" => (vec![INT32, u(64)], Type::Unit),
-            "storeF32" => (vec![INT32, Type::Float32], Type::Unit),
-            "storeF64" => (vec![INT32, Type::Float], Type::Unit),
-            "copy" => (vec![INT32, INT32, INT32], Type::Unit),
-            "fill" => (vec![INT32, u(8), INT32], Type::Unit),
-            "memorySize" => (vec![], INT32),
-            "grow" => (vec![INT32], INT32),
-            "heapBase" | "ioTable" | "utf8Table" => (vec![], INT32),
-            "trap" => (vec![INT32, INT32], Type::Unit),
-            _ => return unsupported(&format!("the `std/mem` primitive `{prim}`"), line),
-        };
-        Ok((Mem::Ins, params, ret))
-    }
-
-    fn mem_ins(&mut self, b: &mut Frame, prim: &str, how: Mem) {
-        let at = |align: u32| MemArg {
-            offset: 0,
-            align,
-            memory_index: 0,
-        };
-        if let Mem::Host(index) = how {
-            match index {
-                Some(i) => b.ins(&Instruction::Call(i)),
-                None => b.ins(&Instruction::Unreachable),
-            };
-            return;
+        for i in &after {
+            b.ins(i);
         }
-        match prim {
-            "load8" => b.ins(&Instruction::I32Load8U(at(0))),
-            "load16" => b.ins(&Instruction::I32Load16U(at(1))),
-            "load32" => b.ins(&Instruction::I32Load(at(2))),
-            "load64" => b.ins(&Instruction::I64Load(at(3))),
-            "loadF32" => b.ins(&Instruction::F32Load(at(2))),
-            "loadF64" => b.ins(&Instruction::F64Load(at(3))),
-            "store8" => b.ins(&Instruction::I32Store8(at(0))),
-            "store16" => b.ins(&Instruction::I32Store16(at(1))),
-            "store32" => b.ins(&Instruction::I32Store(at(2))),
-            "store64" => b.ins(&Instruction::I64Store(at(3))),
-            "storeF32" => b.ins(&Instruction::F32Store(at(2))),
-            "storeF64" => b.ins(&Instruction::F64Store(at(3))),
-            "copy" => b.ins(&MEMORY_COPY),
-            "fill" => b.ins(&Instruction::MemoryFill(0)),
-            "memorySize" => b.ins(&Instruction::MemorySize(0)),
-            "grow" => b.ins(&Instruction::MemoryGrow(0)),
-            "heapBase" => b.ins(&Instruction::GlobalGet(HEAP_BASE)),
-            "ioTable" => b.ins(&Instruction::I32Const(self.cx.rt.io as i32)),
-            "utf8Table" => b.ins(&Instruction::I32Const(self.cx.rt.utf8d as i32)),
-            // `write_all` first, so stdout is flushed before the message.
-            "trap" => b
-                .ins(&Instruction::Call(self.cx.rt.write_all))
-                .ins(&Instruction::Drop)
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Call(self.cx.rt.proc_exit))
-                .ins(&Instruction::Unreachable),
-            _ => unreachable!("`mem_spec` answered, so the name is one of these"),
-        };
+        Ok(decl.ret.clone())
     }
 
     /// Writes one log line, `[LEVEL] name: message\n`, to the configured descriptor, with
@@ -9123,7 +9079,7 @@ struct Rt {
     /// `wasi_snapshot_preview1.proc_exit`, so a lowering outside `runtime` can end the
     /// process: `std/mem`'s `trap` primitive is a write to descriptor 2 and this call.
     proc_exit: u32,
-    /// The host-import table, so `Fn_::mem_prim` can lower a `std/mem` import to its `call`.
+    /// The host-import table, so [`mem_ins`] can lower a `std/mem` import to its `call`.
     wasi: Wasi,
     /// The address of the UTF-8 DFA table `utf8Valid` walks, interned by
     /// `runtime`; every caller passes it as the third argument.
@@ -10702,8 +10658,7 @@ impl<'p> Fn_<'_, 'p> {
         hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
-        // A `std/mem` primitive is one instruction, never a call; [`Fn_::mem_spec`] holds
-        // the table.
+        // A `std/mem` primitive is its instructions, never a call; [`mem_ins`] holds the table.
         if let Some(prim) = callee.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
             return self.core_mem(m, b, body, w, prim, args, ret, line);
         }
@@ -12650,8 +12605,9 @@ impl<'p> Fn_<'_, 'p> {
             ("adopt", 1) => return Some(Type::Param("T".into())),
             _ => {}
         }
-        let (_, params, ret) = self.mem_spec(prim, 0).ok()?;
-        (params.len() == args).then_some(ret)
+        let decl = self.cx.mem.get(prim)?;
+        mem_ins(self.cx, prim)?;
+        (decl.params.len() == args).then(|| decl.ret.clone())
     }
 
     /// The checker's type of `v`; `lit` for an integer or byte literal.
@@ -13981,6 +13937,20 @@ mod tests {
         }
     }
 
+    /// `addr` and `adopt` change a type and emit nothing, so [`Fn_::core_mem`] answers them
+    /// before the table.
+    #[test]
+    fn every_mem_declaration_has_a_row() {
+        let (program, _) = linked("fn main() -> Int64 {\n    return 0\n}\n").unwrap();
+        let c = cx();
+        for f in program.functions.iter().filter(|f| f.exported) {
+            if let Some(prim) = f.name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
+                let emits = mem_ins(&c, prim).is_some();
+                assert_eq!(emits, !matches!(prim, "addr" | "adopt"), "`std/mem.{prim}`");
+            }
+        }
+    }
+
     /// A runtime name is declared once, so [`VyrnRt::reserve`] hands out one index per row and
     /// [`VyrnRt::take`] finds the row a body belongs to. [`VyrnRt::check`] refuses a link where a
     /// row has no body.
@@ -14009,6 +13979,7 @@ mod tests {
             generics: HashMap::new(),
             higher_order: HashMap::new(),
             skipped: std::collections::HashSet::new(),
+            mem: HashMap::new(),
             owned: Default::default(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
