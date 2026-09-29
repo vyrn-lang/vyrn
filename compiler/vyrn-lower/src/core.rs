@@ -8444,22 +8444,12 @@ fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) 
 
 /// Every name `s` binds, at any depth: a `let` and a switch arm's binders.
 pub fn names_bound(s: &St, out: &mut Vec<Name>) {
-    match s {
-        St::Let(n, _) => out.push(*n),
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| names_bound(s, out));
-            els.iter().for_each(|s| names_bound(s, out));
+    for (r, _) in s.rows() {
+        match r {
+            St::Let(n, _) => out.push(*n),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| out.extend(&a.binds)),
+            _ => {}
         }
-        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
-            b.iter().for_each(|s| names_bound(s, out))
-        }
-        St::Switch { arms, .. } => {
-            for a in arms {
-                out.extend(&a.binds);
-                a.body.iter().for_each(|s| names_bound(s, out));
-            }
-        }
-        _ => {}
     }
 }
 
