@@ -151,6 +151,32 @@ pub struct Ownership {
     /// See [`crate::declared::arg_caps`]. It reads only declarations, so one
     /// table serves every body.
     pub arg_caps: HashMap<String, Vec<Capability>>,
+    /// What the kernel decided over the placer's first build of each body,
+    /// which every later build of this program writes down. Empty without a
+    /// placer.
+    pub placed: Placed,
+}
+
+/// One edge release: the name, the edge, and the holes the release walks
+/// around, spelled relative to the name (`Elem.1`).
+pub type EdgeRow = (String, u32, Vec<String>);
+
+/// The kernel's placement over a first build. The first build states no
+/// release the kernel has not judged owed, so the judgment reports every one.
+#[derive(Default, Clone, Debug)]
+pub struct Placed {
+    /// `(switch site, arm) -> [(binder, holes)]`: the payload binders still
+    /// held where their arm ends.
+    pub arms: HashMap<(NodeId, u32), Vec<(String, Vec<String>)>>,
+    /// Per join node, the releases one edge owes because another edge took
+    /// the name. A sub-place row is spelled `d.line`.
+    pub edges: HashMap<NodeId, Vec<EdgeRow>>,
+    /// The store nodes the kernel found a held place at: the stores that
+    /// release what they displace, with the holes each release walks around.
+    pub stores: HashMap<NodeId, Vec<String>>,
+    /// The nodes that produced a borrowed receiver still held, whose free
+    /// rides as an argument-temporary drop.
+    pub producers: std::collections::HashSet<NodeId>,
 }
 
 /// Holds one ownership analysis per command, adopting the load's through
@@ -278,6 +304,7 @@ fn analyze_now(program: &Program) -> Ownership {
         releases: HashMap::new(),
         fnval_clear: facts.fnval_clear.clone(),
         arg_caps: crate::declared::arg_caps(program),
+        placed: Placed::default(),
     };
     // The placer runs the lowering, which runs this analysis, so it is not
     // re-entered.

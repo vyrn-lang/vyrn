@@ -3974,7 +3974,7 @@ impl<'a> Builder<'a> {
                 let mentions = vyrn_frontend::ast::mentions_place(value, name);
                 let fresh_str = self.fresh_str(&ty, value);
                 let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
-                let releases = !handed_back && placed_store(sid);
+                let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
                 // Module state owns what it holds and nothing may `consume`
                 // it, so a store into one releases what it replaces whenever
                 // that owns heap.
@@ -4012,7 +4012,7 @@ impl<'a> Builder<'a> {
                     site: Site::Node(sid),
                     releases,
                     holes: if releases {
-                        store_holes(sid)
+                        (self.own.placed.stores.get(&sid).cloned()).unwrap_or_default()
                     } else {
                         Vec::new()
                     },
@@ -4546,7 +4546,7 @@ impl<'a> Builder<'a> {
     /// Releases the payload binders the kernel found still held where this
     /// arm ends. The first build states none, so [`crate::kernel::placement`]
     /// reports every held binder, and the second build reads the rows back
-    /// out of [`Placed`].
+    /// out of [`Ownership::placed`].
     fn arm_frees(
         &mut self,
         site: NodeId,
@@ -4555,7 +4555,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Vec<Name> {
         let mut frees: Vec<Name> = Vec::new();
-        let Some(rows) = placed_arm(site, arm) else {
+        let Some(rows) = self.own.placed.arms.get(&(site, arm)).cloned() else {
             return frees;
         };
         for b in binds {
@@ -4630,7 +4630,7 @@ impl<'a> Builder<'a> {
 
     /// Rule N: the drops one edge of a join owes.
     fn edge_drops(&mut self, join: NodeId, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
-        let Some(ers) = placed_edges(join) else {
+        let Some(ers) = self.own.placed.edges.get(&join).cloned() else {
             return Ok(());
         };
         for (name, e, holes) in &ers {
@@ -4689,7 +4689,7 @@ impl<'a> Builder<'a> {
         // `s.dense = s.dense.push(i)` releases nothing.
         let handed_back =
             vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
-        let releases = !handed_back && placed_store(sid);
+        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
@@ -4702,7 +4702,7 @@ impl<'a> Builder<'a> {
             site: Site::Node(sid),
             releases,
             holes: if releases {
-                store_holes(sid)
+                (self.own.placed.stores.get(&sid).cloned()).unwrap_or_default()
             } else {
                 Vec::new()
             },
@@ -4882,7 +4882,7 @@ impl<'a> Builder<'a> {
         let handed_back = (vyrn_frontend::ast::mentions_place(value, name)
             && !self.store_is_fresh(value, name))
             || vyrn_frontend::ast::mentions_place(index, name);
-        let releases = !handed_back && placed_store(sid);
+        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place,
             value: v,
@@ -4895,7 +4895,7 @@ impl<'a> Builder<'a> {
             site,
             releases,
             holes: if releases {
-                store_holes(sid)
+                (self.own.placed.stores.get(&sid).cloned()).unwrap_or_default()
             } else {
                 Vec::new()
             },
@@ -5852,7 +5852,7 @@ impl<'a> Builder<'a> {
         let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
-            if placed_producer(producer) {
+            if self.own.placed.producers.contains(&producer) {
                 if !self.after.contains(&r) {
                     self.body.names[r as usize].arg_drop = Some(producer);
                     self.after.push(r);
@@ -7779,7 +7779,6 @@ thread_local! {
     /// an emitter first reads it, so `vyrn check` decides none of its own.
     static UNDECIDED: std::cell::RefCell<(HashMap<String, TypeDecl>, std::collections::HashSet<String>)> =
         std::cell::RefCell::new((HashMap::new(), std::collections::HashSet::new()));
-    static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
     /// What the checker decided about a program, under [`Key`]. Held as the
     /// checker's `Rc`, so serving it costs a refcount, not a copy of a map
     /// with a row per node.
@@ -7942,57 +7941,7 @@ pub struct Facts {
     pub owns_scrutinee: std::collections::HashSet<NodeId>,
 }
 
-/// One edge release: the name, the edge, and the holes the release walks
-/// around, spelled relative to the name (`Elem.1`).
-pub type EdgeRow = (String, u32, Vec<String>);
-
-/// What the kernel decided over the core's first build
-/// ([`crate::kernel::placement`]), which the second build writes down. The
-/// first build states no release the kernel has not judged owed, so the
-/// judgment reports every one.
-#[derive(Default, Clone, Debug)]
-pub(crate) struct Placed {
-    /// `(switch site, arm) -> [(binder, holes)]`: the payload binders still
-    /// held where their arm ends.
-    arms: std::collections::HashMap<(NodeId, u32), Vec<(String, Vec<String>)>>,
-    /// Per join node, the releases one edge owes because another edge took
-    /// the name. A sub-place row is spelled `d.line`.
-    edges: std::collections::HashMap<NodeId, Vec<EdgeRow>>,
-    /// The store nodes the kernel found a held place at: the stores that
-    /// release what they displace, with the holes each release walks around.
-    stores: std::collections::HashMap<NodeId, Vec<String>>,
-    /// The nodes that produced a borrowed receiver still held, whose free
-    /// rides as an argument-temporary drop.
-    producers: std::collections::HashSet<NodeId>,
-}
-
-/// Whether the kernel found this store's place still holding. Empty on the
-/// first build, where every store says [`Old::Pending`].
-fn placed_store(site: NodeId) -> bool {
-    PLACED.with(|p| p.borrow().stores.contains_key(&site))
-}
-
-/// The holes the release at a placed store walks around.
-fn store_holes(site: NodeId) -> Vec<String> {
-    PLACED.with(|p| p.borrow().stores.get(&site).cloned().unwrap_or_default())
-}
-
-/// The binders the kernel found held at the end of one arm. Empty on the
-/// first build.
-fn placed_arm(site: NodeId, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
-    PLACED.with(|p| p.borrow().arms.get(&(site, arm)).cloned())
-}
-
-/// Whether the placer wrote an argument-temporary drop for the receiver this
-/// node produced. Empty on the first build.
-fn placed_producer(node: NodeId) -> bool {
-    PLACED.with(|p| p.borrow().producers.contains(&node))
-}
-
-/// Rule N's rows for one join, as the kernel equalized its edges.
-fn placed_edges(join: NodeId) -> Option<Vec<EdgeRow>> {
-    PLACED.with(|p| p.borrow().edges.get(&join).cloned())
-}
+pub use vyrn_frontend::own::EdgeRow;
 
 /// The core's answers for the program last analysed on this thread. `None`
 /// in a host that never installed the placer, where an emitter reads the plan,
@@ -8736,9 +8685,6 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
 /// as the plan had it.
 pub fn augment(program: &Program, own: &mut Ownership) {
     let _p = vyrn_frontend::prof::phase("placer");
-    // A node is an address the allocator reuses: a row placed for the last
-    // program must not fire on this one.
-    PLACED.with(|p| *p.borrow_mut() = Placed::default());
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
     drop(lw);
@@ -9382,12 +9328,9 @@ fn place_frames(
             // A store's row is keyed by the store alone: its place may be no
             // binding of this frame, so it is handled before the name is read.
             if m.kind == MissingKind::Store {
-                let fresh = PLACED.with(|p| {
-                    p.borrow_mut()
-                        .stores
-                        .insert(m.site, m.holes.clone())
-                        .is_none()
-                });
+                let fresh = (own.placed.stores)
+                    .insert(m.site, m.holes.clone())
+                    .is_none();
                 if fresh {
                     if trace {
                         eprintln!("placer: {} store at {} releases", body.name, m.site.0);
@@ -9407,7 +9350,7 @@ fn place_frames(
             // A receiver a consumer borrowed out of ([`NameInfo::producer`]):
             // an argument temporary keyed by the producing node.
             if let Some(producer) = info.producer {
-                let fresh = PLACED.with(|p| p.borrow_mut().producers.insert(producer));
+                let fresh = own.placed.producers.insert(producer);
                 if fresh {
                     touched.insert(owner.to_string());
                 }
@@ -9438,41 +9381,32 @@ fn place_frames(
                 // Rule N: one edge of a join still holds what another took.
                 // Keyed by name, so a loop variable qualifies.
                 MissingKind::Edge { edge } => {
-                    PLACED.with(|p| {
-                        let mut p = p.borrow_mut();
-                        let rows = p.edges.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e, _)| *n == info.source && *e == edge) {
-                            rows.push((info.source.clone(), edge, holes));
-                            touched.insert(owner.to_string());
-                        }
-                    });
+                    let rows = own.placed.edges.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e, _)| *n == info.source && *e == edge) {
+                        rows.push((info.source.clone(), edge, holes));
+                        touched.insert(owner.to_string());
+                    }
                     continue;
                 }
                 // The sub-place one edge took, released on the other, spelled
                 // `d.line`.
                 MissingKind::EdgePlace { edge, path } => {
                     let name = format!("{}{}", info.source, path);
-                    PLACED.with(|p| {
-                        let mut p = p.borrow_mut();
-                        let rows = p.edges.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e, _)| *n == name && *e == edge) {
-                            rows.push((name, edge, Vec::new()));
-                            touched.insert(owner.to_string());
-                        }
-                    });
+                    let rows = own.placed.edges.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e, _)| *n == name && *e == edge) {
+                        rows.push((name, edge, Vec::new()));
+                        touched.insert(owner.to_string());
+                    }
                     continue;
                 }
                 // The arm's unmoved payload binders, one entry each, with the
                 // holes the arm left.
                 MissingKind::ArmBinder { arm } => {
-                    PLACED.with(|p| {
-                        let mut p = p.borrow_mut();
-                        let rows = p.arms.entry((m.site, arm)).or_default();
-                        if !rows.iter().any(|(n, _)| *n == info.source) {
-                            rows.push((info.source.clone(), holes));
-                            touched.insert(owner.to_string());
-                        }
-                    });
+                    let rows = own.placed.arms.entry((m.site, arm)).or_default();
+                    if !rows.iter().any(|(n, _)| *n == info.source) {
+                        rows.push((info.source.clone(), holes));
+                        touched.insert(owner.to_string());
+                    }
                     continue;
                 }
                 MissingKind::Exit => {}
