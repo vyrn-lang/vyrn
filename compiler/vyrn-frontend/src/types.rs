@@ -269,22 +269,19 @@ pub fn copy_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
         .then(|| impl_method_name(COPY, key, COPY_COPY))
 }
 
-/// Returns the flattened `size` name and the `place nth` that `ty` iterates
-/// through, or `None` unless its `impl Iterate` has both.
-pub fn iterate_impl<'a>(impls: &'a [ImplBlock], ty: &Type) -> Option<(String, &'a Function)> {
-    iterate_impl_by_key(impls, &type_key(ty)?)
-}
-
-pub fn iterate_impl_by_key<'a>(
+/// Returns the `impl Iterate` of `ty`, its flattened `size` name and its
+/// `place nth`, or `None` unless the impl has both.
+pub fn iterate_impl<'a>(
     impls: &'a [ImplBlock],
-    key: &str,
-) -> Option<(String, &'a Function)> {
+    ty: &Type,
+) -> Option<(&'a ImplBlock, String, &'a Function)> {
+    let key = type_key(ty)?;
     let imp = impls
         .iter()
-        .find(|i| i.protocol == ITERATE && type_key(&i.ty).as_deref() == Some(key))?;
+        .find(|i| i.protocol == ITERATE && type_key(&i.ty).as_deref() == Some(&key))?;
     let nth = imp.places.iter().find(|f| f.name == ITERATE_NTH)?;
     imp.methods.iter().find(|m| m.name == ITERATE_SIZE)?;
-    Some((impl_method_name(ITERATE, key, ITERATE_SIZE), nth))
+    Some((imp, impl_method_name(ITERATE, &key, ITERATE_SIZE), nth))
 }
 
 /// The inclusive `(min, max)` a `where` predicate implies, from `value OP N`

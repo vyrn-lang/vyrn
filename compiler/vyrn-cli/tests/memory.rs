@@ -2293,6 +2293,15 @@ fn an_element_stored_from_a_copy_of_its_sibling_is_released() {
     shape_runs_clean("an-element-stored-from-a-copy-of-its-sibling", "11\n");
 }
 
+#[test]
+fn a_for_over_a_user_container_in_a_field_runs() {
+    shape_runs_clean(
+        "a-for-over-a-user-container-read-from-a-field",
+        "9
+",
+    );
+}
+
 /// Runs the shape `stem` of `tests/shapes/` under the free audit, and asserts
 /// it prints `want`, exits 0 and prints nothing on stderr.
 fn shape_runs_clean(stem: &str, want: &str) {
