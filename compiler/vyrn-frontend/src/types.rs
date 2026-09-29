@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::codec::Wire;
+use crate::prim::Cmp;
 
 /// Returns the structural identity of a value's `Debug` form: 64 bits of
 /// SHA-256, as hex. Every synthesizer that names a function after a type
@@ -295,33 +296,28 @@ pub fn predicate_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
             let (r0, r1) = predicate_bounds(rhs);
             return (l0.or(r0), l1.or(r1));
         }
-        // Normalize to `value OP n`.
-        let (normalized, n) = match (&**lhs, &**rhs) {
-            (l, r) if is_value(l) => (*op, int_lit(r)),
-            (l, r) if is_value(r) => (flip(*op), int_lit(l)),
-            _ => return (None, None),
-        };
-        let Some(n) = n else { return (None, None) };
-        return match normalized {
-            BinOp::GtEq => (Some(n), None),
-            // An exclusive bound steps inward, saturating at the `i64` edges.
-            BinOp::Gt => (Some(n.saturating_add(1)), None),
-            BinOp::LtEq => (None, Some(n)),
-            BinOp::Lt => (None, Some(n.saturating_sub(1))),
-            _ => (None, None),
+        return match value_cmp(*op, lhs, rhs, is_value, int_lit) {
+            Some((c, n)) => c.bounds(n),
+            None => (None, None),
         };
     }
     (None, None)
 }
 
-/// `n OP value` is `value flip(OP) n`.
-fn flip(op: BinOp) -> BinOp {
-    match op {
-        BinOp::Lt => BinOp::Gt,
-        BinOp::Gt => BinOp::Lt,
-        BinOp::LtEq => BinOp::GtEq,
-        BinOp::GtEq => BinOp::LtEq,
-        other => other,
+/// The comparison `lhs OP rhs` read as `v OP' n`, where `is_v` picks the
+/// side `v` and `lit` reads the other.
+fn value_cmp<T>(
+    op: BinOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    is_v: fn(&Expr) -> bool,
+    lit: fn(&Expr) -> Option<T>,
+) -> Option<(Cmp, T)> {
+    let c = op.compare()?;
+    match (lhs, rhs) {
+        (l, r) if is_v(l) => Some((c, lit(r)?)),
+        (l, r) if is_v(r) => Some((c.converse(), lit(l)?)),
+        _ => None,
     }
 }
 
@@ -362,19 +358,8 @@ pub fn predicate_length_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
             let (r0, r1) = predicate_length_bounds(rhs);
             return (l0.or(r0), l1.or(r1));
         }
-        let (norm, n) = match (&**lhs, &**rhs) {
-            (l, r) if is_length_of_value(l) => (*op, int_lit(r)),
-            (l, r) if is_length_of_value(r) => (flip(*op), int_lit(l)),
-            _ => return (None, None),
-        };
-        if let Some(n) = n {
-            return match norm {
-                BinOp::GtEq => (Some(n), None),
-                BinOp::Gt => (Some(n.saturating_add(1)), None),
-                BinOp::LtEq => (None, Some(n)),
-                BinOp::Lt => (None, Some(n.saturating_sub(1))),
-                _ => (None, None),
-            };
+        if let Some((c, n)) = value_cmp(*op, lhs, rhs, is_length_of_value, int_lit) {
+            return c.bounds(n);
         }
     }
     (None, None)
@@ -791,17 +776,9 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
         }
         return false;
     }
-    // `minLength` is inclusive, so `> N` becomes `N + 1`.
-    let (norm, lit) = match (&**lhs, &**rhs) {
-        (l, r) if is_length_of_value(l) => (*op, int_lit(r)),
-        (l, r) if is_length_of_value(r) => (flip(*op), int_lit(l)),
-        _ => return false,
-    };
-    match (norm, lit) {
-        (BinOp::GtEq, Some(n)) => push_true(out, "minLength", n.to_string()),
-        (BinOp::Gt, Some(n)) => push_true(out, "minLength", n.saturating_add(1).to_string()),
-        (BinOp::LtEq, Some(n)) => push_true(out, "maxLength", n.to_string()),
-        (BinOp::Lt, Some(n)) => push_true(out, "maxLength", n.saturating_sub(1).to_string()),
+    match value_cmp(*op, lhs, rhs, is_length_of_value, int_lit).map(|(c, n)| c.bounds(n)) {
+        Some((Some(n), _)) => push_true(out, "minLength", n.to_string()),
+        Some((_, Some(n))) => push_true(out, "maxLength", n.to_string()),
         _ => false,
     }
 }
@@ -926,21 +903,18 @@ fn collect_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> bool {
                 None => false,
             }
         }
-        BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
-            let (norm, lit) = match (&**lhs, &**rhs) {
-                (l, r) if is_value(l) => (*op, num_lit(r)),
-                (l, r) if is_value(r) => (flip(*op), num_lit(l)),
-                _ => (*op, None),
-            };
-            match (norm, lit) {
-                (BinOp::GtEq, Some(n)) => push_true(out, "minimum", n),
-                (BinOp::Gt, Some(n)) => push_true(out, "exclusiveMinimum", n),
-                (BinOp::LtEq, Some(n)) => push_true(out, "maximum", n),
-                (BinOp::Lt, Some(n)) => push_true(out, "exclusiveMaximum", n),
-                _ => false,
+        _ => match value_cmp(*op, lhs, rhs, is_value, num_lit) {
+            Some((Cmp::Order { strict, flipped }, n)) => {
+                let key = match (flipped, strict) {
+                    (false, false) => "minimum",
+                    (false, true) => "exclusiveMinimum",
+                    (true, false) => "maximum",
+                    (true, true) => "exclusiveMaximum",
+                };
+                push_true(out, key, n)
             }
-        }
-        _ => false,
+            _ => false,
+        },
     }
 }
 
