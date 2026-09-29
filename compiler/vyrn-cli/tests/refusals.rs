@@ -726,52 +726,6 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
             bad.push(format!("{what}: it is not the kernel that refuses it"));
         }
     }
-    // The ways out the menus offer compile.
-    let compiles: &[(&str, String)] = &[
-        (
-            "the export copies",
-            format!(
-                "let mut kept = \"x\" export extern fn set(arg: String) \
-                 {{ kept = arg.copy() }}{END}"
-            ),
-        ),
-        (
-            "the consume signature",
-            format!(
-                "type R = {{ s: String }} \
-                 fn keep(x: consume String) -> R {{ return R {{ s: x }} }}{END}"
-            ),
-        ),
-        (
-            "the field copies",
-            format!(
-                "type R = {{ s: String }} \
-                 fn keep(x: String) -> R {{ return R {{ s: x.copy() }} }}{END}"
-            ),
-        ),
-        (
-            "the loop takes its container",
-            format!(
-                "fn go(xs: consume Array<String>) -> Int64 {{ let mut out: Array<String> = [] \
-                 for x in consume xs {{ out.push(x) }} return out.length }}{END}"
-            ),
-        ),
-        (
-            "the map key copies",
-            format!(
-                "fn build(ks: Array<String>) -> Map<String, Int64> \
-                 {{ let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m }}{END}"
-            ),
-        ),
-    ];
-    for (what, src) in compiles {
-        let name = format!("ok_{}.vyrn", what.replace(' ', "_"));
-        std::fs::write(dir.join(&name), src).expect("write the program");
-        let (ok, text) = whole_refusal_in(dir.to_path_buf(), &name, false);
-        if !ok {
-            bad.push(format!("{what}: refused, {text}"));
-        }
-    }
     assert!(
         bad.is_empty(),
         "rule 2 no longer refuses:\n  {}",

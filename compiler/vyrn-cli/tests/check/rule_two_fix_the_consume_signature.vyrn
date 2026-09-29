@@ -1,0 +1,1 @@
+type R = { s: String } fn keep(x: consume String) -> R { return R { s: x } } fn main() -> Int64 { return 0 }
