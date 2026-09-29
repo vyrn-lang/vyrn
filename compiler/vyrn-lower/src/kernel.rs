@@ -1870,8 +1870,8 @@ impl<'b> Kernel<'b> {
         };
         if std::env::var("VYRN_KERNEL_TRACE").is_ok() {
             eprintln!(
-                "owe-store: {} line {} site {}",
-                self.body.name, self.here, at.0
+                "owe-store: {} line {} site {:?}",
+                self.body.name, self.here, at
             );
         }
         self.missing.push(Missing {

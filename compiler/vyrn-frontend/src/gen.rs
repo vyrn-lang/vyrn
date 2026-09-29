@@ -668,7 +668,7 @@ fn generator_program(program: &Program, g: &str) -> Program {
         surface_shadows: program.surface_shadows.clone(),
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
-        nodes: program.nodes,
+        units: program.units,
     }
 }
 

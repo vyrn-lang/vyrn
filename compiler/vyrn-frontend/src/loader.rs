@@ -1217,7 +1217,7 @@ fn load_modules(
                     log_level: DEFAULT_LOG_LEVEL,
                     surface_shadows: std::collections::HashSet::new(),
                     log_sink: LogSink::Stderr,
-                    nodes: 0,
+                    units: 0,
                 },
                 import_targets: Vec::new(),
                 gen_source: None,

@@ -973,7 +973,7 @@ impl Parser {
                 log_sink,
                 // The loader fills this once every module is linked.
                 surface_shadows: std::collections::HashSet::new(),
-                nodes: 0,
+                units: 0,
             },
             errors,
         )
@@ -4379,8 +4379,23 @@ mod tests {
         parse(lex(s).unwrap()).unwrap()
     }
 
+    /// Every `#unit.local` a numbered tree's `{:#?}` prints.
+    fn ids(dbg: &str) -> Vec<(u32, u32)> {
+        dbg.split('#')
+            .skip(1)
+            .map(|t| {
+                let id: String = t
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                let (unit, local) = id.split_once('.').unwrap();
+                (unit.parse().unwrap(), local.parse().unwrap())
+            })
+            .collect()
+    }
+
     #[test]
-    fn parse_numbers_every_node_once_from_one() {
+    fn parse_numbers_each_unit_once_from_one() {
         let p = parse_src(
             r#"type P = { x: Int64 }
 impl Show for P { fn show(self) -> String { "p" } }
@@ -4392,20 +4407,34 @@ fn main() -> Int64 {
   return 0
 }"#,
         );
-        let dbg = format!("{p:#?}");
-        let mut ids: Vec<u32> = dbg
-            .split('#')
-            .skip(1)
-            .map(|t| {
-                t.split(|c: char| !c.is_ascii_digit())
-                    .next()
-                    .unwrap()
-                    .parse()
-                    .unwrap()
-            })
-            .collect();
-        ids.sort();
-        assert_eq!(ids, (1..=p.nodes).collect::<Vec<_>>());
+        let mut units: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+        for (unit, local) in ids(&format!("{p:#?}")) {
+            assert!(unit < p.units, "unit {unit} of {}", p.units);
+            units.entry(unit).or_default().push(local);
+        }
+        for locals in units.values_mut() {
+            locals.sort();
+            assert_eq!(*locals, (1..=locals.len() as u32).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn an_edit_in_one_unit_renumbers_no_other() {
+        let src = |extra: &str| {
+            parse_src(&format!(
+                "fn a() -> Int64 {{ return 1 + 2 }}
+fn b() -> Int64 {{ {extra}return 3 }}
+fn c(x: Int64) -> Int64 {{ return x }}
+test \"t\" {{ assert(c(1) == 1) }}"
+            ))
+        };
+        let (before, after) = (src(""), src("let y = [4, 5]\n"));
+        let unit = |p: &Program, i: usize| ids(&format!("{:#?}", p.functions[i]));
+        assert_ne!(unit(&before, 1), unit(&after, 1));
+        assert_eq!(unit(&before, 0), unit(&after, 0));
+        assert_eq!(unit(&before, 2), unit(&after, 2));
+        let tests = |p: &Program| ids(&format!("{:#?}", p.tests));
+        assert_eq!(tests(&before), tests(&after));
     }
 
     fn first_call(p: &Program) -> String {
