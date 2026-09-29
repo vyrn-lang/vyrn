@@ -12,6 +12,7 @@
 /// with `vyrn routes <file>`.
 
 import { fromBytesOr } from "std/strings"
+import { includes } from "std/arrays"
 import { checkContract } from "std/contract"
 import { report, reportHere, Severity } from "std/diag"
 
@@ -140,7 +141,7 @@ fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) ->
     // The contract first: its procedures always live there.
     let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
-        if rpcListContains(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
@@ -166,15 +167,6 @@ fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) ->
         }
     }
     return out
-}
-
-fn rpcListContains(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 /// The reply surface every client flavor exports: `RpcIssue`,
@@ -787,7 +779,7 @@ gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
     }
     let mut specs: Array<String> = []
     for s in typeMods {
-        if rpcListContains(specs, s) == false {
+        if includes(specs, s) == false {
             specs.push(s.copy())
         }
     }
@@ -1027,7 +1019,7 @@ gen fn rpcClientTypes(mods: Array<RpcModule>) -> RpcClientTypes {
     for m in mods {
         let iface = moduleInterface(m.modPath)
         for t in iface.types {
-            if rpcListContains(seen, t.name) == false {
+            if includes(seen, t.name) == false {
                 seen.push(t.name.copy())
                 out = out + t.source + "\n"
                 syms.push(symbol(t.name, t.origin, []))

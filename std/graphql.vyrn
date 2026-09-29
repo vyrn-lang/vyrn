@@ -35,6 +35,7 @@
 /// a `null` propagates.
 
 import { fromBytesOr } from "std/strings"
+import { includes } from "std/arrays"
 import { Json, JsonField, copyJson, copyJsonArray, emit } from "std/json"
 import { parseJson } from "std/jsonread"
 import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } from "std/scan"
@@ -1546,7 +1547,7 @@ fn gqlAnswerValue(
 fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
     let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
-        if gqlHas(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
@@ -1568,15 +1569,6 @@ fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
         }
     }
     return out
-}
-
-fn gqlHas(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 fn gqlJoin(parts: Array<String>, sep: String) -> String {

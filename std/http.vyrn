@@ -25,6 +25,7 @@ import { parseJson } from "std/jsonread"
 import { fieldsOf, hasField } from "std/jsondec"
 import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
 import { fnv1aStr, sha1 } from "std/hash"
+import { includes } from "std/arrays"
 // A path segment is wire text and a placeholder binds a value: `httpMatch`
 // decodes on the way in, `httpFill` encodes on the way out, with the RFC 3986
 // alphabet `std/ui` uses.
@@ -1104,7 +1105,7 @@ export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String
     }
     let mut fs: Array<JsonField> = []
     for k in ps.keys() {
-        let v = httpValue(httpAt(ps, k), httpListHas(numeric, k))
+        let v = httpValue(httpAt(ps, k), includes(numeric, k))
         fs.push(JsonField { key: k, value: v })
     }
     if body != "" {
@@ -1125,15 +1126,6 @@ fn httpValue(raw: String, isNumber: Bool) -> Json {
         }
     }
     return JStr(raw.copy())
-}
-
-fn httpListHas(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 fn httpAt(ps: Map<String, String>, k: String) -> String {
@@ -1320,7 +1312,7 @@ fn httpBraced(fields: Array<String>) -> Array<String> {
 fn httpImports(iface: ModuleInterface, module: String) -> String {
     let mut specs: Array<String> = [module.copy()]
     for t in iface.types {
-        if httpContains(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
@@ -1342,15 +1334,6 @@ fn httpImports(iface: ModuleInterface, module: String) -> String {
         }
     }
     return out
-}
-
-fn httpContains(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 /// The REST projection of one procedure module: a placeholder-checked

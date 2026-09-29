@@ -17,6 +17,7 @@
 // The `connect`-prefixed copies of `std/rpc`'s helpers keep this generator
 // self-contained.
 import { fromBytesOr } from "std/strings"
+import { includes } from "std/arrays"
 import { endsWith, startsWith } from "std/strpred"
 
 import { reportHere, Severity } from "std/diag"
@@ -48,15 +49,6 @@ fn connectJoin(parts: Array<String>, sep: String) -> String {
         i = i + 1
     }
     return out
-}
-
-fn connectListContains(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
 }
 
 fn connectIsNamedType(spelling: String, iface: ModuleInterface) -> Bool {
@@ -127,7 +119,7 @@ fn connectValidateContract(iface: ModuleInterface) -> String {
 fn connectImportBlock(iface: ModuleInterface, contract: String) -> String {
     let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
-        if connectListContains(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
