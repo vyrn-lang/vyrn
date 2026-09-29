@@ -809,8 +809,13 @@ fn the_checkers_literal_unit_tests_are_still_refused() {
         ),
         (
             "a negated slot past the minimum",
-            "integer literal 2147483649 does not fit Int32",
+            "integer literal -2147483649 does not fit Int32",
             "fn main() -> Int64 { let a: Int32 = -2147483649 return 0 }",
+        ),
+        (
+            "a negated literal in an unsigned slot",
+            "integer literal -1 does not fit UInt8",
+            "fn main() -> Int64 { let b: UInt8 = -1 return 0 }",
         ),
         (
             "a literal pattern",

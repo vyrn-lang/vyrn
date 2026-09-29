@@ -1902,6 +1902,14 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
         };
         match e {
             Expr::Int(n) => sized(e).and_then(|(b, s)| misfit("integer", literal_value(*n), b, s)),
+            Expr::Unary {
+                op: vyrn_frontend::ast::UnOp::Neg,
+                expr,
+                ..
+            } if matches!(**expr, Expr::Int(_)) => {
+                let v = int_literal_value(e)?;
+                sized(e).and_then(|(b, s)| misfit("integer", v, b, s))
+            }
             Expr::Byte(v) => sized(e).and_then(|(b, s)| misfit("byte", i128::from(*v), b, s)),
             Expr::Binary {
                 op: BinOp::Match,

@@ -3759,24 +3759,15 @@ impl<'a> Checker<'a> {
                 self.judged()
             }
             Expr::Unary { op, expr, .. } => {
-                // `-9223372036854775808`: the lexer wraps the magnitude to
-                // i64::MIN, and negation wraps it back.
-                if *op == UnOp::Neg && matches!(**expr, Expr::Int(i64::MIN)) {
-                    return Ok(Type::Int);
-                }
-                // A signed sized type's minimum written negated
-                // (`let x: Int32 = -2147483648`): the magnitude alone does not
-                // fit, the negation does.
-                if *op == UnOp::Neg {
-                    if let Expr::Int(n) = &**expr {
-                        if let Some(Type::IntN { bits, signed: true }) =
-                            expected.map(|t| self.base(t))
-                        {
-                            if bits < 64 && *n == 1i64 << (bits - 1) {
-                                return Ok(Type::IntN { bits, signed: true });
-                            }
-                        }
-                    }
+                // A negated integer literal is one literal: `-128` fits `Int8`
+                // although `128` does not, and `-1` fits no unsigned type. It
+                // takes the expected sized type, and the typed judgment checks
+                // its value whole (`checker::misfit`).
+                if *op == UnOp::Neg && matches!(**expr, Expr::Int(_)) {
+                    return Ok(match expected.map(|t| self.base(t)) {
+                        Some(t @ Type::IntN { .. }) => t,
+                        _ => Type::Int,
+                    });
                 }
                 // Every unary operator preserves its type, so the expectation
                 // flows through: `let a: Float32 = -0.5`.
