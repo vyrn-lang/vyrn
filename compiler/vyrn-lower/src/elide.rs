@@ -586,6 +586,103 @@ impl Walk<'_> {
         }
     }
 
+    /// The halving lemma. A loop that opens with `if u > c else break`
+    /// (`c >= 1`), halves `u` on every turn (`u = u >> 1` or `u / 2` among
+    /// [`every_turn`]'s rows), writes `u` nowhere else and has no `continue`
+    /// turns at most `N = floor(log2 U)` times, `U` its type's largest value:
+    /// turn `j` needs `u0 >> j >= 2`. A counter `k` whose only write is one
+    /// such row `k = k + s` then lies between `k0` and `k0 + s*N` at the head,
+    /// `k0` its entry value over names the loop does not write, when both fit
+    /// `k`'s type. Returns those head facts.
+    fn halving(&self, entry: &State, body: &[St], written: &BTreeSet<Name>) -> Vec<Lin> {
+        let [St::Let(t, Rhs::Prim(Op::Bin(op), vs, _)), St::If {
+            cond: Val::Name(c),
+            then,
+            els,
+            ..
+        }, rest @ ..] = body
+        else {
+            return Vec::new();
+        };
+        let (u, c1) = match (op, vs.as_slice()) {
+            (BinOp::Gt, [Val::Name(u), Val::Lit(Lit::Int(k))]) => (*u, *k),
+            (BinOp::GtEq, [Val::Name(u), Val::Lit(Lit::Int(k))]) => (*u, k.saturating_sub(1)),
+            _ => return Vec::new(),
+        };
+        let Kind::Int(bits, signed) = self.kind(u) else {
+            return Vec::new();
+        };
+        if c != t
+            || c1 < 1
+            || !then.is_empty()
+            || !matches!(els.as_slice(), [St::Break { .. }])
+            || any_continue(body)
+            || writes_of(body, u) != 1
+        {
+            return Vec::new();
+        }
+        let rows = every_turn(rest);
+        // `n = x op lit` among the rows, stored back into `x` by a row.
+        let step = |x: Name| {
+            rows.iter().find_map(|r| match r {
+                St::Store {
+                    place: Place::Name(p),
+                    value: Val::Name(v),
+                    ..
+                } if *p == x => rows.iter().find_map(|d| match d {
+                    St::Let(n, Rhs::Prim(Op::Bin(o), vs, _)) if n == v => match vs.as_slice() {
+                        [Val::Name(y), Val::Lit(Lit::Int(k))] if *y == x => Some((*o, *k)),
+                        _ => None,
+                    },
+                    _ => None,
+                }),
+                _ => None,
+            })
+        };
+        if !matches!(step(u), Some((BinOp::Shr, 1) | (BinOp::Div, 2))) {
+            return Vec::new();
+        }
+        // `u <= 2^(bits - 1) - 1` signed, `2^bits - 1` unsigned.
+        let n = i64::from(bits) - if signed { 2 } else { 1 };
+        let mut out = Vec::new();
+        for r in &rows {
+            let St::Store {
+                place: Place::Name(k),
+                ..
+            } = r
+            else {
+                continue;
+            };
+            let s = match step(*k) {
+                Some((BinOp::Add, s)) => s,
+                Some((BinOp::Sub, s)) => s.saturating_neg(),
+                _ => continue,
+            };
+            let k = *k;
+            let Some(k0) = entry.norm(&Lin::of(Term::Val(k))) else {
+                continue;
+            };
+            let Some(end) = s.checked_mul(n).and_then(|d| k0.plus(d)) else {
+                continue;
+            };
+            if k == u
+                || s == 0
+                || writes_of(body, k) != 1
+                || !matches!(self.kind(k), Kind::Int(..))
+                || k0.terms.iter().any(|(t, _)| written.contains(&name_of(*t)))
+                || !self.in_range(k, &k0, entry)
+                || !self.in_range(k, &end, entry)
+            {
+                continue;
+            }
+            let v = Lin::of(Term::Val(k));
+            let (lo, hi) = if s > 0 { (k0, end) } else { (end, k0) };
+            out.extend(v.sub(&lo));
+            out.extend(hi.sub(&v));
+        }
+        out
+    }
+
     fn looped(&mut self, entry: State, body: &mut [St]) -> State {
         let key = (body.as_ptr() as usize, entry);
         if !self.record {
@@ -608,6 +705,9 @@ impl Walk<'_> {
         let mut head = entry.clone();
         for n in &written {
             head.kill(*n);
+        }
+        for l in self.halving(entry, body, &written) {
+            head.assume(&l);
         }
         // Candidates: what entry knows about the written names, and the
         // counter shapes an index needs.
@@ -665,6 +765,53 @@ impl Walk<'_> {
         let (breaks, _) = self.loops.pop().expect("pushed above");
         State::join(&breaks)
     }
+}
+
+/// The rows a loop runs on every turn that reaches its end: the body's own
+/// rows and those of the blocks among them.
+fn every_turn(ss: &[St]) -> Vec<&St> {
+    ss.iter()
+        .flat_map(|s| match s {
+            St::Block { body, .. } => every_turn(body),
+            s => vec![s],
+        })
+        .collect()
+}
+
+/// How many rows of `ss` write `n`: a `let`, a store, a binder, or a call
+/// argument other than `read`.
+fn writes_of(ss: &[St], n: Name) -> usize {
+    let by_call = |rhs: &Rhs| match rhs {
+        Rhs::Call { args, .. } => args
+            .iter()
+            .filter(|(a, c)| *c != Capability::Read && root(a) == Some(n))
+            .count(),
+        _ => 0,
+    };
+    ss.iter()
+        .map(|s| match s {
+            St::Let(m, rhs) => usize::from(*m == n) + by_call(rhs),
+            St::Do { rhs, .. } => by_call(rhs),
+            St::Store { place, .. } => usize::from(place_root(place) == Some(n)),
+            St::If { then, els, .. } => writes_of(then, n) + writes_of(els, n),
+            St::Loop { body, .. } | St::Block { body, .. } => writes_of(body, n),
+            St::Switch { arms, .. } => arms
+                .iter()
+                .map(|a| usize::from(a.binds.contains(&n)) + writes_of(&a.body, n))
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn any_continue(ss: &[St]) -> bool {
+    ss.iter().any(|s| match s {
+        St::Continue { .. } => true,
+        St::If { then, els, .. } => any_continue(then) || any_continue(els),
+        St::Loop { body, .. } | St::Block { body, .. } => any_continue(body),
+        St::Switch { arms, .. } => arms.iter().any(|a| any_continue(&a.body)),
+        _ => false,
+    })
 }
 
 /// Whether a builtin's length effect lands on its result: its receiver is not

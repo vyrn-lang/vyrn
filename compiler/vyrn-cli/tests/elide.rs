@@ -179,6 +179,40 @@ fn a_length_of_two_to_the_31_traps_below_itself() {
     );
 }
 
+#[test]
+fn a_halving_loop_bounds_its_counter() {
+    let src = "fn w(xs: Array<Int64>, b: UInt8, t: Int32) -> Int64 {
+    let mut u = b
+                   let mut k: Int64 = 0
+    while u > 1 {
+        u = u >> 1
+        k = k + 1
+    }
+                   let mut v = t >> 2
+    let mut shift: Int32 = 0
+    while v > 1 {
+                       v = v >> 1
+        shift = shift + 1
+    }
+    let size = (t >> shift) & 3
+                   if xs.length > 7 {
+        return xs[k] + Int64(size)
+    }
+    return 0
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        [
+            "proved shift-range",
+            "proved shift-range",
+            "proved shift-range",
+            "proved shift-range",
+            "proved array-index",
+        ]
+    );
+}
+
 /// Each witness: a function `w` whose checks must all stay, and the call in
 /// `main` that makes one trap with the wording given.
 const WITNESSES: &[(&str, &str, &str)] = &[
@@ -335,4 +369,101 @@ fn every_witness_keeps_its_checks_and_traps_there() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Witnesses of the halving lemma: the literal halving shift is proved, the
+/// index stays and traps.
+const HALVING: &[(&str, &str, &str)] = &[
+    // A `UInt8` halves at most seven times, not six.
+    (
+        "fn w(xs: Array<Int64>, b: UInt8) -> Int64 {
+    let mut u = b
+    let mut k: Int64 = 0
+             while u > 1 {
+        u = u >> 1
+        k = k + 1
+    }
+    if xs.length > 6 {
+                 return xs[k]
+    }
+    return 0
+}
+",
+        "    print(w([0, 0, 0, 0, 0, 0, 0], 255).toString())",
+        "array index 7 out of bounds",
+    ),
+    // A second write of the halved name.
+    (
+        "fn w(xs: Array<Int64>, b: UInt8) -> Int64 {
+    let mut u = b
+    let mut k: Int64 = 0
+             let mut again = true
+    while u > 1 {
+        u = u >> 1
+        k = k + 1
+                 if again {
+            u = 255
+            again = false
+        }
+    }
+             if xs.length > 7 {
+        return xs[k]
+    }
+    return 0
+}
+",
+        "    print(w([0, 0, 0, 0, 0, 0, 0, 0], 255).toString())",
+        "array index 8 out of bounds",
+    ),
+    // A `continue` skips the halving.
+    (
+        "fn w(xs: Array<Int64>, b: UInt8) -> Int64 {
+    let mut u = b
+    let mut k: Int64 = 0
+             while u > 1 {
+        k = k + 1
+        if k == 1 {
+            continue
+        }
+                 u = u >> 1
+    }
+    if xs.length > 7 {
+        return xs[k]
+    }
+    return 0
+}
+",
+        "    print(w([0, 0, 0, 0, 0, 0, 0, 0], 255).toString())",
+        "array index 8 out of bounds",
+    ),
+];
+
+#[test]
+fn every_halving_witness_keeps_its_index_and_traps_there() {
+    let mut failures = Vec::new();
+    for (src, calls, trap) in HALVING {
+        let rows = verdicts(src, "w");
+        if rows != ["proved shift-range", "check array-index"] {
+            failures.push(format!(
+                "{src}
+rows: {rows:?}"
+            ));
+        }
+        let (err, _) = oracle(src, calls, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!(
+                "{src}
+ran: {err}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+
+"
+        )
+    );
 }
