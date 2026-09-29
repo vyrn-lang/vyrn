@@ -879,7 +879,7 @@ fn each_store(
             _ => Vec::new(),
         }
     }
-    for s in stmts {
+    for (s, _) in rows(stmts) {
         match s {
             St::Store {
                 place, line, site, ..
@@ -900,12 +900,6 @@ fn each_store(
                     .iter()
                     .for_each(|(p, r)| f(p, info.line, info.binding, *r))
             }
-            St::If { then, els, .. } => {
-                each_store(then, names, f);
-                each_store(els, names, f);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => each_store(body, names, f),
-            St::Switch { arms, .. } => arms.iter().for_each(|a| each_store(&a.body, names, f)),
             _ => {}
         }
     }
