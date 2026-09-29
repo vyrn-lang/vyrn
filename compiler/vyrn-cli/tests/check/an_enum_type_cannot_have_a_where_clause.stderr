@@ -1,0 +1,1 @@
+an_enum_type_cannot_have_a_where_clause.vyrn:1:0: an enum type cannot have a `where` clause

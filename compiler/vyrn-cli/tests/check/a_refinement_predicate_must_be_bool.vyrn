@@ -1,0 +1,1 @@
+type A = Int64 where value + 1

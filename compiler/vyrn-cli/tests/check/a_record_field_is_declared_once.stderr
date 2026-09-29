@@ -1,0 +1,1 @@
+a_record_field_is_declared_once.vyrn:1:0: duplicate field `a` in record `R`

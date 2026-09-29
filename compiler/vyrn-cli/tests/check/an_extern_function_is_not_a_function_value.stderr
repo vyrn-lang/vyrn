@@ -1,0 +1,1 @@
+an_extern_function_is_not_a_function_value.vyrn:3:0: an `extern` function cannot be used as a function value — the host boundary dispatches by name

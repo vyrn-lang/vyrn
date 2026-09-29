@@ -1,0 +1,9 @@
+type Box = { data: Array<Int64> }
+impl Index for Box {
+    fn tryGet(read self, k: Int64) -> read Option<Int64> {
+        if k < 0 {
+            return None
+        }
+        return Some(k + 1)
+    }
+}

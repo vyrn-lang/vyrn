@@ -1,0 +1,1 @@
+module_state_may_not_be_a_stream.vyrn:1:0: module state `g` may not be a `Stream` — a stream's lifetime is a scope, and module state is never dropped

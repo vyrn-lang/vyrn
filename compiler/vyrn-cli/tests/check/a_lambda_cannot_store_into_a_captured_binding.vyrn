@@ -1,0 +1,8 @@
+fn main() -> Int64 {
+    let mut xs = [1, 2]
+    let f: fn(Int64) -> Int64 = x -> {
+        xs[0] = x
+        return x
+    }
+    return 0
+}

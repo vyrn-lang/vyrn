@@ -1,0 +1,1 @@
+a_refinement_alias_needs_a_scalar_base.vyrn:1:0: `S` must have a scalar base (Int64, sized int, Float64, Bool, or String)
