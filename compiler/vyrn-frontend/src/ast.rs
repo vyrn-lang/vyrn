@@ -220,13 +220,13 @@ pub struct TypeDecl {
     pub line: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Field {
     pub name: String,
     pub ty: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EnumVariant {
     pub name: String,
     /// Empty for a nullary variant.
@@ -622,7 +622,7 @@ pub struct Param {
 
 /// A type. A validated type is a [`Type::Named`] whose [`TypeDecl`] carries the
 /// predicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     /// `Int64`, the default integer.
     Int,

@@ -986,10 +986,13 @@ pub fn refused(body: &Body, as_written: bool) -> Vec<(usize, String)> {
 /// that carries heap, or a type declaring `impl Owned`. A type parameter is
 /// refused, because no instance check runs on the body. The types are read
 /// as written, so the caller passes no instance of a generic function.
-pub fn drops(body: &Body, program: &vyrn_frontend::ast::Program) -> Vec<(usize, String)> {
+pub fn drops(
+    body: &Body,
+    program: &vyrn_frontend::ast::Program,
+    decls: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
+) -> Vec<(usize, String)> {
     use vyrn_frontend::types;
     let mut out = Vec::new();
-    let mut decls = None;
     for f in body.frames() {
         for (name, line) in &f.unbound_drops {
             out.push((
@@ -1013,7 +1016,6 @@ pub fn drops(body: &Body, program: &vyrn_frontend::ast::Program) -> Vec<(usize, 
                     i.protocol == types::OWNED && types::type_key(&i.ty).as_ref() == Some(&k)
                 })
             });
-            let decls = decls.get_or_insert_with(|| types::decl_map(program));
             let t = types::resolve(&info.ty, decls);
             let heap = matches!(
                 t,

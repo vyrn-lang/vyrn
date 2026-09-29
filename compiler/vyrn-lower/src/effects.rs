@@ -571,7 +571,7 @@ pub(crate) fn judge_built<R>(
             }
         }
     }
-    let decls = vyrn_frontend::types::decl_map(program);
+    let decls = own.proto.types();
     let externs: std::collections::BTreeSet<&str> = program
         .functions
         .iter()
@@ -599,7 +599,7 @@ pub(crate) fn judge_built<R>(
     };
     let stored = vyrn_frontend::checker::stored_fn_effects(program);
     let mut through = |ty: &Type| -> Callee {
-        let ty = &vyrn_frontend::types::resolve(ty, &decls);
+        let ty = &vyrn_frontend::types::resolve(ty, decls);
         if !matches!(ty, Type::Fn(..)) {
             return Callee::Unknown;
         }

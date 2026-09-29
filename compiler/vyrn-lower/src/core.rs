@@ -2814,9 +2814,7 @@ impl<'a> Builder<'a> {
     }
 
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
-        let heap = self.proto.owns_heap(&ty);
-        let linear = self.proto.linear_kind(&ty).is_some();
-        let runs = self.proto.declared_releases(&ty);
+        let (heap, linear, runs) = self.proto.name_facts(&ty);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
@@ -4536,9 +4534,10 @@ impl<'a> Builder<'a> {
                 if *consuming {
                     self.body.names[it as usize].for_consume = true;
                 }
-                let decls = vyrn_frontend::types::decl_map(self.program);
-                let streaming =
-                    matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Stream(_));
+                let streaming = matches!(
+                    vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                    Type::Stream(_)
+                );
                 if streaming {
                     self.stream_loops.push(it);
                 }
@@ -4616,7 +4615,12 @@ impl<'a> Builder<'a> {
                 // growable array's triple; other containers have no such
                 // buffer). A wrong answer here frees somebody else's storage.
                 let mut unreached = None;
-                if owned && matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Array(_)) {
+                if owned
+                    && matches!(
+                        vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                        Type::Array(_)
+                    )
+                {
                     self.body.loop_buffers.push(sid);
                     unreached = counter.map(|(n, i)| Unreached {
                         it,
@@ -8223,8 +8227,9 @@ fn placed_edges(join: usize) -> Option<Vec<EdgeRow>> {
 }
 
 /// The core's answers for the program last analysed on this thread. `None`
-/// in a host that never installed the placer; an emitter then reads the
-/// plan.
+/// in a host that never installed the placer, where an emitter reads the plan,
+/// and after an analysis that feeds no emitter
+/// ([`vyrn_frontend::movecheck::emitting`]).
 pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
@@ -8962,7 +8967,7 @@ fn typed(
             }
         }
         if as_written {
-            found.extend(crate::typed::drops(top, program));
+            found.extend(crate::typed::drops(top, program, own.proto.types()));
         }
         found.sort_by_key(|(line, _)| *line);
         let refused = !found.is_empty();
@@ -9400,48 +9405,53 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
     BODIES.with(|b| b.borrow_mut().clear());
-    if let Ok(top) = build_module_state(program, own, &lowered.globals) {
-        for body in top.frames() {
-            fold_frame(body, &own.proto, &mut facts);
+    // `vyrn check` emits nothing, so it folds no facts; the worklist below
+    // still places its rows.
+    let folds = vyrn_frontend::movecheck::emitting();
+    if folds {
+        if let Ok(top) = build_module_state(program, own, &lowered.globals) {
+            for body in top.frames() {
+                fold_frame(body, &own.proto, &mut facts);
+            }
         }
-    }
-    for (i, inst) in lowered.instances.iter().enumerate() {
-        // Rebuilt only where the pass above wrote a row for this function; the
-        // rest fold the body that pass already built.
-        let fresh = if touched.contains(&inst.func.name) {
-            let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
-            build(program, inst, own).ok()
-        } else {
-            None
-        };
-        let Some(top) = fresh.as_ref().or(built[i].as_ref()) else {
-            continue;
-        };
-        for body in top.frames() {
-            fold_frame(body, &own.proto, &mut facts);
+        for (i, inst) in lowered.instances.iter().enumerate() {
+            // Rebuilt only where the pass above wrote a row for this function; the
+            // rest fold the body that pass already built.
+            let fresh = if touched.contains(&inst.func.name) {
+                let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
+                build(program, inst, own).ok()
+            } else {
+                None
+            };
+            let Some(top) = fresh.as_ref().or(built[i].as_ref()) else {
+                continue;
+            };
+            for body in top.frames() {
+                fold_frame(body, &own.proto, &mut facts);
+            }
         }
-    }
-    // The same for `test` and `bench` bodies, whose nodes an emitter looks up
-    // too.
-    for (i, ob) in lowered.bodies.iter().enumerate() {
-        let fresh = if touched.contains(&ob.name) {
-            build_outside(
-                program,
-                own,
-                &ob.name,
-                ob.module.clone(),
-                ob.block,
-                &ob.facts,
-            )
-            .ok()
-        } else {
-            None
-        };
-        let Some(top) = fresh.as_ref().or(outside[i].as_ref()) else {
-            continue;
-        };
-        for body in top.frames() {
-            fold_frame(body, &own.proto, &mut facts);
+        // The same for `test` and `bench` bodies, whose nodes an emitter looks up
+        // too.
+        for (i, ob) in lowered.bodies.iter().enumerate() {
+            let fresh = if touched.contains(&ob.name) {
+                build_outside(
+                    program,
+                    own,
+                    &ob.name,
+                    ob.module.clone(),
+                    ob.block,
+                    &ob.facts,
+                )
+                .ok()
+            } else {
+                None
+            };
+            let Some(top) = fresh.as_ref().or(outside[i].as_ref()) else {
+                continue;
+            };
+            for body in top.frames() {
+                fold_frame(body, &own.proto, &mut facts);
+            }
         }
     }
     // A worklist to a fixpoint. Each body is built, placed, and built again,
@@ -9468,6 +9478,9 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     own.releases.entry(f).or_default().push(row);
                 }
             }
+            if !folds {
+                continue;
+            }
             let Ok(top) = build(program, inst, own) else {
                 continue;
             };
@@ -9477,7 +9490,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     }
-    FACTS.with(|f| *f.borrow_mut() = Some(facts));
+    FACTS.with(|f| *f.borrow_mut() = folds.then_some(facts));
     crate::effects::set_state_callees(None);
 }
 
