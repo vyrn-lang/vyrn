@@ -10,12 +10,16 @@
 //! crate so `vyrn-lsp` can reach it; outside the default workspace because
 //! `wasmtime` is an external dependency.
 
+#[cfg(feature = "host")]
 use std::path::PathBuf;
+#[cfg(feature = "host")]
 use std::sync::mpsc;
 
 use vyrn_frontend::ast::{Block, Expr, Function, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
-use vyrn_frontend::gen::{compiler_identity, CodePiece, GenInputs, GenOutput, GenRead, Spliced};
+#[cfg(feature = "host")]
+use vyrn_frontend::gen::{compiler_identity, CodePiece, GenRead, Spliced};
+use vyrn_frontend::gen::{GenInputs, GenOutput};
 
 /// Calls this path cannot serve; a module containing one is declined (see
 /// [`engine`]). A `gen fn` may not call the write capabilities, so this only
@@ -30,12 +34,14 @@ const RESULT_BEGIN: &str = "<<vyrn-genwasm-result>>";
 const RESULT_END: &str = "<<vyrn-genwasm-result-end>>";
 
 /// Installs the wasm generation engine. Called once from `main`.
+#[cfg(feature = "host")]
 pub fn install() {
     vyrn_frontend::gen::set_gen_engine(Box::new(engine));
 }
 
 /// Claims a generation run, or declines it with `None`, which the frontend
 /// reports as an error.
+#[cfg(feature = "host")]
 fn engine(
     program: &Program,
     fn_name: &str,
@@ -54,6 +60,7 @@ fn engine(
 }
 
 /// `VYRN_GENWASM_TRACE=1` prints per-phase timings on stderr.
+#[cfg(feature = "host")]
 fn trace(phase: &str, d: std::time::Duration) {
     if std::env::var("VYRN_GENWASM_TRACE").is_ok() {
         eprintln!("genwasm {phase}: {:.2} ms", d.as_secs_f64() * 1000.0);
@@ -62,6 +69,7 @@ fn trace(phase: &str, d: std::time::Duration) {
 
 /// Declines, saying why under `VYRN_GENWASM_TRACE`; otherwise a decline is
 /// invisible.
+#[cfg(feature = "host")]
 fn decline(why: &str) -> EngineError {
     if std::env::var("VYRN_GENWASM_TRACE").is_ok() {
         eprintln!("genwasm declined: {why}");
@@ -69,6 +77,7 @@ fn decline(why: &str) -> EngineError {
     EngineError::Unsupported
 }
 
+#[cfg(feature = "host")]
 enum EngineError {
     /// This path cannot serve the generator.
     Unsupported,
@@ -91,6 +100,7 @@ fn reaches_unserved(program: &Program) -> Option<String> {
     })
 }
 
+#[cfg(feature = "host")]
 fn run(
     program: &Program,
     fn_name: &str,
@@ -152,6 +162,7 @@ fn run(
 ///
 /// `Err` is a scoping violation or an unreadable remote pin; it aborts
 /// generation and the guest never sees it.
+#[cfg(feature = "host")]
 fn serve(
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
@@ -223,6 +234,51 @@ fn serve(
             Ok(Served::Bytes(1, Vec::new()))
         }
     }
+}
+
+/// Runs generator `fn_name` without wasmtime, for the playground, where the
+/// browser runs the module. `exec` instantiates the module bytes, runs them
+/// with the argv and the `TypeArg`'s atoms, and answers the module's stdout.
+///
+/// Only a generator whose one parameter is a `TypeArg` is served: `exec`'s
+/// host answers no read, no module reflection and no code quote, so any other
+/// generator is declined (`None`).
+pub fn run_pure(
+    program: &Program,
+    fn_name: &str,
+    args: &[ConstVal],
+    inputs: &GenInputs<'_>,
+    exec: impl FnOnce(&[u8], &[String], &[Atom]) -> Result<Vec<u8>, String>,
+) -> Option<Result<GenOutput, String>> {
+    let target = program.functions.iter().find(|f| f.name == fn_name)?;
+    let arg = inputs.type_arg.as_ref()?;
+    if !dispatchable(target) || !takes_type_arg(target) || !args.is_empty() {
+        return None;
+    }
+    if reaches_unserved(program).is_some() {
+        return None;
+    }
+    let types = program
+        .type_decls
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect();
+    let mut atoms = Vec::new();
+    let run = || -> Result<GenOutput, String> {
+        encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)?;
+        let wrapper =
+            wrapper_program(program).ok_or("the wrapper program cannot be synthesized")?;
+        let bytes = vyrn_codegen::direct::compile_gen_host(&wrapper)?;
+        let stdout = exec(&bytes, &[fn_name.to_string()], &atoms)?;
+        let (_, source) = unframe_result(&stdout)?;
+        let source =
+            String::from_utf8(source).map_err(|_| "generator emitted invalid UTF-8".to_string())?;
+        Ok(GenOutput {
+            source,
+            reads: Vec::new(),
+        })
+    };
+    Some(run())
 }
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
@@ -750,28 +806,34 @@ fn mangle(ty: &Type) -> Option<String> {
 /// toolchain. `vyrn-cli/tests/genwasm.rs` runs every generator example under
 /// both engines and fails on a byte of difference; a program the backend
 /// cannot compile declines.
+#[cfg(feature = "host")]
 fn compile_to_wasm(_key: &str, program: &Program) -> Result<Vec<u8>, EngineError> {
     vyrn_codegen::direct::compile_gen_host(program).map_err(|e| decline(&e))
 }
 
 /// `__vyrn_gen_read`'s modes, shared with the emitter.
+#[cfg(feature = "host")]
 const MODE_READ: i32 = 0;
+#[cfg(feature = "host")]
 const MODE_LIST: i32 = 2;
 /// Not a read: `moduleInterface` needs the resolver and the loader, so it is
 /// served on the host thread like one.
+#[cfg(feature = "host")]
 const MODE_MODULE_INTERFACE: i32 = 3;
 /// `listDirKinds`: `MODE_LIST`'s encoding with `/` appended to each directory.
+#[cfg(feature = "host")]
 const MODE_LIST_KINDS: i32 = 4;
 
 /// One unit of a structured host result. Encoder and decoder walk the same
 /// static type, so the variant is not a tag the decoder consults: a `nextInt`
 /// that finds a string means the two walks disagreed.
-enum Atom {
+pub enum Atom {
     Int(i64),
     Str(Vec<u8>),
 }
 
 #[derive(Default)]
+#[cfg(feature = "host")]
 struct Streams {
     /// NUL-terminated argv, argv[0] first, as `args_get` writes it.
     argv: Vec<Vec<u8>>,
@@ -783,6 +845,7 @@ struct Streams {
     mem: Option<wasmtime::Memory>,
 }
 
+#[cfg(feature = "host")]
 impl GenHost for Streams {
     fn gen(&mut self) -> &mut GenState {
         &mut self.gen
@@ -795,6 +858,7 @@ impl GenHost for Streams {
 /// A store that can serve the `vyrn_gen` imports through [`link`]: this crate's
 /// generation run, and the driver's `test` run of a module that reaches a
 /// generator.
+#[cfg(feature = "host")]
 pub trait GenHost {
     fn gen(&mut self) -> &mut GenState;
     fn memory(&self) -> Option<wasmtime::Memory>;
@@ -803,6 +867,7 @@ pub trait GenHost {
 /// The host side of the `vyrn_gen` imports: the code arena, the atom stream,
 /// the stash, and the declarations `contractOf` and `lex` read.
 #[derive(Default)]
+#[cfg(feature = "host")]
 pub struct GenState {
     /// The last served read or `render`, waiting for `fetch` to copy it into
     /// guest memory. The host never allocates on the guest's side.
@@ -825,6 +890,7 @@ pub struct GenState {
     caps: Option<Caps>,
 }
 
+#[cfg(feature = "host")]
 impl GenState {
     /// Takes the declarations `contractOf` and `lex` reflect over.
     pub fn new(p: &Program) -> Self {
@@ -840,6 +906,7 @@ impl GenState {
     }
 }
 
+#[cfg(feature = "host")]
 impl GenState {
     /// The pieces a handle names. Compiled code only holds handles the imports
     /// made, but the index is guest-supplied, so it is checked.
@@ -892,7 +959,7 @@ impl GenState {
 /// Pushes `lit`, a literal from the compiler's reflection, onto the atom stream
 /// by walking the static type, as the decoder does. Fields are taken from the
 /// literal by name, so their order in the literal does not matter.
-fn encode(
+pub fn encode(
     ty: &Type,
     lit: &Expr,
     types: &std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
@@ -956,6 +1023,7 @@ fn encode(
 ///
 /// The guest runs on its own thread because wasmtime needs `'static` store data
 /// and the resolver is borrowed; channels avoid an `unsafe` lifetime extension.
+#[cfg(feature = "host")]
 struct Caps {
     req: mpsc::Sender<(String, i32)>,
     resp: mpsc::Receiver<Result<Served, String>>,
@@ -963,6 +1031,7 @@ struct Caps {
 
 /// The host thread's answer: bytes for a read or a listing, or the reflection
 /// literal for `moduleInterface`.
+#[cfg(feature = "host")]
 enum Served {
     Bytes(i32, Vec<u8>),
     /// Encoded on the guest thread, so one [`encode`] call serves all three
@@ -972,33 +1041,44 @@ enum Served {
 
 /// `proc_exit`, carried out of the guest as an error: the only way to stop it.
 #[derive(Debug)]
+#[cfg(feature = "host")]
 struct Exit(i32);
 
+#[cfg(feature = "host")]
+#[cfg(feature = "host")]
 impl std::fmt::Display for Exit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "exit {}", self.0)
     }
 }
 
+#[cfg(feature = "host")]
+#[cfg(feature = "host")]
 impl std::error::Error for Exit {}
 
 /// A host-side refusal carried out as a trap: a read outside the declared
 /// inputs, or a value with no splice rule. Both abort generation; neither may
 /// reach the generator as a value.
 #[derive(Debug)]
+#[cfg(feature = "host")]
 struct Denied(String);
 
+#[cfg(feature = "host")]
+#[cfg(feature = "host")]
 impl std::fmt::Display for Denied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
+#[cfg(feature = "host")]
+#[cfg(feature = "host")]
 impl std::error::Error for Denied {}
 
 /// Serves the `vyrn_gen` imports [`vyrn_codegen::direct::compile_gen_host`]
 /// emits, on any [`GenHost`] store. Splicing, escaping and float formatting
 /// are the frontend's own functions (`vyrn_frontend::gen`).
+#[cfg(feature = "host")]
 pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime::Result<()> {
     use wasmtime::{Caller, Error, Result};
     // `read` resolves and stashes; `fetch` copies the stash into a buffer the
@@ -1190,6 +1270,7 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
 }
 
 /// The guest's memory and its store data, held at once.
+#[cfg(feature = "host")]
 fn guest_mem<'a, T: GenHost>(
     caller: &'a mut wasmtime::Caller<'_, T>,
 ) -> wasmtime::Result<(&'a mut [u8], &'a mut T)> {
@@ -1201,6 +1282,7 @@ fn guest_mem<'a, T: GenHost>(
 
 /// A NUL-terminated guest string. Vyrn strings are UTF-8 with no interior NUL,
 /// so this is a copy, not a parse.
+#[cfg(feature = "host")]
 fn cstr(data: &[u8], at: i32) -> wasmtime::Result<String> {
     let rest = data
         .get(at as usize..)
@@ -1213,6 +1295,7 @@ fn cstr(data: &[u8], at: i32) -> wasmtime::Result<String> {
 /// and the one word it sent, so the frontend's one splice rule runs on it.
 /// Floats cross as bits because the shortest-roundtrip formatting belongs on
 /// this side.
+#[cfg(feature = "host")]
 fn splice_value(
     tag: i32,
     bits: i64,
@@ -1239,16 +1322,21 @@ fn splice_value(
     })
 }
 
+#[cfg(feature = "host")]
 const ERRNO_SUCCESS: i32 = 0;
+#[cfg(feature = "host")]
 const ERRNO_BADF: i32 = 8;
+#[cfg(feature = "host")]
 const ERRNO_SPIPE: i32 = 29;
 
+#[cfg(feature = "host")]
 fn wr32(data: &mut [u8], at: i32, v: u32) -> Option<()> {
     let at = at as usize;
     data.get_mut(at..at + 4)?.copy_from_slice(&v.to_le_bytes());
     Some(())
 }
 
+#[cfg(feature = "host")]
 fn rd32(data: &[u8], at: i32) -> Option<u32> {
     let at = at as usize;
     Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
@@ -1263,6 +1351,7 @@ fn rd32(data: &[u8], at: i32) -> Option<u32> {
 /// and may persist to disk. Without one (a generated module in the closure) the
 /// key hashes the program's `Debug` and stays in memory: a cheap key that
 /// missed an edit would run a stale artifact.
+#[cfg(feature = "host")]
 fn artifact_key(program: &Program, fingerprint: Option<&str>) -> String {
     use std::fmt::Write as _;
 
@@ -1290,6 +1379,7 @@ fn artifact_key(program: &Program, fingerprint: Option<&str>) -> String {
 
 /// Where compiled artifacts persist: inside the generation cache, so clearing it
 /// clears them.
+#[cfg(feature = "host")]
 fn artifact_dir() -> PathBuf {
     vyrn_frontend::manifest::gen_cache_dir().join("wasm")
 }
@@ -1300,6 +1390,7 @@ fn artifact_dir() -> PathBuf {
 /// deserialized only when its tag verifies under the per-user secret of
 /// `vyrn_frontend::loader::gen_cache_tag`: any process running as the user can
 /// write to the cache directory. Every failure is a cache miss.
+#[cfg(feature = "host")]
 fn load_artifact(key: &str) -> Option<wasmtime::Module> {
     let bytes = std::fs::read(artifact_dir().join(key)).ok()?;
     let (tag, module) = bytes.split_at_checked(ARTIFACT_TAG_LEN)?;
@@ -1312,10 +1403,12 @@ fn load_artifact(key: &str) -> Option<wasmtime::Module> {
 }
 
 /// The authentication tag prefixed to every stored artifact: a sha256 in hex.
+#[cfg(feature = "host")]
 const ARTIFACT_TAG_LEN: usize = 64;
 
 /// Stores an artifact for the next session. Best-effort: a failure costs a
 /// recompile.
+#[cfg(feature = "host")]
 fn store_artifact(key: &str, module: &wasmtime::Module) {
     let Ok(bytes) = module.serialize() else {
         return;
@@ -1340,11 +1433,13 @@ fn store_artifact(key: &str, module: &wasmtime::Module) {
 /// 1,000 per step plus a flat 1M leaves ~2.4x margin. One statement can copy
 /// unbounded bytes, so this is a margin, not a proof. The default budget burns
 /// out in about 0.7 s.
+#[cfg(feature = "host")]
 fn wasm_fuel(steps: u64) -> u64 {
     steps.saturating_mul(1_000).saturating_add(1_000_000)
 }
 
 /// The process's wasmtime engine, with fuel metering on.
+#[cfg(feature = "host")]
 fn wasm_engine() -> &'static wasmtime::Engine {
     static ENGINE: std::sync::OnceLock<wasmtime::Engine> = std::sync::OnceLock::new();
     ENGINE.get_or_init(|| {
@@ -1356,6 +1451,7 @@ fn wasm_engine() -> &'static wasmtime::Engine {
     })
 }
 
+#[cfg(feature = "host")]
 fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, wasmtime::Module>>
 {
     static CACHE: std::sync::OnceLock<
@@ -1367,6 +1463,7 @@ fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String,
 /// Compiles once and runs, returning the source the guest framed on stdout.
 /// Three tiers, cheapest first: this process's modules, artifacts on disk,
 /// then emit plus Cranelift.
+#[cfg(feature = "host")]
 fn run_module(
     key: &str,
     persist: bool,
@@ -1412,6 +1509,7 @@ fn run_module(
 /// Runs the guest on its own thread and serves its capability requests from
 /// this one, where the resolver lives. The loop ends when the guest's store,
 /// and with it its `Sender`, is dropped.
+#[cfg(feature = "host")]
 fn run_hosted(
     module: &wasmtime::Module,
     argv: &[String],
@@ -1468,6 +1566,7 @@ fn run_hosted(
 ///
 /// Embedded rather than spawned: the `wasmtime` CLI's launch measured ~106 ms. WASI is a hand-written minimum;
 /// every other import traps.
+#[cfg(feature = "host")]
 fn run_wasm(
     module: &wasmtime::Module,
     argv: &[String],
@@ -1726,6 +1825,7 @@ fn run_wasm(
 }
 
 #[cfg(test)]
+#[cfg(feature = "host")]
 mod tests {
     use super::*;
 
