@@ -538,6 +538,24 @@ pub enum Capability {
     Consume,
 }
 
+impl Capability {
+    /// The contextual word that spells this capability.
+    pub fn word(self) -> &'static str {
+        match self {
+            Capability::Read => "read",
+            Capability::Modify => "modify",
+            Capability::Consume => "consume",
+        }
+    }
+
+    /// The capability a word spells, or `None`.
+    pub fn from_word(word: &str) -> Option<Capability> {
+        [Capability::Read, Capability::Modify, Capability::Consume]
+            .into_iter()
+            .find(|c| c.word() == word)
+    }
+}
+
 /// A name a binding form introduces, and where the source spells it.
 ///
 /// `col` is the 1-based column of the name in Unicode scalar values, `0` when a

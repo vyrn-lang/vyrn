@@ -2,7 +2,7 @@
 //
 // A TextMate grammar is a second copy of a fact the compiler already holds, and
 // a second copy drifts. This one had: `from` and `logging` were coloured as
-// keywords while the lexer's `keywords!` table holds neither, so `let from =
+// keywords while the lexer's `keywords` table holds neither, so `let from =
 // 1` and `let logging = 2` — both ordinary bindings the parser accepts — read as
 // reserved words in the editor.
 //
@@ -24,15 +24,15 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "..", "..", "..");
 
-/** Every word the lexer's `keywords!` table maps to a keyword token. */
+/** Every word the lexer's `keywords` table maps to a keyword token. */
 async function lexerKeywords() {
   const src = await readFile(
     path.join(repo, "compiler", "vyrn-frontend", "src", "lexer.rs"),
     "utf8",
   );
-  const at = src.indexOf("keywords! {");
-  assert.ok(at > 0, "the keywords! table is gone from lexer.rs — this test needs a new anchor");
-  const body = src.slice(at, src.indexOf("\n}", at));
+  const at = src.indexOf("\n    keywords {\n");
+  assert.ok(at > 0, "the keywords table is gone from lexer.rs — this test needs a new anchor");
+  const body = src.slice(at, src.indexOf("\n    }", at));
   // `"fn" => Tok::Fn,` — the arms that name a token, not the `_ => Ident` fallback.
   const words = [...body.matchAll(/"([a-z]+)"\s*=>\s*Tok::/g)].map((m) => m[1]);
   assert.ok(words.length > 15, `only ${words.length} keyword arms found — the shape changed`);

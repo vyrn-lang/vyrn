@@ -57,7 +57,7 @@ fn parser_sections() -> Vec<Section> {
     use Kind::*;
     vec![
         sec("pub fn is_member_type_param(name: &str) -> bool {", Grammar),
-        sec("fn mark_member_type_params(ty: &mut Type) {", Twice),
+        sec("fn mark_member_type_params(ty: &mut Type) {", Desugar),
         sec("fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {", Grammar),
         sec("pub const METHOD_BUILTINS: &[(&str, &str)] = &[", Twice),
         sec("pub fn method_surface(internal: &str) -> &str {", Shared),
@@ -86,13 +86,13 @@ fn parser_sections() -> Vec<Section> {
         sec("fn contract_decl(&mut self) -> Result<ContractDecl, Diagnostic> {", Grammar),
         sec("fn contract_member_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
         sec("fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {", Grammar),
-        sec("fn parse_self_capability(&mut self) -> Capability {", Twice),
-        sec("fn parse_result_capability(&mut self) -> Result<Option<Capability>, Diagnostic> {", Twice),
+        sec("fn parse_self_capability(&mut self) -> Capability {", Grammar),
+        sec("fn parse_result_capability(&mut self) -> Result<Option<Capability>, Diagnostic> {", Grammar),
         sec("fn impl_method(", Grammar),
         sec("fn logging_config(&mut self) -> Result<(usize, LogSink), Diagnostic> {", Grammar),
         sec("fn import_decl(&mut self) -> Result<ImportDecl, Diagnostic> {", Grammar),
         sec("fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {", Grammar),
-        sec("fn parse_capability(&mut self) -> Capability {", Twice),
+        sec("fn parse_capability(&mut self) -> Capability {", Grammar),
         sec("fn enum_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
         sec("fn record_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
         sec("fn type_param_binder(", Grammar),
@@ -111,7 +111,7 @@ fn parser_sections() -> Vec<Section> {
         sec("fn refutable_let(&mut self, line: usize, mutable: bool) -> Result<Stmt, Diagnostic> {", Desugar),
         sec("fn stmt(&mut self) -> Result<Stmt, Diagnostic> {", Grammar),
         sec("fn expr(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
-        sec("fn binop(tok: &Tok) -> Option<(BinOp, u8)> {", Twice),
+        sec("fn binop(tok: &Tok) -> Option<(BinOp, u8)> {", Grammar),
         sec("const NULLISH_BP: u8 = 5;", Grammar),
         sec("fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {", Desugar),
         sec("fn unary(&mut self) -> Result<Expr, Diagnostic> {", Grammar),
@@ -135,16 +135,13 @@ fn parser_sections() -> Vec<Section> {
 fn lexer_sections() -> Vec<Section> {
     use Kind::*;
     vec![
-        sec("pub enum Tok {", Grammar),
         sec("pub struct Token {", Shared),
         sec(
             "pub fn token_name_and_text(tok: &Tok) -> (String, String) {",
             Shared,
         ),
         sec("pub struct Triv {", Shared),
-        sec("macro_rules! keywords {", Twice),
-        sec("macro_rules! punctuation {", Twice),
-        sec("fn single_char_op(c: char) -> Option<Tok> {", Twice),
+        sec("macro_rules! tokens {", Grammar),
         sec(
             "pub fn scan(src: &str) -> Result<Scan, Diagnostic> {",
             Grammar,
@@ -294,17 +291,17 @@ fn the_parser_census_matches_its_pin() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3116, 51),
-        ("parser.rs", "a desugar the parser states", 951, 7),
-        ("parser.rs", "a table stated a second time", 178, 1),
+        ("parser.rs", "the grammar's own arm", 3204, 52),
+        ("parser.rs", "a desugar the parser states", 963, 7),
+        ("parser.rs", "a table stated a second time", 55, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
         ("parser.rs", "shared machinery", 199, 1),
         ("parser.rs", "tests", 1877, 0),
-        ("lexer.rs", "the grammar's own arm", 531, 11),
+        ("lexer.rs", "the grammar's own arm", 595, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
-        ("lexer.rs", "a table stated a second time", 138, 0),
+        ("lexer.rs", "a table stated a second time", 0, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
-        ("lexer.rs", "shared machinery", 191, 2),
+        ("lexer.rs", "shared machinery", 204, 2),
         ("lexer.rs", "tests", 234, 0),
     ];
     assert_eq!(got, want, "the parser census has moved");
