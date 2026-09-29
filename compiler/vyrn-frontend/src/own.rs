@@ -216,12 +216,15 @@ fn ident(program: &Program) -> (usize, usize, usize) {
 }
 
 thread_local! {
-    /// The load's analysis and the [`ident`] of its program.
-    static LOADED: std::cell::RefCell<Option<((usize, usize, usize), Ownership)>> =
-        const { std::cell::RefCell::new(None) };
+    /// The load's analysis and checker record, and the [`ident`] of its program.
+    #[allow(clippy::type_complexity)]
+    static LOADED: std::cell::RefCell<
+        Option<((usize, usize, usize), Ownership, Option<crate::checker::HeldRecord>)>,
+    > = const { std::cell::RefCell::new(None) };
 }
 
-/// Hands the load's analysis to the [`Memo`] the command opens next.
+/// Hands the load's analysis and checker record to the [`Memo`] the command
+/// opens next.
 ///
 /// Only inside a compile scope ([`crate::project::memo_open`]): there a
 /// projection site keeps one expansion, so the load's nodes are the ones the
@@ -231,7 +234,8 @@ pub fn hand_on(program: &Program, ownership: &Ownership) {
     if !crate::project::memo_open() {
         return;
     }
-    LOADED.with(|l| *l.borrow_mut() = Some((ident(program), ownership.clone())));
+    let record = crate::checker::held(program);
+    LOADED.with(|l| *l.borrow_mut() = Some((ident(program), ownership.clone(), record)));
 }
 
 /// Drops what the load handed on. Call it after rewriting the program in place
@@ -258,12 +262,16 @@ impl<'a> Memo<'a> {
         let adopted = LOADED
             .with(|l| l.borrow_mut().take())
             .filter(|_| crate::project::memo_open())
-            .filter(|(id, _)| *id == ident(program))
-            .map(|(_, o)| o);
-        MEMO.with(|m| *m.borrow_mut() = adopted);
+            .filter(|(id, _, _)| *id == ident(program))
+            .map(|(_, o, r)| (o, r));
+        let (ownership, record) = adopted.unzip();
+        MEMO.with(|m| *m.borrow_mut() = ownership);
         // The lowering reads the checker's record (`checker::recorded`)
         // instead of checking the program again.
         crate::checker::hold_open(program);
+        if let Some(record) = record.flatten() {
+            crate::checker::adopt(program, record);
+        }
         Memo {
             program: std::marker::PhantomData,
         }

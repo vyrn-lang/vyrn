@@ -1718,12 +1718,12 @@ thread_local! {
     /// key because the guard that sets it borrows the program
     /// ([`crate::own::Memo::open`]).
     static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// `(program address, generator host, test host, record)`. The host flags
-    /// change what a check decides, so they are part of the key.
-    #[allow(clippy::type_complexity)]
-    static HELD: RefCell<Option<(usize, bool, bool, std::rc::Rc<Recorded>)>> =
-        const { RefCell::new(None) };
+    static HELD: RefCell<Option<(usize, HeldRecord)>> = const { RefCell::new(None) };
 }
+
+/// `(generator host, test host, record)`. The host flags change what a check
+/// decides, so a record answers only under the flags it was made with.
+pub(crate) type HeldRecord = (bool, bool, std::rc::Rc<Recorded>);
 
 /// Opens the record slot for `program`. Called by [`crate::own::Memo::open`],
 /// so a record lives as long as its analysis.
@@ -1762,23 +1762,35 @@ impl Drop for Held {
 }
 
 fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
+    adopt(program, (gen_host(), test_host(), made));
+}
+
+/// Holds `record` for `program` where the slot is open for it. The CLI adopts
+/// the load's record through [`crate::own::Memo::open`]: the `Program` moved,
+/// but the nodes the record keys did not.
+pub(crate) fn adopt(program: &Program, record: HeldRecord) {
     let key = program as *const Program as usize;
     if HOLDING.with(|h| h.get()) == key {
-        HELD.with(|h| *h.borrow_mut() = Some((key, gen_host(), test_host(), made)));
+        HELD.with(|h| *h.borrow_mut() = Some((key, record)));
     }
+}
+
+/// The record held for `program`, with the host flags it was made under.
+pub(crate) fn held(program: &Program) -> Option<HeldRecord> {
+    let key = program as *const Program as usize;
+    HELD.with(|h| {
+        h.borrow()
+            .as_ref()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, r)| r.clone())
+    })
 }
 
 /// Returns the record of `program`: the held one if it matches the program
 /// and host flags, else a new one, held for the next ask.
 pub fn recorded(program: &Program) -> std::rc::Rc<Recorded> {
-    let key = program as *const Program as usize;
-    let held = HELD.with(|h| {
-        h.borrow()
-            .as_ref()
-            .filter(|(k, g, t, _)| *k == key && *g == gen_host() && *t == test_host())
-            .map(|(_, _, _, r)| r.clone())
-    });
-    if let Some(r) = held {
+    if let Some((_, _, r)) = held(program).filter(|(g, t, _)| (*g, *t) == (gen_host(), test_host()))
+    {
         return r;
     }
     let made = std::rc::Rc::new(record(program));
