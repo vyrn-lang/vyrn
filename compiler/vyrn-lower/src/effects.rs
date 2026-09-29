@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use vyrn_frontend::ast::{Type, TypeDecl};
 use vyrn_frontend::floor;
 
-use crate::core::{rows, Body, Place, Rhs, St};
+use vyrn_frontend::core::{rows, Arg, Body, Name, Place, Rhs, St};
 
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
@@ -318,7 +318,7 @@ impl Walk<'_> {
 
     /// Who a call reaches. A call through a value (`value`) reaches what the
     /// value's type may hold; any other callee is resolved by name.
-    fn callee(&mut self, callee: &str, value: Option<crate::core::Name>) -> Callee {
+    fn callee(&mut self, callee: &str, value: Option<Name>) -> Callee {
         let Some(n) = value else {
             return match self.memo.get(callee) {
                 Some(c) => c.clone(),
@@ -356,7 +356,7 @@ impl Walk<'_> {
         };
         // A place argument is a move-out window's place; the call writes it.
         for (a, _) in args {
-            if let crate::core::Arg::Place(p) = a {
+            if let Arg::Place(p) = a {
                 if let Some(g) = global_root(p) {
                     self.writes.insert(g.clone());
                 }
@@ -368,7 +368,7 @@ impl Walk<'_> {
 
     /// Joins a call to `callee` (through `value` when it is a function value);
     /// true when the callee is not a user body.
-    fn call(&mut self, callee: &str, value: Option<crate::core::Name>, line: usize) -> bool {
+    fn call(&mut self, callee: &str, value: Option<Name>, line: usize) -> bool {
         let c = self.callee(callee, value);
         self.calls.push((callee.to_string(), c.clone()));
         match c {
@@ -464,7 +464,7 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
 /// of instance `i`'s own body. A callback, because `refs` borrows `bodies`.
 fn with_judgment<R>(
     program: &vyrn_frontend::ast::Program,
-    then: impl FnOnce(&Judged, &[&crate::core::Body], &[&crate::Instance], &[usize]) -> R,
+    then: impl FnOnce(&Judged, &[&Body], &[&crate::Instance], &[usize]) -> R,
 ) -> R {
     let lowered = crate::lower(program);
     let own = vyrn_frontend::own::analyze(program);
@@ -476,7 +476,7 @@ fn with_judgment<R>(
             insts.push(inst);
         }
     }
-    let tops: Vec<(&str, &crate::core::Body)> = insts
+    let tops: Vec<(&str, &Body)> = insts
         .iter()
         .zip(&bodies)
         .map(|(i, b)| (i.func.name.as_str(), b))
@@ -494,12 +494,12 @@ pub(crate) fn judge_built<R>(
     program: &vyrn_frontend::ast::Program,
     lowered: &crate::Lowered<'_>,
     own: &vyrn_frontend::own::Ownership,
-    tops: &[(&str, &crate::core::Body)],
-    then: impl FnOnce(&Judged, &[&crate::core::Body], &[usize]) -> R,
+    tops: &[(&str, &Body)],
+    then: impl FnOnce(&Judged, &[&Body], &[usize]) -> R,
 ) -> R {
     // An `impl` projection has no instance but is a call by its own name in
     // the core, so it is judged too.
-    let mut place_bodies: Vec<(&str, crate::core::Body)> = Vec::new();
+    let mut place_bodies: Vec<(&str, Body)> = Vec::new();
     for pr in &lowered.places {
         let inst = crate::Instance {
             func: pr.func,
@@ -533,7 +533,7 @@ pub(crate) fn judge_built<R>(
     }
     // A lambda frame is keyed by its defining function and line, as a
     // lambda source is named.
-    let mut refs: Vec<&crate::core::Body> = Vec::new();
+    let mut refs: Vec<&Body> = Vec::new();
     let mut top: Vec<usize> = Vec::new();
     let mut lambda_frames: HashMap<(&str, usize), Vec<usize>> = HashMap::new();
     for (name, b) in tops {

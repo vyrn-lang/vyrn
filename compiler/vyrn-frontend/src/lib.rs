@@ -8,6 +8,7 @@ pub mod checker;
 pub mod codec;
 pub mod consteval;
 pub mod contracts;
+pub mod core;
 pub mod ctor;
 pub mod declared;
 pub mod diagnostics;

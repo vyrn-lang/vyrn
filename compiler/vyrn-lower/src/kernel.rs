@@ -29,14 +29,17 @@
 //!   a place is an alias of it: a take of the alias is refused (the place owns
 //!   the buffer), and a write to the place, including a `modify` argument, ends
 //!   the alias. A borrow with no place carries a
-//!   [`crate::core::BorrowKind`] instead (a parameter, a second name for one,
+//!   [`vyrn_frontend::core::BorrowKind`] instead (a parameter, a second name for one,
 //!   a capture); a take of one is refused. A read of module state is an alias
 //!   of the global. Every other unowned name is invisible here.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::core::{Arg, Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Use, Val, Walk};
 use vyrn_frontend::ast::{Capability, NodeId};
+use vyrn_frontend::core::{
+    Arg, Arm, Body, BorrowKind, Name, NameInfo, Old, Op, Payload, Place, Rhs, Site, St, Use, Val,
+    Walk,
+};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::Exit;
@@ -228,7 +231,7 @@ pub fn in_element(rel: &str) -> bool {
 /// Every write point of the row `s` in judgment order, without the rows of a
 /// list inside `s`. The state walk and [`writes`] share it so they agree.
 /// `body` is the body's name in the effect judgment.
-fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<Write<'s>> {
+fn writes_of<'s>(s: &'s St, names: &[NameInfo], body: &str) -> Vec<Write<'s>> {
     let mut w = match s {
         // A second name for a borrow reads it; nothing is handed on.
         St::Let(n, Rhs::Val(Val::Name(m)))
@@ -295,24 +298,18 @@ fn release_state(runs: &[String], body: &str) -> Vec<String> {
 /// for a global, only a call that stores into it. Before `augment` holds
 /// the effect judgment no call counts, and `augment` rebuilds every body
 /// where that could differ.
-pub fn writes(ss: &[St], on: Root, names: &[crate::core::NameInfo], body: &str) -> bool {
+pub fn writes(ss: &[St], on: Root, names: &[NameInfo], body: &str) -> bool {
     walk_writes(ss, on, names, body, false)
 }
 
 /// Whether a row of `ss` hands `on`, or a name that may alias it, to a
 /// `modify` parameter, or a closure captures an alias: [`writes`] counting
 /// only `modify` write points. The judgment ends every borrow of `on` there.
-pub fn modifies(ss: &[St], on: Root, names: &[crate::core::NameInfo], body: &str) -> bool {
+pub fn modifies(ss: &[St], on: Root, names: &[NameInfo], body: &str) -> bool {
     walk_writes(ss, on, names, body, true)
 }
 
-fn walk_writes(
-    ss: &[St],
-    on: Root,
-    names: &[crate::core::NameInfo],
-    body: &str,
-    modify: bool,
-) -> bool {
+fn walk_writes(ss: &[St], on: Root, names: &[NameInfo], body: &str, modify: bool) -> bool {
     let mut inside = Vec::new();
     ss.iter()
         .for_each(|s| crate::core::names_bound(s, &mut inside));
@@ -342,7 +339,7 @@ struct Writes<'a> {
     /// Those of `alias` that read inside an element of `on`.
     elem: Vec<Name>,
     inside: Vec<Name>,
-    names: &'a [crate::core::NameInfo],
+    names: &'a [NameInfo],
     /// How many loops inside `ss` enclose the row being asked about.
     depth: usize,
     /// Whether only a `modify` argument is a write ([`modifies`]).
@@ -418,7 +415,7 @@ impl Writes<'_> {
                         }
                     }
                 }
-                matches!(r, Rhs::Prim(crate::core::Op::Closure(_), vs, _)
+                matches!(r, Rhs::Prim(Op::Closure(_), vs, _)
                     if vs.iter().any(|v| matches!(v, Val::Name(k) if self.alias.contains(k))))
             }
             St::If { then, els, .. } => {
@@ -474,7 +471,7 @@ struct Kernel<'b> {
     here: usize,
     by: String,
     /// Where each part of the record literal being judged goes
-    /// ([`crate::core::NameInfo::fields`]), and the part being judged: its
+    /// ([`NameInfo::fields`]), and the part being judged: its
     /// index plus one, or zero for none.
     made: Vec<String>,
     part: std::cell::Cell<usize>,
@@ -501,7 +498,7 @@ struct Kernel<'b> {
     /// can name an arm binder.
     arms: Vec<(NodeId, u32, Vec<Name>)>,
     /// The binders an arm binds as a read out of its scrutinee
-    /// ([`crate::core::Arm::reads`]): an alias whether or not the value owns
+    /// ([`vyrn_frontend::core::Arm::reads`]): an alias whether or not the value owns
     /// heap, because the emitter holds the payload's address.
     read_out: Vec<bool>,
     /// The names whose block has ended, which lost their taker there. A
@@ -718,7 +715,7 @@ impl<'b> Kernel<'b> {
     }
 
     /// The name a refusal quotes: for a temporary minted for a read of a
-    /// place, the path the reader wrote ([`crate::core::NameInfo::path`]);
+    /// place, the path the reader wrote ([`NameInfo::path`]);
     /// otherwise the source spelling. No program contains `@borrow`.
     fn src(&self, n: Name) -> &str {
         let i = &self.body.names[n as usize];
@@ -1369,7 +1366,7 @@ impl<'b> Kernel<'b> {
             // A declared `consume` parameter and a `drop` carry no `.copy()`
             // menu; every other taker does, a builtin sink included. A linear
             // value is worded as `consume` even under a builtin (`close(s)`)
-            // ([`crate::core::NameInfo::linear`]).
+            // ([`NameInfo::linear`]).
             Some((l, by, t))
                 if *t == Taker::Declared
                     || by == "`drop`"
@@ -1515,7 +1512,7 @@ impl<'b> Kernel<'b> {
             // A release is a take, so releasing a borrow is refused.
             // A `for x in consume xs` loop's take lands on the
             // container's release, so it is worded as the loop, not a `drop`
-            // ([`crate::core::NameInfo::for_consume`]).
+            // ([`NameInfo::for_consume`]).
             if st.alias.contains_key(&n) {
                 let form = if self.body.names[n as usize].for_consume {
                     "the `for .. in consume` loop"
@@ -1741,7 +1738,7 @@ impl<'b> Kernel<'b> {
     /// [`Kernel::take`]. The receiver of a rebuilding builtin (`out.push(v)`,
     /// `write_back`) changes no owner, since the store after the call puts it
     /// back, so it may be a `modify` parameter
-    /// ([`crate::core::Rhs::Call::write_back`], `prelude::rebuilds`).
+    /// ([`vyrn_frontend::core::Rhs::Call::write_back`], `prelude::rebuilds`).
     fn take_arg(
         &self,
         st: &mut State,
@@ -1864,11 +1861,11 @@ impl<'b> Kernel<'b> {
     /// that is itself a hole holds nothing, and a hole under an element
     /// cannot be walked around, so neither records a row: the first is empty
     /// and the second leaks rather than frees twice.
-    fn owe_store(&mut self, site: &crate::core::Site, holes: Vec<String>) {
+    fn owe_store(&mut self, site: &Site, holes: Vec<String>) {
         if self.mode != Mode::Place || holes.iter().any(|h| h.is_empty() || h.contains("[]")) {
             return;
         }
-        let crate::core::Site::Node(at) = site else {
+        let Site::Node(at) = site else {
             return;
         };
         if std::env::var("VYRN_KERNEL_TRACE").is_ok() {
@@ -2189,8 +2186,8 @@ impl<'b> Kernel<'b> {
                 let is_static = self.releases(*n) && matches!(rhs, Rhs::Val(Val::Lit(_)));
                 // A closure that outlives its call may not hold a borrow.
                 // The core marks which closures escape
-                // ([`crate::core::NameInfo::closure_escapes`]).
-                if matches!(rhs, Rhs::Prim(crate::core::Op::Closure(_), ..)) {
+                // ([`NameInfo::closure_escapes`]).
+                if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
                     let i = &self.body.names[*n as usize];
                     if let Some(reads) = i.closure_reads.clone() {
                         self.escaping_capture(st, &reads, i.line)?;
