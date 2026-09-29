@@ -978,3 +978,51 @@ jobs:
         with:
           name: bench-json
           path: bench/out/*.json
+
+  check-speed:
+    name: compiler speed (regression tripwire)
+    # Push-to-main only, for the reason `bench` gives: timing on shared PR
+    # runners is noise. The verdict compares this push against the commit it
+    # replaced, both built and timed on this runner in this run, base and head
+    # interleaved, so the fleet's spread cancels. Separate from `bench` so
+    # neither job's build profile changes: `bench` builds debug, this builds
+    # release, the binary a user runs.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Ratio of head's total `vyrn check` time to base's. Set above the
+      # spread measured on one machine with the same tree on both sides.
+      CHECK_SPEED_THRESHOLD: "1.10"
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.before }}
+          path: base
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: |
+            compiler
+            base/compiler
+          prefix-key: check-speed
+      - name: Build head and base, release
+        run: |
+          set -eu
+          cargo build --quiet --release --manifest-path compiler/Cargo.toml -p vyrn-cli
+          cargo build --quiet --release --manifest-path base/compiler/Cargo.toml -p vyrn-cli
+      - name: Time `vyrn check` on both trees
+        run: sh scripts/check-speed.sh base . 5 | tee check-speed.txt
+      - name: Upload the timing
+        if: always()
+        # actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: check-speed
+          path: check-speed.txt

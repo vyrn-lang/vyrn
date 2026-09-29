@@ -141,6 +141,7 @@ Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates. Then, from the root, the step "The site's own tests" in `.github/workflows/site.yml`: `compiler/target/release/vyrn test` on `site/export.vyrn` and each `site/app/*.vyrn`, after `python3 scripts/site-history.py > site/data/history.json`. A std module doc is its reference page's description, and the site tests pin it.
 - The lexer's reserved words: `node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"`; the editor grammar's keywords must equal the lexer's.
 - A manifest row that moves: `cargo test --release -p vyrn-cli --test residue -- --ignored`, about six minutes. A moved row can move a release, and a moved release is an ownership change.
+- A claim about compiler speed: `sh ../scripts/check-speed.sh <main's tree> ..`, both release builds without incremental. It prints microseconds per line for each tree and exits 1 above the threshold; CI runs it on every push to main.
 - The slice's licence: the lowering pin, the bench table, whichever it names.
 
 Per commit, run only the build and the census that commit moves; re-pin with `git commit --fixup` and `GIT_SEQUENCE_EDITOR=true git rebase --autosquash <base>`.
