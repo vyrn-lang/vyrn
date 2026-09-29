@@ -122,7 +122,9 @@ type TypeInfo = {
     // Where the type was declared — the reflected module's file for its
     // own types, the DECLARING module's for a closure type reached
     // across an import.
-    origin: Origin
+    origin: Origin,
+    // The declaration's base as a tree of `TypeNode`s, node 0 the root.
+    shape: Array<TypeNode>
 }
 
 type ModuleInterface = { functions: Array<FnInfo>, types: Array<TypeInfo> }
@@ -199,3 +201,21 @@ type Response = {
     // the `Request` lowercasing rule does not apply here).
     headers: Map<String, String>
 }
+
+// One node of a reflected type expression. `args` and each member's `args`
+// index the array the node lives in. `kind` is a scalar's spelling (`Int64`,
+// `String`, ...) or one of `record`, `enum`, `array`, `option`, `result`,
+// `map`, `named`, `param`, `other`. `name` is a `named` node's declaration,
+// which `ModuleInterface.types` holds, or a `param` node's type parameter.
+// `members` are a record's fields (`args` = its type) or an enum's variants
+// (`args` = the payloads). `predicate` is the `where` written on the node.
+type TypeNode = {
+    kind: String,
+    name: String,
+    spelling: String,
+    args: Array<Int64>,
+    members: Array<TypeMember>,
+    predicate: String
+}
+
+type TypeMember = { name: String, args: Array<Int64> }

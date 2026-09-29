@@ -198,9 +198,6 @@ export fn cliUnexpected(value: String) -> Issue {
     return cliIssueOf("cli.unexpected", "", "unexpected argument `" + value + "`")
 }
 
-/// One field of the command record, as `lex()` reads it back.
-type CliField = { name: String, ty: String }
-
 /// One option, fully decided: what it is called, what it holds, and what its
 /// type refuses.
 type CliPlan = {
@@ -213,62 +210,6 @@ type CliPlan = {
     named: String,
     bounds: String,
     doc: String,
-}
-
-/// The fields of a record declaration, in declaration order.
-///
-/// Read off `TypeInfo.source` with `lex()`, as `std/http:httpFields` does: at
-/// brace depth 1 an identifier followed by `:` is a field, and the tokens up to
-/// the next top-level `,` are its type.
-gen fn cliFieldsOf(src: String) -> Array<CliField> {
-    let toks = lex(src)
-    let mut out: Array<CliField> = []
-    let mut depth = 0
-    let mut i = 0
-    while i < toks.length {
-        let tk = toks[i]
-        if tk.kind == "punct" && tk.text == "{" {
-            depth = depth + 1
-        }
-        if tk.kind == "punct" && tk.text == "}" {
-            depth = depth - 1
-        }
-        if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
-            let nx = toks[i + 1]
-            if nx.kind == "punct" && nx.text == ":" {
-                let mut ty = ""
-                let mut ang = 0
-                let mut j = i + 2
-                let mut going = true
-                while going && j < toks.length {
-                    let c = toks[j]
-                    if c.kind == "punct" && c.text == "<" {
-                        ang = ang + 1
-                    }
-                    if c.kind == "punct" && c.text == ">" {
-                        ang = ang - 1
-                    }
-                    if ang == 0 && c.kind == "punct" && (c.text == "," || c.text == "}") {
-                        going = false
-                    } else {
-                        ty = ty + c.text
-                        j = j + 1
-                    }
-                }
-                out.push(CliField { name: tk.text.copy(), ty: ty })
-            }
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// `Option<String>` is `String`; anything else is itself.
-fn cliInner(ty: String) -> String {
-    if ty.startsWith("Option<") && ty.endsWith(">") {
-        return substring(ty, 7, ty.byteLength - 1)
-    }
-    return ty.copy()
 }
 
 /// lowerCamelCase to kebab-case, with the first byte lowered: `dryRun` is
@@ -333,15 +274,17 @@ gen fn cliTypeOf(name: String, iface: ModuleInterface) -> Option<Schema> {
     return None
 }
 
-/// `Int64`, `String` or `Bool`: the base a spelling reduces to, or `""` when a
-/// command line cannot spell it.
-gen fn cliBaseOf(spelling: String, iface: ModuleInterface) -> String {
-    if spelling == "Int64" || spelling == "String" || spelling == "Bool" {
-        return spelling.copy()
+/// `Int64`, `String` or `Bool`: the base a field's node reduces to, or `""`
+/// when a command line cannot spell it.
+gen fn cliBaseOf(n: TypeNode, iface: ModuleInterface) -> String {
+    if n.predicate == "" && (n.kind == "Int64" || n.kind == "String" || n.kind == "Bool") {
+        return n.kind.copy()
     }
-    if let Some(s) = cliTypeOf(spelling, iface) {
-        if s.base == "Int64" || s.base == "String" {
-            return s.base.copy()
+    if n.kind == "named" && n.args.length == 0 {
+        if let Some(s) = cliTypeOf(n.name, iface) {
+            if s.base == "Int64" || s.base == "String" {
+                return s.base.copy()
+            }
         }
     }
     return ""
@@ -395,10 +338,11 @@ gen fn cliPlansOf(t: TypeInfo, iface: ModuleInterface) -> Array<CliPlan> {
     let mut out: Array<CliPlan> = []
     let mut used: Array<String> = ["h"]
     let mut frees = 0
-    for f in cliFieldsOf(t.source) {
-        let inner = cliInner(f.ty)
-        let optional = inner != f.ty
-        if f.ty == "Array<String>" {
+    for f in t.shape[0].members {
+        let node = t.shape[f.args[0]]
+        let optional = node.kind == "option"
+        let inner = if optional { t.shape[node.args[0]] } else { node }
+        if node.spelling == "Array<String>" {
             frees = frees + 1
             if frees > 1 {
                 panic(
@@ -422,7 +366,7 @@ gen fn cliPlansOf(t: TypeInfo, iface: ModuleInterface) -> Array<CliPlan> {
             let base = cliBaseOf(inner, iface)
             if base == "" {
                 panic(
-                    "std/cli: field `" + f.name + "` of `" + t.name + "` has type `" + f.ty + "`, which a command line cannot spell. M1 understands Bool, Int64, String, a validated type over Int64 or String, an Option of those, and one Array<String> for the positionals.",
+                    "std/cli: field `" + f.name + "` of `" + t.name + "` has type `" + node.spelling + "`, which a command line cannot spell. M1 understands Bool, Int64, String, a validated type over Int64 or String, an Option of those, and one Array<String> for the positionals.",
                 )
             }
             if base == "Bool" && optional {
@@ -430,7 +374,7 @@ gen fn cliPlansOf(t: TypeInfo, iface: ModuleInterface) -> Array<CliPlan> {
                     "std/cli: field `" + f.name + "` of `" + t.name + "` is `Option<Bool>`. A flag is present or it is not, so `Bool` says all of it.",
                 )
             }
-            let named = if inner == base { "" } else { inner.copy() }
+            let named = if inner.kind == "named" { inner.name.copy() } else { "" }
             let mut bounds = ""
             let mut doc = ""
             if named != "" {
@@ -800,12 +744,6 @@ test "kebab and the short letter come from the field name" {
     assertEq(cliKebab("port"), "port")
     assertEq(cliInitial("dryRun"), "d")
     assertEq(cliInitial("Port"), "p")
-}
-
-test "Option<T> reduces to T" {
-    assertEq(cliInner("Option<String>"), "String")
-    assertEq(cliInner("Array<String>"), "Array<String>")
-    assertEq(cliInner("Int64"), "Int64")
 }
 
 test "a bound is worded once and read twice" {
