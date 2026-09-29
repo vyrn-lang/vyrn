@@ -7407,7 +7407,9 @@ impl<'a> Builder<'a> {
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
         }
-        if let ("@pop" | "@swapRemove", Some(recv)) = (name, args.first()) {
+        let length = prelude::builtin(name).map(|b| b.length);
+        if let (Some(prelude::Length::ShrinksByOneIfNotEmpty), Some(recv)) = (length, args.first())
+        {
             self.shrinks(&name[1..], recv, line);
         }
         if let (Callee::Projection, Some(recv)) = (kind, args.first()) {

@@ -155,6 +155,33 @@ impl Shape {
     }
 }
 
+/// What a call does to its receiver's length: the fact a pass that removes a
+/// bounds check may carry across the call (obligation O3). Every other operand
+/// is read, so it keeps its length and its elements.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Length {
+    /// States nothing, so the pass forgets what it knew.
+    Unknown,
+    Keeps,
+    GrowsByOne,
+    /// By one; `@pop` of an empty array keeps it, and `@swapRemove` of one traps.
+    ShrinksByOneIfNotEmpty,
+    SetToZero,
+    GrowsByLenOf(usize),
+    SetToLenOf(usize),
+}
+
+/// What a call does to its receiver's elements, in the sense of [`Length`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Elements {
+    Unknown,
+    /// Every position that survives the call holds the element it held.
+    KeepsEachPosition,
+    /// Every element after the call is one the receiver held, at any position:
+    /// `@swapRemove` moves the last element into the removed slot.
+    KeepsRange,
+}
+
 /// One builtin, keyed by the name a call site carries. The checker's contract,
 /// the parser's method spelling, the core's [`Spec`], the effect lattice's
 /// atom, the loader's route and the editor's completion, hover and colour read
@@ -179,6 +206,10 @@ pub struct Builtin {
     pub gen_route: Option<&'static str>,
     /// Hover and completion text, under the method's spelling.
     pub hover: Option<String>,
+    /// [`Length::Unknown`] for a row that neither takes its receiver
+    /// ([`Spec::Rebuilds`]) nor shrinks it ([`Spec::Removes`]).
+    pub length: Length,
+    pub elements: Elements,
 }
 
 fn b(name: &'static str) -> Builtin {
@@ -192,6 +223,8 @@ fn b(name: &'static str) -> Builtin {
         route: None,
         gen_route: None,
         hover: None,
+        length: Length::Unknown,
+        elements: Elements::Unknown,
     }
 }
 
@@ -240,6 +273,13 @@ impl Builtin {
     fn hover(self, h: &str) -> Self {
         Builtin {
             hover: Some(h.to_string()),
+            ..self
+        }
+    }
+    fn resizes(self, length: Length, elements: Elements) -> Self {
+        Builtin {
+            length,
+            elements,
             ..self
         }
     }
@@ -307,7 +347,8 @@ fn table() -> Vec<Builtin> {
             ))
             .method("push", lists)
             .spec(Spec::Rebuilds)
-            .hover("array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver"),
+            .hover("array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver")
+            .resizes(Length::GrowsByOne, Elements::KeepsEachPosition),
         // The builtin containers' `place at` / `place atSet`. The body names no
         // type, so one pair serves every container and each backend types
         // [`ELEM`] itself; the `Unit` types are inert. `xs[i]` is `@at` too, and
@@ -334,7 +375,8 @@ fn table() -> Vec<Builtin> {
             .sig(row("@pop", &["T"], &[("self", Modify, arr(t()))], opt(t()), &[]))
             .method("pop", &[Array, SmallArray])
             .spec(Spec::Removes)
-            .hover("array.pop() -> Option<T> — remove and return the last element (None if empty)"),
+            .hover("array.pop() -> Option<T> — remove and return the last element (None if empty)")
+            .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsEachPosition),
         b("@swapRemove")
             .sig(row(
                 "@swapRemove",
@@ -345,7 +387,8 @@ fn table() -> Vec<Builtin> {
             ))
             .method("swapRemove", &[Array, SmallArray])
             .spec(Spec::Removes)
-            .hover("array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot"),
+            .hover("array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot")
+            .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsRange),
         // Rebuilds like `push`: the result carries the possibly reallocated
         // buffer and the statement form writes it back. A named array type
         // (`type Buf = Array<Int64>`) survives through the ordinary coercion.
@@ -359,7 +402,8 @@ fn table() -> Vec<Builtin> {
             ))
             .method("reserve", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation"),
+            .hover("array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation")
+            .resizes(Length::Keeps, Elements::KeepsEachPosition),
         // The [`HEAPLESS`] rows. `clear` keeps the buffer for the next fill.
         // `append` copies its source's elements in by bytes, and `copyFrom`
         // overwrites the receiver's, reusing its buffer.
@@ -371,7 +415,8 @@ fn table() -> Vec<Builtin> {
             ))
             .method("clear", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap"),
+            .hover("array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap")
+            .resizes(Length::SetToZero, Elements::KeepsEachPosition),
         b("@append")
             .sig(bounded(
                 row(
@@ -386,7 +431,8 @@ fn table() -> Vec<Builtin> {
             ))
             .method("append", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap"),
+            .hover("array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap")
+            .resizes(Length::GrowsByLenOf(1), Elements::KeepsEachPosition),
         b("@copyFrom")
             .sig(bounded(
                 row(
@@ -401,7 +447,8 @@ fn table() -> Vec<Builtin> {
             ))
             .method("copyFrom", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap"),
+            .hover("array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap")
+            .resizes(Length::SetToLenOf(1), Elements::Unknown),
         b("@toArray")
             .method("toArray", &[SmallArray])
             .spec(Spec::Builds(arr(t())))
@@ -690,7 +737,10 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Builds(opt(t())))
             .hover("pullAt(address) -> Option<T> — one element from the stream in that box; needs its type from the annotation: `let x: Option<T> = pullAt(a)`"),
         b("@pull").spec(Spec::Pulls),
-        b("@strAppend").spec(Spec::Rebuilds),
+        // The parts' lengths add up to the growth, which no one operand states.
+        b("@strAppend")
+            .spec(Spec::Rebuilds)
+            .resizes(Length::Unknown, Elements::KeepsEachPosition),
         // String `a + b` and interpolation: copies both and allocates.
         b("@concat").sig(row(
             "@concat",
@@ -1121,6 +1171,25 @@ mod tests {
                 n.starts_with('@') || crate::checker::RESERVED.contains(&n),
                 "`{n}` has a seeded contract but is neither reserved nor \
                  unspellable, so a user function of that name would inherit it"
+            );
+        }
+    }
+
+    /// A pass that removes a bounds check reads the length effect; an array
+    /// row that resizes and states none makes it forget every length.
+    #[test]
+    fn every_array_resizing_row_states_its_length_effect() {
+        for b in builtins() {
+            let resizes = matches!(b.spec, Some(Spec::Rebuilds | Spec::Removes))
+                && b.sig
+                    .as_ref()
+                    .and_then(|f| f.params.first())
+                    .is_some_and(|p| matches!(p.ty, Type::Array(_)));
+            assert_eq!(
+                resizes,
+                b.length != Length::Unknown,
+                "`{}` resizes an array: {resizes}",
+                b.name
             );
         }
     }

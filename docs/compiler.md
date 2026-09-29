@@ -386,7 +386,8 @@ spent its time, per phase (`prof.rs`).
 - A new refusal or acceptance test: a program in `tests/check/` and its
   `.stderr`, never a program in a Rust string.
 - A new builtin: one `prelude::Builtin` row, with its contract (a capability
-  per parameter), method spelling, `Spec`, effect, route and editor text; its body in `std/runtime` when it can be Vyrn, otherwise a
+  per parameter), method spelling, `Spec`, effect, route, length effect and
+  editor text; its body in `std/runtime` when it can be Vyrn, otherwise a
   lowering in `direct.rs`.
 - A new trap wording: `vyrn_frontend::trap`, and nowhere else.
 - A new effect: the builtin row's `effect`, or `effects::RUNTIME_ATOMS` for a
