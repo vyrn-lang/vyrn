@@ -11,94 +11,6 @@ pub struct Hole {
     pub col: usize,
 }
 
-/// A lexical token kind.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Tok {
-    Int(i64),
-    /// A byte literal `'c'`: one ASCII byte, an integer literal the checker
-    /// defaults to `UInt8`.
-    Byte(u8),
-    Float(f64),
-    /// A string literal with its escapes decoded.
-    Str(String),
-    /// An interpolated string `"a\{e}b"`. `parts` are the decoded fragments,
-    /// always `exprs.len() + 1` of them; the parser parses `exprs`.
-    TemplateStr {
-        parts: Vec<String>,
-        exprs: Vec<Hole>,
-    },
-    /// A `///` doc line as markdown, one leading space stripped. The parser attaches
-    /// it to the next declaration.
-    Doc(String),
-    Ident(String),
-
-    Fn,
-    Let,
-    Mut,
-    If,
-    Else,
-    While,
-    For,
-    In,
-    Drop,
-    Protocol,
-    Import,
-    Export,
-    Impl,
-    Vself,
-    Return,
-    True,
-    False,
-    Type,
-    Where,
-    Match,
-    Region,
-    Break,
-    Continue,
-
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    LBracket,
-    RBracket,
-    Comma,
-    Semi,
-    Colon,
-    Dot,
-    Arrow,
-    FatArrow,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Percent,
-    Eq,
-    EqEq,
-    TildeMatch,
-    NotEq,
-    Lt,
-    LtEq,
-    Gt,
-    GtEq,
-    AndAnd,
-    OrOr,
-    Bang,
-    Question,
-    /// `??`. Maximal munch, so two postfix `?` are written `(x?)?`.
-    QuestionQuestion,
-    Pipe,
-    Amp,
-    Caret,
-    Tilde,
-    // `>>` lexes greedily; in type position the parser splits it into two `>`,
-    // so `Array<Array<T>>` parses.
-    Shl,
-    Shr,
-
-    Eof,
-}
-
 /// A token and the 1-based line and column it starts on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -173,14 +85,29 @@ pub struct Scan {
     pub end_col: usize,
 }
 
-/// Every keyword with its spelling: the one keyword table. It is a macro so one
-/// table answers both directions.
+/// Every token kind with its spelling: the one token table. It generates `Tok` and
+/// each direction of lookup on it, so a kind is written once.
 ///
 /// `tests/forms.rs` and `editor/vscode/test/grammar.test.mjs` parse the
-/// `"word" => Tok::Name` rows below as text. Keep one row per line, spelled
+/// `"word" => Tok::Name` rows of `keywords` as text. Keep one row per line, spelled
 /// that way.
-macro_rules! keywords {
-    ($($w:literal => Tok::$t:ident),* $(,)?) => {
+macro_rules! tokens {
+    (
+        payload { $($payload:tt)* }
+        keywords { $($w:literal => Tok::$t:ident),* $(,)? }
+        two { $(($a:literal, $b:literal) => $tt:ident),* $(,)? }
+        one { $($c:literal => $ot:ident),* $(,)? }
+    ) => {
+        /// A lexical token kind.
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum Tok {
+            $($payload)*
+            $($t,)*
+            $($tt,)*
+            $($ot,)*
+            Eof,
+        }
+
         fn keyword_or_ident(text: &str) -> Tok {
             match text {
                 $($w => Tok::$t,)*
@@ -194,42 +121,7 @@ macro_rules! keywords {
                 _ => return None,
             })
         }
-    };
-}
 
-keywords! {
-    "fn" => Tok::Fn,
-    "let" => Tok::Let,
-    "mut" => Tok::Mut,
-    "if" => Tok::If,
-    "else" => Tok::Else,
-    "while" => Tok::While,
-    "for" => Tok::For,
-    "in" => Tok::In,
-    "drop" => Tok::Drop,
-    "protocol" => Tok::Protocol,
-    "import" => Tok::Import,
-    "export" => Tok::Export,
-    "impl" => Tok::Impl,
-    "self" => Tok::Vself,
-    "return" => Tok::Return,
-    "true" => Tok::True,
-    "false" => Tok::False,
-    "type" => Tok::Type,
-    "where" => Tok::Where,
-    "match" => Tok::Match,
-    "region" => Tok::Region,
-    "break" => Tok::Break,
-    "continue" => Tok::Continue,
-}
-
-/// Every punctuation token with its spelling: the one punctuation table. It is a
-/// macro so one table answers both directions.
-macro_rules! punctuation {
-    (
-        two { $(($a:literal, $b:literal) => $tt:ident),* $(,)? }
-        one { $($c:literal => $ot:ident),* $(,)? }
-    ) => {
         fn two_char_op(a: char, b: char) -> Option<Tok> {
             match (a, b) {
                 $(($a, $b) => Some(Tok::$tt),)*
@@ -268,7 +160,51 @@ macro_rules! punctuation {
     };
 }
 
-punctuation! {
+tokens! {
+    payload {
+        Int(i64),
+        /// A byte literal `'c'`: one ASCII byte, an integer literal the checker
+        /// defaults to `UInt8`.
+        Byte(u8),
+        Float(f64),
+        /// A string literal with its escapes decoded.
+        Str(String),
+        /// An interpolated string `"a\{e}b"`. `parts` are the decoded fragments,
+        /// always `exprs.len() + 1` of them; the parser parses `exprs`.
+        TemplateStr {
+            parts: Vec<String>,
+            exprs: Vec<Hole>,
+        },
+        /// A `///` doc line as markdown, one leading space stripped. The parser attaches
+        /// it to the next declaration.
+        Doc(String),
+        Ident(String),
+    }
+    keywords {
+        "fn" => Tok::Fn,
+        "let" => Tok::Let,
+        "mut" => Tok::Mut,
+        "if" => Tok::If,
+        "else" => Tok::Else,
+        "while" => Tok::While,
+        "for" => Tok::For,
+        "in" => Tok::In,
+        "drop" => Tok::Drop,
+        "protocol" => Tok::Protocol,
+        "import" => Tok::Import,
+        "export" => Tok::Export,
+        "impl" => Tok::Impl,
+        "self" => Tok::Vself,
+        "return" => Tok::Return,
+        "true" => Tok::True,
+        "false" => Tok::False,
+        "type" => Tok::Type,
+        "where" => Tok::Where,
+        "match" => Tok::Match,
+        "region" => Tok::Region,
+        "break" => Tok::Break,
+        "continue" => Tok::Continue,
+    }
     two {
         ('-', '>') => Arrow,
         ('=', '>') => FatArrow,
@@ -279,8 +215,11 @@ punctuation! {
         ('>', '=') => GtEq,
         ('&', '&') => AndAnd,
         ('|', '|') => OrOr,
+        // Maximal munch, so two postfix `?` are written `(x?)?`.
         ('?', '?') => QuestionQuestion,
         ('<', '<') => Shl,
+        // Lexes greedily; in type position the parser splits `>>` into two `>`,
+        // so `Array<Array<T>>` parses.
         ('>', '>') => Shr,
     }
     one {

@@ -135,16 +135,13 @@ fn parser_sections() -> Vec<Section> {
 fn lexer_sections() -> Vec<Section> {
     use Kind::*;
     vec![
-        sec("pub enum Tok {", Grammar),
         sec("pub struct Token {", Shared),
         sec(
             "pub fn token_name_and_text(tok: &Tok) -> (String, String) {",
             Shared,
         ),
         sec("pub struct Triv {", Shared),
-        sec("macro_rules! keywords {", Twice),
-        sec("macro_rules! punctuation {", Twice),
-        sec("fn single_char_op(c: char) -> Option<Tok> {", Twice),
+        sec("macro_rules! tokens {", Grammar),
         sec(
             "pub fn scan(src: &str) -> Result<Scan, Diagnostic> {",
             Grammar,
@@ -300,11 +297,11 @@ fn the_parser_census_matches_its_pin() {
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
         ("parser.rs", "shared machinery", 199, 1),
         ("parser.rs", "tests", 1877, 0),
-        ("lexer.rs", "the grammar's own arm", 531, 11),
+        ("lexer.rs", "the grammar's own arm", 595, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
-        ("lexer.rs", "a table stated a second time", 138, 0),
+        ("lexer.rs", "a table stated a second time", 0, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
-        ("lexer.rs", "shared machinery", 191, 2),
+        ("lexer.rs", "shared machinery", 204, 2),
         ("lexer.rs", "tests", 234, 0),
     ];
     assert_eq!(got, want, "the parser census has moved");

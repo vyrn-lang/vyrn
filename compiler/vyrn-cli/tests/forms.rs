@@ -231,14 +231,17 @@ fn declarations() -> Vec<String> {
     out
 }
 
-/// Every `"word" => Tok::Name` row of the lexer's `keywords!` table, in order.
+/// Every `"word" => Tok::Name` row of the lexer's `keywords` table, in order.
 /// `editor/vscode/test/grammar.test.mjs` reads the same anchor.
 fn keywords() -> Vec<(String, String)> {
     let src = compiler_file("vyrn-frontend/src/lexer.rs");
     let at = src
-        .find("keywords! {")
-        .expect("the `keywords!` table is gone from lexer.rs — this test needs a new anchor");
-    let body = &src[at..src[at..].find("\n}").map(|e| at + e).unwrap_or(src.len())];
+        .find("\n    keywords {\n")
+        .expect("the `keywords` table is gone from lexer.rs — this test needs a new anchor");
+    let body = &src[at..src[at..]
+        .find("\n    }")
+        .map(|e| at + e)
+        .unwrap_or(src.len())];
     let mut out = Vec::new();
     for line in body.lines() {
         let t = line.trim();
