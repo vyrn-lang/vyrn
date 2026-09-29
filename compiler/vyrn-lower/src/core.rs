@@ -1523,25 +1523,7 @@ pub fn gaps(body: &Body) -> Vec<String> {
 /// store, the call it feeds, an arm's releases), and a builder cannot cut its
 /// own list because its caller extends it afterwards.
 fn cut(ss: &mut Vec<St>) {
-    for s in ss.iter_mut() {
-        match s {
-            St::If { then, els, .. } => {
-                cut(then);
-                cut(els);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => cut(body),
-            St::Switch { arms, .. } => arms.iter_mut().for_each(|a| cut(&mut a.body)),
-            St::Let(..)
-            | St::Do { .. }
-            | St::Store { .. }
-            | St::Drop(..)
-            | St::Row { .. }
-            | St::Return { .. }
-            | St::Break { .. }
-            | St::Continue { .. }
-            | St::Trap => {}
-        }
-    }
+    ss.iter_mut().flat_map(St::lists_mut).for_each(cut);
     if let Some(i) = ss.iter().position(traps) {
         ss.truncate(i + 1);
     }
@@ -8171,12 +8153,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: bool) -> bool {
     let mut reads = vec![0; names];
     for i in 0..ss.len() {
-        let nested = match &mut ss[i] {
-            St::If { then, els, .. } => vec![then, els],
-            St::Loop { body, .. } | St::Block { body, .. } => vec![body],
-            St::Switch { arms, .. } => arms.iter_mut().map(|a| &mut a.body).collect(),
-            _ => Vec::new(),
-        };
+        let nested: Vec<&mut Vec<St>> = ss[i].lists_mut().collect();
         let mut inner = 0;
         for b in &nested {
             count_reads(b, &mut reads);
