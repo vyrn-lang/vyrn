@@ -123,9 +123,10 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     // against it, so the second check's answers stand.
     if diags.is_empty() && !derived.is_empty() {
         match gen::derive(program, &derived) {
-            Ok(fns) => {
+            Ok((fns, decls)) => {
                 let at = program.functions.len();
                 program.functions.extend(fns);
+                program.type_decls.extend(decls);
                 // Parsed apart, so numbered from 1: renumbered, or their ids
                 // would key the second check's types over the program's own.
                 program.number_appended(at);
