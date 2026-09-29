@@ -1,0 +1,1 @@
+a_result_capability_must_match_the_receiver.vyrn:3:35: `fn at` returns `modify T`, so its receiver must be `modify self` — the result is a place inside the receiver, and the two capabilities name one access

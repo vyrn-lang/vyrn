@@ -1,0 +1,1 @@
+duplicate_contract_members_are_rejected.vyrn:1:41: contract `P` already declares `a` (line 1) — only `fn` members may have alternative signatures

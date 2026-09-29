@@ -1,0 +1,1 @@
+a_refutable_let_refuses_mut.vyrn:3:13: `let mut Circle(..)` — a pattern binder is a borrow of the scrutinee's payload; bind it, then `copy()` what you mutate

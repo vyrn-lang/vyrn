@@ -1,0 +1,1 @@
+nested_index_field_assign_is_rejected.vyrn:2:60: only a single field write-through is supported: `a[i].field = v` (not `a[i].field.field = v`)

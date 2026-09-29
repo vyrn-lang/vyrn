@@ -1,0 +1,2 @@
+// An anonymous record has no name for the synthetic refinement type.
+fn f(x: { n: Int64 where value > 0 }) -> Int64 { return 0 } fn main() -> Int64 { return 0 }

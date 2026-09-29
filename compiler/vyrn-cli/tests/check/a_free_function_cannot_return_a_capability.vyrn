@@ -1,0 +1,2 @@
+fn f(xs: Array<Int64>, i: Int64) -> read Int64 { return xs[i] }
+fn main() -> Int64 { return 0 }

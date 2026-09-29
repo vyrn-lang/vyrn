@@ -1,0 +1,4 @@
+// An expression-`if` branch refuses statements.
+fn main() -> Int64 {
+    let x = if true { let y = 1 y } else { 0 }
+    return x }

@@ -1,0 +1,1 @@
+index_field_assign_on_non_variable_array_is_rejected.vyrn:2:31: the left side of `[i].field = ..` must be an array variable, a record field, or an array element

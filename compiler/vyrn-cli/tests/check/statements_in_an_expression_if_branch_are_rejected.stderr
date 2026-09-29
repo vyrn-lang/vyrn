@@ -1,0 +1,8 @@
+statements_in_an_expression_if_branch_are_rejected.vyrn:3:23: an `if` used as an expression takes a single expression in each branch, not statements — use the statement form or a function for multi-statement branches
+statements_in_an_expression_if_branch_are_rejected.vyrn:3:37: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Else
+statements_in_an_expression_if_branch_are_rejected.vyrn:3:42: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found LBrace
+statements_in_an_expression_if_branch_are_rejected.vyrn:3:44: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Int(0)
+statements_in_an_expression_if_branch_are_rejected.vyrn:3:46: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found RBrace
+statements_in_an_expression_if_branch_are_rejected.vyrn:4:5: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Return
+statements_in_an_expression_if_branch_are_rejected.vyrn:4:12: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Ident("x")
+statements_in_an_expression_if_branch_are_rejected.vyrn:4:14: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found RBrace

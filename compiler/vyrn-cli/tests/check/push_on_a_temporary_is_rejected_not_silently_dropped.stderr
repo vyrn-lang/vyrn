@@ -1,0 +1,1 @@
+push_on_a_temporary_is_rejected_not_silently_dropped.vyrn:3:37: this `push` has no place to write back to, so it would silently do nothing. Its receiver must be an assignable place: a variable (`xs.push(v)`), a record field (`r.xs.push(v)`), or an array element (`a[i].push(v)`) — not a temporary or a deeper chain.

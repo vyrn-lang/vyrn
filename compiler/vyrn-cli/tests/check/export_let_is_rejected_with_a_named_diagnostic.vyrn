@@ -1,0 +1,2 @@
+// Module state is legal in any module but never exported.
+export let x = 1 fn main() -> Int64 { return 0 }

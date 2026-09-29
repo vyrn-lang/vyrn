@@ -1,0 +1,4 @@
+type Shape = | Circle(Int64) | Dot
+fn main() -> Int64 { let d = Dot
+    let Dot() = d
+    return 0 }

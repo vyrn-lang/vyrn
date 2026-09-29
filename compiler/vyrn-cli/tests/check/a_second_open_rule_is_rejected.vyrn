@@ -1,0 +1,1 @@
+contract P { fn *(a: String) -> String fn *(b: Int64) -> Int64 }

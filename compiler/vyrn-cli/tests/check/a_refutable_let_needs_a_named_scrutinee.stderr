@@ -1,0 +1,1 @@
+a_refutable_let_needs_a_named_scrutinee.vyrn:3:26: the scrutinee of `let Circle(..)` must be a name — a multi-payload pattern reads it once per binder, so bind the value with an ordinary `let` first
