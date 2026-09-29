@@ -8,9 +8,9 @@
 //! type may hold (`StoredFnEffects::every_source`). A lambda is a frame of its
 //! own, and the body that builds it joins its set, because the value can run it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use vyrn_frontend::ast::Type;
+use vyrn_frontend::ast::{Type, TypeDecl};
 use vyrn_frontend::floor;
 
 use crate::core::{Body, Place, Rhs, St};
@@ -20,6 +20,38 @@ use crate::core::{Body, Place, Rhs, St};
 pub use vyrn_frontend::effects::{
     atom, atoms, gen_allows, gen_refusal, Effect, Effects, GEN_ATOM_OVERRIDES,
 };
+
+/// The callee names with no effect of their own and no body to judge: a
+/// builtin row without an atom, a sum or record constructor, and a `std/mem`
+/// or `std/runtime` declaration. A resolver asks [`atom`] and its bodies first.
+pub struct PureNames<'a> {
+    decls: &'a HashMap<String, TypeDecl>,
+    variants: HashSet<&'a str>,
+}
+
+impl<'a> PureNames<'a> {
+    pub fn new(decls: &'a HashMap<String, TypeDecl>) -> Self {
+        let variants = decls
+            .values()
+            .filter_map(|d| match &d.base {
+                Type::Enum(vs) => Some(vs),
+                _ => None,
+            })
+            .flat_map(|vs| vs.iter().map(|v| v.name.as_str()))
+            .collect();
+        PureNames { decls, variants }
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        vyrn_frontend::prelude::builtin(name).is_some()
+            || vyrn_frontend::checker::RESERVED.contains(&name)
+            || name.starts_with('@')
+            || name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
+            || name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX)
+            || self.variants.contains(name)
+            || self.decls.contains_key(name)
+    }
+}
 
 /// What a callee's name resolves to. The caller of [`judge`] resolves names;
 /// the judgment resolves nothing.
@@ -567,6 +599,7 @@ pub(crate) fn judge_built<R>(
         }
     }
     let decls = own.proto.types();
+    let pure = PureNames::new(decls);
     let externs: std::collections::BTreeSet<&str> = program
         .functions
         .iter()
@@ -589,6 +622,9 @@ pub(crate) fn judge_built<R>(
         // A projection dispatched by name.
         if let Some(idx) = place_tops.get(name) {
             return Callee::Bodies(idx.clone());
+        }
+        if pure.contains(name) {
+            return Callee::Pure;
         }
         Callee::Unknown
     };

@@ -432,16 +432,8 @@ fn run_corpus() {
                 }
             }
         }
-        // A variant constructor takes its payload and does nothing else.
         let decls = vyrn_frontend::types::decl_map(&program);
-        let variants: BTreeSet<&str> = decls
-            .values()
-            .filter_map(|d| match &d.base {
-                vyrn_frontend::ast::Type::Enum(vs) => Some(vs),
-                _ => None,
-            })
-            .flat_map(|vs| vs.iter().map(|v| v.name.as_str()))
-            .collect();
+        let pure = effects::PureNames::new(&decls);
         let externs: BTreeSet<&str> = program
             .functions
             .iter()
@@ -465,16 +457,10 @@ fn run_corpus() {
             if let Some(idx) = place_tops.get(name) {
                 return Callee::Bodies(idx.clone());
             }
-            if vyrn_frontend::prelude::signature(name).is_some()
-                || vyrn_frontend::checker::RESERVED.contains(&name)
-                || name.starts_with('@')
-                || name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
-                || name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX)
-                || program.functions.iter().any(|f| f.name == name)
-                || variants.contains(name)
-                || decls.contains_key(name)
-                || matches!(name, "Some" | "Ok" | "Err" | "logger" | "print")
-            {
+            // A program function without a judged body (a generic reached only
+            // from a `test` body, a generic declared release) is judged pure
+            // here: a hole the survey does not count.
+            if pure.contains(name) || program.functions.iter().any(|f| f.name == name) {
                 return Callee::Pure;
             }
             Callee::Unknown
