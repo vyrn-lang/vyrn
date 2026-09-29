@@ -10,6 +10,8 @@ pub mod append;
 pub mod check;
 pub mod core;
 pub mod effects;
+pub mod elide;
+pub mod facts;
 mod fixpoint;
 pub mod kernel;
 pub mod typed;

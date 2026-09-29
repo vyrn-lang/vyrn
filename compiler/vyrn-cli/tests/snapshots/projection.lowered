@@ -138,14 +138,14 @@ fn main()
     let a! = fn build(read lit 4)
     check array-index a![lit 1]  (line 71 #0)
     a![lit 1] = lit 99  (Nothing)
-    check array-index a![lit 0]  (line 72 #0)
+    proved array-index a![lit 0]  (line 72 #0)
     let @borrow = read a![lit 0]
     let @t46! = builtin @str(read @borrow)
     let @t47! = prim add(lit "array: ", @t46!)
     drop @t46!
     let @t48! = prim add(@t47!, lit " ")
     drop @t47!
-    check array-index a![lit 1]  (line 72 #1)
+    proved array-index a![lit 1]  (line 72 #1)
     let @borrow = read a![lit 1]
     let @t49! = builtin @str(read @borrow)
     let @t50! = prim add(@t48!, @t49!)

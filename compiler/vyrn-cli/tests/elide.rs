@@ -1,36 +1,217 @@
-//! The check oracle (`VYRN_CHECKS=<file>`): a run counts each check row it
-//! reaches into the file, one line per row.
+//! Check elision (`vyrn_lower::elide`): which check rows a body proves, and the
+//! programs that witness each rule's side condition. A witness is a check the
+//! pass must keep, and a run that traps there under the oracle
+//! (`VYRN_CHECKS=<file>`), which also fails the run if the check was proved.
 
 mod common;
 use common::*;
 
-/// Runs `src` under the oracle and returns the log's rows for `body`, each as
-/// `line ordinal rule verdict count`.
-fn oracle(src: &str, body: &str) -> Vec<String> {
+/// `src` as a program with `main` from `calls`, in a fresh directory.
+fn program(src: &str, calls: &str) -> (Scratch, std::path::PathBuf) {
     let dir = scratch("elide");
-    let (file, log) = (dir.join("p.vyrn"), dir.join("counts.tsv"));
-    std::fs::write(&file, src).unwrap();
+    let file = dir.join("p.vyrn");
+    let main = format!(
+        "fn main() -> Int64 {{\n    let mut xs: Array<Int64> = []\n    xs.push(10)\n    \
+         xs.push(20)\n    xs.push(30)\n{calls}\n    return 0\n}}\n"
+    );
+    std::fs::write(&file, format!("{src}\n{main}")).unwrap();
+    (dir, file)
+}
+
+/// The check rows of `body` as `vyrn emit-lowered` prints them: `proved` or
+/// `check`, then the rule.
+fn verdicts(src: &str, body: &str) -> Vec<String> {
+    let (_dir, file) = program(src, "");
+    let out = vyrn().arg("emit-lowered").arg(&file).output().unwrap();
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let mut rows = Vec::new();
+    let mut inside = false;
+    for l in norm(&out.stdout).lines() {
+        if let Some(head) = l.strip_prefix("fn ") {
+            inside = head.split('(').next() == Some(body);
+        } else if inside {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            if matches!(w.first(), Some(&"proved" | &"check")) {
+                rows.push(format!("{} {}", w[0], w[1]));
+            }
+        }
+    }
+    rows
+}
+
+/// Runs the program under the oracle and returns its stderr and the oracle's
+/// rows for `body`, each as `line ordinal rule verdict count`.
+fn oracle(src: &str, calls: &str, body: &str) -> (String, Vec<String>) {
+    let (dir, file) = program(src, calls);
+    let log = dir.join("counts.tsv");
     let out = vyrn()
         .arg("run")
         .arg(&file)
         .env("VYRN_CHECKS", &log)
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", norm(&out.stderr));
-    std::fs::read_to_string(&log)
-        .unwrap()
+    let rows = std::fs::read_to_string(&log)
+        .unwrap_or_default()
         .lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
             (f[1] == body).then(|| f[2..].join(" "))
         })
-        .collect()
+        .collect();
+    (norm(&out.stderr), rows)
 }
 
 #[test]
 fn the_oracle_counts_each_run_of_a_check_row() {
-    let src = "fn get(xs: Array<Int64>, i: Int64) -> Int64 {\n    return xs[i]\n}\n\n\
-               fn main() -> Int64 {\n    let mut xs: Array<Int64> = []\n    xs.push(4)\n    \
-               print((get(xs, 0) + get(xs, 0) + get(xs, 0)).toString())\n    return 0\n}\n";
-    assert_eq!(oracle(src, "get"), ["2 0 array-index kept 3"]);
+    let src = "fn get(xs: Array<Int64>, i: Int64) -> Int64 {\n    return xs[i]\n}\n";
+    let calls = "    print((get(xs, 0) + get(xs, 1) + get(xs, 2)).toString())";
+    let (err, rows) = oracle(src, calls, "get");
+    assert_eq!(err, "");
+    assert_eq!(rows, ["2 0 array-index kept 3"]);
+}
+
+#[test]
+fn a_for_loop_proves_its_element_read() {
+    let src = "fn sum(xs: Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    \
+               for x in xs {\n        s = s + x\n    }\n    return s\n}\n";
+    assert_eq!(verdicts(src, "sum"), ["proved array-index"]);
+}
+
+#[test]
+fn a_counted_while_proves_its_index() {
+    let src = "fn sum(xs: Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    \
+               let mut i: Int64 = 0\n    while i < xs.length {\n        s = s + xs[i]\n        \
+               i = i + 1\n    }\n    return s\n}\n";
+    assert_eq!(verdicts(src, "sum"), ["proved array-index"]);
+}
+
+#[test]
+fn a_length_guard_proves_the_last_element() {
+    let src = "fn last(xs: Array<Int64>) -> Int64 {\n    if xs.length > 0 {\n        \
+               return xs[xs.length - 1]\n    }\n    return 0\n}\n";
+    assert_eq!(verdicts(src, "last"), ["proved array-index"]);
+}
+
+#[test]
+fn literal_operands_and_masks_prove_their_checks() {
+    let src = "fn ops(x: Int64, k: Int64) -> Int64 {\n    let t = [1, 2, 3]\n    \
+               return x / 2 + x % 7 + (x << 3) + (x << (k & 63)) + t[2]\n}\n";
+    assert_eq!(
+        verdicts(src, "ops"),
+        [
+            "proved int-div-zero",
+            "proved int-div-overflow",
+            "proved int-rem-zero",
+            "proved shift-range",
+            "proved shift-range",
+            "proved array-index",
+        ]
+    );
+}
+
+/// Each witness: a function `w` whose checks must all stay, and the call in
+/// `main` that makes one trap with the wording given.
+const WITNESSES: &[(&str, &str, &str)] = &[
+    // The bound is one past the end.
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    let mut i: Int64 = 0\n    \
+         while i <= xs.length {\n        s = s + xs[i]\n        i = i + 1\n    }\n    return s\n}\n",
+        "    print(w(xs).toString())",
+        "array index 3 out of bounds",
+    ),
+    // The counter starts below zero: Houdini's entry filter.
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    let mut i: Int64 = -1\n    \
+         while i < xs.length {\n        s = s + xs[i]\n        i = i + 1\n    }\n    return s\n}\n",
+        "    print(w(xs).toString())",
+        "array index -1 out of bounds",
+    ),
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    let mut i: Int64 = 0\n    \
+         while i < xs.length {\n        s = s + xs[i + 1]\n        i = i + 1\n    }\n    return s\n}\n",
+        "    print(w(xs).toString())",
+        "array index 3 out of bounds",
+    ),
+    // The counter falls: Houdini's end-of-turn filter.
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    let mut i: Int64 = 0\n    \
+         while i < xs.length {\n        s = s + xs[i]\n        i = i - 1\n    }\n    return s\n}\n",
+        "    print(w(xs).toString())",
+        "array index -1 out of bounds",
+    ),
+    // A builtin shrinks the array through `modify`.
+    (
+        "fn w(xs: modify Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    let mut i: Int64 = 0\n    \
+         while i < xs.length {\n        let p = xs.pop() ?? 0\n        s = s + p + xs[i]\n        \
+         i = i + 1\n    }\n    return s\n}\n",
+        "    print(w(xs).toString())",
+        "array index 1 out of bounds",
+    ),
+    // A call shrinks the array through `modify`.
+    (
+        "fn cut(xs: modify Array<Int64>) {\n    let p = xs.pop() ?? 0\n}\n\n\
+         fn w(xs: modify Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    let mut i: Int64 = 0\n    \
+         while i < xs.length {\n        cut(xs)\n        s = s + xs[i]\n        i = i + 1\n    }\n    \
+         return s\n}\n",
+        "    print(w(xs).toString())",
+        "array index 1 out of bounds",
+    ),
+    // The join keeps only what both branches prove.
+    (
+        "fn w(c: Bool) -> Int64 {\n    let t = [1, 2, 3]\n    let mut i: Int64 = 1\n    if c {\n        \
+         i = 5\n    }\n    return t[i]\n}\n",
+        "    print(w(true).toString())",
+        "array index 5 out of bounds",
+    ),
+    // A sum is exact only when it provably fits (research witness h21t).
+    (
+        "fn w(xs: Array<Int64>, n: Int64) -> Int64 {\n    if n >= 0 {\n        let i = n + n\n        \
+         if i < xs.length {\n            return xs[i]\n        }\n    }\n    return 0\n}\n",
+        "    print(w(xs, 4611686018427387904).toString())",
+        "out of bounds",
+    ),
+    // A conversion is exact only when its source provably fits (witness s3).
+    (
+        "fn w(xs: Array<Int64>, x: Int64) -> Int64 {\n    let k = Int32(x)\n    if k >= 0 {\n        \
+         if Int64(k) < xs.length {\n            return xs[x]\n        }\n    }\n    return 0\n}\n",
+        "    print(w(xs, 4294967297).toString())",
+        "array index 4294967297 out of bounds",
+    ),
+    (
+        "fn w(x: Int64, y: Int64) -> Int64 {\n    return x / y\n}\n",
+        "    print(w(1, 0).toString())",
+        "division by zero",
+    ),
+    // `-1` is a computed divisor: the quotient's check stays.
+    (
+        "fn w(x: Int64, y: Int64) -> Int64 {\n    return x / -y\n}\n",
+        "    print(w(-9223372036854775807 - 1, 1).toString())",
+        "overflow",
+    ),
+    (
+        "fn w(x: Int64, k: Int64) -> Int64 {\n    return x << (k & 64)\n}\n",
+        "    print(w(1, 64).toString())",
+        "shift",
+    ),
+    (
+        "fn w(xs: Array<Int64>, b: UInt8) -> Int64 {\n    return xs[Int64(b)]\n}\n",
+        "    print(w(xs, 255).toString())",
+        "array index 255 out of bounds",
+    ),
+];
+
+#[test]
+fn every_witness_keeps_its_checks_and_traps_there() {
+    let mut failures = Vec::new();
+    for (src, calls, trap) in WITNESSES {
+        let rows = verdicts(src, "w");
+        if rows.is_empty() || rows.iter().any(|v| v.starts_with("proved")) {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, calls, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

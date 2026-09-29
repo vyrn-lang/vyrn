@@ -7850,6 +7850,11 @@ thread_local! {
     /// bodies share.
     static BODIES: std::cell::RefCell<HashMap<String, Option<Body>>> =
         std::cell::RefCell::new(HashMap::new());
+    /// The type declarations of the program in [`BODIES`], and the bodies
+    /// whose check rows are not decided yet: [`body_of`] decides a body when
+    /// an emitter first reads it, so `vyrn check` decides none of its own.
+    static UNDECIDED: std::cell::RefCell<(HashMap<String, TypeDecl>, std::collections::HashSet<String>)> =
+        std::cell::RefCell::new((HashMap::new(), std::collections::HashSet::new()));
     static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
     /// What the checker decided about a program, under [`Key`]. Held as the
     /// checker's `Rc`, so serving it costs a refcount, not a copy of a map
@@ -8090,7 +8095,17 @@ pub fn lambda_line(name: &str) -> Option<usize> {
 /// name for module state). `None` for a [`Gap`] and for a name two bodies
 /// share; a reader then walks the source.
 pub fn body_of(name: &str) -> Option<Body> {
-    BODIES.with(|b| b.borrow().get(name).cloned().flatten())
+    BODIES.with(|b| {
+        let mut b = b.borrow_mut();
+        let body = b.get_mut(name)?.as_mut()?;
+        UNDECIDED.with(|u| {
+            let (decls, pending) = &mut *u.borrow_mut();
+            if pending.remove(name) {
+                crate::elide::decide(body, decls);
+            }
+        });
+        Some(body.clone())
+    })
 }
 
 /// The instance of `body` whose `fn`-typed parameters are bound:
@@ -8683,8 +8698,22 @@ fn global_ty(program: &Program, g: &str) -> Option<Type> {
         .or_else(|| node_ty(&d.init as *const Expr as usize))
 }
 
-/// `body` with its check rows: the form an emitter reads.
+/// `body` with its check rows, each decided unless the build keeps them all
+/// ([`crate::check::mode`]): the form an emitter reads.
 pub fn checked(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> Body {
+    let mut out = stated(program, decls, body);
+    if decides() {
+        crate::elide::decide(&mut out, decls);
+    }
+    out
+}
+
+fn decides() -> bool {
+    *crate::check::mode() != crate::check::Mode::Keep
+}
+
+/// `body` with its check rows, every one kept.
+fn stated(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> Body {
     let global = |g: &str| global_ty(program, g);
     let mut out = body.clone();
     crate::check::state(
@@ -8705,7 +8734,12 @@ fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
         b.borrow_mut()
             .entry(body.name.clone())
             .and_modify(|had| *had = None)
-            .or_insert_with(|| Some(checked(program, proto.types(), body)));
+            .or_insert_with(|| {
+                if decides() {
+                    UNDECIDED.with(|u| u.borrow_mut().1.insert(body.name.clone()));
+                }
+                Some(stated(program, proto.types(), body))
+            });
     });
     fold_facts(body, proto, &body.stmts, out);
     out.loop_buffer_only
@@ -9257,6 +9291,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
     BODIES.with(|b| b.borrow_mut().clear());
+    UNDECIDED.with(|u| *u.borrow_mut() = (own.proto.types().clone(), Default::default()));
     // `vyrn check` emits nothing, so it folds no facts; the worklist below
     // still places its rows.
     let folds = vyrn_frontend::movecheck::emitting();

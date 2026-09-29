@@ -96,7 +96,7 @@ fn overForIn()
       else
         break
       {
-        check array-index @t1![@t3]  (line 79 #0)
+        proved array-index @t1![@t3]  (line 79 #0)
         let r = read @t1![@t3]
         let @t5 = prim add(@t3, lit 1)
         @t3 = @t5  (Nothing)

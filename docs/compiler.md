@@ -142,7 +142,10 @@ emitter runs a check only from its row. `check::mode` reads `VYRN_CHECKS`:
 `keep` keeps every row, and a file path is the oracle, which counts each row's
 runs into that file and fails a run where a proved row would have trapped.
 `scripts/check-elision.sh` runs the examples, the benchmarks and the site
-export in all three modes. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
+export in all three modes. `elide::decide` marks a row proved when linear
+facts over one body's own names (`facts`) show it cannot fail, with a
+certificate `facts::Cert::verify` checks again; `core::body_of` decides a body
+when an emitter first reads it. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left
