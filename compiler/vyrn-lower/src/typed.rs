@@ -788,13 +788,15 @@ pub struct StoreRules<'a> {
 }
 
 /// Every store the reader may not write, as the sentence `vyrn check` gives
-/// and its line, one per source statement. A store is a `St::Store`, a place
-/// passed to a `modify` argument, or a removal's receiver. A store inside a
-/// value whose record type has a `where` rule is refused, since the rule is
-/// checked where the value is built; so is a store into a name the reader
-/// wrote without `mut`. A minted temporary (`@t`) is not the reader's. `seen`
-/// holds the statements already refused, so the instances of one generic
-/// function refuse a statement once.
+/// and its line, one per source statement. A store is a `St::Store`, a
+/// module-state place passed to a `modify` argument, or a removal's receiver.
+/// A store inside a value whose record type has a `where` rule is refused,
+/// since the rule is checked where the value is built; so is a store into a
+/// name the reader wrote without `mut`. A local name passed to a `modify`
+/// argument is not a store here: `check_modify_arg` refuses it, and this pass
+/// accepts it. A minted temporary (`@t`) is not the reader's. `seen` holds the
+/// statements already refused, so the instances of one generic function refuse
+/// a statement once.
 pub fn stores(
     body: &Body,
     rules: &StoreRules,
