@@ -1,6 +1,7 @@
 //! Hand-written lexer: [`scan`] reads the source once, and [`lex`] and the formatter read the scan.
 
 use crate::diagnostics::Diagnostic;
+use crate::rules::{refuse, Rule};
 
 /// An interpolation hole: its raw source and where that source starts, so the
 /// nodes parsed from it carry their own lines and columns (#471).
@@ -336,27 +337,13 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                              // A String is NUL-terminated natively, so it cannot
                                              // hold a NUL. Refuse one at both entrances: a raw NUL
                                              // byte and `\u{0}` (there is no `\0` escape).
-            let nul = || {
-                Diagnostic::error(
-                    start_line,
-                    start_col,
-                    "lex",
-                    "string literal contains a NUL byte; a Vyrn String is NUL-terminated and \
-                     cannot hold one"
-                        .to_string(),
-                )
-            };
+            let nul = || refuse!("lex", start_line, start_col, NulInString);
             let mut parts: Vec<String> = Vec::new();
             let mut exprs: Vec<Hole> = Vec::new();
             let mut cur = String::new();
             loop {
                 if i >= chars.len() {
-                    return Err(Diagnostic::error(
-                        start_line,
-                        start_col,
-                        "lex",
-                        "unterminated string literal".to_string(),
-                    ));
+                    return Err(refuse!("lex", start_line, start_col, UnterminatedString));
                 }
                 let ch = chars[i];
                 if ch == '\0' {
@@ -393,12 +380,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                 }
                 if ch == '\\' {
                     if i + 1 >= chars.len() {
-                        return Err(Diagnostic::error(
-                            start_line,
-                            start_col,
-                            "lex",
-                            "unterminated escape in string".to_string(),
-                        ));
+                        return Err(refuse!("lex", start_line, start_col, UnterminatedEscape));
                     }
                     // `\{` opens a hole: scan its raw source to the matching `}`.
                     if chars[i + 1] == '{' {
@@ -429,11 +411,11 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                         }
                                     }
                                     if i >= chars.len() {
-                                        return Err(Diagnostic::error(
+                                        return Err(refuse!(
+                                            "lex",
                                             start_line,
                                             start_col,
-                                            "lex",
-                                            "unterminated string in interpolation".to_string(),
+                                            UnterminatedInterpString
                                         ));
                                     }
                                     i += 1; // closing nested quote
@@ -445,12 +427,11 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                         i += if chars[i] == '\\' { 2 } else { 1 };
                                     }
                                     if i >= chars.len() || chars[i] == '\n' {
-                                        return Err(Diagnostic::error(
+                                        return Err(refuse!(
+                                            "lex",
                                             start_line,
                                             start_col,
-                                            "lex",
-                                            "unterminated character literal in interpolation"
-                                                .to_string(),
+                                            UnterminatedInterpChar
                                         ));
                                     }
                                     i += 1; // closing nested quote
@@ -477,21 +458,11 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                             }
                         }
                         if depth != 0 {
-                            return Err(Diagnostic::error(
-                                start_line,
-                                start_col,
-                                "lex",
-                                "unterminated `\\{` interpolation".to_string(),
-                            ));
+                            return Err(refuse!("lex", start_line, start_col, UnterminatedInterp));
                         }
                         let hole_src: String = chars[hole..i].iter().collect();
                         if hole_src.trim().is_empty() {
-                            return Err(Diagnostic::error(
-                                start_line,
-                                start_col,
-                                "lex",
-                                "empty `\\{ }` interpolation".to_string(),
-                            ));
+                            return Err(refuse!("lex", start_line, start_col, EmptyInterp));
                         }
                         exprs.push(Hole {
                             src: hole_src,
@@ -519,12 +490,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                         '\\' => '\\',
                         '"' => '"',
                         other => {
-                            return Err(Diagnostic::error(
-                                start_line,
-                                start_col,
-                                "lex",
-                                format!("unknown escape `\\{other}`"),
-                            ))
+                            return Err(refuse!("lex", start_line, start_col, UnknownEscape, other))
                         }
                     };
                     cur.push(esc);
@@ -587,23 +553,19 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
             }
             let text: String = chars[start..i].iter().collect();
             let tok = if is_float {
-                let value: f64 = text.parse().map_err(|_| {
-                    Diagnostic::error(line, col, "lex", format!("invalid float literal: {text}"))
-                })?;
+                let value: f64 = text
+                    .parse()
+                    .map_err(|_| refuse!("lex", line, col, InvalidFloat, text))?;
                 Tok::Float(value)
             } else {
                 // A literal above `i64::MAX`, reachable only for `UInt64`, keeps its `u64` bit
                 // pattern.
                 let value: i64 = match text.parse::<i64>() {
                     Ok(v) => v,
-                    Err(_) => text.parse::<u64>().map(|u| u as i64).map_err(|_| {
-                        Diagnostic::error(
-                            line,
-                            col,
-                            "lex",
-                            format!("integer literal out of range: {text}"),
-                        )
-                    })?,
+                    Err(_) => text
+                        .parse::<u64>()
+                        .map(|u| u as i64)
+                        .map_err(|_| refuse!("lex", line, col, IntOutOfRange, text))?,
                 };
                 Tok::Int(value)
             };
@@ -647,11 +609,12 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
             None => match single_char_op(c) {
                 Some(tok) => (tok, 1usize),
                 None => {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "lex",
                         line,
                         col,
-                        "lex",
-                        format!("unexpected character {c:?}"),
+                        UnexpectedChar,
+                        c = format!("{c:?}")
                     ))
                 }
             },
@@ -688,9 +651,9 @@ fn parse_unicode_escape(
     line: usize,
     col: usize,
 ) -> Result<(char, usize), Diagnostic> {
-    let err = |m: &str| Diagnostic::error(line, col, "lex", m.to_string());
+    let err = |rule: Rule| Diagnostic::refusal(line, col, "lex", rule);
     if at + 2 >= chars.len() || chars[at + 2] != '{' {
-        return Err(err("`\\u` must be followed by `{HEX}`"));
+        return Err(err(Rule::UnicodeEscapeBrace {}));
     }
     let mut j = at + 3;
     let mut hex = String::new();
@@ -699,10 +662,10 @@ fn parse_unicode_escape(
         j += 1;
     }
     if j >= chars.len() {
-        return Err(err("unterminated `\\u{` escape"));
+        return Err(err(Rule::UnterminatedUnicodeEscape {}));
     }
-    let cp = u32::from_str_radix(hex.trim(), 16).map_err(|_| err("`\\u{}` needs hex digits"))?;
-    let ch = char::from_u32(cp).ok_or_else(|| err("invalid Unicode scalar in `\\u{}`"))?;
+    let cp = u32::from_str_radix(hex.trim(), 16).map_err(|_| err(Rule::UnicodeEscapeDigits {}))?;
+    let ch = char::from_u32(cp).ok_or_else(|| err(Rule::UnicodeEscapeScalar {}))?;
     Ok((ch, j + 1)) // past the closing `}`
 }
 
@@ -717,18 +680,16 @@ fn lex_byte_literal(
     line: usize,
     col: usize,
 ) -> Result<(u8, usize), Diagnostic> {
-    let err = |m: &str| Diagnostic::error(line, col, "lex", m.to_string());
+    let err = |rule: Rule| Diagnostic::refusal(line, col, "lex", rule);
     let i = start + 1; // first char of the content (past the opening `'`)
     if i >= chars.len() {
-        return Err(err("unterminated byte literal"));
+        return Err(err(Rule::UnterminatedByte {}));
     }
     let (val, after): (u8, usize) = if chars[i] == '\'' {
-        return Err(err(
-            "empty byte literal; a byte literal holds exactly one byte, e.g. 'a' or '\\x0a'",
-        ));
+        return Err(err(Rule::EmptyByte {}));
     } else if chars[i] == '\\' {
         if i + 1 >= chars.len() {
-            return Err(err("unterminated byte escape"));
+            return Err(err(Rule::UnterminatedByteEscape {}));
         }
         match chars[i + 1] {
             'n' => (0x0A, i + 2),
@@ -739,35 +700,35 @@ fn lex_byte_literal(
             '\'' => (0x27, i + 2),
             'x' => {
                 if i + 3 >= chars.len() {
-                    return Err(err("`\\x` needs two hex digits"));
+                    return Err(err(Rule::ByteHexDigits {}));
                 }
                 match (chars[i + 2].to_digit(16), chars[i + 3].to_digit(16)) {
                     (Some(h), Some(l)) => ((h * 16 + l) as u8, i + 4),
-                    _ => return Err(err("`\\x` needs two hex digits")),
+                    _ => return Err(err(Rule::ByteHexDigits {})),
                 }
             }
-            other => return Err(err(&format!("unknown byte escape `\\{other}`"))),
+            other => {
+                return Err(err(Rule::UnknownByteEscape {
+                    other: other.to_string(),
+                }))
+            }
         }
     } else {
         let ch = chars[i];
         if ch == '\n' {
-            return Err(err("raw newline in byte literal; write '\\n'"));
+            return Err(err(Rule::ByteNewline {}));
         }
         let cp = ch as u32;
         if !(0x20..=0x7E).contains(&cp) {
-            return Err(err(
-                "byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly",
-            ));
+            return Err(err(Rule::ByteNotAscii {}));
         }
         (cp as u8, i + 1)
     };
     if after >= chars.len() {
-        return Err(err("unterminated byte literal"));
+        return Err(err(Rule::UnterminatedByte {}));
     }
     if chars[after] != '\'' {
-        return Err(err(
-            "single-quoted strings are not allowed: '…' is a single byte (e.g. 'a', '\\n', '\\x41'); use \"…\" for text",
-        ));
+        return Err(err(Rule::SingleQuotedString {}));
     }
     Ok((val, after + 1))
 }

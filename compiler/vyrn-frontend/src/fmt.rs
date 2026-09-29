@@ -11,6 +11,7 @@
 
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Tok, Triv, TrivKind};
+use crate::rules::refuse;
 
 /// Formats `source` into its canonical form. The input must lex but need not
 /// parse, so format-on-save works on a broken file. Returns a lex error verbatim.
@@ -22,14 +23,7 @@ pub fn fmt(source: &str) -> Result<String, Diagnostic> {
     // Safety invariant: lex(fmt(src)) == lex(src) without Semi tokens.
     let after = lexer::lex(&output)?;
     if strip_semi(&before) != strip_semi(&after) {
-        return Err(Diagnostic::error(
-            0,
-            0,
-            "fmt",
-            "internal formatter error: output would change the token sequence \
-             (source left unchanged)"
-                .to_string(),
-        ));
+        return Err(refuse!("fmt", 0, 0, FormatterInvariant));
     }
     Ok(output)
 }

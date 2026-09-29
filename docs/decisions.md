@@ -177,7 +177,7 @@ pull request.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
 - Diagnostics speak intent: what you asked for, what blocks it, how to fix it. They say read, modify and consume, never "borrow" or "lifetime".
-- A checker refusal is a row in `rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule.
+- A refusal of the lexer, parser, loader or checker is a row in `rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule. Text written outside the frontend (`vyrn-lower` sentences, generator output, manifest and schema errors) stays a string in `Diagnostic::error`.
 - The runtime (allocator, strings, maps, arrays, I/O, traps, regions) is Vyrn in `std/runtime`. The raw memory and WASI primitives are declarations in `std/mem`, importable only by `std/runtime`.
 - The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`wasmrun.rs`, `wasi_host.c`) to exactly its rows.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.

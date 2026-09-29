@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
+use crate::rules::refuse;
 use crate::{lexer, parser};
 
 /// Provides module source text for a resolved specifier: a normalized,
@@ -574,17 +575,15 @@ fn audience_objection(
     if !audience::widens(from.audience, to.audience) {
         return None;
     }
-    let d = Diagnostic::error(
+    let d = refuse!(
+        "audience",
         line,
         0,
-        "audience",
-        format!(
-            "`{}` is {} and cannot import `{}`, which is {}",
-            audience::display_path(importer, map),
-            from.audience.phrase(),
-            audience::display_path(imported, map),
-            to.audience.phrase()
-        ),
+        AudienceCannotImport,
+        importer = audience::display_path(importer, map),
+        from = from.audience.phrase(),
+        imported = audience::display_path(imported, map),
+        to = to.audience.phrase()
     );
     Some(d.with_note(format!(
         "audience `{}` is declared by vyrn.json:{} — {}; the importer's own audience comes from {}",
@@ -635,12 +634,7 @@ fn runtime_fence(
         Some(map) => crate::audience::display_path(importer, map),
         None => importer.to_string(),
     };
-    let d = Diagnostic::error(
-        line,
-        0,
-        "audience",
-        format!("`{shown}` cannot import `{fenced}`, whose audience is the runtime"),
-    );
+    let d = refuse!("audience", line, 0, AudienceRuntime, shown, fenced);
     Some(d.with_note(format!(
         "audience `{RUNTIME_SPEC}` is declared by the compiler, not by \
          vyrn.json; the safe surface over `std/mem` is what `{RUNTIME_SPEC}` exports, \
@@ -960,14 +954,12 @@ pub fn load_with_origins(
         // argument (`g(x + "1")` from `g(x)`). The depth bound turns that stack
         // overflow into a named error.
         return (
-            Err(vec![Diagnostic::error(
-                0,
-                0,
+            Err(vec![refuse!(
                 "load",
-                format!(
-                    "generator imports nest more than {GEN_DEPTH_MAX} deep — a generator \
-                     likely imports itself with a growing argument"
-                ),
+                0,
+                0,
+                GenImportsDeep,
+                max = GEN_DEPTH_MAX
             )]),
             crate::origin::OriginMaps::default(),
             Vec::new(),
@@ -1144,11 +1136,13 @@ fn load_modules(
             Some(true) => return Ok(()), // already loaded
             Some(false) => {
                 let cycle: Vec<&str> = w.stack.iter().map(|s| s.as_str()).collect();
-                return Err(vec![Diagnostic::error(
-                    0,
-                    0,
+                return Err(vec![refuse!(
                     "load",
-                    format!("import cycle: {} -> {key}", cycle.join(" -> ")),
+                    0,
+                    0,
+                    ImportCycle,
+                    cycle = cycle.join(" -> "),
+                    key
                 )]);
             }
             None => {}
@@ -1159,14 +1153,9 @@ fn load_modules(
         let _read = crate::prof::phase("read");
         let text = match source {
             Some(t) => t.to_string(),
-            None => resolver.read(key).map_err(|e| {
-                vec![Diagnostic::error(
-                    0,
-                    0,
-                    "load",
-                    format!("cannot load `{key}`: {e}"),
-                )]
-            })?,
+            None => resolver
+                .read(key)
+                .map_err(|e| vec![refuse!("load", 0, 0, CannotLoad, key, why = e)])?,
         };
         drop(_read);
         let is_root = key == root_key;
@@ -1300,12 +1289,7 @@ fn load_modules(
         if !is_root
             && (program.log_level != DEFAULT_LOG_LEVEL || program.log_sink != LogSink::Stderr)
         {
-            return Err(vec![Diagnostic::error(
-                0,
-                0,
-                "load",
-                format!("`{key}`: only the root module may configure `logging {{ .. }}`"),
-            )]);
+            return Err(vec![refuse!("load", 0, 0, LoggingRootOnly, key)]);
         }
 
         // Module state is legal in any module: module-private, one
@@ -3603,14 +3587,14 @@ fn clash_diagnostics(
             // A linked module was imported, so a site exists; the diagnostic
             // survives even if it does not.
             None => {
-                out.push(Diagnostic::error(
-                    0,
-                    0,
+                out.push(refuse!(
                     "load",
-                    format!(
-                        "`{}` is declared by both `{first}` and `{second}`",
-                        names[0]
-                    ),
+                    0,
+                    0,
+                    DeclaredByBoth,
+                    name = names[0],
+                    first,
+                    second
                 ));
                 continue;
             }
@@ -3629,15 +3613,14 @@ fn clash_diagnostics(
             ImportSource::Generator { .. } => None,
         };
         let line = imp.line;
-        let d = Diagnostic::error(
+        let d = refuse!(
+            "load",
             line,
             0,
-            "load",
-            format!(
-                "`{}` is declared by both `{first}` and `{second}` — a top-level name is \
-                 program-wide, so two linked modules cannot share one",
-                names[0]
-            ),
+            DeclaredByBothLinked,
+            name = names[0],
+            first,
+            second
         );
         let fix = match spec {
             Some(s) => format!(

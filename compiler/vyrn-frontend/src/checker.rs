@@ -19,17 +19,11 @@ use crate::types::FALLIBLE;
 /// `cerr!(line, Rule, hole = expr, ..)` fills each hole with `expr`'s
 /// `Display`; a bare `hole` reads the binding of that name.
 macro_rules! cerr {
-    (@hole $h:ident) => {
-        $h.to_string()
-    };
-    (@hole $h:ident $e:expr) => {
-        $e.to_string()
-    };
     ($line:expr; $rule:expr) => {
         $crate::diagnostics::Diagnostic::refusal($crate::checker::line_of($line), 0, "check", $rule)
     };
     ($line:expr, $rule:ident $(, $h:ident $(= $e:expr)?)* $(,)?) => {
-        cerr!($line; $crate::rules::Rule::$rule { $($h: cerr!(@hole $h $($e)?)),* })
+        $crate::rules::refuse!("check", $crate::checker::line_of($line), 0, $rule $(, $h $(= $e)?)*)
     };
 }
 

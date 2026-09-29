@@ -1,8 +1,9 @@
 //! Recursive-descent parser with precedence climbing for expressions.
 
 use crate::ast::*;
-use crate::diagnostics::{menu, Diagnostic};
+use crate::diagnostics::Diagnostic;
 use crate::lexer::{Hole, Tok, Token};
+use crate::rules::{refuse, Rule};
 use std::collections::HashSet;
 
 /// Whether `name` in a contract member's type is an implicit type parameter:
@@ -648,11 +649,13 @@ impl Parser {
             self.tokens[self.pos].col += 1;
             Ok(())
         } else {
-            Err(Diagnostic::error(
+            Err(refuse!(
+                "parse",
                 self.line(),
                 self.col(),
-                "parse",
-                format!("expected {:?}, found {:?}", expected, self.peek()),
+                Expected,
+                pty = format!("{:?}", expected),
+                aty = format!("{:?}", self.peek())
             ))
         }
     }
@@ -693,11 +696,12 @@ impl Parser {
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {
         match self.advance() {
             Tok::Ident(name) => Ok(name),
-            other => Err(Diagnostic::error(
+            other => Err(refuse!(
+                "parse",
                 self.line(),
                 self.col(),
-                "parse",
-                format!("expected identifier, found {:?}", other),
+                ExpectedIdent,
+                found = format!("{:?}", other)
             )),
         }
     }
@@ -748,19 +752,12 @@ impl Parser {
                     && !is_export_mut
                 {
                     // Module state is legal in any module but never exported.
-                    let msg = if *self.peek() == Tok::Let {
-                        "module state is not exportable — export accessor functions \
-                         (a top-level `let` is module-private in every module)"
+                    let rule = if *self.peek() == Tok::Let {
+                        Rule::ModuleStateExport {}
                     } else {
-                        "`export` must be followed by `fn`, `type`, `protocol`, `contract`, \
-                         `extern fn`, `gen fn`, or `mut fn`"
+                        Rule::ExportNeedsDecl {}
                     };
-                    errors.push(Diagnostic::error(
-                        self.line(),
-                        self.col(),
-                        "parse",
-                        msg.to_string(),
-                    ));
+                    errors.push(Diagnostic::refusal(self.line(), self.col(), "parse", rule));
                     self.sync_to_decl();
                     continue;
                 }
@@ -929,12 +926,7 @@ impl Parser {
                     let line = self.line();
                     let col = self.col();
                     if saw_logging {
-                        errors.push(Diagnostic::error(
-                            line,
-                            col,
-                            "parse",
-                            "duplicate `logging` config block".to_string(),
-                        ));
+                        errors.push(refuse!("parse", line, col, DuplicateLogging));
                         self.sync_to_decl();
                         continue;
                     }
@@ -951,14 +943,12 @@ impl Parser {
                     }
                 }
                 other => {
-                    errors.push(Diagnostic::error(
+                    errors.push(refuse!(
+                        "parse",
                         self.line(),
                         self.col(),
-                        "parse",
-                        format!(
-                            "expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or \
-                             `logging` at top level, found {other:?}"
-                        ),
+                        TopLevelExpected,
+                        found = format!("{other:?}")
                     ));
                     self.advance(); // Consume the stray token so the loop makes progress.
                 }
@@ -1077,27 +1067,16 @@ impl Parser {
                 self.advance();
                 let aname = self.expect_ident()?;
                 if *self.peek() == Tok::Eq {
-                    return Err(Diagnostic::error(
-                        tline,
-                        col,
-                        "parse",
-                        format!(
-                            "`type {aname}` in a protocol declares an associated type and takes no \
-                             right-hand side — the implementing type supplies it, so \
-                             `type {aname} = ..` belongs in the `impl`"
-                        ),
-                    ));
+                    return Err(refuse!("parse", tline, col, AssocTypeRhs, aname));
                 }
                 if !methods.is_empty() {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         tline,
                         col,
-                        "parse",
-                        format!(
-                            "`type {aname}` must be declared before the methods of `{name}` — an \
-                             associated type is resolved where it is named, so a signature above \
-                             it cannot see it"
-                        ),
+                        AssocTypeAfterMethods,
+                        aname,
+                        name
                     ));
                 }
                 assoc.push(aname.clone());
@@ -1130,15 +1109,13 @@ impl Parser {
                 if let Some(rc) = result_cap {
                     if recv != rc {
                         let want = rc.word();
-                        return Err(Diagnostic::error(
+                        return Err(refuse!(
+                            "parse",
                             rline,
                             rcol,
-                            "parse",
-                            format!(
-                                "`fn {mname}` returns `{want} T`, so its receiver must be \
-                                 `{want} self` — the result is a place inside the receiver, \
-                                 and the two capabilities name one access"
-                            ),
+                            ProjectionReceiver,
+                            name = mname,
+                            want
                         ));
                     }
                 }
@@ -1192,15 +1169,13 @@ impl Parser {
                 Tok::Let => self.contract_value_member(doc, mline)?,
                 Tok::Fn => self.contract_fn_member(doc, mline)?,
                 other => {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         self.line(),
                         self.col(),
-                        "parse",
-                        format!(
-                            "expected `let` or `fn` in contract `{name}`, found {other:?} \
-                             (a contract member is `let name: Type [= default]`, \
-                             `fn name(..) -> T [= default]`, or the open rule `fn *(..) -> T`)"
-                        ),
+                        ContractMemberExpected,
+                        name,
+                        found = format!("{other:?}")
                     ))
                 }
             };
@@ -1209,15 +1184,13 @@ impl Parser {
             // one name as both a `let` and a `fn` member.
             if let Some(prev) = members.iter().find(|m| m.name == member.name) {
                 if member.is_open_rule() {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         member.line,
                         self.col(),
-                        "parse",
-                        format!(
-                            "contract `{name}` already has an open rule (line {}) — \
-                             a contract has at most one",
-                            prev.line
-                        ),
+                        ContractOpenRuleTwice,
+                        name,
+                        line = prev.line
                     ));
                 }
                 let same_form = matches!(
@@ -1228,28 +1201,25 @@ impl Parser {
                     ) | (ContractMemberKind::Fn { .. }, ContractMemberKind::Fn { .. })
                 );
                 if !same_form {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         member.line,
                         self.col(),
-                        "parse",
-                        format!(
-                            "contract `{name}` declares `{}` as both a value and a function \
-                             (line {}) — alternative signatures are alternatives, not a \
-                             change of member form",
-                            member.name, prev.line
-                        ),
+                        ContractMemberFormChange,
+                        name,
+                        member = member.name,
+                        line = prev.line
                     ));
                 }
                 if matches!(member.kind, ContractMemberKind::Value { .. }) {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         member.line,
                         self.col(),
-                        "parse",
-                        format!(
-                            "contract `{name}` already declares `{}` (line {}) — only \
-                             `fn` members may have alternative signatures",
-                            member.name, prev.line
-                        ),
+                        ContractMemberTwice,
+                        name,
+                        member = member.name,
+                        line = prev.line
                     ));
                 }
             }
@@ -1276,14 +1246,12 @@ impl Parser {
         self.eat(&Tok::Let)?;
         let name = self.expect_ident()?;
         if *self.peek() != Tok::Colon {
-            return Err(Diagnostic::error(
+            return Err(refuse!(
+                "parse",
                 self.line(),
                 self.col(),
-                "parse",
-                format!(
-                    "contract member `{name}` needs a type: write `let {name}: Type` \
-                     (a contract states the shape of an export, so the type is never inferred)"
-                ),
+                ContractMemberNeedsType,
+                name
             ));
         }
         self.eat(&Tok::Colon)?;
@@ -1325,15 +1293,12 @@ impl Parser {
             && self.tokens.get(self.pos + 1).map(|t| &t.tok) == Some(&Tok::Dot);
         if variadic {
             if name != OPEN_RULE_NAME {
-                return Err(Diagnostic::error(
+                return Err(refuse!(
+                    "parse",
                     self.line(),
                     self.col(),
-                    "parse",
-                    format!(
-                        "contract member `{name}` cannot take `(..)` — only the open rule \
-                         `fn *(..)` may leave its parameters open, because a named member's \
-                         arity is part of what the name promises"
-                    ),
+                    ContractMemberParams,
+                    name
                 ));
             }
             self.advance();
@@ -1360,14 +1325,11 @@ impl Parser {
         let default = if *self.peek() == Tok::Eq {
             if name == OPEN_RULE_NAME {
                 // The open rule has no name whose absence a default could stand in for.
-                return Err(Diagnostic::error(
+                return Err(refuse!(
+                    "parse",
                     self.line(),
                     self.col(),
-                    "parse",
-                    "a contract's open rule cannot have a default — it describes the shape of \
-                     exports whose names the contract does not know, so there is no absent \
-                     member for a default to supply"
-                        .to_string(),
+                    ContractOpenRuleDefault
                 ));
             }
             self.advance();
@@ -1441,29 +1403,19 @@ impl Parser {
                 // restores the aliases.
                 if !methods.is_empty() {
                     self.type_params.clear();
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         tline,
                         col,
-                        "parse",
-                        format!(
-                            "`type {aname} = ..` must be declared before the methods of \
-                             `impl {protocol} for {ty}` — an associated type is resolved where it \
-                             is named, so a method above it cannot see it"
-                        ),
+                        ImplAssocTypeOrder,
+                        aname,
+                        protocol,
+                        ty
                     ));
                 }
                 if type_params.contains(&aname) {
                     self.type_params.clear();
-                    return Err(Diagnostic::error(
-                        tline,
-                        col,
-                        "parse",
-                        format!(
-                            "`type {aname}` collides with the `{aname}` this impl's head binds — \
-                             an associated type and a type variable are different things and \
-                             cannot share a name"
-                        ),
-                    ));
+                    return Err(refuse!("parse", tline, col, ImplAssocTypeClash, aname));
                 }
                 self.eat(&Tok::Eq)?;
                 let bound = self.type_()?;
@@ -1534,13 +1486,7 @@ impl Parser {
             return Ok(None);
         }
         if cap == Capability::Consume {
-            return Err(Diagnostic::error(
-                self.line(),
-                self.col(),
-                "parse",
-                "a result is owned by its caller already — `-> consume T` is spelled `-> T`"
-                    .to_string(),
-            ));
+            return Err(refuse!("parse", self.line(), self.col(), ConsumeResult));
         }
         self.advance();
         Ok(Some(cap))
@@ -1596,15 +1542,13 @@ impl Parser {
             if let Some(rc) = rc {
                 if capability != rc {
                     let want = rc.word();
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         rline,
                         rcol,
-                        "parse",
-                        format!(
-                            "`fn {name}` returns `{want} T`, so its receiver must be \
-                             `{want} self` — the result is a place inside the receiver, \
-                             and the two capabilities name one access"
-                        ),
+                        ProjectionReceiver,
+                        name,
+                        want
                     ));
                 }
             }
@@ -1650,24 +1594,11 @@ impl Parser {
             match key.as_str() {
                 "level" => {
                     let name = self.expect_ident()?;
-                    level = log_level_ordinal(&name).ok_or_else(|| {
-                        Diagnostic::error(
-                            line,
-                            col,
-                            "parse",
-                            format!("unknown log level `{name}` (trace/debug/info/warn/error)"),
-                        )
-                    })?;
+                    level = log_level_ordinal(&name)
+                        .ok_or_else(|| refuse!("parse", line, col, UnknownLogLevel, name))?;
                 }
                 "sink" => sink = self.log_sink()?,
-                other => {
-                    return Err(Diagnostic::error(
-                        line,
-                        col,
-                        "parse",
-                        format!("unknown `logging` field `{other}` (expected `level` or `sink`)"),
-                    ))
-                }
+                other => return Err(refuse!("parse", line, col, UnknownLoggingField, other)),
             }
             if *self.peek() == Tok::Comma {
                 self.advance();
@@ -1691,23 +1622,19 @@ impl Parser {
                 let path = match self.advance() {
                     Tok::Str(s) => s,
                     other => {
-                        return Err(Diagnostic::error(
+                        return Err(refuse!(
+                            "parse",
                             line,
                             col,
-                            "parse",
-                            format!("`file(..)` sink needs a string path, found {other:?}"),
+                            FileSinkPath,
+                            found = format!("{other:?}")
                         ))
                     }
                 };
                 self.eat(&Tok::RParen)?;
                 Ok(LogSink::File(path))
             }
-            other => Err(Diagnostic::error(
-                line,
-                col,
-                "parse",
-                format!("unknown sink `{other}` (expected stderr, stdout, or file(\"..\"))"),
-            )),
+            other => Err(refuse!("parse", line, col, UnknownSink, other)),
         }
     }
 
@@ -1723,11 +1650,12 @@ impl Parser {
             match self.advance() {
                 Tok::Ident(kw) if kw == "as" => {}
                 other => {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         line,
                         self.col(),
-                        "parse",
-                        format!("expected `as` after `import *`, found {other:?}"),
+                        ImportStarAs,
+                        found = format!("{other:?}")
                     ))
                 }
             }
@@ -1735,11 +1663,13 @@ impl Parser {
             match self.advance() {
                 Tok::Ident(kw) if kw == "from" => {}
                 other => {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         line,
                         self.col(),
-                        "parse",
-                        format!("expected `from` after `import * as {ns}`, found {other:?}"),
+                        ImportStarFrom,
+                        ns,
+                        found = format!("{other:?}")
                     ))
                 }
             }
@@ -1775,22 +1705,17 @@ impl Parser {
         }
         self.eat(&Tok::RBrace)?;
         if names.is_empty() {
-            return Err(Diagnostic::error(
-                line,
-                self.col(),
-                "parse",
-                "an import must name at least one binding: `import { name } from \"..\"`"
-                    .to_string(),
-            ));
+            return Err(refuse!("parse", line, self.col(), ImportEmpty));
         }
         match self.advance() {
             Tok::Ident(kw) if kw == "from" => {}
             other => {
-                return Err(Diagnostic::error(
+                return Err(refuse!(
+                    "parse",
                     line,
                     self.col(),
-                    "parse",
-                    format!("expected `from` after the import list, found {other:?}"),
+                    ImportFrom,
+                    found = format!("{other:?}")
                 ))
             }
         }
@@ -1832,14 +1757,12 @@ impl Parser {
                     line: call_line,
                 })
             }
-            other => Err(Diagnostic::error(
+            other => Err(refuse!(
+                "parse",
                 line,
                 self.col(),
-                "parse",
-                format!(
-                    "expected a module path string or a generator call after `from`, \
-                     found {other:?}"
-                ),
+                ImportPathExpected,
+                found = format!("{other:?}")
             )),
         }
     }
@@ -1893,16 +1816,7 @@ impl Parser {
                 // A refinement was collected but the outer `{ .. }` is not the whole base: a
                 // `&` wrapped it in [`Type::Merge`], or an enum payload holds it. There is no
                 // single record to hang `Decl.field` on.
-                return Err(Diagnostic::error(
-                    line,
-                    col,
-                    "parse",
-                    format!(
-                        "an inline field `where` refines one record's fields, so the base of \
-                         `type {name}` must be exactly `{{ .. }}` — a merge (`&`) or enum \
-                         variant cannot carry refinements"
-                    ),
-                ));
+                return Err(refuse!("parse", line, col, InlineWhereBase, name));
             };
             for (fname, pred) in field_preds {
                 let synthetic = format!("{name}.{fname}");
@@ -2005,15 +1919,7 @@ impl Parser {
                     // Named record types only: the deferral is a fact about a declared field, and
                     // an anonymous record has no declaration to stamp on a value.
                     if !collecting {
-                        return Err(Diagnostic::error(
-                            line,
-                            col,
-                            "parse",
-                            "a `lazy` field needs a named record type \
-                             (`type T = { field: lazy U }`); an anonymous record \
-                             has no declaration to defer against"
-                                .to_string(),
-                        ));
+                        return Err(refuse!("parse", line, col, LazyAnonymous));
                     }
                 }
                 let ty = self.type_()?;
@@ -2024,27 +1930,12 @@ impl Parser {
                     self.advance();
                     let pred = self.expr()?;
                     if !collecting {
-                        return Err(Diagnostic::error(
-                            line,
-                            col,
-                            "parse",
-                            "an inline field `where` needs a named record type \
-                             (`type T = { field: .. where .. }`); an anonymous record \
-                             has no name to attach the refinement to"
-                                .to_string(),
-                        ));
+                        return Err(refuse!("parse", line, col, WhereAnonymous));
                     }
                     // An inline `where` would move the field into a synthetic type and hide the
                     // `lazy` marker, so the read would stop being forced.
                     if lazy {
-                        return Err(Diagnostic::error(
-                            line,
-                            col,
-                            "parse",
-                            "a `lazy` field may not carry an inline `where`: name the \
-                             validated type and defer that (`field: lazy Body`)"
-                                .to_string(),
-                        ));
+                        return Err(refuse!("parse", line, col, LazyWhere));
                     }
                     local.push((name.clone(), pred));
                 }
@@ -2188,16 +2079,7 @@ impl Parser {
             self.advance();
             let (rline, rcol) = (self.line(), self.col());
             if self.parse_result_capability()?.is_some() {
-                return Err(Diagnostic::error(
-                    rline,
-                    rcol,
-                    "parse",
-                    format!(
-                        "`fn {name}` cannot return a capability — a projection's result \
-                         is a place inside its receiver, and a free function has none. \
-                         Declare it on an `impl`."
-                    ),
-                ));
+                return Err(refuse!("parse", rline, rcol, FreeFnCapability, name));
             }
             self.type_()?
         } else {
@@ -2236,11 +2118,13 @@ impl Parser {
         let name = match self.advance() {
             Tok::Str(s) => s,
             other => {
-                return Err(Diagnostic::error(
+                return Err(refuse!(
+                    "parse",
                     self.line(),
                     self.col(),
-                    "parse",
-                    format!("expected a {word} name string, found {other:?}"),
+                    NameStringExpected,
+                    word,
+                    found = format!("{other:?}")
                 ))
             }
         };
@@ -2303,12 +2187,11 @@ impl Parser {
         let has_body = *self.peek() == Tok::LBrace;
         if exported {
             if !has_body {
-                return Err(Diagnostic::error(
+                return Err(refuse!(
+                    "parse",
                     self.line(),
                     self.col(),
-                    "parse",
-                    "an exported extern needs a body — a body-less `extern fn` is an import"
-                        .to_string(),
+                    ExportedExternBody
                 ));
             }
             self.type_params.clear();
@@ -2333,12 +2216,7 @@ impl Parser {
             });
         }
         if has_body {
-            return Err(Diagnostic::error(
-                self.line(),
-                self.col(),
-                "parse",
-                "an `extern fn` has no body".to_string(),
-            ));
+            return Err(refuse!("parse", self.line(), self.col(), ExternBody));
         }
         self.eat_semi();
         Ok(Function {
@@ -2489,24 +2367,8 @@ impl Parser {
             "F64x2" => Type::F64x2,
             "Mask64x2" => Type::Mask64x2,
             // Point the removed unsized names at the sized spellings.
-            "Int" => {
-                return Err(Diagnostic::error(
-                    self.line(),
-                    self.col(),
-                    "parse",
-                    "`Int` has no size; write `Int64` (or `Int8`/`Int16`/`Int32`, \
-                     `UInt8`..`UInt64`)"
-                        .to_string(),
-                ))
-            }
-            "Float" => {
-                return Err(Diagnostic::error(
-                    self.line(),
-                    self.col(),
-                    "parse",
-                    "`Float` has no size; write `Float64` (or `Float32`)".to_string(),
-                ))
-            }
+            "Int" => return Err(refuse!("parse", self.line(), self.col(), IntUnsized)),
+            "Float" => return Err(refuse!("parse", self.line(), self.col(), FloatUnsized)),
             "Bool" => Type::Bool,
             "String" => Type::Str,
             "Unit" => Type::Unit,
@@ -2525,14 +2387,7 @@ impl Parser {
                     self.advance();
                     let n = match self.peek() {
                         Tok::Int(n) if *n >= 0 => *n as usize,
-                        _ => {
-                            return Err(Diagnostic::error(
-                                self.line(),
-                                self.col(),
-                                "parse",
-                                "`Array<T, N>` needs a non-negative integer size".to_string(),
-                            ))
-                        }
+                        _ => return Err(refuse!("parse", self.line(), self.col(), ArraySize)),
                     };
                     self.advance();
                     self.eat(&Tok::Gt)?;
@@ -2548,24 +2403,22 @@ impl Parser {
                 self.eat(&Tok::Lt)?;
                 let inner = self.type_()?;
                 if *self.peek() != Tok::Comma {
-                    return Err(Diagnostic::error(
+                    return Err(refuse!(
+                        "parse",
                         self.line(),
                         self.col(),
-                        "parse",
-                        "`SmallArray<T, N>` needs an inline capacity, e.g. \
-                         `SmallArray<Int64, 16>`"
-                            .to_string(),
+                        SmallArrayNeedsCapacity
                     ));
                 }
                 self.advance();
                 let n = match self.peek() {
                     Tok::Int(n) if *n >= 0 => *n as usize,
                     _ => {
-                        return Err(Diagnostic::error(
+                        return Err(refuse!(
+                            "parse",
                             self.line(),
                             self.col(),
-                            "parse",
-                            "`SmallArray<T, N>` needs a non-negative integer capacity".to_string(),
+                            SmallArrayCapacityType
                         ))
                     }
                 };
@@ -2608,12 +2461,7 @@ impl Parser {
                 }
                 self.eat(&Tok::Gt)?;
                 if keys.is_empty() {
-                    return Err(Diagnostic::error(
-                        self.line(),
-                        self.col(),
-                        "parse",
-                        format!("`{name}` needs at least one field, e.g. `{name}<T, field>`"),
-                    ));
+                    return Err(refuse!("parse", self.line(), self.col(), NeedsField, name));
                 }
                 if name == "Omit" {
                     Type::Omit(Box::new(base), keys)
@@ -2679,11 +2527,12 @@ impl Parser {
     /// depth this one left.
     fn nest_enter(&mut self) -> Result<(), Diagnostic> {
         if self.depth >= Self::MAX_NEST {
-            return Err(Diagnostic::error(
+            return Err(refuse!(
+                "parse",
                 self.line(),
                 self.col(),
-                "parse",
-                format!("nesting exceeds {} levels", Self::MAX_NEST),
+                NestingTooDeep,
+                max = Self::MAX_NEST
             ));
         }
         self.depth += 1;
@@ -2790,14 +2639,12 @@ impl Parser {
             None
         };
         if *self.peek() != Tok::Eq {
-            return Err(Diagnostic::error(
+            return Err(refuse!(
+                "parse",
                 self.line(),
                 self.col(),
-                "parse",
-                format!(
-                    "module state `{name}` needs an initializer: write `let {name} = <value>` \
-                     (top-level `let` has no default value)"
-                ),
+                GlobalNeedsInit,
+                name
             ));
         }
         self.eat(&Tok::Eq)?;
@@ -2896,15 +2743,7 @@ impl Parser {
         let col = self.col();
         let variant = self.expect_ident()?;
         if mutable {
-            return Err(Diagnostic::error(
-                line,
-                col,
-                "parse",
-                format!(
-                    "`let mut {variant}(..)` — a pattern binder is a borrow of the \
-                     scrutinee's payload; bind it, then `copy()` what you mutate"
-                ),
-            ));
+            return Err(refuse!("parse", line, col, LetMutPattern, variant));
         }
         self.eat(&Tok::LParen)?;
         let mut binds: Vec<Binder> = Vec::new();
@@ -2921,27 +2760,10 @@ impl Parser {
         let scrut = self.expr()?;
         self.eat_semi();
         if !matches!(scrut, Expr::Var { .. }) {
-            return Err(Diagnostic::error(
-                line,
-                col,
-                "parse",
-                format!(
-                    "the scrutinee of `let {variant}(..)` must be a name — a \
-                     multi-payload pattern reads it once per binder, so bind the \
-                     value with an ordinary `let` first"
-                ),
-            ));
+            return Err(refuse!("parse", line, col, LetPatternScrutinee, variant));
         }
         if binds.is_empty() {
-            return Err(Diagnostic::error(
-                line,
-                col,
-                "parse",
-                format!(
-                    "`let {variant}()` binds nothing — a payload-free variant is a \
-                     question, and `if let`/`match` are how it is asked"
-                ),
-            ));
+            return Err(refuse!("parse", line, col, LetEmptyVariant, variant));
         }
         let msg = format!("let `{variant}(..)` did not match");
         let mut stmts = Vec::new();
@@ -3206,14 +3028,7 @@ impl Parser {
                                 };
                                 return Ok(self.spliced(stmts));
                             }
-                            return Err(Diagnostic::error(
-                                line,
-                                self.col(),
-                                "parse",
-                                "the left side of an index assignment `[i] = ..` must be \
-                                 an array variable, a record field, or an array element"
-                                    .to_string(),
-                            ));
+                            return Err(refuse!("parse", line, self.col(), IndexAssignTarget));
                         }
                     }
                     // `a[i].f = v`: [`store_stmts`] moves the container out, sets the field on the
@@ -3230,26 +3045,12 @@ impl Parser {
                                     };
                                     return Ok(self.spliced(stmts));
                                 }
-                                return Err(Diagnostic::error(
-                                    line,
-                                    self.col(),
-                                    "parse",
-                                    "the left side of `[i].field = ..` must be an array \
-                                     variable, a record field, or an array element"
-                                        .to_string(),
-                                ));
+                                return Err(refuse!("parse", line, self.col(), FieldAssignTarget));
                             }
                         }
                         // `a[i].f.g = v` and deeper are refused: one level of field write-through.
                         if is_index_field_chain(expr) {
-                            return Err(Diagnostic::error(
-                                line,
-                                self.col(),
-                                "parse",
-                                "only a single field write-through is supported: \
-                                 `a[i].field = v` (not `a[i].field.field = v`)"
-                                    .to_string(),
-                            ));
+                            return Err(refuse!("parse", line, self.col(), FieldWriteDepth));
                         }
                     }
                 }
@@ -3318,17 +3119,7 @@ impl Parser {
                                 });
                             }
                             _ => {
-                                return Err(Diagnostic::error(
-                                    line,
-                                    self.col(),
-                                    "parse",
-                                    "this `push` has no place to write back to, so it \
-                                     would silently do nothing. Its receiver must be an \
-                                     assignable place: a variable (`xs.push(v)`), a \
-                                     record field (`r.xs.push(v)`), or an array element \
-                                     (`a[i].push(v)`) — not a temporary or a deeper chain."
-                                        .to_string(),
-                                ));
+                                return Err(refuse!("parse", line, self.col(), PushNoPlace));
                             }
                         }
                     }
@@ -3538,11 +3329,12 @@ impl Parser {
         while matches!(self.peek(), Tok::Question | Tok::Dot | Tok::LBracket) {
             links += 1;
             if self.depth.saturating_add(links) >= Self::MAX_NEST {
-                return Err(Diagnostic::error(
+                return Err(refuse!(
+                    "parse",
                     self.line(),
                     self.col(),
-                    "parse",
-                    format!("nesting exceeds {} levels", Self::MAX_NEST),
+                    NestingTooDeep,
+                    max = Self::MAX_NEST
                 ));
             }
             let r = self.postfix_step(e);
@@ -3755,10 +3547,7 @@ impl Parser {
                 Tok::OrOr => ("||", "`() -> ...`"),
                 _ => ("|x|", "`x -> ...`, or `(x, y) -> ...` for more than one"),
             };
-            let says = format!(
-                "`{form} ...` is not a lambda here; a lambda takes its parameters before an arrow"
-            );
-            return Err(Diagnostic::error(line, col, "parse", menu(says, [fix])));
+            return Err(refuse!("parse", line, col, LambdaNotHere, form, fix));
         }
         match self.advance() {
             Tok::Int(v) => Ok(Expr::Int(v, Id::NEW)),
@@ -3871,15 +3660,7 @@ impl Parser {
                             return self.code_quote(vec![s], Vec::new(), line, col);
                         }
                     }
-                    return Err(Diagnostic::error(
-                        line,
-                        col,
-                        "parse",
-                        format!(
-                            "a tagged template `{name}\"..\"` needs at least one `\\{{ }}` \
-                             interpolation; use a plain string otherwise"
-                        ),
-                    ));
+                    return Err(refuse!("parse", line, col, TemplateNoHole, name));
                 }
                 // `Name?(args)`, and `ns.Name?(args)`, whose dotted path folds into `name`
                 // like a dotted type. Only a path that continues `?(` folds;
@@ -3960,11 +3741,12 @@ impl Parser {
                     })
                 }
             }
-            other => Err(Diagnostic::error(
+            other => Err(refuse!(
+                "parse",
                 line,
                 col,
-                "parse",
-                format!("unexpected token in expression: {other:?}"),
+                UnexpectedToken,
+                found = format!("{other:?}")
             )),
         }
     }
@@ -4020,14 +3802,8 @@ impl Parser {
     /// enclosing function's generic parameters.
     fn parse_hole(&self, hole: &Hole, line: usize, col: usize) -> Result<Expr, Diagnostic> {
         let src = hole.src.as_str();
-        let toks = crate::lexer::lex(src).map_err(|e| {
-            Diagnostic::error(
-                line,
-                col,
-                "parse",
-                format!("in interpolation: {}", e.render()),
-            )
-        })?;
+        let toks = crate::lexer::lex(src)
+            .map_err(|e| refuse!("parse", line, col, InInterpolation, detail = e.render()))?;
         // The hole's tokens count from its own line 1, column 1; move them to where
         // the hole stands, so a node's line and a lambda's key are its own.
         let toks = toks
@@ -4045,23 +3821,16 @@ impl Parser {
         let mut sub = self.sub(toks);
         // A sub-parser diagnostic's line is relative to the hole: anchor it at the
         // template and embed the detail.
-        let e = sub.expr().map_err(|d| {
-            Diagnostic::error(
-                line,
-                col,
-                "parse",
-                format!("in interpolation: {}", d.message),
-            )
-        })?;
+        let e = sub
+            .expr()
+            .map_err(|d| refuse!("parse", line, col, InInterpolation, detail = d.message))?;
         if *sub.peek() != Tok::Eof {
-            return Err(Diagnostic::error(
+            return Err(refuse!(
+                "parse",
                 line,
                 col,
-                "parse",
-                format!(
-                    "unexpected tokens after interpolation expression `{}`",
-                    src.trim()
-                ),
+                InterpolationTrailing,
+                src = src.trim()
             ));
         }
         Ok(e)
@@ -4160,10 +3929,10 @@ impl Parser {
             }
         }
         if !self.skeleton_parses_any(&skel) {
-            let (msg, skel_line, skel_col) = self.skeleton_error_detail(&skel);
+            let (rule, skel_line, skel_col) = self.skeleton_error_detail(&skel);
             let rline = line + skel_line.saturating_sub(1);
             let rcol = if skel_line <= 1 { col } else { skel_col };
-            return Err(Diagnostic::error(rline, rcol, "parse", msg));
+            return Err(Diagnostic::refusal(rline, rcol, "parse", rule));
         }
         let mut acc: Option<Expr> = None;
         let add = |acc: &mut Option<Expr>, e: Expr| {
@@ -4286,23 +4055,16 @@ impl Parser {
 
     /// The message and skeleton-relative line and column for a skeleton that parses
     /// in no mode, preferring the statement-mode error.
-    fn skeleton_error_detail(&self, skel: &str) -> (String, usize, usize) {
+    fn skeleton_error_detail(&self, skel: &str) -> (Rule, usize, usize) {
         if let Some(mut p) = self.sub_parser(&as_fn_body(skel)) {
             let (_prog, errs) = p.program_accum();
             if let Some(d) = errs.into_iter().next() {
                 let sl = d.line.saturating_sub(1).max(1); // undo the wrapper's line
-                return (
-                    format!("`vyrn\"…\"` skeleton does not parse: {}", d.message),
-                    sl,
-                    d.col,
-                );
+                let detail = d.message;
+                return (Rule::SkeletonDetail { detail }, sl, d.col);
             }
         }
-        (
-            "`vyrn\"…\"` skeleton does not parse as Vyrn code".to_string(),
-            1,
-            1,
-        )
+        (Rule::SkeletonUnparsable {}, 1, 1)
     }
 
     /// `match scrutinee { pattern => expr, ... }`; the caller consumed `match`.
@@ -4478,14 +4240,7 @@ impl Parser {
     fn if_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {
         // `if let` is a statement only; the refusal suggests `match`.
         if *self.peek() == Tok::Let {
-            return Err(Diagnostic::error(
-                line,
-                self.col(),
-                "parse",
-                "`if let` is a statement, not an expression — use `match` to bind \
-                 a pattern in an expression position"
-                    .to_string(),
-            ));
+            return Err(refuse!("parse", line, self.col(), IfLetExpr));
         }
         let cond = self.cond_expr()?;
         let then_branch = self.if_branch()?;
@@ -4530,15 +4285,7 @@ impl Parser {
                 | Tok::Break
                 | Tok::Continue
         ) {
-            return Err(Diagnostic::error(
-                self.line(),
-                self.col(),
-                "parse",
-                "an `if` used as an expression takes a single expression in each \
-                 branch, not statements — use the statement form or a function for \
-                 multi-statement branches"
-                    .to_string(),
-            ));
+            return Err(refuse!("parse", self.line(), self.col(), IfExprStatements));
         }
         // Braces delimit, so a bare `Name { .. }` is a struct literal again.
         let saved = self.no_struct;
@@ -4546,15 +4293,7 @@ impl Parser {
         let e = self.expr()?;
         self.no_struct = saved;
         if *self.peek() != Tok::RBrace {
-            return Err(Diagnostic::error(
-                line,
-                self.col(),
-                "parse",
-                "an `if` used as an expression takes a single expression in each \
-                 branch, not statements — use the statement form or a function for \
-                 multi-statement branches"
-                    .to_string(),
-            ));
+            return Err(refuse!("parse", line, self.col(), IfExprStatements));
         }
         self.eat(&Tok::RBrace)?;
         Ok(e)
