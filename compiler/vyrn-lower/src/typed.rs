@@ -601,27 +601,30 @@ pub mod obligation {
             // through this statement disposes it", `.1` "every path does"; they
             // differ only where a `match` or an if-expression branches.
             let none = (false, false);
-            let moved = match st {
-                // A write back into the binding is not a disposal: the binding
-                // holds a value again when the statement ends. `pool.push(t)`
-                // parses as `pool = @push(pool, t)` (`hoist_mutating_receiver`),
-                // and must not discharge `pool`.
-                Stmt::Assign { name: n, value, .. } if n == name => none,
-                Stmt::Assign { value, .. }
-                | Stmt::Let { value, .. }
-                | Stmt::SetField { value, .. }
-                | Stmt::Expr(value, _) => paths(value, name),
-                Stmt::IndexSet { index, value, .. } => {
-                    let (i, v) = (paths(index, name), paths(value, name));
-                    (i.0 || v.0, i.1 || v.1)
+            let branched = branches(st);
+            let moved = if let Some((head, _)) = &branched {
+                paths(head, name)
+            } else {
+                match st {
+                    // A write back into the binding is not a disposal: the binding
+                    // holds a value again when the statement ends. `pool.push(t)`
+                    // parses as `pool = @push(pool, t)` (`hoist_mutating_receiver`),
+                    // and must not discharge `pool`.
+                    Stmt::Assign { name: n, value, .. } if n == name => none,
+                    Stmt::Assign { value, .. }
+                    | Stmt::Let { value, .. }
+                    | Stmt::SetField { value, .. }
+                    | Stmt::Expr(value, _) => paths(value, name),
+                    Stmt::IndexSet { index, value, .. } => {
+                        let (i, v) = (paths(index, name), paths(value, name));
+                        (i.0 || v.0, i.1 || v.1)
+                    }
+                    Stmt::If { cond: e, .. } | Stmt::While { cond: e, .. } => paths(e, name),
+                    Stmt::ForIn { iter, .. } => paths(iter, name),
+                    Stmt::Drop { name: n, .. } => (n == name, n == name),
+                    Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => none,
+                    Stmt::Region { .. } => none,
                 }
-                Stmt::If { cond: e, .. }
-                | Stmt::While { cond: e, .. }
-                | Stmt::IfLet { scrutinee: e, .. } => paths(e, name),
-                Stmt::ForIn { iter, .. } => paths(iter, name),
-                Stmt::Drop { name: n, .. } => (n == name, n == name),
-                Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => none,
-                Stmt::Region { .. } => none,
             };
             // One arm disposes it and another does not: one path is wrong
             // whatever follows, as with two disagreeing `if` blocks below.
@@ -665,51 +668,26 @@ pub mod obligation {
                     acc.leaked |= !nested_loop;
                     return acc;
                 }
-                Stmt::If {
-                    then_block,
-                    else_block,
-                    ..
-                }
-                | Stmt::IfLet {
-                    then_block,
-                    else_block,
-                    ..
-                } => {
-                    let t = scan(&then_block.stmts, name, nested_loop);
-                    let e = match else_block {
-                        Some(b) => scan(&b.stmts, name, nested_loop),
-                        None => Scan::default(),
-                    };
-                    acc.leaked |= t.leaked || e.leaked;
-                    acc.doubled |= t.doubled || e.doubled;
-                    match (t.diverges, e.diverges) {
-                        (true, true) => {
-                            acc.diverges = true;
-                            return acc;
-                        }
-                        (true, false) => {
-                            if e.disposed {
-                                acc.disposed = true;
-                                return acc;
-                            }
-                        }
-                        (false, true) => {
-                            if t.disposed {
-                                acc.disposed = true;
-                                return acc;
-                            }
-                        }
-                        (false, false) => {
-                            if t.disposed && e.disposed {
-                                acc.disposed = true;
-                                return acc;
-                            }
-                            // The branches disagree, so one path is wrong whatever
-                            // follows: a leak, or a double disposal later. It is
-                            // reported once, here.
-                            acc.leaked |= t.disposed != e.disposed;
-                        }
+                _ if let Some((_, arms)) = branched => {
+                    let arms: Vec<Scan> = arms
+                        .into_iter()
+                        .map(|b| scan(b, name, nested_loop))
+                        .collect();
+                    acc.leaked |= arms.iter().any(|a| a.leaked);
+                    acc.doubled |= arms.iter().any(|a| a.doubled);
+                    let falls: Vec<&Scan> = arms.iter().filter(|a| !a.diverges).collect();
+                    if falls.is_empty() {
+                        acc.diverges = true;
+                        return acc;
                     }
+                    if falls.iter().all(|a| a.disposed) {
+                        acc.disposed = true;
+                        return acc;
+                    }
+                    // The branches that fall through disagree, so one path is
+                    // wrong whatever follows: a leak, or a double disposal
+                    // later. It is reported once, here.
+                    acc.leaked |= falls.iter().any(|a| a.disposed);
                 }
                 // A loop body may run zero times, and a disposal in it would
                 // repeat on the next iteration, so any disposal there leaks.
@@ -741,22 +719,43 @@ pub mod obligation {
         stmts.iter().any(|s| match s {
             Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
             Stmt::Expr(Expr::Call { name, .. }, _) => vyrn_frontend::ast::is_panic(name),
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            }
-            | Stmt::IfLet {
-                then_block,
-                else_block,
-                ..
-            } => {
-                diverges(&then_block.stmts)
-                    && else_block.as_ref().is_some_and(|b| diverges(&b.stmts))
-            }
             Stmt::Region { body, .. } => diverges(&body.stmts),
-            _ => false,
+            _ => branches(s).is_some_and(|(_, arms)| arms.into_iter().all(diverges)),
         })
+    }
+
+    /// The head and the paths of a statement that takes one of its blocks: an
+    /// `if` (a missing `else` is an empty path) or a statement `match` whose
+    /// every arm is a block.
+    fn branches(s: &Stmt) -> Option<(&Expr, Vec<&[Stmt]>)> {
+        match s {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => Some((
+                cond,
+                vec![
+                    &then_block.stmts,
+                    else_block.as_ref().map_or(&[][..], |b| &b.stmts),
+                ],
+            )),
+            Stmt::Expr(
+                Expr::Match {
+                    scrutinee, arms, ..
+                },
+                _,
+            ) => arms
+                .iter()
+                .map(|a| match &a.body {
+                    ArmBody::Block(b) => Some(&b.stmts[..]),
+                    ArmBody::Expr(_) => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|arms| (&**scrutinee, arms)),
+            _ => None,
+        }
     }
 }
 

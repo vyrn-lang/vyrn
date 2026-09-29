@@ -1142,7 +1142,6 @@ fn check_accum_inner(
         stored_calls: RefCell::new(Vec::new()),
         derive_sites: RefCell::new(Vec::new()),
         record: recording.then(RefCell::default),
-        desugaring: std::cell::Cell::new(false),
         pending_subst: RefCell::new(None),
         pending_call: RefCell::new(None),
     };
@@ -1558,20 +1557,10 @@ fn count_yields(b: &crate::ast::Block) -> usize {
         .iter()
         .map(|s| match s {
             Stmt::Return { value: Some(_), .. } => 1,
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            }
-            | Stmt::IfLet {
-                then_block,
-                else_block,
-                ..
-            } => count_yields(then_block) + else_block.as_ref().map(count_yields).unwrap_or(0),
-            Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
-                count_yields(body)
-            }
-            _ => 0,
+            _ => crate::ast::sub_blocks(s)
+                .into_iter()
+                .map(count_yields)
+                .sum(),
         })
         .sum()
 }
@@ -1863,8 +1852,6 @@ struct Checker<'a> {
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
     record: Option<RefCell<Recorded>>,
-    /// Inside [`Checker::record_desugar`]: typing AST the lexer never made.
-    desugaring: std::cell::Cell<bool>,
     /// The substitution the innermost generic call just solved, for the
     /// [`Checker::expr`] wrapper that knows the call node's address. A nested
     /// call consumes and clears it before its caller writes one.
@@ -3156,10 +3143,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Types an expansion (an inlined projection, a `for` over a user
-    /// container) in the caller's scope, recording its node types and nothing
-    /// else. `project` leaks each expansion once ([`crate::project::Memo`]), so
-    /// its node addresses are stable keys.
+    /// Types an expansion (an inlined projection) in the caller's scope,
+    /// recording its node types and nothing else. `project` leaks each
+    /// expansion once ([`crate::project::Memo`]), so its node addresses are
+    /// stable keys.
     ///
     /// Diagnostics, scope changes and [`Checker::pending_subst`] stay inside: an
     /// expansion fails only where its source already did, and the wrapper
@@ -3167,10 +3154,8 @@ impl<'a> Checker<'a> {
     fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope)) {
         let mark = self.errors.borrow().len();
         let saved = self.pending_subst.take();
-        let was = self.desugaring.replace(true);
         let mut sc = scope.clone();
         run(self, &mut sc);
-        self.desugaring.set(was);
         *self.pending_subst.borrow_mut() = saved;
         self.errors.borrow_mut().truncate(mark);
     }
@@ -3442,41 +3427,6 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                line,
-                id: _,
-            } => {
-                // An optional projection's one legal position,
-                // typed before `place_result` can refuse it.
-                let raw = match self.optional_scrutinee(scrutinee, pattern, scope, ret, *line)? {
-                    Some(t) => t,
-                    None => self.expr(scrutinee, scope, None, Some(ret))?,
-                };
-                let sty = self.resolve_scrutinee(&raw);
-                let binders = self.pattern_binders(&sty, pattern, *line)?;
-                // The binders are in scope in `then_block` only.
-                scope.push(HashMap::new());
-                for (name, ty) in &binders {
-                    self.bind_seen(Some(ty.clone()), name.line, name.col);
-                    scope.last_mut().unwrap().insert(
-                        name.name.clone(),
-                        Binding {
-                            ty: ty.clone(),
-                            mutable: false,
-                        },
-                    );
-                }
-                self.block(then_block, ret, scope);
-                scope.pop();
-                if let Some(eb) = else_block {
-                    self.block(eb, ret, scope);
-                }
-                Ok(())
-            }
             Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
             Stmt::While { cond, body, .. } => {
                 self.expr(cond, scope, None, Some(ret))?;
@@ -3504,16 +3454,7 @@ impl<'a> Checker<'a> {
                         // A user container's element is what its `nth` yields,
                         // looked up by the declared type.
                         match crate::types::iterate_impl(self.impl_blocks, &ity) {
-                            Some((_, nth)) => {
-                                match crate::project::lookup_impl(
-                                    self.impl_blocks,
-                                    &ity,
-                                    crate::types::ITERATE_NTH,
-                                ) {
-                                    Some((imp, _)) => self.solve_head(imp, &ity, &nth.ret, *line),
-                                    None => nth.ret.clone(),
-                                }
-                            }
+                            Some((imp, _, nth)) => self.solve_head(imp, &ity, &nth.ret, *line),
                             // The typed judgment refuses the loop.
                             None => Type::Err,
                         }
@@ -3530,24 +3471,24 @@ impl<'a> Checker<'a> {
                 );
                 self.block(body, ret, scope);
                 scope.pop();
-                // A `for` over a user container lowers to `nth` inlined around
-                // a copy of the body; record that copy.
+                // A `for` over a user container reads each element through its
+                // `nth`; record that read.
                 if self.recording() {
-                    if let Some(blk) = crate::types::iterate_impl(self.impl_blocks, &ity).and_then(
-                        |(size_fn, nth)| {
-                            crate::project::iterate_loop(
-                                &size_fn,
-                                nth,
-                                var,
-                                iter,
-                                body,
-                                iter.line(),
-                            )
-                            .ok()
-                        },
-                    ) {
+                    if let Ok(Some(p)) =
+                        crate::project::for_element(self.impl_blocks, &ity, iter, *line)
+                    {
                         self.record_desugar(scope, |c, sc| {
-                            c.block(blk, ret, sc);
+                            let bind = |ty| Binding { ty, mutable: false };
+                            sc.push(HashMap::from([
+                                (crate::project::FOR_RECV.to_string(), bind(ity.clone())),
+                                (crate::project::FOR_INDEX.to_string(), bind(Type::Int)),
+                            ]));
+                            for s in &p.prologue {
+                                if c.stmt(s, ret, sc).is_err() {
+                                    return;
+                                }
+                            }
+                            let _ = c.expr(&p.place, sc, None, Some(ret));
                         });
                     }
                 }
@@ -3700,9 +3641,7 @@ impl<'a> Checker<'a> {
             Expr::Int(n, _) => match expected.map(|t| self.base(t)) {
                 Some(t @ Type::IntN { .. }) => Ok(t),
                 _ => {
-                    // An expansion's `Expr::Int(-1)` (`project::iterate_loop`)
-                    // never went through the lexer and means minus one.
-                    if *n < 0 && !self.desugaring.get() {
+                    if *n < 0 {
                         Err(cerr!(
                             *self.stmt_line.borrow(),
                             "integer literal {} exceeds Int64's maximum \
@@ -4296,7 +4235,19 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let raw_sty = self.expr(scrutinee, scope, None, fn_ret)?;
+        let if_let = stmt_pos && matches!(arms.last(), Some(a) if a.pattern == Pattern::Other);
+        // An optional projection's one legal position, typed before
+        // `place_result` can refuse it.
+        let optional = match fn_ret {
+            Some(ret) if if_let => {
+                self.optional_scrutinee(scrutinee, &arms[0].pattern, scope, ret, line)?
+            }
+            _ => None,
+        };
+        let raw_sty = match optional {
+            Some(t) => t,
+            None => self.expr(scrutinee, scope, None, fn_ret)?,
+        };
         // A transparent sum alias matches as its underlying shape.
         let sty = match &raw_sty {
             Type::Named(n) => match self.types.get(n) {
@@ -4309,9 +4260,10 @@ impl<'a> Checker<'a> {
         };
         // `base` answers `Enum` for `Option` and `Result` too.
         let Type::Enum(evs) = self.base(&sty) else {
+            let form = if if_let { "if let" } else { "match" };
             return Err(cerr!(
                 line,
-                "`match` scrutinee must be an Option, Result, or enum, found {sty}"
+                "`{form}` scrutinee must be an Option, Result, or enum, found {sty}"
             ));
         };
         self.check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos)
@@ -4356,8 +4308,8 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, Diagnostic> {
         let mut result: Option<Type> = expected.cloned();
         for arm in arms {
-            // The refutable-`let` desugar's last arm: any remaining
-            // variant, no bindings. No source can write it.
+            // A desugar's last arm: any remaining variant, no bindings. No
+            // source can write it.
             if matches!(arm.pattern, Pattern::Other) {
                 let mut inner = scope.clone();
                 match &arm.body {
@@ -4494,94 +4446,6 @@ impl<'a> Checker<'a> {
         };
         *result = Some(joined.clone());
         Ok(joined)
-    }
-
-    /// The type bound by pattern `tag` when matching a value of type `sty`.
-    fn binding_type(&self, sty: &Type, tag: &str) -> Type {
-        match tag {
-            "Some" => crate::types::option_payload(sty).cloned(),
-            "Ok" => crate::types::result_payloads(sty).map(|(t, _)| t.clone()),
-            "Err" => crate::types::result_payloads(sty).map(|(_, e)| e.clone()),
-            _ => None,
-        }
-        .unwrap_or(Type::Unit)
-    }
-
-    /// Resolves a scrutinee's type through a transparent sum alias.
-    fn resolve_scrutinee(&self, raw: &Type) -> Type {
-        match raw {
-            Type::Named(n) => match self.types.get(n) {
-                Some(d) if d.predicate.is_none() && matches!(d.base, Type::Enum(..)) => {
-                    crate::types::resolve(raw, self.types)
-                }
-                _ => raw.clone(),
-            },
-            _ => raw.clone(),
-        }
-    }
-
-    /// Checks an `if let` or `while let` pattern against the scrutinee type
-    /// and returns its binders with their types.
-    fn pattern_binders(
-        &self,
-        sty: &Type,
-        pattern: &Pattern,
-        line: usize,
-    ) -> Result<Vec<(Binder, Type)>, Diagnostic> {
-        if let Type::Enum(evs) = self.base(sty) {
-            let (vname, binds) = match pattern {
-                Pattern::Variant(n, b) => (n.clone(), b.clone()),
-                _ => {
-                    return Err(cerr!(
-                        line,
-                        "pattern does not match scrutinee of type {sty}"
-                    ))
-                }
-            };
-            let ev = evs
-                .iter()
-                .find(|v| v.name == vname)
-                .ok_or_else(|| cerr!(line, "`{vname}` is not a variant of {sty}"))?;
-            if ev.payload.len() != binds.len() {
-                return Err(cerr!(
-                    line,
-                    "variant `{vname}` has {} payload(s), but the pattern binds {}",
-                    ev.payload.len(),
-                    binds.len()
-                ));
-            }
-            return Ok(binds.into_iter().zip(ev.payload.iter().cloned()).collect());
-        }
-        let (tag, bind): (&str, Option<Binder>) = match pattern {
-            Pattern::Variant(v, binds) => {
-                sum_arm_arity(v, binds.len(), line)?;
-                (v.as_str(), binds.first().cloned())
-            }
-            // Their desugars write a `match`, never an `if let`.
-            Pattern::Success(_) | Pattern::Failure(_) | Pattern::Other => {
-                unreachable!("the desugared patterns are produced only inside a `match`")
-            }
-        };
-        let want: [&str; 2] = if crate::types::option_payload(sty).is_some() {
-            ["Some", "None"]
-        } else if crate::types::result_payloads(sty).is_some() {
-            ["Ok", "Err"]
-        } else {
-            return Err(cerr!(
-                line,
-                "`if let` scrutinee must be an Option, Result, or enum, found {sty}"
-            ));
-        };
-        if !want.contains(&tag) {
-            return Err(cerr!(
-                line,
-                "pattern `{tag}` does not match scrutinee of type {sty}"
-            ));
-        }
-        match bind {
-            Some(name) => Ok(vec![(name, self.binding_type(sty, tag))]),
-            None => Ok(vec![]),
-        }
     }
 
     fn binop_type(&self, op: BinOp, l: Type, r: Type, line: usize) -> Result<Type, Diagnostic> {
@@ -7714,19 +7578,6 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
             _ => {}
         }
     }
-}
-
-/// Checks a built-in sum's pattern arity: `None` binds nothing, `Some`,
-/// `Ok` and `Err` bind one. They have no declaration to state it.
-fn sum_arm_arity(name: &str, binds: usize, line: usize) -> Result<(), Diagnostic> {
-    let want = usize::from(name != "None");
-    if binds != want {
-        return Err(cerr!(
-            line,
-            "variant `{name}` has {want} payload(s), but the pattern binds {binds}"
-        ));
-    }
-    Ok(())
 }
 
 /// A name a global answers to and no local shadows is a reference, whether

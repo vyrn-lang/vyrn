@@ -1,0 +1,4 @@
+// a for over a user container read from a field
+// The loop borrows `h.w` and reads each element through `nth`, as it does from
+// a name, so the kernel refuses a store over `h.w` in the body.
+type Window = { data: Array<String>, start: Int64 } impl Iterate for Window { fn size(self) -> Int64 { return self.data.length - self.start } fn nth(read self, i: Int64) -> read String { return self.data[self.start + i] } } type Holder = { w: Window, n: Int64 } fn vyrnTestMain() -> Int64 { let h = Holder { w: Window { data: ["a", "bb", "ccc", "dddd"], start: 1 }, n: 0 } let mut t = 0 for s in h.w { t = t + s.byteLength } return t }

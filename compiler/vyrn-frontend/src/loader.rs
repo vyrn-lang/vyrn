@@ -1174,6 +1174,7 @@ fn load_modules(
             })?,
         };
         drop(_read);
+        crate::prof::read_lines(text.lines().count());
         let is_root = key == root_key;
 
         // Register a generated module's `//@origin` table before it is lexed:
@@ -3871,8 +3872,6 @@ impl BodyVisitMut for Renamer<'_> {
                     *name = ren(self.map, name);
                 }
             }
-            // The variant name follows the rename, as in a `match` arm.
-            Stmt::IfLet { pattern, .. } => self.rename_variant(pattern),
             _ => {}
         }
     }

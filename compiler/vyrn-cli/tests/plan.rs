@@ -86,26 +86,8 @@ fn let_stmts<'a>(body: &'a Block, out: &mut Vec<&'a Stmt>) {
         if matches!(s, Stmt::Let { .. }) {
             out.push(s);
         }
-        match s {
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            }
-            | Stmt::IfLet {
-                then_block,
-                else_block,
-                ..
-            } => {
-                let_stmts(then_block, out);
-                if let Some(e) = else_block {
-                    let_stmts(e, out);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
-                let_stmts(body, out)
-            }
-            _ => {}
+        for sub in vyrn_frontend::ast::sub_blocks(s) {
+            let_stmts(sub, out);
         }
     }
 }

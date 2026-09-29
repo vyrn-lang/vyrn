@@ -156,6 +156,7 @@ pull request.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
 - A rule stays in the checker when no other pass refuses the program on the same line. A moved rule keeps its surviving home's sentence.
 - The generation fence stays in the checker, because it is the only judgment that runs before a generator executes.
+- A surface form that another form can state is a parser desugar, so each walker states one form. `if let` and `while let` are a statement `match` with a `Pattern::Other` arm, and take their scrutinee at its last use as `match` does.
 - The interpreter is deleted and there is no `--engine` flag. It was a third value model, and a flag with one legal value is a rule stated twice.
 - The oracle is recorded output (`examples/expected/`) and the per-example wasm SHA-256 manifest checked on every CI platform.
 - Wasm is emitted directly with `wasm-encoder`. No LLVM, clang or sysroot is needed to build or test the compiler.
@@ -181,6 +182,7 @@ pull request.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
 - Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names.
 - Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.
+- A `for` over any indexed container is one index walk in the core. A user container supplies its `size` call and its `nth` element read; it gets no loop of its own.
 - A `read` or `modify` aggregate parameter is the caller's storage, used in place, while no module state can name that storage; the checker's exclusive-`modify` rule covers the parameters. A per-callee effect gate waits until the effect judgment attributes every call.
 - Runtime modules are injected on mention under unlexable `$` names, so user names neither collide with them nor capture them.
 - A generator runs as compiled wasm in embedded wasmtime. Each capability that needs compiler machinery (read, list, `moduleInterface`, `lex`, `contractOf`, code quotes) is a host import, so there is no second implementation.
