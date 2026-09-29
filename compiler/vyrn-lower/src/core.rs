@@ -745,6 +745,197 @@ impl Test {
     }
 }
 
+/// What a row does with a value it names ([`St::operands`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Use {
+    /// Reads the value and leaves it where it is.
+    Read,
+    /// Hands the value on: a `consume` argument, a part of a literal, a
+    /// stored or returned value.
+    Hand,
+    /// The key a store writes at, which the container keeps.
+    Key,
+    /// The name a place is rooted at.
+    Root,
+    /// An index or a key that selects a place.
+    Index,
+    Bind,
+    Release,
+}
+
+impl St {
+    /// The lists of rows this row holds, in program order: an `if`'s then
+    /// and else, a loop's or a block's body, each arm's body.
+    pub fn lists(&self) -> impl Iterator<Item = &Vec<St>> {
+        let (a, b, arms): (Option<&Vec<St>>, Option<&Vec<St>>, &[Arm]) = match self {
+            St::If { then, els, .. } => (Some(then), Some(els), &[]),
+            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &[]),
+            St::Switch { arms, .. } => (None, None, arms),
+            St::Let(..)
+            | St::Store { .. }
+            | St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. }
+            | St::Do { .. }
+            | St::Trap => (None, None, &[]),
+        };
+        a.into_iter().chain(b).chain(arms.iter().map(|a| &a.body))
+    }
+
+    /// [`St::lists`], to write to.
+    pub fn lists_mut(&mut self) -> impl Iterator<Item = &mut Vec<St>> {
+        let (a, b, arms): (Option<&mut Vec<St>>, Option<&mut Vec<St>>, &mut [Arm]) = match self {
+            St::If { then, els, .. } => (Some(then), Some(els), &mut []),
+            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &mut []),
+            St::Switch { arms, .. } => (None, None, arms),
+            St::Let(..)
+            | St::Store { .. }
+            | St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. }
+            | St::Do { .. }
+            | St::Trap => (None, None, &mut []),
+        };
+        a.into_iter()
+            .chain(b)
+            .chain(arms.iter_mut().map(|a| &mut a.body))
+    }
+
+    /// This row and every row under it, as [`rows`] walks them.
+    pub fn rows(&self) -> Rows<'_> {
+        rows(std::slice::from_ref(self))
+    }
+
+    /// Every value this row names, in the order it evaluates them, with what
+    /// it does with each. The rows it holds name their own, and an arm's
+    /// binders are the arm's ([`Arm::binds`]).
+    pub fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            St::Let(n, rhs) => {
+                rhs.operands(f);
+                f(&Val::Name(*n), Use::Bind);
+            }
+            St::Do { rhs, .. } => rhs.operands(f),
+            St::Store { place, value, .. } => {
+                place.stored(f);
+                f(value, Use::Hand);
+            }
+            St::Drop(n, ..) | St::Row { name: n, .. } => f(&Val::Name(*n), Use::Release),
+            St::If { cond, .. } => f(cond, Use::Read),
+            St::Switch { on, arms, .. } => {
+                for n in arms.iter().filter_map(|a| a.test.reads()) {
+                    f(&Val::Name(n), Use::Read);
+                }
+                f(on, Use::Read);
+            }
+            St::Return { value: Some(v), .. } => f(v, Use::Hand),
+            St::Return { value: None, .. }
+            | St::Loop { .. }
+            | St::Block { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Trap => {}
+        }
+    }
+}
+
+impl Rhs {
+    fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Rhs::Val(v) => f(v, Use::Read),
+            Rhs::Read(p) | Rhs::Take(p) => p.operands(f),
+            Rhs::Call { args, kind, .. } => {
+                if let Some(n) = kind.value() {
+                    f(&Val::Name(n), Use::Read);
+                }
+                for (a, c) in args {
+                    match a {
+                        Arg::Place(p) => p.operands(f),
+                        Arg::Val(v) if *c == Capability::Consume => f(v, Use::Hand),
+                        Arg::Val(v) => f(v, Use::Read),
+                    }
+                }
+            }
+            Rhs::Prim(_, vs, _) => vs.iter().for_each(|v| f(v, Use::Read)),
+            Rhs::Make(_, vs) => vs.iter().for_each(|v| f(v, Use::Hand)),
+        }
+    }
+}
+
+impl Place {
+    fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Place::Name(n) => f(&Val::Name(*n), Use::Root),
+            Place::Global(_) => {}
+            Place::Field(b, _) => b.operands(f),
+            Place::Elem(b, v) | Place::Key(b, v) => {
+                b.operands(f);
+                f(v, Use::Index);
+            }
+        }
+    }
+
+    /// [`Place::operands`] of a place a store writes: the key it writes at,
+    /// below any fields and elements, is [`Use::Key`].
+    fn stored(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Place::Key(b, v) => {
+                b.operands(f);
+                f(v, Use::Key);
+            }
+            Place::Field(b, _) => b.stored(f),
+            Place::Elem(b, v) => {
+                b.stored(f);
+                f(v, Use::Index);
+            }
+            Place::Name(_) | Place::Global(_) => self.operands(f),
+        }
+    }
+}
+
+/// Every row of `ss` and every row under it, in program order, each before
+/// the rows it holds, with the number of loops between the row and `ss`.
+pub fn rows(ss: &[St]) -> Rows<'_> {
+    Rows(vec![(ss.iter(), 0)])
+}
+
+/// The iterator [`rows`] returns: a stack of the lists still being walked,
+/// the innermost last, each with its loop depth.
+pub struct Rows<'a>(Vec<(std::slice::Iter<'a, St>, u32)>);
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = (&'a St, u32);
+
+    fn next(&mut self) -> Option<(&'a St, u32)> {
+        loop {
+            let (list, depth) = self.0.last_mut()?;
+            let depth = *depth;
+            let Some(s) = list.next() else {
+                self.0.pop();
+                continue;
+            };
+            let inner = depth + u32::from(matches!(s, St::Loop { .. }));
+            let at = self.0.len();
+            self.0.extend(s.lists().map(|l| (l.iter(), inner)));
+            self.0[at..].reverse();
+            return Some((s, depth));
+        }
+    }
+}
+
+/// Calls `f` on every row of `ss` and every row under it, in program order,
+/// each before the rows it holds.
+pub fn each_row_mut(ss: &mut [St], f: &mut dyn FnMut(&mut St)) {
+    for s in ss {
+        f(s);
+        s.lists_mut().for_each(|l| each_row_mut(l, f));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
@@ -1121,7 +1312,6 @@ fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
             handed: vec![false; f.names.len()],
             switches: Vec::new(),
             order: 0,
-            depth: 0,
         };
         w.stmts(&f.stmts, 0);
         for p in &f.params {
@@ -1168,148 +1358,53 @@ struct Reads {
     handed: Vec<bool>,
     switches: Vec<(usize, Name, usize, usize)>,
     order: usize,
-    depth: usize,
 }
 
 impl Reads {
-    /// A value in a position that transfers it: a declared `consume`
-    /// argument, a part of a literal, a stored value, a map key a store
-    /// writes at, a returned value.
-    fn hand(&mut self, v: &Val) {
-        if let Val::Name(n) = v {
-            self.handed[*n as usize] = true;
-        }
-        self.val(v);
-    }
-
-    /// The place of a store: the key it writes at is handed to the container.
-    fn store_place(&mut self, p: &Place) {
-        match p {
-            Place::Key(b, v) => {
-                self.place(b);
-                self.hand(v);
+    fn stmts(&mut self, stmts: &[St], depth: usize) {
+        for st in stmts {
+            // A row is the plan's, not the core's: see [`last_owner`].
+            if matches!(st, St::Row { .. }) {
+                continue;
             }
-            Place::Field(b, _) | Place::Elem(b, _) => self.store_place(b),
-            _ => self.place(p),
-        }
-        if let Place::Elem(_, v) = p {
-            self.val(v);
-        }
-    }
-
-    fn val(&mut self, v: &Val) {
-        self.order += 1;
-        if let Val::Name(n) = v {
-            self.last[*n as usize] = self.order;
-            self.deep[*n as usize] = self.depth;
-        }
-    }
-
-    fn place(&mut self, p: &Place) {
-        match p {
-            Place::Name(n) => {
+            st.operands(&mut |v, u| {
+                let Val::Name(n) = *v else { return };
+                let n = n as usize;
+                if u == Use::Bind {
+                    self.bound[n] = depth;
+                    return;
+                }
                 self.order += 1;
-                self.last[*n as usize] = self.order;
-                self.deep[*n as usize] = self.depth;
-            }
-            Place::Global(_) => {}
-            Place::Field(b, _) => self.place(b),
-            Place::Elem(b, v) | Place::Key(b, v) => {
-                self.place(b);
-                self.val(v);
-            }
-        }
-    }
-
-    fn rhs(&mut self, r: &Rhs) {
-        match r {
-            Rhs::Val(v) => self.val(v),
-            Rhs::Read(p) => self.place(p),
+                self.last[n] = self.order;
+                self.deep[n] = depth;
+                self.handed[n] |= matches!(u, Use::Hand | Use::Key);
+            });
             // A take out of a sub-place hands that part on, so what is left
             // is this turn's: `out.push(consume p.value)` in a `for p in ..`.
-            Rhs::Take(p) => {
-                self.place(p);
+            if let St::Let(_, Rhs::Take(p))
+            | St::Do {
+                rhs: Rhs::Take(p), ..
+            } = st
+            {
                 if let Some(Val::Name(n)) = root_name(p) {
                     self.handed[n as usize] = true;
                 }
             }
-            Rhs::Call { args, kind, .. } => {
-                if let Some(f) = kind.value() {
-                    self.val(&Val::Name(f));
-                }
-                for (a, c) in args {
-                    match a {
-                        Arg::Place(p) => self.place(p),
-                        Arg::Val(v) if *c == vyrn_frontend::ast::Capability::Consume => {
-                            self.hand(v)
-                        }
-                        Arg::Val(v) => self.val(v),
-                    }
-                }
+            let St::Switch { on, arms, .. } = st else {
+                let inner = depth + usize::from(matches!(st, St::Loop { .. }));
+                st.lists().for_each(|l| self.stmts(l, inner));
+                continue;
+            };
+            if let (Val::Name(n), Some(a)) = (on, arms.first()) {
+                self.switches.push((a.site, *n, depth, self.order));
             }
-            Rhs::Prim(_, vs, _) => {
-                for v in vs {
-                    self.val(v);
+            for a in arms {
+                for b in &a.binds {
+                    self.bound[*b as usize] = depth;
                 }
-            }
-            Rhs::Make(_, vs) => {
-                for v in vs {
-                    self.hand(v);
-                }
-            }
-        }
-    }
-
-    fn name(&mut self, n: Name) {
-        self.order += 1;
-        self.last[n as usize] = self.order;
-        self.deep[n as usize] = self.depth;
-    }
-
-    fn stmts(&mut self, stmts: &[St], depth: usize) {
-        for st in stmts {
-            self.depth = depth;
-            match st {
-                St::Let(n, r) => {
-                    self.rhs(r);
-                    self.bound[*n as usize] = depth;
-                }
-                St::Store { place, value, .. } => {
-                    self.store_place(place);
-                    self.hand(value);
-                }
-                St::Drop(n, _, _, _) => self.name(*n),
-                // A row is the plan's, not the core's: see [`last_owner`].
-                St::Row { .. } => {}
-                St::If {
-                    cond, then, els, ..
-                } => {
-                    self.val(cond);
-                    self.stmts(then, depth);
-                    self.stmts(els, depth);
-                }
-                St::Loop { body: b, .. } => self.stmts(b, depth + 1),
-                St::Block { body, .. } => self.stmts(body, depth),
-                St::Return { value: Some(v), .. } => self.hand(v),
-                St::Switch { on, arms, .. } => {
-                    arms.iter()
-                        .filter_map(|a| a.test.reads())
-                        .for_each(|n| self.val(&Val::Name(n)));
-                    self.val(on);
-                    if let (Val::Name(n), Some(a)) = (on, arms.first()) {
-                        self.switches.push((a.site, *n, depth, self.order));
-                    }
-                    for a in arms {
-                        for b in &a.binds {
-                            self.bound[*b as usize] = depth;
-                        }
-                        // The rows that read a binder out of the scrutinee
-                        // are the binder's, not a read of the scrutinee.
-                        self.stmts(&a.body[a.reads(on).len()..], depth);
-                    }
-                }
-                St::Do { rhs: r, .. } => self.rhs(r),
-                _ => {}
+                // The rows that read a binder out of the scrutinee
+                // are the binder's, not a read of the scrutinee.
+                self.stmts(&a.body[a.reads(on).len()..], depth);
             }
         }
     }
