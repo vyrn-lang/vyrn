@@ -969,8 +969,10 @@ pub fn drops(
                 },
             ));
         }
-        let mut written = Vec::new();
-        each_drop(&f.stmts, &mut written);
+        let written = rows(&f.stmts).filter_map(|(s, _)| match s {
+            St::Drop(n, _, line, _) if *line > 0 => Some((*n, *line)),
+            _ => None,
+        });
         for (n, line) in written {
             let info = &f.names[n as usize];
             let owned = types::type_key(&info.ty).is_some_and(|k| {
@@ -1011,19 +1013,4 @@ pub fn drops(
         }
     }
     out
-}
-
-fn each_drop(stmts: &[St], out: &mut Vec<(Name, usize)>) {
-    for s in stmts {
-        match s {
-            St::Drop(n, _, line, _) if *line > 0 => out.push((*n, *line)),
-            St::If { then, els, .. } => {
-                each_drop(then, out);
-                each_drop(els, out);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => each_drop(body, out),
-            St::Switch { arms, .. } => arms.iter().for_each(|a| each_drop(&a.body, out)),
-            _ => {}
-        }
-    }
 }
