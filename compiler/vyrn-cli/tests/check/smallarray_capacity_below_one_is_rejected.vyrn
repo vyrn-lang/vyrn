@@ -1,0 +1,1 @@
+fn main() -> Int64 { let xs: SmallArray<Int64, 0> = [] return xs.length }

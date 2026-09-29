@@ -1,0 +1,3 @@
+fn main() -> Int64 { let s = "a" + "b"
+    let t: String = s.copy()
+    return t.byteLength }

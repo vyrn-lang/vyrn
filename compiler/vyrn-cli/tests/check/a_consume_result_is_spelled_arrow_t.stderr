@@ -1,0 +1,1 @@
+a_consume_result_is_spelled_arrow_t.vyrn:3:37: a result is owned by its caller already — `-> consume T` is spelled `-> T`

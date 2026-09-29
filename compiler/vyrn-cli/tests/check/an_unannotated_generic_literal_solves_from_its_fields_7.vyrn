@@ -1,0 +1,4 @@
+type P<T> = { v: T }
+type G<T> = { p: P<T> }
+fn main() -> Int64 { let g = G { p: P { v: 2 } }
+    return 0 }

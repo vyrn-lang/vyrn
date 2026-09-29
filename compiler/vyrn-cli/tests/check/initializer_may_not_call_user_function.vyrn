@@ -1,0 +1,3 @@
+fn seed() -> Int64 { return 7 }
+let x = seed()
+fn main() -> Int64 { return 0 }

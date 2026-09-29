@@ -1,0 +1,1 @@
+extern fn jsAdd(a: consume Int64) -> Int64 fn main() -> Int64 { return 0 }

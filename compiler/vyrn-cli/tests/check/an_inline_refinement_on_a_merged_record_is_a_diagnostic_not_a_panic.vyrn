@@ -1,0 +1,3 @@
+// An inline field `where` in a record that `&` wraps in a merge is a parse
+// error, not an abort.
+type T = { x: Int64 where x > 0 } & { y: Int64 }

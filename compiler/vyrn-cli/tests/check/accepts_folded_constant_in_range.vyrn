@@ -1,0 +1,2 @@
+// A foldable expression that passes the predicate is proven and costs nothing.
+type Age = Int64 where value >= 18 fn birth() -> Age { return 12 + 9 } fn main() -> Int64 { return 0 }

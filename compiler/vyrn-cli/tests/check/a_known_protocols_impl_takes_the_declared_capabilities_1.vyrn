@@ -1,0 +1,5 @@
+// A protocol the compiler knows by name is held to its capabilities too:
+// `print(c)` reads `c`, so a `modify self` show would write through a read.
+type C = { n: Int64 }
+impl Show for C { fn show(modify self) -> String { return "c" } }
+fn main() -> Int64 { return 0 }

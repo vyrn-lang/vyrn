@@ -1,0 +1,1 @@
+type C = { x: Int64 } fn f(c: modify C) { c.x = 1 } fn main() -> Int64 { let c = C { x: 0 } f(c) return c.x }

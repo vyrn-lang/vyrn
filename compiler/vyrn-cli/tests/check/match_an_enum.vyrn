@@ -1,0 +1,1 @@
+type E = | A | B fn f(e: E) -> Int64 { return match e { A => 1 } } fn main() -> Int64 { return f(A) }

@@ -1,0 +1,2 @@
+type H = { xs: Array<Int64> } where xs[0] == 1
+fn main() -> Int64 { let mut h = H { xs: [1, 2] } h.xs[0] = 42 return 0 }

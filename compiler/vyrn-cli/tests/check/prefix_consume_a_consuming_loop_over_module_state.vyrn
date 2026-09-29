@@ -1,0 +1,1 @@
+type Bag = { a: String } type R = { xs: Array<String> } let g: String = "m" let gs: Array<String> = [] let gr: R = R { xs: [] } fn make() -> R { return R { xs: ["a"] } } fn take(xs: consume Array<String>) -> Int64 { return xs.length } fn go() -> Int64 { let mut o: Array<String> = [] for x in consume gs { o.push(x) } return o.length } fn main() -> Int64 { return 0 }

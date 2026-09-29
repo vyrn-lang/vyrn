@@ -1,0 +1,1 @@
+type Port = Int64 where value >= 1 && value <= 65535 fn main() -> Int64 { let p = Port(70000) return 0 }

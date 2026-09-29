@@ -1,0 +1,5 @@
+type M = Map<String, Int64>
+fn main() -> Int64 {
+    let v = fromJson<M>("{}")
+    print(jsonSchema<M>())
+    return 0 }

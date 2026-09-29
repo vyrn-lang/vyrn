@@ -1,0 +1,3 @@
+type H = { xs: Array<Int64> } where xs[0] == 1
+fn poke(h: modify H) { h.xs[0] = 42 }
+fn main() -> Int64 { let mut h = H { xs: [1, 2] } poke(h) return 0 }

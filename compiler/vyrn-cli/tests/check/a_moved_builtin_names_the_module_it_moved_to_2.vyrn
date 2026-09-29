@@ -1,0 +1,1 @@
+fn main() -> Int64 { let x = contains("hi", "h") return 0 }

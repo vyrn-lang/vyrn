@@ -1,0 +1,1 @@
+an_unsolved_parameter_in_a_stored_fn_type_names_the_annotation_1.vyrn:7:0: `widthOf` cannot be stored as `fn(T) -> Int64`: nothing has solved `T` here, so there is no signature to check `widthOf` against. Annotate the binding with a type that names `T`

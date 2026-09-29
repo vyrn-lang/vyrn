@@ -1,0 +1,1 @@
+fn main() -> Int64 { let x: UInt64 = 18446744073709551615 let m = -9223372036854775808 if m < 0 { return 0 } return 1 }

@@ -1,0 +1,3 @@
+type Named = { name: Int64 } type User = { name: Int64, age: Int64 }
+fn f(u: User) -> Int64 { return u.age }
+fn main() -> Int64 { let n = Named { name: 1 } return f(n) }

@@ -1,0 +1,1 @@
+test "t" { assert(true) assertEq(1 + 1, 2) assertEq("a", "a") }

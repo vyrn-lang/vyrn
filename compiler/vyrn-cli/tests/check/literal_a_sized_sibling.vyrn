@@ -1,0 +1,1 @@
+fn main() -> Int64 { let x: UInt8 = 200 if x < 300 { return 1 } return 0 }

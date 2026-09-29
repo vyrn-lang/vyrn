@@ -1,0 +1,3 @@
+// An inline field `where` in an enum variant payload is a parse error, not an
+// abort: the payload reaches `record_type` with the collector armed.
+type T = | Box({ w: Int64 where w > 0 })

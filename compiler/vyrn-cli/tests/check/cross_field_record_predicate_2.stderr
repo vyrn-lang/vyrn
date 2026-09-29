@@ -1,0 +1,1 @@
+cross_field_record_predicate_2.vyrn:1:0: `R { .. }` violates `where a < b`

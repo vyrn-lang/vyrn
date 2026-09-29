@@ -1,0 +1,1 @@
+a_projection_yields_once_and_last.vyrn:2:26: projection `at` must end with exactly one `return <place>` — a projection is inlined at the access site, so it has one exit

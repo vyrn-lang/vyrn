@@ -1,0 +1,1 @@
+fn main() -> Int64 { let mut a: Array<Int64, 3> = [1, 2, 3] let p = a.pop() return 0 }

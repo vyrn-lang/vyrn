@@ -1,0 +1,3 @@
+consume_parameter_a_field_of_a_place_this_frame_owns.vyrn:1:0: `b.xs` may not be passed to a `consume` parameter via `take(..)` — it is read out of a place that owns it
+  fix: `consume b.xs` if `b` should give it up — the field is dead afterwards
+  fix: `b.xs.copy()` if both sides need a value

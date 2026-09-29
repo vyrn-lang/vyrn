@@ -1,0 +1,1 @@
+inline_where_outside_a_type_decl_is_an_error.vyrn:2:20: an inline field `where` needs a named record type (`type T = { field: .. where .. }`); an anonymous record has no name to attach the refinement to

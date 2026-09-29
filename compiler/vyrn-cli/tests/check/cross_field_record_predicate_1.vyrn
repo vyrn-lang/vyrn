@@ -1,0 +1,2 @@
+// A provably-violating constant literal is rejected at compile time.
+type R = { a: Int64, b: Int64 } where a < b fn main() -> Int64 { let r = R { a: 1, b: 2 } return 0 }

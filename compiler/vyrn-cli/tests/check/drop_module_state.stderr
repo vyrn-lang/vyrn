@@ -1,0 +1,1 @@
+drop_module_state.vyrn:2:0: cannot `drop` module state `s` — it lives for the whole module and is reclaimed at process exit

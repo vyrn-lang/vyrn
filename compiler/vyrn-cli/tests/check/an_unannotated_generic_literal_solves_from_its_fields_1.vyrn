@@ -1,0 +1,5 @@
+// The field values settle the type parameter, through every carrier that reads
+// its type off the expectation.
+type G<T> = { xs: Array<T> }
+fn main() -> Int64 { let g = G { xs: [2, 1] }
+    return 0 }

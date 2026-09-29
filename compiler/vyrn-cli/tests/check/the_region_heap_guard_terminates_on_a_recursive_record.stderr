@@ -1,0 +1,1 @@
+the_region_heap_guard_terminates_on_a_recursive_record.vyrn:4:0: cannot store a heap value into `out`, which outlives the enclosing `region` (it would dangle when the region frees). Move `out` inside the region, or compute a non-heap result to carry out.

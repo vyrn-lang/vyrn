@@ -1,0 +1,3 @@
+consume_parameter_a_loop_variable.vyrn:1:0: `r` may not be passed to a `consume` parameter via `take(..)` — it is a loop variable
+  fix: `for r in consume ns` if the loop should take the elements
+  fix: `r.copy()` if both sides need a value

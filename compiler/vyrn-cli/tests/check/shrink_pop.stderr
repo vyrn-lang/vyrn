@@ -1,0 +1,1 @@
+shrink_pop.vyrn:1:0: `pop` is not available on a fixed-size array (it cannot shrink); use a growable `Array<T>`

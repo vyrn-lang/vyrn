@@ -1,0 +1,4 @@
+let mut spare: Array<Int64> = []
+type Ring = { data: Array<Int64> }
+impl Index for Ring { fn at(read self, i: Int64) -> read Int64 { return spare[i] } }
+fn main() -> Int64 { return 0 }

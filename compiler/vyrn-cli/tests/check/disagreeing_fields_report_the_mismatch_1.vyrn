@@ -1,0 +1,5 @@
+// Fields that disagree are a mismatch, not a wrong solve: the first field
+// settles the parameter and the second is measured against the answer.
+type D<T> = { front: Array<T>, back: Array<T> }
+fn main() -> Int64 { let d = D { front: [1], back: ["x"] }
+    return 0 }

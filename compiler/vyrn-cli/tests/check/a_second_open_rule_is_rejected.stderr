@@ -1,0 +1,1 @@
+a_second_open_rule_is_rejected.vyrn:1:64: contract `P` already has an open rule (line 1) — a contract has at most one

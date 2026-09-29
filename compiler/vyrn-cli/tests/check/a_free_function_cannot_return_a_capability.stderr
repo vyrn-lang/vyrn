@@ -1,0 +1,1 @@
+a_free_function_cannot_return_a_capability.vyrn:1:37: `fn f` cannot return a capability — a projection's result is a place inside its receiver, and a free function has none. Declare it on an `impl`.

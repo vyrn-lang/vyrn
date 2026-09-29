@@ -1,0 +1,1 @@
+literal_a_negated_literal_in_an_unsigned_slot.vyrn:1:0: integer literal -1 does not fit UInt8 (its range is 0..=255)

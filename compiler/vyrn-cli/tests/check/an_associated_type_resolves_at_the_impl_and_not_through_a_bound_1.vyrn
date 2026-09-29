@@ -1,0 +1,8 @@
+// An associated type resolves at the impl, so a concrete receiver types and a
+// `<T: P>` receiver is refused by name.
+// A concrete receiver selects the impl, so `Output` is `Int64`. Through a
+// bound: refused, naming the protocol and the member.
+protocol Unwrap { type Output fn valueOr(self, f: Output) -> Output }
+impl Unwrap for Int64 { type Output = Int64
+    fn valueOr(self, f: Output) -> Output { return self } }
+fn main() -> Int64 { return 7.valueOr(0) + 1 }

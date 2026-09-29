@@ -1,0 +1,1 @@
+structural_record_into_predicated_named_is_auto_checked_1.vyrn:5:0: `Range { .. }` violates `where start < end`

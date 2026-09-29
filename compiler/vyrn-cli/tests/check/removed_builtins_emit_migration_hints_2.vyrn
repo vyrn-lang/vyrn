@@ -1,0 +1,1 @@
+fn main() -> Int64 { let s = concat("a", "b") return 0 }

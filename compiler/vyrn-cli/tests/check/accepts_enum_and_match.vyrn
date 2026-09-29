@@ -1,0 +1,1 @@
+type Shape = | Circle(Int64) | Empty fn area(s: Shape) -> Int64 { return match s { Circle(r) => r * r, Empty => 0 } } fn main() -> Int64 { return area(Circle(3)) + area(Empty) }

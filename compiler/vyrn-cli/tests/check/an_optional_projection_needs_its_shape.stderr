@@ -1,0 +1,1 @@
+an_optional_projection_needs_its_shape.vyrn:5:8: optional projection `tryAt` must hold one `if <miss> { return None }` and end with `return Some(<place>)` — one prologue, one decision, and statements after the decision run only on the hit

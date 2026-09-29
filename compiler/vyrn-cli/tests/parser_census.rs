@@ -233,7 +233,7 @@ fn the_parser_census_matches_its_pin() {
         ("parser.rs", "a table stated a second time", 55, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
         ("parser.rs", "shared machinery", 199, 1),
-        ("parser.rs", "tests", 1877, 0),
+        ("parser.rs", "tests", 1638, 0),
         ("lexer.rs", "the grammar's own arm", 595, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
         ("lexer.rs", "a table stated a second time", 0, 0),

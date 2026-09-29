@@ -1,0 +1,3 @@
+prefix_consume_a_consuming_loop_over_a_read_parameter.vyrn:1:0: `xs` may not be stored into the `for .. in consume` loop — it is a `read` parameter
+  fix: declare the parameter `xs: consume ..` if this function should own it
+  fix: `xs.copy()` if both sides need a value

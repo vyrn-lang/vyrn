@@ -1,0 +1,3 @@
+type C = { n: Int64 }
+impl Copy for C { fn copy(consume self) -> C { return self } }
+fn main() -> Int64 { return 0 }

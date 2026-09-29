@@ -1,0 +1,1 @@
+an_associated_type_resolves_at_the_impl_and_not_through_a_bound_2.vyrn:5:0: `valueOr` mentions `Unwrap`'s associated type `Output`, and a `<T: Unwrap>` bound cannot name it — call `.valueOr(..)` on a concrete type, where the impl (and so `Output`) is known

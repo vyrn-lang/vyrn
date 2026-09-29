@@ -1,0 +1,4 @@
+type R = { n: Int64 }
+let mut r = R { n: 1 }
+fn get() -> R { return r }
+fn main() -> Int64 { return 0 }

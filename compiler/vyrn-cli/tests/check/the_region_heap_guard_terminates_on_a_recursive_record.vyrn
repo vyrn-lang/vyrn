@@ -1,0 +1,4 @@
+// The region escape guard's heap walk terminates on a recursive record and
+// refuses the store. The heap field sits after the self-reference, where an
+// unguarded walk would overflow first.
+type Node = { next: Option<Node>, name: String } fn main() -> Int64 { let mut out = Node { next: None, name: "n" } region { out = Node { next: None, name: "n" } } return 0 }

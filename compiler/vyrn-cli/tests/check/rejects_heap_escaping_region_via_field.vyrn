@@ -1,0 +1,2 @@
+// Storing an arena string into an outer record's field dangles too.
+type Holder = { s: String } fn main() -> Int64 { let mut h = Holder { s: "init" } region { h.s = "a" + "b" } return 0 }

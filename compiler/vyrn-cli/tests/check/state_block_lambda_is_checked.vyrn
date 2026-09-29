@@ -1,0 +1,12 @@
+// A checker rule in a lambda of a module-state initializer is refused in its own
+// sentence, not as the core's internal error (#554).
+type Op = fn(Int64) -> Int64
+let ops: Array<Op> = [
+    x -> {
+        let a = 1 + "s"
+        return x
+    },
+]
+fn main() -> Int64 {
+    return ops.length
+}

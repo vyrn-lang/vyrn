@@ -1,0 +1,4 @@
+type R = { name: String }
+fn main() -> Int64 { let r = R { name: "a" }
+    let q: R = r.copy()
+    return q.name.byteLength }

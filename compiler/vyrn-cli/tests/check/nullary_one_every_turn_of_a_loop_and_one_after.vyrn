@@ -1,0 +1,2 @@
+// A nullary constructor is a value with no owner, not a name to consume twice.
+type Maybe = | Nothing | Just(String) fn takeM(m: consume Maybe) -> Int64 { return 0 } fn main() -> Int64 { let mut t = 0 let mut i = 0 while i < 2 { t = t + takeM(Nothing) i = i + 1 } return t + takeM(Nothing) }

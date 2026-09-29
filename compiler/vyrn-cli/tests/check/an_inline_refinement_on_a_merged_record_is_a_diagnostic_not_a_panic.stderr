@@ -1,0 +1,1 @@
+an_inline_refinement_on_a_merged_record_is_a_diagnostic_not_a_panic.vyrn:3:1: an inline field `where` refines one record's fields, so the base of `type T` must be exactly `{ .. }` — a merge (`&`) or enum variant cannot carry refinements

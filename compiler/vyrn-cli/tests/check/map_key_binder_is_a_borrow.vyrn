@@ -1,0 +1,2 @@
+// `m[k]` borrows the entry, so a binder of `match m[k]` borrows too (#463).
+fn keep(xs: consume Array<Int64>) -> Int64 { return xs.length } fn main() -> Int64 { let mut m: Map<String, Array<Int64>> = [:] m["a"] = [1, 2] let n = match m["a"] { Some(xs) => keep(xs), None => 0 } return n }

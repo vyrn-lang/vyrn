@@ -1,0 +1,2 @@
+prefix_consume_a_prefix_take_of_a_field_of_module_state_at_a_call.vyrn:1:0: `gr.xs` may not be passed to a `consume` parameter via `take(..)` — it is module state, which nothing may take
+  fix: `gr.xs.copy()` — the callee releases what it is handed

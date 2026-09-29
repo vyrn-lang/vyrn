@@ -1,0 +1,2 @@
+// A count starts after the dot where the call writes one (#577).
+fn main() -> Int64 { let m: Map<String, Int64> = [:] let k = m.keys(1) return 0 }

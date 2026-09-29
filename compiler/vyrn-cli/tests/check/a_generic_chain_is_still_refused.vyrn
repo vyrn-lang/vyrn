@@ -1,0 +1,19 @@
+// The inner `at` declares `-> read T`, which has no impl key without a
+// substitution, so the next projection cannot resolve.
+type E = | Tag(String) | Blank
+type Slab<T> = { vals: Array<T> }
+impl<T> Index for Slab<T> {
+    fn at(read self, i: Int64) -> read T {
+        return self.vals[i]
+    }
+}
+impl Index for E {
+    fn s(read self) -> read String {
+        let Tag(v) = self
+        return v
+    }
+}
+fn main() -> Int64 {
+    let s: Slab<E> = Slab { vals: [Tag("x")] }
+    return s.at(0).s().byteLength
+}

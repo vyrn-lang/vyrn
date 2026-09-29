@@ -1,0 +1,1 @@
+a_global_read_in_a_sibling_arm_is_still_impure.vyrn:2:0: `gen fn g` is not comptime-pure: it reads or writes module state (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)

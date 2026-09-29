@@ -1,0 +1,1 @@
+a_refutable_let_that_binds_nothing_is_refused.vyrn:3:9: `let Dot()` binds nothing — a payload-free variant is a question, and `if let`/`match` are how it is asked

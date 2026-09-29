@@ -1,0 +1,1 @@
+call_dispatched_without_a_dot.vyrn:2:0: `m` argument 2 expects Int64, found String

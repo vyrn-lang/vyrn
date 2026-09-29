@@ -1,0 +1,2 @@
+// A std function called without its import names the module to import.
+fn main() -> Int64 { let x = slice("hi", 0, 1) return 0 }

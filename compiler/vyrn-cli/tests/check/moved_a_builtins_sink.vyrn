@@ -1,0 +1,1 @@
+fn main() -> Int64 { let s = "a" + "b" let mut xs: Array<String> = [] xs.push(s) return s.byteLength }

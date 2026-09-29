@@ -1,0 +1,1 @@
+fn main() -> Int64 { print(lineAt("ab", 1)) return 0 }

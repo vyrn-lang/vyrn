@@ -1,0 +1,5 @@
+type T = { id: Int64 }
+let g = T { id: 1 }
+fn take(t: consume T) -> Int64 { return t.id }
+fn useIt() -> Int64 { let g = T { id: 2 } return take(g) }
+fn main() -> Int64 { return 0 }

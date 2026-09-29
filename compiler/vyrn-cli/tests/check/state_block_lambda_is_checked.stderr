@@ -1,0 +1,1 @@
+state_block_lambda_is_checked.vyrn:6:0: `+` concatenates two Strings, found Int64 and String

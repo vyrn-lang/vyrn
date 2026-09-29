@@ -1,0 +1,1 @@
+assert_outside_a_test_is_rejected_1.vyrn:1:0: `assert` is only available inside a `test` block — in ordinary code, use a validated type or return a `Result` to signal failure

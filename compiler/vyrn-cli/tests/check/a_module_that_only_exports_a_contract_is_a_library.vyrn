@@ -1,0 +1,2 @@
+// An exported contract is a public surface, so no `main` is needed.
+export contract Page { let head: String = "" }

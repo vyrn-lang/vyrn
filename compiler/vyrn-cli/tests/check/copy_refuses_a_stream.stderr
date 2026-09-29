@@ -1,0 +1,1 @@
+copy_refuses_a_stream.vyrn:4:0: `copy` cannot copy a Stream: a stream is a cursor over a producer, not a container. Collect it first (`collect`), then copy the array

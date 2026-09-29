@@ -1,0 +1,2 @@
+// A constant that violates the element predicate is refused.
+type Age = Int64 where value >= 18 fn main() -> Int64 { let mut a: Array<Age> = [Age(20)] a[0] = 5 return 0 }

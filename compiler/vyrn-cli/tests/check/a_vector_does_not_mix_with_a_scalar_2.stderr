@@ -1,0 +1,1 @@
+a_vector_does_not_mix_with_a_scalar_2.vyrn:1:0: arithmetic needs matching numeric operands, found F32x4 and Float64

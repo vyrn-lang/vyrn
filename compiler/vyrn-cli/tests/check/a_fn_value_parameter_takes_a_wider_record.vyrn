@@ -1,0 +1,4 @@
+// A fn value's parameter check is contravariant: the value must accept what the
+// callee passes. `fn_slot_a_narrower_record` pins the refusal; this pins
+// the accepted direction.
+type P = { x: Int64 } type Q = { x: Int64, y: Int64 } fn g(v: Q) -> Int64 { return v.y } fn apply(f: fn(Q) -> Int64, q: Q) -> Int64 { return f(q) } fn main() -> Int64 { let h: fn(Q) -> Int64 = g return apply(h, Q { x: 1, y: 2 }) }

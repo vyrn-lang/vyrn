@@ -1,0 +1,1 @@
+structural_record_into_predicated_named_is_auto_checked_2.vyrn:1:0: this value does not satisfy `Range` (predicate `where start < end` is false)

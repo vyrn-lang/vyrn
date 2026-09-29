@@ -1,0 +1,1 @@
+initializer_may_not_read_itself.vyrn:1:0: module state `a` may not read itself in its own initializer

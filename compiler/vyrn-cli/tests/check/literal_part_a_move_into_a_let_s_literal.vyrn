@@ -1,0 +1,1 @@
+type R = { s: String } fn mk() -> String { return "a" + "b" } fn take(r: consume R) -> Int64 { return r.s.byteLength } fn go() -> Int64 { let d = mk() let r = R { s: d } return r.s.byteLength + d.byteLength } fn main() -> Int64 { return 0 }

@@ -1,0 +1,10 @@
+// The core carries the exit into the arm, so the kernel names the loop variable
+// the reader wrote, not a temporary the core minted.
+type R = { name: String }
+fn pick(xs: Array<String>) -> String
+{ for x in xs { return if true { x } else { "" } } return "" }
+fn g(a: Array<String>) -> R { return R { name: pick(a) } }
+fn h(a: Array<String>) -> Array<String> { return [pick(a)] }
+fn main() -> Int64 { let arr: Array<String> = ["a" + "b"]
+    let r = g(arr) let s2 = h(arr)
+    return r.name.byteLength + s2[0].byteLength }

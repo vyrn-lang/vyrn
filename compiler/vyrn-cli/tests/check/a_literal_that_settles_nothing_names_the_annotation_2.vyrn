@@ -1,0 +1,3 @@
+type D<T> = { front: Array<T>, back: Array<T> }
+fn main() -> Int64 { let d: D<Int64> = D { front: [], back: [] }
+    return 0 }

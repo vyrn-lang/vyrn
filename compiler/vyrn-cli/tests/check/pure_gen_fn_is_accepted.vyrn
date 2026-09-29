@@ -1,0 +1,2 @@
+// readFile is mediated (permitted); the rest is ordinary pure code.
+gen fn g(dir: String) -> String { let r = readFile(dir) return "fn x() -> Int64 { return 0 }" } fn main() -> Int64 { return 0 }

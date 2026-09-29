@@ -1,0 +1,1 @@
+a_bounded_receiver_cannot_dispatch_a_projection.vyrn:9:0: `tag` is a projection, and a projection inlines at its access site — a `<T: ..>` receiver has no body to inline, so call `.tag(..)` on a concrete type

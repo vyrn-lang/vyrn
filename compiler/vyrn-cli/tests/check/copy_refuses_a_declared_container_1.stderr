@@ -1,0 +1,1 @@
+copy_refuses_a_declared_container_1.vyrn:7:0: `copy` cannot copy `Ring`: it declares `impl Owned for Ring`, so only `Ring` knows what duplicating it means. Say what duplicating it means with `impl Copy for Ring`, or copy the parts you need

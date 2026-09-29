@@ -1,0 +1,3 @@
+let mut title = "x"
+fn get() -> String { return title.copy() }
+fn main() -> Int64 { return 0 }

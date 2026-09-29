@@ -1,0 +1,2 @@
+fn id(s: String) -> String { return s.copy() }
+fn main() -> Int64 { return 0 }

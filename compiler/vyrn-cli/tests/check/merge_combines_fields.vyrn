@@ -1,0 +1,1 @@
+type A = { x: Int64 } type B = { y: Int64 } type C = Merge<A, B> fn main() -> Int64 { let c = C { x: 1, y: 2 } return c.x + c.y }

@@ -1,0 +1,3 @@
+let mut kept = "x"
+export extern fn set(arg: String) { kept = arg.copy() }
+fn main() -> Int64 { return 0 }

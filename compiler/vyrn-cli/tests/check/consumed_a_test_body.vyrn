@@ -1,0 +1,1 @@
+type T = { id: Int64 } fn take(t: consume T) -> Int64 { return t.id } test "consumes twice" { let x = T { id: 1 } let a = take(x) let b = take(x) assert(a == b) } fn main() -> Int64 { return 0 }

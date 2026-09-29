@@ -1,0 +1,2 @@
+type H = { f: fn(Int64) -> Int64 }
+fn main() -> Int64 { let h = H { f: x -> x } let s = toJson(h) return 0 }

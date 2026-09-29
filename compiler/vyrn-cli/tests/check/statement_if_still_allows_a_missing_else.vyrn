@@ -1,0 +1,5 @@
+// The statement form: no `else`, statements inside, no value.
+fn main() -> Int64 {
+    let mut x = 0
+    if true { x = 1 }
+    return x }

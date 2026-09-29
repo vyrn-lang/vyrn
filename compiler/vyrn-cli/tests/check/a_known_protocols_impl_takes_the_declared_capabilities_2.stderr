@@ -1,0 +1,1 @@
+a_known_protocols_impl_takes_the_declared_capabilities_2.vyrn:2:22: `impl Copy for C` does not match protocol `Copy` — it declares `fn copy(self) -> C`, this provides `fn copy(consume self) -> C`

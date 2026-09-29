@@ -1,0 +1,1 @@
+rejects_mismatched_match_arms.vyrn:1:0: `match` arms have differing types: Int64 vs Bool

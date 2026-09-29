@@ -1,0 +1,1 @@
+asserteq_needs_equal_equatable_types.vyrn:2:0: `assertEq` needs two equal, equatable values, found Int64 and Bool

@@ -1,0 +1,1 @@
+a_protocol_may_not_name_self_1.vyrn:5:0: `Self` is not a type in Vyrn — a protocol that must name the implementing type declares an associated type instead: `protocol P { type Out  fn m(self) -> Out }`, and each impl binds it with `type Out = ..`

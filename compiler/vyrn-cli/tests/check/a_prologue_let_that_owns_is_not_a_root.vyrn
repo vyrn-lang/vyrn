@@ -1,0 +1,8 @@
+type Box = { v: Array<Int64> }
+impl Index for Box {
+    fn at(read self, i: Int64) -> read Int64 {
+        let xs = [1, 2, 3]
+        return xs[i]
+    }
+}
+fn main() -> Int64 { return 0 }

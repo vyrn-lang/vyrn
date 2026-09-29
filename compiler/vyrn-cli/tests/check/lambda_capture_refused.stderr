@@ -1,0 +1,2 @@
+lambda_capture_refused.vyrn:9:0: `s` is used here but was already consumed by `take(..)` on line 7
+  (a `consume` parameter takes ownership; the value can't be used afterward)

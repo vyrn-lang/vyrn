@@ -1,0 +1,1 @@
+consume_in_a_loop_a_trailing_continue.vyrn:1:0: `x` is consumed by `take(..)` inside a loop, so it would be used again on the next iteration

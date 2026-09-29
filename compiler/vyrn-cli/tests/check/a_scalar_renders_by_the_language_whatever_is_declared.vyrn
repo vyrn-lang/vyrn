@@ -1,0 +1,7 @@
+// A scalar never reaches the dispatch: `examples/protocol.vyrn` declares this
+// impl with body `self.toString()`, which would recurse forever.
+protocol Show { fn show(self) -> String }
+impl Show for Int64 { fn show(self) -> String { return self.toString() } }
+fn main() -> Int64 { print(7)
+ let s: String = "\{7}"
+ return 0 }

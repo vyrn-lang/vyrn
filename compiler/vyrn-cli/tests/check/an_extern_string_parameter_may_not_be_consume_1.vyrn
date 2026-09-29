@@ -1,0 +1,4 @@
+// An extern cannot take `consume`: the JS caller frees a String buffer when the
+// call returns, whatever the declaration says.
+// A scalar carries no ownership, so it is untouched.
+let mut kept = "x" export extern fn setIt(arg: consume String) { kept = arg } fn main() -> Int64 { return 0 }

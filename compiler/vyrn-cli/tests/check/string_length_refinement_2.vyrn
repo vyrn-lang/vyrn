@@ -1,0 +1,1 @@
+type Name = String where value.byteLength >= 3 fn main() -> Int64 { let n = Name("ab") return 0 }

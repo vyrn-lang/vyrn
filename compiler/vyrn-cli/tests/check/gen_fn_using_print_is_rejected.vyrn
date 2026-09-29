@@ -1,0 +1,3 @@
+// `print` and `writeStdout` are one effect with one verdict. A generator reruns
+// only on a cache miss, so its output would depend on the cache.
+gen fn g() -> String { print("hi") return "" } fn main() -> Int64 { return 0 }

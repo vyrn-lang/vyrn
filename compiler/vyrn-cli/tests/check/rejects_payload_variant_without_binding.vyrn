@@ -1,0 +1,1 @@
+type E = | Val(Int64) | Empty fn f(e: E) -> Int64 { return match e { Val => 1, Empty => 0 } } fn main() -> Int64 { return f(Empty) }

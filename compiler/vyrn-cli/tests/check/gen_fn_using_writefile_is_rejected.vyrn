@@ -1,0 +1,1 @@
+gen fn g() -> String { let w = writeFile("x", "y") return "" } fn main() -> Int64 { return 0 }

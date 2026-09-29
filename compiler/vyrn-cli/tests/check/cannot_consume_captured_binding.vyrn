@@ -1,0 +1,3 @@
+fn take(s: consume String) -> Int64 { return 1 }
+fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }
+fn main() -> Int64 { let name = "hi" let r = apply(name, x -> { let z = take(name) return x }) return 0 }

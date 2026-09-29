@@ -1,0 +1,6 @@
+// `Self` is no type in Vyrn and is refused on the protocol's line, in each of
+// three positions, not at every impl.
+// The declaration is the error, so it fires with no impl. The way out is named
+// rather than implied. With an impl: one error, on the protocol's line.
+protocol Grow { fn grow(self) -> Self }
+fn main() -> Int64 { return 0 }

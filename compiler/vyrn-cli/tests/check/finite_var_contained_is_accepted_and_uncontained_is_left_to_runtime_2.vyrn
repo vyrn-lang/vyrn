@@ -1,0 +1,4 @@
+type Wide = String where value =~ "a|b|c"
+type Narrow = String where value =~ "a|b"
+fn want(x: Wide) -> Int64 { return 0 }
+fn main() -> Int64 { let n: Narrow = "a" return want(n) }

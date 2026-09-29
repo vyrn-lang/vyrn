@@ -1,0 +1,3 @@
+literal_part_a_borrow_into_an_inline_literal.vyrn:1:0: `x` may not be stored into the field `R.s` — it is a `read` parameter
+  fix: declare the parameter `x: consume ..` if this function should own it
+  fix: `x.copy()` if both sides need a value

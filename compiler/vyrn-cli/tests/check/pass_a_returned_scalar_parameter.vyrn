@@ -1,0 +1,2 @@
+fn id(n: Int64) -> Int64 { return n }
+fn main() -> Int64 { return id(1) }

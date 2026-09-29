@@ -1,0 +1,4 @@
+// The binder takes the Option payload type and is usable in the body. Wrong
+// pattern for the scrutinee shape. A name that is not one of the scrutinee's
+// variants.
+fn f() -> Option<Int64> { return Some(1) } fn main() -> Int64 { if let Some(v) = f() { return v } return 0 }

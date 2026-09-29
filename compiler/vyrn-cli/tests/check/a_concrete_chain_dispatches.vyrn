@@ -1,0 +1,19 @@
+// Every link declares a concrete named result (`E`, then `String`), so the
+// chain resolves.
+type E = | Tag(String) | Blank
+type Led = { rows: Array<E> }
+impl Index for Led {
+    fn at(read self, i: Int64) -> read E {
+        return self.rows[i]
+    }
+}
+impl Index for E {
+    fn s(read self) -> read String {
+        let Tag(v) = self
+        return v
+    }
+}
+fn main() -> Int64 {
+    let led = Led { rows: [] }
+    return led.at(0).s().byteLength
+}

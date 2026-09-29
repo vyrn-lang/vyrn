@@ -1,0 +1,6 @@
+protocol Unwrap { type Output fn valueOr(self, f: Output) -> Output }
+impl Unwrap for Int64 { type Output = Int64
+    fn valueOr(self, f: Output) -> Output { return self } }
+fn pick<T: Unwrap>(x: T) -> Int64 { return 0 }
+fn viaBound<T: Unwrap>(x: T, f: Int64) -> Int64 { return x.valueOr(f) }
+fn main() -> Int64 { return viaBound(7, 0) + pick(1) }

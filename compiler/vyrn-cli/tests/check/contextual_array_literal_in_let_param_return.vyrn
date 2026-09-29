@@ -1,0 +1,3 @@
+// A literal in an `Array<T>` position becomes a growable heap array: in a `let`
+// annotation, as a call argument, and as a return value.
+fn take(a: Array<Int64>) -> Int64 { return a.length } fn make() -> Array<String> { return ["a", "b"] } fn main() -> Int64 { let xs: Array<Int64> = [1, 2, 3] let n = take([4, 5]) return xs.length + n + make().length }

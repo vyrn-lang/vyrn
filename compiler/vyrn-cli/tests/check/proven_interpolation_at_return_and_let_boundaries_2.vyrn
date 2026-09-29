@@ -1,0 +1,3 @@
+type Section = String where value =~ "home|about"
+type Key = String where value =~ "nav\\.(home|about)\\.label"
+fn main() -> Int64 { let s: Section = "home"  let k: Key = "nav.\{s}.label"  return 0 }

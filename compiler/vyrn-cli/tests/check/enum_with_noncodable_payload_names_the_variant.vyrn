@@ -1,0 +1,1 @@
+type Bad = | Boxed(Logger) | Empty fn f(b: Bad) -> String { return toJson(b) } fn main() -> Int64 { return 0 }

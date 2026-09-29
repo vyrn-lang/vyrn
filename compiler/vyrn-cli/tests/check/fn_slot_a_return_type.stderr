@@ -1,0 +1,1 @@
+fn_slot_a_return_type.vyrn:5:0: this lambda returns Bool, but `twice` expects it to return Int64

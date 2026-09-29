@@ -1,0 +1,2 @@
+// A heap value assigned to a region-local `mut` dies with it.
+fn main() -> Int64 { let a = "x" let b = "y" region { let mut s = a s = a + b print(s) } return 0 }

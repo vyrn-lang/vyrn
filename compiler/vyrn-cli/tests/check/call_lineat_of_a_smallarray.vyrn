@@ -1,0 +1,3 @@
+// A `SmallArray` is not the `{ ptr, i64, i64 }` an `Array` is.
+fn main() -> Int64 { let mut a: SmallArray<UInt8, 4> = [] a.push('x')
+    print(lineAt(a, 0)) return 0 }

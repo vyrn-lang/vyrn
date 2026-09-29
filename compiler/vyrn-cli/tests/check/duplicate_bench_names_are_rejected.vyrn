@@ -1,0 +1,2 @@
+// The refusal in a bench says `bench`.
+bench "dup" { let a = 1 } bench "dup" { let a = 1 }

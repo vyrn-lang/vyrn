@@ -1,0 +1,1 @@
+modify_projection_of_a_read_parameter.vyrn:6:8: projection `atSet` returns a value, not a place — a `read`/`modify` result must be a field or element of `self`; a projection that computes a new value is an ordinary `fn` returning `-> T`

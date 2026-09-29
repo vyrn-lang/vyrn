@@ -1,0 +1,1 @@
+variant_named_like_a_std_type.vyrn:2:0: enum variant `Match` clashes with the type `Match` declared in `std/regex`; rename the variant

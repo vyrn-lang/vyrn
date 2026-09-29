@@ -1,0 +1,3 @@
+prefix_consume_a_prefix_take_of_a_field_of_a_read_parameter.vyrn:1:0: `d` may not be consumed — it is a `read` parameter
+  fix: declare the parameter `d: consume ..` if this function should own it
+  fix: `d.a.copy()` if both sides need a value

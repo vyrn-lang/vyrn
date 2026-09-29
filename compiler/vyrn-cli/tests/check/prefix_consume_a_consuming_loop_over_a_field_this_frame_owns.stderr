@@ -1,0 +1,5 @@
+prefix_consume_a_consuming_loop_over_a_field_this_frame_owns.vyrn:1:0: `x` may not be stored into `push(..)` — it is read out of a place that owns it
+  fix: `x.copy()` if both sides need a value
+prefix_consume_a_consuming_loop_over_a_field_this_frame_owns.vyrn:1:0: `r.xs` may not be stored into the `for .. in consume` loop — it is read out of a place that owns it
+  fix: `consume r.xs` if `r` should give it up — the field is dead afterwards
+  fix: `r.xs.copy()` if both sides need a value

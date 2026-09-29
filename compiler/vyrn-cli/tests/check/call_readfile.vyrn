@@ -1,0 +1,1 @@
+fn main() -> Int64 { let r = readFile(5) return 0 }

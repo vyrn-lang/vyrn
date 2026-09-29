@@ -1,0 +1,1 @@
+type T = { id: Int64 } fn take(t: consume T) -> Int64 { return t.id } fn main() -> Int64 { let x = T { id: 1 } for i in [0, 1] { let a = take(x) break } return take(x) }

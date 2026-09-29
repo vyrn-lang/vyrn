@@ -1,0 +1,1 @@
+cannot_consume_captured_binding.vyrn:3:0: a lambda cannot consume the captured binding `name` (line 3)

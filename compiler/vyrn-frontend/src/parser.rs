@@ -4689,48 +4689,6 @@ mod tests {
     }
 
     #[test]
-    fn a_result_capability_must_match_the_receiver() {
-        let src = "type Ring = { data: Array<Int64> }\n\
-                   impl Index for Ring {\n\
-                       fn at(read self, i: Int64) -> modify Int64 { return self.data[i] }\n\
-                   }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (_, errs) = parse_accum(lex(src).unwrap());
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains("receiver must be `modify self`")),
-            "{errs:?}"
-        );
-    }
-
-    #[test]
-    fn a_consume_result_is_spelled_arrow_t() {
-        let src = "type Ring = { data: Array<Int64> }\n\
-                   impl Index for Ring {\n\
-                       fn take(read self, i: Int64) -> consume Int64 { return self.data[i] }\n\
-                   }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (_, errs) = parse_accum(lex(src).unwrap());
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains("`-> consume T` is spelled `-> T`")),
-            "{errs:?}"
-        );
-    }
-
-    #[test]
-    fn a_free_function_cannot_return_a_capability() {
-        let src = "fn f(xs: Array<Int64>, i: Int64) -> read Int64 { return xs[i] }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (_, errs) = parse_accum(lex(src).unwrap());
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains("a free function has none")),
-            "{errs:?}"
-        );
-    }
-
-    #[test]
     fn a_protocol_declares_a_projection() {
         // The result capability marks the requirement, under the receiver rule an
         // impl member follows.
@@ -4800,41 +4758,6 @@ mod tests {
     }
 
     #[test]
-    fn a_refutable_let_needs_a_named_scrutinee() {
-        let src = "type Shape = | Circle(Int64) | Dot\n\
-                   fn make() -> Shape { return Circle(1) }\n\
-                   fn main() -> Int64 { let Circle(r) = make()\n return r }";
-        let (_, errs) = parse_accum(lex(src).unwrap());
-        assert!(
-            errs.iter().any(|e| e.message.contains("must be a name")),
-            "{errs:?}"
-        );
-    }
-
-    #[test]
-    fn a_refutable_let_that_binds_nothing_is_refused() {
-        let src = "type Shape = | Circle(Int64) | Dot\n\
-                   fn main() -> Int64 { let d = Dot\n let Dot() = d\n return 0 }";
-        let (_, errs) = parse_accum(lex(src).unwrap());
-        assert!(
-            errs.iter().any(|e| e.message.contains("binds nothing")),
-            "{errs:?}"
-        );
-    }
-
-    #[test]
-    fn a_refutable_let_refuses_mut() {
-        let src = "type Shape = | Circle(Int64) | Dot\n\
-                   fn main() -> Int64 { let c = Circle(1)\n let mut Circle(r) = c\n return r }";
-        let (_, errs) = parse_accum(lex(src).unwrap());
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains("binder is a borrow")),
-            "{errs:?}"
-        );
-    }
-
-    #[test]
     fn a_type_named_read_still_parses_in_return_position() {
         // The result capability counts only where a type follows, so `-> read {`
         // keeps `read` as a type name and the brace as the body.
@@ -4880,17 +4803,6 @@ mod tests {
             panic!("expected an if-let as the while body");
         };
         assert!(matches!(eb.stmts[0], Stmt::Break { .. }));
-    }
-
-    #[test]
-    fn if_let_as_expression_is_rejected_with_a_match_hint() {
-        let src = "fn main() -> Int64 { let x = if let Some(v) = f() { v } else { 0 } return x }";
-        let err = parse(lex(src).unwrap()).unwrap_err();
-        assert!(
-            err.render().contains("`if let` is a statement") && err.render().contains("match"),
-            "{}",
-            err.render()
-        );
     }
 
     #[test]
@@ -5072,23 +4984,6 @@ mod tests {
     }
 
     #[test]
-    fn export_let_is_rejected_with_a_named_diagnostic() {
-        // Module state is legal in any module but never exported.
-        let err =
-            parse(lex("export let x = 1 fn main() -> Int64 { return 0 }").unwrap()).unwrap_err();
-        assert!(
-            err.message.contains("module state is not exportable"),
-            "{}",
-            err.message
-        );
-        assert!(
-            err.message.contains("accessor functions"),
-            "{}",
-            err.message
-        );
-    }
-
-    #[test]
     fn gen_is_still_an_identifier_elsewhere() {
         // `gen` as a variable name is unharmed.
         let p = parse_src("fn main() -> Int64 { let gen = 3 return gen }");
@@ -5188,15 +5083,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_where_outside_a_type_decl_is_an_error() {
-        // An anonymous record has no name for the synthetic refinement type.
-        let src = "fn f(x: { n: Int64 where value > 0 }) -> Int64 { return 0 } \
-                   fn main() -> Int64 { return 0 }";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("named record type"), "{}", e.message);
-    }
-
-    #[test]
     fn parses_top_level_let_module_state() {
         // `let [mut] name [: Type] = init` at the top level.
         let src = "let mut hits: Int64 = 0\n\
@@ -5210,13 +5096,6 @@ mod tests {
         assert_eq!(p.globals[1].name, "banner");
         assert!(!p.globals[1].mutable);
         assert_eq!(p.globals[1].ty, None);
-    }
-
-    #[test]
-    fn top_level_let_requires_initializer() {
-        let src = "let mut hits: Int64\nfn main() -> Int64 { return 0 }";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("needs an initializer"), "{}", e.message);
     }
 
     #[test]
@@ -5354,15 +5233,6 @@ mod tests {
                    }";
         let p = parse_src(src);
         assert_eq!(p.functions[0].body.stmts.len(), 4);
-    }
-
-    #[test]
-    fn hole_parse_errors_are_anchored_at_the_template() {
-        // Hole-relative line numbers must not leak.
-        let toks = lex("fn main() -> Int64 {\n    let s = \"\\{ 1 + }\"\n    return 0\n}").unwrap();
-        let e = parse(toks).unwrap_err();
-        assert_eq!(e.line, 2, "{e:?}");
-        assert!(e.message.contains("in interpolation"), "{}", e.message);
     }
 
     #[test]
@@ -5706,30 +5576,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn nested_index_field_assign_is_rejected() {
-        // `a[i].f.g = v` is a parse error.
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f.g = 9  return 0 }";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(
-            e.message.contains("single field write-through"),
-            "{}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn index_field_assign_on_non_variable_array_is_rejected() {
-        // A call result is not a place: there is nowhere to move the array back to.
-        let src = "fn main() -> Int64 { f()[0].x = 9  return 0 }";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(
-            e.message.contains("record field, or an array element"),
-            "{}",
-            e.message
-        );
-    }
-
     // Index assignment through a place.
 
     /// `s.xs[0] = 9` lowers to three statements (move the header out, store, move
@@ -5983,19 +5829,6 @@ mod tests {
     }
 
     #[test]
-    fn push_on_a_temporary_is_rejected_not_silently_dropped() {
-        // A `push` on a receiver that is not an assignable place is a parse error
-        // naming the supported places, not a silent no-op.
-        let src = "fn main() -> Int64 { make().push(1)  return 0 }";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(
-            e.message.contains("no place to write back to"),
-            "{}",
-            e.message
-        );
-    }
-
-    #[test]
     fn push_on_a_deeper_field_chain_is_rejected() {
         // `r.a.b.push(x)` is a parse error, never a silent copy.
         let src =
@@ -6151,23 +5984,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn statements_in_an_expression_if_branch_are_rejected() {
-        // An expression-`if` branch refuses statements.
-        let (_, errors) = parse_accum(
-            lex("fn main() -> Int64 {\n\
-                 let x = if true { let y = 1  y } else { 0 }\n\
-                 return x }")
-            .unwrap(),
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|d| d.message.contains("single expression in each")),
-            "{errors:?}"
-        );
-    }
-
     // Module contracts.
 
     #[test]
@@ -6241,39 +6057,6 @@ mod tests {
     fn contract_without_an_open_rule_is_closed() {
         let p = parse_src("contract P { let a: String }");
         assert!(p.contracts[0].open_rule().is_none());
-    }
-
-    #[test]
-    fn duplicate_contract_members_are_rejected() {
-        let (_, errors) = parse_accum(lex("contract P { let a: String  let a: Int64 }").unwrap());
-        assert!(
-            errors
-                .iter()
-                .any(|d| d.message.contains("already declares `a`")),
-            "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn a_second_open_rule_is_rejected() {
-        let (_, errors) = parse_accum(
-            lex("contract P { fn *(a: String) -> String  fn *(b: Int64) -> Int64 }").unwrap(),
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|d| d.message.contains("already has an open rule")),
-            "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn a_contract_member_must_declare_its_type() {
-        let (_, errors) = parse_accum(lex("contract P { let a = 1 }").unwrap());
-        assert!(
-            errors.iter().any(|d| d.message.contains("needs a type")),
-            "{errors:?}"
-        );
     }
 
     #[test]
@@ -6382,28 +6165,6 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
     }
 
     // Refinements under `&`, postfix chains, associated-type alias leaks.
-
-    /// An inline field `where` in a record that `&` wraps in a merge is a parse
-    /// error, not an abort.
-    #[test]
-    fn an_inline_refinement_on_a_merged_record_is_a_diagnostic_not_a_panic() {
-        let src = "type T = { x: Int64 where x > 0 } & { y: Int64 }";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(
-            e.message.contains("inline field `where`") && e.message.contains("merge"),
-            "{}",
-            e.message
-        );
-    }
-
-    /// The same through an enum variant payload, which reaches `record_type` with
-    /// the collector armed.
-    #[test]
-    fn an_inline_refinement_in_an_enum_variant_is_a_diagnostic_not_a_panic() {
-        let src = "type T = | Box({ w: Int64 where w > 0 })";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("inline field `where`"), "{}", e.message);
-    }
 
     /// Each postfix link counts toward [`Parser::MAX_NEST`], so a long `a.b.b...b`
     /// chain is refused instead of aborting in a later walk.

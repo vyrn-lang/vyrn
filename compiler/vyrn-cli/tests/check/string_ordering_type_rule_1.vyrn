@@ -1,0 +1,2 @@
+// `< <= > >=` compare two Strings; a String and a non-String do not.
+fn main() -> Int64 { if "a" < "b" { return 1 } return 0 }

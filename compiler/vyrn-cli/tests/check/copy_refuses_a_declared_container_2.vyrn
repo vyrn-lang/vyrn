@@ -1,0 +1,7 @@
+protocol Owned { fn release(self) }
+type Ring = { buf: Array<Int64> }
+impl Owned for Ring { fn release(self) { print(1) } }
+type Holder = { r: Ring }
+fn main() -> Int64 { let h = Holder { r: Ring { buf: [] } }
+    let q = h.copy()
+    return 0 }

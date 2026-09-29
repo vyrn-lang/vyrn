@@ -1,0 +1,1 @@
+top_level_let_requires_initializer.vyrn:2:1: module state `hits` needs an initializer: write `let hits = <value>` (top-level `let` has no default value)

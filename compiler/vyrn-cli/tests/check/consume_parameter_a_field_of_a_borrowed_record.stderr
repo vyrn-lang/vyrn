@@ -1,0 +1,3 @@
+consume_parameter_a_field_of_a_borrowed_record.vyrn:1:0: `b.xs` may not be passed to a `consume` parameter via `take(..)` — it is a `read` parameter
+  fix: declare the parameter `b: consume ..` if this function should own it
+  fix: `b.xs.copy()` if both sides need a value

@@ -1,0 +1,2 @@
+protocol P { fn m(self, k: Int64) -> Int64 }
+impl P for Int64 { fn m(self, k: Int64) -> Int64 { return self + k } } fn main() -> Int64 { return m(7, "x") }

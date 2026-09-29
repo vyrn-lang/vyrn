@@ -1,0 +1,1 @@
+comptime_purity_sees_an_effect_inside_a_lambda.vyrn:3:0: `gen fn g` is not comptime-pure: it calls `print` (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)

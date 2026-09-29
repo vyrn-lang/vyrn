@@ -1,0 +1,2 @@
+protocol Merge { fn merge(self, other: Self) -> Int64 }
+fn main() -> Int64 { return 0 }

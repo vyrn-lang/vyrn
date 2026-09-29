@@ -1,0 +1,1 @@
+fn main() -> Int64 { assertEq(1, 1) return 0 }

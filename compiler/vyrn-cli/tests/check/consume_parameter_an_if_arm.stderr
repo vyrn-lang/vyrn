@@ -1,0 +1,3 @@
+consume_parameter_an_if_arm.vyrn:1:0: `d.title` may not be passed to a `consume` parameter via `sink(..)` — it is read out of a place that owns it
+  fix: `consume d.title` if `d` should give it up — the field is dead afterwards
+  fix: `d.title.copy()` if both sides need a value

@@ -1,0 +1,6 @@
+// Fields that say nothing are an error that names the fix; otherwise an open
+// `D<T>` would reach a concrete program.
+// The annotation is the fix.
+type D<T> = { front: Array<T>, back: Array<T> }
+fn main() -> Int64 { let d = D { front: [], back: [] }
+    return 0 }

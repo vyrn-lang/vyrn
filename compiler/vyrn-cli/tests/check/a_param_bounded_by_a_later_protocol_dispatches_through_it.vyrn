@@ -1,0 +1,3 @@
+// A parameter bounded by a protocol other than the first to declare the method
+// dispatches through its bound.
+type T = { v: Int64 } protocol P1 { fn frob(self) -> Int64 } protocol P2 { fn frob(self) -> Int64 } impl P1 for T { fn frob(self) -> Int64 { return self.v } } impl P2 for T { fn frob(self) -> Int64 { return self.v } } fn g<U: P2>(u: U) -> Int64 { return u.frob() } fn main() -> Int64 { return g(T { v: 7 }) }

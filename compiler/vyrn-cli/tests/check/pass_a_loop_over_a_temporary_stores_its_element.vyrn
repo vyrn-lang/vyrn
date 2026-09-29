@@ -1,0 +1,4 @@
+fn make() -> Array<String> { return ["a" + "b"] }
+fn go() -> Int64 { let mut out: Array<String> = []
+    for x in make() { out.push(x) } return out.length }
+fn main() -> Int64 { return 0 }

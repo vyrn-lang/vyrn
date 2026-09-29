@@ -1,0 +1,10 @@
+// Two different `N`s coexist as distinct types.
+fn main() -> Int64 {
+    let mut a: SmallArray<Int64, 4> = []
+    let mut b: SmallArray<Int64, 8> = []
+    a.push(1)
+    b.push(2)
+    let n = a.length + b.length
+    drop a
+    drop b
+    return n }

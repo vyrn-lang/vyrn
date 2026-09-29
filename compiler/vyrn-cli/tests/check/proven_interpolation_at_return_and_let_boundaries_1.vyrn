@@ -1,0 +1,5 @@
+// Return boundary. Let-annotation boundary.
+type Section = String where value =~ "home|about"
+type Key = String where value =~ "nav\\.(home|about)\\.label"
+fn build(s: Section) -> Key { return "nav.\{s}.label" }
+fn main() -> Int64 { let s: Section = "home" build(s) return 0 }

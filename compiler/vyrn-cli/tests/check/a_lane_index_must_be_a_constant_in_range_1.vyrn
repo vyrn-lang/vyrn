@@ -1,0 +1,3 @@
+// A lane index is checked at compile time or not at all: a backend emits
+// `f32x4.extract_lane` with no guard.
+fn main() -> Int64 { let v = F32x4(1.0, 2.0, 3.0, 4.0) print(v.lane(0)) print(v.lane(3)) return 0 }

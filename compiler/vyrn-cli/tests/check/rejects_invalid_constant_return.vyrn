@@ -1,0 +1,3 @@
+// A literal returned where a predicated type is expected is proven at compile
+// time, exactly like a let/argument boundary.
+type Age = Int64 where value >= 18 fn birth() -> Age { return 5 } fn main() -> Int64 { return 0 }

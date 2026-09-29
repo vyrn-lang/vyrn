@@ -1,0 +1,3 @@
+// The exact minimum of every signed sized type is writable negated: the bare
+// magnitude does not fit, but its negation does.
+fn main() -> Int64 { let a: Int8 = -128 let b: Int16 = -32768 let c: Int32 = -2147483648 return 0 }

@@ -1,0 +1,1 @@
+a_known_protocols_impl_takes_the_declared_capabilities_3.vyrn:2:23: `impl Owned for C` does not match protocol `Owned` — it declares `fn release(consume self) -> Unit`, this provides `fn release(self) -> Unit`

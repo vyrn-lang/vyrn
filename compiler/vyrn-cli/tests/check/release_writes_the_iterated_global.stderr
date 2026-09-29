@@ -1,0 +1,3 @@
+release_writes_the_iterated_global.vyrn:14:0: `gs` is written here while `gs` still reads out of it
+line 12: ... and `gs` is used again here
+  fix: `gs.copy()` on line 12, so `gs` is a value of its own

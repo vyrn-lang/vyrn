@@ -1,0 +1,2 @@
+fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }
+fn main() -> Int64 { let name = "hi" let r = apply(name, x -> { drop name return x }) return 0 }

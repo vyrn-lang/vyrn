@@ -1,0 +1,1 @@
+fn main() -> Int64 { let b: UInt8 = -1 return 0 }

@@ -1,0 +1,1 @@
+enum_with_noncodable_payload_names_the_variant.vyrn:1:0: `toJson` cannot encode `Logger (payload of variant `Boxed`)` (not a codable type)

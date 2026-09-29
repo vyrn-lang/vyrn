@@ -1,0 +1,1 @@
+export_let_is_rejected_with_a_named_diagnostic.vyrn:2:8: module state is not exportable — export accessor functions (a top-level `let` is module-private in every module)

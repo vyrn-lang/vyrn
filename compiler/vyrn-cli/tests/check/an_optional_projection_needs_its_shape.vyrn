@@ -1,0 +1,15 @@
+// Two miss tests: statements between them would run after the first miss
+// decided.
+type B = { rows: Array<Int64> }
+impl Index for B {
+    fn tryAt(read self, i: Int64) -> read Option<Int64> {
+        if i < 0 {
+            return None
+        }
+        if i >= self.rows.length {
+            return None
+        }
+        return Some(self.rows[i])
+    }
+}
+fn main() -> Int64 { return 0 }

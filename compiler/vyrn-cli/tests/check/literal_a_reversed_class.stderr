@@ -1,0 +1,1 @@
+literal_a_reversed_class.vyrn:1:0: invalid regex `[z-a]`: reversed range `z-a` in character class

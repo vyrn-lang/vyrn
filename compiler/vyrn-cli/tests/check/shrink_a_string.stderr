@@ -1,0 +1,1 @@
+shrink_a_string.vyrn:1:0: `pop` needs an `Array<T>`, found String

@@ -1,0 +1,2 @@
+// A heap temporary lives and dies inside the region; only an Int escapes.
+fn main() -> Int64 { let a = "x" let b = "y" let mut n = 0 region { let s = a + b n = s.byteLength } return n }

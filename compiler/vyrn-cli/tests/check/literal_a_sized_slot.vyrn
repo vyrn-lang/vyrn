@@ -1,0 +1,5 @@
+fn main() -> Int64 {
+    let q = 0
+    let x: Int8 = 300
+    return 0
+}

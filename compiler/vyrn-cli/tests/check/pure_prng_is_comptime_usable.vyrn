@@ -1,0 +1,2 @@
+// The seeded PRNG (MINSTD) is pure; only the host seed is an effect.
+gen fn g() -> String { let seed = 42 let next = (seed * 48271) % 2147483647 return "" } fn main() -> Int64 { return 0 }

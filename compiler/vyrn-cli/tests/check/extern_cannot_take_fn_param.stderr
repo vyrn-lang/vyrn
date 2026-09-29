@@ -1,0 +1,1 @@
+extern_cannot_take_fn_param.vyrn:1:11: an `extern` function may not take a `fn`-typed parameter

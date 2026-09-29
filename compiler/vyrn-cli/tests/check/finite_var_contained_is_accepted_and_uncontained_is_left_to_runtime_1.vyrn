@@ -1,0 +1,7 @@
+// Section is no subset of TransKey, but a Section variable may hold a
+// conforming value, so the flow compiles with its run-time check. A finite type
+// that IS contained in the target flows with no error.
+type TransKey = String where value =~ "(home\\.(title|subtitle)|nav\\.(home|about|settings)\\.label)"
+type Section = String where value =~ "home|about|settings"
+fn t(key: TransKey) -> Int64 { return 0 }
+fn main() -> Int64 { let s: Section = "home" return t(s) }

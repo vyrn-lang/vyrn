@@ -1,0 +1,1 @@
+cannot_drop_captured_binding.vyrn:2:0: a lambda cannot `drop` the captured binding `name` (line 2)

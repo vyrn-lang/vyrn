@@ -1,0 +1,1 @@
+host_clock_extern_is_rejected_in_a_generator.vyrn:3:0: `gen fn g` is not comptime-pure: it reaches `now` (via g -> now), which reads the clock (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)

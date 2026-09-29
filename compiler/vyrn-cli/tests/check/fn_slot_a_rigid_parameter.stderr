@@ -1,0 +1,1 @@
+fn_slot_a_rigid_parameter.vyrn:3:0: `widthOf` expects a String argument, but `fn(T) -> Int64` will pass it T

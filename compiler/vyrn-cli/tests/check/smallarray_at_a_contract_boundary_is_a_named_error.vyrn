@@ -1,0 +1,5 @@
+// `SmallArray` has no JSON codec, so a contract type refuses it by name.
+fn main() -> Int64 {
+    let xs: SmallArray<Int64, 4> = [1, 2]
+    let s = toJson(xs)
+    return xs.length }

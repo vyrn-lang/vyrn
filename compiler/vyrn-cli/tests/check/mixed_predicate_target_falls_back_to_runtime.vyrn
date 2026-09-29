@@ -1,0 +1,6 @@
+// A length clause beside a regex clause is no pure regex language, so
+// containment does not apply and the length is checked at run time.
+type Key = String where value =~ "[a-z]+" && value.byteLength < 3
+type Section = String where value =~ "home|about"
+fn t(k: Key) -> Int64 { return 0 }
+fn main() -> Int64 { let s: Section = "home"  return t("\{s}") }

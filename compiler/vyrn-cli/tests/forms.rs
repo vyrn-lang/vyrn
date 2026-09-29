@@ -637,23 +637,27 @@ fn count_source(src: &str, into: &mut Uses) -> bool {
 /// Label -> how many times the corpus writes it.
 type Uses = std::collections::BTreeMap<String, usize>;
 
-/// One `Uses` per bucket, and (files parsed, files seen) per bucket.
+/// One `Uses` per bucket, and (files parsed, files meant to parse) per bucket.
+/// A `tests/check` program that does not parse and has a `.stderr` is a parse
+/// refusal on purpose; its tokens count, its forms cannot.
 fn corpus_uses() -> (Vec<(&'static str, Uses)>, Vec<(usize, usize)>) {
     let mut out = Vec::new();
     let mut seen = Vec::new();
     for (label, dirs) in CORPUS {
         let mut uses = Uses::new();
         let files = vyrn_files(dirs);
-        let mut ok = 0usize;
+        let (mut ok, mut all) = (0usize, files.len());
         for p in &files {
             let Ok(src) = std::fs::read_to_string(p) else {
                 continue;
             };
             if count_source(&src, &mut uses) {
                 ok += 1;
+            } else if p.with_extension("stderr").exists() {
+                all -= 1;
             }
         }
-        seen.push((ok, files.len()));
+        seen.push((ok, all));
         out.push((*label, uses));
     }
     let fences = doc_fences();

@@ -1,0 +1,5 @@
+// Only a single letter is a type parameter, so the typo `Haed` must resolve and
+// is caught.
+type Head = { title: String }
+contract Page { let head: Haed }
+fn main() -> Int64 { return 0 }

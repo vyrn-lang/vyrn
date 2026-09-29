@@ -1,0 +1,3 @@
+fn main() -> Int64 { let s = "a"
+    let t = s.copy(1)
+    return 0 }

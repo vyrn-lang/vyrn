@@ -1,0 +1,1 @@
+type Shape = | Rect(Int64, Int64) | Empty fn area(s: Shape) -> Int64 { return match s { Rect(w, h) => w * h, Empty => 0 } } fn main() -> Int64 { return area(Rect(3, 4)) }

@@ -1,0 +1,11 @@
+protocol Shelf { fn tag(read self, i: Int64) -> read String }
+type Crate = { labels: Array<String> }
+impl Shelf for Crate {
+    fn tag(read self, i: Int64) -> read String {
+        return self.labels[i]
+    }
+}
+fn main() -> Int64 {
+    let c = Crate { labels: ["a"] }
+    return c.tag(0).byteLength
+}

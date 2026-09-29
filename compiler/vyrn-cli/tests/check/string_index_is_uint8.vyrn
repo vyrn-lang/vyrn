@@ -1,0 +1,1 @@
+fn main() -> Int64 { let s = "hi" let b: UInt8 = s[0] return Int64(b) }

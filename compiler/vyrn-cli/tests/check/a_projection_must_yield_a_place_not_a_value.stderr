@@ -1,0 +1,1 @@
+a_projection_must_yield_a_place_not_a_value.vyrn:2:26: projection `at` returns a value, not a place — a `read`/`modify` result must be a field or element of `self`; a projection that computes a new value is an ordinary `fn` returning `-> T`

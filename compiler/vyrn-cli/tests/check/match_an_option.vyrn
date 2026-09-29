@@ -1,0 +1,1 @@
+fn main() -> Int64 { let o: Option<Int64> = Some(1) return match o { Some(x) => x } }

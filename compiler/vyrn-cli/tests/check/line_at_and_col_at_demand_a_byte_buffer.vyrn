@@ -1,0 +1,3 @@
+// The row states the buffer type; `call_lineat_of_*` pins the refusals, and
+// this pins the accepted shape every real caller passes.
+fn main() -> Int64 { let b = bytes("a\nb") print(lineAt(b, 2)) print(colAt(b, 2)) return 0 }

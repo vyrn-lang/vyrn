@@ -1,0 +1,4 @@
+protocol Grow { fn grow(self) -> Self }
+type Ring = { n: Int64 }
+impl Grow for Ring { fn grow(self) -> Ring { return Ring { n: self.n } } }
+fn main() -> Int64 { return 0 }

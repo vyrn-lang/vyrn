@@ -1,0 +1,1 @@
+contract_of_rejects_a_name_that_is_not_a_contract.vyrn:2:0: `contractOf` needs a declared contract name; `Page` is not a contract

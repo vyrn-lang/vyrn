@@ -1,0 +1,1 @@
+duplicate_bench_names_are_rejected.vyrn:2:0: duplicate bench name "dup" (already declared on line 2)

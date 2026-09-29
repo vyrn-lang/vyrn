@@ -1,0 +1,1 @@
+a_parameter_under_a_compound_slot_is_still_refused_1.vyrn:5:0: array elements must share a type: expected Array<T>, found Array<Int64>

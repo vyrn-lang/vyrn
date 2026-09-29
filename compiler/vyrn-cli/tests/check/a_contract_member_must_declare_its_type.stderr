@@ -1,0 +1,1 @@
+a_contract_member_must_declare_its_type.vyrn:1:20: contract member `a` needs a type: write `let a: Type` (a contract states the shape of an export, so the type is never inferred)

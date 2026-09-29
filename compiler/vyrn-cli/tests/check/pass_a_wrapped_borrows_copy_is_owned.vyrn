@@ -1,0 +1,6 @@
+type M = { name: String }
+type C = { members: Array<M> }
+fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m.copy()) }
+    return None }
+fn main() -> Int64 { let c = C { members: [] }
+    if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }

@@ -1,0 +1,1 @@
+a_literal_that_settles_nothing_names_the_annotation_1.vyrn:5:0: cannot infer type parameter `T` of `D`; no field value determines it, so annotate the binding (e.g. `let x: D<..> = D { .. }`)

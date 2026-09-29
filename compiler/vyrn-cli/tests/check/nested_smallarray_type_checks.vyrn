@@ -1,0 +1,8 @@
+fn main() -> Int64 {
+    let row: SmallArray<Int64, 2> = [1, 2]
+    let mut grid: SmallArray<SmallArray<Int64, 2>, 2> = []
+    grid.push(row)
+    let got = grid[0]
+    let n = got[1]
+    drop grid
+    return n }

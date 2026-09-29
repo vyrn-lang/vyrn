@@ -1,0 +1,1 @@
+type Age = Int64 where value >= 18 fn g(a: Age) -> Int64 { return 0 } fn main() -> Int64 { return g(20) }

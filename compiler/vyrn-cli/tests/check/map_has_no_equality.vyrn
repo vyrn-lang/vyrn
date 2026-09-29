@@ -1,0 +1,5 @@
+fn main() -> Int64 {
+    let a: Map<String, Int64> = [:]
+    let b: Map<String, Int64> = [:]
+    if a == b { return 1 }
+    return 0 }

@@ -1,0 +1,3 @@
+type G<T> = { o: Option<T> }
+fn main() -> Int64 { let g = G { o: Some(2) }
+    return 0 }

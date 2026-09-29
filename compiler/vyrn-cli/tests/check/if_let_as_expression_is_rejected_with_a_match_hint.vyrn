@@ -1,0 +1,1 @@
+fn main() -> Int64 { let x = if let Some(v) = f() { v } else { 0 } return x }

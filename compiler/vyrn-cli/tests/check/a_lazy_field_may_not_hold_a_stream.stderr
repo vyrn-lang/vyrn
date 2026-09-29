@@ -1,0 +1,1 @@
+a_lazy_field_may_not_hold_a_stream.vyrn:3:0: `lazy Stream<Int64>` may not be a record field — a stream's lifetime is a scope, so it may be a binding, a parameter, or a return type, and nothing may store it

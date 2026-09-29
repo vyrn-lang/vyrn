@@ -1,0 +1,1 @@
+fn main() -> Int64 { let r: Result<Bool, String> = renameFile("a", "b") let s: Result<Bool, String> = fsyncFile("a") return 0 }

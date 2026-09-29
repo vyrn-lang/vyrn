@@ -1,0 +1,1 @@
+duplicate_test_names_are_rejected.vyrn:1:0: duplicate test name "dup" (already declared on line 1)

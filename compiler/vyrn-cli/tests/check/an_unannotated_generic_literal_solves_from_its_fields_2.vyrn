@@ -1,0 +1,3 @@
+type G<T> = { xs: Array<T, 2> }
+fn main() -> Int64 { let g = G { xs: [2, 1] }
+    return 0 }

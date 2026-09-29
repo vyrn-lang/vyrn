@@ -1,0 +1,3 @@
+protocol P { fn m(self, k: Int64) -> Int64 }
+impl P for Int64 { fn m(self, k: Int64) -> Int64 { return self + k } } fn go<T: P>(x: T) -> Int64 { return x.m("x") }
+fn main() -> Int64 { return go(7) }

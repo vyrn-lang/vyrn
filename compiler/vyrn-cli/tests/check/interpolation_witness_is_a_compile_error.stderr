@@ -1,0 +1,1 @@
+interpolation_witness_is_a_compile_error.vyrn:6:0: "nav.profile.label" (a possible value of this interpolation) does not satisfy `TransKey` (predicate `where value =~ "nav\\.(home|about)\\.label"` is false)

@@ -1,0 +1,10 @@
+// Insert, honest Option lookup, has/remove/length/keys over the surface.
+fn main() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    m["a"] = 1
+    let hit = match m["a"] { Some(v) => v, None => 0 }
+    let present = m.has("a")
+    let gone = m.remove("a")
+    let n = m.length
+    for k in m.keys() { print(k) }
+    return hit + n }

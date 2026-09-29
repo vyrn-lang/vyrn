@@ -1,0 +1,2 @@
+// Scalars in; a scalar, String or Unit out.
+extern fn jsLog(msg: String) extern fn jsNow() -> Float64 extern fn jsAdd(a: Int64, b: Int64) -> Int64 extern fn jsFlag(on: Bool, small: UInt8) -> Bool fn main() -> Int64 { return 0 }

@@ -1,0 +1,2 @@
+extern fn e(f: fn(Int64) -> Int64) -> Int64
+fn main() -> Int64 { return 0 }

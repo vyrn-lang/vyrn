@@ -1,0 +1,3 @@
+fn build(ks: Array<String>) -> Map<String, Int64>
+{ let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m }
+fn main() -> Int64 { return 0 }

@@ -1,0 +1,2 @@
+an_extern_string_parameter_may_not_be_consume_1.vyrn:4:37: extern fn `setIt` parameter `arg` may not be `consume` — the caller across this boundary is JS, and it releases the String when the call returns
+  fix: take `arg: String` and store `arg.copy()`

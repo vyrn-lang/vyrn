@@ -1,0 +1,2 @@
+fn id(s: consume String) -> String { return s }
+fn main() -> Int64 { return 0 }

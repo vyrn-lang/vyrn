@@ -1,0 +1,7 @@
+// Field order does not decide for a `fn`-typed field either: a stored `fn`
+// needs a solved signature, so `width` reads what `tag` settled, in either
+// written order.
+type G<T> = { tag: T, width: fn(T) -> Int64 }
+fn widthOf(s: String) -> Int64 { return 1 }
+fn main() -> Int64 { let g = G { tag: "x", width: widthOf }
+    return 0 }

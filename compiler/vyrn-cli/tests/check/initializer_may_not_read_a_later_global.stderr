@@ -1,0 +1,1 @@
+initializer_may_not_read_a_later_global.vyrn:1:0: initializer of `a` reads `b`, a module-state binding declared later — a global may only read earlier ones

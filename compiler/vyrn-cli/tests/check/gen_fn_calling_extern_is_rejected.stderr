@@ -1,0 +1,1 @@
+gen_fn_calling_extern_is_rejected.vyrn:1:0: `gen fn g` is not comptime-pure: it calls the extern `host` (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)

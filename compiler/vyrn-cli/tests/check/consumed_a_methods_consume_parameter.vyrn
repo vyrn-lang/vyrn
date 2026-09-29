@@ -1,0 +1,1 @@
+type T = { n: Int64 } protocol Taking { fn take(modify self, s: consume String) -> Unit } impl Taking for T { fn take(modify self, s: consume String) -> Unit { self.n = self.n + s.byteLength } } fn main() -> Int64 { let mut t = T { n: 1 } let s = "a" t.take(s) return s.byteLength }

@@ -1,0 +1,3 @@
+// A `String where value.byteLength ..` type-checks and const-validates. A
+// provably-too-short constant is rejected at compile time.
+type Name = String where value.byteLength >= 3 fn main() -> Int64 { let n = Name("bob") return 0 }

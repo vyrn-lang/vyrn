@@ -1,0 +1,1 @@
+type T = { id: Int64 } fn take(t: consume T) -> Bool { return t.id > 0 } fn main() -> Int64 { let x = T { id: 1 } while take(x) { let y = 1 } return 0 }

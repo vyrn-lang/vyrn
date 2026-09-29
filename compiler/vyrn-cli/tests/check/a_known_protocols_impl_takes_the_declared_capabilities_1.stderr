@@ -1,0 +1,1 @@
+a_known_protocols_impl_takes_the_declared_capabilities_1.vyrn:4:22: `impl Show for C` does not match protocol `Show` — it declares `fn show(self) -> String`, this provides `fn show(modify self) -> String`

@@ -1,0 +1,3 @@
+// A `push` on a receiver that is not an assignable place is a parse error
+// naming the supported places, not a silent no-op.
+fn main() -> Int64 { make().push(1) return 0 }

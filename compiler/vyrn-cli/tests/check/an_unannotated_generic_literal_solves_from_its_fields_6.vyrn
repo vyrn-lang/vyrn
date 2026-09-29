@@ -1,0 +1,3 @@
+type G<T> = { r: Result<T, String> }
+fn main() -> Int64 { let g = G { r: Ok(2) }
+    return 0 }

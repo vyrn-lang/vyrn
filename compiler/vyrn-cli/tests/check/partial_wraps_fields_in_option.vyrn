@@ -1,0 +1,1 @@
+type U = { a: Int64 } type P = Partial<U> fn f(p: P) -> Int64 { return match p.a { Some(n) => n, None => 0 } } fn main() -> Int64 { return f(P { a: Some(5) }) }

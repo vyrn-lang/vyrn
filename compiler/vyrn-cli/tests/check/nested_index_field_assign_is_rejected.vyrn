@@ -1,0 +1,2 @@
+// `a[i].f.g = v` is a parse error.
+fn main() -> Int64 { let mut a: Array<Int64> = [] a[0].f.g = 9 return 0 }

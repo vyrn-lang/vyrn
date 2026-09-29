@@ -1,0 +1,3 @@
+// A composite parameter cannot cross the JS boundary. Same for a composite
+// return.
+extern fn bad(xs: Array<Int64>) fn main() -> Int64 { return 0 }

@@ -1,0 +1,1 @@
+a_moved_builtin_names_the_module_it_moved_to_1.vyrn:2:0: `slice` is `std/strpred`'s — add `import { slice } from "std/strpred"`

@@ -1,0 +1,2 @@
+// A call result is not a place: there is nowhere to move the array back to.
+fn main() -> Int64 { f()[0].x = 9 return 0 }

@@ -1,0 +1,1 @@
+type Bag = { xs: Array<Int64> } let g: Array<Int64> = [1] let gb: Bag = Bag { xs: [1] } fn take(xs: consume Array<Int64>) -> Int64 { let n = xs.length drop xs return n } fn takeBag(b: consume Bag) -> Int64 { return b.xs.length } fn go(ns: read Array<Array<Int64>>) -> Int64 { return take(ns[0]) } fn main() -> Int64 { return 0 }

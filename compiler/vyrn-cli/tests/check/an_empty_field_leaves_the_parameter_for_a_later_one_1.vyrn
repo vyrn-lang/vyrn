@@ -1,0 +1,5 @@
+// Field order does not decide. `back: []` settles nothing and leaves the
+// parameter for `front`; binding `T = T` would refuse the literal.
+type D<T> = { front: Array<T>, back: Array<T> }
+fn main() -> Int64 { let d = D { front: [2, 1], back: [] }
+    return 0 }
