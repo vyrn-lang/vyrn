@@ -447,7 +447,7 @@ fn refusal(
             crossing(importer, module)
         ));
     }
-    let mut d = Diagnostic::error(
+    Diagnostic::error(
         c.line,
         0,
         "floor",
@@ -458,10 +458,9 @@ fn refusal(
             map.display_path(module),
             c.cap.does()
         ),
-    );
-    d.file = Some(module.to_string());
-    d.note = Some(note);
-    d
+    )
+    .in_file(Some(module.to_string()))
+    .with_note(note)
 }
 
 /// Returns the call `importer` writes to reach `module` through the wire

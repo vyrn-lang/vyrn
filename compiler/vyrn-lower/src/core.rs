@@ -18,6 +18,7 @@ use vyrn_frontend::ast::{
     Program, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::Owned;
+use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
 pub use vyrn_frontend::prelude::Spec;
@@ -8717,10 +8718,7 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
-type Typed = (
-    Vec<vyrn_frontend::diagnostics::Diagnostic>,
-    std::collections::HashSet<usize>,
-);
+type Typed = (Vec<Diagnostic>, std::collections::HashSet<usize>);
 
 thread_local! {
     /// What the typed judgment refused about the program last analysed on
@@ -8761,9 +8759,7 @@ fn typed(
         // One sentence per line: a declaration's predicate is also the body
         // of its constructor.
         for u in crate::typed::refused(top, as_written) {
-            let said = |d: &vyrn_frontend::diagnostics::Diagnostic| {
-                (&d.file, d.line, &d.message) == (file, u.0, &u.1)
-            };
+            let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
             if !out.iter().any(said) && !found.contains(&u) {
                 found.push(u);
             }
@@ -8773,11 +8769,9 @@ fn typed(
         }
         found.sort_by_key(|(line, _)| *line);
         let refused = !found.is_empty();
-        out.extend(
-            found
-                .into_iter()
-                .map(|(line, message)| diagnostic(line, message, file)),
-        );
+        out.extend(found.into_iter().map(|(line, message)| {
+            Diagnostic::error(line, 0, "check", message).in_file(file.clone())
+        }));
         refused
     })
 }
@@ -8810,19 +8804,9 @@ fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
     None
 }
 
-fn diagnostic(
-    line: usize,
-    message: String,
-    file: &Option<String>,
-) -> vyrn_frontend::diagnostics::Diagnostic {
-    let mut d = vyrn_frontend::diagnostics::Diagnostic::error(line, 0, "check", message);
-    d.file = file.clone();
-    d
-}
-
 /// The typed judgment's refusals, drained. Installed into `own`'s slot by
 /// [`crate::install`].
-pub fn typed_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+pub fn typed_diagnostics() -> Vec<Diagnostic> {
     TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
 }
 
@@ -8836,7 +8820,7 @@ pub fn typed_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
 /// identity, with the count of that sentence within one body's run:
 /// `out.push(s) out.push(s)` on one line is two mistakes. `file` is `None`
 /// for the root module, which tells `vyrn fix` the edit is its to make.
-pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+pub fn refusal_diagnostics() -> Vec<Diagnostic> {
     if !refuses() {
         let _ = take_refusals();
         return Vec::new();
@@ -8858,8 +8842,7 @@ pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
             seen.insert((key, *n))
         })
         .map(|r| {
-            let mut d =
-                vyrn_frontend::diagnostics::Diagnostic::error(r.line, 0, "movecheck", r.message);
+            let mut d = Diagnostic::error(r.line, 0, "movecheck", r.message);
             d.file = r.file;
             d
         })
@@ -8882,7 +8865,8 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
             g.what
         );
         // The typed judgment's list prints whichever pass refused.
-        TYPED.with(|t| t.borrow_mut().0.push(diagnostic(g.line, message, file)));
+        let d = Diagnostic::error(g.line, 0, "check", message).in_file(file.clone());
+        TYPED.with(|t| t.borrow_mut().0.push(d));
         return;
     };
     REFUSALS.with(|v| {

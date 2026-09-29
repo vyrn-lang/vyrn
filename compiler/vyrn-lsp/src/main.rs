@@ -60,21 +60,11 @@ fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Ana
     if let Some(e) = manifest_error {
         analysis.diagnostics.insert(
             0,
-            vyrn_frontend::diagnostics::Diagnostic {
-                file: None,
-                line: 1,
-                col: 0,
-                end_col: 0,
-                severity: vyrn_frontend::diagnostics::Severity::Error,
-                stage: "parse",
-                message: e,
-                note: Some(
-                    "note: the project's import map and audience rules cannot be read, \
-                     so this file is analyzed without them"
-                        .to_string(),
-                ),
-                from_generated: false,
-            },
+            vyrn_frontend::diagnostics::Diagnostic::error(1, 0, "parse", e).with_note(
+                "note: the project's import map and audience rules cannot be read, \
+                 so this file is analyzed without them"
+                    .to_string(),
+            ),
         );
     }
     // `VYRN_BUILD_PROFILE=1`: the phase table of one analysis, the cost of a
