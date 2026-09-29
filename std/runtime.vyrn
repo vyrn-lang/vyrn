@@ -220,7 +220,7 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 // ignores it and only `regionExit` reclaims it.
 //
 // The request is an `Int64` because callers compute `count * stride` from an
-// `Int64` length, and an `Int32` product once wrapped. The width check comes
+// `Int64` length, and an `Int32` product would wrap. The width check comes
 // first, so `n + 7` cannot wrap. The rounding stays in 64 bits and the class
 // size widens unsigned: a request in (2^31 - 8, 2^31] rounds to 2^31, which an
 // `Int32` reads as negative, and class 115's size is 2^31 (`mallocround`).
@@ -816,8 +816,8 @@ export fn mapKeysCopy(kind: Int32, klen: Int32, hdr: Int32) -> Int32 {
 // Growth is `malloc`, `copy`, `free`. `push` doubles from four; `append` grows
 // to the larger of double and the need; `reserve` and `copyFrom` grow to
 // exactly the need. Products are 64-bit and `malloc` judges them, so doubling
-// a 2 GiB buffer traps `out of memory` (`tests/parity.rs`). `a[i]`'s bounds
-// check stays at its site.
+// a 2 GiB buffer traps `out of memory`. `a[i]`'s bounds check stays at its
+// site.
 
 /// `push` without the element: the triple at `dst` with `len + 1`, and the
 /// buffer the growth replaced, or 0. The emitter stores the element, then frees
