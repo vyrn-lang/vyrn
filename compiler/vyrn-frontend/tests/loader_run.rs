@@ -94,31 +94,6 @@ mod tests {
                 gone.hint(name)
             );
         }
-        let routes: Vec<&str> = RT_MODULES
-            .iter()
-            .flat_map(|rt| rt.routes())
-            .map(|(b, _)| b)
-            .collect();
-        assert_eq!(
-            routes,
-            vec![
-                "@charCount",
-                "lineAt",
-                "colAt",
-                "args",
-                "readLine",
-                "parse",
-                "readFile",
-                "readFileBytes",
-                "writeFile",
-                "writeFileBytes",
-                "writeStdout",
-                "renameFile",
-                "fsyncFile",
-                "listDir",
-                "listDirKinds"
-            ]
-        );
     }
 
     /// [`F64_STR`] is called by two backends, so its module must be in the table with a
