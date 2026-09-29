@@ -1748,7 +1748,8 @@ fn build_twice(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Resul
 /// range, and at a node the checker typed `Err` whose operands it typed, the
 /// rule the node breaks (an operator, a field, a construction, a variant, a
 /// record literal, or a call's arity, type arguments and arguments).
-fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usize, String)> {
+fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
+    let decls = own.proto.types();
     let recorded = |e: &Expr| facts.types.get(&e.id()).filter(|t| **t != Type::Err);
     let resolved = |e: &Expr| recorded(e).map(|t| vyrn_frontend::types::resolve(t, decls));
     // Rules over a literal as written, whatever the checker typed it, so that
@@ -1923,7 +1924,7 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
                 dot,
                 ..
             } => {
-                let d = call_decl(e.id())?;
+                let d = call_decl(own, e.id())?;
                 let shown = &d.shown;
                 // Counts are of what the reader wrote after the dot (#577). A
                 // callee with no parameters has no receiver slot.
@@ -1985,12 +1986,13 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
 /// written, so every instance gives one sentence.
 fn unbound(
     facts: &NodeTypes<'_>,
-    decls: &HashMap<String, TypeDecl>,
+    own: &Ownership,
     impls: &[vyrn_frontend::ast::ImplBlock],
     outer: &HashMap<String, Vec<String>>,
 ) -> Vec<(usize, String)> {
     use vyrn_frontend::prelude::{signature, DECODABLE, HEAPLESS};
     use vyrn_frontend::types::{self, SHOW};
+    let decls = own.proto.types();
     let fails = |t: &Type, bound: &str| {
         let base = types::resolve(t, decls);
         match bound {
@@ -2024,7 +2026,7 @@ fn unbound(
                 return None;
             };
             let bounds = &signature(name)?.type_bounds;
-            let written = node_solved(e.id()).unwrap_or_default();
+            let written = node_solved(own, e.id()).unwrap_or_default();
             let shown = prelude::method_surface(name).trim_start_matches('@');
             let solved = facts.solved.get(&e.id())?;
             solved.iter().find_map(|(tp, t)| {
@@ -2250,13 +2252,8 @@ fn build_seeded(
         inst.facts.produced.clone(),
         inst.facts.solved.clone(),
     );
-    let mistyped = judged(&inst.facts, own.proto.types());
-    let refused = unbound(
-        &inst.facts,
-        own.proto.types(),
-        &program.impls,
-        &inst.func.type_bounds,
-    );
+    let mistyped = judged(&inst.facts, own);
+    let refused = unbound(&inst.facts, own, &program.impls, &inst.func.type_bounds);
     // The plan's own rows, not the instance's copy: the copy predates the
     // rows [`augment`] places. The copy adds only the substituted type a
     // `Deep` walks, and nothing below reads a kind.
@@ -2614,8 +2611,8 @@ impl<'a> Builder<'a> {
             facts.produced.clone(),
             facts.solved.clone(),
         );
-        let mistyped = judged(facts, own.proto.types());
-        let refused = unbound(facts, own.proto.types(), &program.impls, &HashMap::new());
+        let mistyped = judged(facts, own);
+        let refused = unbound(facts, own, &program.impls, &HashMap::new());
         Builder {
             program,
             own,
@@ -3787,7 +3784,7 @@ impl<'a> Builder<'a> {
                 ty: annotation,
                 ..
             } => {
-                if let Some(vty) = node_ty(value.id()) {
+                if let Some(vty) = node_ty(self.own, value.id()) {
                     let decls = self.proto.types();
                     let refusal = match annotation {
                         Some(t) if !vyrn_frontend::types::coercible(&vty, t, decls) => {
@@ -3906,7 +3903,7 @@ impl<'a> Builder<'a> {
                     Some(n) => Some(self.body.names[n as usize].ty.clone()),
                     None => self.named_place(name, *line).ok().map(|(_, t)| t),
                 };
-                if let (Some(to), Some(vty)) = (&to, node_ty(value.id())) {
+                if let (Some(to), Some(vty)) = (&to, node_ty(self.own, value.id())) {
                     if !vyrn_frontend::types::coercible(&vty, to, self.proto.types()) {
                         let refusal = format!("`{name}` is {to} but assigned {vty}");
                         self.body.mistyped.push((*line, refusal));
@@ -3974,7 +3971,7 @@ impl<'a> Builder<'a> {
                 let mentions = vyrn_frontend::ast::mentions_place(value, name);
                 let fresh_str = self.fresh_str(&ty, value);
                 let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
-                let releases = !handed_back && placed_store(sid);
+                let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
                 // Module state owns what it holds and nothing may `consume`
                 // it, so a store into one releases what it replaces whenever
                 // that owns heap.
@@ -4012,7 +4009,7 @@ impl<'a> Builder<'a> {
                     site: Site::Node(sid),
                     releases,
                     holes: if releases {
-                        store_holes(sid)
+                        (self.own.placed.stores.get(&sid).cloned()).unwrap_or_default()
                     } else {
                         Vec::new()
                     },
@@ -4051,7 +4048,7 @@ impl<'a> Builder<'a> {
             }
             Stmt::Return { value, line, id: _ } => {
                 let vty = match value {
-                    Some(e) => node_ty(e.id()),
+                    Some(e) => node_ty(self.own, e.id()),
                     None => Some(Type::Unit),
                 };
                 if let (Some(vty), Some(ret)) = (vty, &self.ret) {
@@ -4546,7 +4543,7 @@ impl<'a> Builder<'a> {
     /// Releases the payload binders the kernel found still held where this
     /// arm ends. The first build states none, so [`crate::kernel::placement`]
     /// reports every held binder, and the second build reads the rows back
-    /// out of [`Placed`].
+    /// out of [`Ownership::placed`].
     fn arm_frees(
         &mut self,
         site: NodeId,
@@ -4555,7 +4552,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Vec<Name> {
         let mut frees: Vec<Name> = Vec::new();
-        let Some(rows) = placed_arm(site, arm) else {
+        let Some(rows) = self.own.placed.arms.get(&(site, arm)).cloned() else {
             return frees;
         };
         for b in binds {
@@ -4630,7 +4627,7 @@ impl<'a> Builder<'a> {
 
     /// Rule N: the drops one edge of a join owes.
     fn edge_drops(&mut self, join: NodeId, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
-        let Some(ers) = placed_edges(join) else {
+        let Some(ers) = self.own.placed.edges.get(&join).cloned() else {
             return Ok(());
         };
         for (name, e, holes) in &ers {
@@ -4689,7 +4686,7 @@ impl<'a> Builder<'a> {
         // `s.dense = s.dense.push(i)` releases nothing.
         let handed_back =
             vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
-        let releases = !handed_back && placed_store(sid);
+        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
@@ -4702,7 +4699,7 @@ impl<'a> Builder<'a> {
             site: Site::Node(sid),
             releases,
             holes: if releases {
-                store_holes(sid)
+                (self.own.placed.stores.get(&sid).cloned()).unwrap_or_default()
             } else {
                 Vec::new()
             },
@@ -4733,7 +4730,7 @@ impl<'a> Builder<'a> {
                 Some(None) => format!("record `{name}` has no field `{field}`"),
                 Some(Some(f)) => {
                     let fty = &f.ty;
-                    let Some(vty) = node_ty(value.id()) else {
+                    let Some(vty) = node_ty(self.own, value.id()) else {
                         return Ok(());
                     };
                     let validated = matches!(fty, Type::Named(n)
@@ -4770,7 +4767,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), Gap> {
         let decls = self.proto.types();
         let coercible = |a: &Type, b: &Type| vyrn_frontend::types::coercible(a, b, decls);
-        let (ity, vty) = (node_ty(index.id()), node_ty(value.id()));
+        let (ity, vty) = (node_ty(self.own, index.id()), node_ty(self.own, value.id()));
         let refusal = match vyrn_frontend::types::resolve(bty, decls) {
             Type::Err => None,
             Type::Map(key, val) => {
@@ -4882,7 +4879,7 @@ impl<'a> Builder<'a> {
         let handed_back = (vyrn_frontend::ast::mentions_place(value, name)
             && !self.store_is_fresh(value, name))
             || vyrn_frontend::ast::mentions_place(index, name);
-        let releases = !handed_back && placed_store(sid);
+        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place,
             value: v,
@@ -4895,7 +4892,7 @@ impl<'a> Builder<'a> {
             site,
             releases,
             holes: if releases {
-                store_holes(sid)
+                (self.own.placed.stores.get(&sid).cloned()).unwrap_or_default()
             } else {
                 Vec::new()
             },
@@ -4991,7 +4988,7 @@ impl<'a> Builder<'a> {
             return Ok((Place::Name(n), self.body.names[n as usize].ty.clone()));
         }
         match self.program.globals.iter().find(|g| &g.name == name) {
-            Some(g) => match g.ty.clone().or_else(|| node_ty(g.init.id())) {
+            Some(g) => match g.ty.clone().or_else(|| node_ty(self.own, g.init.id())) {
                 Some(t) => Ok((Place::Global(name.to_string()), t)),
                 None => gap_d("a global the checker did not type", name, line),
             },
@@ -5852,7 +5849,7 @@ impl<'a> Builder<'a> {
         let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
-            if placed_producer(producer) {
+            if self.own.placed.producers.contains(&producer) {
                 if !self.after.contains(&r) {
                     self.body.names[r as usize].arg_drop = Some(producer);
                     self.after.push(r);
@@ -7776,112 +7773,26 @@ thread_local! {
     /// an emitter first reads it, so `vyrn check` decides none of its own.
     static UNDECIDED: std::cell::RefCell<(HashMap<String, TypeDecl>, std::collections::HashSet<String>)> =
         std::cell::RefCell::new((HashMap::new(), std::collections::HashSet::new()));
-    static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
-    /// What the checker decided about a program, under [`Key`]. Held as the
-    /// checker's `Rc`, so serving it costs a refcount, not a copy of a map
-    /// with a row per node.
-    #[allow(clippy::type_complexity)]
-    static DECIDED: std::cell::RefCell<
-        Option<(Key, std::rc::Rc<vyrn_frontend::checker::Recorded>)>,
-    > = const { std::cell::RefCell::new(None) };
 }
 
-/// Holds what the checker decided about `program` for the emitters to read by
-/// node. Every route to an emitter calls this first, so one record serves the
-/// lowering and both backends. Its types are as the checker wrote them: a
-/// reader in a monomorphized body substitutes its own instantiation.
-///
-/// Where the held record is another program's, this makes a new one rather
-/// than serve answers off colliding addresses; see [`Decided`].
-#[must_use = "the record is held only while the guard is alive"]
-pub fn decide(program: &Program) -> Decided {
-    let key = key_of(program);
-    if DECIDED.with(|d| d.borrow().as_ref().is_some_and(|(k, _)| *k == key)) {
-        return Decided(None);
-    }
-    let made = vyrn_frontend::checker::recorded(program);
-    let prev = DECIDED.with(|d| d.borrow_mut().replace((key, made)));
-    Decided(Some(prev))
-}
-
-/// The guard [`decide`] returns: the record stays held while it lives.
-///
-/// The key is an address, and two programs built one after another can land
-/// at the same address with the same shape (`vyrn-codegen`'s tests do), so a
-/// record this made is put back as it was found on drop. A record it only
-/// borrowed (the lowering's, for the same program) is left alone.
-pub struct Decided(Option<Option<(Key, std::rc::Rc<vyrn_frontend::checker::Recorded>)>>);
-
-impl Drop for Decided {
-    fn drop(&mut self) {
-        if let Some(prev) = self.0.take() {
-            DECIDED.with(|d| *d.borrow_mut() = prev);
-        }
-    }
-}
-
-/// What a held record belongs to: the program, and the two contexts a check of
-/// it depends on (`vyrn_frontend::checker::gen_host` and `test_host`).
-type Key = (usize, bool, bool);
-
-fn key_of(program: &Program) -> Key {
-    (
-        program as *const Program as usize,
-        vyrn_frontend::checker::gen_host(),
-        vyrn_frontend::checker::test_host(),
-    )
-}
-
-/// Holds `made` as the record for `program`, unconditionally.
-/// [`crate::lower_with`] calls it after its own check: a program extended
-/// since the last lowering has the same address and different nodes.
-pub fn set_decided(program: &Program, made: &std::rc::Rc<vyrn_frontend::checker::Recorded>) {
-    let key = key_of(program);
-    DECIDED.with(|d| *d.borrow_mut() = Some((key, made.clone())));
-}
-
-/// The checker's type for the expression at `node`.
-///
-/// `None` for a node the checker never typed: one of a program no lowering
-/// ran over on this thread (a host that never linked this crate), or an
-/// expression an emitter built. A reader then falls back to its own derivation.
-pub fn node_ty(node: NodeId) -> Option<Type> {
-    DECIDED.with(|d| {
-        d.borrow()
-            .as_ref()
-            .and_then(|(_, r)| r.node_types.get(&node).cloned())
-    })
+/// The checker's type for the expression at `node`, off the record the placer
+/// lowered `own` against. `None` for a node the checker never typed, or an
+/// analysis no placer ran over.
+fn node_ty(own: &Ownership, node: NodeId) -> Option<Type> {
+    own.record.as_ref()?.node_types.get(&node).cloned()
 }
 
 /// The type arguments the checker solved at the call `node`, as it typed the
 /// body: before an instance's substitution.
-fn node_solved(node: NodeId) -> Option<Vec<(String, Type)>> {
-    DECIDED.with(|d| {
-        d.borrow()
-            .as_ref()
-            .and_then(|(_, r)| r.node_substs.get(&node).map(|(_, s)| s.clone()))
-    })
+fn node_solved(own: &Ownership, node: NodeId) -> Option<Vec<(String, Type)>> {
+    let (_, s) = own.record.as_ref()?.node_substs.get(&node)?;
+    Some(s.clone())
 }
 
 /// The declaration the checker recorded at the call `node` it typed `Err`
 /// for the typed judgment ([`vyrn_frontend::checker::Recorded::calls`]).
-fn call_decl(node: NodeId) -> Option<vyrn_frontend::checker::CallDecl> {
-    DECIDED.with(|d| {
-        d.borrow()
-            .as_ref()
-            .and_then(|(_, r)| r.calls.get(&node).cloned())
-    })
-}
-
-/// The checker's type for the `match` or `if` expression at `node`: the join
-/// subset of [`node_ty`]. A merge holds one value, so an emitter must not
-/// take the type one arm happened to produce (`["z"]` for `Array<String>`).
-pub fn join_ty(node: NodeId) -> Option<Type> {
-    DECIDED.with(|d| {
-        d.borrow()
-            .as_ref()
-            .and_then(|(_, r)| r.joins.get(&node).cloned())
-    })
+fn call_decl(own: &Ownership, node: NodeId) -> Option<vyrn_frontend::checker::CallDecl> {
+    own.record.as_ref()?.calls.get(&node).cloned()
 }
 
 /// The core's statements folded into side tables keyed by AST node, as the
@@ -7939,57 +7850,7 @@ pub struct Facts {
     pub owns_scrutinee: std::collections::HashSet<NodeId>,
 }
 
-/// One edge release: the name, the edge, and the holes the release walks
-/// around, spelled relative to the name (`Elem.1`).
-pub type EdgeRow = (String, u32, Vec<String>);
-
-/// What the kernel decided over the core's first build
-/// ([`crate::kernel::placement`]), which the second build writes down. The
-/// first build states no release the kernel has not judged owed, so the
-/// judgment reports every one.
-#[derive(Default, Clone, Debug)]
-pub(crate) struct Placed {
-    /// `(switch site, arm) -> [(binder, holes)]`: the payload binders still
-    /// held where their arm ends.
-    arms: std::collections::HashMap<(NodeId, u32), Vec<(String, Vec<String>)>>,
-    /// Per join node, the releases one edge owes because another edge took
-    /// the name. A sub-place row is spelled `d.line`.
-    edges: std::collections::HashMap<NodeId, Vec<EdgeRow>>,
-    /// The store nodes the kernel found a held place at: the stores that
-    /// release what they displace, with the holes each release walks around.
-    stores: std::collections::HashMap<NodeId, Vec<String>>,
-    /// The nodes that produced a borrowed receiver still held, whose free
-    /// rides as an argument-temporary drop.
-    producers: std::collections::HashSet<NodeId>,
-}
-
-/// Whether the kernel found this store's place still holding. Empty on the
-/// first build, where every store says [`Old::Pending`].
-fn placed_store(site: NodeId) -> bool {
-    PLACED.with(|p| p.borrow().stores.contains_key(&site))
-}
-
-/// The holes the release at a placed store walks around.
-fn store_holes(site: NodeId) -> Vec<String> {
-    PLACED.with(|p| p.borrow().stores.get(&site).cloned().unwrap_or_default())
-}
-
-/// The binders the kernel found held at the end of one arm. Empty on the
-/// first build.
-fn placed_arm(site: NodeId, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
-    PLACED.with(|p| p.borrow().arms.get(&(site, arm)).cloned())
-}
-
-/// Whether the placer wrote an argument-temporary drop for the receiver this
-/// node produced. Empty on the first build.
-fn placed_producer(node: NodeId) -> bool {
-    PLACED.with(|p| p.borrow().producers.contains(&node))
-}
-
-/// Rule N's rows for one join, as the kernel equalized its edges.
-fn placed_edges(join: NodeId) -> Option<Vec<EdgeRow>> {
-    PLACED.with(|p| p.borrow().edges.get(&join).cloned())
-}
+pub use vyrn_frontend::own::EdgeRow;
 
 /// The core's answers for the program last analysed on this thread. `None`
 /// in a host that never installed the placer, where an emitter reads the plan,
@@ -8472,17 +8333,17 @@ fn fold_facts(body: &Body, proto: &Owned, out: &mut Facts) {
 
 /// The declared type of the module-state name `g`, or the checker's type for
 /// its initializer.
-fn global_ty(program: &Program, g: &str) -> Option<Type> {
+fn global_ty(program: &Program, own: &Ownership, g: &str) -> Option<Type> {
     let d = program.globals.iter().find(|d| d.name == g)?;
-    d.ty.clone().or_else(|| node_ty(d.init.id()))
+    d.ty.clone().or_else(|| node_ty(own, d.init.id()))
 }
 
 /// `body` with its check rows, each decided unless the build keeps them all
 /// ([`crate::check::mode`]): the form an emitter reads.
-pub fn checked(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> Body {
-    let mut out = stated(program, decls, body);
+pub fn checked(program: &Program, own: &Ownership, body: &Body) -> Body {
+    let mut out = stated(program, own, body);
     if decides() {
-        crate::elide::decide(&mut out, decls);
+        crate::elide::decide(&mut out, own.proto.types());
     }
     out
 }
@@ -8492,13 +8353,13 @@ fn decides() -> bool {
 }
 
 /// `body` with its check rows, every one kept.
-fn stated(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> Body {
-    let global = |g: &str| global_ty(program, g);
+fn stated(program: &Program, own: &Ownership, body: &Body) -> Body {
+    let global = |g: &str| global_ty(program, own, g);
     let mut out = body.clone();
     crate::check::state(
         &mut out,
         &crate::check::Types {
-            decls,
+            decls: own.proto.types(),
             global: &global,
         },
     );
@@ -8506,7 +8367,8 @@ fn stated(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> 
 }
 
 /// Every frame's answers, added to the table.
-fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
+fn fold_frame(program: &Program, body: &Body, own: &Ownership, out: &mut Facts) {
+    let proto = &own.proto;
     // Filled at the same site as the fold, so a body the fold does not see is
     // one no emitter may walk either.
     BODIES.with(|b| {
@@ -8517,7 +8379,7 @@ fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
                 if decides() {
                     UNDECIDED.with(|u| u.borrow_mut().1.insert(body.name.clone()));
                 }
-                Some(stated(program, proto.types(), body))
+                Some(stated(program, own, body))
             });
     });
     fold_facts(body, proto, out);
@@ -8587,7 +8449,7 @@ fn typed(
     as_written: bool,
 ) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
-    let global_ty = |g: &str| global_ty(program, g);
+    let global_ty = |g: &str| global_ty(program, own, g);
     let projected =
         |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
     let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
@@ -8733,11 +8595,9 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
 /// as the plan had it.
 pub fn augment(program: &Program, own: &mut Ownership) {
     let _p = vyrn_frontend::prof::phase("placer");
-    // A node is an address the allocator reuses: a row placed for the last
-    // program must not fire on this one.
-    PLACED.with(|p| *p.borrow_mut() = Placed::default());
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
+    own.record = Some(lowered.recorded.clone());
     drop(lw);
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
@@ -8946,7 +8806,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // judgment alone. An initializer the checker did not type has no core;
     // the checker's refusal is its sentence.
     for g in &program.globals {
-        if node_ty(g.init.id()).is_none() {
+        if node_ty(own, g.init.id()).is_none() {
             continue;
         }
         match build_root(
@@ -9038,7 +8898,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     if folds {
         if let Ok(top) = build_module_state(program, own, &lowered.globals) {
             for body in top.frames() {
-                fold_frame(program, body, &own.proto, &mut facts);
+                fold_frame(program, body, own, &mut facts);
             }
         }
         for (i, inst) in lowered.instances.iter().enumerate() {
@@ -9054,7 +8914,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, &own.proto, &mut facts);
+                fold_frame(program, body, own, &mut facts);
             }
         }
         // The same for `test` and `bench` bodies, whose nodes an emitter looks up
@@ -9077,7 +8937,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, &own.proto, &mut facts);
+                fold_frame(program, body, own, &mut facts);
             }
         }
     }
@@ -9112,7 +8972,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, &own.proto, &mut facts);
+                fold_frame(program, body, own, &mut facts);
             }
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
@@ -9379,12 +9239,9 @@ fn place_frames(
             // A store's row is keyed by the store alone: its place may be no
             // binding of this frame, so it is handled before the name is read.
             if m.kind == MissingKind::Store {
-                let fresh = PLACED.with(|p| {
-                    p.borrow_mut()
-                        .stores
-                        .insert(m.site, m.holes.clone())
-                        .is_none()
-                });
+                let fresh = (own.placed.stores)
+                    .insert(m.site, m.holes.clone())
+                    .is_none();
                 if fresh {
                     if trace {
                         eprintln!("placer: {} store at {} releases", body.name, m.site.0);
@@ -9404,7 +9261,7 @@ fn place_frames(
             // A receiver a consumer borrowed out of ([`NameInfo::producer`]):
             // an argument temporary keyed by the producing node.
             if let Some(producer) = info.producer {
-                let fresh = PLACED.with(|p| p.borrow_mut().producers.insert(producer));
+                let fresh = own.placed.producers.insert(producer);
                 if fresh {
                     touched.insert(owner.to_string());
                 }
@@ -9435,41 +9292,32 @@ fn place_frames(
                 // Rule N: one edge of a join still holds what another took.
                 // Keyed by name, so a loop variable qualifies.
                 MissingKind::Edge { edge } => {
-                    PLACED.with(|p| {
-                        let mut p = p.borrow_mut();
-                        let rows = p.edges.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e, _)| *n == info.source && *e == edge) {
-                            rows.push((info.source.clone(), edge, holes));
-                            touched.insert(owner.to_string());
-                        }
-                    });
+                    let rows = own.placed.edges.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e, _)| *n == info.source && *e == edge) {
+                        rows.push((info.source.clone(), edge, holes));
+                        touched.insert(owner.to_string());
+                    }
                     continue;
                 }
                 // The sub-place one edge took, released on the other, spelled
                 // `d.line`.
                 MissingKind::EdgePlace { edge, path } => {
                     let name = format!("{}{}", info.source, path);
-                    PLACED.with(|p| {
-                        let mut p = p.borrow_mut();
-                        let rows = p.edges.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e, _)| *n == name && *e == edge) {
-                            rows.push((name, edge, Vec::new()));
-                            touched.insert(owner.to_string());
-                        }
-                    });
+                    let rows = own.placed.edges.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e, _)| *n == name && *e == edge) {
+                        rows.push((name, edge, Vec::new()));
+                        touched.insert(owner.to_string());
+                    }
                     continue;
                 }
                 // The arm's unmoved payload binders, one entry each, with the
                 // holes the arm left.
                 MissingKind::ArmBinder { arm } => {
-                    PLACED.with(|p| {
-                        let mut p = p.borrow_mut();
-                        let rows = p.arms.entry((m.site, arm)).or_default();
-                        if !rows.iter().any(|(n, _)| *n == info.source) {
-                            rows.push((info.source.clone(), holes));
-                            touched.insert(owner.to_string());
-                        }
-                    });
+                    let rows = own.placed.arms.entry((m.site, arm)).or_default();
+                    if !rows.iter().any(|(n, _)| *n == info.source) {
+                        rows.push((info.source.clone(), holes));
+                        touched.insert(owner.to_string());
+                    }
                     continue;
                 }
                 MissingKind::Exit => {}

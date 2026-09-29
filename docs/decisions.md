@@ -154,6 +154,7 @@ pull request.
 - The kernel re-checks every body on every compile with three judgments: ownership, effects and types.
 - A whole-program analysis over the call graph runs on `fixpoint::solve` in `vyrn-lower`: components bottom-up, a join the analysis supplies, widening by round number. No analysis writes its own fixpoint loop.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
+- What one analysis decided about a program (the kernel's placement, the checker's record) lives on that program's `own::Ownership`, and a pass reads the one it is handed. A thread-local keyed by a program's address answered for another program.
 - A rule stays in the checker when no other pass refuses the program on the same line. A moved rule keeps its surviving home's sentence.
 - The generation fence stays in the checker, because it is the only judgment that runs before a generator executes.
 - A surface form that another form can state is a parser desugar, so each walker states one form. `if let` and `while let` are a statement `match` with a `Pattern::Other` arm, and take their scrutinee at its last use as `match` does.
