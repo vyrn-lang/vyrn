@@ -622,7 +622,7 @@ pub mod obligation {
                 Stmt::Assign { value, .. }
                 | Stmt::Let { value, .. }
                 | Stmt::SetField { value, .. }
-                | Stmt::Expr(value) => paths(value, name),
+                | Stmt::Expr(value, _) => paths(value, name),
                 Stmt::IndexSet { index, value, .. } => {
                     let (i, v) = (paths(index, name), paths(value, name));
                     (i.0 || v.0, i.1 || v.1)
@@ -752,7 +752,7 @@ pub mod obligation {
     fn diverges(stmts: &[Stmt]) -> bool {
         stmts.iter().any(|s| match s {
             Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
-            Stmt::Expr(Expr::Call { name, .. }) => vyrn_frontend::ast::is_panic(name),
+            Stmt::Expr(Expr::Call { name, .. }, _) => vyrn_frontend::ast::is_panic(name),
             Stmt::If {
                 then_block,
                 else_block,

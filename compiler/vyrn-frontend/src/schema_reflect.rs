@@ -81,10 +81,10 @@ impl Origins {
         struct_lit(
             "Origin",
             vec![
-                ("file", Expr::Str(file)),
-                ("line", Expr::Int(line as i64)),
-                ("col", Expr::Int(col as i64)),
-                ("name", Expr::Str(name.to_string())),
+                ("file", Expr::Str(file, Id::NEW)),
+                ("line", Expr::Int(line as i64, Id::NEW)),
+                ("col", Expr::Int(col as i64, Id::NEW)),
+                ("name", Expr::Str(name.to_string(), Id::NEW)),
             ],
         )
     }
@@ -200,16 +200,16 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
             struct_lit(
                 "MemberInfo",
                 vec![
-                    ("name", Expr::Str(m.name.clone())),
-                    ("kind", Expr::Str(kind.to_string())),
-                    ("spelling", Expr::Str(m.spelling())),
+                    ("name", Expr::Str(m.name.clone(), Id::NEW)),
+                    ("kind", Expr::Str(kind.to_string(), Id::NEW)),
+                    ("spelling", Expr::Str(m.spelling(), Id::NEW)),
                     (
                         "params",
-                        array_lit(params.into_iter().map(Expr::Str).collect()),
+                        array_lit(params.into_iter().map(|s| Expr::Str(s, Id::NEW)).collect()),
                     ),
-                    ("ret", Expr::Str(ret)),
-                    ("optional", Expr::Bool(m.optional())),
-                    ("variadic", Expr::Bool(variadic)),
+                    ("ret", Expr::Str(ret, Id::NEW)),
+                    ("optional", Expr::Bool(m.optional(), Id::NEW)),
+                    ("variadic", Expr::Bool(variadic, Id::NEW)),
                     ("doc", opt_str(m.doc.as_deref())),
                 ],
             )
@@ -218,10 +218,13 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
     struct_lit(
         "ContractInfo",
         vec![
-            ("name", Expr::Str(c.name.clone())),
-            ("module", Expr::Str(c.module.clone().unwrap_or_default())),
+            ("name", Expr::Str(c.name.clone(), Id::NEW)),
+            (
+                "module",
+                Expr::Str(c.module.clone().unwrap_or_default(), Id::NEW),
+            ),
             ("doc", opt_str(c.doc.as_deref())),
-            ("open", Expr::Bool(c.open_rule().is_some())),
+            ("open", Expr::Bool(c.open_rule().is_some(), Id::NEW)),
             ("members", array_lit(members)),
         ],
     )
@@ -284,10 +287,13 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origin
             struct_lit(
                 "ParamInfo",
                 vec![
-                    ("name", Expr::Str(p.name.clone())),
-                    ("spelling", Expr::Str(p.ty.to_string())),
+                    ("name", Expr::Str(p.name.clone(), Id::NEW)),
+                    ("spelling", Expr::Str(p.ty.to_string(), Id::NEW)),
                     ("schema", schema_lit_for_type(&p.ty, types)),
-                    ("uncodable", Expr::Str(uncodable_of(&p.ty, types, true))),
+                    (
+                        "uncodable",
+                        Expr::Str(uncodable_of(&p.ty, types, true), Id::NEW),
+                    ),
                 ],
             )
         })
@@ -301,15 +307,15 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origin
     struct_lit(
         "FnInfo",
         vec![
-            ("name", Expr::Str(f.name.clone())),
+            ("name", Expr::Str(f.name.clone(), Id::NEW)),
             ("params", array_lit(params)),
-            ("ret", Expr::Str(ret_spelling)),
+            ("ret", Expr::Str(ret_spelling, Id::NEW)),
             ("retSchema", schema_lit_for_type(&f.ret, types)),
             (
                 "retUncodable",
-                Expr::Str(uncodable_of(&f.ret, types, false)),
+                Expr::Str(uncodable_of(&f.ret, types, false), Id::NEW),
             ),
-            ("mutates", Expr::Bool(f.is_mut)),
+            ("mutates", Expr::Bool(f.is_mut, Id::NEW)),
             ("origin", origins.lit(&f.module, &f.name, f.line)),
         ],
     )
@@ -339,9 +345,9 @@ fn type_info_lit(
     struct_lit(
         "TypeInfo",
         vec![
-            ("name", Expr::Str(t.name.clone())),
-            ("source", Expr::Str(render_type_decl(t, types))),
-            ("module", Expr::Str(module_spec.to_string())),
+            ("name", Expr::Str(t.name.clone(), Id::NEW)),
+            ("source", Expr::Str(render_type_decl(t, types), Id::NEW)),
+            ("module", Expr::Str(module_spec.to_string(), Id::NEW)),
             ("schema", crate::types::schema_struct_lit(t)),
             ("origin", origins.lit(&t.module, &t.name, t.line)),
             ("shape", shape_lit(t, types)),
@@ -419,7 +425,7 @@ fn push_node(
             .iter()
             .map(|t| {
                 let (i, s) = push_node(t, None, types, nodes);
-                (Expr::Int(i), s)
+                (Expr::Int(i, Id::NEW), s)
             })
             .unzip();
         (array_lit(ix), spelled)
@@ -431,7 +437,7 @@ fn push_node(
         let (margs, s) = kids(&ts);
         lits.push(struct_lit(
             "TypeMember",
-            vec![("name", Expr::Str(m.clone())), ("args", margs)],
+            vec![("name", Expr::Str(m.clone(), Id::NEW)), ("args", margs)],
         ));
         spelled.push(match (kind, s.is_empty()) {
             ("record", _) => format!("{m}: {}", s.join("")),
@@ -453,17 +459,20 @@ fn push_node(
         vec![
             (
                 "kind",
-                Expr::Str(if kind.is_empty() {
-                    written
-                } else {
-                    kind.to_string()
-                }),
+                Expr::Str(
+                    if kind.is_empty() {
+                        written
+                    } else {
+                        kind.to_string()
+                    },
+                    Id::NEW,
+                ),
             ),
-            ("name", Expr::Str(name.to_string())),
-            ("spelling", Expr::Str(spelling.clone())),
+            ("name", Expr::Str(name.to_string(), Id::NEW)),
+            ("spelling", Expr::Str(spelling.clone(), Id::NEW)),
             ("args", args),
             ("members", array_lit(lits)),
-            ("predicate", Expr::Str(pred.unwrap_or_default())),
+            ("predicate", Expr::Str(pred.unwrap_or_default(), Id::NEW)),
         ],
     );
     (at as i64, spelling)
@@ -481,8 +490,8 @@ fn schema_lit_for_type(ty: &Type, types: &HashMap<String, TypeDecl>) -> Expr {
     struct_lit(
         "Schema",
         vec![
-            ("name", Expr::Str(spelling.clone())),
-            ("base", Expr::Str(spelling)),
+            ("name", Expr::Str(spelling.clone(), Id::NEW)),
+            ("base", Expr::Str(spelling, Id::NEW)),
             ("doc", none()),
             ("min", none()),
             ("max", none()),
@@ -580,6 +589,7 @@ fn render_field_type(
 
 fn struct_lit(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
     Expr::StructLit {
+        id: Id::NEW,
         name: name.to_string(),
         fields: fields
             .into_iter()
@@ -590,11 +600,16 @@ fn struct_lit(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
 }
 
 fn array_lit(elems: Vec<Expr>) -> Expr {
-    Expr::ArrayLit { elems, line: 0 }
+    Expr::ArrayLit {
+        id: Id::NEW,
+        elems,
+        line: 0,
+    }
 }
 
 fn none() -> Expr {
     Expr::Var {
+        id: Id::NEW,
         name: "None".to_string(),
         line: 0,
     }
@@ -603,10 +618,11 @@ fn none() -> Expr {
 fn opt_str(s: Option<&str>) -> Expr {
     match s {
         Some(v) => Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: "Some".to_string(),
-            args: vec![Expr::Str(v.to_string())],
+            args: vec![Expr::Str(v.to_string(), Id::NEW)],
             line: 0,
         },
         None => none(),
@@ -682,7 +698,7 @@ mod tests {
     }
     fn str_of(e: &Expr) -> &str {
         match e {
-            Expr::Str(s) => s,
+            Expr::Str(s, _) => s,
             other => panic!("expected a string, got {other:?}"),
         }
     }
@@ -699,7 +715,7 @@ mod tests {
             elems(e)
                 .iter()
                 .map(|x| match x {
-                    Expr::Int(n) => *n,
+                    Expr::Int(n, _) => *n,
                     other => panic!("expected an int, got {other:?}"),
                 })
                 .collect()
@@ -790,11 +806,11 @@ mod tests {
     /// its name is written.
     fn assert_points_at(src: &str, origin: &Expr) {
         let line: usize = match field(origin, "line") {
-            Expr::Int(n) => *n as usize,
+            Expr::Int(n, _) => *n as usize,
             other => panic!("line is not an int: {other:?}"),
         };
         let col: usize = match field(origin, "col") {
-            Expr::Int(n) => *n as usize,
+            Expr::Int(n, _) => *n as usize,
             other => panic!("col is not an int: {other:?}"),
         };
         let name = str_of(field(origin, "name"));

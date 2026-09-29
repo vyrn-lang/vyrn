@@ -4,11 +4,12 @@
 //! [`store_index`] expands `a[i] = v`; a builtin container keeps its own nodes
 //! and lowers to [`ELEM`], the unspellable addressing primitive. While a
 //! [`Memo`] is open each site is expanded once and leaked, because the
-//! checker, the ownership passes and the lowering key side tables by node
-//! address.
+//! checker, the ownership passes and the lowering key side tables by node, and
+//! each expansion is numbered anew.
 
 use crate::ast::{
-    BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type, TypeDecl,
+    BinOp, Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt,
+    Type, TypeDecl,
 };
 use std::collections::HashMap;
 
@@ -111,7 +112,7 @@ pub fn lookup_impl_by_key<'a>(
 /// Returns the expansion an access site lowers through. `None` means the site
 /// keeps its own nodes: no user projection answers, and the seeded expansion
 /// would be the identity. `Some` is built once per site while
-/// a [`Memo`] is open, so every pass sees the same node addresses.
+/// a [`Memo`] is open, so every pass sees the same node ids.
 pub fn site(
     impls: &[ImplBlock],
     recv: Option<&Type>,
@@ -130,12 +131,7 @@ pub fn site(
         return Ok(None);
     };
     memo(
-        (
-            recv_expr as *const Expr as usize,
-            line,
-            key,
-            method.to_string(),
-        ),
+        (recv_expr.id(), line, key, method.to_string()),
         recv_expr,
         args,
         || inline(f, recv_expr, args, line),
@@ -167,28 +163,26 @@ pub fn optional_site(
     }
     let hit = OPT_MEMO.with(|m| {
         let m = m.borrow();
-        let e = m.as_ref()?.get(&(
-            recv_expr as *const Expr as usize,
-            line,
-            key.clone(),
-            method.to_string(),
-        ))?;
+        let e = m
+            .as_ref()?
+            .get(&(recv_expr.id(), line, key.clone(), method.to_string()))?;
         (e.recv == *recv_expr && e.args == args).then_some(e.tree)
     });
     if let Some(t) = hit {
         return Ok(Some(t));
     }
-    let tree: &'static OptionalProjection =
-        Box::leak(Box::new(optional_inline(f, recv_expr, args, line)?));
+    let mut built = optional_inline(f, recv_expr, args, line)?;
+    numbered(|n| {
+        built.prologue.iter_mut().for_each(|s| n.stmt(s));
+        n.expr(&mut built.miss);
+        built.hit.iter_mut().for_each(|s| n.stmt(s));
+        n.expr(&mut built.place);
+    });
+    let tree: &'static OptionalProjection = Box::leak(Box::new(built));
     OPT_MEMO.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(
-                (
-                    recv_expr as *const Expr as usize,
-                    line,
-                    key,
-                    method.to_string(),
-                ),
+                (recv_expr.id(), line, key, method.to_string()),
                 OptExpansion {
                     recv: recv_expr.clone(),
                     args: args.to_vec(),
@@ -207,15 +201,15 @@ struct OptExpansion {
     tree: &'static OptionalProjection,
 }
 
-/// An access site: receiver node address, line, receiver type key, member
-/// name. The line is needed because the memo spans a load, which drops whole
-/// generator programs, so an address is reused and two equal sites can differ
-/// only in their line.
-type Key = (usize, usize, String, String);
+/// An access site: receiver node, line, receiver type key, member name. The
+/// line is needed because the memo spans a load, which checks whole generator
+/// programs, whose ids repeat the root's, so two equal sites can differ only in
+/// their line.
+type Key = (NodeId, usize, String, String);
 
 /// One expansion and the site inputs it was built from. A hit compares the
-/// inputs, because a reused address would otherwise answer with another site's
-/// expansion.
+/// inputs, because a generator program's node would otherwise answer with
+/// another site's expansion.
 struct Expansion {
     recv: Expr,
     args: Vec<Expr>,
@@ -225,7 +219,7 @@ struct Expansion {
 thread_local! {
     #[allow(clippy::type_complexity)]
     static LOOPS: std::cell::RefCell<
-        Option<HashMap<(usize, String, String), (Expr, Block, &'static Block)>>,
+        Option<HashMap<(NodeId, String, String), (Expr, Block, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
     static MEMO: std::cell::RefCell<Option<HashMap<Key, Expansion>>> =
         const { std::cell::RefCell::new(None) };
@@ -236,19 +230,35 @@ thread_local! {
     /// node, only the temporary [`store_index`] synthesizes.
     #[allow(clippy::type_complexity)]
     static STORES: std::cell::RefCell<
-        Option<HashMap<usize, (String, Expr, Expr, &'static Block)>>,
+        Option<HashMap<NodeId, (String, Expr, Expr, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
     /// The `Schema` literal each `schemaOf<T>()` node stands for, keyed by
     /// the call node, with the target's name. See [`schema`].
-    static SCHEMAS: std::cell::RefCell<Option<HashMap<usize, (String, &'static Expr)>>> =
+    static SCHEMAS: std::cell::RefCell<Option<HashMap<NodeId, (String, &'static Expr)>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    /// The last id [`numbered`] gave.
+    static EXPANDED: std::cell::Cell<u32> = const { std::cell::Cell::new(NodeId::EXPANDED) };
+}
+
+/// Numbers an expansion's nodes above every program's own ids, so a
+/// substituted argument is a node apart from the one it copies.
+fn numbered(f: impl FnOnce(&mut Numbering)) {
+    EXPANDED.with(|c| {
+        let mut n = Numbering(c.get());
+        f(&mut n);
+        c.set(n.0);
+    });
 }
 
 /// Shares every expansion built while it is alive, so the checker, the
 /// lowering and the emitter walk the same nodes; `direct::compile` takes it as
 /// proof (#547). The LSP opens none: it re-checks per keystroke. Expansions are
-/// leaked on purpose, because passes key side tables by their addresses; the
-/// cost is one tree per user-projection site.
+/// leaked on purpose, because passes key side tables by their node ids and a
+/// rebuilt expansion is numbered anew; the cost is one tree per
+/// user-projection site.
 pub struct Memo(());
 
 impl Memo {
@@ -282,11 +292,13 @@ pub fn schema(call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
     SCHEMAS.with(|m| {
         let mut m = m.borrow_mut();
         let m = m.as_mut()?;
-        let key = call as *const Expr as usize;
+        let key = call.id();
         if let Some((_, e)) = m.get(&key).filter(|(n, _)| *n == decl.name) {
             return Some(*e);
         }
-        let e: &'static Expr = Box::leak(Box::new(crate::types::schema_struct_lit(decl)));
+        let mut lit = crate::types::schema_struct_lit(decl);
+        numbered(|n| n.expr(&mut lit));
+        let e: &'static Expr = Box::leak(Box::new(lit));
         m.insert(key, (decl.name.clone(), e));
         Some(e)
     })
@@ -294,7 +306,7 @@ pub fn schema(call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
 
 /// Returns the literal [`schema`] expanded for `call`.
 pub fn schema_at(call: &Expr) -> Option<&'static Expr> {
-    let key = call as *const Expr as usize;
+    let key = call.id();
     SCHEMAS.with(|m| m.borrow().as_ref()?.get(&key).map(|(_, e)| *e))
 }
 
@@ -319,7 +331,12 @@ fn memo(
     if let Some(t) = hit {
         return Ok(t);
     }
-    let tree: &'static Projection = Box::leak(Box::new(build()?));
+    let mut built = build()?;
+    numbered(|n| {
+        built.prologue.iter_mut().for_each(|s| n.stmt(s));
+        n.expr(&mut built.place);
+    });
+    let tree: &'static Projection = Box::leak(Box::new(built));
     MEMO.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(
@@ -350,6 +367,7 @@ pub fn store_index(
     }
     let line = index.line();
     let recv = Expr::Var {
+        id: Id::NEW,
         name: name.to_string(),
         line,
     };
@@ -373,11 +391,16 @@ pub fn store_index(
     };
     let mut out = p.prologue.clone();
     out.extend(store);
-    let blk: &'static Block = Box::leak(Box::new(Block { stmts: out }));
+    let mut built = Block {
+        id: Id::NEW,
+        stmts: out,
+    };
+    numbered(|n| n.block(&mut built));
+    let blk: &'static Block = Box::leak(Box::new(built));
     STORES.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(
-                index as *const Expr as usize,
+                index.id(),
                 (name.to_string(), index.clone(), value.clone(), blk),
             );
         }
@@ -391,7 +414,7 @@ pub fn store_index(
 pub fn stored(name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> {
     STORES.with(|m| {
         let m = m.borrow();
-        let (n, i, v, blk) = m.as_ref()?.get(&(index as *const Expr as usize))?;
+        let (n, i, v, blk) = m.as_ref()?.get(&index.id())?;
         (n == name && i == index && v == value).then_some(*blk)
     })
 }
@@ -454,6 +477,7 @@ fn substituted(
                 (
                     k.clone(),
                     Expr::Var {
+                        id: Id::NEW,
                         name: v.clone(),
                         line,
                     },
@@ -478,6 +502,7 @@ fn substituted(
         } else {
             let tmp = format!("@p{tag}.{}", p.name);
             prologue.push(Stmt::Let {
+                id: Id::NEW,
                 name: tmp.clone(),
                 mutable: false,
                 ty: None,
@@ -485,7 +510,14 @@ fn substituted(
                 line,
                 col: 0,
             });
-            map.insert(p.name.clone(), Expr::Var { name: tmp, line });
+            map.insert(
+                p.name.clone(),
+                Expr::Var {
+                    id: Id::NEW,
+                    name: tmp,
+                    line,
+                },
+            );
         }
     }
     subst_block(&mut body, &map);
@@ -611,11 +643,7 @@ pub fn iterate_loop(
     body: &Block,
     line: usize,
 ) -> Result<&'static Block, String> {
-    let key = (
-        iter as *const Expr as usize,
-        size_fn.to_string(),
-        var.to_string(),
-    );
+    let key = (iter.id(), size_fn.to_string(), var.to_string());
     let hit = LOOPS.with(|m| {
         let m = m.borrow();
         let (i, b, blk) = m.as_ref()?.get(&key)?;
@@ -624,9 +652,9 @@ pub fn iterate_loop(
     if let Some(b) = hit {
         return Ok(b);
     }
-    let blk: &'static Block = Box::leak(Box::new(iterate_loop_build(
-        size_fn, nth, var, iter, body, line,
-    )?));
+    let mut built = iterate_loop_build(size_fn, nth, var, iter, body, line)?;
+    numbered(|n| n.block(&mut built));
+    let blk: &'static Block = Box::leak(Box::new(built));
     LOOPS.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(key, (iter.clone(), body.clone(), blk));
@@ -647,13 +675,15 @@ fn iterate_loop_build(
     const LEN: &str = "@i.n";
     const RECV: &str = "@i.c";
     let var_of = |n: &str| Expr::Var {
+        id: Id::NEW,
         name: n.to_string(),
         line,
     };
     let bump = |e: Expr| Expr::Binary {
+        id: Id::NEW,
         op: BinOp::Add,
         lhs: Box::new(e),
-        rhs: Box::new(Expr::Int(1)),
+        rhs: Box::new(Expr::Int(1, Id::NEW)),
         line,
     };
 
@@ -664,6 +694,7 @@ fn iterate_loop_build(
         iter.clone()
     } else {
         out.push(Stmt::Let {
+            id: Id::NEW,
             name: RECV.to_string(),
             mutable: false,
             ty: None,
@@ -674,10 +705,12 @@ fn iterate_loop_build(
         var_of(RECV)
     };
     out.push(Stmt::Let {
+        id: Id::NEW,
         name: LEN.to_string(),
         mutable: false,
         ty: None,
         value: Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: size_fn.to_string(),
@@ -688,15 +721,17 @@ fn iterate_loop_build(
         col: 0,
     });
     out.push(Stmt::Let {
+        id: Id::NEW,
         name: IDX.to_string(),
         mutable: true,
         ty: None,
-        value: Expr::Int(-1),
+        value: Expr::Int(-1, Id::NEW),
         line,
         col: 0,
     });
 
     let mut inner = vec![Stmt::Assign {
+        id: Id::NEW,
         name: IDX.to_string(),
         value: bump(var_of(IDX)),
         line,
@@ -704,6 +739,7 @@ fn iterate_loop_build(
     let p = inline(nth, &recv, &[var_of(IDX)], line)?;
     inner.extend(p.prologue);
     inner.push(Stmt::Let {
+        id: Id::NEW,
         name: var.to_string(),
         mutable: false,
         ty: None,
@@ -713,16 +749,24 @@ fn iterate_loop_build(
     });
     inner.extend(body.stmts.iter().cloned());
     out.push(Stmt::While {
+        id: Id::NEW,
         cond: Expr::Binary {
+            id: Id::NEW,
             op: BinOp::Lt,
             lhs: Box::new(bump(var_of(IDX))),
             rhs: Box::new(var_of(LEN)),
             line,
         },
-        body: Block { stmts: inner },
+        body: Block {
+            id: Id::NEW,
+            stmts: inner,
+        },
         line,
     });
-    Ok(Block { stmts: out })
+    Ok(Block {
+        id: Id::NEW,
+        stmts: out,
+    })
 }
 
 /// Maps every binding a projection body introduces to an unspellable name.
@@ -869,7 +913,10 @@ fn uses_outside_lambdas(b: &Block, name: &str) -> usize {
     let mut probe = b.clone();
     walk_block(&mut probe, &mut |e: &mut Expr| {
         if let Expr::Lambda { body, .. } = e {
-            *body = LambdaBody::Block(Block { stmts: Vec::new() });
+            *body = LambdaBody::Block(Block {
+                id: Id::NEW,
+                stmts: Vec::new(),
+            });
         }
     });
     count_uses(&probe, name)
@@ -985,10 +1032,14 @@ pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr))
 /// [`walk_block`] over a bare expression.
 pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     let mut b = Block {
-        stmts: vec![Stmt::Expr(std::mem::replace(e, Expr::Int(0)))],
+        id: Id::NEW,
+        stmts: vec![Stmt::Expr(
+            std::mem::replace(e, Expr::Int(0, Id::NEW)),
+            Id::NEW,
+        )],
     };
     walk_block(&mut b, f);
-    let Some(Stmt::Expr(back)) = b.stmts.pop() else {
+    let Some(Stmt::Expr(back, _)) = b.stmts.pop() else {
         unreachable!("one statement in, one statement out")
     };
     *e = back;
@@ -1090,7 +1141,7 @@ pub fn element_path(e: &Expr) -> Option<(String, String)> {
 fn index_text(e: Option<&Expr>) -> String {
     match e {
         Some(Expr::Var { name, .. }) => name.clone(),
-        Some(Expr::Int(n)) => n.to_string(),
+        Some(Expr::Int(n, _)) => n.to_string(),
         _ => "..".to_string(),
     }
 }
@@ -1140,16 +1191,19 @@ mod tests {
         );
         let f = lookup(&p, &Type::Named("Ring".into()), "at").unwrap();
         let recv = Expr::Var {
+            id: Id::NEW,
             name: "r".into(),
             line: 1,
         };
         let idx = Expr::Binary {
+            id: Id::NEW,
             op: crate::ast::BinOp::Add,
             lhs: Box::new(Expr::Var {
+                id: Id::NEW,
                 name: "k".into(),
                 line: 1,
             }),
-            rhs: Box::new(Expr::Int(1)),
+            rhs: Box::new(Expr::Int(1, Id::NEW)),
             line: 1,
         };
         let pr = inline(f, &recv, std::slice::from_ref(&idx), 1).unwrap();
@@ -1178,10 +1232,12 @@ mod tests {
         let pr = inline(
             f,
             &Expr::Var {
+                id: Id::NEW,
                 name: "r".into(),
                 line: 5,
             },
             &[Expr::Var {
+                id: Id::NEW,
                 name: "side".into(),
                 line: 5,
             }],
@@ -1200,10 +1256,11 @@ mod tests {
     #[test]
     fn a_builtin_container_expands_to_nothing() {
         let recv = Expr::Var {
+            id: Id::NEW,
             name: "a".into(),
             line: 3,
         };
-        let args = [Expr::Int(2)];
+        let args = [Expr::Int(2, Id::NEW)];
         for ty in [
             Type::Array(Box::new(Type::Int)),
             Type::Str,
@@ -1239,10 +1296,14 @@ mod tests {
             nth,
             "x",
             &Expr::Var {
+                id: Id::NEW,
                 name: "r".into(),
                 line: 9,
             },
-            &Block { stmts: Vec::new() },
+            &Block {
+                id: Id::NEW,
+                stmts: Vec::new(),
+            },
             9,
         )
         .unwrap();
@@ -1275,13 +1336,17 @@ mod tests {
             nth,
             "x",
             &Expr::Call {
+                id: Id::NEW,
                 dot: false,
                 type_args: Vec::new(),
                 name: "makeRing".into(),
                 args: Vec::new(),
                 line: 9,
             },
-            &Block { stmts: Vec::new() },
+            &Block {
+                id: Id::NEW,
+                stmts: Vec::new(),
+            },
             9,
         )
         .unwrap();
@@ -1316,10 +1381,11 @@ mod tests {
         let pr = inline(
             f,
             &Expr::Var {
+                id: Id::NEW,
                 name: "r".into(),
                 line: 1,
             },
-            &[Expr::Int(3)],
+            &[Expr::Int(3, Id::NEW)],
             1,
         )
         .unwrap();
@@ -1345,10 +1411,11 @@ mod tests {
         let mut pr = inline(
             f,
             &Expr::Var {
+                id: Id::NEW,
                 name: "r".into(),
                 line: 1,
             },
-            &[Expr::Int(1)],
+            &[Expr::Int(1, Id::NEW)],
             1,
         )
         .unwrap();
@@ -1360,12 +1427,13 @@ mod tests {
         );
         assert!(
             pr.prologue.iter().any(
-                |s| matches!(s, Stmt::Let { name, value: Expr::Int(1), .. } if name.starts_with("@p"))
+                |s| matches!(s, Stmt::Let { name, value: Expr::Int(1, _), .. } if name.starts_with("@p"))
             ),
             "the caller's argument binds a temporary, not a capture"
         );
         let mut seen_lambda = false;
         let mut prologue = Block {
+            id: Id::NEW,
             stmts: std::mem::take(&mut pr.prologue),
         };
         {

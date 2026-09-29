@@ -78,7 +78,9 @@ pub fn check(source: &str) -> Result<ast::Program, String> {
             // path adds the constructors too. The JSON walks need the checker's
             // record, so they stay on the linked path.
             let types = types::decl_map(&program);
+            let from = program.functions.len();
             program.functions.extend(ctor::constructors(&types));
+            program.number_appended(from);
             Ok(program)
         }
         Some(d) => Err(d.render()),
@@ -120,6 +122,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
         checker::check_accum_with_json_types(program);
     drop(check_span);
     let synth_span = prof::phase("synthesize");
+    let from = program.functions.len();
     if diags.is_empty() {
         let types = types::decl_map(program);
         match jsonenc::encoders(&json_types, &types) {
@@ -142,6 +145,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
             .collect();
         program.functions.extend(fresh);
     }
+    program.number_appended(from);
     // The checker's ownership refusals and the kernel's form one list, in
     // source order. The core builds bodies only for a program that type-checks.
     drop(synth_span);
@@ -220,7 +224,7 @@ fn lower_typed(
                     return;
                 };
                 let Some(recv) = args.first() else { return };
-                hit |= match record.node_types.get(&(recv as *const ast::Expr as usize)) {
+                hit |= match record.node_types.get(&recv.id()) {
                     Some(ast::Type::Param(_)) => refused_method(out, name, None),
                     Some(t) => {
                         types::type_key(t).is_some_and(|k| refused_method(out, name, Some(&k)))
