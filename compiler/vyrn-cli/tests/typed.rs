@@ -123,7 +123,7 @@ fn step_ty(
 
 /// Every body of `program` the core builds, the module-state initializer
 /// included. The caller holds the projection memo open.
-fn bodies_of(program: &Program) -> Vec<vyrn_lower::core::Body> {
+fn bodies_of(program: &Program) -> Vec<vyrn_frontend::core::Body> {
     let lowered = vyrn_lower::lower(program);
     let own = vyrn_frontend::own::analyze(program);
     let mut bodies = Vec::new();
@@ -143,7 +143,7 @@ fn bodies_of(program: &Program) -> Vec<vyrn_lower::core::Body> {
 /// Judges `refs`, with `program`'s declarations answering which types are
 /// validated and what each place step holds. A call's type is the core's
 /// (`Rhs::Call::ret`).
-fn judge(program: &Program, refs: &[&vyrn_lower::core::Body]) -> typed::Judged {
+fn judge(program: &Program, refs: &[&vyrn_frontend::core::Body]) -> typed::Judged {
     let types = decls(program);
     let globals: BTreeMap<String, Type> = program
         .globals
@@ -181,7 +181,7 @@ fn a_read_of_a_validated_place_produces_its_type() {
     .unwrap();
     let (program, _memo) = load(&path, None).unwrap();
     let bodies = bodies_of(&program);
-    let refs: Vec<&vyrn_lower::core::Body> = bodies.iter().flat_map(|b| b.frames()).collect();
+    let refs: Vec<&vyrn_frontend::core::Body> = bodies.iter().flat_map(|b| b.frames()).collect();
     let judged = judge(&program, &refs);
     let kind_of = |producer: &str| {
         judged
@@ -267,7 +267,8 @@ fn run_corpus() {
         programs += 1;
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         let bodies = bodies_of(&program);
-        let refs: Vec<&vyrn_lower::core::Body> = bodies.iter().flat_map(|b| b.frames()).collect();
+        let refs: Vec<&vyrn_frontend::core::Body> =
+            bodies.iter().flat_map(|b| b.frames()).collect();
         let judgement = judge(&program, &refs);
         unjudged += judgement.unjudged;
         judged += judgement.stores.len();

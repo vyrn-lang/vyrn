@@ -1144,26 +1144,6 @@ mod gen_tests {
                 .cloned()
                 .ok_or_else(|| format!("not found: {resolved}"))
         }
-        fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-            let prefix = format!("{}/", resolved.trim_end_matches('/'));
-            let mut names: std::collections::BTreeSet<String> = Default::default();
-            let mut any = false;
-            for k in self.files.keys() {
-                if let Some(rest) = k.strip_prefix(&prefix) {
-                    any = true;
-                    if let Some(seg) = rest.split('/').next() {
-                        if !seg.is_empty() {
-                            names.insert(seg.to_string());
-                        }
-                    }
-                }
-            }
-            if any {
-                Ok(names.into_iter().collect())
-            } else {
-                Err(vyrn_frontend::trap::io_at("listerr", resolved))
-            }
-        }
         fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
             let prefix = format!("{}/", resolved.trim_end_matches('/'));
             let mut names: std::collections::BTreeSet<String> = Default::default();
@@ -1733,6 +1713,30 @@ fn main() -> Int64 { return shape().byteLength }"#;
             "the directory appeared: the cached miss is stale"
         );
         assert_eq!(gen_run_count(), before + 2, "directory appeared: re-run");
+    }
+
+    #[test]
+    fn a_kinds_listing_with_a_subdirectory_hits_and_a_changed_kind_misses() {
+        // The byte lengths tell `b` from `b/`, so the answer follows the kind.
+        let gen = "export gen fn kinds(dir: String) -> String { \
+                       let mut n = 0 \
+                       if let Ok(names) = listDirKinds(dir) { \
+                           for s in names { n = n + s.byteLength } } \
+                       return \"export fn n() -> Int64 { return \" + n.toString() + \" }\" }";
+        let root = "import { kinds } from \"./gen\" \
+                    import { n } from kinds(\"./data\") \
+                    fn main() -> Int64 { return n() }";
+        let mut r =
+            CachingResolver::new(&[("gen.vyrn", gen), ("data/b", "1"), ("data/sub/x.txt", "2")]);
+        let before = gen_run_count();
+        assert_eq!(run_with(root, &r).unwrap(), 5, "`b` and `sub/`");
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
+
+        r.files.remove("data/b");
+        r.files.insert("data/b/c".to_string(), "3".to_string());
+        assert_eq!(run_with(root, &r).unwrap(), 6, "`b/` and `sub/`");
+        assert_eq!(gen_run_count(), before + 2, "a file became a directory");
     }
 
     #[test]

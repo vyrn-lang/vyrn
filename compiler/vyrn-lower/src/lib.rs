@@ -252,7 +252,7 @@ impl<'a> Lowered<'a> {
 }
 
 /// The named core of `program`'s root-module instances, as `vyrn emit-lowered`
-/// prints it: the version line, then each body's [`core::Body::render`], or the
+/// prints it: the version line, then each body's [`vyrn_frontend::core::Body::render`], or the
 /// gap that stopped it. Root-module only, `vyrn why --memory`'s rule: a linked
 /// program's imports are another file's answer.
 pub fn render(program: &Program, source: &str) -> String {

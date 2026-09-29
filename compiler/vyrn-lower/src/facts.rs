@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::core::Name;
+use vyrn_frontend::core::Name;
 
 /// A value the facts speak about: an integer name, or the length of an array
 /// or String name (bytes for a String).

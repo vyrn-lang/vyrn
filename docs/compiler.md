@@ -41,8 +41,8 @@ sysroot. A crate is judged on what it costs, not on a rule against crates.
 
 | Crate | Owns | Depends on |
 |---|---|---|
-| `vyrn-frontend` | lexer, parser, AST, loader, checker, the ownership vocabulary, the editor queries, the formatter, the manifest and lock reader | nothing |
-| `vyrn-lower` | the lowered form, the named core, the placer, the three judgments | `vyrn-frontend` |
+| `vyrn-frontend` | lexer, parser, AST, loader, checker, the ownership vocabulary, the core's data types (`core`), the editor queries, the formatter, the manifest and lock reader | nothing |
+| `vyrn-lower` | the lowered form, the builder of the named core, the placer, the three judgments | `vyrn-frontend` |
 | `vyrn-codegen` | the wasm emitter, layout, the module encoder, the toolchain finder, the WASI host in C for the native route | `vyrn-frontend`, `vyrn-lower`, `wasm-encoder`, `wasmprinter` |
 | `vyrn-cli` | the `vyrn` driver and the in-process WASI host | all of the above, `vyrn-genwasm`, `wasmtime` |
 | `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load; without its `host` feature, builds the module a host runs (`run_pure`) | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` (feature `host`) |

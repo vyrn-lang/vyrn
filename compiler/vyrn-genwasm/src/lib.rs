@@ -190,18 +190,24 @@ fn serve(
         path,
     )?;
     if mode == MODE_LIST || mode == MODE_LIST_KINDS {
-        let listed = if mode == MODE_LIST_KINDS {
-            inputs.resolver.list_kinds(&resolved)
-        } else {
-            inputs.resolver.list(&resolved)
-        };
-        return match listed {
+        return match inputs.resolver.list_kinds(&resolved) {
             Ok(mut names) => {
+                // Both modes record the kinds listing under the directory key,
+                // the listing the cache re-hashes, so a changed listing or kind
+                // misses.
                 names.sort();
-                // Recorded under the directory key, so a changed listing
-                // misses the cache.
                 let joined = names.join("\n").into_bytes();
                 reads.push((format!("{resolved}/"), Some(joined.clone())));
+                if mode == MODE_LIST {
+                    for n in &mut names {
+                        if n.ends_with('/') {
+                            n.pop();
+                        }
+                    }
+                    names.sort();
+                    names.dedup();
+                    return Ok(Served::Bytes(0, names.join("\n").into_bytes()));
+                }
                 Ok(Served::Bytes(0, joined))
             }
             Err(_) => {

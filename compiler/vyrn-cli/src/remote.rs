@@ -219,11 +219,8 @@ impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
             DiskResolver.read(resolved)
         }
     }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        // A remote key has no directory to enumerate.
-        DiskResolver.list(resolved)
-    }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        // A remote key has no directory to enumerate.
         DiskResolver.list_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {

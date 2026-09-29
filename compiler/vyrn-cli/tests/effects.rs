@@ -304,7 +304,7 @@ fn run_corpus() {
         // The module-state initializer and every `test` and `bench` body: no
         // instance and no pass verdict, but the lambdas they hold need a frame,
         // which is what a stored source names.
-        let mut outside: Vec<vyrn_lower::core::Body> = Vec::new();
+        let mut outside: Vec<vyrn_frontend::core::Body> = Vec::new();
         if !program.globals.is_empty() {
             match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
                 Ok(b) => outside.push(b),
@@ -340,7 +340,7 @@ fn run_corpus() {
         // core lowers an access site as a call by the projection's name, so the
         // judgment needs the body to bound what `x.field(k)` runs. Built under the
         // empty substitution a declaration has.
-        let mut place_bodies: Vec<(&str, vyrn_lower::core::Body)> = Vec::new();
+        let mut place_bodies: Vec<(&str, vyrn_frontend::core::Body)> = Vec::new();
         for pr in &lowered.places {
             let inst = vyrn_lower::Instance {
                 func: pr.func,
@@ -369,7 +369,7 @@ fn run_corpus() {
         // Every frame, outermost first. `top[i]` is the slot of instance `i`'s own
         // body; a lambda frame is keyed by its enclosing function and line, as the
         // checker names a lambda source.
-        let mut refs: Vec<&vyrn_lower::core::Body> = Vec::new();
+        let mut refs: Vec<&vyrn_frontend::core::Body> = Vec::new();
         let mut top: Vec<usize> = Vec::new();
         let mut lambda_frames: BTreeMap<(&str, usize), Vec<usize>> = BTreeMap::new();
         for (i, b) in bodies.iter().enumerate() {
@@ -856,9 +856,9 @@ fn run_corpus() {
     let _ = &rows[0].module;
 }
 
-fn collect_callees(stmts: &[vyrn_lower::core::St], out: &mut BTreeSet<String>) {
-    use vyrn_lower::core::{Rhs, St};
-    for (s, _) in vyrn_lower::core::rows(stmts) {
+fn collect_callees(stmts: &[vyrn_frontend::core::St], out: &mut BTreeSet<String>) {
+    use vyrn_frontend::core::{Rhs, St};
+    for (s, _) in vyrn_frontend::core::rows(stmts) {
         if let St::Let(_, Rhs::Call { callee, .. })
         | St::Do {
             rhs: Rhs::Call { callee, .. },
