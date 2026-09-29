@@ -46,9 +46,9 @@ sysroot. A crate is judged on what it costs, not on a rule against crates.
 | `vyrn-lower` | the lowered form, the named core, the placer, the three judgments | `vyrn-frontend` |
 | `vyrn-codegen` | the wasm emitter, layout, the module encoder, the toolchain finder, the WASI host in C for the native route | `vyrn-frontend`, `vyrn-lower`, `wasm-encoder`, `wasmprinter` |
 | `vyrn-cli` | the `vyrn` driver and the in-process WASI host | all of the above, `vyrn-genwasm`, `wasmtime` |
-| `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` |
+| `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load; without its `host` feature, builds the module a host runs (`run_pure`) | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` (feature `host`) |
 | `vyrn-lsp` | the language server, an adapter over `vyrn-frontend` | `vyrn-frontend`, `vyrn-lower`, `vyrn-genwasm` |
-| `vyrn-play` | the playground: the front end and the emitter compiled to `wasm32-unknown-unknown` | `vyrn-frontend`, `vyrn-codegen`, `vyrn-lower` |
+| `vyrn-play` | the playground: the front end and the emitter compiled to `wasm32-unknown-unknown` | `vyrn-frontend`, `vyrn-codegen`, `vyrn-lower`, `vyrn-genwasm` without `host` |
 
 `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` are excluded from the workspace.
 Test and format the first two with `--manifest-path`. Build `vyrn-play` from
@@ -61,11 +61,14 @@ the kernel's refusals (`own::install_refusals`), the must-use judgment
 (`own::install_must_use`), the typed judgment's refusals
 (`own::install_typed`) and the effect judgment into the floor
 (`floor::install_judge`). `vyrn_genwasm::install` installs the generation
-engine (`gen::set_gen_engine`). Every process that compiles calls both first:
-the CLI's `install`, the language server's `main`, the playground's `load`,
-and any test that asserts a refusal. A process that skips `vyrn_lower::install`
+engine (`gen::set_gen_engine`); the playground installs its own, which runs
+the module in the page. Every process that compiles calls both first: the
+CLI's `install`, the language server's `main`, the playground's `load`, and
+any test that asserts a refusal. A process that skips `vyrn_lower::install`
 runs a different compiler: the core stays empty and the emitter refuses every
-body. `tests/hosts.rs` holds each host to this.
+body. A process with no engine fails every `derive` and generator import.
+`tests/hosts.rs` holds each host to both, and names the hosts without an
+engine with the reason.
 
 ## The front end
 
@@ -103,6 +106,9 @@ the playground serves an embedded `std/`. The loader:
    (`consteval.rs`). The checker records every expression's type in
    `checker::Recorded`, keyed by node address. Every later pass reads types
    from this record and derives none of its own.
+   If the program calls `derive(g, x)`, `gen::derive` runs each generator
+   once over a `TypeArg` of the types its sites need, and the functions it
+   writes join the program, which is checked again with them.
 2. Synthesis, only for a program that type-checks: `jsonenc::encoders` and
    `jsondec::decoders` generate the per-type JSON walks as Vyrn functions, and
    `ctor::constructors` generates one constructor per `where` type. These are

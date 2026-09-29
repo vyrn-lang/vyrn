@@ -219,3 +219,12 @@ type TypeNode = {
 }
 
 type TypeMember = { name: String, args: Array<Int64> }
+
+// What a derived-code generator receives: every type its call sites need, as
+// one graph of `TypeNode`s. `roots` holds one node per distinct type at a call
+// site, in source order. A node is one checked type. Its `name` is `t` and the
+// type's `struct_key`, an identifier. Its `kind` is its wire form: a scalar's
+// spelling, `record`, `option`, `array`, `map` or `enum`. A recursive type
+// points back at its own node. `spelling` is the type as generated code
+// writes it.
+type TypeArg = { roots: Array<Int64>, nodes: Array<TypeNode> }

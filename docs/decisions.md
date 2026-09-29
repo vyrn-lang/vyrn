@@ -188,6 +188,9 @@ pull request.
 - A generator is comptime-pure: no `extern`, module state, file writes, stdin, `args` or logging. It reads files only under its constant path arguments, and every file it reads joins its cache key.
 - The generator cache is keyed by everything a generation observed and authenticated with a per-user secret. It is never restored across CI runs: a restored cache is untrusted compiler input.
 - Type reflection is a flat array of `TypeNode`s whose edges are indices, so no recursive Vyrn type and no new decoder shape is needed. A declared name is a leaf; kinds are strings, like `Schema.base`.
+- A derived-code generator receives one `TypeArg`: a graph over the checked types its call sites need, a node per `struct_key`, each node's kind `codec::wire`'s verdict. The codec rules stay in Rust; the generator only writes text.
+- A `derive` generator runs once per program over every type its sites need, cached in-process by its program and argument. A run per type would write a shared subtype twice. Its compiled module persists across processes under a hash of the trimmed program's canonical text, which sorts the AST's hash containers. What it writes is checked with the program.
+- The playground runs a generator in the page: `vyrn-genwasm` without `host` builds the module and the `TypeArg` atoms, and `play-wasm.js` runs it. The page serves no read, no module reflection and no code quote, so only a `derive` generator runs there.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
 - Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.

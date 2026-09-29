@@ -1,0 +1,38 @@
+/// A derived-code generator: for each type it is handed, a function that
+/// describes the type's shape. `derive(shapeOf, x)` calls the one for `x`.
+
+import { joinWith } from "std/strings"
+
+/// The words for one node: its kind, with a record's fields and an array's
+/// element spelled out one level deep.
+gen fn describe(t: TypeArg, i: Int64) -> String {
+    let n = t.nodes[i]
+    if n.kind == "record" {
+        let mut fields: Array<String> = []
+        for m in n.members {
+            fields.push(m.name + ": " + t.nodes[m.args[0]].kind)
+        }
+        return "record { " + joinWith(fields, ", ") + " }"
+    }
+    if n.kind == "array" || n.kind == "option" {
+        return n.kind + " of " + t.nodes[n.args[0]].kind
+    }
+    if n.kind == "enum" {
+        let mut arms: Array<String> = []
+        for m in n.members {
+            arms.push(m.name.copy())
+        }
+        return "enum " + joinWith(arms, " | ")
+    }
+    return n.kind.copy()
+}
+
+export gen fn shapeOf(t: TypeArg) -> String {
+    let mut out = ""
+    for r in t.roots {
+        let n = t.nodes[r]
+        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
+        out = out + "    return \"" + n.spelling + " is " + describe(t, r) + "\"\n}\n"
+    }
+    return out
+}

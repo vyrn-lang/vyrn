@@ -1,0 +1,5 @@
+Point is record { x: Int64, y: Int64 }
+Point is record { x: Int64, y: Int64 }
+Array<String> is array of String
+Option<Int64> is option of Int64
+Shade is enum Light | Dark | Custom

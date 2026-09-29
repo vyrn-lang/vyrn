@@ -362,6 +362,9 @@ a dependency.
 (highlighting with the real lexer), `play_check` (diagnostics from the real
 loader) and `play_compile` (the bytes `vyrn build --target wasm` writes).
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
+A `derive` generator runs in the page: the module calls its one import,
+`vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the
+generator's module synchronously and serves it its `TypeArg` and nothing else.
 `std/` is embedded at build time; a relative import reports
 `module not found`.
 

@@ -72,6 +72,14 @@ name = "vyrn-frontend"
 version = "0.0.0"
 
 [[package]]
+name = "vyrn-genwasm"
+version = "0.0.0"
+dependencies = [
+ "vyrn-codegen",
+ "vyrn-frontend",
+]
+
+[[package]]
 name = "vyrn-lower"
 version = "0.0.0"
 dependencies = [
@@ -84,6 +92,7 @@ version = "0.0.0"
 dependencies = [
  "vyrn-codegen",
  "vyrn-frontend",
+ "vyrn-genwasm",
  "vyrn-lower",
 ]
 

@@ -118,8 +118,29 @@ pub fn load(
 /// backend has built its function table from the program yet.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     let check_span = prof::phase("check");
-    let (mut diags, json_types, json_dec_types, refused) =
+    let (mut diags, mut json_types, mut json_dec_types, derived, mut refused) =
         checker::check_accum_with_json_types(program);
+    // What a `derive` generator writes joins the program and is checked with
+    // it, so the second check's answers stand.
+    if diags.is_empty() && !derived.is_empty() {
+        match gen::derive(program, &derived) {
+            Ok(fns) => {
+                program.functions.extend(fns);
+                let again;
+                (diags, json_types, json_dec_types, again, refused) =
+                    checker::check_accum_with_json_types(program);
+                if diags.is_empty() && again.len() != derived.len() {
+                    diags.push(diagnostics::Diagnostic::error(
+                        0,
+                        0,
+                        "check",
+                        "a `derive` generator wrote a `derive` call".to_string(),
+                    ));
+                }
+            }
+            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
+        }
+    }
     drop(check_span);
     let synth_span = prof::phase("synthesize");
     let from = program.functions.len();

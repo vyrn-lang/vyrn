@@ -34,6 +34,10 @@ vyrn-codegen = { path = "../vyrn-codegen" }
 # the page. Reached only through `vyrn-codegen`, it would never be installed. Its
 # only dependency is `vyrn-frontend`, so it costs this target nothing new.
 vyrn-lower = { path = "../vyrn-lower" }
+# The generation engine without wasmtime, which cannot build for this target:
+# the page runs the generator's module (`run_generator` in
+# `site/public/play-wasm.js`), and this crate builds it and reads its output.
+vyrn-genwasm = { path = "../vyrn-genwasm", default-features = false }
 
 [lib]
 name = "vyrn_play"
