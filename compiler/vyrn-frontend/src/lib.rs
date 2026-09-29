@@ -125,7 +125,11 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     if diags.is_empty() && !derived.is_empty() {
         match gen::derive(program, &derived) {
             Ok(fns) => {
+                let at = program.functions.len();
                 program.functions.extend(fns);
+                // Parsed apart, so numbered from 1: renumbered, or their ids
+                // would key the second check's types over the program's own.
+                program.number_appended(at);
                 let again;
                 (diags, json_types, json_dec_types, again, refused) =
                     checker::check_accum_with_json_types(program);
