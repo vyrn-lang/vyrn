@@ -35,7 +35,7 @@
 
 use crate::core::{Arg, Arm, Body, BorrowKind, Name, Old, Payload, Place, Rhs, St, Val, Walk};
 use vyrn_frontend::ast::Capability;
-use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::Exit;
 
@@ -107,16 +107,6 @@ struct State {
     /// What each alias reads, set by the `let` that reads the place or the
     /// store that rebinds a borrow's binding.
     alias: Vec<Option<Alias>>,
-}
-
-/// Appends one `fix:` line per way out, as `movecheck::menu` does.
-/// The words match the checker's so a rule can leave the checker
-/// without its diagnostic moving.
-fn menu(mut message: String, fixes: Vec<String>) -> String {
-    for f in fixes {
-        message.push_str(&format!("\n  fix: {f}"));
-    }
-    message
 }
 
 /// Whether two paths under one name are equal or one is under the other.

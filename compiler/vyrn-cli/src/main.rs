@@ -2581,11 +2581,13 @@ fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics
 
 /// The path a `.copy()` fix names, out of a diagnostic's menu.
 ///
-/// A menu line is ``  fix: `PATH.copy()` <why>``, the text `movecheck::menu`
-/// writes.
+/// A menu line is ``  fix: `PATH.copy()` <why>``, the text
+/// `vyrn_frontend::diagnostics::menu` writes.
 fn copy_path(message: &str) -> Option<String> {
+    use vyrn_frontend::diagnostics::FIX;
     for line in message.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("fix: `") else {
+        let fix = line.trim_start().strip_prefix(FIX);
+        let Some(rest) = fix.and_then(|f| f.strip_prefix('`')) else {
             continue;
         };
         let Some((quoted, _)) = rest.split_once('`') else {

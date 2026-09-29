@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use crate::ast::*;
 use crate::consteval;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{menu, Diagnostic};
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
 use crate::types::FALLIBLE;
@@ -2941,13 +2941,19 @@ impl<'a> Checker<'a> {
                 self.errors.borrow_mut().push(cerr_at!(
                     f.line,
                     f.name_span(),
-                    "extern fn `{}` parameter `{}` may not be `consume` — the caller \
-                     across this boundary is JS, and it releases the String when the call \
-                     returns\n  fix: take `{}: String` and store `{}.copy()`",
-                    f.name,
-                    p.name,
-                    p.name,
-                    p.name
+                    "{}",
+                    menu(
+                        format!(
+                            "extern fn `{}` parameter `{}` may not be `consume` — the caller \
+                             across this boundary is JS, and it releases the String when the \
+                             call returns",
+                            f.name, p.name
+                        ),
+                        [format!(
+                            "take `{}: String` and store `{}.copy()`",
+                            p.name, p.name
+                        )]
+                    )
                 ));
             }
         }
@@ -6854,20 +6860,15 @@ impl<'a> Checker<'a> {
         if let Some((root, path)) = crate::ast::place_path(arg) {
             for (j, b) in args.iter().enumerate() {
                 if j != i && crate::ast::mentions(b, &root) {
-                    let mut d = cerr!(
-                        line,
+                    let fixes = [
+                        format!("`{root}.copy()` for the second argument"),
+                        "or split the call so the two accesses do not overlap".to_string(),
+                    ];
+                    let says = format!(
                         "`{path}` is passed to `{fname}` as `modify` and read again in the \
                          same call — a `modify` borrow is exclusive"
                     );
-                    d.message.push_str(&format!(
-                        "
-  fix: `{root}.copy()` for the second argument"
-                    ));
-                    d.message.push_str(
-                        "
-  fix: or split the call so the two accesses do not overlap",
-                    );
-                    return Err(d);
+                    return Err(cerr!(line, "{}", menu(says, fixes)));
                 }
             }
         }

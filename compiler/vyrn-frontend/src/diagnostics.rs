@@ -103,3 +103,15 @@ impl Diagnostic {
         format!("line {}: {}", self.line, self.message)
     }
 }
+
+/// Opens a fix line under a refusal's sentence; `vyrn fix` reads a menu by it.
+pub const FIX: &str = "fix: ";
+
+/// Appends one `  fix: ...` line per way out of `sentence`, in order.
+pub fn menu(sentence: String, fixes: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
+    let mut message = sentence;
+    for f in fixes {
+        message.push_str(&format!("\n  {FIX}{f}"));
+    }
+    message
+}

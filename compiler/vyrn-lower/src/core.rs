@@ -18,7 +18,7 @@ use vyrn_frontend::ast::{
     Program, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::Owned;
-use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
@@ -1065,9 +1065,12 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
     }
     if let Some((root, path)) = vyrn_frontend::project::element_path(e) {
         return refuse(
-            format!(
-                "`{path}` may not be taken — an element is not a place a take reaches\n  fix: \
-                 `{root}.swapRemove(..)` returns the element and leaves the container one shorter"
+            menu(
+                format!("`{path}` may not be taken — an element is not a place a take reaches"),
+                [format!(
+                    "`{root}.swapRemove(..)` returns the element and leaves the container one \
+                     shorter"
+                )],
             ),
             line,
         );
@@ -1085,7 +1088,7 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
             "drop the `consume`: the value is already owned",
         )
     };
-    refuse(format!("{says}\n  fix: {drop_it}"), line)
+    refuse(menu(says.to_string(), [drop_it]), line)
 }
 
 /// The scrutinee a binder borrows: its name, where the construct does not
@@ -2685,10 +2688,14 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         refuse(
-            format!(
-                "`{a}` may not be handed out of an arm inside a loop — the result is \
-                 released on every turn, and `{a}` is bound outside the loop\n  \
-                 fix: `{a}.copy()` if the arm should hand out a value of its own"
+            menu(
+                format!(
+                    "`{a}` may not be handed out of an arm inside a loop — the result is \
+                     released on every turn, and `{a}` is bound outside the loop"
+                ),
+                [format!(
+                    "`{a}.copy()` if the arm should hand out a value of its own"
+                )],
             ),
             line,
         )
@@ -6346,11 +6353,8 @@ impl<'a> Builder<'a> {
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow && !info.must_use_param => {
-                let mut msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
-                for f in k.fixes(&path) {
-                    msg.push_str(&format!("\n  fix: {f}"));
-                }
-                refuse(msg, line)
+                let msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
+                refuse(menu(msg, k.fixes(&path)), line)
             }
             _ => Ok(()),
         }
