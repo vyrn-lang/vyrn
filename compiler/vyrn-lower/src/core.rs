@@ -2814,9 +2814,7 @@ impl<'a> Builder<'a> {
     }
 
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
-        let heap = self.proto.owns_heap(&ty);
-        let linear = self.proto.linear_kind(&ty).is_some();
-        let runs = self.proto.declared_releases(&ty);
+        let (heap, linear, runs) = self.proto.name_facts(&ty);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,

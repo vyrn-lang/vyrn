@@ -24,7 +24,13 @@ pub struct Owned {
     types: HashMap<String, TypeDecl>,
     /// Whether a type parameter answers as a String does ([`Owned::as_written`]).
     params_own: bool,
+    /// [`Owned::name_facts`] by type, filled on first ask.
+    name_facts: std::cell::RefCell<HashMap<Type, NameFacts>>,
 }
+
+/// What a binding of a type needs from its release: whether it owns heap,
+/// whether it is linear, and its [`Owned::declared_releases`].
+pub type NameFacts = (bool, bool, Vec<String>);
 
 impl Owned {
     pub fn new(program: &Program) -> Self {
@@ -56,6 +62,7 @@ impl Owned {
                 .collect(),
             types: crate::types::decl_map(program),
             params_own: false,
+            name_facts: Default::default(),
         }
     }
 
@@ -65,6 +72,7 @@ impl Owned {
     pub fn as_written(&self) -> Self {
         Owned {
             params_own: true,
+            name_facts: Default::default(),
             ..self.clone()
         }
     }
@@ -125,6 +133,21 @@ impl Owned {
     /// [`crate::types::decl_map`], which clones them all, per node.
     pub fn types(&self) -> &HashMap<String, TypeDecl> {
         &self.types
+    }
+
+    /// [`Owned::owns_heap`], [`Owned::linear_kind`] and
+    /// [`Owned::declared_releases`] of `ty`, each walk made once per type.
+    pub fn name_facts(&self, ty: &Type) -> NameFacts {
+        if let Some(f) = self.name_facts.borrow().get(ty) {
+            return f.clone();
+        }
+        let f = (
+            self.owns_heap(ty),
+            self.linear_kind(ty).is_some(),
+            self.declared_releases(ty),
+        );
+        self.name_facts.borrow_mut().insert(ty.clone(), f.clone());
+        f
     }
 
     /// Whether `ty` transitively owns heap. Differs from
