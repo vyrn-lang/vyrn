@@ -276,7 +276,7 @@ fn run_corpus() {
             None => path.file_name().unwrap().to_string_lossy().to_string(),
         };
         let lowered = vyrn_lower::lower(&program);
-        let own = vyrn_frontend::own::analyze(&program);
+        let own = vyrn_lower::analyze(&program);
         let mut bodies = Vec::new();
         let mut insts = Vec::new();
         for inst in &lowered.instances {

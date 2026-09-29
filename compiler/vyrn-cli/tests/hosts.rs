@@ -1,12 +1,11 @@
-//! Which hosts compile with a core, and which compile with none.
+//! Which hosts install the lowering's judgments, and which install none.
 //!
-//! `vyrn_lower::install()` puts `core::augment` into `own::analyze`
-//! (`own::install_placer`), the kernel's and the must-use refusals into a file's
-//! one refusal list, and the effect judgment into the floor. A process that does
-//! not call it runs a different compiler: `core::BODIES` stays empty,
-//! `Fn_::core` is `None` for every function, the emitter refuses every body, and
-//! the refusals are `movecheck.rs`'s, not the kernel's. This census finds a host
-//! by what it calls, so a host that forgets the line fails here.
+//! `vyrn_lower::install()` puts the effect judgment into the floor
+//! (`floor::install_judge`), and the must-use judgment and the typed judgment's
+//! drain into a generator's own check and run. A process that does not call it
+//! runs a different compiler: the floor refuses every carrier it scans, reached
+//! or not, and a generator's program gets no must-use refusal. This census finds
+//! a host by what it calls, so a host that forgets the line fails here.
 //!
 //! Every `.rs` file under `compiler/`, with its comment lines dropped, is a host
 //! if it names a compile entry (`direct::compile`, `direct::compile_gen_host`,
@@ -21,11 +20,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// Whether a host installs the lowering before it compiles.
+/// Whether a host installs the lowering's judgments before it compiles.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Core {
     Installed,
-    /// The host's emitter has no core to read, with the reason.
+    /// The host installs none, with the reason.
     None_(&'static str),
 }
 use Core::{Installed, None_};
@@ -93,9 +92,9 @@ fn the_only_thing_that_compiles_without_a_core_is_not_a_process() {
     assert_eq!(
         without,
         ["compiler/vyrn-genwasm/src/lib.rs"],
-        "a host compiles with no core. Its emitter refuses every body and its \
-         refusals are not the kernel's, so it is a second compiler with a \
-         second rule"
+        "a host compiles with no judgment installed. Its floor refuses what \
+         the effect judgment clears, so it is a second compiler with a second \
+         rule"
     );
 }
 

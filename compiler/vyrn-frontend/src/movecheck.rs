@@ -1,8 +1,8 @@
 //! The ownership judgment's driver, and the facts the core reads at a call.
 //! Every ownership rule is the kernel's (`vyrn_lower::kernel`) and every
-//! obligation rule is the typed judgment's; this module states none. It merges
-//! their refusals into one list ([`refusals`]), keeps a generator's program out
-//! of it ([`comptime`]), memoizes the kernel's per-body judgment for the editor
+//! obligation rule is the typed judgment's; this module states none. It sorts
+//! their refusals into source order ([`in_source_order`]), marks a generator's
+//! program ([`comptime`]), memoizes the kernel's per-body judgment for the editor
 //! ([`Judgments`]), and answers the fn-value meet ([`facts`]) and the
 //! argument-temporary screens the core asks at a call ([`arg_verdict`]).
 
@@ -321,7 +321,7 @@ fn views(name: &str) -> bool {
 /// Sorts refusals into source order, since no walk order is one a reader can
 /// predict. Files keep the order they were first named in; two refusals on one
 /// line keep the walk's order, so the sort is stable.
-fn in_source_order(diags: &mut [Diagnostic]) {
+pub fn in_source_order(diags: &mut [Diagnostic]) {
     let mut files: Vec<Option<String>> = Vec::new();
     for d in diags.iter() {
         if !files.contains(&d.file) {
@@ -331,66 +331,13 @@ fn in_source_order(diags: &mut [Diagnostic]) {
     diags.sort_by_key(|d| (files.iter().position(|f| *f == d.file).unwrap_or(0), d.line));
 }
 
-/// Returns every ownership refusal a program earns, the must-use judgment's
-/// and the kernel's, as one list in source order. `vyrn check` and the editor
-/// both call it. The caller guarantees the program type-checks.
-///
-/// A kernel refusal is dropped at a line the must-use judgment already
-/// refused, so one mistake is not said twice. It is also dropped when its
-/// subject is a binding the must-use judgment names anywhere in the file: a
-/// `Stream` closed twice is a must-use refusal and a use after a take at two
-/// lines, and still one mistake.
-pub fn refusals(program: &Program) -> Vec<Diagnostic> {
-    let mut diags = Vec::new();
-    let owed = crate::own::must_use_refusals(program);
-    let mustuse: HashSet<(Option<String>, String)> = owed
-        .iter()
-        .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
-        .collect();
-    diags.extend(owed);
-    // A generator's program skips the kernel: nothing prints its refusals, and
-    // judging them costs the editor on every keystroke that re-runs one.
-    if COMPTIME.with(|c| c.get()) {
-        in_source_order(&mut diags);
-        return diags;
-    }
-    // The placer judges a core body for every instance, and the analysis is
-    // handed on: a command's next `own::Memo` adopts it. Only this analysis
-    // may reuse a judgment ([`reuse_judgments`]). The kernel's list is emptied
-    // first because an engine's or a generator's compile may have left
-    // refusals there with no file.
-    let _ = crate::own::kernel_refusals();
-    let _ = crate::own::typed_refusals();
-    JUDGING.with(|j| j.set(true));
-    crate::own::hand_on(program, &crate::own::analyze(program));
-    JUDGING.with(|j| j.set(false));
-    // A program the typed judgment refuses gets those refusals alone.
-    let mut typed = crate::own::typed_refusals();
-    if !typed.is_empty() {
-        let _ = crate::own::kernel_refusals();
-        in_source_order(&mut typed);
-        return typed;
-    }
-    let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
-    for d in &diags {
-        lines.insert((d.file.clone(), d.line));
-    }
-    diags.extend(crate::own::kernel_refusals().into_iter().filter(|d| {
-        !lines.contains(&(d.file.clone(), d.line))
-            && !subject(&d.message)
-                .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
-    }));
-    in_source_order(&mut diags);
-    diags
-}
-
 thread_local! {
     /// Set inside [`comptime`].
     static COMPTIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Runs `f` with the program marked as a generator's own, which
-/// [`refusals`] does not judge with the kernel.
+/// `vyrn_lower::refusals` does not judge with the kernel.
 pub fn comptime<T>(f: impl FnOnce() -> T) -> T {
     let was = COMPTIME.with(|c| c.replace(true));
     let out = f();
@@ -425,7 +372,7 @@ thread_local! {
     static REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set by [`emit_nothing`].
     static NO_EMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Whether the analysis running now is the one [`refusals`] asked for.
+    /// Whether the analysis running now is the one [`judging`] runs.
     static JUDGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The declaration fingerprint and the entries valid under it. A new
     /// fingerprint drops the whole map, so nothing needs eviction.
@@ -447,7 +394,7 @@ pub fn reuse_judgments() {
 }
 
 /// Whether the analysis running now may reuse a judgment: the host armed it,
-/// and [`refusals`] asked for this analysis.
+/// and [`judging`] runs this analysis.
 pub fn reusing_judgments() -> bool {
     REUSE.with(|r| r.get()) && JUDGING.with(|j| j.get())
 }
@@ -459,10 +406,19 @@ pub fn emit_nothing() {
 }
 
 /// Whether the analysis running now feeds an emitter. Only the analysis
-/// [`refusals`] asks for can answer no: a generator compiled during the load
+/// [`judging`] runs can answer no: a generator compiled during the load
 /// still needs its facts.
 pub fn emitting() -> bool {
     !(NO_EMIT.with(|r| r.get()) && JUDGING.with(|j| j.get()))
+}
+
+/// Runs `f`, the analysis whose refusals `vyrn_lower::refusals` reports. Only
+/// that analysis may reuse a judgment or skip the emitter's facts.
+pub fn judging<T>(f: impl FnOnce() -> T) -> T {
+    JUDGING.with(|j| j.set(true));
+    let out = f();
+    JUDGING.with(|j| j.set(false));
+    out
 }
 
 /// The judgment cache, open for one analysis. It copies the loader's module
@@ -608,17 +564,6 @@ fn declaration_fingerprint(program: &Program) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
-}
-
-/// Returns the binding a refusal is about: the root of the first path its
-/// message quotes in backticks. Both passes write the subject first, so no
-/// field has to be filled at every refusal site. A message that quotes nothing
-/// has no subject and is never suppressed.
-fn subject(message: &str) -> Option<&str> {
-    let rest = message.split_once('`')?.1;
-    let path = rest.split_once('`')?.0;
-    let root = crate::ast::root_of(path);
-    (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
 }
 
 #[cfg(test)]

@@ -54,17 +54,21 @@ Test and format the first two with `--manifest-path`. Build `vyrn-play` from
 its own directory, so its `.cargo/config.toml` sets the linker stack size.
 
 The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
-front end cannot call the lowering, so it declares slots and the lowering
-fills them. `vyrn_lower::install` installs the placer (`own::install_placer`),
-the kernel's refusals (`own::install_refusals`), the must-use judgment
-(`own::install_must_use`) and the typed judgment's refusals
-(`own::install_typed`). `vyrn_genwasm::install` installs the generation
-engine (`gen::set_gen_engine`); the playground installs its own, which runs
-the module in the page. Every process that compiles calls both first: the
-CLI's `install`, the language server's `main`, the playground's `load`, and
-any test that asserts a refusal. A process that skips `vyrn_lower::install`
-runs a different compiler: the core stays empty and the emitter refuses every
-body. A process with no engine fails every `derive` and generator import.
+front end cannot call the lowering. A host enters through `vyrn-lower`
+(`load`, `check_and_synthesize`, `analyze`), which calls the front end and
+then its own judgments. The editor passes the ownership judgments into
+`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). Where the front
+end still needs a judgment, it declares a slot and the lowering fills it:
+`vyrn_lower::install` installs the must-use judgment
+(`own::install_must_use`) and the typed judgment's drain
+(`own::install_typed`) for a generator's own check and run.
+`vyrn_genwasm::install` installs the generation engine
+(`gen::set_gen_engine`); the playground installs its own, which runs the
+module in the page. Every process that compiles calls both first: the CLI's
+`install`, the language server's `main`, the playground's `load`, and any
+test that asserts a refusal. A process that skips `vyrn_lower::install` gets
+no must-use or typed refusal for a generator's own program. A process with no
+engine fails every `derive` and generator import.
 `tests/hosts.rs` holds each host to both, and names the hosts without an
 engine with the reason.
 
@@ -117,7 +121,7 @@ the playground serves an embedded `std/`. The loader:
 2. Synthesis, only for a program that type-checks: `ctor::constructors`
    generates one constructor per `where` type the `derive` join did not add.
    These are ordinary functions, so every backend compiles one body.
-3. `movecheck::refusals`: `own::analyze`, which runs the installed placer and
+3. `vyrn_lower::refusals`: `vyrn_lower::analyze`, which runs the placer and
    the judgments, then one list of ownership refusals in source order.
 4. `floor::decide`: whether each artifact's target provides what its code
    reaches.
@@ -127,10 +131,18 @@ function the type errors do not reach and adds the typed judgment's refusals,
 so one run reports both kinds. A generator's own program gets steps 1, 2 and
 4 and the must-use judgment alone (`lib::check_generator`).
 
-`symbols::analyze` and `analyze_linked` run the same pipeline for the editor
-and return diagnostics with columns, the symbol index and the tokens.
-`vyrn-lsp` serves hover, definition, completion, references and rename from
-that `Analysis`, and holds no rule of its own.
+The editor runs a shorter pipeline. `symbols::analyze_judged` loads the
+document's imports as `vyrn_lower::load` does (an untitled buffer is checked
+alone), then runs `checker::check_accum_recording` and, for a program that
+type-checks, the `Judge` it is given (`vyrn_lower::JUDGE`:
+`vyrn_lower::refusals` and the placed analysis's memory rows). It runs no
+`derive`, no synthesis, no `lower_typed` and no `floor::settle`. So the editor
+shows no error in a function a `derive` wrote, no typed refusal beside a type
+error, and no floor refusal the load deferred to the effect judgment.
+`symbols::analyze` and `analyze_linked` also skip the judgments. Each returns
+diagnostics with columns, the symbol index and the tokens. `vyrn-lsp` serves
+hover, definition, completion, references and rename from that `Analysis`,
+and holds no rule of its own.
 
 ## The lowered form and the named core
 

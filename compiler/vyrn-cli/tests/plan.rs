@@ -1,6 +1,6 @@
 //! The release plan over one body: which bindings a frame reclaims, and with
-//! what. The rows are the placer's, so these tests live here, where a lowering
-//! can be installed and the placer can run.
+//! what. The rows are the placer's, so these tests live here, where the placer
+//! can run.
 //!
 //! `drop_count` counts the distinct bindings `Ownership::releases` names for a
 //! function, `drop_kinds` reads the kind off each row, `kepts` lines the rows
@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{Block, EnumVariant, Field, NodeId, Program, Stmt, Type};
-use vyrn_frontend::own::{analyze, DropKind, Ownership};
+use vyrn_frontend::own::{DropKind, Ownership};
+use vyrn_lower::analyze;
 
-/// Parses, then analyses with the placer installed, so the rows are the core's.
+/// Parses, then analyses with the core's placer.
 fn analyze_src(src: &str) -> (Ownership, Program) {
-    vyrn_lower::install();
     let (p, _memo) = vyrn_frontend::project::Memo::load(|| {
         vyrn_frontend::parser::parse(vyrn_frontend::lexer::lex(src).unwrap())
     })

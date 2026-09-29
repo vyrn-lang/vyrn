@@ -6625,8 +6625,8 @@ fn call_decl(own: &Ownership, node: NodeId) -> Option<vyrn_frontend::checker::Ca
 }
 
 /// The core's answers for the program last analysed on this thread. `None`
-/// in a host that never installed the placer, where an emitter reads the plan,
-/// and after an analysis that feeds no emitter
+/// before the placer runs on this thread, and after an analysis that feeds no
+/// emitter
 /// ([`vyrn_frontend::movecheck::emitting`]).
 pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
@@ -7266,9 +7266,8 @@ pub fn typed_diagnostics() -> Vec<Diagnostic> {
 }
 
 /// The kernel's refusals as `movecheck`-stage diagnostics, deduplicated, for
-/// the one list a file's refusals come out in
-/// (`vyrn_frontend::movecheck::refusals`). Installed into `own::analyze`'s
-/// slot by [`crate::install`]; the caller orders the list.
+/// the one list a file's refusals come out in ([`crate::refusals`]); the
+/// caller orders the list.
 ///
 /// Several instances of one generic body reach the same rule, and a reader
 /// is owed one sentence per mistake, so file, line and message are the
@@ -7337,8 +7336,8 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
 /// droppable table. The core orders across a loop's back edge, which the
 /// plan's fold cannot.
 ///
-/// Installed into `own::analyze` by [`crate::install`], so every consumer of
-/// the plan sees the same rows. A body the core cannot build, or the kernel
+/// Run by [`crate::analyze`], so every consumer of the plan sees the same
+/// rows. A body the core cannot build, or the kernel
 /// refuses for another reason (a double free, a use after release), is left
 /// as the plan had it.
 pub fn augment(program: &Program, own: &mut Ownership) {

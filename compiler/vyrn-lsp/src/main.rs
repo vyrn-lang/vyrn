@@ -39,22 +39,23 @@ use lsp_types::{
 
 use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
-    analyze, class_completions, class_token_hover, completions, member_completions, references,
-    resolve, string_literal_completions, Analysis, Completion, LocalKind, RefRange, SemKind,
-    SemMods, SymbolKind,
+    analyze_judged, class_completions, class_token_hover, completions, member_completions,
+    references, resolve, string_literal_completions, Analysis, Completion, LocalKind, RefRange,
+    SemKind, SemMods, SymbolKind,
 };
 
 use templates::VyxCursor;
 
-/// Analyze `text`, linking imports when the document has a filesystem path; an
-/// untitled buffer gets single-file [`analyze`]. `overlays` maps every open
-/// buffer's path to its live text, read in place of the file.
+/// Analyze `text` with the ownership judgments, linking imports when the
+/// document has a filesystem path; an untitled buffer is analyzed alone.
+/// `overlays` maps every open buffer's path to its live text, read in place of
+/// the file.
 fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Analysis {
     let (opts, resolver, path, manifest_error) = match load_context(uri, overlays) {
         Some(ctx) => ctx,
-        None => return analyze(text),
+        None => return analyze_judged(text, None, &vyrn_lower::JUDGE),
     };
-    let mut analysis = vyrn_frontend::analyze_linked(text, &path, &opts, &resolver);
+    let mut analysis = analyze_judged(text, Some((&path, &opts, &resolver)), &vyrn_lower::JUDGE);
     // A manifest that does not parse would drop the import map and audience
     // rules silently, so it is an error on the open document.
     if let Some(e) = manifest_error {
@@ -206,8 +207,8 @@ fn main() {
     // compiled generator is cached for the session.
     vyrn_genwasm::install();
 
-    // The same call `vyrn` makes at start-up: without the kernel the editor
-    // accepts programs `vyrn check` refuses.
+    // The same call `vyrn` makes at start-up: without the effect judgment the
+    // floor refuses programs `vyrn check` accepts.
     vyrn_lower::install();
 
     let (connection, io_threads) = Connection::stdio();
@@ -1435,7 +1436,11 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
     // A linked root in the owner's directory, so relative imports resolve. Its
     // diagnostics ("no main") are never read.
     let synth_path = synth_path_for(&owner_path);
-    let analysis = vyrn_frontend::analyze_linked(&gen_source, &synth_path, &opts, &resolver);
+    let analysis = analyze_judged(
+        &gen_source,
+        Some((&synth_path, &opts, &resolver)),
+        &vyrn_lower::JUDGE,
+    );
     let tokens = vyrn_frontend::semantic_tokens(&analysis);
     let a = Rc::new(AnalyzedSynth {
         gen_source,

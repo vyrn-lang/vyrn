@@ -467,7 +467,7 @@ fn with_judgment<R>(
     then: impl FnOnce(&Judged, &[&Body], &[&crate::Instance], &[usize]) -> R,
 ) -> R {
     let lowered = crate::lower(program);
-    let own = vyrn_frontend::own::analyze(program);
+    let own = crate::analyze(program);
     let mut bodies = Vec::new();
     let mut insts = Vec::new();
     for inst in &lowered.instances {

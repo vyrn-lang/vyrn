@@ -1,9 +1,9 @@
 //! Whole-program ownership facts the emitters read: the release vocabulary
 //! ([`Release`], [`Exit`], [`DropKind`]), the `vyrn why --memory` rows, and the
 //! slots through which `vyrn-lower`, which sits above this crate, installs the
-//! placer and its judgments. [`Owned`] answers what owns; the core's placer
-//! decides what is released where. Nodes are keyed by [`NodeId`], which a
-//! clone keeps.
+//! must-use judgment and the typed judgment's drain. [`Owned`] answers what
+//! owns; the core's placer decides what is released where. Nodes are keyed by
+//! [`NodeId`], which a clone keeps.
 
 use std::collections::HashMap;
 
@@ -276,9 +276,11 @@ impl Drop for Memo<'_> {
     }
 }
 
-/// Analyses ownership across a whole program, served from the open [`Memo`]
-/// when it holds one for `program`.
-pub fn analyze(program: &Program) -> Ownership {
+/// Analyses ownership across a whole program, and hands the analysis to
+/// `place`, which adds the release rows and the memory rows
+/// (`vyrn_lower::analyze` passes the core's placer). Served from the open
+/// [`Memo`] when it holds one for `program`.
+pub fn analyze(program: &Program, place: fn(&Program, &mut Ownership)) -> Ownership {
     let key = program as *const Program as usize;
     let memoed = MEMO_FOR.with(|p| p.get()) == key;
     if memoed {
@@ -286,14 +288,14 @@ pub fn analyze(program: &Program) -> Ownership {
             return o;
         }
     }
-    let ownership = analyze_now(program);
+    let ownership = analyze_now(program, place);
     if memoed {
         MEMO.with(|m| *m.borrow_mut() = Some(ownership.clone()));
     }
     ownership
 }
 
-fn analyze_now(program: &Program) -> Ownership {
+fn analyze_now(program: &Program, place: fn(&Program, &mut Ownership)) -> Ownership {
     let _p = crate::prof::phase("own: analyze_now");
     let ps = crate::prof::phase("own: Owned::new");
     let proto = Owned::new(program);
@@ -311,58 +313,11 @@ fn analyze_now(program: &Program) -> Ownership {
         placed: Placed::default(),
         record: None,
     };
-    // The placer runs the lowering, which runs this analysis, so it is not
-    // re-entered.
-    if let Some(place) = PLACER.get() {
-        if !PLACING.with(|p| p.get()) {
-            PLACING.with(|p| p.set(true));
-            place(program, &mut ownership);
-            PLACING.with(|p| p.set(false));
-        }
-    }
+    place(program, &mut ownership);
     ownership
 }
 
-/// A pass that adds release rows to a finished analysis: the core's placer,
-/// which lives in `vyrn-lower`, above this crate.
-pub type Placer = fn(&Program, &mut Ownership);
-
-static PLACER: std::sync::OnceLock<Placer> = std::sync::OnceLock::new();
-
-thread_local! {
-    static PLACING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Installs the placer. The first installation wins.
-pub fn install_placer(f: Placer) {
-    let _ = PLACER.set(f);
-}
-
-/// Whether anything in this process lowers a program. The checker keeps its
-/// record only when this is true, because the lowering is its one reader.
-pub fn placer_installed() -> bool {
-    PLACER.get().is_some()
-}
-
-/// Drains the kernel's refusals about the program the placer just judged. A
-/// generator's own load drains its refusals, so what is left is this
-/// program's.
-pub type Refusals = fn() -> Vec<crate::diagnostics::Diagnostic>;
-
-static REFUSALS: std::sync::OnceLock<Refusals> = std::sync::OnceLock::new();
-
-/// Installs the kernel's refusal drain. The first installation wins.
-pub fn install_refusals(f: Refusals) {
-    let _ = REFUSALS.set(f);
-}
-
-/// Returns what the kernel refuses about the program just analysed; empty when
-/// nothing is installed or under `VYRN_NO_KERNEL=1`.
-pub fn kernel_refusals() -> Vec<crate::diagnostics::Diagnostic> {
-    REFUSALS.get().map(|f| f()).unwrap_or_default()
-}
-
-/// The must-use judgment (`vyrn_lower::typed::obligation`). Unlike the drains,
+/// The must-use judgment (`vyrn_lower::typed::obligation`). Unlike the drain,
 /// it is asked of a program and holds no state between calls.
 pub type MustUse = fn(&Program) -> Vec<crate::diagnostics::Diagnostic>;
 
@@ -379,7 +334,8 @@ pub fn must_use_refusals(program: &Program) -> Vec<crate::diagnostics::Diagnosti
     MUST_USE.get().map(|f| f(program)).unwrap_or_default()
 }
 
-/// Drains the typed judgment's refusals, like [`Refusals`].
+/// Drains the typed judgment's refusals about the program the placer just
+/// judged.
 pub type Typed = fn() -> Vec<crate::diagnostics::Diagnostic>;
 
 static TYPED: std::sync::OnceLock<Typed> = std::sync::OnceLock::new();
@@ -393,13 +349,13 @@ pub fn install_typed(f: Typed) {
 ///
 /// # Panics
 ///
-/// If a placer is installed and this slot is not: the checker does not state
-/// these rules, so an empty slot would be a silent acceptance.
+/// If the must-use judgment is installed and this slot is not: the checker
+/// does not state these rules, so an empty slot would be a silent acceptance.
 pub fn typed_refusals() -> Vec<crate::diagnostics::Diagnostic> {
     match TYPED.get() {
         Some(f) => f(),
-        None if placer_installed() => {
-            panic!("the placer is installed and the typed judgment is not")
+        None if MUST_USE.get().is_some() => {
+            panic!("the must-use judgment is installed and the typed judgment is not")
         }
         None => Vec::new(),
     }

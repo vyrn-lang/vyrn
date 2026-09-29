@@ -1,9 +1,8 @@
 //! Every refusal the editor shows is pinned to a token, the kernel's included. The
-//! memory judgment sits above `vyrn-frontend`, behind `own.rs`'s installed slot, so
-//! the pin lives in this crate: `vyrn_lower::install()`, then
-//! `vyrn_frontend::symbols::analyze`, the call `vyrn-lsp` makes. A refusal keeps its
-//! line and gains a 1-based column span over a real token, never `0`, which the LSP
-//! squiggles as the whole line.
+//! ownership judgments sit above `vyrn-frontend`, so the pin lives in this crate:
+//! `vyrn_frontend::analyze_judged` with `vyrn_lower::JUDGE`, the call `vyrn-lsp`
+//! makes. A refusal keeps its line and gains a 1-based column span over a real
+//! token, never `0`, which the LSP squiggles as the whole line.
 
 use std::path::{Path, PathBuf};
 
@@ -29,10 +28,10 @@ fn programs() -> Vec<PathBuf> {
     out
 }
 
-/// The first diagnostic `analyze` gives for `src`, with the lowering installed.
+/// The first diagnostic the editor gives for `src`.
 fn first(src: &str) -> Option<vyrn_frontend::diagnostics::Diagnostic> {
     vyrn_lower::install();
-    vyrn_frontend::symbols::analyze(src)
+    vyrn_frontend::analyze_judged(src, None, &vyrn_lower::JUDGE)
         .diagnostics
         .into_iter()
         .next()

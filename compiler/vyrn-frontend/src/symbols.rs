@@ -12,7 +12,6 @@ use crate::ast::{
 use crate::checker;
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Tok};
-use crate::movecheck;
 use crate::parser;
 use crate::symbolmap::MappedSymbol;
 
@@ -133,8 +132,9 @@ pub struct Analysis {
     pub symbol_maps: Vec<crate::symbolmap::MappedSymbol>,
     /// What the ownership analysis decided about every `let` in this document:
     /// reclaimed, or why not. The answer `vyrn why --memory` prints, at the
-    /// cursor. Read from [`crate::own::analyze`], never re-derived, so it cannot
-    /// disagree with the walk that decided. Empty when the checks did not run.
+    /// cursor. Read from [`Judge::ownership`], never re-derived, so it cannot
+    /// disagree with the walk that decided. Empty when the checks did not run
+    /// or no [`Judge`] was given.
     pub memory: Vec<MemoryNote>,
 }
 
@@ -193,16 +193,16 @@ pub struct Completion {
     pub doc: Option<String>,
 }
 
-/// Lexes, parses, type-checks, move-checks and indexes `source` in one pass.
+/// Lexes, parses, type-checks and indexes `source` in one pass.
 ///
 /// A lex error leaves `symbols`, `tokens` and `locals` empty, with the one lex
 /// error in `diagnostics`. The parser recovers between declarations
 /// and between statements, so after a parse error the partial program is still
-/// indexed and hover, outline and completion keep working. The type and
-/// ownership checks are skipped after any parse error, so `diagnostics` then
-/// holds parse errors only.
+/// indexed and hover, outline and completion keep working. The type check is
+/// skipped after any parse error, so `diagnostics` then holds parse errors
+/// only. [`analyze_judged`] adds the ownership judgments.
 pub fn analyze(source: &str) -> Analysis {
-    analyze_inner(source, None)
+    analyze_inner(source, None, None)
 }
 
 /// Like [`analyze`], but resolves the document's imports through the module
@@ -217,7 +217,32 @@ pub fn analyze_linked(
     opts: &crate::loader::LoadOptions,
     resolver: &dyn crate::loader::ModuleResolver,
 ) -> Analysis {
-    analyze_inner(source, Some((root_path, opts, resolver)))
+    analyze_inner(source, Some((root_path, opts, resolver)), None)
+}
+
+/// The ownership judgments over a program that type-checks. They live in
+/// `vyrn-lower`, above this crate, which passes them in (`vyrn_lower::JUDGE`).
+#[derive(Clone, Copy)]
+pub struct Judge {
+    /// Every ownership refusal, in source order.
+    pub refusals: fn(&crate::ast::Program) -> Vec<Diagnostic>,
+    /// The analysis with the placer's memory rows.
+    pub ownership: fn(&crate::ast::Program) -> crate::own::Ownership,
+}
+
+/// Like [`analyze`], or [`analyze_linked`] with `linker`, and also shows what
+/// `judge` decides: its refusals among the diagnostics, its memory rows on
+/// hover.
+pub fn analyze_judged(
+    source: &str,
+    linker: Option<(
+        &str,
+        &crate::loader::LoadOptions,
+        &dyn crate::loader::ModuleResolver,
+    )>,
+    judge: &Judge,
+) -> Analysis {
+    analyze_inner(source, linker, Some(judge))
 }
 
 /// Rewrites a foreign-file diagnostic so it shows in the root document without
@@ -239,6 +264,7 @@ fn analyze_inner(
         &crate::loader::LoadOptions,
         &dyn crate::loader::ModuleResolver,
     )>,
+    judge: Option<&Judge>,
 ) -> Analysis {
     let tokens = match lexer::lex(source) {
         Ok(t) => t,
@@ -358,8 +384,8 @@ fn analyze_inner(
             // The editor asks the driver `vyrn check` asks, only of a program the
             // type check accepted, as `vyrn_lower::check_and_synthesize` does: the kernel
             // needs a body the core can build.
-            if checked_diags.is_empty() {
-                checked_diags.extend(movecheck::refusals(prog));
+            if let Some(judge) = judge.filter(|_| checked_diags.is_empty()) {
+                checked_diags.extend((judge.refusals)(prog));
             }
             // A diagnostic at an origin-governed line of a generated module moves
             // to its input file and is set aside for that file's URI.
@@ -512,15 +538,15 @@ fn analyze_inner(
         css_constant(member_src).unwrap_or_default()
     };
 
-    // Memory notes only when the checks ran and found no error: `own::analyze`
+    // Memory notes only when the checks ran and found no error: the analysis
     // reads a program the checker approved. `remapped` counts too, because a
     // type error at an origin-governed line leaves `diags` empty, and
     // the lowering refuses a body typed `<type error>`.
     let errored =
         |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
     let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
-    let memory = match &checked {
-        Some(prog) if clean => memory_notes(prog),
+    let memory = match (&checked, judge) {
+        (Some(prog), Some(judge)) if clean => memory_notes(prog, judge.ownership),
         _ => Vec::new(),
     };
 
@@ -550,8 +576,11 @@ fn analyze_inner(
 /// Every `let` in the root module, with what the ownership analysis decided.
 /// A function with no `module` tag belongs to this document, the filter
 /// `vyrn why --memory` uses.
-fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote> {
-    let own = crate::own::analyze(program);
+fn memory_notes(
+    program: &crate::ast::Program,
+    ownership: fn(&crate::ast::Program) -> crate::own::Ownership,
+) -> Vec<MemoryNote> {
+    let own = ownership(program);
     let mut out = Vec::new();
     for f in program
         .functions

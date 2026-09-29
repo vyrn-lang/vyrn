@@ -42,11 +42,11 @@ pub mod validate;
 pub mod vyx;
 
 pub use symbols::{
-    analyze, analyze_linked, at_module_scope, class_completions, class_token_hover, classify_at,
-    completions, import_spec_at, inlay_hints, member_completions, module_doc, references,
-    references_to, resolve, semantic_tokens, string_literal_completions, Analysis, Completion,
-    DocExport, InlayHint, LocalBinding, LocalKind, MemoryNote, ModuleDoc, RefRange, Resolution,
-    SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
+    analyze, analyze_judged, analyze_linked, at_module_scope, class_completions, class_token_hover,
+    classify_at, completions, import_spec_at, inlay_hints, member_completions, module_doc,
+    references, references_to, resolve, semantic_tokens, string_literal_completions, Analysis,
+    Completion, DocExport, InlayHint, Judge, LocalBinding, LocalKind, MemoryNote, ModuleDoc,
+    RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
 };
 // Hover's type spelling, shared with the LSP's inlay hints.
 pub use symbols::type_to_string;
@@ -88,12 +88,11 @@ pub fn check(source: &str) -> Result<ast::Program, String> {
     }
 }
 
-/// Lexes, parses, type-checks and move-checks `source`, and returns every
-/// problem found.
+/// Lexes, parses and type-checks `source`, and returns every problem found.
 ///
 /// A lex error is reported alone: the lexer stops at the first illegal token.
 /// The parser recovers past a bad top-level declaration. Once the
-/// source parses, every type and ownership error in every function is reported.
+/// source parses, every type error in every function is reported.
 pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
     symbols::analyze(source).diagnostics
 }
@@ -166,7 +165,7 @@ pub fn check_and_synthesize(
 }
 
 /// Checks a generator's own program: [`check_and_synthesize`] and the must-use
-/// judgment. `movecheck::refusals` judges nothing else under
+/// judgment. `vyrn_lower::refusals` judges nothing else under
 /// [`movecheck::comptime`]. The floor does not judge it: a generator's load is
 /// nested, so it refuses inside the load.
 pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
@@ -175,7 +174,9 @@ pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Di
         let _held = checker::Held::open(program);
         if diags.is_empty() {
             let _p = prof::phase("movecheck");
-            diags.extend(movecheck::refusals(program));
+            let mut owed = own::must_use_refusals(program);
+            movecheck::in_source_order(&mut owed);
+            diags.extend(owed);
         }
         diags
     })

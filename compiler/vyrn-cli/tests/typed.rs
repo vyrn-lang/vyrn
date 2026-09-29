@@ -125,7 +125,7 @@ fn step_ty(
 /// included. The caller holds the projection memo open.
 fn bodies_of(program: &Program) -> Vec<vyrn_frontend::core::Body> {
     let lowered = vyrn_lower::lower(program);
-    let own = vyrn_frontend::own::analyze(program);
+    let own = vyrn_lower::analyze(program);
     let mut bodies = Vec::new();
     for inst in &lowered.instances {
         if let Ok(b) = vyrn_lower::core::build(program, inst, &own) {
