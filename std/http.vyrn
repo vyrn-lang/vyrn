@@ -23,7 +23,7 @@
 import { Json, JsonField, copyJson, emit } from "std/json"
 import { parseJson } from "std/jsonread"
 import { fieldsOf, hasField } from "std/jsondec"
-import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
+import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, toLower, trim } from "std/strings"
 import { fnv1aStr, sha1 } from "std/hash"
 import { includes } from "std/arrays"
 // A path segment is wire text and a placeholder binds a value: `httpMatch`
@@ -519,7 +519,7 @@ fn httpOpenSocket(w: Socket, req: Request, ps: Map<String, String>) -> Response 
 fn httpTokenAsOffered(value: String, token: String) -> String {
     for part in split(value, ",") {
         let t = trim(part)
-        if lowerOf(t) == lowerOf(token) {
+        if toLower(t) == toLower(token) {
             return t.copy()
         }
     }
@@ -529,19 +529,6 @@ fn httpTokenAsOffered(value: String, token: String) -> String {
 /// Whether a comma-separated header value lists `token`, case-insensitively.
 fn httpHasToken(value: String, token: String) -> Bool {
     return httpTokenAsOffered(value, token) != ""
-}
-
-/// ASCII lowercase; a header value is not folded at the edge as a name is.
-fn lowerOf(s: String) -> String {
-    let mut out: Array<UInt8> = []
-    for b in bytes(s) {
-        if b >= 'A' && b <= 'Z' {
-            out.push(b + 32)
-        } else {
-            out.push(b)
-        }
-    }
-    return fromBytesOr(out, s)
 }
 
 /// The route a socket shadows, for the mount audit.
