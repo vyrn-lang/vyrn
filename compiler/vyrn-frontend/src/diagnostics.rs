@@ -76,9 +76,42 @@ impl Diagnostic {
         }
     }
 
+    /// Places the diagnostic in `file`; `None` means the root module.
+    pub fn in_file(self, file: Option<String>) -> Self {
+        Diagnostic { file, ..self }
+    }
+
+    /// Narrows the diagnostic to the 1-based columns `col..=end_col`.
+    pub fn at(self, col: usize, end_col: usize) -> Self {
+        Diagnostic {
+            col,
+            end_col,
+            ..self
+        }
+    }
+
+    pub fn with_note(self, note: String) -> Self {
+        Diagnostic {
+            note: Some(note),
+            ..self
+        }
+    }
+
     /// Renders `"line {N}: {message}"`, independent of the columns so the CLI
     /// output and the tests stay stable.
     pub fn render(&self) -> String {
         format!("line {}: {}", self.line, self.message)
     }
+}
+
+/// Opens a fix line under a refusal's sentence; `vyrn fix` reads a menu by it.
+pub const FIX: &str = "fix: ";
+
+/// Appends one `  fix: ...` line per way out of `sentence`, in order.
+pub fn menu(sentence: String, fixes: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
+    let mut message = sentence;
+    for f in fixes {
+        message.push_str(&format!("\n  {FIX}{f}"));
+    }
+    message
 }

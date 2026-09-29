@@ -1,7 +1,7 @@
 //! Recursive-descent parser with precedence climbing for expressions.
 
 use crate::ast::*;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{menu, Diagnostic};
 use crate::lexer::{Hole, Tok, Token};
 use std::collections::HashSet;
 
@@ -3744,19 +3744,14 @@ impl Parser {
         // The `|x| e` spelling gets a named refusal: a `|` is infix-only, so it cannot
         // start an expression.
         if matches!(self.peek(), Tok::Pipe | Tok::OrOr) {
-            let empty = matches!(self.peek(), Tok::OrOr);
-            return Err(Diagnostic::error(
-                line,
-                col,
-                "parse",
-                if empty {
-                    "`|| ...` is not a lambda here; a lambda takes its parameters before an arrow\n  fix: `() -> ...`"
-                        .to_string()
-                } else {
-                    "`|x| ...` is not a lambda here; a lambda takes its parameters before an arrow\n  fix: `x -> ...`, or `(x, y) -> ...` for more than one"
-                        .to_string()
-                },
-            ));
+            let (form, fix) = match self.peek() {
+                Tok::OrOr => ("||", "`() -> ...`"),
+                _ => ("|x|", "`x -> ...`, or `(x, y) -> ...` for more than one"),
+            };
+            let says = format!(
+                "`{form} ...` is not a lambda here; a lambda takes its parameters before an arrow"
+            );
+            return Err(Diagnostic::error(line, col, "parse", menu(says, [fix])));
         }
         match self.advance() {
             Tok::Int(v) => Ok(Expr::Int(v, Id::NEW)),

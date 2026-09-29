@@ -574,7 +574,7 @@ fn audience_objection(
     if !audience::widens(from.audience, to.audience) {
         return None;
     }
-    let mut d = Diagnostic::error(
+    let d = Diagnostic::error(
         line,
         0,
         "audience",
@@ -586,14 +586,13 @@ fn audience_objection(
             to.audience.phrase()
         ),
     );
-    d.note = Some(format!(
+    Some(d.with_note(format!(
         "audience `{}` is declared by vyrn.json:{} — {}; the importer's own audience comes from {}",
         to.audience,
         to.audience.key(),
         audience::remedy(to.audience, importer, imported, map),
         from.because()
-    ));
-    Some(d)
+    )))
 }
 
 /// Refuses an import of `std/mem` from anywhere but `std/runtime`, and of
@@ -636,18 +635,17 @@ fn runtime_fence(
         Some(map) => crate::audience::display_path(importer, map),
         None => importer.to_string(),
     };
-    let mut d = Diagnostic::error(
+    let d = Diagnostic::error(
         line,
         0,
         "audience",
         format!("`{shown}` cannot import `{fenced}`, whose audience is the runtime"),
     );
-    d.note = Some(format!(
+    Some(d.with_note(format!(
         "audience `{RUNTIME_SPEC}` is declared by the compiler, not by \
          vyrn.json; the safe surface over `std/mem` is what `{RUNTIME_SPEC}` exports, \
          and the compiler links that into every program"
-    ));
-    Some(d)
+    )))
 }
 
 /// One parsed module awaiting linking.
@@ -3623,7 +3621,7 @@ fn clash_diagnostics(
             ImportSource::Generator { .. } => None,
         };
         let line = imp.line;
-        let mut d = Diagnostic::error(
+        let d = Diagnostic::error(
             line,
             0,
             "load",
@@ -3645,7 +3643,7 @@ fn clash_diagnostics(
                 .to_string(),
         };
         let rest = &names[1..];
-        d.note = Some(if rest.is_empty() {
+        let note = if rest.is_empty() {
             fix
         } else {
             let list: Vec<String> = rest.iter().map(|n| format!("`{n}`")).collect();
@@ -3654,8 +3652,8 @@ fn clash_diagnostics(
                 list.join(", "),
                 if rest.len() == 1 { "s" } else { "" }
             )
-        });
-        out.push(in_module(d, &m.key, root_key));
+        };
+        out.push(in_module(d.with_note(note), &m.key, root_key));
     }
     out
 }

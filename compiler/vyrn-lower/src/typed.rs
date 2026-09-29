@@ -486,11 +486,10 @@ pub mod obligation {
         } else {
             return;
         };
-        let mut d = Diagnostic::error(line, 0, "movecheck", msg);
         // A stream's release is pushed by its own lowering, so `drop` on one
         // reclaims nothing; a declared type has no `close` and is not iterable
         // unless it says so.
-        d.note = Some(match &o.row {
+        let note = match &o.row {
             Linear::Stream => format!(
                 "a stream must be consumed with `for … in`, forwarded by returning it, \
                  or released with `close({name})` — on every path"
@@ -507,9 +506,9 @@ pub mod obligation {
                  must be handed on by name — passed to a call, forwarded by returning it, \
                  or released with `drop {name}`, which releases each element — on every path"
             ),
-        });
-        d.file = module.clone();
-        out.push(d);
+        };
+        let d = Diagnostic::error(line, 0, "movecheck", msg).with_note(note);
+        out.push(d.in_file(module.clone()));
     }
 
     /// Checks that every must-use binding declared in `b` is disposed on every

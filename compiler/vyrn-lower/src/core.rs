@@ -18,6 +18,8 @@ use vyrn_frontend::ast::{
     Pattern, Program, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::Owned;
+use vyrn_frontend::diagnostics::{menu, Diagnostic};
+use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
 pub use vyrn_frontend::prelude::Spec;
@@ -1289,9 +1291,12 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
     }
     if let Some((root, path)) = vyrn_frontend::project::element_path(e) {
         return refuse(
-            format!(
-                "`{path}` may not be taken — an element is not a place a take reaches\n  fix: \
-                 `{root}.swapRemove(..)` returns the element and leaves the container one shorter"
+            menu(
+                format!("`{path}` may not be taken — an element is not a place a take reaches"),
+                [format!(
+                    "`{root}.swapRemove(..)` returns the element and leaves the container one \
+                     shorter"
+                )],
             ),
             line,
         );
@@ -1309,7 +1314,7 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
             "drop the `consume`: the value is already owned",
         )
     };
-    refuse(format!("{says}\n  fix: {drop_it}"), line)
+    refuse(menu(says.to_string(), [drop_it]), line)
 }
 
 /// The scrutinee a binder borrows: its name, where the construct does not
@@ -2730,10 +2735,14 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         refuse(
-            format!(
-                "`{a}` may not be handed out of an arm inside a loop — the result is \
-                 released on every turn, and `{a}` is bound outside the loop\n  \
-                 fix: `{a}.copy()` if the arm should hand out a value of its own"
+            menu(
+                format!(
+                    "`{a}` may not be handed out of an arm inside a loop — the result is \
+                     released on every turn, and `{a}` is bound outside the loop"
+                ),
+                [format!(
+                    "`{a}.copy()` if the arm should hand out a value of its own"
+                )],
             ),
             line,
         )
@@ -6402,11 +6411,8 @@ impl<'a> Builder<'a> {
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow && !info.must_use_param => {
-                let mut msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
-                for f in k.fixes(&path) {
-                    msg.push_str(&format!("\n  fix: {f}"));
-                }
-                refuse(msg, line)
+                let msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
+                refuse(menu(msg, k.fixes(&path)), line)
             }
             _ => Ok(()),
         }
@@ -7897,7 +7903,7 @@ fn mentions_in_lambda(body: &LambdaBody) -> Vec<&Expr> {
 }
 
 thread_local! {
-    static REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
+    static REFUSALS: std::cell::RefCell<Vec<Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
     /// The core's bodies for the program last analysed on this thread, by the
@@ -8703,14 +8709,11 @@ pub fn refuses() -> bool {
 /// A gap ([`Gap`] with no `rule`) is not collected here: the core has no
 /// opinion, and the command goes on with the plan. A refusal is an answer no
 /// placement repairs, and only refusals fail a command.
-pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
+pub fn take_refusals() -> Vec<Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
-type Typed = (
-    Vec<vyrn_frontend::diagnostics::Diagnostic>,
-    std::collections::HashSet<NodeId>,
-);
+type Typed = (Vec<Diagnostic>, std::collections::HashSet<NodeId>);
 
 thread_local! {
     /// What the typed judgment refused about the program last analysed on
@@ -8747,9 +8750,7 @@ fn typed(
         // One sentence per line: a declaration's predicate is also the body
         // of its constructor.
         for u in crate::typed::refused(top, as_written) {
-            let said = |d: &vyrn_frontend::diagnostics::Diagnostic| {
-                (&d.file, d.line, &d.message) == (file, u.0, &u.1)
-            };
+            let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
             if !out.iter().any(said) && !found.contains(&u) {
                 found.push(u);
             }
@@ -8759,11 +8760,9 @@ fn typed(
         }
         found.sort_by_key(|(line, _)| *line);
         let refused = !found.is_empty();
-        out.extend(
-            found
-                .into_iter()
-                .map(|(line, message)| diagnostic(line, message, file)),
-        );
+        out.extend(found.into_iter().map(|(line, message)| {
+            Diagnostic::error(line, 0, "check", message).in_file(file.clone())
+        }));
         refused
     })
 }
@@ -8796,19 +8795,9 @@ fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
     None
 }
 
-fn diagnostic(
-    line: usize,
-    message: String,
-    file: &Option<String>,
-) -> vyrn_frontend::diagnostics::Diagnostic {
-    let mut d = vyrn_frontend::diagnostics::Diagnostic::error(line, 0, "check", message);
-    d.file = file.clone();
-    d
-}
-
 /// The typed judgment's refusals, drained. Installed into `own`'s slot by
 /// [`crate::install`].
-pub fn typed_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+pub fn typed_diagnostics() -> Vec<Diagnostic> {
     TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
 }
 
@@ -8822,7 +8811,7 @@ pub fn typed_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
 /// identity, with the count of that sentence within one body's run:
 /// `out.push(s) out.push(s)` on one line is two mistakes. `file` is `None`
 /// for the root module, which tells `vyrn fix` the edit is its to make.
-pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+pub fn refusal_diagnostics() -> Vec<Diagnostic> {
     if !refuses() {
         let _ = take_refusals();
         return Vec::new();
@@ -8838,17 +8827,13 @@ pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
                 body = r.body.clone();
                 nth.clear();
             }
-            let key = (r.file.clone(), r.line, r.message.clone());
+            let d = &r.diagnostic;
+            let key = (d.file.clone(), d.line, d.message.clone());
             let n = nth.entry(key.clone()).or_default();
             *n += 1;
             seen.insert((key, *n))
         })
-        .map(|r| {
-            let mut d =
-                vyrn_frontend::diagnostics::Diagnostic::error(r.line, 0, "movecheck", r.message);
-            d.file = r.file;
-            d
-        })
+        .map(|r| r.diagnostic)
         .collect()
 }
 
@@ -8868,14 +8853,13 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str) {
             g.what
         );
         // The typed judgment's list prints whichever pass refused.
-        TYPED.with(|t| t.borrow_mut().0.push(diagnostic(g.line, message, file)));
+        let d = Diagnostic::error(g.line, 0, "check", message).in_file(file.clone());
+        TYPED.with(|t| t.borrow_mut().0.push(d));
         return;
     };
     REFUSALS.with(|v| {
-        v.borrow_mut().push(crate::kernel::Refusal {
-            message,
-            line: g.line,
-            file: file.clone(),
+        v.borrow_mut().push(Refusal {
+            diagnostic: Diagnostic::error(g.line, 0, "movecheck", message).in_file(file.clone()),
             body: body.to_string(),
         })
     });
@@ -9286,7 +9270,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
 /// One body `augment` built, or served out of the memo.
 enum Made {
     /// The refusals the memo recorded for it.
-    Served(Vec<crate::kernel::Refusal>),
+    Served(Vec<Refusal>),
     Built(
         Option<vyrn_frontend::movecheck::JudgmentKey>,
         Result<Body, Gap>,
@@ -9298,18 +9282,8 @@ enum Made {
 fn serve(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
     key: Option<&vyrn_frontend::movecheck::JudgmentKey>,
-) -> Option<Vec<crate::kernel::Refusal>> {
-    let hit = memo?.get(key?)?;
-    Some(
-        hit.into_iter()
-            .map(|(file, line, message, body)| crate::kernel::Refusal {
-                message,
-                line,
-                file,
-                body,
-            })
-            .collect(),
-    )
+) -> Option<Vec<Refusal>> {
+    memo?.get(key?)
 }
 
 /// Records one body's refusals, from `from` to the end of the list, for
@@ -9323,15 +9297,7 @@ fn remember(
     let (Some(memo), Some(key)) = (memo, key) else {
         return;
     };
-    memo.put(
-        key,
-        REFUSALS.with(|v| {
-            v.borrow()[from..]
-                .iter()
-                .map(|r| (r.file.clone(), r.line, r.message.clone(), r.body.clone()))
-                .collect()
-        }),
-    );
+    memo.put(key, REFUSALS.with(|v| v.borrow()[from..].to_vec()));
 }
 
 /// The memory report for one frame, read by `vyrn why --memory` and the
@@ -9540,7 +9506,7 @@ fn place_frames(
             Err(rs) => {
                 for r in rs {
                     if trace {
-                        eprintln!("placer: refused: {}: {}", r.body, r.message);
+                        eprintln!("placer: refused: {}: {}", r.body, r.diagnostic.message);
                     }
                     // No placement repairs these. Every one the body earns is
                     // kept, so the driver can merge by binding and line.

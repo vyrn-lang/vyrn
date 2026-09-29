@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use crate::ast::*;
 use crate::consteval;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{menu, Diagnostic};
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
 use crate::types::FALLIBLE;
@@ -32,10 +32,7 @@ macro_rules! cerr {
 macro_rules! cerr_at {
     ($line:expr, $span:expr, $($arg:tt)*) => {{
         let (col, end_col) = $span;
-        let mut d = cerr!($line, $($arg)*);
-        d.col = col;
-        d.end_col = end_col;
-        d
+        cerr!($line, $($arg)*).at(col, end_col)
     }};
 }
 
@@ -541,15 +538,14 @@ fn check_accum_inner(
     let mut types: HashMap<String, TypeDecl> = HashMap::new();
     for t in &program.type_decls {
         if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
-            let mut d = cerr!(t.line, "cannot redefine built-in type `{}`", t.name);
-            d.file = t.module.clone();
-            out.push(d);
+            out.push(
+                cerr!(t.line, "cannot redefine built-in type `{}`", t.name)
+                    .in_file(t.module.clone()),
+            );
             continue;
         }
         if types.contains_key(&t.name) {
-            let mut d = cerr!(t.line, "type `{}` defined twice", t.name);
-            d.file = t.module.clone();
-            out.push(d);
+            out.push(cerr!(t.line, "type `{}` defined twice", t.name).in_file(t.module.clone()));
             continue;
         }
         types.insert(t.name.clone(), t.clone());
@@ -1142,9 +1138,7 @@ fn check_accum_inner(
     // 3b. Validate each contract decl: member types exist, defaults match.
     for c in &program.contracts {
         for s in checker.check_contract_decl(c) {
-            let mut d = s;
-            d.file = c.module.clone();
-            out.push(d);
+            out.push(s.in_file(c.module.clone()));
         }
     }
 
@@ -1152,9 +1146,7 @@ fn check_accum_inner(
     //     name types that exist.
     for p in &program.protocols {
         for s in checker.check_protocol_decl(p) {
-            let mut d = s;
-            d.file = p.module.clone();
-            out.push(d);
+            out.push(s.in_file(p.module.clone()));
         }
     }
 
@@ -1241,14 +1233,10 @@ fn check_accum_inner(
             Ok(())
         })();
         if let Err(s) = r {
-            let mut d = s;
-            d.file = f.module.clone();
-            out.push(d);
+            out.push(s.in_file(f.module.clone()));
         }
         for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = f.module.clone();
-            out.push(d);
+            out.push(s.in_file(f.module.clone()));
         }
         if out.len() > produced_from {
             refused.insert(f.name.clone());
@@ -1302,11 +1290,7 @@ fn check_accum_inner(
 /// rooted in `self` or a parameter, which the access site owns.
 fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
     for (imp, f) in crate::project::all(program) {
-        let mut push = |msg: Diagnostic| {
-            let mut d = msg;
-            d.file = f.module.clone();
-            out.push(d);
-        };
+        let mut push = |d: Diagnostic| out.push(d.in_file(f.module.clone()));
         if crate::project::is_optional(f) {
             check_optional_place(checker, f, &mut push);
             continue;
@@ -1586,13 +1570,12 @@ fn check_named_blocks(
     for t in blocks {
         let key = (t.module.clone(), t.name.clone());
         if let Some(prev) = seen.get(&key) {
-            let mut d = cerr!(
+            let d = cerr!(
                 t.line,
                 "duplicate {noun} name {:?} (already declared on line {prev})",
                 t.name
             );
-            d.file = t.module.clone();
-            out.push(d);
+            out.push(d.in_file(t.module.clone()));
         } else {
             seen.insert(key, t.line);
         }
@@ -1622,14 +1605,10 @@ fn check_named_blocks(
             is_mut: false,
         };
         if let Err(s) = checker.function_body(&synthetic, &t.body) {
-            let mut d = s;
-            d.file = t.module.clone();
-            out.push(d);
+            out.push(s.in_file(t.module.clone()));
         }
         for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = t.module.clone();
-            out.push(d);
+            out.push(s.in_file(t.module.clone()));
         }
     }
     *host.borrow_mut() = false;
@@ -2965,13 +2944,19 @@ impl<'a> Checker<'a> {
                 self.errors.borrow_mut().push(cerr_at!(
                     f.line,
                     f.name_span(),
-                    "extern fn `{}` parameter `{}` may not be `consume` — the caller \
-                     across this boundary is JS, and it releases the String when the call \
-                     returns\n  fix: take `{}: String` and store `{}.copy()`",
-                    f.name,
-                    p.name,
-                    p.name,
-                    p.name
+                    "{}",
+                    menu(
+                        format!(
+                            "extern fn `{}` parameter `{}` may not be `consume` — the caller \
+                             across this boundary is JS, and it releases the String when the \
+                             call returns",
+                            f.name, p.name
+                        ),
+                        [format!(
+                            "take `{}: String` and store `{}.copy()`",
+                            p.name, p.name
+                        )]
+                    )
                 ));
             }
         }
@@ -2985,14 +2970,7 @@ impl<'a> Checker<'a> {
                 f.ret
             ));
         }
-        let mut errs = self.errors.borrow_mut();
-        if let Some(first) = errs.first().cloned() {
-            let rest: Vec<Diagnostic> = errs.drain(1..).collect();
-            *errs = rest;
-            Err(first)
-        } else {
-            Ok(())
-        }
+        self.first_error()
     }
 
     /// Checks every global in declaration order and records its type in
@@ -3082,10 +3060,7 @@ impl<'a> Checker<'a> {
                     mutable: g.mutable,
                 },
                 Err(s) => {
-                    out.extend(s.map(|mut d| {
-                        d.file = g.module.clone();
-                        d
-                    }));
+                    out.extend(s.map(|d| d.in_file(g.module.clone())));
                     refused.insert(g.name.clone());
                     Binding {
                         ty: Type::Err,
@@ -3104,10 +3079,7 @@ impl<'a> Checker<'a> {
                     r.borrow_mut().node_types.remove(&key);
                 }
             }
-            out.extend(lambda.into_iter().map(|mut d| {
-                d.file = g.module.clone();
-                d
-            }));
+            out.extend(lambda.into_iter().map(|d| d.in_file(g.module.clone())));
             self.globals.borrow_mut().insert(g.name.clone(), binding);
             ready.insert(g.name.clone());
         }
@@ -3154,14 +3126,16 @@ impl<'a> Checker<'a> {
             );
         }
         self.block(body, &f.ret, &mut scope);
-        // The first error is the `Err`; the rest stay in `errors`.
+        self.first_error()
+    }
+
+    /// Hands out the first recorded error as the `Err`; the rest stay in
+    /// `errors`.
+    fn first_error(&self) -> Result<(), Diagnostic> {
         let mut errs = self.errors.borrow_mut();
-        if let Some(first) = errs.first().cloned() {
-            let rest: Vec<Diagnostic> = errs.drain(1..).collect();
-            *errs = rest;
-            Err(first)
-        } else {
-            Ok(())
+        match errs.is_empty() {
+            true => Ok(()),
+            false => Err(errs.remove(0)),
         }
     }
 
@@ -6914,20 +6888,15 @@ impl<'a> Checker<'a> {
         if let Some((root, path)) = crate::ast::place_path(arg) {
             for (j, b) in args.iter().enumerate() {
                 if j != i && crate::ast::mentions(b, &root) {
-                    let mut d = cerr!(
-                        line,
+                    let fixes = [
+                        format!("`{root}.copy()` for the second argument"),
+                        "or split the call so the two accesses do not overlap".to_string(),
+                    ];
+                    let says = format!(
                         "`{path}` is passed to `{fname}` as `modify` and read again in the \
                          same call — a `modify` borrow is exclusive"
                     );
-                    d.message.push_str(&format!(
-                        "
-  fix: `{root}.copy()` for the second argument"
-                    ));
-                    d.message.push_str(
-                        "
-  fix: or split the call so the two accesses do not overlap",
-                    );
-                    return Err(d);
+                    return Err(cerr!(line, "{}", menu(says, fixes)));
                 }
             }
         }
@@ -7423,9 +7392,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
                         g.name
                     )
                 };
-                let mut d = msg;
-                d.file = g.module.clone();
-                out.push(d);
+                out.push(msg.in_file(g.module.clone()));
                 break;
             }
             for callee in edges.clone() {
