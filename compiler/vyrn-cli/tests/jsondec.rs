@@ -15,7 +15,7 @@ use std::process::Command;
 use vyrn_frontend::hash::sha256_hex;
 
 /// The transcript's SHA-256.
-const CORPUS_DIGEST: &str = "cb683ded4a4060bb661f8032c2c54136dde3c2137a0ce52d48fe0aac151eb1f5";
+const CORPUS_DIGEST: &str = "41b65a23126315011a6659be00463b187c6bb674c11c950f34a3ed734d095b02";
 
 fn repo_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -447,6 +447,20 @@ const TARGETS: &[Target] = &[
         show: "x.copy()",
         inputs: &["\"ab\"", "\"a\"", "7", "", "\"ab\" x"],
     },
+    Target {
+        tag: "range",
+        decls: "type Range = { lo: Int64, hi: Int64 } where lo <= hi",
+        ty: "Range",
+        show: "toJson(x)",
+        inputs: &["{\"lo\":1,\"hi\":2}", "{\"lo\":3,\"hi\":2}", "{\"lo\":3}"],
+    },
+    Target {
+        tag: "inrange",
+        decls: "type TInRange = { r: Range }",
+        ty: "TInRange",
+        show: "toJson(x)",
+        inputs: &["{\"r\":{\"lo\":1,\"hi\":1}}", "{\"r\":{\"lo\":2,\"hi\":1}}"],
+    },
 ];
 
 /// One Vyrn program covering the whole corpus.
@@ -687,6 +701,16 @@ fn the_decode_corpus_answers_exactly_this() {
             "{\"n\":1,\"kids\":[{\"n\":2,\"kids\":[{\"n\":\"x\",\"kids\":[]}]}]}"
         ),
         "json.type@kids[0].kids[0].n: expected integer, found string"
+    );
+
+    // A record `where` runs after its fields decode, and encodes as its fields.
+    assert_eq!(
+        row("range", "{\"lo\":1,\"hi\":2}"),
+        "ok {\"lo\":1,\"hi\":2}"
+    );
+    assert_eq!(
+        row("inrange", "{\"r\":{\"lo\":2,\"hi\":1}}"),
+        "validate@r: validation failed: `Range` violates its `where` clause"
     );
 
     let digest = sha256_hex(stdout.as_bytes());
