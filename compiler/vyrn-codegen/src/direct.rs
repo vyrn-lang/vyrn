@@ -14043,24 +14043,14 @@ fn ho_shell(
 /// `ons`. [`Fn_::core_switch`] binds a payload binder on entering the arm and reads a
 /// scrutinee as an address, so the screen's place clause asks about neither.
 fn core_switched(s: &St, ons: bool, out: &mut Vec<vyrn_lower::core::Name>) {
-    match s {
-        St::Switch { on, arms, .. } => {
-            if let (Val::Name(n), true) = (on, ons) {
-                out.push(*n);
-            }
-            for a in arms {
-                out.extend(a.binds.iter().copied());
-                a.body.iter().for_each(|s| core_switched(s, ons, out));
-            }
+    for (r, _) in s.rows() {
+        let St::Switch { on, arms, .. } = r else {
+            continue;
+        };
+        if let (Val::Name(n), true) = (on, ons) {
+            out.push(*n);
         }
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_switched(s, ons, out));
-            els.iter().for_each(|s| core_switched(s, ons, out));
-        }
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_switched(s, ons, out));
-        }
-        _ => {}
+        arms.iter().for_each(|a| out.extend(&a.binds));
     }
 }
 
