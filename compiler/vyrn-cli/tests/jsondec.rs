@@ -15,7 +15,7 @@ use std::process::Command;
 use vyrn_frontend::hash::sha256_hex;
 
 /// The transcript's SHA-256.
-const CORPUS_DIGEST: &str = "7b5c763d82a681935b231d2f6a9f807f110116f84d375422c1e035304b1b377d";
+const CORPUS_DIGEST: &str = "cb683ded4a4060bb661f8032c2c54136dde3c2137a0ce52d48fe0aac151eb1f5";
 
 fn repo_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -387,6 +387,65 @@ const TARGETS: &[Target] = &[
             "{\"n\":1,\"kids\":[{\"kids\":[]}]}",
             "{\"n\":1,\"kids\":[{\"n\":2,\"kids\":[{\"n\":\"x\",\"kids\":[]}]}]}",
         ],
+    },
+    Target {
+        tag: "imap",
+        decls: "type IM = Map<Int64, Array<Age>>",
+        ty: "IM",
+        show: "toJson(x)",
+        inputs: &[
+            "{}",
+            "{\"1\":[5],\"-2\":[]}",
+            "{\"01\":[5]}",
+            "{\"x\":[5],\"2\":[0,7,\"a\"]}",
+            "{\"1\":[1],\"1\":[2]}",
+            "[]",
+        ],
+    },
+    Target {
+        tag: "anon",
+        decls: "type TAn = { p: { x: Int8, y: Option<UInt16> }, t: Option<Bool> }",
+        ty: "TAn",
+        show: "toJson(x)",
+        inputs: &[
+            "{\"p\":{\"x\":1}}",
+            "{\"p\":{\"x\":1,\"y\":70000},\"t\":true}",
+            "{\"p\":{\"x\":300,\"y\":\"a\"},\"t\":1}",
+            "{\"p\":1}",
+        ],
+    },
+    Target {
+        tag: "tuple",
+        decls: "type Op = | Nop | Move(Int64, Age) | Say(String) 
+ type Ops = Array<Op>",
+        ty: "Ops",
+        show: "toJson(x)",
+        inputs: &[
+            "[\"Nop\",{\"Move\":[1,2]},{\"Say\":\"hi\"}]",
+            "[{\"Move\":[1]},{\"Move\":[1,0]},{\"Move\":3},{\"Say\":4}]",
+            "[\"Jump\",{\"Nop\":1},{\"Move\":[1,2],\"Say\":\"a\"},null]",
+            "{\"Nop\":null}",
+        ],
+    },
+    // `elemAt` answers `JNull` past the end and `JNull` is a legal `None`, so
+    // only the arity check refuses a short all-`Option` tuple.
+    Target {
+        tag: "optpair",
+        decls: "type OP = | P(Option<Int64>, Option<Int64>)",
+        ty: "OP",
+        show: "toJson(x)",
+        inputs: &[
+            "{\"P\":[null,null]}",
+            "{\"P\":[]}",
+            "{\"P\":[null,null,null]}",
+        ],
+    },
+    Target {
+        tag: "top",
+        decls: "type Tag = String where value.byteLength >= 2",
+        ty: "Tag",
+        show: "x.copy()",
+        inputs: &["\"ab\"", "\"a\"", "7", "", "\"ab\" x"],
     },
 ];
 

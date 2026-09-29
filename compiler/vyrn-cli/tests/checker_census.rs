@@ -72,7 +72,7 @@ fn sections() -> Vec<Section> {
         sec("fn set_gen_host", Shared),
         sec("struct LocalBinding", Shared),
         sec("const RESERVED", Surface),
-        sec("fn check_accum_with_json_types", Shared),
+        sec("fn check_accum_with_sites", Shared),
         sec("fn check_accum_inner", Shared),
         sec("fn check_places", Refusal),
         sec("fn check_optional_place", Refusal),

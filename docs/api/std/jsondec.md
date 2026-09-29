@@ -1,8 +1,9 @@
 # std/jsondec
 
-std/jsondec: the untyped half of `fromJson`.
+std/jsondec: the untyped half of `fromJson`, and the generator of the
+typed half.
 
-`vyrn-frontend`'s `jsondec` generates the typed half per target type; it
+`jsonDecoders` writes the typed half per target type; what it writes
 calls this module for kind names, `Issue`s, paths, tree accessors and
 scalar decoders. Decoding accumulates: a decoder records its
 failure and returns, and a composite constructs only when every part
@@ -219,3 +220,15 @@ fn dFloat32(v: Json, path: String, iss: modify Array<Issue>) -> Array<Float32>
 
 A JSON number as a `Float32`, rounded once: decimal -> `Float64` ->
 `Float32` rounds twice and is wrong near a `Float32` tie.
+
+## jsonDecoders
+
+```vyrn
+fn jsonDecoders(t: TypeArg) -> String
+```
+
+Writes the decoders `fromJson` calls: for each root, the entry that reads a
+document into `Validation<T>`, and for each node, the function that decodes
+a `Json` tree into zero or one value. Generated source cannot spell reserved
+names, so it writes `VyrnRt_` for `std/json`'s, `VyrnRd_` for this module's
+and `VyrnWp_` for a `where` type's predicate.

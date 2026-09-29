@@ -242,7 +242,7 @@ pub(crate) fn local_index(
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
 pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (out, binders, _, _, _, _) = check_accum_full(program);
+    let (out, binders, _, _, _) = check_accum_full(program);
     (out, binders)
 }
 
@@ -443,21 +443,13 @@ pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
 
 use crate::types::INT32;
 
-/// Returns the diagnostics, every `fromJson` target, every `derive` site,
-/// and the refused set: the functions and module state the
-/// diagnostics all belong to, so every other body is typed. The set is `None`
-/// when a refusal stands anywhere else.
-pub fn check_accum_with_json_types(program: &Program) -> CheckedJson {
-    let (out, _, _, jdec, derived, refused) = check_accum_full(program);
-    (out, jdec, derived, refused)
+/// Returns the diagnostics, every `derive` site, and the refused set: the
+/// functions and module state the diagnostics all belong to, so every other
+/// body is typed. The set is `None` when a refusal stands anywhere else.
+pub fn check_accum_with_sites(program: &Program) -> Appended {
+    let (out, _, _, derived, refused) = check_accum_full(program);
+    (out, derived, refused)
 }
-
-pub type CheckedJson = (
-    Vec<Diagnostic>,
-    Vec<Type>,
-    Vec<(String, Type)>,
-    Option<HashSet<String>>,
-);
 
 fn check_accum_full(
     program: &Program,
@@ -465,12 +457,11 @@ fn check_accum_full(
     Vec<Diagnostic>,
     Vec<LocalBinding>,
     StoredFnEffects,
-    Vec<Type>,
     Vec<(String, Type)>,
     Option<HashSet<String>>,
 ) {
-    let (out, binders, effects, jdec, derived, typed, _) = check_accum_inner(program, false, 0);
-    (out, binders, effects, jdec, derived, typed)
+    let (out, binders, effects, derived, typed, _) = check_accum_inner(program, false, 0);
+    (out, binders, effects, derived, typed)
 }
 
 /// Checks `program`, whose functions before `at` passed a check alone, typing
@@ -479,11 +470,9 @@ fn check_accum_full(
 ///
 /// A body is typed against the declarations alone, so an earlier body keeps
 /// its verdict unless the appended functions change a table it reads by
-/// something other than their names. `None` names the two cases where a
-/// whole check must run instead: an appended signature makes a stored
-/// function value's parameter `consume`, or an appended body names a
-/// `fromJson` target, whose place in the ordered target list only a whole
-/// check knows.
+/// something other than their names. `None` names the case where a whole
+/// check must run instead: an appended signature makes a stored function
+/// value's parameter `consume`.
 pub fn check_appended(program: &Program, at: usize) -> Option<Appended> {
     let before = caps_by_sig(&program.functions[..at]);
     let widened = caps_by_sig(&program.functions)
@@ -492,8 +481,8 @@ pub fn check_appended(program: &Program, at: usize) -> Option<Appended> {
     if widened {
         return None;
     }
-    let (out, _, _, jdec, derived, typed, _) = check_accum_inner(program, false, at);
-    jdec.is_empty().then_some((out, derived, typed))
+    let (out, _, _, derived, typed, _) = check_accum_inner(program, false, at);
+    Some((out, derived, typed))
 }
 
 pub type Appended = (
@@ -585,7 +574,6 @@ fn check_accum_inner(
     Vec<Diagnostic>,
     Vec<LocalBinding>,
     StoredFnEffects,
-    Vec<Type>,
     Vec<(String, Type)>,
     Option<HashSet<String>>,
     Option<Recorded>,
@@ -1152,7 +1140,6 @@ fn check_accum_inner(
         stored_sources: RefCell::new(Vec::new()),
         arg_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
-        json_dec_types: RefCell::new(Vec::new()),
         derive_sites: RefCell::new(Vec::new()),
         record: recording.then(RefCell::default),
         desugaring: std::cell::Cell::new(false),
@@ -1305,15 +1292,12 @@ fn check_accum_inner(
         calls: checker.stored_calls.borrow().clone(),
     };
     let binders = local_index(program, &checker.binder_types.borrow());
-    let mut json_dec_types = checker.json_dec_types.borrow().clone();
-    json_dec_types.dedup_by_key(|t| format!("{t:?}"));
     let typed = (in_bodies == out.len()).then_some(refused);
     let record = checker.record.map(RefCell::into_inner);
     (
         out,
         binders,
         effects,
-        json_dec_types,
         checker.derive_sites.take(),
         typed,
         record,
@@ -1699,7 +1683,7 @@ pub struct Recorded {
 
 /// One pass that returns the diagnostics, the root's bindings and the record.
 fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
-    let (diags, binders, _, _, _, _, made) = check_accum_inner(program, true, 0);
+    let (diags, binders, _, _, _, made) = check_accum_inner(program, true, 0);
     (diags, binders, made.unwrap_or_default())
 }
 
@@ -1874,8 +1858,6 @@ struct Checker<'a> {
     /// Each call through a stored function value, as (enclosing function,
     /// signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
-    /// Every `fromJson<T>` target, for the decoders.
-    json_dec_types: RefCell<Vec<Type>>,
     /// Every `derive(g, x)` site: the generator and `x`'s type.
     derive_sites: RefCell<Vec<(String, Type)>>,
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
@@ -6395,11 +6377,13 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // `fromJson<T>` needs `T`'s decoder linked before lowering, and the
-            // solve is the one place `T` is known.
+            // `fromJson<T>(s)` calls what `std/jsondec`'s generator writes for
+            // `T`, and the solve is the one place `T` is known.
             if d.key == "fromJson" {
                 if let Some(t) = subst.get("T") {
-                    self.json_dec_types.borrow_mut().push(t.clone());
+                    self.derive_sites
+                        .borrow_mut()
+                        .push((crate::loader::JSON_DECODERS.to_string(), t.clone()));
                 }
             }
             let rty = crate::types::substitute(ret, &subst);

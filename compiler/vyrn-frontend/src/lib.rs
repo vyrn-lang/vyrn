@@ -17,7 +17,6 @@ pub mod floor;
 pub mod fmt;
 pub mod gen;
 pub mod hash;
-pub mod jsondec;
 pub mod lexer;
 pub mod loader;
 pub mod manifest;
@@ -113,15 +112,14 @@ pub fn load(
 ///
 /// An ordinary load and a generator re-loaded as its own root both
 /// call it, so neither misses the synthesis. The synthesis sits here because
-/// only here has the checker just typed every `fromJson` target while no
+/// only here has the checker just typed every `derive` site while no
 /// backend has built its function table from the program yet.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     let check_span = prof::phase("check");
-    let (mut diags, mut json_dec_types, derived, mut refused) =
-        checker::check_accum_with_json_types(program);
+    let (mut diags, derived, mut refused) = checker::check_accum_with_sites(program);
     // What a `derive` generator writes joins the program and is checked
     // against it, so the second check's answers stand. The `where`
-    // constructors join with it: written code may call the predicates.
+    // constructors join with it: `fromJson`'s decoders call the predicates.
     if diags.is_empty() && !derived.is_empty() {
         match gen::derive(program, &derived) {
             Ok((fns, decls)) => {
@@ -139,8 +137,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
                 (diags, again, refused, old_sites) = match checker::check_appended(program, at) {
                     Some((d, again, r)) => (d, again, r, 0),
                     None => {
-                        let (d, j, again, r) = checker::check_accum_with_json_types(program);
-                        json_dec_types = j;
+                        let (d, again, r) = checker::check_accum_with_sites(program);
                         (d, again, r, derived.len())
                     }
                 };
@@ -161,13 +158,6 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     let from = program.functions.len();
     if diags.is_empty() {
         let types = types::decl_map(program);
-        match jsondec::decoders(&json_dec_types, &types) {
-            Ok((fns, aliases)) => {
-                program.functions.extend(fns);
-                program.type_decls.extend(aliases);
-            }
-            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
-        }
         // One constructor per `where` type, unless the `derive` join added it.
         let have: std::collections::HashSet<&str> =
             program.functions.iter().map(|f| f.name.as_str()).collect();
