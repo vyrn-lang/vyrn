@@ -3437,12 +3437,9 @@ fn a_name_yielded_out_of_a_join_arm_is_moved() {
     }
 }
 
-/// A drop runs the declared `release` of its type, so a release that stores
-/// into module state writes it at the drop. Accepted, the loop would read the
-/// freed array.
-#[test]
-fn a_drop_whose_release_writes_the_iterated_global_is_refused() {
-    let src = "let mut gs: Array<Int64> = [1, 2, 3, 4]
+/// Declarations whose `Ow` release stores into `gs`, the module state a
+/// `for x in gs` loop walks.
+const RELEASE_WRITES_GS: &str = "let mut gs: Array<Int64> = [1, 2, 3, 4]
 type Ow = { d: Array<Int64>, tag: Int64 }
 impl Owned for Ow {
     fn release(consume self) {
@@ -3451,7 +3448,29 @@ impl Owned for Ow {
         drop d
     }
 }
-fn main() -> Int64 {
+";
+
+/// Asserts that `check` refuses [`RELEASE_WRITES_GS`] followed by `rest`
+/// first on `line`, for the write of `gs`.
+fn release_refused(scratch: &str, rest: &str, line: usize) {
+    let dir = common::scratch(scratch);
+    let src = RELEASE_WRITES_GS.to_string() + rest;
+    std::fs::write(dir.join("release.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "release.vyrn", false);
+    let want =
+        format!("release.vyrn:{line}:0: `gs` is written here while `gs` still reads out of it");
+    assert!(
+        !ok && text.lines().next().is_some_and(|l| l.ends_with(&want)),
+        "`check` said {text}"
+    );
+}
+
+/// A drop runs the declared `release` of its type, so a release that stores
+/// into module state writes it at the drop. Accepted, the loop would read the
+/// freed array.
+#[test]
+fn a_drop_whose_release_writes_the_iterated_global_is_refused() {
+    let rest = "fn main() -> Int64 {
     for x in gs {
         let o = Ow { d: [x], tag: x }
         drop o
@@ -3459,14 +3478,92 @@ fn main() -> Int64 {
     return 0
 }
 ";
-    let dir = common::scratch("release-state");
-    std::fs::write(dir.join("release.vyrn"), src).expect("write the program");
-    let (ok, text) = refusal_in(dir.to_path_buf(), "release.vyrn", false);
-    let want = "release.vyrn:13:0: `gs` is written here while `gs` still reads out of it";
-    assert!(
-        !ok && text.lines().next().is_some_and(|l| l.ends_with(want)),
-        "`check` said {text}"
-    );
+    release_refused("release-drop", rest, 13);
+}
+
+/// The release the scope exit runs writes `gs` where the scope ends, at its
+/// last statement's line.
+#[test]
+fn a_scope_exit_whose_release_writes_the_iterated_global_is_refused() {
+    let rest = "fn main() -> Int64 {
+    for x in gs {
+        let o = Ow { d: [x], tag: x }
+        print(o.tag.toString())
+    }
+    return 0
+}
+";
+    release_refused("release-exit", rest, 13);
+}
+
+/// A store releases the value it displaces.
+#[test]
+fn a_store_whose_release_writes_the_iterated_global_is_refused() {
+    let rest = "fn main() -> Int64 {
+    let mut o = Ow { d: [0], tag: 0 }
+    for x in gs {
+        o = Ow { d: [x], tag: x }
+    }
+    return o.tag
+}
+";
+    release_refused("release-store", rest, 13);
+}
+
+/// A record with no release of its own runs its fields' releases.
+#[test]
+fn a_nested_release_that_writes_the_iterated_global_is_refused() {
+    let rest = "type Box = { inner: Ow, n: Int64 }
+fn main() -> Int64 {
+    for x in gs {
+        let b = Box { inner: Ow { d: [x], tag: x }, n: x }
+        print(b.n.toString())
+    }
+    return 0
+}
+";
+    release_refused("release-nested", rest, 14);
+}
+
+/// A callee that releases an `Ow` at its own scope exit writes `gs` at the
+/// call.
+#[test]
+fn a_call_whose_callee_releases_into_the_iterated_global_is_refused() {
+    let rest = "fn make(x: Int64) -> Int64 {
+    let o = Ow { d: [x], tag: x }
+    return o.tag
+}
+fn main() -> Int64 {
+    for x in gs {
+        print(make(x).toString())
+    }
+    return 0
+}
+";
+    release_refused("release-callee", rest, 16);
+}
+
+/// A generic declared `release` has no instance until its row is placed, so
+/// the effect judgment reads it as written.
+#[test]
+fn a_generic_release_that_writes_the_iterated_global_is_refused() {
+    let rest = "type Gw<T> = { d: Array<T> }
+impl<T> Owned for Gw<T> {
+    fn release(consume self) {
+        gs = [70, 71, 72, 73]
+        let d = consume self.d
+        drop d
+    }
+}
+fn main() -> Int64 {
+    for x in gs {
+        let g = Gw { d: [x] }
+        print(x.toString())
+    }
+    return 0
+}
+";
+    release_refused("release-generic", rest, 21);
 }
 
 /// A declared `release` frees `self`'s parts, so taking one part twice frees it

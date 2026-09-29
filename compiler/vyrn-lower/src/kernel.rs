@@ -202,7 +202,7 @@ pub fn in_element(rel: &str) -> bool {
 /// list inside `s`. The state walk and [`writes`] share it so they agree.
 /// `body` is the body's name in the effect judgment.
 fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<Write<'s>> {
-    match s {
+    let mut w = match s {
         // A second name for a borrow reads it; nothing is handed on.
         St::Let(n, Rhs::Val(Val::Name(m)))
             if names[*n as usize].borrow && names[*m as usize].borrow =>
@@ -233,22 +233,27 @@ fn writes_of<'s>(s: &'s St, names: &[crate::core::NameInfo], body: &str) -> Vec<
             }
             w
         }
-        St::Drop(n, ..) | St::Row { name: n, .. } => {
-            let mut state: Vec<String> = (names[*n as usize].runs.iter())
-                .flat_map(|r| crate::effects::writes_state(body, r))
-                .collect();
-            state.sort();
-            state.dedup();
-            let mut w = vec![Write::Release(*n)];
-            if !state.is_empty() {
-                w.push(Write::State(state));
-            }
-            w
-        }
+        St::Drop(n, ..) | St::Row { name: n, .. } => vec![Write::Release(*n)],
         St::Return { value: Some(v), .. } => vec![Write::Hand(v, false)],
         St::Switch { on, consuming, .. } if *consuming => vec![Write::Hand(on, false)],
         _ => vec![],
+    };
+    let state = release_state(crate::core::runs(s, names), body);
+    if !state.is_empty() {
+        w.push(Write::State(state));
     }
+    w
+}
+
+/// The globals the declared releases `runs` may store into, by the effect
+/// judgment of the body named `body`.
+fn release_state(runs: &[String], body: &str) -> Vec<String> {
+    let mut state: Vec<String> = (runs.iter())
+        .flat_map(|r| crate::effects::writes_state(body, r))
+        .collect();
+    state.sort();
+    state.dedup();
+    state
 }
 
 /// Whether a row of `ss` writes `on` where the judgment would end a borrow
@@ -951,6 +956,15 @@ impl<'b> Kernel<'b> {
         }
     }
 
+    /// Records a release the plan owes on the path `st`. The row runs where
+    /// it is recorded, so the module state its declared releases store into
+    /// is written there ([`writes_of`] for a row already in the body).
+    fn owe(&mut self, st: &mut State, m: Missing) {
+        let runs = &self.body.names[m.name as usize].runs;
+        self.end_state(st, &release_state(runs, &self.body.name));
+        self.missing.push(m);
+    }
+
     /// Ends every borrow of the globals `gs`: the judgment names no place
     /// under a global, so a borrow of any part of one ends.
     fn end_state(&self, st: &mut State, gs: &[String]) {
@@ -1414,13 +1428,16 @@ impl<'b> Kernel<'b> {
                         }
                         _ => (exit, site, MissingKind::Exit),
                     };
-                    self.missing.push(Missing {
-                        exit,
-                        site,
-                        name: *n,
-                        kind,
-                        holes,
-                    });
+                    self.owe(
+                        st,
+                        Missing {
+                            exit,
+                            site,
+                            name: *n,
+                            kind,
+                            holes,
+                        },
+                    );
                     self.gone(st, *n);
                     continue;
                 }
@@ -2493,13 +2510,16 @@ impl<'b> Kernel<'b> {
                 // The arm row carries the binder's holes.
                 if self.mode == Mode::Place && site != 0 {
                     let holes = self.holes_owned(st, *n);
-                    self.missing.push(Missing {
-                        exit: Exit::Block,
-                        site,
-                        name: *n,
-                        kind: MissingKind::ArmBinder { arm },
-                        holes,
-                    });
+                    self.owe(
+                        st,
+                        Missing {
+                            exit: Exit::Block,
+                            site,
+                            name: *n,
+                            kind: MissingKind::ArmBinder { arm },
+                            holes,
+                        },
+                    );
                     self.gone(st, *n);
                     continue;
                 }
@@ -2556,13 +2576,16 @@ impl<'b> Kernel<'b> {
                             },
                         ),
                     };
-                    self.missing.push(Missing {
-                        exit: Exit::Block,
-                        site,
-                        name,
-                        kind,
-                        holes: Vec::new(),
-                    });
+                    self.owe(
+                        &mut edges[*i],
+                        Missing {
+                            exit: Exit::Block,
+                            site,
+                            name,
+                            kind,
+                            holes: Vec::new(),
+                        },
+                    );
                     edges[*i].holes.push((n, h.clone()));
                     edges[*i].holes.sort();
                 }
@@ -2572,13 +2595,17 @@ impl<'b> Kernel<'b> {
                 continue;
             }
             for i in held {
-                self.missing.push(Missing {
-                    exit: Exit::Block,
-                    site,
-                    name: n,
-                    kind: MissingKind::Edge { edge: i as u32 },
-                    holes: self.holes_owned(&edges[i], n),
-                });
+                let holes = self.holes_owned(&edges[i], n);
+                self.owe(
+                    &mut edges[i],
+                    Missing {
+                        exit: Exit::Block,
+                        site,
+                        name: n,
+                        kind: MissingKind::Edge { edge: i as u32 },
+                        holes,
+                    },
+                );
                 self.gone(&mut edges[i], n);
             }
         }

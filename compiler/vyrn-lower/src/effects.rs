@@ -157,6 +157,11 @@ pub fn judge(
             memo_ty: &mut memo_ty,
         };
         w.stmts(&b.stmts);
+        for info in b.names.iter().filter(|i| !i.borrow) {
+            for r in &info.runs {
+                w.call(r, None, info.line);
+            }
+        }
         own.push(w.own);
         let mut e = w.edges;
         // The body that builds a lambda value can run its frame.
@@ -278,14 +283,11 @@ impl Walk<'_> {
                 }
                 self.place(place)
             }
-            // A release runs the declared `release` bodies its type reaches.
-            St::Drop(n, ..) | St::Row { name: n, .. } => {
-                let info = &self.body.names[*n as usize];
-                for r in &info.runs {
-                    self.call(r, None, info.line);
-                }
-            }
-            St::Break { .. } | St::Continue { .. } | St::Return { .. } => {}
+            St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. } => {}
         }
     }
 
@@ -493,6 +495,25 @@ pub(crate) fn judge_built<R>(
         };
         if let Ok(b) = crate::core::build(program, &inst, own) {
             place_bodies.push((pr.func.name.as_str(), b));
+        }
+    }
+    // Nor does a generic declared `release` until the placer writes the row
+    // that calls it, so it is judged as written.
+    let generic_release = |f: &vyrn_frontend::ast::Function| {
+        !f.type_params.is_empty() && own.proto.is_release_fn(&f.name)
+    };
+    if program.functions.iter().any(generic_release) {
+        let written = vyrn_frontend::own::Ownership {
+            proto: own.proto.as_written(),
+            ..own.clone()
+        };
+        for inst in crate::as_written(program, own) {
+            if !generic_release(inst.func) {
+                continue;
+            }
+            if let Ok(b) = crate::core::build(program, &inst, &written) {
+                place_bodies.push((inst.func.name.as_str(), b));
+            }
         }
     }
     // A lambda frame is keyed by its defining function and line, as a
