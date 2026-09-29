@@ -926,7 +926,7 @@ mod tests {
             .iter()
             .map(|e| format!("{e:?}"))
             .collect();
-        assert_eq!(ints, ["Int(0)", "Int(3)"]);
+        assert_eq!(ints, ["Int(0, _)", "Int(3, _)"]);
         let rows: Vec<String> = shape_rows(field(&lit, "nodes"))
             .into_iter()
             .map(|r| {
