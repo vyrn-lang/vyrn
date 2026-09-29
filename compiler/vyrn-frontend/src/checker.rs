@@ -3153,10 +3153,7 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
-                if matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()))
-                {
-                    return Ok(());
-                }
+                let ruled = matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
                 let Some(fty) = crate::types::record_fields(&b.ty, self.types)
                     .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
                     .map(|f| f.ty)
@@ -3164,6 +3161,9 @@ impl<'a> Checker<'a> {
                     return Ok(());
                 };
                 let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
+                if ruled {
+                    return Ok(());
+                }
                 // A predicated field takes only a value of its own type.
                 let validated = matches!(&fty, Type::Named(n)
                     if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
