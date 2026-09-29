@@ -42,7 +42,7 @@ pub struct Diagnostic {
     /// `"lex"` | `"parse"` | `"check"` | `"movecheck"`.
     pub stage: &'static str,
     pub message: String,
-    /// The rule a checker refusal states; `message` is its rendering.
+    /// The row of `rules.rs` that states this diagnostic, if any; `message` is its rendering.
     pub rule: Option<Rule>,
     /// A secondary note: the generated location of a diagnostic
     /// remapped to its origin file, or why an origin directive could not be
@@ -55,8 +55,9 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Builds an error for `stage` at `(line, col)`; `col == 0` means the whole
-    /// line.
+    /// Builds an error for `stage` at `(line, col)` from text written outside the
+    /// frontend; `col == 0` means the whole line. The frontend's own sentences are
+    /// [`Rule`]s: see [`Diagnostic::refusal`].
     pub fn error(line: usize, col: usize, stage: &'static str, message: String) -> Self {
         Diagnostic {
             file: None,

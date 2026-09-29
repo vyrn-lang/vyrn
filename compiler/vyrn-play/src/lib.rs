@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::lexer::{self, Tok, Triv, TrivKind};
 use vyrn_frontend::loader::{LoadOptions, MapResolver};
+use vyrn_frontend::rules::Rule;
 
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -64,11 +65,13 @@ pub extern "C" fn play_compile(src_len: usize) -> usize {
 fn with_input(src_len: usize, f: impl FnOnce(&str) -> Vec<u8>) -> usize {
     let too_long = INPUT.with(|i| src_len > i.borrow().len());
     if too_long {
-        let d = Diagnostic::error(
+        let d = Diagnostic::refusal(
             0,
             0,
             "host",
-            format!("src_len {src_len} exceeds the input buffer"),
+            Rule::SourceTooLong {
+                src_len: src_len.to_string(),
+            },
         );
         return publish_json(format!("{{\"diagnostics\":[{}]}}", diag_json(&d)));
     }
@@ -76,7 +79,7 @@ fn with_input(src_len: usize, f: impl FnOnce(&str) -> Vec<u8>) -> usize {
     let result = match std::str::from_utf8(&bytes) {
         Ok(src) => f(src),
         Err(_) => {
-            let d = Diagnostic::error(0, 0, "lex", "the source is not valid UTF-8".to_string());
+            let d = Diagnostic::refusal(0, 0, "lex", Rule::NotUtf8 {});
             format!("{{\"diagnostics\":[{}]}}", diag_json(&d)).into_bytes()
         }
     };

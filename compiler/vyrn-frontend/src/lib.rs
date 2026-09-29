@@ -143,12 +143,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
                     }
                 };
                 if diags.is_empty() && again.len() != old_sites {
-                    diags.push(diagnostics::Diagnostic::error(
-                        0,
-                        0,
-                        "check",
-                        "a `derive` generator wrote a `derive` call".to_string(),
-                    ));
+                    diags.push(rules::refuse!("check", 0, 0, DeriveWroteDerive));
                 }
             }
             Err(d) => diags.push(d),
