@@ -6,8 +6,6 @@
 //!    crosses as.
 //! 2. The canonical escape ([`escape_into`]), the one table every encoder
 //!    writes.
-//! 3. The type-dependent issue wording ([`enum_expected`],
-//!    [`validate_message`]), which [`crate::jsondec`] bakes into its decoders.
 //!
 //! Decode ignores unknown fields, reads an absent field or `null` as `None`,
 //! parses integers exactly, and runs every `where` clause; failures
@@ -33,30 +31,18 @@ pub fn escape_into(s: &str, out: &mut String) {
     }
 }
 
-/// Returns `one of `A`, `B`` for an enum target, naming every variant, payload
-/// or not: the `json.type` expected-one-of message.
-pub fn enum_expected(vs: &[EnumVariant]) -> String {
-    let names: Vec<String> = vs.iter().map(|v| format!("`{}`", v.name)).collect();
-    format!("one of {}", names.join(", "))
-}
-
-/// Returns the `validate` message: [`crate::trap::validation_of`]'s wording,
-/// accumulated as an issue.
-pub fn validate_message(decl: &TypeDecl) -> String {
-    crate::trap::validation_of(decl)
-}
-
 /// What a type is on the JSON wire, once names, generic applications and record
 /// transformers are resolved away.
 ///
 /// The checker's gate ([`codable`]), the schema emitter
-/// (`types::type_schema`), the `TypeArg` builder and `jsondec` read this one
+/// (`types::type_schema`) and the `TypeArg` builder read this one
 /// answer. A record transformer is the record it computes
 /// and an applied generic its substituted base, so both cross the wire.
 ///
 /// A [`Type::Named`] is presented by each caller before it gets here, and they
 /// differ: [`codable`] keeps a `seen` list to end a cycle, `type_schema` emits
-/// a `$ref`, and `jsondec` decodes a refinement's base, then guards.
+/// a `$ref`, and the `TypeArg` builder gives a `where` type its own node over
+/// its base.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Wire {
     /// `Int64`: a JSON number in integer syntax.

@@ -18,7 +18,7 @@
 - [std/icons](std/icons.md) — Inline SVG icons generated from a pinned Iconify collection, one function
 - [std/json](std/json.md) — std/json: the JSON value tree and its canonical writer.
 - [std/json5](std/json5.md) — std/json5: a JSON5 reader that builds the `Json` tree of `std/json`.
-- [std/jsondec](std/jsondec.md) — std/jsondec: the untyped half of `fromJson`.
+- [std/jsondec](std/jsondec.md) — std/jsondec: the untyped half of `fromJson`, and the generator of the
 - [std/jsonread](std/jsonread.md) — std/jsonread: the strict JSON reader over the `Json` tree of `std/json`.
 - [std/math](std/math.md) — std/math: integer helpers (min, max, abs, clamp) and float ones (pi, floor,
 - [std/num](std/num.md) — std/num: text -> number, correctly rounded, and `Float64` -> `%f` text.

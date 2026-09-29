@@ -695,6 +695,13 @@ pub const RT_JSON_SPEC: &str = "std/json";
 /// name. `toJson(x)` is `derive(jsonEncoders, x)`.
 pub const JSON_ENCODERS: &str = "json$jsonEncoders";
 
+/// The reserved prefix of `std/jsondec`'s declarations.
+pub const JSONDEC_PREFIX: &str = "jsondec$";
+
+/// The `std/jsondec` generator that writes `fromJson`'s decoders, under its
+/// reserved name. `fromJson<T>(s)` calls what it wrote for `T`.
+pub const JSON_DECODERS: &str = "jsondec$jsonDecoders";
+
 /// A Vyrn module a builtin's implementation lives in, and the reserved prefix
 /// its declarations are renamed to.
 pub struct RtModule {
@@ -772,12 +779,11 @@ pub const RT_MODULES: &[RtModule] = &[
         desugared: &["toJson", "fromJson"],
         always: false,
     },
-    // `fromJson`'s untyped half: the reader, the `Issue` vocabulary, the
-    // path arithmetic and the scalar decoders. `jsondec` generates the typed half
-    // per target type, and it calls in here.
+    // `fromJson`'s decoders: the reader, the path arithmetic, the scalar
+    // decoders, and the generator that writes the typed half per target type.
     RtModule {
         spec: "std/jsondec",
-        prefix: "jsondec$",
+        prefix: JSONDEC_PREFIX,
         desugared: &["fromJson"],
         always: false,
     },
@@ -866,9 +872,8 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
 ///
 /// `contractOf(C)` calls the entry `vyrn-genwasm` appends for `C` and hands on
 /// nothing. `toJson(x)` calls what [`JSON_ENCODERS`] wrote for `x`'s type, and
-/// `fromJson<T>(s)` the decoder of `T`, which [`crate::check_and_synthesize`]
-/// appends. The builder and the emitter treat it as a call only where the
-/// program declares it.
+/// `fromJson<T>(s)` what [`JSON_DECODERS`] wrote for `T`. The builder and the
+/// emitter treat it as a call only where the program declares it.
 pub fn routed_callee<'e>(
     name: &str,
     type_args: &[Type],
@@ -883,7 +888,7 @@ pub fn routed_callee<'e>(
         ("derive", _, [Expr::Var { name: g, .. }, a]) => {
             Some((crate::gen::derived_name(g, &ty_of(a)?), &args[1..]))
         }
-        ("fromJson", [t], [_]) => Some((crate::jsondec::top_name(t), args)),
+        ("fromJson", [t], [_]) => Some((crate::gen::derived_name(JSON_DECODERS, t), args)),
         _ => None,
     }
 }

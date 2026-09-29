@@ -1,6 +1,7 @@
-/// std/jsondec: the untyped half of `fromJson`.
+/// std/jsondec: the untyped half of `fromJson`, and the generator of the
+/// typed half.
 ///
-/// `vyrn-frontend`'s `jsondec` generates the typed half per target type; it
+/// `jsonDecoders` writes the typed half per target type; what it writes
 /// calls this module for kind names, `Issue`s, paths, tree accessors and
 /// scalar decoders. Decoding accumulates: a decoder records its
 /// failure and returns, and a composite constructs only when every part
@@ -348,6 +349,247 @@ export fn dFloat32(v: Json, path: String, iss: modify Array<Issue>) -> Array<Flo
 }
 
 // The typed half is generated; its tests live in `examples/jsondecbytes.vyrn`.
+
+/// Writes the decoders `fromJson` calls: for each root, the entry that reads a
+/// document into `Validation<T>`, and for each node, the function that decodes
+/// a `Json` tree into zero or one value. Generated source cannot spell reserved
+/// names, so it writes `VyrnRt_` for `std/json`'s, `VyrnRd_` for this module's
+/// and `VyrnWp_` for a `where` type's predicate.
+export gen fn jsonDecoders(t: TypeArg) -> String {
+    let mut out = ""
+    for r in t.roots {
+        let n = t.nodes[r]
+        // `consume` walks: a borrowed walk leaks the doc buffer and the decoded
+        // snapshot on every call.
+        out = out + "fn " + n.name + "(src: String) -> Validation<" + n.spelling + "> {\n"
+        out = out + "    let mut iss: Array<Issue> = []\n    let doc = VyrnRd_readDoc(src, iss)\n"
+        out = out + "    let mut val: Array<" + n.spelling + "> = []\n"
+        out = out + "    for j in consume doc {\n        val = d" + n.name + "(j, \"\", iss)\n    }\n"
+        out = out + "    if iss.length > 0 {\n        return Invalid(consume iss)\n    }\n"
+        out = out + "    for x in consume val {\n        return Valid(x)\n    }\n    return Invalid(consume iss)\n}\n"
+    }
+    for n in t.nodes {
+        out = out + "fn d" + n.name + "(v: VyrnRt_Json, path: String, iss: modify Array<Issue>) -> Array<" + n.spelling + "> {\n"
+        out = out + jsonDecoderBody(t, n) + "}\n"
+        // `{ c: 1 }` is not an expression, so a record without a name gets an
+        // alias for its literal.
+        if n.kind == "record" && !isName(n.spelling) {
+            let mut fs = ""
+            for m in n.members {
+                fs = fs + (if fs == "" { "" } else { ", " }) + m.name + ": " + t.nodes[m.args[0]].spelling
+            }
+            out = out + "type r" + n.name + " = { " + fs + " }\n"
+        }
+    }
+    return out
+}
+
+gen fn isName(s: String) -> Bool {
+    for b in bytes(s) {
+        let word = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+        if !word {
+            return false
+        }
+    }
+    return true
+}
+
+/// A decoder's body. A composite constructs only when every part produced a
+/// value; each part's issues are already recorded.
+gen fn jsonDecoderBody(t: TypeArg, n: TypeNode) -> String {
+    let out = "    let mut out: Array<" + n.spelling + "> = []\n"
+    let object = "    let k = VyrnRd_kindName(v)\n    if k != \"object\" {\n        VyrnRd_pushType(iss, path, \"object\", k)\n        return out\n    }\n"
+    // Decode the base, then run the declaration's predicate. The push into
+    // `Array<T>` is the construction, and it holds for a record base too.
+    if n.kind == "where" {
+        let mut binds = ""
+        for m in n.members {
+            binds = binds + (if binds == "" { "" } else { ", " }) + "b." + m.name
+        }
+        let args = if binds == "" { "b" } else { binds }
+        let base = "    for b in d" + t.nodes[n.args[0]].name + "(v, path, iss) {\n"
+        let test = "        if VyrnWp_" + n.spelling + "(" + args + ") {\n            out.push(b)\n"
+        let fail = "        } else {\n            VyrnRd_pushValidate(iss, path, \"" + n.predicate + "\")\n        }\n    }\n"
+        return out + base + test + fail + "    return out\n"
+    }
+    if n.kind == "record" {
+        return out + object + jsonRecordBody(t, n)
+    }
+    // Each element decodes at `path[i]`; a bad element is an issue, not a
+    // missing array.
+    if n.kind == "array" {
+        let e = t.nodes[n.args[0]]
+        let head = "    let k = VyrnRd_kindName(v)\n    if k != \"array\" {\n        VyrnRd_pushType(iss, path, \"array\", k)\n        return out\n    }\n"
+        let walk = "    let items = VyrnRd_itemsOf(v)\n    let mut acc: Array<" + e.spelling + "> = []\n    let mut i = 0\n    while i < items.length {\n"
+        let each = "        for e in d" + e.name + "(VyrnRd_elemAt(items, i), VyrnRd_indexPath(path, i), iss) {\n            acc.push(e)\n        }\n        i = i + 1\n    }\n"
+        return out + head + walk + each + "    out.push(acc)\n    return out\n"
+    }
+    // Document order becomes insertion order; `std/jsonread` refuses repeated
+    // keys. The key is copied: `f` belongs to the snapshot `fieldsOf` returns.
+    // An `Int64` key must be canonical decimal text.
+    if n.kind == "map" {
+        let val = t.nodes[n.args[1]]
+        let dv = "let dv = d" + val.name + "(f.value, VyrnRd_fieldPath(path, f.key), iss)\n"
+        if t.nodes[n.args[0]].kind == "String" {
+            let m = "    let mut m: Map<String, " + val.spelling + "> = [:]\n    for f in VyrnRd_fieldsOf(v) {\n        " + dv
+            let put = "        if m.has(f.key) == false {\n            for x in consume dv {\n                m[f.key.copy()] = x\n            }\n        }\n    }\n"
+            return out + object + m + put + "    out.push(m)\n    return out\n"
+        }
+        let m = "    let mut m: Map<Int64, " + val.spelling + "> = [:]\n    for f in VyrnRd_fieldsOf(v) {\n"
+        let key = "        for kn in VyrnRd_dIntKey(f.key, VyrnRd_fieldPath(path, f.key), iss) {\n            " + dv
+        let put = "            if m.has(kn) == false {\n                for x in consume dv {\n                    m[kn] = x\n                }\n            }\n        }\n    }\n"
+        return out + object + m + key + put + "    out.push(m)\n    return out\n"
+    }
+    if n.kind == "option" {
+        let none = "    if VyrnRd_isNull(v) {\n        out.push(None)\n        return out\n    }\n"
+        let some = "    for x in d" + t.nodes[n.args[0]].name + "(v, path, iss) {\n        out.push(Some(x))\n    }\n"
+        return out + none + some + "    return out\n"
+    }
+    if n.kind == "enum" {
+        return out + jsonVariantsBody(t, n)
+    }
+    return jsonScalarBody(n)
+}
+
+/// A record: each field decodes into its own staging array, and the record is
+/// built once every required field has a value. An `Option<T>` field is
+/// inlined: absent or `null` is `None`, and a failed inner decode leaves `None`
+/// with its issue recorded.
+gen fn jsonRecordBody(t: TypeArg, n: TypeNode) -> String {
+    let mut out = "    let fs = VyrnRd_fieldsOf(v)\n"
+    let mut guards = ""
+    let mut inits = ""
+    let mut i = 0
+    for m in n.members {
+        let f = t.nodes[m.args[0]]
+        let ix = i.toString()
+        let name = "\"" + m.name + "\""
+        out = out + "    let p" + ix + " = VyrnRd_fieldPath(path, " + name + ")\n"
+        inits = inits + (if i == 0 { "" } else { ", " }) + m.name + ": f" + ix
+        if f.kind == "option" {
+            let inner = t.nodes[f.args[0]]
+            out = out + "    let mut f" + ix + ": Option<" + inner.spelling + "> = None\n    let j" + ix + " = VyrnRd_fieldAt(fs, " + name + ")\n"
+            out = out + "    if VyrnRd_isNull(j" + ix + ") == false {\n        for x in d" + inner.name + "(j" + ix + ", p" + ix + ", iss) {\n"
+            out = out + "            f" + ix + " = Some(x)\n        }\n    }\n"
+        } else {
+            out = out + "    let mut f" + ix + ": Array<" + f.spelling + "> = []\n    if VyrnRd_hasField(fs, " + name + ") {\n"
+            out = out + "        f" + ix + " = d" + f.name + "(VyrnRd_fieldAt(fs, " + name + "), p" + ix + ", iss)\n"
+            out = out + "    } else {\n        VyrnRd_pushMissing(iss, p" + ix + ", " + name + ")\n    }\n"
+            guards = guards + (if guards == "" { "" } else { " && " }) + "f" + ix + ".length == 1"
+            // Take the value out of its one-element carrier: an element read
+            // borrows its container.
+            inits = inits + ".swapRemove(0)"
+        }
+        i = i + 1
+    }
+    let lit = (if isName(n.spelling) { n.spelling.copy() } else { "r" + n.name }) + " { " + inits + " }"
+    if guards == "" {
+        return out + "    out.push(" + lit + ")\n    return out\n"
+    }
+    return out + "    if " + guards + " {\n        out.push(" + lit + ")\n    }\n    return out\n"
+}
+
+/// A sum in wire form: a bare string is a nullary variant, and a one-key
+/// object `{"Tag":..}` a payload variant, a tuple payload as an array. Any
+/// other form is a `json.type` issue that names every variant.
+gen fn jsonVariantsBody(t: TypeArg, n: TypeNode) -> String {
+    let mut out = ""
+    let mut expected = ""
+    let mut tags = ""
+    let mut keys = ""
+    for m in n.members {
+        expected = expected + (if expected == "" { "one of `" } else { ", `" }) + m.name + "`"
+        if m.args.length == 0 {
+            tags = tags + "    if tag == \"" + m.name + "\" {\n        out.push(" + m.name + ")\n        return out\n    }\n"
+        } else {
+            keys = keys + "    if key == \"" + m.name + "\" {\n" + jsonPayloadArm(t, m) + "        return out\n    }\n"
+        }
+    }
+    if tags != "" {
+        out = out + "    let tag = VyrnRd_tagOf(v)\n" + tags
+    }
+    if keys != "" {
+        out = out + "    let key = VyrnRd_keyOf(v)\n" + keys
+    }
+    return out + "    VyrnRd_pushType(iss, path, \"" + expected + "\", VyrnRd_kindName(v))\n    return out\n"
+}
+
+/// One payload variant's arm, decoding at `path.Tag` and a tuple's members at
+/// `path.Tag[i]`. The arity is checked first: a short array would otherwise
+/// decode `Option` members from `elemAt`'s out-of-range `JNull` as `None`, a
+/// shape nothing encodes.
+gen fn jsonPayloadArm(t: TypeArg, m: TypeMember) -> String {
+    let c = "        let c = VyrnRd_fieldPath(path, \"" + m.name + "\")\n"
+    if m.args.length == 1 {
+        let each = "        for a0 in d" + t.nodes[m.args[0]].name + "(VyrnRd_valOf(v), c, iss) {\n"
+        return c + each + "            out.push(" + m.name + "(a0))\n        }\n"
+    }
+    let arity = m.args.length.toString()
+    let mut out = c + "        let pv = VyrnRd_valOf(v)\n        let pk = VyrnRd_kindName(pv)\n        if pk != \"array\" {\n"
+    out = out + "            VyrnRd_pushType(iss, c, \"array\", pk)\n            return out\n        }\n"
+    out = out + "        let items = VyrnRd_itemsOf(pv)\n        if items.length != " + arity + " {\n"
+    out = out + "            VyrnRd_pushType(iss, c, \"array of length " + arity + "\", \"array of length \" + items.length.toString())\n"
+    out = out + "            return out\n        }\n"
+    let mut guards = ""
+    let mut binds = ""
+    let mut i = 0
+    for a in m.args {
+        let ix = i.toString()
+        let sep = if i == 0 { "" } else { ", " }
+        out = out + "        let mut a" + ix + " = d" + t.nodes[a].name + "(VyrnRd_elemAt(items, " + ix + "), VyrnRd_indexPath(c, " + ix + "), iss)\n"
+        guards = guards + (if i == 0 { "" } else { " && " }) + "a" + ix + ".length == 1"
+        binds = binds + sep + "a" + ix + ".swapRemove(0)"
+        i = i + 1
+    }
+    return out + "        if " + guards + " {\n            out.push(" + m.name + "(" + binds + "))\n        }\n"
+}
+
+/// A scalar. A sized integer decodes through an `Int64` or `UInt64` helper
+/// that refuses every value outside the type's bounds, so the narrowing
+/// conversion cannot wrap.
+gen fn jsonScalarBody(n: TypeNode) -> String {
+    let k = n.kind
+    let whole = if k == "Int64" {
+        "VyrnRd_dInt64(v, path, iss)"
+    } else if k == "UInt64" {
+        "VyrnRd_dUIntMax(v, path, iss, 18446744073709551615)"
+    } else if k == "Float64" {
+        "VyrnRd_dFloat64(v, path, iss)"
+    } else if k == "Float32" {
+        "VyrnRd_dFloat32(v, path, iss)"
+    } else if k == "Bool" {
+        "VyrnRd_dBool(v, path, iss)"
+    } else if k == "String" {
+        "VyrnRd_dStr(v, path, iss)"
+    } else {
+        ""
+    }
+    if whole != "" {
+        return "    return " + whole + "\n"
+    }
+    // Any other kind writes no `return`, and the check of the written code
+    // refuses it.
+    let narrow = if k == "Int8" {
+        "VyrnRd_dIntRange(v, path, iss, 0 - 128, 127)"
+    } else if k == "Int16" {
+        "VyrnRd_dIntRange(v, path, iss, 0 - 32768, 32767)"
+    } else if k == "Int32" {
+        "VyrnRd_dIntRange(v, path, iss, 0 - 2147483648, 2147483647)"
+    } else if k == "UInt8" {
+        "VyrnRd_dUIntMax(v, path, iss, 255)"
+    } else if k == "UInt16" {
+        "VyrnRd_dUIntMax(v, path, iss, 65535)"
+    } else if k == "UInt32" {
+        "VyrnRd_dUIntMax(v, path, iss, 4294967295)"
+    } else {
+        ""
+    }
+    if narrow == "" {
+        return ""
+    }
+    let out = "    let mut out: Array<" + n.spelling + "> = []\n    for n in " + narrow + " {\n"
+    return out + "        out.push(" + n.spelling + "(n))\n    }\n    return out\n"
+}
 
 test "kind names are the canonical ones" {
     assertEq(kindName(JNull), "null")

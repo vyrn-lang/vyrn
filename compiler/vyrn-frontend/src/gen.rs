@@ -489,7 +489,7 @@ thread_local! {
     /// Each generator run's parsed output, keyed by the generator, its program
     /// and its `TypeArg`, so the editor's re-check of an unchanged program does
     /// not run the generator again.
-    static DERIVED: std::cell::RefCell<HashMap<String, Vec<crate::ast::Function>>> =
+    static DERIVED: std::cell::RefCell<HashMap<String, Derived>> =
         std::cell::RefCell::new(HashMap::new());
     /// The generators running, outermost first. A generator's own program may
     /// call `derive` (a `std/ui` generator reaches `toJson`), but not reach
@@ -497,20 +497,22 @@ thread_local! {
     static DERIVING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// What a derive generator wrote: its functions and type declarations, each
+/// renamed under `derive$g$`, which no source can spell.
+pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
+
 /// Runs the generator of every `derive(g, x)` site on the types the checker
-/// gave `x`, and returns the functions they wrote, renamed under `derive$g$`.
+/// gave `x`, and returns what they wrote.
 ///
 /// `sites` is `(generator, type)` in source order. Each generator runs once per
 /// program, over all of its types as one `TypeArg`: a run per type would write a
 /// shared subtype's function twice. Its program is `program` cut down to the
 /// functions the generator reaches, checked as a generator's own program is.
 /// The output is not checked here; the caller checks the program it joins.
-pub fn derive(
-    program: &Program,
-    sites: &[(String, crate::ast::Type)],
-) -> Result<Vec<crate::ast::Function>, String> {
+pub fn derive(program: &Program, sites: &[(String, crate::ast::Type)]) -> Result<Derived, String> {
+    let mut out: Derived = (Vec::new(), Vec::new());
     if sites.is_empty() {
-        return Ok(Vec::new());
+        return Ok(out);
     }
     let types = crate::types::decl_map(program);
     let mut gens: Vec<&str> = Vec::new();
@@ -519,7 +521,6 @@ pub fn derive(
             gens.push(g);
         }
     }
-    let mut out = Vec::new();
     for g in gens {
         let roots: Vec<crate::ast::Type> = sites
             .iter()
@@ -537,18 +538,18 @@ pub fn derive(
         let fingerprint = crate::hash::sha256_hex(canonical(&gen_program).as_bytes());
         let key = crate::hash::sha256_hex(format!("{g}\u{0}{fingerprint}\u{0}{arg:?}").as_bytes());
         let cached = DERIVED.with(|d| d.borrow().get(&key).cloned());
-        let fns = match cached {
-            Some(fns) => fns,
+        let (fns, decls) = match cached {
+            Some(d) => d,
             None => {
                 if DERIVING.with(|d| d.borrow().iter().any(|r| r == g)) {
                     return Err(format!("generator `{g}` reaches `derive({g}, ..)`"));
                 }
                 DERIVING.with(|d| d.borrow_mut().push(g.to_string()));
-                let fns = run_derive(gen_program, g, arg, fingerprint);
+                let written = run_derive(gen_program, g, arg, fingerprint);
                 DERIVING.with(|d| d.borrow_mut().pop());
-                let fns = fns?;
-                DERIVED.with(|d| d.borrow_mut().insert(key, fns.clone()));
-                fns
+                let written = written?;
+                DERIVED.with(|d| d.borrow_mut().insert(key, written.clone()));
+                written
             }
         };
         for ty in &roots {
@@ -559,7 +560,8 @@ pub fn derive(
                 ));
             }
         }
-        out.extend(fns);
+        out.0.extend(fns);
+        out.1.extend(decls);
     }
     Ok(out)
 }
@@ -667,15 +669,15 @@ fn canonical(p: &Program) -> String {
 }
 
 /// Checks and runs generator `g` on `arg`, parses what it wrote, and renames
-/// each function it defines to `derive$g$<name>`. `fingerprint` names the
-/// generator's program, so the engine keeps its compiled module across
-/// processes.
+/// each function and type it defines to `derive$g$<name>`. `fingerprint`
+/// names the generator's program, so the engine keeps its compiled module
+/// across processes.
 fn run_derive(
     mut gen_program: Program,
     g: &str,
     arg: Expr,
     fingerprint: String,
-) -> Result<Vec<crate::ast::Function>, String> {
+) -> Result<Derived, String> {
     let diags = crate::floor::aside(|| {
         crate::movecheck::comptime(|| crate::check_and_synthesize(&mut gen_program))
     });
@@ -714,26 +716,27 @@ fn run_derive(
             d.message
         )
     })?;
-    let (mut written, errors) = crate::parser::parse_accum(tokens);
+    let (mut written, errors) = crate::parser::parse_bare(tokens);
     if let Some(d) = errors.first() {
         return Err(format!(
             "generator `{g}` wrote text that does not parse: {}\n{src}",
             d.message
         ));
     }
-    let mut map: HashMap<String, String> = written
-        .functions
-        .iter()
-        .map(|f| (f.name.clone(), format!("derive${g}${}", f.name)))
+    let names = written.functions.iter().map(|f| &f.name);
+    let mut map: HashMap<String, String> = names
+        .chain(written.type_decls.iter().map(|t| &t.name))
+        .map(|n| (n.clone(), format!("derive${g}${n}")))
         .collect();
-    let ph = crate::schema_reflect::PH;
-    for (i, _) in src.match_indices(ph) {
-        let name: String = src[i..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        let real = format!("{}{}", crate::loader::RT_PREFIX, &name[ph.len()..]);
-        map.insert(name, real);
+    for (ph, fold) in crate::schema_reflect::PLACEHOLDERS {
+        for (i, _) in src.match_indices(ph) {
+            let name: String = src[i..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let real = format!("{fold}{}", &name[ph.len()..]);
+            map.insert(name, real);
+        }
     }
     // The banner a diagnostic in the written code names as its file.
     let banner = format!("generated by derive({g}, ..)");
@@ -741,6 +744,10 @@ fn run_derive(
         f.name = map[&f.name].clone();
         f.module = Some(banner.clone());
     }
+    for t in &mut written.type_decls {
+        t.name = map[&t.name].clone();
+        t.module = Some(banner.clone());
+    }
     crate::loader::rewrite_names(&mut written, &map);
-    Ok(written.functions)
+    Ok((written.functions, written.type_decls))
 }
