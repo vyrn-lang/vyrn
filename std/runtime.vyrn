@@ -220,9 +220,10 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 // ignores it and only `regionExit` reclaims it.
 //
 // The request is an `Int64` because callers compute `count * stride` from an
-// `Int64` length, and an `Int32` product once wrapped (`tests/parity.rs`,
-// `a_malloc_whose_bump_pointer_would_wrap_traps_instead_of_lying`). The width
-// check precedes the rounding because `n + 7` is the cast.
+// `Int64` length, and an `Int32` product once wrapped. The width check comes
+// first, so `n + 7` cannot wrap. The rounding stays in 64 bits and the class
+// size widens unsigned: a request in (2^31 - 8, 2^31] rounds to 2^31, which an
+// `Int32` reads as negative, and class 115's size is 2^31 (`mallocround`).
 
 /// `malloc`: `n` bytes, eight-aligned, from the class's free list or the bump
 /// region. Traps `out of memory` when the request cannot fit a wasm32 memory
@@ -231,11 +232,10 @@ export fn malloc(n: Int64) -> Int32 {
     if UInt64(n) > 2147483648 {
         panic("out of memory")
     }
-    let mut t = Int32((n + 7) & -8)
-    if t < 8 {
-        t = 8
+    let mut t = Int32(((n + 7) & -8) - 1)
+    if t < 7 {
+        t = 7
     }
-    t = t - 1
     // `shift = floorLog2(t) - 2`; `t >= 7`, so `u >= 1`.
     let mut shift: Int32 = 0
     let mut u = t >> 2
@@ -256,7 +256,7 @@ export fn malloc(n: Int64) -> Int32 {
     }
     let p = base + 8768 + Int32(load32(base + 464))
     // In 64 bits so the sum cannot wrap.
-    let end = Int64(UInt32(p)) + Int64(size) + 8
+    let end = Int64(UInt32(p)) + Int64(UInt32(size)) + 8
     if end > 4294967295 {
         panic("out of memory")
     }
@@ -425,26 +425,27 @@ fn arenaAlloc(n: Int64, base: Int32) -> Int32 {
     if UInt64(n) > 2147483648 {
         panic("out of memory")
     }
-    let size = Int32((n + 7) & -8) + 8
+    // In 64 bits, as in `malloc`: a request near the limit is 2 GiB with its
+    // header, and a chunk near the top of a wasm32 memory would wrap the sum.
+    let size = ((n + 7) & -8) + 8
     let mut c = Int32(load32(base + 468))
     let mut cur = Int32(load32(base + 472))
-    // In 64 bits: a chunk near the top of a wasm32 memory would wrap the sum.
-    let full = c == 0 || Int64(UInt32(cur)) + Int64(size) > Int64(load32(c + 4))
+    let full = c == 0 || Int64(UInt32(cur)) + size > Int64(load32(c + 4))
     if full {
         let mut body = size
         if body < 4096 {
             body = 4096
         }
-        let nc = malloc(Int64(body) + 8)
+        let nc = malloc(body + 8)
         store32(nc, UInt32(c))
-        store32(nc + 4, UInt32(nc + 8 + body))
+        store32(nc + 4, UInt32(Int64(nc) + 8 + body))
         store32(base + 468, UInt32(nc))
         c = nc
         cur = nc + 8
     }
     // Class 0: the ownership test above.
     store32(cur, 0)
-    store32(base + 472, UInt32(cur + size))
+    store32(base + 472, UInt32(Int64(cur) + size))
     return cur + 8
 }
 
@@ -875,6 +876,10 @@ export fn arrReserve(dst: Int32, src: Int32, stride: Int32, n: Int64) {
     let mut cap = Int64(load64(src + 16))
     let need = len + n
     if need > cap {
+        // Past the length limit `need * stride` can wrap before `malloc` sees it.
+        if need > 2147483647 {
+            panic("out of memory")
+        }
         let grown = malloc(need * Int64(stride))
         copy(grown, data, Int32(len) * stride)
         free(data)
@@ -1285,8 +1290,9 @@ fn readAll(fd: Int32, hdr: Int32) -> Int32 {
     let mut len: Int32 = 0
     while true {
         if UInt32(len + 1) >= UInt32(cap) {
+            // In 64 bits: doubling 2 GiB is 0 in an `Int32`.
+            let nb = malloc(Int64(UInt32(cap)) * 2 + Int64(hdr)) + hdr
             cap = cap << 1
-            let nb = malloc(Int64(UInt32(cap + hdr))) + hdr
             copy(nb, buf, len)
             free(buf - hdr)
             buf = nb

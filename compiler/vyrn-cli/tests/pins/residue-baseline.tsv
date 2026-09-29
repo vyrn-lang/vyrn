@@ -103,6 +103,7 @@ linkedlist	other
 listdir	clean
 logging	clean
 looptemp	clean
+mallocround	other
 mandelbrot	clean
 map	clean
 mapdemo	clean
@@ -143,6 +144,7 @@ regionarena	clean
 regionescape	clean
 releaseacrossexit	clean
 releaseacrosstry	clean
+reservewrap	other
 rest	clean
 revcomp	clean
 rpc	clean

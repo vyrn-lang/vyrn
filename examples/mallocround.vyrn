@@ -1,0 +1,19 @@
+/// A request in (2^31 - 8, 2^31] bytes rounds to 2^31, past an `Int32`.
+/// `malloc` rounds in 64 bits, so the block is 2 GiB, not 8 bytes that the
+/// pushes overrun into `b`. Two such blocks cannot fit a wasm32 memory, so the
+/// second traps `out of memory`.
+fn main() -> Int64 {
+    let mut a: Array<UInt8> = []
+    a.reserve(2147483644)
+    let mut b: Array<UInt8> = [1, 2, 3, 4, 5, 6, 7, 8]
+    let mut i = 0
+    while i < 64 {
+        a.push(UInt8(7))
+        i = i + 1
+    }
+    print("b[0] \{Int64(b[0])}")
+    let mut c: Array<UInt8> = []
+    c.reserve(2147483644)
+    print("unreached")
+    return 0
+}

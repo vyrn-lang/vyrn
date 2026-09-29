@@ -1,0 +1,9 @@
+/// `reserve(2^61)` of 8-byte elements is 2^64 bytes, which an `Int64` wraps to
+/// 0. `reserve` refuses a length past the limit before it multiplies, so this
+/// traps `out of memory` instead of pushing into an 8-byte block.
+fn main() -> Int64 {
+    let mut a: Array<Int64> = []
+    a.reserve(2305843009213693952)
+    print("unreached")
+    return 0
+}
