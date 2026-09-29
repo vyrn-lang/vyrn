@@ -15,8 +15,8 @@ use crate::codec::Wire;
 /// and the name is also the worklist's dedup key. `Debug` over [`Type`] is a
 /// total, injective rendering; it is not a stable format, so no artifact
 /// outside the emitted module may carry a key, and `struct_key_is_pinned` pins
-/// a table. A 64-bit collision is detected: `jsonenc` and `jsondec` keep the
-/// type beside the key.
+/// a table. A 64-bit collision is detected: the `TypeArg` builder and
+/// `jsondec` keep the type beside the key.
 pub fn struct_key(x: &impl std::fmt::Debug) -> String {
     crate::hash::sha256_hex(format!("{x:?}").as_bytes())[..16].to_string()
 }
@@ -1790,9 +1790,10 @@ mod struct_key_tests {
             ty: Type::Int,
         }]);
         let k = struct_key(&ty);
-        assert!(crate::jsonenc::enc_name(&ty).ends_with(&k));
+        let enc = crate::gen::derived_name(crate::loader::JSON_ENCODERS, &ty);
+        assert!(enc.ends_with(&k));
         assert!(crate::jsondec::top_name(&ty).ends_with(&k));
-        assert_ne!(crate::jsonenc::enc_name(&ty), crate::jsondec::top_name(&ty));
+        assert_ne!(enc, crate::jsondec::top_name(&ty));
     }
 }
 

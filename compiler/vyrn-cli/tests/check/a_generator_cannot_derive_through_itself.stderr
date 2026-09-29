@@ -1,0 +1,1 @@
+a_generator_cannot_derive_through_itself.vyrn:0:0: generator `g` does not check: line 0: generator `g` reaches `derive(g, ..)`

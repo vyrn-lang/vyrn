@@ -432,6 +432,87 @@ export fn jsonEq(a: Json, b: Json) -> Bool {
     return emit(a) == emit(b)
 }
 
+/// Writes the encoders `toJson` calls: for each root, the function that renders
+/// its value, and for each node, the function that builds its `Json` tree.
+/// Generated source cannot spell this module's reserved names, so it writes
+/// them as `VyrnRt_` placeholders the compiler folds back.
+export gen fn jsonEncoders(t: TypeArg) -> String {
+    let mut out = ""
+    for r in t.roots {
+        let n = t.nodes[r]
+        // Bound, not returned inline: an argument temporary's tree would leak.
+        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
+        out = out + "    let t: VyrnRt_Json = e" + n.name + "(v)\n    let s = VyrnRt_emit(t)\n    return s\n}\n"
+    }
+    for n in t.nodes {
+        out = out + "fn e" + n.name + "(v: " + n.spelling + ") -> VyrnRt_Json {\n"
+        out = out + jsonEncoderBody(t, n) + "}\n"
+    }
+    return out
+}
+
+gen fn jsonEncoderBody(t: TypeArg, n: TypeNode) -> String {
+    let fs = "    let mut fs: Array<VyrnRt_JsonField> = []\n"
+    if n.kind == "record" {
+        let mut out = fs
+        for m in n.members {
+            let f = t.nodes[m.args[0]]
+            // A `None` field is omitted; `push` returns the array.
+            if f.kind == "option" {
+                out = out + "    fs = match v." + m.name + " { Some(x) => fs.push(VyrnRt_JsonField { key: \"" + m.name + "\", value: e" + t.nodes[f.args[0]].name + "(x) }), None => fs }\n"
+            } else {
+                out = out + "    fs.push(VyrnRt_JsonField { key: \"" + m.name + "\", value: e" + f.name + "(v." + m.name + ") })\n"
+            }
+        }
+        return out + "    return VyrnRt_JObj(fs)\n"
+    }
+    if n.kind == "option" {
+        return "    return match v { Some(x) => e" + t.nodes[n.args[0]].name + "(x), None => VyrnRt_JNull }\n"
+    }
+    if n.kind == "array" {
+        return "    let mut out: Array<VyrnRt_Json> = []\n    for it in v { out.push(e" + t.nodes[n.args[0]].name + "(it)) }\n    return VyrnRt_JArr(out)\n"
+    }
+    if n.kind == "map" {
+        // An `Int64` key is the decimal text `toString` writes.
+        let key = if t.nodes[n.args[0]].kind == "String" { "k" } else { "k.toString()" }
+        return fs + "    for k in v.keys() {\n        fs = match v[k] { Some(x) => fs.push(VyrnRt_JsonField { key: " + key + ", value: e" + t.nodes[n.args[1]].name + "(x) }), None => fs }\n    }\n    return VyrnRt_JObj(fs)\n"
+    }
+    if n.kind == "enum" {
+        let mut arms = ""
+        for m in n.members {
+            arms = arms + "        " + jsonVariant(t, m) + ",\n"
+        }
+        return "    return match v {\n" + arms + "    }\n"
+    }
+    if n.kind == "Bool" {
+        return "    return VyrnRt_JBool(v)\n"
+    }
+    // Copied: `v` is a `read` parameter and the tree outlives the call.
+    if n.kind == "String" {
+        return "    return VyrnRt_JStr(v.copy())\n"
+    }
+    return "    return VyrnRt_JNum(v.toString())\n"
+}
+
+/// One match arm in wire form: a nullary variant is a bare string, one payload
+/// `{"Tag":<v>}`, several `{"Tag":[..]}`.
+gen fn jsonVariant(t: TypeArg, m: TypeMember) -> String {
+    if m.args.length == 0 {
+        return m.name + " => VyrnRt_JStr(\"" + m.name + "\")"
+    }
+    let mut binds = ""
+    let mut items = ""
+    let mut i = 0
+    for a in m.args {
+        let sep = if i == 0 { "" } else { ", " }
+        binds = binds + sep + "p" + i.toString()
+        items = items + sep + "e" + t.nodes[a].name + "(p" + i.toString() + ")"
+        i = i + 1
+    }
+    let value = if m.args.length == 1 { items } else { "VyrnRt_JArr([" + items + "])" }
+    return m.name + "(" + binds + ") => VyrnRt_JObj([VyrnRt_JsonField { key: \"" + m.name + "\", value: " + value + " }])"
+}
+
 test "emits compact JSON with correct escaping" {
     assertEq(emit(JNull), "null")
     assertEq(emit(JArr([JNum("1"), JStr("a\nb")])), "[1,\"a\\nb\"]")

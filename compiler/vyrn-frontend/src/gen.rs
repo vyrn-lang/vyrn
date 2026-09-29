@@ -491,6 +491,10 @@ thread_local! {
     /// not run the generator again.
     static DERIVED: std::cell::RefCell<HashMap<String, Vec<crate::ast::Function>>> =
         std::cell::RefCell::new(HashMap::new());
+    /// The generators running, outermost first. A generator's own program may
+    /// call `derive` (a `std/ui` generator reaches `toJson`), but not reach
+    /// itself.
+    static DERIVING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Runs the generator of every `derive(g, x)` site on the types the checker
@@ -507,9 +511,6 @@ pub fn derive(
 ) -> Result<Vec<crate::ast::Function>, String> {
     if sites.is_empty() {
         return Ok(Vec::new());
-    }
-    if crate::movecheck::in_comptime() {
-        return Err("a generator's own program cannot call `derive`".to_string());
     }
     let types = crate::types::decl_map(program);
     let mut gens: Vec<&str> = Vec::new();
@@ -539,7 +540,13 @@ pub fn derive(
         let fns = match cached {
             Some(fns) => fns,
             None => {
-                let fns = run_derive(gen_program, g, arg, fingerprint)?;
+                if DERIVING.with(|d| d.borrow().iter().any(|r| r == g)) {
+                    return Err(format!("generator `{g}` reaches `derive({g}, ..)`"));
+                }
+                DERIVING.with(|d| d.borrow_mut().push(g.to_string()));
+                let fns = run_derive(gen_program, g, arg, fingerprint);
+                DERIVING.with(|d| d.borrow_mut().pop());
+                let fns = fns?;
                 DERIVED.with(|d| d.borrow_mut().insert(key, fns.clone()));
                 fns
             }
@@ -557,45 +564,84 @@ pub fn derive(
     Ok(out)
 }
 
-/// `program` with the functions `g` does not reach, the tests, the benches and
-/// the module state removed: what a generator's own load would link.
+/// `program` with the functions and module state `g` does not reach, the tests
+/// and the benches removed: what a generator's own load would link.
 fn generator_program(program: &Program, g: &str) -> Program {
     let by_name: HashMap<&str, &crate::ast::Function> = program
         .functions
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
+    let state: HashMap<&str, &Expr> = program
+        .globals
+        .iter()
+        .map(|s| (s.name.as_str(), &s.init))
+        .collect();
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The injected runtime modules (`$` names) stay whole: the emitter calls
-    // into `std/runtime` where no source does.
+    // into `std/runtime` where no source does. The impls and contracts stay
+    // whole, so their flattened methods and what their defaults call stay too.
     let mut work: Vec<String> = vec![g.to_string()];
     work.extend(
         program
             .functions
             .iter()
-            .filter(|f| f.name.contains('$'))
+            .filter(|f| f.name.contains('$') || crate::types::impl_method_member(&f.name).is_some())
             .map(|f| f.name.clone()),
     );
+    for d in program
+        .contracts
+        .iter()
+        .flat_map(|c| &c.members)
+        .filter_map(|m| m.default())
+    {
+        work.extend(crate::checker::expr_refs(d));
+    }
     for m in program
         .impls
         .iter()
         .flat_map(|i| i.methods.iter().chain(&i.places))
     {
-        work.extend(crate::checker::fn_calls(&m.body));
+        work.extend(crate::checker::fn_refs(m));
     }
     while let Some(n) = work.pop() {
         if let Some(f) = by_name.get(n.as_str()) {
             if keep.insert(n) {
-                work.extend(crate::checker::fn_calls(&f.body));
+                work.extend(crate::checker::fn_refs(f));
+            }
+        } else if let Some(init) = state.get(n.as_str()) {
+            if keep.insert(n) {
+                work.extend(crate::checker::expr_refs(init));
             }
         }
     }
-    let mut p = program.clone();
-    p.functions.retain(|f| keep.contains(&f.name));
-    p.globals.clear();
-    p.tests.clear();
-    p.benches.clear();
-    p
+    // Built field by field, not cloned and cut: the dropped bodies are most of
+    // a large program.
+    Program {
+        functions: program
+            .functions
+            .iter()
+            .filter(|f| keep.contains(&f.name))
+            .cloned()
+            .collect(),
+        globals: program
+            .globals
+            .iter()
+            .filter(|s| keep.contains(&s.name))
+            .cloned()
+            .collect(),
+        tests: Vec::new(),
+        benches: Vec::new(),
+        imports: program.imports.clone(),
+        type_decls: program.type_decls.clone(),
+        protocols: program.protocols.clone(),
+        contracts: program.contracts.clone(),
+        impls: program.impls.clone(),
+        surface_shadows: program.surface_shadows.clone(),
+        log_level: program.log_level,
+        log_sink: program.log_sink.clone(),
+        nodes: program.nodes,
+    }
 }
 
 /// Returns a text that names `p` alike in every process: its `Debug`, with the
@@ -675,11 +721,20 @@ fn run_derive(
             d.message
         ));
     }
-    let map: HashMap<String, String> = written
+    let mut map: HashMap<String, String> = written
         .functions
         .iter()
         .map(|f| (f.name.clone(), format!("derive${g}${}", f.name)))
         .collect();
+    let ph = crate::schema_reflect::PH;
+    for (i, _) in src.match_indices(ph) {
+        let name: String = src[i..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let real = format!("{}{}", crate::loader::RT_PREFIX, &name[ph.len()..]);
+        map.insert(name, real);
+    }
     // The banner a diagnostic in the written code names as its file.
     let banner = format!("generated by derive({g}, ..)");
     for f in &mut written.functions {

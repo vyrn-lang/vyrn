@@ -242,7 +242,7 @@ pub(crate) fn local_index(
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
 pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (out, binders, _, _, _, _, _) = check_accum_full(program);
+    let (out, binders, _, _, _, _) = check_accum_full(program);
     (out, binders)
 }
 
@@ -443,18 +443,17 @@ pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
 
 use crate::types::INT32;
 
-/// Returns the diagnostics, every `toJson` argument type and `fromJson` target,
+/// Returns the diagnostics, every `fromJson` target, every `derive` site,
 /// and the refused set: the functions and module state the
 /// diagnostics all belong to, so every other body is typed. The set is `None`
 /// when a refusal stands anywhere else.
 pub fn check_accum_with_json_types(program: &Program) -> CheckedJson {
-    let (out, _, _, json, jdec, derived, refused) = check_accum_full(program);
-    (out, json, jdec, derived, refused)
+    let (out, _, _, jdec, derived, refused) = check_accum_full(program);
+    (out, jdec, derived, refused)
 }
 
 pub type CheckedJson = (
     Vec<Diagnostic>,
-    Vec<Type>,
     Vec<Type>,
     Vec<(String, Type)>,
     Option<HashSet<String>>,
@@ -467,12 +466,70 @@ fn check_accum_full(
     Vec<LocalBinding>,
     StoredFnEffects,
     Vec<Type>,
-    Vec<Type>,
     Vec<(String, Type)>,
     Option<HashSet<String>>,
 ) {
-    let (out, binders, effects, json, jdec, derived, typed, _) = check_accum_inner(program, false);
-    (out, binders, effects, json, jdec, derived, typed)
+    let (out, binders, effects, jdec, derived, typed, _) = check_accum_inner(program, false, 0);
+    (out, binders, effects, jdec, derived, typed)
+}
+
+/// Checks `program`, whose functions before `at` passed a check alone, typing
+/// only the bodies from `at` on. Returns the diagnostics, the `derive` sites of
+/// those bodies, and the refused set, as a whole check would.
+///
+/// A body is typed against the declarations alone, so an earlier body keeps
+/// its verdict unless the appended functions change a table it reads by
+/// something other than their names. `None` names the two cases where a
+/// whole check must run instead: an appended signature makes a stored
+/// function value's parameter `consume`, or an appended body names a
+/// `fromJson` target, whose place in the ordered target list only a whole
+/// check knows.
+pub fn check_appended(program: &Program, at: usize) -> Option<Appended> {
+    let before = caps_by_sig(&program.functions[..at]);
+    let widened = caps_by_sig(&program.functions)
+        .into_iter()
+        .any(|(k, caps)| before.get(&k).is_some_and(|b| *b != caps));
+    if widened {
+        return None;
+    }
+    let (out, _, _, jdec, derived, typed, _) = check_accum_inner(program, false, at);
+    jdec.is_empty().then_some((out, derived, typed))
+}
+
+pub type Appended = (
+    Vec<Diagnostic>,
+    Vec<(String, Type)>,
+    Option<HashSet<String>>,
+);
+
+/// Parameter capabilities keyed by the Debug text of a `Type::Fn`, which
+/// carries none, for a call through a stored function value. When two
+/// declarations share a signature, `consume` wins: refusing is the sound side.
+fn caps_by_sig(functions: &[crate::ast::Function]) -> HashMap<String, Vec<Capability>> {
+    let mut caps_by_sig: HashMap<String, Vec<Capability>> = HashMap::new();
+    for f in functions {
+        let key = format!(
+            "{:?}",
+            Type::Fn(
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(f.ret.clone()),
+            )
+        );
+        let cs: Vec<Capability> = f.params.iter().map(|p| p.capability).collect();
+        match caps_by_sig.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                for (c, n) in o.get_mut().iter_mut().zip(&cs) {
+                    if *n == Capability::Consume {
+                        *c = *n;
+                    }
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(cs);
+            }
+        }
+    }
+    caps_by_sig
 }
 
 /// An impl head as written (`impl<T> Show for Option<T>`), for the overlap
@@ -523,11 +580,11 @@ fn render_method_sig(
 fn check_accum_inner(
     program: &Program,
     recording: bool,
+    bodies_from: usize,
 ) -> (
     Vec<Diagnostic>,
     Vec<LocalBinding>,
     StoredFnEffects,
-    Vec<Type>,
     Vec<Type>,
     Vec<(String, Type)>,
     Option<HashSet<String>>,
@@ -675,33 +732,7 @@ fn check_accum_inner(
             caps.insert(m.name.clone(), cs);
         }
     }
-    // Parameter capabilities keyed by the Debug text of a `Type::Fn`, which
-    // carries none, for a call through a stored function value.
-    // When two declarations share a signature, `consume` wins: refusing is
-    // the sound side.
-    let mut caps_by_sig: HashMap<String, Vec<Capability>> = HashMap::new();
-    for f in &program.functions {
-        let key = format!(
-            "{:?}",
-            Type::Fn(
-                f.params.iter().map(|p| p.ty.clone()).collect(),
-                Box::new(f.ret.clone()),
-            )
-        );
-        let cs: Vec<Capability> = f.params.iter().map(|p| p.capability).collect();
-        match caps_by_sig.entry(key) {
-            std::collections::hash_map::Entry::Occupied(mut o) => {
-                for (c, n) in o.get_mut().iter_mut().zip(&cs) {
-                    if *n == Capability::Consume {
-                        *c = *n;
-                    }
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(cs);
-            }
-        }
-    }
+    let caps_by_sig = caps_by_sig(&program.functions);
 
     // Protocol registries: each method name to its protocol and
     // signature, and which (protocol, type key) pairs are implemented.
@@ -1121,7 +1152,6 @@ fn check_accum_inner(
         stored_sources: RefCell::new(Vec::new()),
         arg_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
-        json_types: RefCell::new(Vec::new()),
         json_dec_types: RefCell::new(Vec::new()),
         derive_sites: RefCell::new(Vec::new()),
         record: recording.then(RefCell::default),
@@ -1182,7 +1212,7 @@ fn check_accum_inner(
     // 5. Check functions, each independently. In a body, errors accumulate
     //    per statement in `errors`; `function` returns the first and this
     //    drains the rest. Within one expression the check is first-error.
-    for f in &program.functions {
+    for f in &program.functions[bodies_from..] {
         let produced_from = out.len();
 
         // Signature validation runs outside `function()` and must accept a
@@ -1253,15 +1283,17 @@ fn check_accum_inner(
     // 6. Projection, test and bench bodies. A test or bench is a Unit body
     //    under an unspellable name (`test@<index>`), absent from `sigs`, so no
     //    code can call it.
-    check_places(&checker, program, &mut out);
-    check_named_blocks(&checker, &program.tests, "test", &checker.in_test, &mut out);
-    check_named_blocks(
-        &checker,
-        &program.benches,
-        "bench",
-        &checker.in_bench,
-        &mut out,
-    );
+    if bodies_from == 0 {
+        check_places(&checker, program, &mut out);
+        check_named_blocks(&checker, &program.tests, "test", &checker.in_test, &mut out);
+        check_named_blocks(
+            &checker,
+            &program.benches,
+            "bench",
+            &checker.in_bench,
+            &mut out,
+        );
+    }
 
     // 7. Comptime purity of every `gen fn` and its callees, after
     //    the body checks so a generator's type errors come first.
@@ -1273,8 +1305,6 @@ fn check_accum_inner(
         calls: checker.stored_calls.borrow().clone(),
     };
     let binders = local_index(program, &checker.binder_types.borrow());
-    let mut json_types = checker.json_types.borrow().clone();
-    json_types.dedup_by_key(|t| format!("{t:?}"));
     let mut json_dec_types = checker.json_dec_types.borrow().clone();
     json_dec_types.dedup_by_key(|t| format!("{t:?}"));
     let typed = (in_bodies == out.len()).then_some(refused);
@@ -1283,7 +1313,6 @@ fn check_accum_inner(
         out,
         binders,
         effects,
-        json_types,
         json_dec_types,
         checker.derive_sites.take(),
         typed,
@@ -1670,7 +1699,7 @@ pub struct Recorded {
 
 /// One pass that returns the diagnostics, the root's bindings and the record.
 fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
-    let (diags, binders, _, _, _, _, _, made) = check_accum_inner(program, true);
+    let (diags, binders, _, _, _, _, made) = check_accum_inner(program, true, 0);
     (diags, binders, made.unwrap_or_default())
 }
 
@@ -1845,9 +1874,6 @@ struct Checker<'a> {
     /// Each call through a stored function value, as (enclosing function,
     /// signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
-    /// Every `toJson` argument type. Only the checker knows it, so it collects
-    /// and `crate::check_and_synthesize` synthesizes the encoders.
-    json_types: RefCell<Vec<Type>>,
     /// Every `fromJson<T>` target, for the decoders.
     json_dec_types: RefCell<Vec<Type>>,
     /// Every `derive(g, x)` site: the generator and `x`'s type.
@@ -5730,12 +5756,14 @@ impl<'a> Checker<'a> {
                     "`toJson` cannot encode `{off}` (not a codable type)"
                 ));
             }
-            // Recorded so the encoder exists in the linked program by lowering.
-            self.json_types.borrow_mut().push(at);
+            self.derive_sites
+                .borrow_mut()
+                .push((crate::loader::JSON_ENCODERS.to_string(), at));
             return Ok(Type::Str);
         }
         // `derive(g, x)`: generator `g` writes a function for `x`'s type after
-        // the check (`gen::derive`); the call site calls it.
+        // the check (`gen::derive`); the call site calls it. `toJson` above is
+        // one.
         if name == "derive" {
             let g = match args {
                 [Expr::Var { name: g, .. }, _] => g,
@@ -7918,6 +7946,51 @@ pub fn fn_calls(b: &Block) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut locals = HashSet::new();
     body_block(b, &mut locals, &mut Calls(&mut out));
+    out
+}
+
+/// Collects what a body calls and every name it reads or assigns that is not a
+/// local: the functions and module state it reaches.
+struct Refs<'a>(&'a mut HashSet<String>);
+
+impl BodyVisit<'_> for Refs<'_> {
+    fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
+        if let Stmt::Assign { name, .. }
+        | Stmt::SetField { name, .. }
+        | Stmt::IndexSet { name, .. } = s
+        {
+            if !locals.contains(name) {
+                self.0.insert(name.clone());
+            }
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+        match e {
+            Expr::Call { name, .. } | Expr::TryConstruct { name, .. } => {
+                self.0.insert(name.clone());
+            }
+            Expr::Var { name, .. } if !locals.contains(name) => {
+                self.0.insert(name.clone());
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+/// Returns the functions and module state `f` reaches (see [`Refs`]).
+pub fn fn_refs(f: &Function) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut locals = f.params.iter().map(|p| p.name.clone()).collect();
+    body_block(&f.body, &mut locals, &mut Refs(&mut out));
+    out
+}
+
+/// Returns the functions and module state `e` reaches (see [`Refs`]).
+pub fn expr_refs(e: &Expr) -> HashSet<String> {
+    let mut out = HashSet::new();
+    body_expr(e, &HashSet::new(), &mut Refs(&mut out));
     out
 }
 
