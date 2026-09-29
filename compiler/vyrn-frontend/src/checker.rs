@@ -1663,23 +1663,23 @@ pub struct CallDecl {
     pub recv: bool,
 }
 
-/// What the checker decided, keyed by AST node address.
+/// What the checker decided, keyed by node.
 #[derive(Debug, Clone, Default)]
 pub struct Recorded {
     /// The static type of every expression the checker typed.
-    pub node_types: HashMap<usize, Type>,
+    pub node_types: HashMap<NodeId, Type>,
     /// The static type of every join (a `match` or `if` expression), before
     /// instantiation. A subset of [`Recorded::node_types`], kept apart for the
     /// emitters, which cannot tell a join from its address.
-    pub joins: HashMap<usize, Type>,
+    pub joins: HashMap<NodeId, Type>,
     /// Every solved type parameter of a generic call or record literal, keyed
     /// by the [`Expr::Call`] or [`Expr::StructLit`] node: the callee or record
     /// name, and the solved arguments in its type-parameter order. The checker
     /// refines nothing later, so the solution governs its whole subtree.
-    pub node_substs: HashMap<usize, (String, Vec<(String, Type)>)>,
+    pub node_substs: HashMap<NodeId, (String, Vec<(String, Type)>)>,
     /// A declared call whose arity, type-argument count or argument the typed
     /// judgment refuses, keyed by the [`Expr::Call`] node.
-    pub calls: HashMap<usize, CallDecl>,
+    pub calls: HashMap<NodeId, CallDecl>,
 }
 
 /// One pass that returns the diagnostics, the root's bindings and the record.
@@ -3099,7 +3099,7 @@ impl<'a> Checker<'a> {
             let lambda: Vec<Diagnostic> = self.errors.borrow_mut().drain(..).collect();
             if !lambda.is_empty() {
                 refused.insert(g.name.clone());
-                let key = &g.init as *const Expr as usize;
+                let key = g.init.id();
                 if let Some(r) = &self.record {
                     r.borrow_mut().node_types.remove(&key);
                 }
@@ -3651,7 +3651,11 @@ impl<'a> Checker<'a> {
             return self.expr_inner(expr, scope, expected, fn_ret);
         };
         let t = self.expr_inner(expr, scope, expected, fn_ret)?;
-        let key = expr as *const Expr as usize;
+        let key = expr.id();
+        assert_ne!(
+            key.0, 0,
+            "the checker typed a node no numbering reached: {expr:?}"
+        );
         let pending = self.pending_subst.take();
         let call = self.pending_call.take();
         {
@@ -6530,7 +6534,7 @@ impl<'a> Checker<'a> {
                 // The core types the literal's closure from this row (a
                 // `consume` position names no target).
                 if let Some(r) = &self.record {
-                    let key = arg as *const Expr as usize;
+                    let key = arg.id();
                     r.borrow_mut().node_types.insert(key, sig);
                 }
                 Ok(true)
@@ -7975,13 +7979,17 @@ mod tests {
             assert_eq!(got.node_types, want.node_types);
             assert_eq!(got.joins, want.joins);
             assert_eq!(got.node_substs.len(), want.node_substs.len());
-            let q = parse(lex(src).unwrap()).unwrap();
+            let q = parse(
+                lex("fn main() -> Int64 {
+    return 0
+}
+")
+                .unwrap(),
+            )
+            .unwrap();
             let other = recorded(&q);
-            assert!(
-                other
-                    .node_types
-                    .keys()
-                    .all(|k| !got.node_types.contains_key(k)),
+            assert_ne!(
+                other.node_types, got.node_types,
                 "a record served for the wrong program"
             );
         }

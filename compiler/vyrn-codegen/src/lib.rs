@@ -104,8 +104,7 @@ pub mod observe {
         /// off-program. `"pred"`: a `where` predicate is cloned out of
         /// `types::decl_map` and again at each validation site.
         pub ctx: &'static str,
-        /// The AST node's address, the identity `own` and `movecheck` use.
-        pub node: usize,
+        pub node: vyrn_frontend::ast::NodeId,
         /// The instantiation the emitter was inside, sorted by parameter name.
         pub subst: Vec<(String, Type)>,
         pub ty: Type,
@@ -297,7 +296,7 @@ pub mod observe {
     pub(crate) fn record(
         site: Site,
         kind: &'static str,
-        node: usize,
+        node: vyrn_frontend::ast::NodeId,
         subst: &std::collections::HashMap<String, Type>,
         ty: &Type,
     ) {

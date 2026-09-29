@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use vyrn_codegen::observe::{self, Site};
-use vyrn_frontend::ast::{Expr, Program, Type, TypeDecl};
+use vyrn_frontend::ast::{Expr, NodeId, Program, Type, TypeDecl};
 use vyrn_frontend::types::{decl_map, mentions_param, resolve};
 use vyrn_lower::NodeTypes;
 
@@ -319,15 +319,15 @@ fn defaulted(a: &Type, b: &Type) -> bool {
     walk(a, b)
 }
 
-/// Each expression of `facts` by address, with the pair it carries: the type
+/// Each expression of `facts` by node, with the pair it carries: the type
 /// it must end up as, and the type it has where that differs.
 #[allow(clippy::type_complexity)]
-fn pairs<'a>(facts: &NodeTypes<'a>) -> Vec<(usize, (Option<Type>, Option<Type>), &'a Expr)> {
+fn pairs<'a>(facts: &NodeTypes<'a>) -> Vec<(NodeId, (Option<Type>, Option<Type>), &'a Expr)> {
     facts
         .exprs
         .iter()
         .map(|(e, _)| {
-            let id = *e as *const Expr as usize;
+            let id = e.id();
             let ty = facts.types.get(&id);
             let has = facts.produced.get(&id).filter(|h| Some(*h) != ty);
             (id, (ty.cloned(), has.cloned()), *e)
@@ -427,11 +427,11 @@ fn gate() {
         }
 
         // (node address, instantiation) -> (end-up type, has-type, node).
-        let mut recorded: HashMap<(usize, String), (Option<Type>, Option<Type>, &Expr)> =
+        let mut recorded: HashMap<(NodeId, String), (Option<Type>, Option<Type>, &Expr)> =
             HashMap::new();
-        // Every node address the lowering recorded, under any instantiation: it
+        // Every node the lowering recorded, under any instantiation: it
         // separates an unbuilt substitution from AST that is not in the program.
-        let mut walked: std::collections::HashSet<usize> = Default::default();
+        let mut walked: std::collections::HashSet<NodeId> = Default::default();
         for inst in &lowered.instances {
             let key = subst_key(
                 &inst
@@ -453,13 +453,13 @@ fn gate() {
         // A `where` predicate lives on a declaration, which has no type
         // parameters, but it is walked inside whatever body the boundary is in:
         // an answer about one is looked up with the instantiation dropped.
-        let mut predicate_nodes: std::collections::HashSet<usize> = Default::default();
+        let mut predicate_nodes: std::collections::HashSet<NodeId> = Default::default();
         for (id, pair, e) in pairs(&lowered.predicates) {
             recorded.insert((id, String::new()), (pair.0, pair.1, e));
             walked.insert(id);
             predicate_nodes.insert(id);
         }
-        let at = |node: usize, subst: &str| {
+        let at = |node: NodeId, subst: &str| {
             if predicate_nodes.contains(&node) {
                 (node, String::new())
             } else {
@@ -567,7 +567,7 @@ fn gate() {
         }
 
         // The engines' answers about one node against each other.
-        let mut per_node: HashMap<(usize, String), Vec<(Site, Type, &'static str, &'static str)>> =
+        let mut per_node: HashMap<(NodeId, String), Vec<(Site, Type, &'static str, &'static str)>> =
             HashMap::new();
         for row in &rows {
             per_node

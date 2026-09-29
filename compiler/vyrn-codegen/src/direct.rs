@@ -3774,12 +3774,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The checker's type for `e`, read by node. [`Fn_::peek_inner`] answers for the AST this
     /// backend builds itself.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        // A tree this backend cloned has no node record; the plan's clone -> original alias
-        // finds the node it copies.
-        let at = e as *const Expr as usize;
-        let t = match vyrn_lower::core::node_ty(at)
-            .or_else(|| vyrn_lower::core::node_ty(self.cx.plan.key_of(at)))
-        {
+        let t = match vyrn_lower::core::node_ty(e.id()) {
             Some(t) => self.cx.sub(&t),
             None => self.peek_inner(e, line)?,
         };
@@ -3787,7 +3782,7 @@ impl<'p> Fn_<'_, 'p> {
             crate::observe::record(
                 crate::observe::Site::Peek,
                 crate::observe::kind_of(e),
-                e as *const Expr as usize,
+                e.id(),
                 &self.cx.subst,
                 &t,
             );

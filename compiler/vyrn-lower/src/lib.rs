@@ -32,7 +32,7 @@ pub use core::{refuses as kernel_refuses, take_refusals};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use vyrn_frontend::ast::{Block, Expr, Function, LambdaBody, Program, Stmt, Type};
+use vyrn_frontend::ast::{Block, Expr, Function, LambdaBody, NodeId, Program, Stmt, Type};
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types::{
@@ -50,13 +50,13 @@ pub const VERSION: &str = "v2";
 pub struct NodeTypes<'a> {
     /// The type each expression must END UP as: the destination the checker
     /// validated it against, or [`NodeTypes::produced`] where it recorded none.
-    pub types: HashMap<usize, Type>,
+    pub types: HashMap<NodeId, Type>,
     /// The type each expression HAS when its code has run, before the coercion
     /// to its destination.
-    pub produced: HashMap<usize, Type>,
+    pub produced: HashMap<NodeId, Type>,
     /// At a generic call or a `?` on a generic `Fallible`, the type arguments
     /// the checker solved, by parameter name in the callee's order.
-    pub solved: HashMap<usize, Vec<(String, Type)>>,
+    pub solved: HashMap<NodeId, Vec<(String, Type)>>,
     /// Every expression the body holds, expansions included, in reading
     /// order, each with its line. A literal has no line of its own and takes
     /// the line of the statement or binding around it.
@@ -336,7 +336,7 @@ struct Walk<'a, 'r> {
     lines: Vec<u32>,
     /// The scrutinee of each open `if let`, innermost last. An optional
     /// projection there expands after the scrutinee and before the blocks.
-    scrutinees: Vec<usize>,
+    scrutinees: Vec<NodeId>,
 }
 
 impl<'a, 'r> Walk<'a, 'r> {
@@ -359,7 +359,7 @@ impl<'a, 'r> Walk<'a, 'r> {
     }
 
     fn recorded(&self, e: &Expr) -> Option<Type> {
-        let key = e as *const Expr as usize;
+        let key = e.id();
         self.recorded
             .node_types
             .get(&key)
@@ -372,13 +372,8 @@ impl<'a, 'r> Walk<'a, 'r> {
         let Some((ty, pushed)) = self.open.pop() else {
             unreachable!("every closed expression was opened");
         };
-        let key = e as *const Expr as usize;
-        let has = has_of(e, |k| {
-            self.facts
-                .produced
-                .get(&(k as *const Expr as usize))
-                .cloned()
-        });
+        let key = e.id();
+        let has = has_of(e, |k| self.facts.produced.get(&k.id()).cloned());
         if let Some(t) = ty.clone().or_else(|| has.clone()) {
             self.facts.types.insert(key, t);
         }
@@ -456,7 +451,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
     fn stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
         self.lines.push(s.line() as u32);
         if let Stmt::IfLet { scrutinee, .. } = s {
-            self.scrutinees.push(scrutinee as *const Expr as usize);
+            self.scrutinees.push(scrutinee.id());
         }
     }
 
@@ -498,7 +493,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
     }
 
     fn expr(&mut self, e: &'a Expr, locals: &std::collections::HashSet<String>) -> bool {
-        let key = e as *const Expr as usize;
+        let key = e.id();
         let line = match e.line() {
             0 => self.lines.last().copied().unwrap_or(0),
             l => l as u32,
@@ -566,7 +561,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
             }
         }
         self.close(e);
-        if self.scrutinees.last() == Some(&(e as *const Expr as usize)) {
+        if self.scrutinees.last() == Some(&e.id()) {
             self.scrutinees.pop();
             let line = self.lines.last().copied().unwrap_or(0) as usize;
             self.optional_site(e, line);
@@ -1056,7 +1051,7 @@ pub fn lint(l: &Lowered) -> Vec<String> {
         }
         let concrete = [&i.facts.types, &i.facts.produced];
         for (e, line) in &i.facts.exprs {
-            let key = *e as *const Expr as usize;
+            let key = e.id();
             for t in concrete.iter().filter_map(|m| m.get(&key)) {
                 if matches!(t, Type::Err) {
                     bad.push(format!(
@@ -1111,7 +1106,7 @@ mod tests {
                 .facts
                 .exprs
                 .iter()
-                .filter_map(|(e, _)| inst.facts.types.get(&(*e as *const Expr as usize)))
+                .filter_map(|(e, _)| inst.facts.types.get(&e.id()))
                 .collect();
             assert_eq!(tys, vec![&want], "{}", inst.spelling());
         }
@@ -1131,7 +1126,7 @@ mod tests {
             .iter()
             .filter(|(e, _)| matches!(e, Expr::Int(_, _)))
             .map(|(e, _)| {
-                let key = *e as *const Expr as usize;
+                let key = e.id();
                 (f.produced[&key].to_string(), f.types[&key].to_string())
             })
             .collect();

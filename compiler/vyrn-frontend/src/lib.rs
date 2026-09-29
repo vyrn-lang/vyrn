@@ -224,7 +224,7 @@ fn lower_typed(
                     return;
                 };
                 let Some(recv) = args.first() else { return };
-                hit |= match record.node_types.get(&(recv as *const ast::Expr as usize)) {
+                hit |= match record.node_types.get(&recv.id()) {
                     Some(ast::Type::Param(_)) => refused_method(out, name, None),
                     Some(t) => {
                         types::type_key(t).is_some_and(|k| refused_method(out, name, Some(&k)))
