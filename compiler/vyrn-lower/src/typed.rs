@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use vyrn_frontend::ast::{NodeId, Type};
 
-use crate::core::{rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Val};
 use vyrn_frontend::ast::Capability;
+use vyrn_frontend::core::{rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Val};
 
 /// A step from one type into the type a place holds, for the caller that
 /// resolves a place's type. `Global` has no base.

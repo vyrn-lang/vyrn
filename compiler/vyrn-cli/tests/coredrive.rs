@@ -7,8 +7,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use vyrn_frontend::ast::Program;
+use vyrn_frontend::core::{Body, Callee, Rhs, St};
 use vyrn_frontend::project::Memo;
-use vyrn_lower::core::{Body, Callee, Rhs, St};
 
 struct Fs;
 
@@ -164,7 +164,7 @@ fn projection_calls(ss: &[St], out: &mut Vec<String>) {
             out.push(callee.clone());
         }
     }
-    for (s, _) in vyrn_lower::core::rows(ss) {
+    for (s, _) in vyrn_frontend::core::rows(ss) {
         if let St::Let(_, r) | St::Do { rhs: r, .. } = s {
             of(r, out);
         }

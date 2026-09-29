@@ -12,7 +12,7 @@ use vyrn_frontend::project::Memo;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vyrn_frontend::ast::Program;
-use vyrn_lower::core::{Ctor, Lit, Rhs, St, Val};
+use vyrn_frontend::core::{Ctor, Lit, Rhs, St, Val};
 
 fn repo_root() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -35,7 +35,7 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
     })
 }
 
-fn core_body(src: &str, which: &str) -> vyrn_lower::core::Body {
+fn core_body(src: &str, which: &str) -> vyrn_frontend::core::Body {
     vyrn_lower::install();
     let (program, _memo) =
         Memo::load(|| vyrn_frontend::load(src, "core.vyrn", &Default::default(), &DiskResolver))
@@ -63,7 +63,7 @@ fn core_holes(src: &str, binding: &str) -> Vec<String> {
 }
 
 /// Returns whether the frame of `which` owes a release on `binding`
-/// ([`vyrn_lower::core::NameInfo`]'s `releases`).
+/// ([`vyrn_frontend::core::NameInfo`]'s `releases`).
 fn core_releases(src: &str, which: &str, binding: &str) -> bool {
     core_body(src, which)
         .frames()
@@ -219,7 +219,7 @@ fn producers(
     out: &mut BTreeMap<(&'static str, bool), usize>,
     ops: &mut BTreeMap<String, usize>,
 ) {
-    for (s, _) in vyrn_lower::core::rows(stmts) {
+    for (s, _) in vyrn_frontend::core::rows(stmts) {
         match s {
             St::Let(_, rhs) => {
                 let row = match rhs {
