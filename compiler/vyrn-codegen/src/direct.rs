@@ -13811,29 +13811,19 @@ fn core_written(
             }
         }
     };
-    match s {
-        St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
-        St::Store { place, .. } => out.extend(
-            vyrn_lower::kernel::root_of(place)
-                .filter(|(n, path)| {
-                    !(vyrn_lower::kernel::in_element(path)
-                        && matches!(names[*n as usize].ty, Type::Array(_)))
-                })
-                .map(|(n, _)| (n, None)),
-        ),
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_written(names, s, out));
-            els.iter().for_each(|s| core_written(names, s, out));
+    for (s, _) in s.rows() {
+        match s {
+            St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
+            St::Store { place, .. } => out.extend(
+                vyrn_lower::kernel::root_of(place)
+                    .filter(|(n, path)| {
+                        !(vyrn_lower::kernel::in_element(path)
+                            && matches!(names[*n as usize].ty, Type::Array(_)))
+                    })
+                    .map(|(n, _)| (n, None)),
+            ),
+            _ => {}
         }
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_written(names, s, out));
-        }
-        St::Switch { arms, .. } => {
-            for a in arms {
-                a.body.iter().for_each(|s| core_written(names, s, out));
-            }
-        }
-        _ => {}
     }
 }
 
