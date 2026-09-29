@@ -573,19 +573,22 @@ fn runtime_fence(
     imported: &str,
     line: usize,
     opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
 ) -> Option<Diagnostic> {
     // A key and a std spec can spell one file two ways (`vyrn check
     // std/runtime.vyrn` is relative to the shell, the std root absolute), so
     // identity falls back to the real path.
-    let is = |key: &str, spec: &str| {
+    let mut real = |p: &str| {
+        real_paths
+            .entry(p.to_string())
+            .or_insert_with(|| crate::manifest::real_path(p))
+            .clone()
+    };
+    let mut is = |key: &str, spec: &str| {
         let Ok(k) = resolve_spec(spec, importer, opts) else {
             return false;
         };
-        key == k
-            || matches!(
-                (crate::manifest::real_path(key), crate::manifest::real_path(&k)),
-                (Some(a), Some(b)) if a == b
-            )
+        key == k || matches!((real(key), real(&k)), (Some(a), Some(b)) if a == b)
     };
     let fenced = if is(imported, MEM_SPEC) {
         if is(importer, RUNTIME_SPEC) {
@@ -625,8 +628,8 @@ struct Module {
 }
 
 /// The state one load walks: the modules entered, their loading state, the
-/// generated-module identities, the origin maps, the warnings and the
-/// cycle stack.
+/// generated-module identities, the origin maps, the warnings, the cycle stack
+/// and the real paths the runtime fence asked for.
 struct Work {
     modules: Vec<Module>,
     /// `false` = loading, `true` = loaded.
@@ -641,6 +644,9 @@ struct Work {
     warnings: Vec<Diagnostic>,
     /// The modules on the path to the one being entered, for the cycle report.
     stack: Vec<String>,
+    /// `key -> manifest::real_path(key)`. A file's identity does not change
+    /// during a load, and [`runtime_fence`] asks for the same keys on every edge.
+    real_paths: HashMap<String, Option<String>>,
 }
 
 /// The prefix every declaration of an injected runtime module is renamed to.
@@ -1094,6 +1100,7 @@ fn load_modules(
         origins: crate::origin::OriginMaps::new(),
         warnings: Vec::new(),
         stack: Vec::new(),
+        real_paths: HashMap::new(),
     };
 
     fn visit(
@@ -1344,7 +1351,7 @@ fn load_modules(
                 // An import may not widen audience. Checked before the
                 // target is visited, so the first illegal edge is the one reported.
                 if let Some(d) = audience_objection(key, &target, imp.line, opts)
-                    .or_else(|| runtime_fence(key, &target, imp.line, opts))
+                    .or_else(|| runtime_fence(key, &target, imp.line, opts, &mut w.real_paths))
                 {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
