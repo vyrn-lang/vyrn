@@ -9,6 +9,7 @@
 pub mod append;
 pub mod core;
 pub mod effects;
+mod fixpoint;
 pub mod kernel;
 pub mod typed;
 
