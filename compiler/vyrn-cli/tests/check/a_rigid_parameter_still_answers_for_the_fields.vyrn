@@ -1,0 +1,9 @@
+// A rigid parameter still answers: `T` in `emptyG` is the caller's type, known
+// only to the expectation.
+type G<T> = { xs: Array<T> }
+type H<T> = { tag: Int64 }
+fn emptyG<T>() -> G<T> { return G { xs: [] } }
+fn brand<T>() -> H<T> { return H { tag: 1 } }
+fn main() -> Int64 { let g: G<String> = emptyG()
+    let h: H<String> = brand()
+    return 0 }

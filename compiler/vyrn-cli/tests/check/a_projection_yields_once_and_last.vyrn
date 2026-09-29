@@ -1,0 +1,6 @@
+type Ring = { data: Array<Int64> }
+impl Index for Ring { fn at(read self, i: Int64) -> read Int64 {
+    if i < 0 { return self.data[0] }
+    return self.data[i]
+} }
+fn main() -> Int64 { return 0 }

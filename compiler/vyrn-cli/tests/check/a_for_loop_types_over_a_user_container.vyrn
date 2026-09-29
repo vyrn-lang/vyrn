@@ -1,0 +1,11 @@
+// A user container iterates through `Iterate`; the loop variable takes what
+// `place nth` yields.
+type Ring = { data: Array<Int64> }
+impl Iterate for Ring {
+    fn size(self) -> Int64 { return self.data.length }
+    fn nth(read self, i: Int64) -> read Int64 { return self.data[i] }
+}
+fn main() -> Int64 { let r = Ring { data: [] }
+    let mut s = 0
+    for x in r { s = s + x }
+    return s }

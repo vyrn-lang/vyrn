@@ -1,0 +1,3 @@
+// `load` is a call-site desugar; the injected `LoadResult<T>` enum lets a
+// caller match all three outcomes without importing anything.
+type Rec = { n: Int64 } fn describe(r: LoadResult<Rec>) -> Int64 { return match r { Missing => 1, Corrupt(iss) => 2, Loaded(x) => x.n } } fn main() -> Int64 { return describe(load(Rec, "p")) }

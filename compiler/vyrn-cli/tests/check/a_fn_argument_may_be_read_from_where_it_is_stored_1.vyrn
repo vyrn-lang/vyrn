@@ -1,0 +1,9 @@
+// A `fn`-typed argument may be any expression of `fn` type; one of the wrong
+// type is refused with the type it found.
+fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    for x in xs { out.push(f(x)) }
+    return out }
+type R = { f: fn(Int64) -> Int64 }
+fn dbl(n: Int64) -> Int64 { return n * 2 }
+fn main() -> Int64 { let r = R { f: dbl } let a = twice([1], r.f) return 0 }

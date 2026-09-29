@@ -1,0 +1,8 @@
+type Head = { title: String }
+contract Page {
+    let head: Head = Head { title: "" }
+    let data: Array<T>
+    fn load(id: Int64) -> String
+    fn *(input: String) -> String
+}
+fn main() -> Int64 { return 0 }

@@ -1,0 +1,1 @@
+rename_and_fsync_are_rejected_in_a_generator_1.vyrn:1:0: `gen fn g` is not comptime-pure: it calls `renameFile` (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)

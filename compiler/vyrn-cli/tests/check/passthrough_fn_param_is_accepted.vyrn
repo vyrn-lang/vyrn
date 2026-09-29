@@ -1,0 +1,6 @@
+fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    for x in xs { out.push(f(x)) }
+    return out }
+fn outer(xs: Array<Int64>, g: fn(Int64) -> Int64) -> Array<Int64> { return twice(xs, g) }
+fn main() -> Int64 { let a = outer([1, 2], x -> x + 1) return 0 }

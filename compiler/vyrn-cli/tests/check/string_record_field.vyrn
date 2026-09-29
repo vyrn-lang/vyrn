@@ -1,0 +1,1 @@
+type U = { name: String, age: Int64 } fn nm(u: U) -> Int64 { print(u.name) return u.age } fn main() -> Int64 { return nm(U { name: "x", age: 7 }) }

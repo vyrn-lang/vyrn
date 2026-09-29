@@ -1,0 +1,2 @@
+// Mismatched types on the two sides.
+test "t" { assertEq(1, true) }

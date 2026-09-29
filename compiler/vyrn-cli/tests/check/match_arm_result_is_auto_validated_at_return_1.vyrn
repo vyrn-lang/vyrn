@@ -1,0 +1,4 @@
+// A raw-Int arm joins the match to Int64; returning it as `Age` is a checked
+// coercion at the return boundary. A provably-invalid CONSTANT return is
+// rejected at compile time.
+type Age = Int64 where value >= 18 fn pick(o: Option<Int64>) -> Age { return match o { Some(x) => x, None => 18 } } fn main() -> Int64 { return 0 }

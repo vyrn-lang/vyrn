@@ -1,0 +1,1 @@
+fn f() -> Result<Int64, Int64> { return Ok(1) } fn main() -> Int64 { let x = f()? return x }

@@ -1,0 +1,5 @@
+// A plain method returns a copy, which is not the contract.
+protocol Shelf { fn tag(read self, i: Int64) -> read String }
+type Crate = { labels: Array<String> }
+impl Shelf for Crate {}
+fn main() -> Int64 { return 0 }

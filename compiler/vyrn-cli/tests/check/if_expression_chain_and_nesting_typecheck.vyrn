@@ -1,0 +1,6 @@
+fn tier(s: Int64) -> String {
+    return if s >= 90 { "gold" } else if s >= 50 { "silver" } else { "bronze" } }
+fn main() -> Int64 {
+    let n = if true { if false { 1 } else { 2 } } else { 3 }
+    print(tier(n))
+    return n }

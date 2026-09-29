@@ -1,0 +1,1 @@
+a_moved_builtin_names_the_module_it_moved_to_4.vyrn:1:0: `hexEncode` is `std/codecs`'s — add `import { hexEncode } from "std/codecs"`

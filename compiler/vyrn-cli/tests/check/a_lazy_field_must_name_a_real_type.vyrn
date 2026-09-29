@@ -1,0 +1,2 @@
+// The type `lazy T` names must exist.
+type Bad = { f: lazy NoSuchType } fn main() -> Int64 { return 0 }

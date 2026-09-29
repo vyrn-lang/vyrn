@@ -1,0 +1,2 @@
+protocol All { fn all(self) -> Array<Self> }
+fn main() -> Int64 { return 0 }

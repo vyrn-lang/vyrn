@@ -1,0 +1,3 @@
+type C = { n: Int64 }
+impl Owned for C { fn release(self) {} }
+fn main() -> Int64 { return 0 }

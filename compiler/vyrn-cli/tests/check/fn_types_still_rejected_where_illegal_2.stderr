@@ -1,0 +1,1 @@
+fn_types_still_rejected_where_illegal_2.vyrn:1:0: a function type cannot carry a `where` predicate

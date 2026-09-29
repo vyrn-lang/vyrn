@@ -1,0 +1,5 @@
+// A protocol's method signatures name types that exist, checked at the
+// protocol, not through its impls.
+// An associated type reaches the walk as a type parameter.
+protocol Grow { fn grow(self) -> Blah }
+fn main() -> Int64 { return 0 }

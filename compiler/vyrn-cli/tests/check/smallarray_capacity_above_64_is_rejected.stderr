@@ -1,0 +1,1 @@
+smallarray_capacity_above_64_is_rejected.vyrn:1:0: smallArray capacity must be between 1 and 64

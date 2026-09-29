@@ -1,0 +1,12 @@
+// Two links: a field borrow, then a payload borrow through it. The root trace
+// is transitive.
+type E = | Tag(Array<Int64>) | Blank
+type Box = { v: E }
+impl Index for Box {
+    fn at(read self, i: Int64) -> read Int64 {
+        let e = self.v
+        let Tag(xs) = e
+        return xs[i]
+    }
+}
+fn main() -> Int64 { return 0 }

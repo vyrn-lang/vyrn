@@ -1,0 +1,1 @@
+a_projection_may_not_propagate_with_a_question_mark.vyrn:2:25: projection `at` uses `?`, which returns — a projection is inlined at the access site, so there is no frame to return from. Check the condition and `panic` instead.

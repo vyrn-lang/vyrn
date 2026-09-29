@@ -1,0 +1,1 @@
+rejects_wrong_pattern_for_scrutinee.vyrn:1:0: `Ok` is not a variant of Option<Int64>

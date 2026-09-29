@@ -1,0 +1,3 @@
+type G<T> = { xs: SmallArray<T, 4> }
+fn main() -> Int64 { let g = G { xs: [2] }
+    return 0 }

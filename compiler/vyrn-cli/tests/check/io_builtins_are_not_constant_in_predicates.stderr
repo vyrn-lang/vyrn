@@ -1,0 +1,1 @@
+io_builtins_are_not_constant_in_predicates.vyrn:2:0: refinement predicate for `P` may not contain calls (v0.1)

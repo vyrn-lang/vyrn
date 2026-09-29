@@ -1,0 +1,7 @@
+// A self-referring type has no structural bottom; an `impl Copy` lifts the
+// refusal.
+type Node = { next: Option<Node>, n: Int64 }
+impl Copy for Node { fn copy(self) -> Node { return Node { next: None, n: self.n } } }
+fn main() -> Int64 { let a = Node { next: None, n: 1 }
+    let b = a.copy()
+    return b.n }

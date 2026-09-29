@@ -1,0 +1,1 @@
+a_generic_chain_is_still_refused.vyrn:18:0: the inner projection's result is not a concrete named type here, so no engine can resolve the chain — bind the inner access with a `let`, then read through the binding

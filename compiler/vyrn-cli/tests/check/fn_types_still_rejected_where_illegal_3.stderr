@@ -1,0 +1,1 @@
+fn_types_still_rejected_where_illegal_3.vyrn:2:0: `==`/`!=` needs matching scalar operands, found fn(Int64) -> Int64 and fn(Int64) -> Int64

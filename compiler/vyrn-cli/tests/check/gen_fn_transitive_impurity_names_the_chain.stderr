@@ -1,0 +1,1 @@
+gen_fn_transitive_impurity_names_the_chain.vyrn:1:0: `gen fn g` is not comptime-pure: it reaches `helper` (via g -> helper), which calls `writeFile` (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)

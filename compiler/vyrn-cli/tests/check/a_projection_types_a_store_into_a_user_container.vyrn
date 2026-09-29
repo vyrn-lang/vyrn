@@ -1,0 +1,8 @@
+// A store coerces into the type `atSet` yields.
+type Ring = { data: Array<Int64> }
+impl Index for Ring { fn atSet(modify self, i: Int64) -> modify Int64 { return self.data[i] } }
+fn main() -> Int64 { let mut d: Array<Int64> = []
+    d.push(7)
+    let mut r = Ring { data: d }
+    r[0] = 9
+    return 0 }

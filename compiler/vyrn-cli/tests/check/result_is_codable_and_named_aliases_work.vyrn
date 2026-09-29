@@ -1,0 +1,1 @@
+type R = Result<Bool, String> fn f(x: R) -> String { return toJson(x) } fn g(s: String) -> Validation<R> { return fromJson<R>(s) } fn main() -> Int64 { return 0 }

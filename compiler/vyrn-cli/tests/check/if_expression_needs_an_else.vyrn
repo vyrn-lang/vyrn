@@ -1,0 +1,5 @@
+// A missing `else` in expression position names the totality rule; the
+// statement form allows it.
+fn main() -> Int64 {
+    let x = if true { 1 }
+    return x }

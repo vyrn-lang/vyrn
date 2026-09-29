@@ -1,0 +1,5 @@
+// Raw-Int branches coerce into the validated `Age` at the `let` boundary.
+type Age = Int64 where value >= 0
+fn main() -> Int64 {
+    let a: Age = if true { 5 } else { 10 }
+    return a }

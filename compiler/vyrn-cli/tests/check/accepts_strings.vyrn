@@ -1,0 +1,1 @@
+fn main() -> Int64 { let s = "hi" print(s) if s == "hi" { return 1 } return 0 }

@@ -1,0 +1,2 @@
+// `where` predicates are const-only; an I/O call can never satisfy one.
+type P = String where readFile(value) == Ok("x") fn main() -> Int64 { return 0 }

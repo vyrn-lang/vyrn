@@ -1,0 +1,1 @@
+a_lane_index_must_be_a_constant_in_range_4.vyrn:1:0: a lane index must be a compile-time constant in 0..3 (that is what makes `lane` total — there is no bounds check to fall back on)

@@ -1,0 +1,1 @@
+fn bad<T>(x: T) -> T { return x + x } fn main() -> Int64 { return 0 }

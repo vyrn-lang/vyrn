@@ -1,0 +1,19 @@
+// A heapless record with `impl Hashable` is a key, every operation included.
+protocol Hashable {
+fn hash(self) -> UInt64
+}
+type Point = { x: Int64, y: Int64 }
+impl Hashable for Point {
+fn hash(self) -> UInt64 {
+return UInt64(self.x)
+}
+}
+fn main() -> Int64 {
+let mut m: Map<Point, Int64> = [:]
+m[Point { x: 1, y: 2 }] = 1
+m.tally(Point { x: 1, y: 2 }, 2)
+let hit = match m[Point { x: 1, y: 2 }] { Some(v) => v, None => 0 }
+let present = m.has(Point { x: 1, y: 2 })
+let gone = m.remove(Point { x: 1, y: 2 })
+for k in m.keys() { print("\{k.x}") }
+return hit + m.length }

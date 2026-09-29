@@ -1,0 +1,1 @@
+a_default_must_have_the_members_declared_type.vyrn:2:0: contract `Page` member `head` defaults to String, but is declared `Head`

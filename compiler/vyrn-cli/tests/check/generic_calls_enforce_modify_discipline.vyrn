@@ -1,0 +1,2 @@
+// The generic-inference path must run the same capability checks.
+type C = { x: Int64 } fn f<T>(c: modify C, tag: T) -> Int64 { c.x = 99 return 0 } fn main() -> Int64 { let c = C { x: 1 } let r = f(c, 0) return c.x }

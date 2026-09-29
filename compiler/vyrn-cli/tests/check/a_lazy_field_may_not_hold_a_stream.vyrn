@@ -1,0 +1,3 @@
+// A T's storage rules reach through `lazy T`, so a stream behind one is
+// refused.
+type B = { f: lazy Stream<Int64> } fn main() -> Int64 { return 0 }

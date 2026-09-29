@@ -1,0 +1,1 @@
+fn f(s: String) -> Bool { return s =~ "[a-z]+" } fn main() -> Int64 { return 0 }

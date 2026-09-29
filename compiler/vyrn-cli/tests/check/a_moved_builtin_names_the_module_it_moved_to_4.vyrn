@@ -1,0 +1,1 @@
+fn main() -> Int64 { let x = hexEncode("hi") return 0 }

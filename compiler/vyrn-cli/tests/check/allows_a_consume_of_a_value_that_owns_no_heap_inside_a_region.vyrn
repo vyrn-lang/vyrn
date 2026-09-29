@@ -1,0 +1,2 @@
+// The rule is about arena memory, so an Int64 crosses freely.
+fn tally(n: consume Int64) -> Int64 { return n } fn main() -> Int64 { let mut c = 0 region { c = tally(7) } return c }

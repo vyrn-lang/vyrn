@@ -1,0 +1,10 @@
+type B = { rows: Array<Int64> }
+impl Index for B {
+    fn at(read self, i: Int64) -> read Option<Int64> {
+        if i < 0 {
+            return None
+        }
+        return Some(self.rows[i])
+    }
+}
+fn main() -> Int64 { return 0 }

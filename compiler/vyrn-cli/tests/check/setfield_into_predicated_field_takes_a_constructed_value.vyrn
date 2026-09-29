@@ -1,0 +1,1 @@
+type Age = Int64 where value >= 18 type User = { age: Age } fn main() -> Int64 { let mut u = User { age: 30 } u.age = Age(21) return 0 }

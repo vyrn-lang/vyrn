@@ -1,0 +1,1 @@
+let mut counter = 0 gen fn g() -> String { return counter.toString() } fn main() -> Int64 { return 0 }

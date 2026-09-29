@@ -1,0 +1,1 @@
+extern fn bad() -> Option<Int64> fn main() -> Int64 { return 0 }

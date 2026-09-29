@@ -1,0 +1,1 @@
+type Bad = Int64 where print(value) == value fn main() -> Int64 { return 0 }

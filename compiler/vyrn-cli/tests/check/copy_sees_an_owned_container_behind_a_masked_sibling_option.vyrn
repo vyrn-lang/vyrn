@@ -1,0 +1,3 @@
+// A sibling's `Option<Int64>` does not mask a later `Option<Ring>` in the owned
+// walk, so `copy` refuses the `impl Owned` container.
+protocol Owned { fn release(self) } type Ring = { buf: Array<Int64> } impl Owned for Ring { fn release(self) { print(1) } } type Holder = { a: Option<Int64>, b: Option<Ring> } fn f(h: Holder) -> Int64 { let q = h.copy() return 0 } fn main() -> Int64 { return 0 }

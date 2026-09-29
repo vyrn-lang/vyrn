@@ -1,0 +1,2 @@
+// `+` on two Strings concatenates.
+fn main() -> Int64 { let x = "a" + "bc" return x.byteLength }

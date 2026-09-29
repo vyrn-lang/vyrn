@@ -1,0 +1,4 @@
+// An index store takes a named key type as the lookup does: both ask
+// `Checker::key_fits` (#509). A key of another type is the typed judgment's
+// refusal.
+protocol Hashable { fn hash(self) -> UInt64 } type Suit = | Clubs | Hearts impl Hashable for Suit { fn hash(self) -> UInt64 { return UInt64(1) } } fn main() -> Int64 { let mut s: Map<Suit, Int64> = [:] let h: Suit = Hearts s[h] = 1 s[Clubs] = 2 return s.length }

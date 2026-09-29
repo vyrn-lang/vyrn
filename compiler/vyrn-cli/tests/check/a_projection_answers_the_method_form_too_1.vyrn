@@ -1,0 +1,8 @@
+// `r.at(0)` reaches the impl like `r[0]`; only the free call `at(r, 0)` is
+// refused.
+type Ring = { data: Array<Int64> }
+impl Index for Ring { fn at(read self, i: Int64) -> read Int64 { return self.data[i] } }
+fn main() -> Int64 { let mut d: Array<Int64> = []
+    d.push(7)
+    let r = Ring { data: d }
+    return r.at(0) }

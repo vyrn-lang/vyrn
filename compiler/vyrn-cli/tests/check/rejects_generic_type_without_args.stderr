@@ -1,0 +1,1 @@
+rejects_generic_type_without_args.vyrn:1:0: `Box` is generic; write `Box<...>` with type arguments

@@ -1,0 +1,1 @@
+fn_types_still_rejected_where_illegal_1.vyrn:5:0: a function type may not take another function value

@@ -1,0 +1,1 @@
+type Wrap = { r: Option<Result<Int64, String>> } fn f(w: Wrap) -> String { return toJson(w) } fn g(s: String) -> Validation<Wrap> { return fromJson<Wrap>(s) } fn main() -> Int64 { return 0 }

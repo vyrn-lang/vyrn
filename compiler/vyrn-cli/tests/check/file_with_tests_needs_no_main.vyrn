@@ -1,0 +1,2 @@
+// A file consisting only of tests is a valid library-like module.
+test "ok" { assert(1 == 1) }

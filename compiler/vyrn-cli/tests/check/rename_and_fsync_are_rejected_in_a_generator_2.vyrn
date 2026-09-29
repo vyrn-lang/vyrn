@@ -1,0 +1,1 @@
+gen fn g() -> String { let w = fsyncFile("a") return "" } fn main() -> Int64 { return 0 }

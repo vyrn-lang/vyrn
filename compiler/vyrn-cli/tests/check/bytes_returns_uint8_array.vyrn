@@ -1,0 +1,1 @@
+fn main() -> Int64 { let b: Array<UInt8> = bytes("hi") return b.length }

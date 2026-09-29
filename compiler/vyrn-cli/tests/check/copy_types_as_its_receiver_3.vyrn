@@ -1,0 +1,3 @@
+fn main() -> Int64 { let m: Map<String, String> = [:]
+    let n: Map<String, String> = m.copy()
+    return n.length }

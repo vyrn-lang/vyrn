@@ -1,0 +1,1 @@
+rejects_operation_on_unbounded_type_param.vyrn:1:0: `T` needs a `Num` bound for arithmetic

@@ -1,0 +1,1 @@
+fn main() -> Int64 { let xs: Array<Int64> = [1] return alen(xs) }

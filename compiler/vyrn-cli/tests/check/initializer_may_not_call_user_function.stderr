@@ -1,0 +1,1 @@
+initializer_may_not_call_user_function.vyrn:2:0: initializer of `x` may not call `seed` — a module-state initializer runs before `main`, so it may use only literals, operators, built-ins, and functions imported from another module (whose state initializes first)

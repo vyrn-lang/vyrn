@@ -1,0 +1,3 @@
+type G<T> = { m: Map<String, T> }
+fn main() -> Int64 { let g = G { m: ["k": 2] }
+    return 0 }

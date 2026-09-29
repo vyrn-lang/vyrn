@@ -1,0 +1,1 @@
+a_vector_does_not_mix_with_a_scalar_1.vyrn:4:0: `F32x4(..)` takes Float32 lanes, found Float64

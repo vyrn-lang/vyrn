@@ -1,0 +1,2 @@
+// let annotation call argument assignment record field array element
+type Age = Int64 where value >= 18 fn main() -> Int64 { let a: Age = 5 return 0 }

@@ -1,0 +1,5 @@
+// No higher-order-of-higher-order: a stored fn type may not take or return
+// another function value. A function type has no `where` domain. Function
+// values have no `==`. `toJson` rejects fn-typed data with the type named
+// (functions don't go on the wire).
+fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = x -> 0 return 0 }

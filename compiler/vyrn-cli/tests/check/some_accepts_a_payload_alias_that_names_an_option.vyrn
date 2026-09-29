@@ -1,0 +1,4 @@
+// Direct construction of a nesting whose inner layer hides behind an alias; the
+// inference route is `a_transparent_alias_may_name_a_nested_option` in
+// `checker.rs`.
+type M = Option<Int64> fn main() -> Int64 { let m: M = None let w = Some(m) return 0 }

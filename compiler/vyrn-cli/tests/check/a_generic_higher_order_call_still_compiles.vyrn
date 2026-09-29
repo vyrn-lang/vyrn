@@ -1,0 +1,9 @@
+// A generic call's `fn`-typed argument arrives with its return parameter open
+// and still compiles: `check_fn_arg` solves it from the value, and only a
+// stored position reaches `stored_fn_named`'s guard.
+fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> { return [] }
+fn twice(n: Int64) -> Int64 { return n * 2 }
+fn main() -> Int64 { let xs: Array<Int64> = [1, 2]
+    let a = map(xs, x -> x * 2)
+    let b = map(xs, twice)
+    return 0 }

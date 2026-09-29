@@ -1,0 +1,1 @@
+rejects_unknown_transformer_key.vyrn:1:0: field `zzz` is not in the transformer's base record

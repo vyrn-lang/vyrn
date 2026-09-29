@@ -1,0 +1,1 @@
+fn main() -> Int64 { let a: Array<Int64> = list([1, 2]) return 0 }

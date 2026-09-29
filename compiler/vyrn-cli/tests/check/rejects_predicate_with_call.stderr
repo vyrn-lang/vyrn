@@ -1,0 +1,1 @@
+rejects_predicate_with_call.vyrn:1:0: refinement predicate for `Bad` may not contain calls (v0.1)

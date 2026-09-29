@@ -1,0 +1,1 @@
+rejects_a_consume_handover_through_a_stored_fn_value.vyrn:3:0: cannot hand a heap value to argument 1 of `h`, which is `consume`, inside a `region`. The region frees the value at its closing brace, so the callee cannot own it. Move the call out of the region, or pass a value that holds no heap.

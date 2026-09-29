@@ -1,0 +1,1 @@
+fn main() -> Int64 { let mut a: Array<Int64> = [10, 20, 30] a[1] = 25 let g = a.swapRemove(0) let p = a.pop() return a.length + g }

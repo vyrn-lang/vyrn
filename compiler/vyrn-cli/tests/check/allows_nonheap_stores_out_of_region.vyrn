@@ -1,0 +1,2 @@
+// An Int64 carries no arena memory, so it may go into an outer array.
+fn main() -> Int64 { let mut a: Array<Int64> = [] region { a.push(2) } return a[0] }

@@ -1,0 +1,1 @@
+fn f(n: Int64) -> Result<Int64, Int64> { if n == 0 { return Err(1) } return Ok(n) } fn g(n: Int64) -> Result<Int64, Int64> { let x = f(n)? return Ok(x + 1) } fn main() -> Int64 { return match g(5) { Ok(v) => v, Err(e) => e } }

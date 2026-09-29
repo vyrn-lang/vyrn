@@ -1,0 +1,6 @@
+// A Section that includes `profile` produces `nav.profile.label`, which
+// TransKey does not contain; the witness names it exactly.
+type TransKey = String where value =~ "nav\\.(home|about)\\.label"
+type Section = String where value =~ "home|about|profile"
+fn t(key: TransKey) -> Int64 { return 0 }
+fn main() -> Int64 { let s: Section = "home"  return t("nav.\{s}.label") }

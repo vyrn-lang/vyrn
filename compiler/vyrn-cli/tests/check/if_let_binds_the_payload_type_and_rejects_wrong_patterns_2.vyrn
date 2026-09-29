@@ -1,0 +1,1 @@
+fn f() -> Option<Int64> { return Some(1) } fn main() -> Int64 { if let Ok(v) = f() { return v } return 0 }

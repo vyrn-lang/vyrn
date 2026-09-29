@@ -1,0 +1,1 @@
+fn main() -> Int64 { let v = F32x4.splat(1.0) let i = 0 print(v.lane(i)) return 0 }

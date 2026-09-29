@@ -1,0 +1,1 @@
+fn f(s: String) -> String { let v = fromJson<Issue>(s) return toJson(v) } fn main() -> Int64 { return 0 }

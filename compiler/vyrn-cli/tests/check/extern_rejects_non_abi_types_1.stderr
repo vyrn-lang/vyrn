@@ -1,0 +1,1 @@
+extern_rejects_non_abi_types_1.vyrn:3:11: extern fn `bad` parameter `xs` has type Array<Int64>, which cannot cross the JS boundary (allowed: Int64, sized ints, Float64, Float32, Bool, String)

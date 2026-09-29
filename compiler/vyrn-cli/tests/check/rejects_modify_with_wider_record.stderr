@@ -1,0 +1,1 @@
+rejects_modify_with_wider_record.vyrn:3:0: `clobber` argument 1 is `modify` and needs exactly Named, found User (width subtyping is read-only: a wider record could lose fields on write-back)

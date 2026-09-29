@@ -1,0 +1,1 @@
+fn main() -> Int64 { assert(true) return 0 }

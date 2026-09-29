@@ -1,0 +1,1 @@
+rejects_heap_escaping_region_via_push.vyrn:2:0: cannot store a heap value into `a`, which outlives the enclosing `region` (it would dangle when the region frees). Move `a` inside the region, or compute a non-heap result to carry out.

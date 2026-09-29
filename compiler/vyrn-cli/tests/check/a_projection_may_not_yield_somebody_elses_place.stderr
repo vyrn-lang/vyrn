@@ -1,0 +1,1 @@
+a_projection_may_not_yield_somebody_elses_place.vyrn:3:26: projection `at` returns a place rooted at `spare`, which the access site does not own — a projection may only return a place inside `self`, a parameter, or a prologue `let` that borrows from one

@@ -1,0 +1,5 @@
+fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {
+    let mut out: Array<U> = []
+    for x in xs { out.push(f(x)) }
+    return out }
+fn main() -> Int64 { let ys: Array<Int64> = [1, 2] let zs = map(ys, x -> x > 0) return 0 }

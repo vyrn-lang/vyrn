@@ -1,0 +1,3 @@
+// A negative literal adapts to a sized sibling exactly as a bare one does, down
+// to the type's minimum.
+fn main() -> Int64 { let mut x: Int32 = 0 if x == -5 { x = -2147483648 } return 0 }

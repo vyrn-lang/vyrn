@@ -1,0 +1,1 @@
+fn charCount(s: String) -> Int64 { return 0 } fn main() -> Int64 { return charCount("x") }

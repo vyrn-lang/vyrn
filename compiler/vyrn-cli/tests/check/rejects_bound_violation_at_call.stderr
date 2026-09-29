@@ -1,0 +1,1 @@
+rejects_bound_violation_at_call.vyrn:1:0: `max` requires `T: Ord`, but Bool does not satisfy `Ord`

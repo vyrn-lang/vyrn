@@ -1,0 +1,1 @@
+type Age = Int64 where value >= 18 fn f(n: Int64) -> Int64 { return match Age?(n) { Some(a) => a, None => 0 } } fn main() -> Int64 { return f(20) }

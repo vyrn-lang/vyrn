@@ -1,0 +1,8 @@
+// `impl Copy for T` overrides that refusal; the result is the impl's type.
+protocol Owned { fn release(self) }
+type Ring = { buf: Array<Int64> }
+impl Owned for Ring { fn release(self) { print(1) } }
+impl Copy for Ring { fn copy(self) -> Ring { return Ring { buf: [] } } }
+fn main() -> Int64 { let r = Ring { buf: [] }
+    let q = r.copy()
+    return 0 }

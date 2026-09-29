@@ -1,0 +1,1 @@
+a_prologue_let_that_owns_is_not_a_root.vyrn:3:8: projection `at` returns a place rooted at `xs`, which the access site does not own — a projection may only return a place inside `self`, a parameter, or a prologue `let` that borrows from one

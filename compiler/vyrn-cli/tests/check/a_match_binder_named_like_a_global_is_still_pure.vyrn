@@ -1,0 +1,3 @@
+// A match arm's binder shadows a module global of the same name, so
+// `JArr(items) => emitArr(items)` does not read a global `items`.
+let mut items: Int64 = 0 gen fn g(o: Option<Int64>) -> String { let n = match o { Some(items) => items, None => 0 } return "" } fn main() -> Int64 { return 0 }

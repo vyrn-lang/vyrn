@@ -1,0 +1,1 @@
+fn main() -> Int64 { let mut xs: Array<Int64> = [] xs = push(xs, 1) return 0 }

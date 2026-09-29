@@ -1,0 +1,2 @@
+fn dbl(n: Int64) -> Int64 { return n * 2 }
+fn main() -> Int64 { let a = dbl let b = dbl if a == b { return 1 } return 0 }

@@ -1,0 +1,1 @@
+type U = { a: Int64 } type B = Omit<U, zzz> fn main() -> Int64 { return 0 }

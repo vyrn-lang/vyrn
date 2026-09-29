@@ -1,0 +1,6 @@
+// `m[k]` is `Option<V>`, so reading `V` takes a match.
+fn main() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    m["a"] = 1
+    let v: Option<Int64> = m["a"]
+    return v ?? 0 }

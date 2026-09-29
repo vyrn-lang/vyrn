@@ -1,0 +1,1 @@
+extern_rejects_non_abi_types_2.vyrn:1:11: extern fn `bad` returns Option<Int64>, which cannot cross the JS boundary (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)

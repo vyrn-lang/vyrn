@@ -1,0 +1,2 @@
+// An arm that binds nothing still reads the global.
+let mut items: Int64 = 0 gen fn g(o: Option<Int64>) -> String { let n = match o { Some(items) => items, None => items } return "" } fn main() -> Int64 { return 0 }

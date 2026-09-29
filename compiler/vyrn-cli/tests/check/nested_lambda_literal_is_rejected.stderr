@@ -1,0 +1,1 @@
+nested_lambda_literal_is_rejected.vyrn:5:0: a lambda body may not contain another lambda literal in v1 (line 5)

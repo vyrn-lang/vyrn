@@ -1,0 +1,2 @@
+// Pushing an arena string into an outer array outlives the region.
+fn main() -> Int64 { let mut a: Array<String> = [] region { a.push("x" + "y") } return 0 }

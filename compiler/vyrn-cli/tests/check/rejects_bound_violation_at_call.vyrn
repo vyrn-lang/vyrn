@@ -1,0 +1,1 @@
+fn max<T: Ord>(a: T, b: T) -> T { if a > b { return a } return b } fn main() -> Int64 { let x = max(true, false) return 0 }

@@ -1,0 +1,19 @@
+// Statements after the one decision run only on the hit, so a payload binding
+// may live there.
+type E = | Tag(Array<Int64>) | Blank
+type B = { v: E }
+impl Index for B {
+    fn tryAt(read self, i: Int64) -> read Option<Int64> {
+        let mut n = 0
+        if let Tag(scan) = self.v {
+            n = scan.length
+        }
+        if i < 0 || i >= n {
+            return None
+        }
+        let e = self.v
+        let Tag(xs) = e
+        return Some(xs[i])
+    }
+}
+fn main() -> Int64 { return 0 }

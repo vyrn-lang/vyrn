@@ -1,0 +1,6 @@
+// Values do not answer a parameter under a compound slot: the backends build a
+// literal inside out, so the inner `[2]` and the stored `fn` would need a type
+// not yet solved. The annotation is the fix.
+type G<T> = { xs: Array<Array<T>> }
+fn main() -> Int64 { let g = G { xs: [[2]] }
+    return 0 }

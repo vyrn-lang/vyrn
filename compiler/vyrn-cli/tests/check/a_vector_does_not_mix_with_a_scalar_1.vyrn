@@ -1,0 +1,4 @@
+// A vector takes `Float32` lanes and combines only with another vector.
+// `Float64` is refused rather than truncated, like every other numeric flow.
+// A float LITERAL adapts to the lane type; a `Float64` binding does not.
+fn main() -> Int64 { let d = 1.0 let v = F32x4(d, d, d, d) print(v.lane(0)) return 0 }

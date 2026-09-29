@@ -1,0 +1,1 @@
+an_impl_of_an_undeclared_protocol_is_refused.vyrn:2:1: `impl NoSuchProto for C`: there is no protocol named `NoSuchProto` — declare it with `protocol NoSuchProto { .. }` or import it

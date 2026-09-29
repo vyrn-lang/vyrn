@@ -1,0 +1,8 @@
+// A field copy of an `impl Owned` type would run its release twice. The refusal
+// reaches through a record that holds one.
+protocol Owned { fn release(self) }
+type Ring = { buf: Array<Int64> }
+impl Owned for Ring { fn release(self) { print(1) } }
+fn main() -> Int64 { let r = Ring { buf: [] }
+    let q = r.copy()
+    return 0 }

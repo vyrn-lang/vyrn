@@ -1,0 +1,2 @@
+type P = { x: Int64, y: Int64 }
+fn main() -> Int64 { let mut a: Array<P> = [P { x: 1, y: 2 }] a[0].x = 9 return 0 }

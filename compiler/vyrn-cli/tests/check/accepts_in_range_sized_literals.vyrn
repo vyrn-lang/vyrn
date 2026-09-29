@@ -1,0 +1,1 @@
+fn main() -> Int64 { let a: Int8 = 127 let b: UInt8 = 255 let c: Int32 = 2147483647 if a < 127 { return 1 } return 0 }

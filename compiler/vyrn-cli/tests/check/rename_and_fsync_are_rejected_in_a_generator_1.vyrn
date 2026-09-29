@@ -1,0 +1,1 @@
+gen fn g() -> String { let w = renameFile("a", "b") return "" } fn main() -> Int64 { return 0 }

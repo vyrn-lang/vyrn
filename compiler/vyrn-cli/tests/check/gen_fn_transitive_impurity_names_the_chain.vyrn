@@ -1,0 +1,1 @@
+fn helper() -> String { let w = writeFile("a", "b") return "" } gen fn g() -> String { return helper() } fn main() -> Int64 { return 0 }

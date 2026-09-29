@@ -1,0 +1,2 @@
+// A user function may still be named `charCount` (the builtin is a method).
+fn main() -> Int64 { return "héllo".charCount() }

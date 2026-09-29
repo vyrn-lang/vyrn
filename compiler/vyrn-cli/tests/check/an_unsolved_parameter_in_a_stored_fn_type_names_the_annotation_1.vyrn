@@ -1,0 +1,8 @@
+// Field values do not answer a stored `fn` field, so an unannotated literal
+// reaches the check with the parameter open and is asked for an annotation.
+// The annotation is the fix. A field that solves the parameter first also
+// works: the guard fires only on an open parameter.
+type G<T> = { width: fn(T) -> Int64 }
+fn widthOf(s: String) -> Int64 { return 1 }
+fn main() -> Int64 { let g = G { width: widthOf }
+    return 0 }

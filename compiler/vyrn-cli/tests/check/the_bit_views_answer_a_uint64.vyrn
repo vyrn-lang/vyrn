@@ -1,0 +1,2 @@
+// The float bit views take and answer a `UInt64`.
+fn main() -> Int64 { let b: UInt64 = floatBits(1.0) let f: Float64 = floatFromBits(b) return 0 }

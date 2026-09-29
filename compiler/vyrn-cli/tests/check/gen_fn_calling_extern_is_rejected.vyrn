@@ -1,0 +1,1 @@
+extern fn host() -> Int64 gen fn g() -> String { let n = host() return "" } fn main() -> Int64 { return 0 }

@@ -1,0 +1,1 @@
+fn_types_still_rejected_where_illegal_4.vyrn:2:0: `toJson` cannot encode `H` (not a codable type)

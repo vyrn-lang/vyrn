@@ -1,0 +1,1 @@
+type User = { name: Int64, age: Int64 } type Employee = User & { salary: Int64 } fn total(e: Employee) -> Int64 { return e.age + e.salary } fn main() -> Int64 { let e = Employee { name: 1, age: 30, salary: 100 } return total(e) }

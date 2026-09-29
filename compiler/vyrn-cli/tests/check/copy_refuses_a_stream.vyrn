@@ -1,0 +1,6 @@
+// A `Stream<T>` is a cursor over a producer, not a container.
+fn main() -> Int64 { let xs: Array<Int64> = []
+    let s = fromArray(xs)
+    let t = s.copy()
+    close(t)
+    return 0 }

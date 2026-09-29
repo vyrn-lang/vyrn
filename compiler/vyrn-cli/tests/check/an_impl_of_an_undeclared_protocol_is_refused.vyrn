@@ -1,0 +1,3 @@
+type C = { n: Int64 }
+impl NoSuchProto for C { fn foo(self) -> Int64 { return 1 } }
+fn main() -> Int64 { return 0 }

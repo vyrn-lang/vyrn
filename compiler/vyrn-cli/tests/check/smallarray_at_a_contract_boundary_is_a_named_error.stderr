@@ -1,0 +1,1 @@
+smallarray_at_a_contract_boundary_is_a_named_error.vyrn:4:0: `toJson` cannot encode `SmallArray<Int64, 4>` (not a codable type)

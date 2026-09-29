@@ -1,0 +1,1 @@
+fn f(b: Bool) -> Option<Int64> { if b { return Some(1) } return None } fn main() -> Int64 { return match f(true) { Some(x) => x, None => 0 } }

@@ -1,0 +1,3 @@
+// The reason is the lattice's `clock` row: `hostNowMillis` is no host import,
+// the runtime shim implements it.
+extern fn hostNowMillis() -> Int64 fn now() -> Int64 { return hostNowMillis() } gen fn g() -> String { let t = now() return "" } fn main() -> Int64 { return 0 }

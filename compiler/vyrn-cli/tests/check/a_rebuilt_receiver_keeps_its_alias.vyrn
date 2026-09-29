@@ -1,0 +1,4 @@
+// The rows of `@reserve` and `@tally` answer `Array<T>` and `Map<K, Int64>`,
+// and a `type Buf = Array<Int64>` receiver takes the result back through
+// ordinary coercion.
+type Buf = Array<Int64> type Counts = Map<String, Int64> type Box = { b: Buf, c: Counts } fn fill(b: Buf) -> Int64 { return b.length } fn main() -> Int64 { let mut x = Box { b: [], c: [:] } x.b.reserve(8) x.b.push(3) x.c.tally("k", 5) x.b.clear() x.b.append([1, 2]) x.b.copyFrom([3, 4]) x.c.tallyBytes(bytes("k"), 1) return fill(x.b) + x.c.keys().length }

@@ -1,0 +1,3 @@
+type Head = { title: String }
+contract Page { let head: Head = "Title" }
+fn main() -> Int64 { return 0 }

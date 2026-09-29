@@ -1,0 +1,3 @@
+protocol Unwrap { type Output fn get(self) -> Output }
+impl Unwrap for Int64 { type Output = Int64 fn get(self) -> Output { return self } }
+fn main() -> Int64 { return 7.get() }

@@ -1,0 +1,1 @@
+rejects_question_mark_when_function_returns_scalar.vyrn:1:0: `?` on a Result requires the function to return Result, but it returns Int64

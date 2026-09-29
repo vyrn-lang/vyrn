@@ -1,0 +1,1 @@
+the_sugar_names_cannot_be_optional.vyrn:3:8: `at` is dispatched by sugar that consumes a place unconditionally — an optional projection needs a name of its own

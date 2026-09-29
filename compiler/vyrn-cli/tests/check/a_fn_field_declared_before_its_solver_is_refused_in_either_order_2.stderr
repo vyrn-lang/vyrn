@@ -1,0 +1,1 @@
+a_fn_field_declared_before_its_solver_is_refused_in_either_order_2.vyrn:3:0: `widthOf` cannot be stored as `fn(T) -> Int64`: nothing has solved `T` here, so there is no signature to check `widthOf` against. Annotate the binding with a type that names `T`

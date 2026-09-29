@@ -1,0 +1,1 @@
+rejects_inconsistent_type_param.vyrn:1:0: type parameter `T` is both Int64 and String

@@ -1,0 +1,4 @@
+// A validated string type resolves to `String`, so it is a legal key.
+type Name = String where value.byteLength >= 1
+fn f(m: Map<Name, Int64>) -> Int64 { return 0 }
+fn main() -> Int64 { return 0 }

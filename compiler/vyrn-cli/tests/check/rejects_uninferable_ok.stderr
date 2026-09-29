@@ -1,0 +1,1 @@
+rejects_uninferable_ok.vyrn:1:0: cannot infer the type of `Ok(..)`; add an annotation (e.g. `-> Result<Int64, Int64>`)

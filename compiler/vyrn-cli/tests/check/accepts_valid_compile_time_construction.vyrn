@@ -1,0 +1,1 @@
+type Age = Int64 where value >= 18 fn main() -> Int64 { let a = Age(25) return 0 }

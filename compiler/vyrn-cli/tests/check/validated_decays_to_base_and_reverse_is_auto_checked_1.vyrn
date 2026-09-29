@@ -1,0 +1,4 @@
+// an Age is usable as an Int64... ...and a raw Int64 flows into an Age with an
+// automatic check: a valid constant is proven free, an invalid one is a compile
+// error.
+type Age = Int64 where value >= 18 fn f(n: Int64) -> Int64 { return n } fn main() -> Int64 { return f(Age(20)) }

@@ -1,0 +1,3 @@
+// The callee may reassign a `modify` param whole; written back through a wider
+// record, that would lose fields.
+type Named = { name: Int64 } type User = { name: Int64, age: Int64 } fn clobber(n: modify Named) { n = Named { name: 5 } } fn main() -> Int64 { let mut u = User { name: 1, age: 30 } clobber(u) return u.age }

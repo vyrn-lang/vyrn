@@ -1,0 +1,1 @@
+type P = { x: Int64, y: Int64 } fn main() -> Int64 { let mut p = P { x: 1, y: 2 } p.x = 10 return p.x + p.y }

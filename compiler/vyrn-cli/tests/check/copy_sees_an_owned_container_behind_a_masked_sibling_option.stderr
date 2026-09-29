@@ -1,0 +1,1 @@
+copy_sees_an_owned_container_behind_a_masked_sibling_option.vyrn:3:0: `copy` cannot copy `Ring`: it declares `impl Owned for Ring`, so only `Ring` knows what duplicating it means. Say what duplicating it means with `impl Copy for Ring`, or copy the parts you need

@@ -1,0 +1,2 @@
+// The collection verbs are reserved, so the hint answers.
+fn main() -> Int64 { let s = str(1) return 0 }

@@ -1,0 +1,1 @@
+rejects_payload_variant_without_binding.vyrn:1:0: variant `Val` has 1 payload(s), but the pattern binds 0

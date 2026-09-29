@@ -1,0 +1,7 @@
+// A plain-String hole is not finite, so no containment and no error; the
+// boundary keeps its run-time validation.
+type TransKey = String where value =~ "(home\\.(title|subtitle)|nav\\.(home|about|settings)\\.label)"
+type Section = String where value =~ "home|about|settings"
+fn t(key: TransKey) -> Int64 { return 0 }
+fn build(x: String) -> Int64 { return t("nav.\{x}.label") }
+fn main() -> Int64 { return build("home") }
