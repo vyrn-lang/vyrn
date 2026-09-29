@@ -1,0 +1,8 @@
+type Buf = { xs: Array<Int64> } where xs.length > 0
+
+fn main() -> Int64 {
+    let mut b: Buf = Buf { xs: [1, 2] }
+    b.xs[0] = 5 + args().length
+    print(b.xs[0])
+    return 0
+}
