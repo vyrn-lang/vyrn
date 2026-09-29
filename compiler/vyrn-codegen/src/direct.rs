@@ -34,7 +34,9 @@ use vyrn_lower::core::{Arg, Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
-use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE};
+use crate::wasm::{
+    self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
+};
 
 /// Refuses a construct this backend cannot lower, naming it and its line. One message shape for
 /// every gap, because the ladder groups blockers by the text after the colon.
@@ -291,6 +293,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
     let mut skipped = std::collections::HashSet::new();
+    let mut mem = HashMap::new();
     for f in &program.functions {
         // An `extern` is an import (declared above); a `gen fn` runs
         // only in the compiler's own interpreter and may use builtins with no
@@ -305,9 +308,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             skipped.insert(f.name.clone());
             continue;
         }
-        // A `std/mem` declaration has no body here; `Fn_::mem_prim` lowers each call to one
-        // instruction.
-        if f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX) {
+        // A `std/mem` declaration has no body here; [`mem_ins`] lowers each call.
+        if let Some(prim) = f.name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
+            mem.insert(prim, f);
             continue;
         }
         // A function with a `fn`-typed parameter exists only as specializations; the
@@ -330,6 +333,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
         kept: RefCell::new(Vec::new()),
+        layouts: RefCell::default(),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -337,6 +341,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         generics,
         higher_order,
         skipped,
+        mem,
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
         fnvals: RefCell::new(Vec::new()),
@@ -384,7 +389,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             Some(t) => t.clone(),
             None => top_level(&cx).peek(&g.init, g.line)?,
         };
-        let l = layout::of_ll(&cx.ll(&ty)).map_err(|e| format!("direct backend: {e}"))?;
+        let l = cx.layout(&ty, g.line)?;
         if cx.repr(&ty, g.line)? == Repr::Unit {
             return unsupported("module state of Unit", g.line);
         }
@@ -789,7 +794,7 @@ impl MapKey {
 enum Repr {
     Unit,
     Scalar(ValType),
-    Agg(Layout),
+    Agg(Rc<Layout>),
 }
 
 impl Repr {
@@ -957,6 +962,8 @@ struct Cx<'a> {
     /// keys on their addresses, kept alive for the compile: a key built from a
     /// node's address is sound only while the node lives (#444).
     kept: RefCell<Vec<Rc<dyn std::any::Any>>>,
+    /// Every layout, parsed once, keyed by `llt_of`'s string: a layout is a function of it alone.
+    layouts: RefCell<HashMap<String, Rc<Layout>>>,
     /// Every `impl` block, for `place` projection lookup: a projection is not a function, so
     /// `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -1002,6 +1009,8 @@ struct Cx<'a> {
     /// The functions [`gen_reach`] leaves out of the module. A call to one
     /// refuses at its own site, naming it.
     skipped: std::collections::HashSet<String>,
+    /// The `std/mem` declarations by primitive name: each states the types [`mem_ins`] lowers.
+    mem: HashMap<&'a str, &'a Function>,
     /// Per function: every release step placed, at the exit that runs it, in run order.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
     /// The per-node release decisions.
@@ -1053,6 +1062,22 @@ impl<'a> Cx<'a> {
         llt_of(&self.sub(ty), &self.types)
     }
 
+    fn layout(&self, ty: &Type, line: usize) -> Result<Rc<Layout>, String> {
+        self.layout_ll(self.ll(ty), line)
+    }
+
+    /// The layout of the LLVM shape `ll`, or the refusal of a shape past 4 GB.
+    fn layout_ll(&self, ll: String, line: usize) -> Result<Rc<Layout>, String> {
+        if let Some(l) = self.layouts.borrow().get(&ll) {
+            return Ok(l.clone());
+        }
+        let l = layout::of_ll(&ll)
+            .map_err(|e| format!("direct backend: layout of {ll} at line {line}: {e}"))?;
+        let l = Rc::new(l);
+        self.layouts.borrow_mut().insert(ll, l.clone());
+        Ok(l)
+    }
+
     fn resolve(&self, ty: &Type) -> Type {
         ftypes::resolve(&self.sub(ty), &self.types)
     }
@@ -1082,10 +1107,15 @@ impl<'a> Cx<'a> {
         kept
     }
 
-    /// Whether a narrow scalar load of `ty` sign-extends: [`load_of`]'s second argument, read off
-    /// the same type as the shape.
-    fn signed(&self, ty: &Type) -> bool {
-        Num::of(&self.resolve(ty)).is_some_and(|n| n.signed)
+    /// The load of a scalar `ty` at `off` bytes. It sign-extends as `ty` does, because `llt_of`
+    /// prints `i8` for both `Int8` and `UInt8`.
+    fn load(&self, ty: &Type, off: u32) -> Instruction<'static> {
+        let signed = Num::of(&self.resolve(ty)).is_some_and(|n| n.signed);
+        load_of(&self.ll(ty), off, signed)
+    }
+
+    fn store(&self, ty: &Type) -> Instruction<'static> {
+        store_of(&self.ll(ty))
     }
 
     /// Returns the signature of a body discovered during emission, reserving its function index
@@ -1212,22 +1242,10 @@ impl<'a> Cx<'a> {
             return unsupported(&why, line);
         }
         let ll = self.ll(ty);
-        Ok(match ll.as_str() {
-            "void" => Repr::Unit,
-            // wasm's one 128-bit vector type. Matched before the aggregate test
-            // because a vector is a wasm value. The instruction decides the lane interpretation,
-            // so all four spellings read `V128`; a mask is all-ones or all-zeros lanes.
-            "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => {
-                Repr::Scalar(ValType::V128)
-            }
-            _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(
-                layout::of_ll(&ll)
-                    .map_err(|e| format!("direct backend: layout of {ll} at line {line}: {e}"))?,
-            ),
-            _ => match wasm::abi(&ll) {
-                Some(v) => Repr::Scalar(v),
-                None => Repr::Unit,
-            },
+        Ok(match wasm::abi(&ll) {
+            _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(self.layout_ll(ll, line)?),
+            Some(v) => Repr::Scalar(v),
+            None => Repr::Unit,
         })
     }
 
@@ -1452,21 +1470,59 @@ struct PartAt {
     ty: Type,
 }
 
-/// How one `std/mem` primitive lowers: a `call` of a [`Wasi`] host import, or one of this
-/// emitter's instructions. A host import the build does not declare is `unreachable`, as the
-/// `vyrn_gen` pair is outside a generation.
-#[derive(Clone, Copy)]
-enum Mem {
-    Host(Option<u32>),
-    Ins,
-}
-
-/// What a `std/mem` primitive pushes UNDER its arguments. Only `trap` has
-/// one: the descriptor its message goes to.
-fn mem_pre(b: &mut Frame, prim: &str) {
-    if prim == "trap" {
-        b.ins(&Instruction::I32Const(2));
-    }
+/// The wasm one `std/mem` primitive lowers to: the instructions under its arguments, then the
+/// ones after them. `None` for a name with no row. `std/mem.vyrn` declares the types
+/// ([`Cx::mem`]); `every_mem_declaration_has_a_row` holds the two lists together.
+///
+/// A host import is one `call` of its [`crate::WASI_IMPORTS`] row. The `vyrn_gen` pair exists
+/// only under a generation ([`Cx::gen`]); elsewhere a call to either is `unreachable`, and its
+/// callers (`readFileGen`, `listDirGen`) are unreachable and swept.
+fn mem_ins(
+    cx: &Cx<'_>,
+    prim: &str,
+) -> Option<(Vec<Instruction<'static>>, Vec<Instruction<'static>>)> {
+    use Instruction as I;
+    let at = |align| mem_arg(0, align);
+    let rt = &cx.rt;
+    let after = match prim {
+        "genRead" => cx.gen.map_or(I::Unreachable, |g| I::Call(g.read)),
+        "genFetch" => cx.gen.map_or(I::Unreachable, |g| I::Call(g.fetch)),
+        "load8" => I::I32Load8U(at(0)),
+        "load16" => I::I32Load16U(at(1)),
+        "load32" => I::I32Load(at(2)),
+        "load64" => I::I64Load(at(3)),
+        "loadF32" => I::F32Load(at(2)),
+        "loadF64" => I::F64Load(at(3)),
+        "store8" => I::I32Store8(at(0)),
+        "store16" => I::I32Store16(at(1)),
+        "store32" => I::I32Store(at(2)),
+        "store64" => I::I64Store(at(3)),
+        "storeF32" => I::F32Store(at(2)),
+        "storeF64" => I::F64Store(at(3)),
+        "copy" => MEMORY_COPY,
+        "fill" => I::MemoryFill(0),
+        "memorySize" => I::MemorySize(0),
+        "grow" => I::MemoryGrow(0),
+        "heapBase" => I::GlobalGet(HEAP_BASE),
+        "ioTable" => I::I32Const(rt.io as i32),
+        "utf8Table" => I::I32Const(rt.utf8d as i32),
+        // The descriptor under the message is stderr; `write_all` first, so stdout is flushed
+        // before the message.
+        "trap" => {
+            return Some((
+                vec![I::I32Const(2)],
+                vec![
+                    I::Call(rt.write_all),
+                    I::Drop,
+                    I::I32Const(1),
+                    I::Call(rt.proc_exit),
+                    I::Unreachable,
+                ],
+            ))
+        }
+        _ => I::Call(rt.wasi.find(prim)?.0),
+    };
+    Some((Vec::new(), vec![after]))
 }
 
 /// The end of an aggregate store, with the destination's address and the
@@ -1477,11 +1533,7 @@ fn agg_landed(b: &mut Frame, size: u32, in_place: bool) {
         b.ins(&Instruction::Drop);
         b.ins(&Instruction::Drop);
     } else {
-        b.ins(&Instruction::I32Const(size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(size);
     }
 }
 
@@ -1832,36 +1884,31 @@ fn lower_body(
     // An aggregate parameter arrives as the caller's address; the prologue copies it into a
     // slot of its own. A `modify` parameter is copy-in/copy-out: copied in here and back out at
     // the epilogue, so the caller sees no write before the call returns.
-    let mut copy_out: Vec<(u32, Place, Repr, String)> = Vec::new();
+    let mut copy_out: Vec<(u32, Place, Repr, Instruction<'static>)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
         let ty = p.ty.clone();
         let r = cx.repr(&p.ty, f.line)?;
         let place = if p.capability == Capability::Modify {
-            let ll = cx.ll(&p.ty);
             let place = match &r {
                 Repr::Agg(l) => {
                     let off = b.alloc(l.size, l.align);
                     b.slot(off);
                     b.ins(&Instruction::LocalGet(local));
-                    b.ins(&Instruction::I32Const(l.size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    b.copy(l.size);
                     Place::Slot(off)
                 }
                 Repr::Scalar(v) => {
                     let own = b.local(*v);
                     b.ins(&Instruction::LocalGet(local));
-                    b.ins(&load_of(&ll, 0, cx.signed(&p.ty)));
+                    b.ins(&cx.load(&p.ty, 0));
                     b.ins(&Instruction::LocalSet(own));
                     Place::Local(own)
                 }
                 Repr::Unit => return unsupported("a `modify` parameter of Unit", f.line),
             };
-            copy_out.push((local, place, r.clone(), ll));
+            copy_out.push((local, place, r.clone(), cx.store(&p.ty)));
             place
         } else {
             match &r {
@@ -1869,11 +1916,7 @@ fn lower_body(
                     let off = b.alloc(l.size, l.align);
                     b.slot(off);
                     b.ins(&Instruction::LocalGet(local));
-                    b.ins(&Instruction::I32Const(l.size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    b.copy(l.size);
                     Place::Slot(off)
                 }
                 _ => Place::Local(local),
@@ -1968,21 +2011,17 @@ fn lower_body(
 
     // The `modify` copy-out, once, at the one exit. Stack-neutral, so a scalar result on the
     // stack survives it.
-    for (arg, place, r, ll) in &copy_out {
+    for (arg, place, r, store) in &copy_out {
         match (place, r) {
             (Place::Local(own), _) => {
                 b.ins(&Instruction::LocalGet(*arg));
                 b.ins(&Instruction::LocalGet(*own));
-                b.ins(&store_of(ll));
+                b.ins(store);
             }
             (Place::Slot(off), Repr::Agg(l)) => {
                 b.ins(&Instruction::LocalGet(*arg));
                 b.slot(*off);
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
             }
             _ => return unsupported("a `modify` parameter of this shape", f.line),
         }
@@ -2145,11 +2184,7 @@ fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
         b.ins(&Instruction::Call(cx.rt.malloc));
         b.ins(&Instruction::LocalTee(dst));
         b.ins(&Instruction::LocalGet(pay));
-        b.ins(&Instruction::I32Const(bl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(bl.size);
         fnval_captures(m, &mut f, &mut b, dst, &bl, &cap_tys, false)?;
         b.ins(&Instruction::LocalGet(dst));
         b.ins(&Instruction::Return);
@@ -2267,11 +2302,7 @@ fn lower_dispatcher(
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(local));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
                 Place::Slot(off)
             }
             Repr::Scalar(_) => Place::Local(local),
@@ -2280,15 +2311,13 @@ fn lower_dispatcher(
         args.push((place, pty.clone()));
     }
 
-    let fl = layout::of_ll(&cx.ll(sig_ty)).map_err(|e| format!("direct backend: {e}"))?;
+    let fl = cx.layout(sig_ty, 0)?;
     let tag = b.local(ValType::I64);
     let pl = b.local(ValType::I32);
     b.ins(&Instruction::LocalGet(fv));
     b.ins(&Instruction::I64Load(at(fl.fields[0])));
     b.ins(&Instruction::LocalSet(tag));
-    b.ins(&Instruction::LocalGet(fv));
-    b.ins(&Instruction::I64Load(at(fl.fields[1])));
-    b.ins(&Instruction::I32WrapI64);
+    load_wrapped(&mut b, fv, fl.fields[1]);
     b.ins(&Instruction::LocalSet(pl));
 
     let variants: Vec<(usize, FnVal)> = cx
@@ -2317,18 +2346,14 @@ fn lower_dispatcher(
             let blk = b.alloc(bl.size, bl.align);
             b.slot(blk);
             b.ins(&Instruction::LocalGet(pl));
-            b.ins(&Instruction::I32Const(bl.size as i32));
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            b.copy(bl.size);
             for (ci, ct) in cap_tys.iter().enumerate() {
                 let at_off = blk + bl.fields[ci];
                 let place = match cx.repr(ct, 0)? {
                     Repr::Scalar(vt) => {
                         let loc = b.local(vt);
                         b.slot(at_off);
-                        b.ins(&load_of(&cx.ll(ct), 0, cx.signed(ct)));
+                        b.ins(&cx.load(ct, 0));
                         b.ins(&Instruction::LocalSet(loc));
                         Place::Local(loc)
                     }
@@ -2356,11 +2381,7 @@ fn lower_dispatcher(
             (Repr::Scalar(_), _) => f.coerce(m, &mut b, None, &got, ret, 0)?,
             (Repr::Agg(l), Repr::Agg(_)) => {
                 f.coerce(m, &mut b, None, &got, ret, 0)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
             }
             // A Unit-signature slot may hold a value-returning function; the result is dropped.
             (Repr::Unit, Repr::Scalar(_) | Repr::Agg(_)) => {
@@ -2530,7 +2551,7 @@ impl<'p> Fn_<'_, 'p> {
             Place::Static(at) => {
                 b.ins(&Instruction::I32Const(at as i32));
                 if let Repr::Scalar(_) = self.cx.repr(t, line)? {
-                    b.ins(&load_of(&self.cx.ll(t), 0, self.cx.signed(t)));
+                    b.ins(&self.cx.load(t, 0));
                 }
             }
         }
@@ -2550,7 +2571,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::Enum(vs) = self.cx.resolve(ty) else {
             return Ok(());
         };
-        let l = self.layout_of(ty, line)?;
+        let l = self.cx.layout(ty, line)?;
         for (tag, var) in vs.iter().enumerate() {
             let mut boxed = Vec::new();
             for (j, pty) in var.payload.clone().iter().enumerate() {
@@ -2565,9 +2586,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
             for j in boxed {
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[j])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[j]);
                 b.ins(&Instruction::Call(self.cx.rt.free));
             }
             self.depth -= 1;
@@ -2587,7 +2606,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::SmallArray(_, cap_n) = self.cx.resolve(ty) else {
             return Err(gap("a SmallArray base", line));
         };
-        let l = self.layout_of(ty, line)?;
+        let l = self.cx.layout(ty, line)?;
         let base = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(l.fields[3] as i32));
@@ -2627,7 +2646,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         let t = self.cx.resolve(ty);
         let bufs = |which: &[usize]| -> Result<Rel, String> {
-            let l = self.layout_of(&t, line)?;
+            let l = self.cx.layout(&t, line)?;
             Ok(Rel::Buffers(which.iter().map(|i| l.fields[*i]).collect()))
         };
         Ok(match self.cx.owned.release_kind(&t) {
@@ -2697,6 +2716,52 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
+    /// The fields of the record `ty` that own heap, with their offsets: what
+    /// [`Fn_::copy_body`] copies and [`Fn_::rel_body`] frees.
+    fn owning_fields(&self, ty: &Type, line: usize) -> Result<Vec<(u32, Field)>, String> {
+        let l = self.cx.layout(ty, line)?;
+        let fields =
+            (self.cx.fields(ty)).ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
+        Ok((fields.into_iter().enumerate())
+            .filter(|(_, f)| self.owns_heap(&f.ty))
+            .map(|(i, f)| (l.fields[i], f))
+            .collect())
+    }
+
+    /// Per variant of the sum `ty` that has any, its tag, its name, and the payloads that own
+    /// heap or ride in a box, as `(index, offset, type, word)`. A boxed payload is listed even
+    /// when it owns nothing (`Option<Handle<Node>>`), so this and `own::owns_heap` must agree.
+    /// [`Fn_::copy_body`] copies exactly these and [`Fn_::rel_body`] frees them.
+    #[allow(clippy::type_complexity)]
+    fn owning_payloads(
+        &self,
+        ty: &Type,
+        line: usize,
+    ) -> Result<Vec<(i64, String, Vec<(usize, u32, Type, Word)>)>, String> {
+        let l = self.cx.layout(ty, line)?;
+        let mut out = Vec::new();
+        for (tag, var) in self
+            .cx
+            .sum_vs(ty)
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+        {
+            let mut slots = Vec::new();
+            for (j, pty) in var.payload.iter().enumerate() {
+                let w = self.word2(pty)?;
+                if self.owns_heap(pty) || w == Word::Boxed {
+                    let off = l.fields[self.cx.payload_slot(&var.payload, j)];
+                    slots.push((j, off, pty.clone(), w));
+                }
+            }
+            if !slots.is_empty() {
+                out.push((tag as i64, var.name, slots));
+            }
+        }
+        Ok(out)
+    }
+
     /// The release walk of `ty`, the mirror of [`Fn_::copy_body`] with `free` for `malloc`.
     /// It frees exactly the storage the copy allocates, so the two must agree on every shape.
     fn rel_body(
@@ -2720,12 +2785,10 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The elements first, then their buffer, which the walk still reads.
             Type::Array(inner) if self.deep_row(&self.cx.resolve(ty)) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::LocalSet(n));
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
@@ -2738,12 +2801,10 @@ impl<'p> Fn_<'_, 'p> {
             // `sa_base` finds the live slots. `data` is null while inline, and `free` refuses
             // null.
             Type::SmallArray(inner, _) if self.deep_row(ty) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let n = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[0])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[0]);
                 b.ins(&Instruction::LocalSet(n));
                 let base = self.sa_base(b, a, ty, line)?;
                 self.each(m, b, true, base, n, stride, &inner, line)?;
@@ -2756,12 +2817,10 @@ impl<'p> Fn_<'_, 'p> {
             // and packed keys go with their buffer.
             Type::Map(kt, vt) if self.deep_row(ty) => {
                 let mk = self.map_key(&kt, line)?;
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let n = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[2])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[2]);
                 b.ins(&Instruction::LocalSet(n));
                 let kstride = mk.stride() as u32;
                 for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
@@ -2797,22 +2856,14 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Record(_) => {
-                let l = self.layout_of(ty, line)?;
-                let fields = self
-                    .cx
-                    .fields(ty)
-                    .ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
-                for (i, f) in fields.iter().enumerate() {
-                    if !self.owns_heap(&f.ty) {
-                        continue;
-                    }
+                for (off, f) in self.owning_fields(ty, line)? {
                     // A `consume` took this field, so another owner frees it.
                     if holes.iter().any(|h| *h == f.name) {
                         continue;
                     }
                     let p = b.local(ValType::I32);
                     b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                    b.ins(&Instruction::I32Const(off as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
                     self.rel_holes = vyrn_frontend::declared::holes_under(holes, &f.name);
@@ -2828,42 +2879,23 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.each(m, b, true, a, count, stride, &inner, line)
             }
-            // Any sum: the live variant's payloads that own heap or are boxed. A boxed payload
-            // is freed even if it owns nothing (`Option<Handle<Node>>`), so this guard and
-            // `own::owns_heap` must agree; this one asks the emitter's [`Fn_::word2`].
             Type::Enum(_) => {
-                let vs = self.cx.sum_vs(ty).unwrap_or_default();
-                let l = self.layout_of(ty, line)?;
-                for (tag, var) in vs.iter().enumerate() {
-                    let mut live = false;
-                    for p in &var.payload {
-                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
-                    }
-                    if !live {
-                        continue;
-                    }
-                    tag_eq(b, a, tag as i64);
+                for (tag, name, slots) in self.owning_payloads(ty, line)? {
+                    tag_eq(b, a, tag);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
-                    for (j, pty) in var.payload.clone().iter().enumerate() {
-                        let w = self.word2(pty)?;
-                        if !self.owns_heap(pty) && w != Word::Boxed {
-                            continue;
-                        }
-                        let at = self.cx.payload_slot(&var.payload, j);
+                    for (j, off, pty, w) in slots {
                         // A `consume` took the payload (`Elem.1`); its box is still the sum's.
-                        let key = format!("{}.{j}", var.name);
+                        let key = format!("{name}.{j}");
                         if holes.contains(&key) {
                             if w == Word::Boxed {
-                                b.ins(&Instruction::LocalGet(a))
-                                    .ins(&Instruction::I64Load(word_at8(l.fields[at])))
-                                    .ins(&Instruction::I32WrapI64)
-                                    .ins(&Instruction::Call(self.cx.rt.free));
+                                load_wrapped(b, a, off);
+                                b.ins(&Instruction::Call(self.cx.rt.free));
                             }
                             continue;
                         }
                         self.rel_holes = vyrn_frontend::declared::holes_under(holes, &key);
-                        self.rel_word(m, b, a, l.fields[at], pty, w, line)?;
+                        self.rel_word(m, b, a, off, &pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -2873,9 +2905,9 @@ impl<'p> Fn_<'_, 'p> {
             // A stored `fn` value is `{ i64 tag, i64 captures }`; only the tag says what the
             // capture block holds, so [`lower_fnval_free`] releases it.
             Type::Fn(..) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 b.ins(&Instruction::LocalGet(a))
-                    .ins(&Instruction::I64Load(word_at8(l.fields[0])))
+                    .ins(&Instruction::I64Load(at(l.fields[0])))
                     .ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word_at(l.fields[1])))
                     .ins(&Instruction::Call(self.cx.fnval_free));
@@ -2925,18 +2957,14 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         match w {
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 str_hdr(b);
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
             Word::Boxed => {
                 let p = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 b.ins(&Instruction::LocalSet(p));
                 self.rel_at(m, b, p, pty, line)?;
                 b.ins(&Instruction::LocalGet(p))
@@ -2985,19 +3013,13 @@ impl<'p> Fn_<'_, 'p> {
         let place = match self.cx.repr(ty, line)? {
             Repr::Agg(l) => {
                 let at = b.alloc(l.size, l.align);
-                b.slot(at)
-                    .ins(&Instruction::LocalGet(a))
-                    .ins(&Instruction::I32Const(l.size as i32))
-                    .ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                b.slot(at).ins(&Instruction::LocalGet(a)).copy(l.size);
                 Place::Slot(at)
             }
             Repr::Scalar(v) => {
                 let t = b.local(v);
                 b.ins(&Instruction::LocalGet(a))
-                    .ins(&load_of(&self.cx.ll(ty), 0, false))
+                    .ins(&self.cx.load(ty, 0))
                     .ins(&Instruction::LocalSet(t));
                 Place::Local(t)
             }
@@ -3104,7 +3126,7 @@ impl<'p> Fn_<'_, 'p> {
         }));
         operand(self, m, b, 0, &bytes)?;
         let src = self.scratch(b, ValType::I32, 0);
-        let al = self.layout_of(&bytes, line)?;
+        let al = self.cx.layout(&bytes, line)?;
         b.ins(&Instruction::LocalSet(src));
         let off = b.alloc(l.size, l.align);
         self.str_from_bytes(b, off, src, &al, line)?;
@@ -3134,7 +3156,7 @@ impl<'p> Fn_<'_, 'p> {
             bits: 8,
             signed: false,
         }));
-        let l = self.layout_of(&ty, line)?;
+        let l = self.cx.layout(&ty, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off);
         operand(self, m, b, 0, &Type::Str)?;
@@ -3185,9 +3207,7 @@ impl<'p> Fn_<'_, 'p> {
         b.slot(dest);
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(al.fields[1])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, src, al.fields[1]);
         b.ins(&Instruction::LocalGet(fault));
         b.ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
             .ins(&Instruction::I32Const(self.cx.rt.butf8 as i32))
@@ -3392,7 +3412,7 @@ impl<'p> Fn_<'_, 'p> {
             .iter()
             .position(|f| f.name == field)
             .ok_or_else(|| gap(&format!("the field `{field}`"), line))?;
-        let l = layout::of_ll(&self.cx.ll(ty)).map_err(|e| format!("direct backend: {e}"))?;
+        let l = self.cx.layout(ty, line)?;
         Ok((l.fields[i], fs[i].ty.clone()))
     }
 
@@ -3545,8 +3565,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("a record that is not an aggregate", line);
                 };
                 let off = b.alloc(dl.size, dl.align);
-                let sl =
-                    layout::of_ll(&self.cx.ll(got)).map_err(|e| format!("direct backend: {e}"))?;
+                let sl = self.cx.layout(got, line)?;
                 for (i, f) in tf.iter().enumerate() {
                     let j = ff
                         .iter()
@@ -3562,23 +3581,15 @@ impl<'p> Fn_<'_, 'p> {
                         Repr::Scalar(_) => {
                             b.slot(off + dl.fields[i]);
                             b.ins(&Instruction::LocalGet(src));
-                            b.ins(&load_of(
-                                &self.cx.ll(&f.ty),
-                                sl.fields[j],
-                                self.cx.signed(&f.ty),
-                            ));
-                            b.ins(&store_of(&self.cx.ll(&f.ty)));
+                            b.ins(&self.cx.load(&f.ty, sl.fields[j]));
+                            b.ins(&self.cx.store(&f.ty));
                         }
                         Repr::Agg(fl) => {
                             b.slot(off + dl.fields[i]);
                             b.ins(&Instruction::LocalGet(src));
                             b.ins(&Instruction::I32Const(sl.fields[j] as i32));
                             b.ins(&Instruction::I32Add);
-                            b.ins(&Instruction::I32Const(fl.size as i32));
-                            b.ins(&Instruction::MemoryCopy {
-                                src_mem: 0,
-                                dst_mem: 0,
-                            });
+                            b.copy(fl.size);
                         }
                         Repr::Unit => return unsupported("a Unit field", line),
                     }
@@ -3594,8 +3605,7 @@ impl<'p> Fn_<'_, 'p> {
                 let Repr::Agg(dl) = self.cx.repr(to, line)? else {
                     return unsupported("a sum that is not an aggregate", line);
                 };
-                let sl =
-                    layout::of_ll(&self.cx.ll(from)).map_err(|e| format!("direct backend: {e}"))?;
+                let sl = self.cx.layout(from, line)?;
                 let off = b.alloc(dl.size, dl.align);
                 b.slot(off);
                 b.ins(&Instruction::I32Const(0));
@@ -3603,11 +3613,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::MemoryFill(0));
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Const(dl.size.min(sl.size) as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(dl.size.min(sl.size));
                 b.slot(off);
                 Ok(())
             }
@@ -3693,15 +3699,11 @@ impl<'p> Fn_<'_, 'p> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<u32, String> {
-        let v = match self.cx.repr(&decl.base, line)? {
-            Repr::Scalar(v) => v,
-            Repr::Agg(_) => ValType::I32,
-            Repr::Unit => {
-                return unsupported(
-                    &format!("a `where` clause over the Unit base `{}`", decl.base),
-                    line,
-                )
-            }
+        let Some(v) = self.cx.repr(&decl.base, line)?.val() else {
+            return unsupported(
+                &format!("a `where` clause over the Unit base `{}`", decl.base),
+                line,
+            );
         };
         let held = b.local(v);
         b.ins(&Instruction::LocalSet(held));
@@ -4514,7 +4516,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Emits a `std/mem` primitive from a core row, by [`Fn_::mem_spec`]'s table.
+    /// Emits a `std/mem` primitive from a core row, by [`mem_ins`]'s table.
     fn core_mem(
         &mut self,
         m: &mut Module,
@@ -4537,117 +4539,24 @@ impl<'p> Fn_<'_, 'p> {
                 _ => unsupported("an `adopt` the checker did not type", line),
             };
         }
-        let (how, params, ret) = self.mem_spec(prim, line)?;
-        if args.len() != params.len() {
+        let (Some(decl), Some((under, after))) =
+            (self.cx.mem.get(prim).copied(), mem_ins(self.cx, prim))
+        else {
+            return unsupported(&format!("the `std/mem` primitive `{prim}`"), line);
+        };
+        if args.len() != decl.params.len() {
             return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
         }
-        mem_pre(b, prim);
-        for ((v, _), p) in args.iter().zip(&params) {
-            self.core_val(m, b, body, w, v, p, line)?;
+        for i in &under {
+            b.ins(i);
         }
-        self.mem_ins(b, prim, how);
-        Ok(ret)
-    }
-
-    /// A `std/mem` primitive's parameter types, result type, and lowering. The types restate
-    /// the module's so a caller can coerce a literal; the checker catches a mismatch first.
-    ///
-    /// # Errors
-    ///
-    /// Refuses a name `std/mem` does not declare.
-    fn mem_spec(&self, prim: &str, line: usize) -> Result<(Mem, Vec<Type>, Type), String> {
-        let u = |bits: u8| Type::IntN {
-            bits,
-            signed: false,
-        };
-        // A host import is one `call` with the witx signature. The `vyrn_gen` pair exists only
-        // under a generation (`Cx::gen`); elsewhere a call to either is `unreachable`, and its
-        // callers (`readFileGen`, `listDirGen`) are unreachable and swept.
-        let host: Option<(Option<u32>, Vec<Type>, Type)> = match prim {
-            "genRead" => Some((self.cx.gen.map(|g| g.read), vec![INT32, INT32], Type::Int)),
-            "genFetch" => Some((self.cx.gen.map(|g| g.fetch), vec![INT32], Type::Unit)),
-            _ => self.cx.rt.wasi.find(prim).map(|(index, params, results)| {
-                // `WASI_IMPORTS` holds `i32` and `i64` alone: `Int32` and `Int64`.
-                let ty = |v: &ValType| match v {
-                    ValType::I64 => Type::Int,
-                    _ => INT32,
-                };
-                let ret = results.first().map_or(Type::Unit, ty);
-                (Some(index), params.iter().map(ty).collect(), ret)
-            }),
-        };
-        if let Some((index, params, ret)) = host {
-            return Ok((Mem::Host(index), params, ret));
+        for ((v, _), p) in args.iter().zip(&decl.params) {
+            self.core_val(m, b, body, w, v, &p.ty, line)?;
         }
-        let (params, ret): (Vec<Type>, Type) = match prim {
-            "load8" => (vec![INT32], u(8)),
-            "load16" => (vec![INT32], u(16)),
-            "load32" => (vec![INT32], u(32)),
-            "load64" => (vec![INT32], u(64)),
-            "loadF32" => (vec![INT32], Type::Float32),
-            "loadF64" => (vec![INT32], Type::Float),
-            "store8" => (vec![INT32, u(8)], Type::Unit),
-            "store16" => (vec![INT32, u(16)], Type::Unit),
-            "store32" => (vec![INT32, u(32)], Type::Unit),
-            "store64" => (vec![INT32, u(64)], Type::Unit),
-            "storeF32" => (vec![INT32, Type::Float32], Type::Unit),
-            "storeF64" => (vec![INT32, Type::Float], Type::Unit),
-            "copy" => (vec![INT32, INT32, INT32], Type::Unit),
-            "fill" => (vec![INT32, u(8), INT32], Type::Unit),
-            "memorySize" => (vec![], INT32),
-            "grow" => (vec![INT32], INT32),
-            "heapBase" | "ioTable" | "utf8Table" => (vec![], INT32),
-            "trap" => (vec![INT32, INT32], Type::Unit),
-            _ => return unsupported(&format!("the `std/mem` primitive `{prim}`"), line),
-        };
-        Ok((Mem::Ins, params, ret))
-    }
-
-    fn mem_ins(&mut self, b: &mut Frame, prim: &str, how: Mem) {
-        let at = |align: u32| MemArg {
-            offset: 0,
-            align,
-            memory_index: 0,
-        };
-        if let Mem::Host(index) = how {
-            match index {
-                Some(i) => b.ins(&Instruction::Call(i)),
-                None => b.ins(&Instruction::Unreachable),
-            };
-            return;
+        for i in &after {
+            b.ins(i);
         }
-        match prim {
-            "load8" => b.ins(&Instruction::I32Load8U(at(0))),
-            "load16" => b.ins(&Instruction::I32Load16U(at(1))),
-            "load32" => b.ins(&Instruction::I32Load(at(2))),
-            "load64" => b.ins(&Instruction::I64Load(at(3))),
-            "loadF32" => b.ins(&Instruction::F32Load(at(2))),
-            "loadF64" => b.ins(&Instruction::F64Load(at(3))),
-            "store8" => b.ins(&Instruction::I32Store8(at(0))),
-            "store16" => b.ins(&Instruction::I32Store16(at(1))),
-            "store32" => b.ins(&Instruction::I32Store(at(2))),
-            "store64" => b.ins(&Instruction::I64Store(at(3))),
-            "storeF32" => b.ins(&Instruction::F32Store(at(2))),
-            "storeF64" => b.ins(&Instruction::F64Store(at(3))),
-            "copy" => b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            }),
-            "fill" => b.ins(&Instruction::MemoryFill(0)),
-            "memorySize" => b.ins(&Instruction::MemorySize(0)),
-            "grow" => b.ins(&Instruction::MemoryGrow(0)),
-            "heapBase" => b.ins(&Instruction::GlobalGet(HEAP_BASE)),
-            "ioTable" => b.ins(&Instruction::I32Const(self.cx.rt.io as i32)),
-            "utf8Table" => b.ins(&Instruction::I32Const(self.cx.rt.utf8d as i32)),
-            // `write_all` first, so stdout is flushed before the message.
-            "trap" => b
-                .ins(&Instruction::Call(self.cx.rt.write_all))
-                .ins(&Instruction::Drop)
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Call(self.cx.rt.proc_exit))
-                .ins(&Instruction::Unreachable),
-            _ => unreachable!("`mem_spec` answered, so the name is one of these"),
-        };
+        Ok(decl.ret.clone())
     }
 
     /// Writes one log line, `[LEVEL] name: message\n`, to the configured descriptor, with
@@ -4807,14 +4716,13 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Scalar(_) = self.cx.repr(ty, line)? else {
             return unsupported("a `modify` argument in a local", line);
         };
-        let ll = self.cx.ll(ty);
-        let l2 = layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))?;
+        let l2 = self.cx.layout(ty, line)?;
         let off = b.alloc(l2.size, l2.align);
         b.slot(off);
         b.ins(&Instruction::LocalGet(l));
-        b.ins(&store_of(&ll));
+        b.ins(&self.cx.store(ty));
         b.slot(off);
-        Ok((off, l, ll, self.cx.signed(ty)))
+        Ok((off, l, self.cx.load(ty, 0)))
     }
 
     /// The program's own body for the lambda literal at `at`, or `None` if the program does
@@ -5027,7 +4935,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Lays out a capture block: the captures packed by value, in order.
-    fn cap_block(&self, cap_tys: &[Type]) -> Result<Layout, String> {
+    fn cap_block(&self, cap_tys: &[Type]) -> Result<Rc<Layout>, String> {
         let ll = format!(
             "{{ {} }}",
             cap_tys
@@ -5036,7 +4944,7 @@ impl<'p> Fn_<'_, 'p> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))
+        self.cx.layout_ll(ll, 0)
     }
 
     /// Writes a stored function value's tag and payload into `dest`.
@@ -5091,14 +4999,10 @@ impl<'p> Fn_<'_, 'p> {
                         if dup {
                             self.copy_stack(m, b, ty, line)?;
                         }
-                        b.ins(&store_of(&self.cx.ll(ty)));
+                        b.ins(&self.cx.store(ty));
                     }
                     Repr::Agg(fl) => {
-                        b.ins(&Instruction::I32Const(fl.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
+                        b.copy(fl.size);
                         if dup {
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalGet(p));
@@ -5117,7 +5021,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         dest.addr(b, l.fields[0]);
         b.ins(&Instruction::I64Const(tag));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         dest.addr(b, l.fields[1]);
         match payload {
             Some(p) => {
@@ -5128,7 +5032,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Const(0));
             }
         }
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         Ok(())
     }
 
@@ -5211,7 +5115,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64ExtendI32U);
             }
             ("length", Type::Array(_)) => {
-                let l = self.layout_of(base, line)?;
+                let l = self.cx.layout(base, line)?;
                 b.ins(&Instruction::I64Load(at(l.fields[1])));
             }
             ("length", Type::ArrayN(_, n)) => {
@@ -5220,12 +5124,12 @@ impl<'p> Fn_<'_, 'p> {
             }
             // A `SmallArray` keeps its length in field 0, where an Array keeps its data.
             ("length", Type::SmallArray(..)) => {
-                let l = self.layout_of(base, line)?;
+                let l = self.cx.layout(base, line)?;
                 b.ins(&Instruction::I64Load(at(l.fields[0])));
             }
             // A Map keeps the shared length of its two buffers in field 2, not 1.
             ("length", Type::Map(..)) => {
-                let l = self.layout_of(base, line)?;
+                let l = self.cx.layout(base, line)?;
                 b.ins(&Instruction::I64Load(at(l.fields[2])));
             }
             _ => return Ok(None),
@@ -5250,14 +5154,9 @@ struct Walk {
 }
 
 impl<'p> Fn_<'_, 'p> {
-    fn layout_of(&self, ty: &Type, line: usize) -> Result<Layout, String> {
-        layout::of_ll(&self.cx.ll(ty))
-            .map_err(|e| gap(&format!("the layout of `{ty}` ({e})"), line))
-    }
-
     /// `of_ll` rounds a size up to its alignment, so a size is a stride.
     fn stride(&self, elem: &Type, line: usize) -> Result<u32, String> {
-        Ok(self.layout_of(elem, line)?.size)
+        Ok(self.cx.layout(elem, line)?.size)
     }
 
     /// Returns the size in bytes of `n` elements of `elem`, for every count-times-stride
@@ -5273,8 +5172,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Every `Stream<T>` shares one six-word header layout, whatever `T` is.
-    fn stream_layout(&self, line: usize) -> Result<Layout, String> {
-        self.layout_of(&Type::Stream(Box::new(Type::Int)), line)
+    fn stream_layout(&self, line: usize) -> Result<Rc<Layout>, String> {
+        self.cx.layout(&Type::Stream(Box::new(Type::Int)), line)
     }
 
     /// Emits `fromArray(xs)`: the array's words into a buffer-tagged header.
@@ -5286,7 +5185,9 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let arr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(arr));
-        let al = self.layout_of(&Type::Array(Box::new(inner.clone())), line)?;
+        let al = self
+            .cx
+            .layout(&Type::Array(Box::new(inner.clone())), line)?;
         let sl = self.stream_layout(line)?;
         let off = b.alloc(sl.size, sl.align);
         b.slot(off + sl.fields[0]);
@@ -5296,12 +5197,12 @@ impl<'p> Fn_<'_, 'p> {
         b.slot(off + sl.fields[1]);
         b.ins(&Instruction::LocalGet(arr));
         b.ins(&Instruction::I64Load(at(al.fields[1])));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         // Tag -1 marks a buffer for the stream's whole life; a buffer leaves words 3-5 zero.
         for (i, v) in [(2usize, -1i64), (3, 0), (4, 0), (5, 0)] {
             b.slot(off + sl.fields[i]);
             b.ins(&Instruction::I64Const(v));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         b.slot(off);
         Ok(Type::Stream(Box::new(inner.clone())))
@@ -5355,20 +5256,16 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Store(word()));
         b.slot(off + sl.fields[1]);
         b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         b.slot(off + sl.fields[2]);
         b.ins(&Instruction::LocalGet(fv));
-        b.ins(&Instruction::I32Const(fl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(fl.size);
         b.slot(off + sl.fields[4]);
         b.ins(&Instruction::LocalGet(c0));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         b.slot(off + sl.fields[5]);
         b.ins(&Instruction::LocalGet(c1));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         b.slot(off);
         Ok(Type::Stream(Box::new(elem)))
     }
@@ -5408,7 +5305,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(w));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(a));
-        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Load(at(0)));
         b.ins(&Instruction::I64Const(Self::BOX_MAGIC));
         b.ins(&Instruction::I64Ne);
         b.ins(&Instruction::If(BlockType::Empty));
@@ -5445,7 +5342,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(p));
         b.ins(&Instruction::I64Const(Self::BOX_MAGIC));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         b.ins(&Instruction::LocalGet(p));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
@@ -5453,11 +5350,7 @@ impl<'p> Fn_<'_, 'p> {
         if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
             return unsupported(&format!("`boxStream` of `{got}`"), line);
         }
-        b.ins(&Instruction::I32Const(sl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(sl.size);
         b.ins(&Instruction::LocalGet(p));
         b.ins(&Instruction::I64ExtendI32U);
         Ok(Type::Int)
@@ -5479,14 +5372,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::I32Const(sl.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(sl.size);
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::Call(self.cx.rt.free));
         b.slot(off);
@@ -5521,11 +5410,11 @@ impl<'p> Fn_<'_, 'p> {
         b.slot(ooff);
         b.ins(&Instruction::LocalGet(has));
         b.ins(&Instruction::I64ExtendI32U);
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         for f in &ol.fields[1..] {
             b.slot(ooff + f);
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         b.ins(&Instruction::LocalGet(has));
         b.ins(&Instruction::If(BlockType::Empty));
@@ -5551,15 +5440,10 @@ impl<'p> Fn_<'_, 'p> {
             place
                 .addr(b, 0)
                 .ok_or_else(|| gap("a two-word payload with no address", line))?;
-            b.ins(&Instruction::I32Const(16));
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            b.copy(16);
             return Ok(());
         }
-        let ll = self.cx.ll(t);
-        let signed = self.cx.signed(t);
+        let load = self.cx.load(t, 0);
         let push = |b: &mut Frame| -> Result<(), String> {
             match place {
                 Place::Local(l) => b.ins(&Instruction::LocalGet(l)),
@@ -5567,7 +5451,7 @@ impl<'p> Fn_<'_, 'p> {
                     place
                         .addr(b, 0)
                         .ok_or_else(|| gap("a payload with no address", line))?;
-                    b.ins(&load_of(&ll, 0, signed))
+                    b.ins(&load)
                 }
             };
             Ok(())
@@ -5593,7 +5477,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64ExtendI32U);
             }
         }
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         Ok(())
     }
 
@@ -5649,9 +5533,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalSet(n));
             b.ins(&Instruction::LocalGet(a));
             b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
-            b.ins(&Instruction::LocalGet(a));
-            b.ins(&Instruction::I64Load(at(sl.fields[4])));
-            b.ins(&Instruction::I32WrapI64);
+            load_wrapped(b, a, sl.fields[4]);
             b.ins(&Instruction::I32Const(stride as i32));
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::I32Add);
@@ -5729,9 +5611,7 @@ impl<'p> Fn_<'_, 'p> {
         let addr = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(s));
         b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
-        b.ins(&Instruction::LocalGet(s));
-        b.ins(&Instruction::I64Load(at(sl.fields[4])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, s, sl.fields[4]);
         b.ins(&Instruction::I32Const(stride as i32));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
@@ -5739,17 +5619,13 @@ impl<'p> Fn_<'_, 'p> {
         match (place, &r) {
             (Place::Local(l), _) => {
                 b.ins(&Instruction::LocalGet(addr));
-                b.ins(&load_of(&self.cx.ll(elem), 0, self.cx.signed(elem)));
+                b.ins(&self.cx.load(elem, 0));
                 b.ins(&Instruction::LocalSet(l));
             }
             (Place::Slot(off), Repr::Agg(el)) => {
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::I32Const(el.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(el.size);
             }
             _ => return unsupported("a stream of Unit", line),
         }
@@ -5816,11 +5692,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.slot(d);
                 src.addr(b, 0)
                     .ok_or_else(|| gap("a stream payload in a local", line))?;
-                b.ins(&Instruction::I32Const(el.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(el.size);
             }
             _ => return unsupported("a stream element of this shape", line),
         }
@@ -5856,7 +5728,7 @@ impl<'p> Fn_<'_, 'p> {
         let len = b.local(ValType::I64);
         Ok(match self.cx.resolve(ty) {
             Type::Array(inner) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let data = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(addr));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
@@ -5904,7 +5776,7 @@ impl<'p> Fn_<'_, 'p> {
             // so every element access downstream sees an ordinary base and count.
             Type::SmallArray(inner, n) => {
                 let ty = self.cx.resolve(ty);
-                let l = self.layout_of(&ty, line)?;
+                let l = self.cx.layout(&ty, line)?;
                 let (sl, _cap, base) = self.sa_parts(b, addr, &l, n);
                 let stride = self.stride(&inner, line)?;
                 Walk {
@@ -6050,7 +5922,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         match self.cx.repr(&w.elem, line)? {
             Repr::Scalar(_) => {
-                b.ins(&load_of(&self.cx.ll(&w.elem), 0, self.cx.signed(&w.elem)));
+                b.ins(&self.cx.load(&w.elem, 0));
             }
             Repr::Agg(_) => {}
             Repr::Unit => return unsupported("an array of Unit", line),
@@ -6077,7 +5949,7 @@ impl<'p> Fn_<'_, 'p> {
                 Repr::Scalar(_) => {
                     dest.addr(b, at);
                     self.part(m, b, elems, i, elem, line)?;
-                    b.ins(&store_of(&self.cx.ll(elem)));
+                    b.ins(&self.cx.store(elem));
                 }
                 Repr::Agg(_) => self.agg_part(m, b, elems, i, dest.at(at), stride, elem, line)?,
                 Repr::Unit => return unsupported("an array of Unit", line),
@@ -6106,7 +5978,7 @@ impl<'p> Fn_<'_, 'p> {
                 Repr::Scalar(_) => {
                     dest.addr(b, l.fields[i]);
                     self.part(m, b, parts, order[i], &f.ty, line)?;
-                    b.ins(&store_of(&self.cx.ll(&f.ty)));
+                    b.ins(&self.cx.store(&f.ty));
                 }
                 Repr::Agg(fl) => {
                     let at = dest.at(l.fields[i]);
@@ -6182,7 +6054,7 @@ impl<'p> Fn_<'_, 'p> {
         used: bool,
     ) -> Result<Type, String> {
         let ty = Type::Array(Box::new(inner.clone()));
-        let l = self.layout_of(&ty, line)?;
+        let l = self.cx.layout(&ty, line)?;
         let n = elems.len();
         let buf = match taken {
             Some(buf) => buf,
@@ -6203,7 +6075,7 @@ impl<'p> Fn_<'_, 'p> {
         for f in [l.fields[1], l.fields[2]] {
             dest.addr(b, f);
             b.ins(&Instruction::I64Const(n as i64));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         dest.addr(b, 0);
         self.dest_used = used;
@@ -6236,12 +6108,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(buf));
         b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(bytes));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        let l = self.layout_of(want, line)?;
+        b.copy(bytes as u32);
+        let l = self.cx.layout(want, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off + l.fields[0]);
         b.ins(&Instruction::LocalGet(buf));
@@ -6250,7 +6118,7 @@ impl<'p> Fn_<'_, 'p> {
         for f in [l.fields[1], l.fields[2]] {
             b.slot(off + f);
             b.ins(&Instruction::I64Const(n as i64));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         b.slot(off);
         Ok(())
@@ -6266,11 +6134,11 @@ impl<'p> Fn_<'_, 'p> {
         aty: &Type,
         verb: &str,
         line: usize,
-    ) -> Result<(Type, Layout, i32, u32), String> {
+    ) -> Result<(Type, Rc<Layout>, i32, u32), String> {
         let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`{verb}` on `{aty}`"), line);
         };
-        let l = self.layout_of(aty, line)?;
+        let l = self.cx.layout(aty, line)?;
         let stride = self.stride(&elem, line)? as i32;
         let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(src));
@@ -6297,7 +6165,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let verb = name.trim_start_matches('@');
         if let (Type::SmallArray(inner, n), "push") = (self.cx.resolve(aty), verb) {
-            let l = self.layout_of(aty, line)?;
+            let l = self.cx.layout(aty, line)?;
             let stride = self.stride(&inner, line)? as i32;
             let hdr = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(hdr));
@@ -6389,14 +6257,10 @@ impl<'p> Fn_<'_, 'p> {
         operand(self, m, b, elem)?;
         match &r {
             Repr::Scalar(_) => {
-                b.ins(&store_of(&self.cx.ll(elem)));
+                b.ins(&self.cx.store(elem));
             }
             Repr::Agg(_) => {
-                b.ins(&Instruction::I32Const(stride));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(stride as u32);
             }
             Repr::Unit => return unsupported("an array of Unit", line),
         }
@@ -6428,18 +6292,18 @@ impl<'p> Fn_<'_, 'p> {
             _ => return unsupported(&format!("`pop` on `{aty}`"), line),
         };
         let elem = *elem;
-        let al = self.layout_of(aty, line)?;
+        let al = self.cx.layout(aty, line)?;
         let opt = Type::option(elem.clone());
-        let ol = self.layout_of(&opt, line)?;
+        let ol = self.cx.layout(&opt, line)?;
         let out = b.alloc(ol.size, ol.align);
         // Write `None` first; the `Some` arm overwrites the tag and payload in place.
         b.slot(out + ol.fields[0]);
         b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         for f in &ol.fields[1..] {
             b.slot(out + f);
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         b.ins(&Instruction::LocalGet(slot));
         let w = self.walk(b, aty, line)?;
@@ -6456,15 +6320,15 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Sub);
         b.ins(&Instruction::LocalTee(last));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         b.slot(out + ol.fields[0]);
         b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         b.slot(out + ol.fields[1]);
         self.elem_addr(b, &w, last);
         self.load_elem(b, &w, line)?;
         self.encode_word2(b, &elem, line)?;
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         self.depth -= 1;
         b.ins(&Instruction::End);
         b.slot(out);
@@ -6487,7 +6351,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::SmallArray(..) => 0,
             _ => return unsupported(&format!("`swapRemove` on `{aty}`"), line),
         };
-        let al = self.layout_of(aty, line)?;
+        let al = self.cx.layout(aty, line)?;
         b.ins(&Instruction::LocalGet(slot));
         let w = self.walk(b, aty, line)?;
         index(self, m, b)?;
@@ -6507,11 +6371,7 @@ impl<'p> Fn_<'_, 'p> {
             (Place::Slot(off), Repr::Agg(el)) => {
                 b.slot(off);
                 self.elem_addr(b, &w, idx);
-                b.ins(&Instruction::I32Const(el.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(el.size);
             }
             _ => return unsupported("an array of Unit", line),
         }
@@ -6523,14 +6383,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Sub);
         b.ins(&Instruction::LocalTee(last));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         self.elem_addr(b, &w, idx);
         self.elem_addr(b, &w, last);
-        b.ins(&Instruction::I32Const(w.stride as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(w.stride);
         match taken {
             Place::Local(l) => {
                 b.ins(&Instruction::LocalGet(l));
@@ -6636,11 +6492,7 @@ impl<'p> Fn_<'_, 'p> {
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
                 let a = b.local(ValType::I32);
                 b.slot(off);
                 b.ins(&Instruction::LocalSet(a));
@@ -6674,10 +6526,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(d));
         b.ins(&Instruction::LocalGet(s));
         b.ins(&Instruction::LocalGet(n));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.ins(&MEMORY_COPY);
         b.ins(&Instruction::LocalGet(d));
     }
 
@@ -6694,10 +6543,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(nb));
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::LocalGet(live));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.ins(&MEMORY_COPY);
         nb
     }
 
@@ -6801,12 +6647,10 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Array(inner) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::LocalTee(n));
                 b.ins(&Instruction::I32Const(stride as i32));
                 b.ins(&Instruction::I32Mul);
@@ -6830,12 +6674,10 @@ impl<'p> Fn_<'_, 'p> {
             // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
             // header copy is the whole copy of its storage.
             Type::SmallArray(inner, cap_n) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, base) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[0])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[0]);
                 b.ins(&Instruction::LocalSet(n));
                 // Inline while `cap == N`; the data pointer is live otherwise.
                 b.ins(&Instruction::LocalGet(a));
@@ -6852,9 +6694,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[2])));
                 b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::I32Const(stride as i32));
                 b.ins(&Instruction::I32Mul);
                 b.ins(&Instruction::LocalSet(bytes));
@@ -6877,16 +6717,12 @@ impl<'p> Fn_<'_, 'p> {
                 // String keys are dup'd per entry; Int64 and packed keys copy
                 // with the buffer.
                 let mk = self.map_key(&kt, line)?;
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let (n, cap) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[2])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[2]);
                 b.ins(&Instruction::LocalSet(n));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[3])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[3]);
                 b.ins(&Instruction::LocalSet(cap));
                 let kstride = mk.stride() as u32;
                 for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
@@ -6934,18 +6770,10 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Record(_) => {
-                let l = self.layout_of(ty, line)?;
-                let fields = self
-                    .cx
-                    .fields(ty)
-                    .ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
-                for (i, f) in fields.iter().enumerate() {
-                    if !self.owns_heap(&f.ty) {
-                        continue;
-                    }
+                for (off, f) in self.owning_fields(ty, line)? {
                     let p = b.local(ValType::I32);
                     b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                    b.ins(&Instruction::I32Const(off as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
                     self.copy_at(m, b, p, &f.ty, line)?;
@@ -6959,30 +6787,15 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.each(m, b, false, a, count, stride, &inner, line)
             }
-            // Any sum: copy the owning payload slots of the live variant, boxes
-            // included. Mirrors `rel_body`'s arm; a copy that skipped a boxed
-            // payload would share the box, and both copies would release it.
+            // A copy that skipped a boxed payload would share the box, and both copies would
+            // release it.
             Type::Enum(_) => {
-                let vs = self.cx.sum_vs(ty).unwrap_or_default();
-                let l = self.layout_of(ty, line)?;
-                for (tag, var) in vs.iter().enumerate() {
-                    let mut live = false;
-                    for p in &var.payload {
-                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
-                    }
-                    if !live {
-                        continue;
-                    }
-                    tag_eq(b, a, tag as i64);
+                for (tag, _, slots) in self.owning_payloads(ty, line)? {
+                    tag_eq(b, a, tag);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
-                    for (j, pty) in var.payload.clone().iter().enumerate() {
-                        let w = self.word2(pty)?;
-                        if !self.owns_heap(pty) && w != Word::Boxed {
-                            continue;
-                        }
-                        let at = self.cx.payload_slot(&var.payload, j);
-                        self.copy_word(m, b, a, l.fields[at], pty, w, line)?;
+                    for (_, off, pty, w) in slots {
+                        self.copy_word(m, b, a, off, &pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -6992,13 +6805,11 @@ impl<'p> Fn_<'_, 'p> {
             // A stored `fn` value is `{ tag, captures }`. The capture block's size
             // is per tag, so the module's derived copy (`fnval_copy`) walks it.
             Type::Fn(..) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[0])));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, l.fields[1]);
                 b.ins(&Instruction::Call(self.cx.fnval_copy));
                 b.ins(&Instruction::I64ExtendI32U);
                 b.ins(&Instruction::I64Store(at(l.fields[1])));
@@ -7025,20 +6836,16 @@ impl<'p> Fn_<'_, 'p> {
         match w {
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
                 b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 self.str_dup(b);
                 b.ins(&Instruction::I64ExtendI32U);
                 b.ins(&Instruction::I64Store(at(off)));
                 Ok(())
             }
             Word::Boxed => {
-                let size = self.layout_of(pty, line)?.size;
+                let size = self.cx.layout(pty, line)?.size;
                 let (src, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, a, off);
                 b.ins(&Instruction::LocalSet(src));
                 b.ins(&Instruction::I32Const(size as i32));
                 b.ins(&Instruction::LocalSet(bytes));
@@ -7079,12 +6886,9 @@ impl<'p> Fn_<'_, 'p> {
     /// the heap, leaving its address as an `i64` word.
     fn box_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
         let malloc = self.cx.rt.malloc;
-        let ll = self.cx.ll(t);
         match self.cx.repr(t, line)? {
             Repr::Scalar(v) => {
-                let size = layout::of_ll(&ll)
-                    .map_err(|e| format!("direct backend: {e}"))?
-                    .size;
+                let size = self.cx.layout(t, line)?.size;
                 // Two distinct scratch slots: `scratch` is keyed on (type, n), so for an
                 // i32 scalar one `n` would give one local, and the `LocalTee` below
                 // would overwrite the value with the box's address.
@@ -7095,7 +6899,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(val));
-                b.ins(&store_of(&ll));
+                b.ins(&self.cx.store(t));
                 b.ins(&Instruction::LocalGet(p));
             }
             Repr::Agg(l) => {
@@ -7106,11 +6910,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(l.size);
                 b.ins(&Instruction::LocalGet(p));
             }
             Repr::Unit => return unsupported("a Unit payload", line),
@@ -7146,23 +6946,19 @@ impl<'p> Fn_<'_, 'p> {
         };
         dest.addr(b, 0);
         b.ins(&Instruction::I64Const(tag as i64));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         // Every slot this variant does not fill is zeroed: a `None` and a
         // narrower variant must not leave the widest one's words behind.
         let mut filled = 1;
         for (i, t) in payload.iter().enumerate() {
-            let at = self.cx.payload_slot(payload, i);
+            let slot = self.cx.payload_slot(payload, i);
             if self.word2(t)? == Word::Inline2 {
                 // Two words already side by side: one copy, no encoding.
-                dest.addr(b, l.fields[at]);
+                dest.addr(b, l.fields[slot]);
                 self.part(m, b, args, i, t, line)?;
-                b.ins(&Instruction::I32Const(16));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(16);
             } else {
-                dest.addr(b, l.fields[at]);
+                dest.addr(b, l.fields[slot]);
                 match args.built(i) {
                     Some(boxed) => {
                         boxed.addr(b, 0);
@@ -7173,14 +6969,14 @@ impl<'p> Fn_<'_, 'p> {
                         self.encode_word2(b, t, line)?;
                     }
                 }
-                b.ins(&Instruction::I64Store(word8()));
+                b.ins(&Instruction::I64Store(at(0)));
             }
-            filled = at + self.cx.words(t);
+            filled = slot + self.cx.words(t);
         }
         for slot in filled..l.fields.len() {
             dest.addr(b, l.fields[slot]);
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         dest.addr(b, 0);
         self.dest_used = used;
@@ -7242,21 +7038,21 @@ impl<'p> Fn_<'_, 'p> {
         };
         let tag = self.scratch(b, ValType::I32, 0);
         b.ins(&Instruction::LocalSet(tag));
-        let at = dest(b, &l);
-        at.addr(b, l.fields[0]);
+        let d = dest(b, &l);
+        d.addr(b, l.fields[0]);
         b.ins(&Instruction::LocalGet(tag));
         b.ins(&Instruction::I64ExtendI32U);
-        b.ins(&Instruction::I64Store(word8()));
-        at.addr(b, l.fields[1]);
+        b.ins(&Instruction::I64Store(at(0)));
+        d.addr(b, l.fields[1]);
         b.ins(&Instruction::LocalGet(held));
         self.encode_word2(b, &base, line)?;
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         for f in &l.fields[2..] {
-            at.addr(b, *f);
+            d.addr(b, *f);
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
-        at.addr(b, 0);
+        d.addr(b, 0);
         Ok(ty)
     }
 
@@ -7375,7 +7171,7 @@ impl<'p> Fn_<'_, 'p> {
             return;
         };
         // Every sum's tag is an `i64` in its first word.
-        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Load(at(0)));
         b.ins(&Instruction::I64Const(tag as i64));
         b.ins(&Instruction::I64Eq);
     }
@@ -7396,7 +7192,6 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Place, String> {
         let off = sl.fields[self.cx.payload_slot(ptys, i)];
         let kind = self.word2(t)?;
-        let ll = self.cx.ll(t);
         Ok(match kind {
             Word::Direct => {
                 let l = b.local(ValType::I64);
@@ -7407,9 +7202,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             Word::Ext(v) => {
                 let l = b.local(v);
-                b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
+                load_wrapped(b, addr, off);
                 b.ins(&Instruction::LocalSet(l));
                 Place::Local(l)
             }
@@ -7431,11 +7224,7 @@ impl<'p> Fn_<'_, 'p> {
                 let slot = b.alloc(16, 8);
                 b.slot(slot);
                 payload_at(b, addr, off, true);
-                b.ins(&Instruction::I32Const(16));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(16);
                 Place::Slot(slot)
             }
             // The word is a heap pointer; the binding gets its own copy, so an
@@ -7448,7 +7237,7 @@ impl<'p> Fn_<'_, 'p> {
                     Repr::Scalar(v) => {
                         let l = b.local(v);
                         b.ins(&Instruction::LocalGet(p));
-                        b.ins(&load_of(&ll, 0, self.cx.signed(t)));
+                        b.ins(&self.cx.load(t, 0));
                         b.ins(&Instruction::LocalSet(l));
                         Place::Local(l)
                     }
@@ -7456,11 +7245,7 @@ impl<'p> Fn_<'_, 'p> {
                         let slot = b.alloc(l.size, l.align);
                         b.slot(slot);
                         b.ins(&Instruction::LocalGet(p));
-                        b.ins(&Instruction::I32Const(l.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
+                        b.copy(l.size);
                         Place::Slot(slot)
                     }
                     Repr::Unit => return unsupported("a Unit payload", line),
@@ -7509,7 +7294,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::Map(key_t, val) = self.cx.resolve(mty) else {
             return unsupported(&format!("a map literal of `{mty}`"), line);
         };
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         dest.addr(b, 0);
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32Const(l.size as i32));
@@ -7547,7 +7332,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::Map(..) = self.cx.resolve(mty) else {
             return unsupported(&format!("`tallyBytes` on `{mty}`"), line);
         };
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         let bytes = Type::Array(Box::new(Type::IntN {
             bits: 8,
             signed: false,
@@ -7555,14 +7340,12 @@ impl<'p> Fn_<'_, 'p> {
         let wsrc = b.local(ValType::I32);
         operand(self, m, b, 0, &bytes)?;
         b.ins(&Instruction::LocalSet(wsrc));
-        let al = self.layout_of(&bytes, line)?;
+        let al = self.cx.layout(&bytes, line)?;
         let (wdata, wlen) = (b.local(ValType::I32), b.local(ValType::I32));
         b.ins(&Instruction::LocalGet(wsrc));
         b.ins(&Instruction::I32Load(word_at(al.fields[0])));
         b.ins(&Instruction::LocalSet(wdata));
-        b.ins(&Instruction::LocalGet(wsrc));
-        b.ins(&Instruction::I64Load(at(al.fields[1])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, wsrc, al.fields[1]);
         b.ins(&Instruction::LocalSet(wlen));
         let n = b.local(ValType::I64);
         operand(self, m, b, 1, &Type::Int)?;
@@ -7574,16 +7357,12 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(wlen));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalGet(wdata));
         b.ins(&Instruction::I64ExtendI32U);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[3]);
         b.ins(&Instruction::Call(self.cx.rt.map_find));
         b.ins(&Instruction::LocalSet(idx));
         b.ins(&Instruction::LocalGet(idx));
@@ -7593,11 +7372,11 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
         // Miss: build the key; an `Err` from `str_from_bytes` traps.
         let rty = Type::result(Type::Str, Type::Str);
-        let rl = layout::of_ll(&self.cx.ll(&rty)).expect("the Result shape");
+        let rl = self.cx.layout(&rty, line)?;
         let dest = b.alloc(rl.size, rl.align);
         self.str_from_bytes(b, dest, wsrc, &al, line)?;
         b.slot(dest + rl.fields[0]);
-        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Load(at(0)));
         b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
@@ -7619,9 +7398,7 @@ impl<'p> Fn_<'_, 'p> {
         self.map_reserve(b, hdr, &l, 8, MapKey::Str);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalTee(idx));
         b.ins(&Instruction::I32Const(4));
         b.ins(&Instruction::I32Mul);
@@ -7695,9 +7472,7 @@ impl<'p> Fn_<'_, 'p> {
         self.map_reserve(b, hdr, &l, 8, mk);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalTee(idx));
         b.ins(&Instruction::I32Const(mk.stride()));
         b.ins(&Instruction::I32Mul);
@@ -7705,15 +7480,11 @@ impl<'p> Fn_<'_, 'p> {
         match mk {
             MapKey::I64 => {
                 b.ins(&Instruction::LocalGet(k));
-                b.ins(&Instruction::I64Store(word8()));
+                b.ins(&Instruction::I64Store(at(0)));
             }
             MapKey::Pack(stride) => {
                 b.ins(&Instruction::LocalGet(k));
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(stride);
             }
             MapKey::Str => {
                 b.ins(&Instruction::LocalGet(k));
@@ -7790,11 +7561,10 @@ impl<'p> Fn_<'_, 'p> {
                 k
             }
         };
-        let v = b.local(match &r {
-            Repr::Scalar(t) => *t,
-            Repr::Agg(_) => ValType::I32,
-            Repr::Unit => return unsupported("a Map of Unit", line),
-        });
+        let Some(v) = r.val() else {
+            return unsupported("a Map of Unit", line);
+        };
+        let v = b.local(v);
         self.part(m, b, parts, key + 1, val, line)?;
         b.ins(&Instruction::LocalSet(v));
 
@@ -7809,9 +7579,7 @@ impl<'p> Fn_<'_, 'p> {
         // keys[len] = k, and the new entry's index IS the old length.
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalTee(idx));
         b.ins(&Instruction::I32Const(mk.stride()));
         b.ins(&Instruction::I32Mul);
@@ -7819,15 +7587,11 @@ impl<'p> Fn_<'_, 'p> {
         match mk {
             MapKey::I64 => {
                 b.ins(&Instruction::LocalGet(k));
-                b.ins(&Instruction::I64Store(word8()));
+                b.ins(&Instruction::I64Store(at(0)));
             }
             MapKey::Pack(stride) => {
                 b.ins(&Instruction::LocalGet(k));
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(stride);
             }
             MapKey::Str => {
                 b.ins(&Instruction::LocalGet(k));
@@ -7867,14 +7631,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(v));
         match &r {
             Repr::Scalar(_) => {
-                b.ins(&store_of(&self.cx.ll(val)));
+                b.ins(&self.cx.store(val));
             }
             Repr::Agg(vl) => {
-                b.ins(&Instruction::I32Const(vl.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(vl.size);
             }
             Repr::Unit => return unsupported("a Map of Unit", line),
         }
@@ -7889,18 +7649,14 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Const(klen));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalGet(k));
         if mk != MapKey::I64 {
             b.ins(&Instruction::I64ExtendI32U);
         }
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[3]);
         b.ins(&Instruction::Call(self.cx.rt.map_find));
         b.ins(&Instruction::LocalSet(idx));
     }
@@ -7915,9 +7671,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[3]);
         b.ins(&Instruction::I32Const(2));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::LocalGet(idx));
@@ -7929,7 +7683,7 @@ impl<'p> Fn_<'_, 'p> {
     fn map_key(&mut self, key_t: &Type, line: usize) -> Result<MapKey, String> {
         Ok(match self.cx.resolve(key_t) {
             Type::Int => MapKey::I64,
-            Type::Record(_) | Type::Enum(_) => MapKey::Pack(self.layout_of(key_t, line)?.size),
+            Type::Record(_) | Type::Enum(_) => MapKey::Pack(self.cx.layout(key_t, line)?.size),
             _ => MapKey::Str,
         })
     }
@@ -7943,7 +7697,7 @@ impl<'p> Fn_<'_, 'p> {
         key_t: &Type,
         line: usize,
     ) -> Result<u32, String> {
-        let l = self.layout_of(key_t, line)?;
+        let l = self.cx.layout(key_t, line)?;
         let off = b.alloc(l.size, l.align);
         let dst = b.local(ValType::I32);
         b.slot(off);
@@ -7968,13 +7722,13 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         if let Type::Record(fs) = self.cx.resolve(ty) {
-            let l = self.layout_of(ty, line)?;
+            let l = self.cx.layout(ty, line)?;
             for (i, f) in fs.iter().enumerate() {
                 self.pack_fields(b, src, dst, off + l.fields[i], &f.ty, line)?;
             }
             return Ok(());
         }
-        let sz = self.layout_of(ty, line)?.size;
+        let sz = self.cx.layout(ty, line)?.size;
         b.ins(&Instruction::LocalGet(dst));
         if off != 0 {
             b.ins(&Instruction::I32Const(off as i32));
@@ -7985,11 +7739,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I32Const(off as i32));
             b.ins(&Instruction::I32Add);
         }
-        b.ins(&Instruction::I32Const(sz as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.copy(sz);
         Ok(())
     }
 
@@ -8034,7 +7784,7 @@ impl<'p> Fn_<'_, 'p> {
         mty: &Type,
         key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
-    ) -> Result<(u32, Layout, MapKey), String> {
+    ) -> Result<(u32, Rc<Layout>, MapKey), String> {
         let (k, l, mk) = self.map_key_local(m, b, mty, key, line)?;
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
@@ -8050,13 +7800,13 @@ impl<'p> Fn_<'_, 'p> {
         mty: &Type,
         key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
-    ) -> Result<(u32, Layout, MapKey), String> {
+    ) -> Result<(u32, Rc<Layout>, MapKey), String> {
         let key_t = match self.cx.resolve(mty) {
             Type::Map(k, _) => *k,
             _ => Type::Str,
         };
         let mk = self.map_key(&key_t, line)?;
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         let k = match mk {
             MapKey::I64 => {
                 let k = b.local(ValType::I64);
@@ -8114,17 +7864,13 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
         b.slot(off + ol.fields[0]);
         b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::I64Store(at(0)));
         match self.word2(val)? {
             // Two words side by side in the value buffer: one copy, no encoding.
             Word::Inline2 => {
                 b.slot(off + ol.fields[1]);
                 self.map_val_addr(b, hdr, &l, idx, esz);
-                b.ins(&Instruction::I32Const(16));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                b.copy(16);
             }
             // A value wider than a word (an aggregate, a vector): the payload word points
             // at the entry in the map's buffer, whose bytes are the box's. The `Option`
@@ -8134,14 +7880,14 @@ impl<'p> Fn_<'_, 'p> {
                 b.slot(off + ol.fields[1]);
                 self.map_val_addr(b, hdr, &l, idx, esz);
                 b.ins(&Instruction::I64ExtendI32U);
-                b.ins(&Instruction::I64Store(word8()));
+                b.ins(&Instruction::I64Store(at(0)));
             }
             _ => {
                 b.slot(off + ol.fields[1]);
                 self.map_val_addr(b, hdr, &l, idx, esz);
-                b.ins(&load_of(&self.cx.ll(val), 0, self.cx.signed(val)));
+                b.ins(&self.cx.load(val, 0));
                 self.encode_word2(b, val, line)?;
-                b.ins(&Instruction::I64Store(word8()));
+                b.ins(&Instruction::I64Store(at(0)));
             }
         }
         self.depth -= 1;
@@ -8504,20 +8250,12 @@ impl<'p> Fn_<'_, 'p> {
                     self.elem_addr(b, &w, idx);
                     // `align: 0` is a log2 exponent: one byte. Nothing guarantees 16-byte
                     // alignment, and an overstated hint lets the engine assume it.
-                    b.ins(&Instruction::V128Load(MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }));
+                    b.ins(&Instruction::V128Load(mem_arg(0, 0)));
                     return Ok(vec);
                 }
                 self.elem_addr(b, &w, idx);
                 operand(self, m, b, 2, Some(&vec))?;
-                b.ins(&Instruction::V128Store(MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }));
+                b.ins(&Instruction::V128Store(mem_arg(0, 0)));
                 return Ok(Type::Unit);
             }
             _ => unsupported(&format!("`{name}` at this arity"), line),
@@ -8539,13 +8277,11 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported(&format!("`keys` on `{mty}`"), line);
         };
         let mk = self.map_key(&key_t, line)?;
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         let aty = Type::Array(key_t);
-        let al = self.layout_of(&aty, line)?;
+        let al = self.cx.layout(&aty, line)?;
         let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
+        load_wrapped(b, hdr, l.fields[2]);
         b.ins(&Instruction::LocalSet(len));
         let (kind, klen) = mk.kind();
         b.ins(&Instruction::I32Const(kind));
@@ -8564,7 +8300,7 @@ impl<'p> Fn_<'_, 'p> {
             b.slot(off + f);
             b.ins(&Instruction::LocalGet(len));
             b.ins(&Instruction::I64ExtendI32U);
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         b.slot(off);
         Ok(aty)
@@ -8637,10 +8373,10 @@ impl<'p> Fn_<'_, 'p> {
 fn sa_head(b: &mut Frame, dest: Dest, l: &Layout, len: usize, n: usize) {
     dest.addr(b, l.fields[0]);
     b.ins(&Instruction::I64Const(len as i64));
-    b.ins(&Instruction::I64Store(word8()));
+    b.ins(&Instruction::I64Store(at(0)));
     dest.addr(b, l.fields[1]);
     b.ins(&Instruction::I64Const(n as i64));
-    b.ins(&Instruction::I64Store(word8()));
+    b.ins(&Instruction::I64Store(at(0)));
     dest.addr(b, l.fields[2]);
     b.ins(&Instruction::I32Const(0));
     b.ins(&Instruction::I32Store(word()));
@@ -8699,17 +8435,13 @@ impl<'p> Fn_<'_, 'p> {
         if len > 0 {
             b.ins(&Instruction::LocalSet(src));
         }
-        let l = self.layout_of(want, line)?;
+        let l = self.cx.layout(want, line)?;
         let off = b.alloc(l.size, l.align);
         sa_head(b, Dest::Slot(off), &l, len, n);
         if len > 0 {
             b.slot(off + l.fields[3]);
             b.ins(&Instruction::LocalGet(src));
-            b.ins(&Instruction::I32Const(self.extent(inner, len, line)? as i32));
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            b.copy(self.extent(inner, len, line)?);
         }
         b.slot(off);
         Ok(())
@@ -8729,7 +8461,7 @@ impl<'p> Fn_<'_, 'p> {
         parts: &mut Parts,
         line: usize,
     ) -> Result<(), String> {
-        let l = self.layout_of(ty, line)?;
+        let l = self.cx.layout(ty, line)?;
         sa_head(b, dest, &l, parts.len(), n);
         self.fixed_elems(m, b, dest.at(l.fields[3]), inner, parts, line)
     }
@@ -8741,11 +8473,11 @@ impl<'p> Fn_<'_, 'p> {
         hdr: u32,
         aty: &Type,
         line: usize,
-    ) -> Result<(Layout, Walk), String> {
+    ) -> Result<(Rc<Layout>, Walk), String> {
         let Type::SmallArray(inner, n) = self.cx.resolve(aty) else {
             return unsupported(&format!("a SmallArray operation on `{aty}`"), line);
         };
-        let l = self.layout_of(aty, line)?;
+        let l = self.cx.layout(aty, line)?;
         let stride = self.stride(&inner, line)?;
         let (len, _cap, base) = self.sa_parts(b, hdr, &l, n);
         let w = Walk {
@@ -8771,7 +8503,7 @@ impl<'p> Fn_<'_, 'p> {
         let (_, w) = self.sa_open(b, hdr, aty, line)?;
         let (len, base, stride, inner) = (w.len, w.data, w.stride, &w.elem);
         let want = Type::Array(Box::new(inner.clone()));
-        let al = self.layout_of(&want, line)?;
+        let al = self.cx.layout(&want, line)?;
         let buf = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::I64Const(stride as i64));
@@ -8785,10 +8517,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::I32Const(stride as i32));
         b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        b.ins(&MEMORY_COPY);
         let count = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::I32WrapI64);
@@ -8801,7 +8530,7 @@ impl<'p> Fn_<'_, 'p> {
         for f in [al.fields[1], al.fields[2]] {
             b.slot(off + f);
             b.ins(&Instruction::LocalGet(len));
-            b.ins(&Instruction::I64Store(word8()));
+            b.ins(&Instruction::I64Store(at(0)));
         }
         b.slot(off);
         Ok(want)
@@ -8810,35 +8539,19 @@ impl<'p> Fn_<'_, 'p> {
 
 /// An 8-byte access at a static offset.
 fn at(off: u32) -> MemArg {
-    MemArg {
-        offset: off as u64,
-        align: 3,
-        memory_index: 0,
-    }
+    mem_arg(off, 3)
 }
 
 /// A 4-byte access at a static offset.
 fn word_at(off: u32) -> MemArg {
-    MemArg {
-        offset: off as u64,
-        align: 2,
-        memory_index: 0,
-    }
+    mem_arg(off, 2)
 }
 
-fn word8() -> MemArg {
-    MemArg {
-        offset: 0,
-        align: 3,
-        memory_index: 0,
-    }
-}
-
-/// An 8-byte access at a static offset.
-fn word_at8(off: u32) -> MemArg {
+/// An access at a static offset whose alignment hint is `2^align` bytes.
+fn mem_arg(off: u32, align: u32) -> MemArg {
     MemArg {
         offset: off as u64,
-        align: 3,
+        align,
         memory_index: 0,
     }
 }
@@ -8997,11 +8710,7 @@ fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
 /// `llt` prints `i8` for both `Int8` and `UInt8`, so `signed` carries [`Num`]'s invariant across
 /// the load. It is ignored where the carrier is the width, and for a `Bool` (a byte of 0 or 1).
 fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
-    let m = |align| MemArg {
-        offset: off as u64,
-        align,
-        memory_index: 0,
-    };
+    let m = |align| mem_arg(off, align);
     match ll {
         "i64" => Instruction::I64Load(m(3)),
         "double" => Instruction::F64Load(m(3)),
@@ -9050,11 +8759,7 @@ fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt))
 }
 
 fn store_of(ll: &str) -> Instruction<'static> {
-    let m = |align| MemArg {
-        offset: 0,
-        align,
-        memory_index: 0,
-    };
+    let m = |align| mem_arg(0, align);
     match ll {
         "i64" => Instruction::I64Store(m(3)),
         "double" => Instruction::F64Store(m(3)),
@@ -9067,15 +8772,14 @@ fn store_of(ll: &str) -> Instruction<'static> {
     }
 }
 
-/// A scalar spilled for a `modify` call: its slot, its local, its LLVM type
-/// and whether it loads signed ([`Fn_::spill`]).
-type Spill = (u32, u32, String, bool);
+/// A scalar spilled for a `modify` call: its slot, its local and its load ([`Fn_::spill`]).
+type Spill = (u32, u32, Instruction<'static>);
 
 /// Write each spilled scalar back into its local after the call.
 fn reload(b: &mut Frame, spilled: &[Spill]) {
-    for (off, l, ll, signed) in spilled {
+    for (off, l, load) in spilled {
         b.slot(*off);
-        b.ins(&load_of(ll, 0, *signed));
+        b.ins(load);
         b.ins(&Instruction::LocalSet(*l));
     }
 }
@@ -9263,7 +8967,7 @@ struct Rt {
     /// `wasi_snapshot_preview1.proc_exit`, so a lowering outside `runtime` can end the
     /// process: `std/mem`'s `trap` primitive is a write to descriptor 2 and this call.
     proc_exit: u32,
-    /// The host-import table, so `Fn_::mem_prim` can lower a `std/mem` import to its `call`.
+    /// The host-import table, so [`mem_ins`] can lower a `std/mem` import to its `call`.
     wasi: Wasi,
     /// The address of the UTF-8 DFA table `utf8Valid` walks, interned by
     /// `runtime`; every caller passes it as the third argument.
@@ -9342,38 +9046,26 @@ fn str_len(b: &mut Frame) {
 }
 
 fn byte() -> MemArg {
-    MemArg {
-        offset: 0,
-        align: 0,
-        memory_index: 0,
-    }
+    mem_arg(0, 0)
 }
 
 /// Push `1` when the sum at address local `a` carries variant `tag`, else `0`. Every sum's tag
 /// is an `i64`, built-in and declared alike.
 fn tag_eq(b: &mut Frame, a: u32, tag: i64) {
     b.ins(&Instruction::LocalGet(a));
-    b.ins(&Instruction::I64Load(word8()));
+    b.ins(&Instruction::I64Load(at(0)));
     b.ins(&Instruction::I64Const(tag));
     b.ins(&Instruction::I64Eq);
 }
 
 fn word() -> MemArg {
-    MemArg {
-        offset: 0,
-        align: 2,
-        memory_index: 0,
-    }
+    word_at(0)
 }
 
 /// The `cap` word of a String's `{ len, cap }` header. Named so an offset of 0 where 4 was
 /// meant cannot pass silently.
 fn cap_at() -> MemArg {
-    MemArg {
-        offset: 4,
-        align: 2,
-        memory_index: 0,
-    }
+    word_at(4)
 }
 
 fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
@@ -10378,7 +10070,7 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
-                    let l = self.layout_of(&mty, *line)?;
+                    let l = self.cx.layout(&mty, *line)?;
                     let kv = [k.clone(), value.clone()];
                     let mut parts = Parts::Core(body, &kv, w);
                     self.map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, *releases, *line)?;
@@ -10409,7 +10101,7 @@ impl<'p> Fn_<'_, 'p> {
                     match self.cx.repr(&ty, *line)? {
                         Repr::Agg(l) => agg_landed(b, l.size, false),
                         _ => {
-                            b.ins(&store_of(&self.cx.ll(&ty)));
+                            b.ins(&self.cx.store(&ty));
                         }
                     }
                     self.free_snap(m, b, snap, *line)?;
@@ -10842,8 +10534,7 @@ impl<'p> Fn_<'_, 'p> {
         hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
-        // A `std/mem` primitive is one instruction, never a call; [`Fn_::mem_spec`] holds
-        // the table.
+        // A `std/mem` primitive is its instructions, never a call; [`mem_ins`] holds the table.
         if let Some(prim) = callee.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
             return self.core_mem(m, b, body, w, prim, args, ret, line);
         }
@@ -10887,11 +10578,7 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 let addr = m.reserve(16, 16) as i32;
                 let tmp = self.scratch(b, t, 9);
-                let at = |align: u32| MemArg {
-                    offset: 0,
-                    align,
-                    memory_index: 0,
-                };
+                let at = |align| mem_arg(0, align);
                 let (store, load) = match t {
                     ValType::I32 => (Instruction::I32Store(at(2)), Instruction::I32Load(at(2))),
                     ValType::I64 => (Instruction::I64Store(at(3)), Instruction::I64Load(at(3))),
@@ -11302,11 +10989,7 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
             return unsupported("a read of a place this walk does not load", line);
         };
-        b.ins(&load_of(
-            &self.cx.ll(&ty),
-            off.unwrap_or(0),
-            self.cx.signed(&ty),
-        ));
+        b.ins(&self.cx.load(&ty, off.unwrap_or(0)));
         Ok(ty)
     }
 
@@ -12794,8 +12477,9 @@ impl<'p> Fn_<'_, 'p> {
             ("adopt", 1) => return Some(Type::Param("T".into())),
             _ => {}
         }
-        let (_, params, ret) = self.mem_spec(prim, 0).ok()?;
-        (params.len() == args).then_some(ret)
+        let decl = self.cx.mem.get(prim)?;
+        mem_ins(self.cx, prim)?;
+        (decl.params.len() == args).then(|| decl.ret.clone())
     }
 
     /// The checker's type of `v`; `lit` for an integer or byte literal.
@@ -14039,6 +13723,15 @@ fn core_leaves(s: &St) -> bool {
     }
 }
 
+/// Pushes the `i64` word at `off` past the address in local `a` as an `i32`: a length, a
+/// capacity or a box pointer, which memory holds as `i64` and every address computes with as
+/// `i32`.
+fn load_wrapped(b: &mut Frame, a: u32, off: u32) {
+    b.ins(&Instruction::LocalGet(a))
+        .ins(&Instruction::I64Load(at(off)))
+        .ins(&Instruction::I32WrapI64);
+}
+
 /// Push the address of the payload at `off` in the sum at `addr`: inside the
 /// sum where the payload is two words `inline`, and the box's otherwise.
 fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
@@ -14125,6 +13818,20 @@ mod tests {
         }
     }
 
+    /// `addr` and `adopt` change a type and emit nothing, so [`Fn_::core_mem`] answers them
+    /// before the table.
+    #[test]
+    fn every_mem_declaration_has_a_row() {
+        let (program, _) = linked("fn main() -> Int64 {\n    return 0\n}\n").unwrap();
+        let c = cx();
+        for f in program.functions.iter().filter(|f| f.exported) {
+            if let Some(prim) = f.name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
+                let emits = mem_ins(&c, prim).is_some();
+                assert_eq!(emits, !matches!(prim, "addr" | "adopt"), "`std/mem.{prim}`");
+            }
+        }
+    }
+
     /// A runtime name is declared once, so [`VyrnRt::reserve`] hands out one index per row and
     /// [`VyrnRt::take`] finds the row a body belongs to. [`VyrnRt::check`] refuses a link where a
     /// row has no body.
@@ -14146,12 +13853,14 @@ mod tests {
             types: HashMap::new(),
             lambdas: HashMap::new(),
             kept: RefCell::new(Vec::new()),
+            layouts: RefCell::default(),
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,
             generics: HashMap::new(),
             higher_order: HashMap::new(),
             skipped: std::collections::HashSet::new(),
+            mem: HashMap::new(),
             owned: Default::default(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
@@ -14200,11 +13909,11 @@ mod tests {
         // `{ i1, i64 }`: the byte, then seven bytes of padding.
         assert_eq!(
             r.unwrap(),
-            Repr::Agg(Layout {
+            Repr::Agg(Rc::new(Layout {
                 size: 16,
                 align: 8,
                 fields: vec![0, 8]
-            })
+            }))
         );
         assert_eq!(
             c.repr(&Type::option(Type::Int), 0).unwrap().val(),
