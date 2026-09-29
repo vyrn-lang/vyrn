@@ -330,6 +330,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
         kept: RefCell::new(Vec::new()),
+        layouts: RefCell::default(),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -384,7 +385,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             Some(t) => t.clone(),
             None => top_level(&cx).peek(&g.init, g.line)?,
         };
-        let l = layout::of_ll(&cx.ll(&ty)).map_err(|e| format!("direct backend: {e}"))?;
+        let l = cx.layout(&ty, g.line)?;
         if cx.repr(&ty, g.line)? == Repr::Unit {
             return unsupported("module state of Unit", g.line);
         }
@@ -789,7 +790,7 @@ impl MapKey {
 enum Repr {
     Unit,
     Scalar(ValType),
-    Agg(Layout),
+    Agg(Rc<Layout>),
 }
 
 impl Repr {
@@ -957,6 +958,8 @@ struct Cx<'a> {
     /// keys on their addresses, kept alive for the compile: a key built from a
     /// node's address is sound only while the node lives (#444).
     kept: RefCell<Vec<Rc<dyn std::any::Any>>>,
+    /// Every layout, parsed once, keyed by `llt_of`'s string: a layout is a function of it alone.
+    layouts: RefCell<HashMap<String, Rc<Layout>>>,
     /// Every `impl` block, for `place` projection lookup: a projection is not a function, so
     /// `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -1051,6 +1054,22 @@ impl<'a> Cx<'a> {
     /// The LLVM shape of `ty`, from `llt_of`, so layout and lowering cannot drift apart.
     fn ll(&self, ty: &Type) -> String {
         llt_of(&self.sub(ty), &self.types)
+    }
+
+    fn layout(&self, ty: &Type, line: usize) -> Result<Rc<Layout>, String> {
+        self.layout_ll(self.ll(ty), line)
+    }
+
+    /// The layout of the LLVM shape `ll`, or the refusal of a shape past 4 GB.
+    fn layout_ll(&self, ll: String, line: usize) -> Result<Rc<Layout>, String> {
+        if let Some(l) = self.layouts.borrow().get(&ll) {
+            return Ok(l.clone());
+        }
+        let l = layout::of_ll(&ll)
+            .map_err(|e| format!("direct backend: layout of {ll} at line {line}: {e}"))?;
+        let l = Rc::new(l);
+        self.layouts.borrow_mut().insert(ll, l.clone());
+        Ok(l)
     }
 
     fn resolve(&self, ty: &Type) -> Type {
@@ -1220,10 +1239,7 @@ impl<'a> Cx<'a> {
             "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => {
                 Repr::Scalar(ValType::V128)
             }
-            _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(
-                layout::of_ll(&ll)
-                    .map_err(|e| format!("direct backend: layout of {ll} at line {line}: {e}"))?,
-            ),
+            _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(self.layout_ll(ll, line)?),
             _ => match wasm::abi(&ll) {
                 Some(v) => Repr::Scalar(v),
                 None => Repr::Unit,
@@ -2280,7 +2296,7 @@ fn lower_dispatcher(
         args.push((place, pty.clone()));
     }
 
-    let fl = layout::of_ll(&cx.ll(sig_ty)).map_err(|e| format!("direct backend: {e}"))?;
+    let fl = cx.layout(sig_ty, 0)?;
     let tag = b.local(ValType::I64);
     let pl = b.local(ValType::I32);
     b.ins(&Instruction::LocalGet(fv));
@@ -2550,7 +2566,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::Enum(vs) = self.cx.resolve(ty) else {
             return Ok(());
         };
-        let l = self.layout_of(ty, line)?;
+        let l = self.cx.layout(ty, line)?;
         for (tag, var) in vs.iter().enumerate() {
             let mut boxed = Vec::new();
             for (j, pty) in var.payload.clone().iter().enumerate() {
@@ -2587,7 +2603,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::SmallArray(_, cap_n) = self.cx.resolve(ty) else {
             return Err(gap("a SmallArray base", line));
         };
-        let l = self.layout_of(ty, line)?;
+        let l = self.cx.layout(ty, line)?;
         let base = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(l.fields[3] as i32));
@@ -2627,7 +2643,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         let t = self.cx.resolve(ty);
         let bufs = |which: &[usize]| -> Result<Rel, String> {
-            let l = self.layout_of(&t, line)?;
+            let l = self.cx.layout(&t, line)?;
             Ok(Rel::Buffers(which.iter().map(|i| l.fields[*i]).collect()))
         };
         Ok(match self.cx.owned.release_kind(&t) {
@@ -2720,7 +2736,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The elements first, then their buffer, which the walk still reads.
             Type::Array(inner) if self.deep_row(&self.cx.resolve(ty)) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
                 b.ins(&Instruction::LocalGet(a));
@@ -2738,7 +2754,7 @@ impl<'p> Fn_<'_, 'p> {
             // `sa_base` finds the live slots. `data` is null while inline, and `free` refuses
             // null.
             Type::SmallArray(inner, _) if self.deep_row(ty) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let n = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(a));
@@ -2756,7 +2772,7 @@ impl<'p> Fn_<'_, 'p> {
             // and packed keys go with their buffer.
             Type::Map(kt, vt) if self.deep_row(ty) => {
                 let mk = self.map_key(&kt, line)?;
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let n = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(a));
@@ -2797,7 +2813,7 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Record(_) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let fields = self
                     .cx
                     .fields(ty)
@@ -2833,7 +2849,7 @@ impl<'p> Fn_<'_, 'p> {
             // `own::owns_heap` must agree; this one asks the emitter's [`Fn_::word2`].
             Type::Enum(_) => {
                 let vs = self.cx.sum_vs(ty).unwrap_or_default();
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
                     let mut live = false;
                     for p in &var.payload {
@@ -2873,7 +2889,7 @@ impl<'p> Fn_<'_, 'p> {
             // A stored `fn` value is `{ i64 tag, i64 captures }`; only the tag says what the
             // capture block holds, so [`lower_fnval_free`] releases it.
             Type::Fn(..) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I64Load(word_at8(l.fields[0])))
                     .ins(&Instruction::LocalGet(a))
@@ -3104,7 +3120,7 @@ impl<'p> Fn_<'_, 'p> {
         }));
         operand(self, m, b, 0, &bytes)?;
         let src = self.scratch(b, ValType::I32, 0);
-        let al = self.layout_of(&bytes, line)?;
+        let al = self.cx.layout(&bytes, line)?;
         b.ins(&Instruction::LocalSet(src));
         let off = b.alloc(l.size, l.align);
         self.str_from_bytes(b, off, src, &al, line)?;
@@ -3134,7 +3150,7 @@ impl<'p> Fn_<'_, 'p> {
             bits: 8,
             signed: false,
         }));
-        let l = self.layout_of(&ty, line)?;
+        let l = self.cx.layout(&ty, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off);
         operand(self, m, b, 0, &Type::Str)?;
@@ -3392,7 +3408,7 @@ impl<'p> Fn_<'_, 'p> {
             .iter()
             .position(|f| f.name == field)
             .ok_or_else(|| gap(&format!("the field `{field}`"), line))?;
-        let l = layout::of_ll(&self.cx.ll(ty)).map_err(|e| format!("direct backend: {e}"))?;
+        let l = self.cx.layout(ty, line)?;
         Ok((l.fields[i], fs[i].ty.clone()))
     }
 
@@ -3545,8 +3561,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("a record that is not an aggregate", line);
                 };
                 let off = b.alloc(dl.size, dl.align);
-                let sl =
-                    layout::of_ll(&self.cx.ll(got)).map_err(|e| format!("direct backend: {e}"))?;
+                let sl = self.cx.layout(got, line)?;
                 for (i, f) in tf.iter().enumerate() {
                     let j = ff
                         .iter()
@@ -3594,8 +3609,7 @@ impl<'p> Fn_<'_, 'p> {
                 let Repr::Agg(dl) = self.cx.repr(to, line)? else {
                     return unsupported("a sum that is not an aggregate", line);
                 };
-                let sl =
-                    layout::of_ll(&self.cx.ll(from)).map_err(|e| format!("direct backend: {e}"))?;
+                let sl = self.cx.layout(from, line)?;
                 let off = b.alloc(dl.size, dl.align);
                 b.slot(off);
                 b.ins(&Instruction::I32Const(0));
@@ -4808,7 +4822,7 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("a `modify` argument in a local", line);
         };
         let ll = self.cx.ll(ty);
-        let l2 = layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))?;
+        let l2 = self.cx.layout(ty, line)?;
         let off = b.alloc(l2.size, l2.align);
         b.slot(off);
         b.ins(&Instruction::LocalGet(l));
@@ -5027,7 +5041,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Lays out a capture block: the captures packed by value, in order.
-    fn cap_block(&self, cap_tys: &[Type]) -> Result<Layout, String> {
+    fn cap_block(&self, cap_tys: &[Type]) -> Result<Rc<Layout>, String> {
         let ll = format!(
             "{{ {} }}",
             cap_tys
@@ -5036,7 +5050,7 @@ impl<'p> Fn_<'_, 'p> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))
+        self.cx.layout_ll(ll, 0)
     }
 
     /// Writes a stored function value's tag and payload into `dest`.
@@ -5211,7 +5225,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64ExtendI32U);
             }
             ("length", Type::Array(_)) => {
-                let l = self.layout_of(base, line)?;
+                let l = self.cx.layout(base, line)?;
                 b.ins(&Instruction::I64Load(at(l.fields[1])));
             }
             ("length", Type::ArrayN(_, n)) => {
@@ -5220,12 +5234,12 @@ impl<'p> Fn_<'_, 'p> {
             }
             // A `SmallArray` keeps its length in field 0, where an Array keeps its data.
             ("length", Type::SmallArray(..)) => {
-                let l = self.layout_of(base, line)?;
+                let l = self.cx.layout(base, line)?;
                 b.ins(&Instruction::I64Load(at(l.fields[0])));
             }
             // A Map keeps the shared length of its two buffers in field 2, not 1.
             ("length", Type::Map(..)) => {
-                let l = self.layout_of(base, line)?;
+                let l = self.cx.layout(base, line)?;
                 b.ins(&Instruction::I64Load(at(l.fields[2])));
             }
             _ => return Ok(None),
@@ -5250,14 +5264,9 @@ struct Walk {
 }
 
 impl<'p> Fn_<'_, 'p> {
-    fn layout_of(&self, ty: &Type, line: usize) -> Result<Layout, String> {
-        layout::of_ll(&self.cx.ll(ty))
-            .map_err(|e| gap(&format!("the layout of `{ty}` ({e})"), line))
-    }
-
     /// `of_ll` rounds a size up to its alignment, so a size is a stride.
     fn stride(&self, elem: &Type, line: usize) -> Result<u32, String> {
-        Ok(self.layout_of(elem, line)?.size)
+        Ok(self.cx.layout(elem, line)?.size)
     }
 
     /// Returns the size in bytes of `n` elements of `elem`, for every count-times-stride
@@ -5273,8 +5282,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Every `Stream<T>` shares one six-word header layout, whatever `T` is.
-    fn stream_layout(&self, line: usize) -> Result<Layout, String> {
-        self.layout_of(&Type::Stream(Box::new(Type::Int)), line)
+    fn stream_layout(&self, line: usize) -> Result<Rc<Layout>, String> {
+        self.cx.layout(&Type::Stream(Box::new(Type::Int)), line)
     }
 
     /// Emits `fromArray(xs)`: the array's words into a buffer-tagged header.
@@ -5286,7 +5295,9 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let arr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(arr));
-        let al = self.layout_of(&Type::Array(Box::new(inner.clone())), line)?;
+        let al = self
+            .cx
+            .layout(&Type::Array(Box::new(inner.clone())), line)?;
         let sl = self.stream_layout(line)?;
         let off = b.alloc(sl.size, sl.align);
         b.slot(off + sl.fields[0]);
@@ -5856,7 +5867,7 @@ impl<'p> Fn_<'_, 'p> {
         let len = b.local(ValType::I64);
         Ok(match self.cx.resolve(ty) {
             Type::Array(inner) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let data = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(addr));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
@@ -5904,7 +5915,7 @@ impl<'p> Fn_<'_, 'p> {
             // so every element access downstream sees an ordinary base and count.
             Type::SmallArray(inner, n) => {
                 let ty = self.cx.resolve(ty);
-                let l = self.layout_of(&ty, line)?;
+                let l = self.cx.layout(&ty, line)?;
                 let (sl, _cap, base) = self.sa_parts(b, addr, &l, n);
                 let stride = self.stride(&inner, line)?;
                 Walk {
@@ -6182,7 +6193,7 @@ impl<'p> Fn_<'_, 'p> {
         used: bool,
     ) -> Result<Type, String> {
         let ty = Type::Array(Box::new(inner.clone()));
-        let l = self.layout_of(&ty, line)?;
+        let l = self.cx.layout(&ty, line)?;
         let n = elems.len();
         let buf = match taken {
             Some(buf) => buf,
@@ -6241,7 +6252,7 @@ impl<'p> Fn_<'_, 'p> {
             src_mem: 0,
             dst_mem: 0,
         });
-        let l = self.layout_of(want, line)?;
+        let l = self.cx.layout(want, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off + l.fields[0]);
         b.ins(&Instruction::LocalGet(buf));
@@ -6266,11 +6277,11 @@ impl<'p> Fn_<'_, 'p> {
         aty: &Type,
         verb: &str,
         line: usize,
-    ) -> Result<(Type, Layout, i32, u32), String> {
+    ) -> Result<(Type, Rc<Layout>, i32, u32), String> {
         let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`{verb}` on `{aty}`"), line);
         };
-        let l = self.layout_of(aty, line)?;
+        let l = self.cx.layout(aty, line)?;
         let stride = self.stride(&elem, line)? as i32;
         let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(src));
@@ -6297,7 +6308,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let verb = name.trim_start_matches('@');
         if let (Type::SmallArray(inner, n), "push") = (self.cx.resolve(aty), verb) {
-            let l = self.layout_of(aty, line)?;
+            let l = self.cx.layout(aty, line)?;
             let stride = self.stride(&inner, line)? as i32;
             let hdr = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(hdr));
@@ -6428,9 +6439,9 @@ impl<'p> Fn_<'_, 'p> {
             _ => return unsupported(&format!("`pop` on `{aty}`"), line),
         };
         let elem = *elem;
-        let al = self.layout_of(aty, line)?;
+        let al = self.cx.layout(aty, line)?;
         let opt = Type::option(elem.clone());
-        let ol = self.layout_of(&opt, line)?;
+        let ol = self.cx.layout(&opt, line)?;
         let out = b.alloc(ol.size, ol.align);
         // Write `None` first; the `Some` arm overwrites the tag and payload in place.
         b.slot(out + ol.fields[0]);
@@ -6487,7 +6498,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::SmallArray(..) => 0,
             _ => return unsupported(&format!("`swapRemove` on `{aty}`"), line),
         };
-        let al = self.layout_of(aty, line)?;
+        let al = self.cx.layout(aty, line)?;
         b.ins(&Instruction::LocalGet(slot));
         let w = self.walk(b, aty, line)?;
         index(self, m, b)?;
@@ -6801,7 +6812,7 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Array(inner) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
                 b.ins(&Instruction::LocalGet(a));
@@ -6830,7 +6841,7 @@ impl<'p> Fn_<'_, 'p> {
             // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
             // header copy is the whole copy of its storage.
             Type::SmallArray(inner, cap_n) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, base) = (b.local(ValType::I32), b.local(ValType::I32));
                 b.ins(&Instruction::LocalGet(a));
@@ -6877,7 +6888,7 @@ impl<'p> Fn_<'_, 'p> {
                 // String keys are dup'd per entry; Int64 and packed keys copy
                 // with the buffer.
                 let mk = self.map_key(&kt, line)?;
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let (n, cap) = (b.local(ValType::I32), b.local(ValType::I32));
                 b.ins(&Instruction::LocalGet(a));
@@ -6934,7 +6945,7 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Type::Record(_) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 let fields = self
                     .cx
                     .fields(ty)
@@ -6964,7 +6975,7 @@ impl<'p> Fn_<'_, 'p> {
             // payload would share the box, and both copies would release it.
             Type::Enum(_) => {
                 let vs = self.cx.sum_vs(ty).unwrap_or_default();
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
                     let mut live = false;
                     for p in &var.payload {
@@ -6992,7 +7003,7 @@ impl<'p> Fn_<'_, 'p> {
             // A stored `fn` value is `{ tag, captures }`. The capture block's size
             // is per tag, so the module's derived copy (`fnval_copy`) walks it.
             Type::Fn(..) => {
-                let l = self.layout_of(ty, line)?;
+                let l = self.cx.layout(ty, line)?;
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[0])));
@@ -7034,7 +7045,7 @@ impl<'p> Fn_<'_, 'p> {
                 Ok(())
             }
             Word::Boxed => {
-                let size = self.layout_of(pty, line)?.size;
+                let size = self.cx.layout(pty, line)?.size;
                 let (src, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(off)));
@@ -7082,9 +7093,7 @@ impl<'p> Fn_<'_, 'p> {
         let ll = self.cx.ll(t);
         match self.cx.repr(t, line)? {
             Repr::Scalar(v) => {
-                let size = layout::of_ll(&ll)
-                    .map_err(|e| format!("direct backend: {e}"))?
-                    .size;
+                let size = self.cx.layout(t, line)?.size;
                 // Two distinct scratch slots: `scratch` is keyed on (type, n), so for an
                 // i32 scalar one `n` would give one local, and the `LocalTee` below
                 // would overwrite the value with the box's address.
@@ -7509,7 +7518,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::Map(key_t, val) = self.cx.resolve(mty) else {
             return unsupported(&format!("a map literal of `{mty}`"), line);
         };
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         dest.addr(b, 0);
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32Const(l.size as i32));
@@ -7547,7 +7556,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::Map(..) = self.cx.resolve(mty) else {
             return unsupported(&format!("`tallyBytes` on `{mty}`"), line);
         };
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         let bytes = Type::Array(Box::new(Type::IntN {
             bits: 8,
             signed: false,
@@ -7555,7 +7564,7 @@ impl<'p> Fn_<'_, 'p> {
         let wsrc = b.local(ValType::I32);
         operand(self, m, b, 0, &bytes)?;
         b.ins(&Instruction::LocalSet(wsrc));
-        let al = self.layout_of(&bytes, line)?;
+        let al = self.cx.layout(&bytes, line)?;
         let (wdata, wlen) = (b.local(ValType::I32), b.local(ValType::I32));
         b.ins(&Instruction::LocalGet(wsrc));
         b.ins(&Instruction::I32Load(word_at(al.fields[0])));
@@ -7593,7 +7602,7 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
         // Miss: build the key; an `Err` from `str_from_bytes` traps.
         let rty = Type::result(Type::Str, Type::Str);
-        let rl = layout::of_ll(&self.cx.ll(&rty)).expect("the Result shape");
+        let rl = self.cx.layout(&rty, line)?;
         let dest = b.alloc(rl.size, rl.align);
         self.str_from_bytes(b, dest, wsrc, &al, line)?;
         b.slot(dest + rl.fields[0]);
@@ -7929,7 +7938,7 @@ impl<'p> Fn_<'_, 'p> {
     fn map_key(&mut self, key_t: &Type, line: usize) -> Result<MapKey, String> {
         Ok(match self.cx.resolve(key_t) {
             Type::Int => MapKey::I64,
-            Type::Record(_) | Type::Enum(_) => MapKey::Pack(self.layout_of(key_t, line)?.size),
+            Type::Record(_) | Type::Enum(_) => MapKey::Pack(self.cx.layout(key_t, line)?.size),
             _ => MapKey::Str,
         })
     }
@@ -7943,7 +7952,7 @@ impl<'p> Fn_<'_, 'p> {
         key_t: &Type,
         line: usize,
     ) -> Result<u32, String> {
-        let l = self.layout_of(key_t, line)?;
+        let l = self.cx.layout(key_t, line)?;
         let off = b.alloc(l.size, l.align);
         let dst = b.local(ValType::I32);
         b.slot(off);
@@ -7968,13 +7977,13 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         if let Type::Record(fs) = self.cx.resolve(ty) {
-            let l = self.layout_of(ty, line)?;
+            let l = self.cx.layout(ty, line)?;
             for (i, f) in fs.iter().enumerate() {
                 self.pack_fields(b, src, dst, off + l.fields[i], &f.ty, line)?;
             }
             return Ok(());
         }
-        let sz = self.layout_of(ty, line)?.size;
+        let sz = self.cx.layout(ty, line)?.size;
         b.ins(&Instruction::LocalGet(dst));
         if off != 0 {
             b.ins(&Instruction::I32Const(off as i32));
@@ -8034,7 +8043,7 @@ impl<'p> Fn_<'_, 'p> {
         mty: &Type,
         key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
-    ) -> Result<(u32, Layout, MapKey), String> {
+    ) -> Result<(u32, Rc<Layout>, MapKey), String> {
         let (k, l, mk) = self.map_key_local(m, b, mty, key, line)?;
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
@@ -8050,13 +8059,13 @@ impl<'p> Fn_<'_, 'p> {
         mty: &Type,
         key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
         line: usize,
-    ) -> Result<(u32, Layout, MapKey), String> {
+    ) -> Result<(u32, Rc<Layout>, MapKey), String> {
         let key_t = match self.cx.resolve(mty) {
             Type::Map(k, _) => *k,
             _ => Type::Str,
         };
         let mk = self.map_key(&key_t, line)?;
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         let k = match mk {
             MapKey::I64 => {
                 let k = b.local(ValType::I64);
@@ -8539,9 +8548,9 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported(&format!("`keys` on `{mty}`"), line);
         };
         let mk = self.map_key(&key_t, line)?;
-        let l = self.layout_of(mty, line)?;
+        let l = self.cx.layout(mty, line)?;
         let aty = Type::Array(key_t);
-        let al = self.layout_of(&aty, line)?;
+        let al = self.cx.layout(&aty, line)?;
         let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -8699,7 +8708,7 @@ impl<'p> Fn_<'_, 'p> {
         if len > 0 {
             b.ins(&Instruction::LocalSet(src));
         }
-        let l = self.layout_of(want, line)?;
+        let l = self.cx.layout(want, line)?;
         let off = b.alloc(l.size, l.align);
         sa_head(b, Dest::Slot(off), &l, len, n);
         if len > 0 {
@@ -8729,7 +8738,7 @@ impl<'p> Fn_<'_, 'p> {
         parts: &mut Parts,
         line: usize,
     ) -> Result<(), String> {
-        let l = self.layout_of(ty, line)?;
+        let l = self.cx.layout(ty, line)?;
         sa_head(b, dest, &l, parts.len(), n);
         self.fixed_elems(m, b, dest.at(l.fields[3]), inner, parts, line)
     }
@@ -8741,11 +8750,11 @@ impl<'p> Fn_<'_, 'p> {
         hdr: u32,
         aty: &Type,
         line: usize,
-    ) -> Result<(Layout, Walk), String> {
+    ) -> Result<(Rc<Layout>, Walk), String> {
         let Type::SmallArray(inner, n) = self.cx.resolve(aty) else {
             return unsupported(&format!("a SmallArray operation on `{aty}`"), line);
         };
-        let l = self.layout_of(aty, line)?;
+        let l = self.cx.layout(aty, line)?;
         let stride = self.stride(&inner, line)?;
         let (len, _cap, base) = self.sa_parts(b, hdr, &l, n);
         let w = Walk {
@@ -8771,7 +8780,7 @@ impl<'p> Fn_<'_, 'p> {
         let (_, w) = self.sa_open(b, hdr, aty, line)?;
         let (len, base, stride, inner) = (w.len, w.data, w.stride, &w.elem);
         let want = Type::Array(Box::new(inner.clone()));
-        let al = self.layout_of(&want, line)?;
+        let al = self.cx.layout(&want, line)?;
         let buf = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::I64Const(stride as i64));
@@ -10378,7 +10387,7 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
-                    let l = self.layout_of(&mty, *line)?;
+                    let l = self.cx.layout(&mty, *line)?;
                     let kv = [k.clone(), value.clone()];
                     let mut parts = Parts::Core(body, &kv, w);
                     self.map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, *releases, *line)?;
@@ -14146,6 +14155,7 @@ mod tests {
             types: HashMap::new(),
             lambdas: HashMap::new(),
             kept: RefCell::new(Vec::new()),
+            layouts: RefCell::default(),
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,
@@ -14200,11 +14210,11 @@ mod tests {
         // `{ i1, i64 }`: the byte, then seven bytes of padding.
         assert_eq!(
             r.unwrap(),
-            Repr::Agg(Layout {
+            Repr::Agg(Rc::new(Layout {
                 size: 16,
                 align: 8,
                 fields: vec![0, 8]
-            })
+            }))
         );
         assert_eq!(
             c.repr(&Type::option(Type::Int), 0).unwrap().val(),
