@@ -8,7 +8,7 @@ use std::collections::HashSet;
 /// Whether `name` in a contract member's type is an implicit type parameter:
 /// one uppercase ASCII letter, optionally followed by digits (`T`,
 /// `T1`). The narrow rule keeps a typo such as `Haed` a named type the checker
-/// must resolve.
+/// must resolve. `std/contract:isTypeParam` states the same rule in Vyrn.
 pub fn is_member_type_param(name: &str) -> bool {
     let mut cs = name.chars();
     match cs.next() {

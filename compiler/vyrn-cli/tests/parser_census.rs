@@ -57,7 +57,7 @@ fn parser_sections() -> Vec<Section> {
     use Kind::*;
     vec![
         sec("pub fn is_member_type_param(name: &str) -> bool {", Grammar),
-        sec("fn mark_member_type_params(ty: &mut Type) {", Twice),
+        sec("fn mark_member_type_params(ty: &mut Type) {", Desugar),
         sec("fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {", Grammar),
         sec("pub const METHOD_BUILTINS: &[(&str, &str)] = &[", Twice),
         sec("pub fn method_surface(internal: &str) -> &str {", Shared),
@@ -295,8 +295,8 @@ fn the_parser_census_matches_its_pin() {
     }
     let want = vec![
         ("parser.rs", "the grammar's own arm", 3172, 52),
-        ("parser.rs", "a desugar the parser states", 951, 7),
-        ("parser.rs", "a table stated a second time", 99, 0),
+        ("parser.rs", "a desugar the parser states", 963, 7),
+        ("parser.rs", "a table stated a second time", 87, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
         ("parser.rs", "shared machinery", 199, 1),
         ("parser.rs", "tests", 1877, 0),

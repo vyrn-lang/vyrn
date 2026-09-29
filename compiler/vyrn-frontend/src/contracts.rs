@@ -936,18 +936,6 @@ fn shape_matches(shape: &ContractShape, e: &ExportSig) -> bool {
         && type_matches(&shape.ret, &e.ret)
 }
 
-/// Returns whether `name` is a member's implicit type parameter: one uppercase
-/// ASCII letter and optional digits. Mirrors `parser::is_member_type_param`
-/// and `std/contract:isTypeParam`.
-fn is_type_param(name: &str) -> bool {
-    let mut cs = name.chars();
-    match cs.next() {
-        Some(c) if c.is_ascii_uppercase() => {}
-        _ => return false,
-    }
-    cs.all(|c| c.is_ascii_digit())
-}
-
 /// Returns the head of a type spelling: `Query<T>` gives `Query`.
 fn head_of(spelling: &str) -> &str {
     match spelling.find('<') {
@@ -961,7 +949,7 @@ fn head_of(spelling: &str) -> &str {
 /// matches any type.
 pub fn type_matches(pattern: &str, actual: &str) -> bool {
     let ph = head_of(pattern);
-    if is_type_param(ph) {
+    if crate::parser::is_member_type_param(ph) {
         return true;
     }
     if ph != head_of(actual) {
