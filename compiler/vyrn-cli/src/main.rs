@@ -168,6 +168,12 @@ fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
         cmd.arg("-pthread");
         cmd.arg("-lm");
     }
+    if cfg!(windows) {
+        cmd.arg(format!(
+            "-Wl,/STACK:{}",
+            vyrn_frontend::trap::RUN_STACK_BYTES
+        ));
+    }
 }
 
 fn main() -> ExitCode {
@@ -4278,7 +4284,7 @@ where
         let (worker, module, run) = (&worker, &module, &run);
         for i in 0..workers {
             std::thread::Builder::new()
-                .stack_size(WORKER_STACK_BYTES)
+                .stack_size(vyrn_frontend::trap::RUN_STACK_BYTES)
                 .spawn_scoped(s, move || {
                     let mut res = match wasmrun::start_on(module, run, None) {
                         Ok((res, 0)) => res,
@@ -4299,9 +4305,6 @@ where
         accept()
     })
 }
-
-/// One worker thread's stack: the guest's compiled code recurses on it.
-const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// The `--workers` gate: `handle` must reach no module state, transitively.
 /// Prints the refusal with the call path and returns the exit code, or `None`

@@ -168,6 +168,34 @@ fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
     );
 }
 
+/// The call depth is the language's even when each frame is wide: 400 values
+/// live across the recursive call spill into the host's stack, and at
+/// wasmtime's default of 512 KiB the run stopped near depth 128 with the
+/// engine's backtrace. `trap::WASM_STACK_BYTES` holds the limit.
+#[test]
+fn wide_frames_reach_the_call_depth_limit() {
+    let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
+    let k = 400;
+    let values: Vec<String> = (0..k).map(|i| i.to_string()).collect();
+    let lets: String = (0..k).map(|i| format!("    let v{i} = g[{i}]\n")).collect();
+    let sum: Vec<String> = (0..k).map(|i| format!("v{i}")).collect();
+    let src = format!(
+        "let mut g: Array<Int64> = [{}]\nfn wide(d: Int64) -> Int64 {{\n    g[0] = g[0] + 1\n    \
+         if d <= 0 {{\n        return 0\n    }}\n{lets}    let r = wide(d - 1)\n    return r + {}\n}}\n\
+         fn main() -> Int64 {{\n    print(wide({}).toString())\n    return 0\n}}\n",
+        values.join(", "),
+        sum.join(" + "),
+        limit - 2
+    );
+    let out = run("run", &src, "wideframes");
+    let got = text(&out);
+    assert_eq!(out.status.code(), Some(0), "got:\n{got}");
+    assert!(
+        got.trim().parse::<i64>().is_ok(),
+        "expected the sum, got:\n{got}"
+    );
+}
+
 /// Two shapes, because two bounds catch them: a spine grows deep, a record grows
 /// wide and doubles per level. `check` must predict what the build refuses.
 ///

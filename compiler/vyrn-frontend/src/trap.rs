@@ -33,6 +33,24 @@ pub const CALL_DEPTH_LIMIT: u32 = 1_000;
 /// costs 126 wasm pages, touched only as deep as a program recurses.
 pub const FRAME_LIMIT: u32 = 8 * 1024;
 
+/// The native stack a program's frames may use: wasmtime's wasm stack limit.
+///
+/// It holds [`CALL_DEPTH_LIMIT`] frames of 32 KiB of spilled values each, so the
+/// depth counter stops a program before the host stack does. At wasmtime's
+/// default of 512 KiB a frame with 500 live values stopped at depth 128.
+pub const WASM_STACK_BYTES: usize = 32 * 1024 * 1024;
+
+/// The stack of a thread that runs a program: [`WASM_STACK_BYTES`] and room for
+/// the host's own frames. The wasm host's workers reserve it, and so does a
+/// Windows native binary's main thread, whose default is 1 MiB. On Linux and
+/// macOS a native binary runs on the process stack, which `ulimit -s` sets.
+pub const RUN_STACK_BYTES: usize = WASM_STACK_BYTES + 16 * 1024 * 1024;
+
+/// The trap for a program whose frames outgrow the host stack. It is wasm-rt's
+/// `wasm_rt_strerror` wording, which the native host prints, so both routes
+/// print one sentence.
+pub const STACK_EXHAUSTED: &str = "Call stack exhausted";
+
 /// The most elements one array literal may have.
 ///
 /// A literal is built in a frame slot, and the array it becomes needs a second

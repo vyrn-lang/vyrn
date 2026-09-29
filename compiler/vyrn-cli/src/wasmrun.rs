@@ -136,14 +136,28 @@ impl vyrn_genwasm::GenHost for Host {
 fn engine(metered: bool) -> &'static Engine {
     static PLAIN: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
     static METERED: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+    let config = |fuel: bool| {
+        let mut cfg = wasmtime::Config::new();
+        cfg.consume_fuel(fuel);
+        cfg.max_wasm_stack(vyrn_frontend::trap::WASM_STACK_BYTES);
+        // wasmtime refuses a wasm stack larger than the async one.
+        cfg.async_stack_size(vyrn_frontend::trap::RUN_STACK_BYTES);
+        Engine::new(&cfg).expect("the engine's configuration is fixed and valid")
+    };
     if metered {
-        METERED.get_or_init(|| {
-            let mut cfg = wasmtime::Config::new();
-            cfg.consume_fuel(true);
-            Engine::new(&cfg).unwrap_or_default()
-        })
+        METERED.get_or_init(|| config(true))
     } else {
-        PLAIN.get_or_init(|| Engine::new(&wasmtime::Config::new()).unwrap_or_default())
+        PLAIN.get_or_init(|| config(false))
+    }
+}
+
+/// The wording of a trap the program did not spell: a stack overflow as
+/// [`vyrn_frontend::trap::STACK_EXHAUSTED`], anything else as the engine's
+/// first line.
+fn host_trap(e: &wasmtime::Error) -> String {
+    match e.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::StackOverflow) => vyrn_frontend::trap::STACK_EXHAUSTED.to_string(),
+        _ => first_line(&format!("{e:?}")).to_string(),
     }
 }
 
@@ -170,7 +184,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
             // A trap the program did not spell (`unreachable`, an out-of-bounds
             // access): the wording is this host's.
             None => {
-                let msg = format!("error: {}\n", first_line(&format!("{e:?}")));
+                let msg = format!("error: {}\n", host_trap(&e));
                 write_err(store.data_mut(), msg.as_bytes());
                 1
             }
@@ -346,7 +360,7 @@ pub fn start_on(
         Ok(()) => 0,
         Err(e) => match e.downcast_ref::<Exit>() {
             Some(Exit(code)) => *code,
-            None => return Err(first_line(&format!("{e:?}")).to_string()),
+            None => return Err(host_trap(&e)),
         },
     };
     Ok((Resident { store, inst }, code))
@@ -424,7 +438,7 @@ impl Resident {
             .trim_start_matches("error: ")
             .to_string();
         if line.is_empty() {
-            format!("{door}: {}", first_line(&format!("{e:?}")))
+            format!("{door}: {}", host_trap(&e))
         } else {
             line
         }
@@ -473,7 +487,7 @@ impl Resident {
                     Err(e) => match e.downcast_ref::<Exit>() {
                         Some(Exit(0)) => Ok(()),
                         Some(Exit(code)) => Err(format!("exit {code}")),
-                        None => Err(first_line(&format!("{e:?}")).to_string()),
+                        None => Err(host_trap(&e)),
                     },
                 },
             };

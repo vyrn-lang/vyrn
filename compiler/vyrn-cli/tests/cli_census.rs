@@ -311,11 +311,11 @@ fn the_structural_census_matches_its_pin() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 4458, 167),
+        ("a command's own path", 4461, 167),
         ("a rule another pass also states", 150, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
-        ("the WASI host and the wasmtime embedding", 1059, 0),
+        ("the WASI host and the wasmtime embedding", 1073, 0),
         ("shared machinery", 1271, 19),
         ("tests", 755, 2),
     ];
@@ -361,7 +361,7 @@ fn the_per_command_census_matches_its_pin() {
     let want = vec![
         ("bench", 567, 17),
         ("why", 504, 19),
-        ("serve, dev", 461, 7),
+        ("serve, dev", 458, 7),
         ("doc", 370, 13),
         ("routes", 303, 4),
         ("build", 260, 17),
@@ -371,8 +371,8 @@ fn the_per_command_census_matches_its_pin() {
         ("deps", 210, 5),
         ("update", 195, 7),
         ("fix", 192, 1),
+        ("build, bench", 127, 0),
         ("test, bench", 124, 2),
-        ("build, bench", 121, 0),
         ("serve", 87, 8),
         ("add", 70, 6),
         ("vendor", 66, 6),
@@ -385,7 +385,7 @@ fn the_per_command_census_matches_its_pin() {
     assert_eq!(per_command(), want, "the per-command census has moved");
     let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
     assert_eq!(
-        total, 4458,
+        total, 4461,
         "the per-command tile does not add up to its kind"
     );
 }
