@@ -615,12 +615,33 @@ fn generator_program(program: &Program, g: &str) -> Program {
             }
         }
     }
-    let mut p = program.clone();
-    p.functions.retain(|f| keep.contains(&f.name));
-    p.globals.retain(|s| keep.contains(&s.name));
-    p.tests.clear();
-    p.benches.clear();
-    p
+    // Built field by field, not cloned and cut: the dropped bodies are most of
+    // a large program.
+    Program {
+        functions: program
+            .functions
+            .iter()
+            .filter(|f| keep.contains(&f.name))
+            .cloned()
+            .collect(),
+        globals: program
+            .globals
+            .iter()
+            .filter(|s| keep.contains(&s.name))
+            .cloned()
+            .collect(),
+        tests: Vec::new(),
+        benches: Vec::new(),
+        imports: program.imports.clone(),
+        type_decls: program.type_decls.clone(),
+        protocols: program.protocols.clone(),
+        contracts: program.contracts.clone(),
+        impls: program.impls.clone(),
+        surface_shadows: program.surface_shadows.clone(),
+        log_level: program.log_level,
+        log_sink: program.log_sink.clone(),
+        nodes: program.nodes,
+    }
 }
 
 /// Returns a text that names `p` alike in every process: its `Debug`, with the
