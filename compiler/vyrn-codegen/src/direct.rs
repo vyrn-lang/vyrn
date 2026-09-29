@@ -5434,11 +5434,16 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
     ) -> Result<u32, String> {
+        let w = b.local(ValType::I64);
         let a = b.local(ValType::I32);
         addr(self, m, b)?;
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::LocalTee(a));
-        b.ins(&Instruction::I32Eqz);
+        // The address is checked as an `Int64` before it is wrapped: a nonzero
+        // 32-bit address is `1..=u32::MAX`, so `w - 1 <u u32::MAX`.
+        b.ins(&Instruction::LocalTee(w));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::I64Const(u32::MAX as i64));
+        b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         let msg = self.cx.rt.intern(
@@ -5449,7 +5454,9 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.trap));
         self.depth -= 1;
         b.ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::LocalGet(w));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalTee(a));
         b.ins(&Instruction::I64Load(word8()));
         b.ins(&Instruction::I64Const(Self::BOX_MAGIC));
         b.ins(&Instruction::I64Ne);
