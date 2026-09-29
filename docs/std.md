@@ -52,6 +52,7 @@ The compiler injects these declarations into every program, so a file names them
 | `Value`, `Template` | Tagged-template holes and `template"..."`. |
 | `Schema` | What `schemaOf<T>()` answers. |
 | `ModuleInterface`, `FnInfo`, `ParamInfo`, `TypeInfo`, `Origin`, `TypeNode`, `TypeMember` | What `moduleInterface(path)` answers in a generator. `TypeInfo.shape` is the declaration as a tree of nodes. |
+| `TypeArg` | What a `derive` generator receives: the checked types its call sites need, as one graph of `TypeNode`s. |
 | `ContractInfo`, `MemberInfo` | What `contractOf(Name)` answers in a generator. |
 | `Request`, `Response` | The HTTP surface `vyrn serve` and `std/ui` use. Request header names are lowercase; `Response.headers` holds every header but `Vary`, which has its own field. |
 

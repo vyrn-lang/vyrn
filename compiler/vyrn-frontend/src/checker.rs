@@ -245,7 +245,7 @@ pub(crate) fn local_index(
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
 pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (out, binders, _, _, _, _) = check_accum_full(program);
+    let (out, binders, _, _, _, _, _) = check_accum_full(program);
     (out, binders)
 }
 
@@ -301,6 +301,7 @@ pub const RESERVED: &[&str] = &[
     "jsonSchema",
     "toJson",
     "fromJson",
+    "derive",
     "toString",
     "pop",
     "swapRemove",
@@ -450,14 +451,15 @@ use crate::types::INT32;
 /// diagnostics all belong to, so every other body is typed. The set is `None`
 /// when a refusal stands anywhere else.
 pub fn check_accum_with_json_types(program: &Program) -> CheckedJson {
-    let (out, _, _, json, jdec, refused) = check_accum_full(program);
-    (out, json, jdec, refused)
+    let (out, _, _, json, jdec, derived, refused) = check_accum_full(program);
+    (out, json, jdec, derived, refused)
 }
 
 pub type CheckedJson = (
     Vec<Diagnostic>,
     Vec<Type>,
     Vec<Type>,
+    Vec<(String, Type)>,
     Option<HashSet<String>>,
 );
 
@@ -469,10 +471,11 @@ fn check_accum_full(
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
+    Vec<(String, Type)>,
     Option<HashSet<String>>,
 ) {
-    let (out, binders, effects, json, jdec, typed, _) = check_accum_inner(program, false);
-    (out, binders, effects, json, jdec, typed)
+    let (out, binders, effects, json, jdec, derived, typed, _) = check_accum_inner(program, false);
+    (out, binders, effects, json, jdec, derived, typed)
 }
 
 /// An impl head as written (`impl<T> Show for Option<T>`), for the overlap
@@ -529,6 +532,7 @@ fn check_accum_inner(
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
+    Vec<(String, Type)>,
     Option<HashSet<String>>,
     Option<Recorded>,
 ) {
@@ -1123,6 +1127,7 @@ fn check_accum_inner(
         stored_calls: RefCell::new(Vec::new()),
         json_types: RefCell::new(Vec::new()),
         json_dec_types: RefCell::new(Vec::new()),
+        derive_sites: RefCell::new(Vec::new()),
         record: recording.then(RefCell::default),
         desugaring: std::cell::Cell::new(false),
         pending_subst: RefCell::new(None),
@@ -1292,6 +1297,7 @@ fn check_accum_inner(
         effects,
         json_types,
         json_dec_types,
+        checker.derive_sites.take(),
         typed,
         record,
     )
@@ -1682,7 +1688,7 @@ pub struct Recorded {
 
 /// One pass that returns the diagnostics, the root's bindings and the record.
 fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
-    let (diags, binders, _, _, _, _, made) = check_accum_inner(program, true);
+    let (diags, binders, _, _, _, _, _, made) = check_accum_inner(program, true);
     (diags, binders, made.unwrap_or_default())
 }
 
@@ -1862,6 +1868,8 @@ struct Checker<'a> {
     json_types: RefCell<Vec<Type>>,
     /// Every `fromJson<T>` target, for the decoders.
     json_dec_types: RefCell<Vec<Type>>,
+    /// Every `derive(g, x)` site: the generator and `x`'s type.
+    derive_sites: RefCell<Vec<(String, Type)>>,
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
     record: Option<RefCell<Recorded>>,
@@ -5718,6 +5726,38 @@ impl<'a> Checker<'a> {
             }
             // Recorded so the encoder exists in the linked program by lowering.
             self.json_types.borrow_mut().push(at);
+            return Ok(Type::Str);
+        }
+        // `derive(g, x)`: generator `g` writes a function for `x`'s type after
+        // the check (`gen::derive`); the call site calls it.
+        if name == "derive" {
+            let g = match args {
+                [Expr::Var { name: g, .. }, _] => g,
+                _ => {
+                    return Err(cerr!(
+                        line,
+                        "`derive` takes a generator's name and a value: `derive(g, x)`"
+                    ))
+                }
+            };
+            let arg = Type::Named("TypeArg".to_string());
+            if !self.gen_fns.contains(g) || self.sigs.get(g) != Some(&(vec![arg], Type::Str)) {
+                return Err(cerr!(
+                    line,
+                    "`derive` needs a `gen fn {g}(t: TypeArg) -> String`; `{g}` is not one"
+                ));
+            }
+            let at = self.expr(&args[1], scope, None, fn_ret)?;
+            if matches!(at, Type::Err) {
+                return Ok(Type::Str);
+            }
+            if let Err(off) = crate::codec::encodable(&at, self.types) {
+                return Err(cerr!(
+                    line,
+                    "`derive({g}, ..)` cannot reflect `{off}`: it has no wire form"
+                ));
+            }
+            self.derive_sites.borrow_mut().push((g.clone(), at));
             return Ok(Type::Str);
         }
         // A tagged template's hole desugars to `value(x)`.

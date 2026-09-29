@@ -760,6 +760,14 @@ fn table() -> Vec<Builtin> {
         // Every allocating builtin needs a row, or an unannotated binding to its
         // result has no type and leaks. `toJson`'s parameter is a union: inert.
         b("toJson").sig(row("toJson", &[], &[("x", Read, Unit)], Str, &[])),
+        // The generator is a name, not a value, and `x` any type: both inert.
+        b("derive").sig(row(
+            "derive",
+            &[],
+            &[("g", Read, Unit), ("x", Read, Unit)],
+            Str,
+            &[],
+        )),
         // Both fold to literals, whose release is a no-op (`cap == 0`); the
         // rows exist so the declared reading names the type at every site.
         b("jsonSchema").sig(row("jsonSchema", &["T"], &[], Str, &[])),

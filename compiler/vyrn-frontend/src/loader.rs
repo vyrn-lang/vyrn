@@ -877,6 +877,9 @@ pub fn routed_callee<'e>(
             Some((crate::checker::gen_entry_contract_of(c), &[]))
         }
         ("toJson", _, [a]) => Some((crate::jsonenc::wrap_name(&ty_of(a)?), args)),
+        ("derive", _, [Expr::Var { name: g, .. }, a]) => {
+            Some((crate::gen::derived_name(g, &ty_of(a)?), &args[1..]))
+        }
         ("fromJson", [t], [_]) => Some((crate::jsondec::top_name(t), args)),
         _ => None,
     }
@@ -1541,8 +1544,8 @@ fn failed(
 }
 
 /// A generator's step budget and output-size cap.
-const GEN_FUEL: u64 = 20_000_000;
-const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
+pub(crate) const GEN_FUEL: u64 = 20_000_000;
+pub(crate) const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
 
 thread_local! {
     /// `module key -> content hash` for the load in progress, so the checker can

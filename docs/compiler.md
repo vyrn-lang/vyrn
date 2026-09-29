@@ -103,6 +103,9 @@ the playground serves an embedded `std/`. The loader:
    (`consteval.rs`). The checker records every expression's type in
    `checker::Recorded`, keyed by node address. Every later pass reads types
    from this record and derives none of its own.
+   If the program calls `derive(g, x)`, `gen::derive` runs each generator
+   once over a `TypeArg` of the types its sites need, and the functions it
+   writes join the program, which is checked again with them.
 2. Synthesis, only for a program that type-checks: `jsonenc::encoders` and
    `jsondec::decoders` generate the per-type JSON walks as Vyrn functions, and
    `ctor::constructors` generates one constructor per `where` type. These are

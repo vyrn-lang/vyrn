@@ -476,3 +476,189 @@ pub fn generate(
         ))
     })
 }
+
+/// The name `derive(g, x)` calls: the entry generator `g` writes for the type
+/// of `x`, after [`derive`] prefixes every function `g` wrote.
+pub fn derived_name(g: &str, ty: &crate::ast::Type) -> String {
+    format!("derive${g}$t{}", crate::types::struct_key(ty))
+}
+
+thread_local! {
+    /// Each generator run's parsed output, keyed by the generator, its program
+    /// and its `TypeArg`, so the editor's re-check of an unchanged program does
+    /// not run the generator again.
+    static DERIVED: std::cell::RefCell<HashMap<String, Vec<crate::ast::Function>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Runs the generator of every `derive(g, x)` site on the types the checker
+/// gave `x`, and returns the functions they wrote, renamed under `derive$g$`.
+///
+/// `sites` is `(generator, type)` in source order. Each generator runs once per
+/// program, over all of its types as one `TypeArg`: a run per type would write a
+/// shared subtype's function twice. Its program is `program` cut down to the
+/// functions the generator reaches, checked as a generator's own program is.
+/// The output is not checked here; the caller checks the program it joins.
+pub fn derive(
+    program: &Program,
+    sites: &[(String, crate::ast::Type)],
+) -> Result<Vec<crate::ast::Function>, String> {
+    if sites.is_empty() {
+        return Ok(Vec::new());
+    }
+    if crate::movecheck::in_comptime() {
+        return Err("a generator's own program cannot call `derive`".to_string());
+    }
+    let types = crate::types::decl_map(program);
+    let mut gens: Vec<&str> = Vec::new();
+    for (g, _) in sites {
+        if !gens.contains(&g.as_str()) {
+            gens.push(g);
+        }
+    }
+    let mut out = Vec::new();
+    for g in gens {
+        let roots: Vec<crate::ast::Type> = sites
+            .iter()
+            .filter(|(s, _)| s == g)
+            .map(|(_, t)| t.clone())
+            .collect();
+        let (arg, placed) = crate::schema_reflect::type_arg_lit(&roots, &types);
+        if let Some(i) = placed.iter().position(Option::is_none) {
+            return Err(format!(
+                "`derive({g}, ..)` cannot reflect `{}`: it has no wire form or no source spelling",
+                roots[i]
+            ));
+        }
+        let gen_program = generator_program(program, g);
+        let key =
+            crate::hash::sha256_hex(format!("{g}\u{0}{gen_program:?}\u{0}{arg:?}").as_bytes());
+        let cached = DERIVED.with(|d| d.borrow().get(&key).cloned());
+        let fns = match cached {
+            Some(fns) => fns,
+            None => {
+                let fns = run_derive(gen_program, g, arg)?;
+                DERIVED.with(|d| d.borrow_mut().insert(key, fns.clone()));
+                fns
+            }
+        };
+        for ty in &roots {
+            let entry = derived_name(g, ty);
+            if !fns.iter().any(|f| f.name == entry) {
+                return Err(format!(
+                    "generator `{g}` wrote no entry for `{ty}`: each root node's `name` must be a function"
+                ));
+            }
+        }
+        out.extend(fns);
+    }
+    Ok(out)
+}
+
+/// `program` with the functions `g` does not reach, the tests, the benches and
+/// the module state removed: what a generator's own load would link.
+fn generator_program(program: &Program, g: &str) -> Program {
+    let by_name: HashMap<&str, &crate::ast::Function> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The injected runtime modules (`$` names) stay whole: the emitter calls
+    // into `std/runtime` where no source does.
+    let mut work: Vec<String> = vec![g.to_string()];
+    work.extend(
+        program
+            .functions
+            .iter()
+            .filter(|f| f.name.contains('$'))
+            .map(|f| f.name.clone()),
+    );
+    for m in program
+        .impls
+        .iter()
+        .flat_map(|i| i.methods.iter().chain(&i.places))
+    {
+        work.extend(crate::checker::fn_calls(&m.body));
+    }
+    while let Some(n) = work.pop() {
+        if let Some(f) = by_name.get(n.as_str()) {
+            if keep.insert(n) {
+                work.extend(crate::checker::fn_calls(&f.body));
+            }
+        }
+    }
+    let mut p = program.clone();
+    p.functions.retain(|f| keep.contains(&f.name));
+    p.globals.clear();
+    p.tests.clear();
+    p.benches.clear();
+    p
+}
+
+/// Checks and runs generator `g` on `arg`, parses what it wrote, and renames
+/// each function it defines to `derive$g$<name>`.
+fn run_derive(
+    mut gen_program: Program,
+    g: &str,
+    arg: Expr,
+) -> Result<Vec<crate::ast::Function>, String> {
+    let diags = crate::floor::aside(|| {
+        crate::movecheck::comptime(|| crate::check_and_synthesize(&mut gen_program))
+    });
+    if let Some(d) = diags.first() {
+        return Err(format!("generator `{g}` does not check: {}", d.render()));
+    }
+    let resolver = crate::loader::MapResolver(HashMap::new());
+    let opts = crate::loader::LoadOptions::default();
+    let _ = crate::own::typed_refusals();
+    let src = crate::movecheck::comptime(|| {
+        generate(
+            &gen_program,
+            g,
+            &[],
+            GenInputs {
+                resolver: &resolver,
+                opts: &opts,
+                importer_dir: String::new(),
+                allowed: Vec::new(),
+                aliased: Vec::new(),
+                fuel: crate::loader::GEN_FUEL,
+                max_output: crate::loader::GEN_MAX_OUTPUT,
+                sources_fingerprint: None,
+                type_arg: Some(arg),
+            },
+        )
+    })
+    .map_err(|trap| match crate::own::typed_refusals().first() {
+        Some(d) => format!("generator `{g}` does not check: {}", d.render()),
+        None => trap,
+    })?
+    .source;
+    let tokens = crate::lexer::lex(&src).map_err(|d| {
+        format!(
+            "generator `{g}` wrote text that does not lex: {}\n{src}",
+            d.message
+        )
+    })?;
+    let (mut written, errors) = crate::parser::parse_accum(tokens);
+    if let Some(d) = errors.first() {
+        return Err(format!(
+            "generator `{g}` wrote text that does not parse: {}\n{src}",
+            d.message
+        ));
+    }
+    let map: HashMap<String, String> = written
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), format!("derive${g}${}", f.name)))
+        .collect();
+    // The banner a diagnostic in the written code names as its file.
+    let banner = format!("generated by derive({g}, ..)");
+    for f in &mut written.functions {
+        f.name = map[&f.name].clone();
+        f.module = Some(banner.clone());
+    }
+    crate::loader::rewrite_names(&mut written, &map);
+    Ok(written.functions)
+}
