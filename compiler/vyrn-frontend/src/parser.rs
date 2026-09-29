@@ -1149,11 +1149,7 @@ impl Parser {
                 // A protocol may declare a projection under the rule an impl member follows.
                 if let Some(rc) = result_cap {
                     if recv != rc {
-                        let want = if rc == Capability::Read {
-                            "read"
-                        } else {
-                            "modify"
-                        };
+                        let want = rc.word();
                         return Err(Diagnostic::error(
                             rline,
                             rcol,
@@ -1525,13 +1521,7 @@ impl Parser {
     /// Parses `read self` / `modify self` / `consume self`; a bare `self` is `read`.
     fn parse_self_capability(&mut self) -> Capability {
         if let Tok::Ident(id) = self.peek() {
-            let cap = match id.as_str() {
-                "read" => Some(Capability::Read),
-                "modify" => Some(Capability::Modify),
-                "consume" => Some(Capability::Consume),
-                _ => None,
-            };
-            if let Some(c) = cap {
+            if let Some(c) = Capability::from_word(id) {
                 if self.tokens[self.pos + 1].tok == Tok::Vself {
                     self.advance();
                     return c;
@@ -1552,11 +1542,8 @@ impl Parser {
         let Tok::Ident(id) = self.peek() else {
             return Ok(None);
         };
-        let cap = match id.as_str() {
-            "read" => Capability::Read,
-            "modify" => Capability::Modify,
-            "consume" => Capability::Consume,
-            _ => return Ok(None),
+        let Some(cap) = Capability::from_word(id) else {
+            return Ok(None);
         };
         // The word counts only when a type follows. After `-> read {` the brace is the
         // body and `read` is a type name.
@@ -1626,11 +1613,7 @@ impl Parser {
             // because the receiver must outlive the access.
             if let Some(rc) = rc {
                 if capability != rc {
-                    let want = if rc == Capability::Read {
-                        "read"
-                    } else {
-                        "modify"
-                    };
+                    let want = rc.word();
                     return Err(Diagnostic::error(
                         rline,
                         rcol,
@@ -1979,13 +1962,7 @@ impl Parser {
     /// `consume(..)` stays a call, because `LParen` does not start a type.
     fn parse_capability(&mut self) -> Capability {
         if let Tok::Ident(id) = self.peek() {
-            let cap = match id.as_str() {
-                "read" => Some(Capability::Read),
-                "modify" => Some(Capability::Modify),
-                "consume" => Some(Capability::Consume),
-                _ => None,
-            };
-            if let Some(c) = cap {
+            if let Some(c) = Capability::from_word(id) {
                 if matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Fn) {
                     self.advance();
                     return c;

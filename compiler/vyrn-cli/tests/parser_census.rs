@@ -86,13 +86,13 @@ fn parser_sections() -> Vec<Section> {
         sec("fn contract_decl(&mut self) -> Result<ContractDecl, Diagnostic> {", Grammar),
         sec("fn contract_member_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
         sec("fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {", Grammar),
-        sec("fn parse_self_capability(&mut self) -> Capability {", Twice),
-        sec("fn parse_result_capability(&mut self) -> Result<Option<Capability>, Diagnostic> {", Twice),
+        sec("fn parse_self_capability(&mut self) -> Capability {", Grammar),
+        sec("fn parse_result_capability(&mut self) -> Result<Option<Capability>, Diagnostic> {", Grammar),
         sec("fn impl_method(", Grammar),
         sec("fn logging_config(&mut self) -> Result<(usize, LogSink), Diagnostic> {", Grammar),
         sec("fn import_decl(&mut self) -> Result<ImportDecl, Diagnostic> {", Grammar),
         sec("fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {", Grammar),
-        sec("fn parse_capability(&mut self) -> Capability {", Twice),
+        sec("fn parse_capability(&mut self) -> Capability {", Grammar),
         sec("fn enum_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
         sec("fn record_type(&mut self) -> Result<Type, Diagnostic> {", Grammar),
         sec("fn type_param_binder(", Grammar),
@@ -294,9 +294,9 @@ fn the_parser_census_matches_its_pin() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3116, 51),
+        ("parser.rs", "the grammar's own arm", 3172, 52),
         ("parser.rs", "a desugar the parser states", 951, 7),
-        ("parser.rs", "a table stated a second time", 178, 1),
+        ("parser.rs", "a table stated a second time", 99, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
         ("parser.rs", "shared machinery", 199, 1),
         ("parser.rs", "tests", 1877, 0),
