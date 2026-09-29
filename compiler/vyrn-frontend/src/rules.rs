@@ -405,6 +405,8 @@ rules! {
     DeriveArity {} "`derive` takes a generator's name and a value: `derive(g, x)`";
     DeriveUnknownGen { g } "`derive` needs a `gen fn {g}(t: TypeArg) -> String`; `{g}` is not one";
     DeriveUncodable { g, off } "`derive({g}, ..)` cannot reflect `{off}`: it has no wire form";
+    DeriveEntryMismatch { g, got, want }
+        "generator `{g}` wrote the entry `{got}`, and this call needs `{want}`";
     ValueType { t, hint } "`value` boxes an Int64, Bool, or String, found {t}{hint}";
     ListType { other } "`@list` needs an Array, found {other}";
     SomePayload { aty, want } "`Some` payload is {aty} but Option<{want}> was expected";

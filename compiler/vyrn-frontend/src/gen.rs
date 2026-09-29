@@ -5,6 +5,7 @@
 //! takes a resolver, a path or a source, and returns an `Expr` or a `String`.
 
 use crate::ast::{Expr, Id, Program};
+use crate::diagnostics::Diagnostic;
 use std::collections::HashMap;
 
 /// One piece of a `Code` fragment: plain rendered text (from a
@@ -501,38 +502,49 @@ thread_local! {
 /// renamed under `derive$g$`, which no source can spell.
 pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
 
+/// A `derive` site: generator `g` writes an entry for `ty`, and the call at
+/// `line` calls it as `entry`, a [`Type::Fn`](crate::ast::Type::Fn).
+pub struct Site {
+    pub g: String,
+    pub ty: crate::ast::Type,
+    pub line: usize,
+    pub entry: crate::ast::Type,
+}
+
 /// Runs the generator of every `derive(g, x)` site on the types the checker
 /// gave `x`, and returns what they wrote.
 ///
-/// `sites` is `(generator, type)` in source order. Each generator runs once per
+/// `sites` are in source order. Each generator runs once per
 /// program, over all of its types as one `TypeArg`: a run per type would write a
 /// shared subtype's function twice. Its program is `program` cut down to the
 /// functions the generator reaches, checked as a generator's own program is.
-/// The output is not checked here; the caller checks the program it joins.
-pub fn derive(program: &Program, sites: &[(String, crate::ast::Type)]) -> Result<Derived, String> {
+/// The output is not checked here, except each entry's signature against its
+/// site; the caller checks the program it joins.
+pub fn derive(program: &Program, sites: &[Site]) -> Result<Derived, Diagnostic> {
+    let unplaced = |e: String| Diagnostic::error(0, 0, "check", e);
     let mut out: Derived = (Vec::new(), Vec::new());
     if sites.is_empty() {
         return Ok(out);
     }
     let types = crate::types::decl_map(program);
     let mut gens: Vec<&str> = Vec::new();
-    for (g, _) in sites {
-        if !gens.contains(&g.as_str()) {
-            gens.push(g);
+    for s in sites {
+        if !gens.contains(&s.g.as_str()) {
+            gens.push(&s.g);
         }
     }
     for g in gens {
         let roots: Vec<crate::ast::Type> = sites
             .iter()
-            .filter(|(s, _)| s == g)
-            .map(|(_, t)| t.clone())
+            .filter(|s| s.g == g)
+            .map(|s| s.ty.clone())
             .collect();
         let (arg, placed) = crate::schema_reflect::type_arg_lit(&roots, &types);
         if let Some(i) = placed.iter().position(Option::is_none) {
-            return Err(format!(
+            return Err(unplaced(format!(
                 "`derive({g}, ..)` cannot reflect `{}`: it has no wire form or no source spelling",
                 roots[i]
-            ));
+            )));
         }
         let gen_program = generator_program(program, g);
         let fingerprint = crate::hash::sha256_hex(canonical(&gen_program).as_bytes());
@@ -542,22 +554,36 @@ pub fn derive(program: &Program, sites: &[(String, crate::ast::Type)]) -> Result
             Some(d) => d,
             None => {
                 if DERIVING.with(|d| d.borrow().iter().any(|r| r == g)) {
-                    return Err(format!("generator `{g}` reaches `derive({g}, ..)`"));
+                    return Err(unplaced(format!(
+                        "generator `{g}` reaches `derive({g}, ..)`"
+                    )));
                 }
                 DERIVING.with(|d| d.borrow_mut().push(g.to_string()));
                 let written = run_derive(gen_program, g, arg, fingerprint);
                 DERIVING.with(|d| d.borrow_mut().pop());
-                let written = written?;
+                let written = written.map_err(unplaced)?;
                 DERIVED.with(|d| d.borrow_mut().insert(key, written.clone()));
                 written
             }
         };
-        for ty in &roots {
-            let entry = derived_name(g, ty);
-            if !fns.iter().any(|f| f.name == entry) {
-                return Err(format!(
-                    "generator `{g}` wrote no entry for `{ty}`: each root node's `name` must be a function"
-                ));
+        for s in sites.iter().filter(|s| s.g == g) {
+            let Some(f) = fns.iter().find(|f| f.name == derived_name(g, &s.ty)) else {
+                return Err(unplaced(format!(
+                    "generator `{g}` wrote no entry for `{}`: each root node's `name` must be a function",
+                    s.ty
+                )));
+            };
+            let got = crate::ast::Type::Fn(
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(f.ret.clone()),
+            );
+            if got != s.entry {
+                let rule = crate::rules::Rule::DeriveEntryMismatch {
+                    g: g.to_string(),
+                    got: got.to_string(),
+                    want: s.entry.to_string(),
+                };
+                return Err(Diagnostic::refusal(s.line, 0, "check", rule));
             }
         }
         out.0.extend(fns);
