@@ -1,0 +1,5 @@
+extern fn host(x: Int64) -> Int64
+fn main() -> Int64 {
+    let f: fn(Int64) -> Int64 = host
+    return 0
+}

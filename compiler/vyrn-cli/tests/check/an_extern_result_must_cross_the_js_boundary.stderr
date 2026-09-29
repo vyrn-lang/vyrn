@@ -1,0 +1,1 @@
+an_extern_result_must_cross_the_js_boundary.vyrn:1:11: extern fn `host` returns Array<Int64>, which cannot cross the JS boundary (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)

@@ -1,0 +1,1 @@
+a_lambda_cannot_store_into_a_captured_binding.vyrn:3:0: a lambda captures by read; it cannot store into the captured binding `xs` (line 4)

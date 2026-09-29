@@ -1,0 +1,1 @@
+a_lambda_cannot_mutate_a_field_of_a_captured_binding.vyrn:4:0: a lambda captures by read; it cannot mutate a field of the captured binding `p` (line 5)

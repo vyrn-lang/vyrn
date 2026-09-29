@@ -1,0 +1,9 @@
+type P = { a: Int64 }
+fn main() -> Int64 {
+    let mut p = P { a: 1 }
+    let f: fn(Int64) -> Int64 = x -> {
+        p.a = x
+        return x
+    }
+    return 0
+}

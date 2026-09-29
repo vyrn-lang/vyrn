@@ -1,0 +1,1 @@
+a_stream_may_not_be_an_enum_payload.vyrn:1:0: `Stream<Int64>` may not be an enum payload — a stream's lifetime is a scope, so it may be a binding, a parameter, or a return type, and nothing may store it

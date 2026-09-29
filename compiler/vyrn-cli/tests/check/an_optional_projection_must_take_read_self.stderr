@@ -1,0 +1,1 @@
+an_optional_projection_must_take_read_self.vyrn:3:8: optional projection `tryGet` must take `read self` — the hit is a borrow the `if let` arm reads, and nothing writes through a miss

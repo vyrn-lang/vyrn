@@ -1,0 +1,1 @@
+an_optional_projection_answers_a_place_not_a_value.vyrn:3:8: optional projection `tryGet` answers `Some` of a value, not of a place — the hit must be a field or element of `self`; a computed value is an ordinary `fn` returning `-> Option<T>`

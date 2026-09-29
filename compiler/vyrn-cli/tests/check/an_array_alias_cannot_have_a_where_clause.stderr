@@ -1,0 +1,1 @@
+an_array_alias_cannot_have_a_where_clause.vyrn:1:0: a `Array` alias cannot have a `where` clause

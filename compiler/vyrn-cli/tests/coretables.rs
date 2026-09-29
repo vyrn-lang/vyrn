@@ -35,22 +35,26 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
     })
 }
 
-/// Returns the core's hole set for the `let` named `binding` in `main`. A `consume p` states
-/// its hole where the take is written ([`vyrn_lower::core`]'s `take_place_at`).
-fn core_holes(src: &str, binding: &str) -> Vec<String> {
+fn core_body(src: &str, which: &str) -> vyrn_lower::core::Body {
     vyrn_lower::install();
     let (program, _memo) =
-        Memo::load(|| vyrn_frontend::load(src, "holes.vyrn", &Default::default(), &DiskResolver))
+        Memo::load(|| vyrn_frontend::load(src, "core.vyrn", &Default::default(), &DiskResolver))
             .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let lowered = vyrn_lower::lower(&program);
     let own = vyrn_frontend::own::analyze(&program);
     let inst = lowered
         .instances
         .iter()
-        .find(|i| i.func.name == "main")
-        .expect("main is lowered");
-    let top = vyrn_lower::core::build(&program, inst, &own).expect("main builds");
-    top.names
+        .find(|i| i.func.name == which)
+        .unwrap_or_else(|| panic!("`{which}` is lowered"));
+    vyrn_lower::core::build(&program, inst, &own).expect("the body builds")
+}
+
+/// Returns the core's hole set for the `let` named `binding` in `main`. A `consume p` states
+/// its hole where the take is written ([`vyrn_lower::core`]'s `take_place_at`).
+fn core_holes(src: &str, binding: &str) -> Vec<String> {
+    core_body(src, "main")
+        .names
         .iter()
         .find(|n| n.bound_by_let && n.source == binding)
         .unwrap_or_else(|| panic!("no `let {binding}` in main"))
@@ -61,24 +65,27 @@ fn core_holes(src: &str, binding: &str) -> Vec<String> {
 /// Returns whether the frame of `which` owes a release on `binding`
 /// ([`vyrn_lower::core::NameInfo`]'s `releases`).
 fn core_releases(src: &str, which: &str, binding: &str) -> bool {
-    vyrn_lower::install();
-    let (program, _memo) =
-        Memo::load(|| vyrn_frontend::load(src, "owns.vyrn", &Default::default(), &DiskResolver))
-            .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
-    let lowered = vyrn_lower::lower(&program);
-    let own = vyrn_frontend::own::analyze(&program);
-    let inst = lowered
-        .instances
-        .iter()
-        .find(|i| i.func.name == which)
-        .unwrap_or_else(|| panic!("`{which}` is lowered"));
-    let top = vyrn_lower::core::build(&program, inst, &own).expect("the body builds");
-    top.frames()
+    core_body(src, which)
+        .frames()
         .iter()
         .flat_map(|f| f.names.iter())
         .find(|n| n.source == binding)
         .unwrap_or_else(|| panic!("no `{binding}` in `{which}`"))
         .releases
+}
+
+/// `x.copy()` of a type with `impl Copy` is a call row to the impl, at the capability the impl
+/// declares, so a pass over the rows sees the call the language makes.
+#[test]
+fn a_copy_of_a_type_with_impl_copy_is_a_call_row_to_the_impl() {
+    let src = "type Box = { s: String }
+               impl Copy for Box { fn copy(read self) -> Box { return Box { s: self.s + \"c\" } } }
+               fn main() -> Int64 { let b = Box { s: \"a\" + \"b\" } let c = b.copy() return 0 }";
+    let rows = core_body(src, "main").render();
+    assert!(
+        rows.contains("let c! = fn Copy__Box__copy(read b!)"),
+        "{rows}"
+    );
 }
 
 /// A refutable `let`'s binder borrows the scrutinee's payload. An owned binder over

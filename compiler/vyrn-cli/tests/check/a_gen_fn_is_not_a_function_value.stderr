@@ -1,0 +1,1 @@
+a_gen_fn_is_not_a_function_value.vyrn:5:0: a `gen fn` runs at generation time and cannot be used as a function value
