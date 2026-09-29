@@ -79,7 +79,7 @@
 /// diagnostic.
 
 // `vyxSlice` stays private: it slices a byte array, so `substring` does not fit.
-import { joinWith, trim, fromBytesOr } from "std/strings"
+import { joinWith, lines, trim, fromBytesOr } from "std/strings"
 import { includes } from "std/arrays"
 // `components` checks its emitted surface against the `Component` contract.
 // `Html` is imported only for that contract; the generated module's
@@ -1322,29 +1322,6 @@ fn vyxScriptErr(err: String) -> VyxScript {
         helperCols: [],
         err: err.copy(),
     }
-}
-
-/// Split `s` into lines (LF-separated, CR stripped).
-fn vyxLines(s: String) -> Array<String> {
-    let ba = bytes(s)
-    let mut lines: Array<String> = []
-    let mut start = 0
-    let mut i = 0
-    while i < ba.length {
-        if ba[i] == '\n' {
-            let mut end = i
-            if end > start && ba[end - 1] == '\r' {
-                end = end - 1
-            }
-            lines.push(vyxSlice(ba, start, end))
-            start = i + 1
-        }
-        i = i + 1
-    }
-    if start < ba.length {
-        lines.push(vyxSlice(ba, start, ba.length))
-    }
-    return lines
 }
 
 /// One parsed `.vyx` component. The position arrays hold the `.vyx` origin of
@@ -2675,7 +2652,7 @@ fn vyxIsDeclOf(t: String, name: String) -> Bool {
 
 /// The declaration line of `fn <name>` in `script`, trimmed ("" when absent).
 fn vyxDeclLine(script: String, name: String) -> String {
-    for line in vyxLines(script) {
+    for line in lines(script) {
         let t = trim(line)
         if vyxIsDeclOf(t, name) {
             return t
@@ -2847,7 +2824,7 @@ fn vyxLoaderDataType(loadRet: String) -> String {
 /// Whether the page's `<script>` has a statement-leading `layout="none"`.
 /// Spaces around `=` are allowed.
 fn vyxScriptLayoutNone(script: String) -> Bool {
-    for line in vyxLines(script) {
+    for line in lines(script) {
         let t = trim(line)
         if t.startsWith("layout") {
             let rest = trim(vyxSlice(bytes(t), 6, bytes(t).length))
@@ -2972,7 +2949,7 @@ export gen fn vyxPageInterface(source: String) -> ModuleInterface {
     if scriptSec.found == false {
         return ModuleInterface { functions: fns, types: [] }
     }
-    for line in vyxLines(vyxSlice(ba, scriptSec.start, scriptSec.end)) {
+    for line in lines(vyxSlice(ba, scriptSec.start, scriptSec.end)) {
         let t = trim(line)
         if t.startsWith("export fn ") {
             let bare = trim(vyxSlice(bytes(t), 7, bytes(t).length))
@@ -3091,7 +3068,7 @@ fn vyxRenameAccessor(t: String, name: String) -> String {
 /// to their private names. Lines already exported pass through.
 fn vyxAutoExportPageDecls(script: String) -> String {
     let mut out = ""
-    for line in vyxLines(script) {
+    for line in lines(script) {
         let t = trim(line)
         if vyxIsLayoutLine(line) {
             // `layout="none"` is consumed by the router shape; it is not Vyrn.
@@ -3146,7 +3123,7 @@ fn vyxParseHead(body: String, srcFile: String) -> VyxHead {
     let mut hasTitle = false
     let mut titleExpr = ""
     let mut items: Array<VyxHeadItem> = []
-    for line in vyxLines(body) {
+    for line in lines(body) {
         let t = trim(line)
         if t.byteLength == 0 || t.startsWith("//") {
             // blank / comment
@@ -3475,15 +3452,15 @@ fn vyxDeclNameOf(t: String) -> String {
 /// page's view, which cannot run client-side; "" when the
 /// view is pure over its props. Runs after the load strip and import prune.
 gen fn vyxClientHelperViolation(script: String, template: String) -> String {
-    let lines = vyxLines(script)
+    let rows = lines(script)
     let mut corpus = ""
-    for line in lines {
+    for line in rows {
         if trim(line).startsWith("import ") == false {
             corpus = corpus + line + " "
         }
     }
     corpus = corpus + template
-    for line in lines {
+    for line in rows {
         let t = trim(line)
         let lb = bytes(t)
         let brace = vyxFind(lb, bytes("{"), 0)
@@ -3579,7 +3556,7 @@ fn vyxStripLineComment(line: String) -> String {
 /// [`vyxImportNameDead`]).
 fn vyxNonImportBody(script: String) -> String {
     let mut out = ""
-    for line in vyxLines(script) {
+    for line in lines(script) {
         if trim(line).startsWith("import ") == false {
             out = out + vyxStripLineComment(line) + " "
         }
@@ -3606,12 +3583,12 @@ fn vyxJoinExcept(lines: Array<String>, skip: Int64) -> String {
 /// more usage (template and generated types); `loadBody` is the stripped
 /// loader's source, so only load-only names go.
 gen fn vyxPruneClientImports(script: String, extra: String, loadBody: String) -> String {
-    let lines = vyxLines(script)
+    let rows = lines(script)
     let mut out = ""
     let mut k = 0
-    for line in lines {
+    for line in rows {
         if trim(line).startsWith("import ") {
-            let kept = vyxPruneOneImport(trim(line), vyxJoinExcept(lines, k) + " " + extra, loadBody)
+            let kept = vyxPruneOneImport(trim(line), vyxJoinExcept(rows, k) + " " + extra, loadBody)
             if kept.byteLength > 0 {
                 out = out + kept + "\n"
             }
