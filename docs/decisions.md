@@ -182,6 +182,7 @@ pull request.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
 - Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names.
 - Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.
+- A `for` over any indexed container is one index walk in the core. A user container supplies its `size` call and its `nth` element read; it gets no loop of its own.
 - A `read` or `modify` aggregate parameter is the caller's storage, used in place, while no module state can name that storage; the checker's exclusive-`modify` rule covers the parameters. A per-callee effect gate waits until the effect judgment attributes every call.
 - Runtime modules are injected on mention under unlexable `$` names, so user names neither collide with them nor capture them.
 - A generator runs as compiled wasm in embedded wasmtime. Each capability that needs compiler machinery (read, list, `moduleInterface`, `lex`, `contractOf`, code quotes) is a host import, so there is no second implementation.

@@ -7,7 +7,7 @@ Stmt::Return	1	5	0	0	6	0	1	1	14
 Stmt::Break	2	1	0	0	5	0	0	0	8
 Stmt::Continue	1	1	0	0	5	0	0	0	7
 Stmt::If	2	2	0	0	5	0	0	0	9
-Stmt::While	2	2	0	0	6	0	0	0	10
+Stmt::While	2	2	0	0	5	0	0	0	9
 Stmt::ForIn	1	3	0	0	7	0	0	0	11
 Stmt::Drop	1	3	0	0	3	0	0	0	7
 Stmt::Expr	3	1	0	0	11	0	1	0	16
@@ -17,7 +17,7 @@ Expr::Byte	2	3	0	0	7	0	1	1	14
 Expr::Float	2	4	0	0	6	0	1	1	14
 Expr::Bool	4	2	0	0	5	0	1	1	13
 Expr::Str	7	2	0	0	6	0	2	2	19
-Expr::Var	25	19	0	0	51	0	3	0	98
+Expr::Var	25	19	0	0	49	0	3	0	96
 Expr::Unary	4	3	0	0	7	0	0	1	15
 Expr::Binary	3	2	0	1	11	0	0	0	17
 Expr::Call	23	13	1	1	37	0	1	0	76
@@ -35,4 +35,4 @@ Pattern::Variant	11	2	0	0	3	0	2	0	18
 Pattern::Success	1	3	0	0	4	0	1	0	9
 Pattern::Failure	1	2	0	0	2	0	0	0	5
 Pattern::Other	2	3	0	0	2	0	1	0	8
-all	151	129	4	2	320	2	26	9	643
+all	151	129	4	2	317	2	26	9	640

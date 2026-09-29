@@ -1155,7 +1155,6 @@ fn check_accum_inner(
         json_dec_types: RefCell::new(Vec::new()),
         derive_sites: RefCell::new(Vec::new()),
         record: recording.then(RefCell::default),
-        desugaring: std::cell::Cell::new(false),
         pending_subst: RefCell::new(None),
         pending_call: RefCell::new(None),
     };
@@ -1871,8 +1870,6 @@ struct Checker<'a> {
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
     record: Option<RefCell<Recorded>>,
-    /// Inside [`Checker::record_desugar`]: typing AST the lexer never made.
-    desugaring: std::cell::Cell<bool>,
     /// The substitution the innermost generic call just solved, for the
     /// [`Checker::expr`] wrapper that knows the call node's address. A nested
     /// call consumes and clears it before its caller writes one.
@@ -3164,10 +3161,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Types an expansion (an inlined projection, a `for` over a user
-    /// container) in the caller's scope, recording its node types and nothing
-    /// else. `project` leaks each expansion once ([`crate::project::Memo`]), so
-    /// its node addresses are stable keys.
+    /// Types an expansion (an inlined projection) in the caller's scope,
+    /// recording its node types and nothing else. `project` leaks each
+    /// expansion once ([`crate::project::Memo`]), so its node addresses are
+    /// stable keys.
     ///
     /// Diagnostics, scope changes and [`Checker::pending_subst`] stay inside: an
     /// expansion fails only where its source already did, and the wrapper
@@ -3175,10 +3172,8 @@ impl<'a> Checker<'a> {
     fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope)) {
         let mark = self.errors.borrow().len();
         let saved = self.pending_subst.take();
-        let was = self.desugaring.replace(true);
         let mut sc = scope.clone();
         run(self, &mut sc);
-        self.desugaring.set(was);
         *self.pending_subst.borrow_mut() = saved;
         self.errors.borrow_mut().truncate(mark);
     }
@@ -3477,16 +3472,7 @@ impl<'a> Checker<'a> {
                         // A user container's element is what its `nth` yields,
                         // looked up by the declared type.
                         match crate::types::iterate_impl(self.impl_blocks, &ity) {
-                            Some((_, nth)) => {
-                                match crate::project::lookup_impl(
-                                    self.impl_blocks,
-                                    &ity,
-                                    crate::types::ITERATE_NTH,
-                                ) {
-                                    Some((imp, _)) => self.solve_head(imp, &ity, &nth.ret, *line),
-                                    None => nth.ret.clone(),
-                                }
-                            }
+                            Some((imp, _, nth)) => self.solve_head(imp, &ity, &nth.ret, *line),
                             // The typed judgment refuses the loop.
                             None => Type::Err,
                         }
@@ -3503,24 +3489,24 @@ impl<'a> Checker<'a> {
                 );
                 self.block(body, ret, scope);
                 scope.pop();
-                // A `for` over a user container lowers to `nth` inlined around
-                // a copy of the body; record that copy.
+                // A `for` over a user container reads each element through its
+                // `nth`; record that read.
                 if self.recording() {
-                    if let Some(blk) = crate::types::iterate_impl(self.impl_blocks, &ity).and_then(
-                        |(size_fn, nth)| {
-                            crate::project::iterate_loop(
-                                &size_fn,
-                                nth,
-                                var,
-                                iter,
-                                body,
-                                iter.line(),
-                            )
-                            .ok()
-                        },
-                    ) {
+                    if let Ok(Some(p)) =
+                        crate::project::for_element(self.impl_blocks, &ity, iter, *line)
+                    {
                         self.record_desugar(scope, |c, sc| {
-                            c.block(blk, ret, sc);
+                            let bind = |ty| Binding { ty, mutable: false };
+                            sc.push(HashMap::from([
+                                (crate::project::FOR_RECV.to_string(), bind(ity.clone())),
+                                (crate::project::FOR_INDEX.to_string(), bind(Type::Int)),
+                            ]));
+                            for s in &p.prologue {
+                                if c.stmt(s, ret, sc).is_err() {
+                                    return;
+                                }
+                            }
+                            let _ = c.expr(&p.place, sc, None, Some(ret));
                         });
                     }
                 }
@@ -3673,9 +3659,7 @@ impl<'a> Checker<'a> {
             Expr::Int(n, _) => match expected.map(|t| self.base(t)) {
                 Some(t @ Type::IntN { .. }) => Ok(t),
                 _ => {
-                    // An expansion's `Expr::Int(-1)` (`project::iterate_loop`)
-                    // never went through the lexer and means minus one.
-                    if *n < 0 && !self.desugaring.get() {
+                    if *n < 0 {
                         Err(cerr!(
                             *self.stmt_line.borrow(),
                             "integer literal {} exceeds Int64's maximum \
