@@ -18,15 +18,10 @@ use crate::{lexer, parser};
 /// slash-separated path (see [`resolve_spec`]).
 pub trait ModuleResolver {
     fn read(&self, resolved: &str) -> Result<String, String>;
-    /// Lists the bare entry names directly under the directory `resolved`,
-    /// without `.` and `..`. Only generation-time `listDir` calls it.
-    /// The default is unsupported.
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        Err(crate::trap::io_at("listerr", resolved))
-    }
-    /// Lists like `list`, but a directory's name ends in `/`. A walker
-    /// needs the kind because `list`'s error cannot tell "not a directory" from
-    /// "unreadable". The default is unsupported.
+    /// Lists the entry names directly under the directory `resolved`, without
+    /// `.` and `..`; a directory's name ends in `/`. Only generation-time
+    /// `listDir` and `listDirKinds` call it, and the generator cache validates
+    /// a listing with it. The default is unsupported.
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
         Err(crate::trap::io_at("listerr", resolved))
     }
@@ -81,26 +76,6 @@ impl ModuleResolver for MapResolver {
             .cloned()
             .ok_or_else(|| format!("module not found: {resolved}"))
     }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        // Every key directly under `resolved/` contributes its next path segment.
-        let prefix = format!("{}/", resolved.trim_end_matches('/'));
-        let mut names: std::collections::BTreeSet<String> = Default::default();
-        let mut any_under = false;
-        for key in self.0.keys() {
-            if let Some(rest) = key.strip_prefix(&prefix) {
-                any_under = true;
-                if let Some(seg) = rest.split('/').next() {
-                    if !seg.is_empty() {
-                        names.insert(seg.to_string());
-                    }
-                }
-            }
-        }
-        if !any_under {
-            return Err(crate::trap::io_at("listerr", resolved));
-        }
-        Ok(names.into_iter().collect())
-    }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
         // A segment with more path after it is a directory; an exact key is a
         // file. If both hold (keys `a/b` and `a/b/c`), the directory wins,
@@ -152,13 +127,8 @@ impl ModuleResolver for DiskResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         std::fs::read_to_string(resolved).map_err(|e| e.to_string())
     }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let mut names = read_dir_names(resolved, false)?;
-        names.sort();
-        Ok(names)
-    }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let mut names = read_dir_names(resolved, true)?;
+        let mut names = read_dir_names(resolved)?;
         names.sort();
         Ok(names)
     }
@@ -170,16 +140,16 @@ impl ModuleResolver for DiskResolver {
     }
 }
 
-/// The entry names directly under `dir`, unsorted; with `kinds`, a directory's
-/// name carries a trailing `/`. The error is the project's own
-/// `listerr` wording, never the operating system's.
-fn read_dir_names(dir: &str, kinds: bool) -> Result<Vec<String>, String> {
+/// The entry names directly under `dir`, unsorted; a directory's name carries a
+/// trailing `/`. The error is the project's own `listerr` wording, never the
+/// operating system's.
+fn read_dir_names(dir: &str) -> Result<Vec<String>, String> {
     let entries = std::fs::read_dir(dir).map_err(|_| crate::trap::io_at("listerr", dir))?;
     Ok(entries
         .filter_map(|e| e.ok())
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if kinds && e.file_type().is_ok_and(|t| t.is_dir()) {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
                 format!("{name}/")
             } else {
                 name
@@ -224,9 +194,6 @@ impl ModuleResolver for RecordingResolver<'_> {
                 .push((resolved.to_string(), s.clone()));
         }
         r
-    }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        self.inner.list(resolved)
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
         self.inner.list_kinds(resolved)
@@ -606,19 +573,22 @@ fn runtime_fence(
     imported: &str,
     line: usize,
     opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
 ) -> Option<Diagnostic> {
     // A key and a std spec can spell one file two ways (`vyrn check
     // std/runtime.vyrn` is relative to the shell, the std root absolute), so
     // identity falls back to the real path.
-    let is = |key: &str, spec: &str| {
+    let mut real = |p: &str| {
+        real_paths
+            .entry(p.to_string())
+            .or_insert_with(|| crate::manifest::real_path(p))
+            .clone()
+    };
+    let mut is = |key: &str, spec: &str| {
         let Ok(k) = resolve_spec(spec, importer, opts) else {
             return false;
         };
-        key == k
-            || matches!(
-                (crate::manifest::real_path(key), crate::manifest::real_path(&k)),
-                (Some(a), Some(b)) if a == b
-            )
+        key == k || matches!((real(key), real(&k)), (Some(a), Some(b)) if a == b)
     };
     let fenced = if is(imported, MEM_SPEC) {
         if is(importer, RUNTIME_SPEC) {
@@ -658,8 +628,8 @@ struct Module {
 }
 
 /// The state one load walks: the modules entered, their loading state, the
-/// generated-module identities, the origin maps, the warnings and the
-/// cycle stack.
+/// generated-module identities, the origin maps, the warnings, the cycle stack
+/// and the real paths the runtime fence asked for.
 struct Work {
     modules: Vec<Module>,
     /// `false` = loading, `true` = loaded.
@@ -674,6 +644,9 @@ struct Work {
     warnings: Vec<Diagnostic>,
     /// The modules on the path to the one being entered, for the cycle report.
     stack: Vec<String>,
+    /// `key -> manifest::real_path(key)`. A file's identity does not change
+    /// during a load, and [`runtime_fence`] asks for the same keys on every edge.
+    real_paths: HashMap<String, Option<String>>,
 }
 
 /// The prefix every declaration of an injected runtime module is renamed to.
@@ -896,7 +869,7 @@ pub fn generated_modules(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
-    let (modules, _, _, _) =
+    let (modules, _, _, _, _) =
         load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
@@ -917,14 +890,22 @@ pub fn load(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Program, Vec<Diagnostic>> {
-    load_with_origins(root_source, root_path, opts, resolver).0
+    let (loaded, _, _, _, pending) = load_with_origins(root_source, root_path, opts, resolver);
+    let program = loaded?;
+    // No judgment answers here, so every scanned carrier stands.
+    match pending.and_then(|p| crate::floor::decide(p, None)) {
+        Some(d) => Err(vec![d]),
+        None => Ok(program),
+    }
 }
 
 /// The warnings of a load that succeeds, in module-entry order.
 pub type Warnings = Vec<Diagnostic>;
 
 /// Like [`load`], and also returns the origin maps of every generated
-/// module reachable from the root, the load's warnings, and its module graph.
+/// module reachable from the root, the load's warnings, its module graph, and
+/// the floor's decision when the outermost load of an artifact could not make it
+/// ([`crate::floor::decide`]).
 ///
 /// The maps come back whether or not the load succeeds: they are a line-scan of
 /// each generated text, so a `.vyx` whose template fails to lex still maps its
@@ -942,6 +923,7 @@ pub fn load_with_origins(
     crate::origin::OriginMaps,
     Warnings,
     ModuleGraph,
+    Option<crate::floor::Pending>,
 ) {
     // A fresh epoch for the outermost load only; see `current_input_hash`.
     let depth = LOAD_DEPTH.with(|d| {
@@ -969,6 +951,7 @@ pub fn load_with_origins(
             crate::origin::OriginMaps::default(),
             Vec::new(),
             Vec::new(),
+            None,
         );
     }
     let out = load_with_origins_inner(root_source, root_path, opts, resolver);
@@ -986,16 +969,17 @@ fn load_with_origins_inner(
     crate::origin::OriginMaps,
     Warnings,
     ModuleGraph,
+    Option<crate::floor::Pending>,
 ) {
     let read_parse = crate::prof::phase("load: read+parse+resolve");
     let loaded = load_modules(root_source, root_path, opts, resolver);
     drop(read_parse);
     match loaded {
-        Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new()),
-        Ok((modules, root_key, origins, warnings)) => {
+        Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new(), None),
+        Ok((modules, root_key, origins, warnings, pending)) => {
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
-            (link(modules, &root_key), origins, warnings, graph)
+            (link(modules, &root_key), origins, warnings, graph, pending)
         }
     }
 }
@@ -1039,7 +1023,7 @@ pub fn capability_graph(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<(crate::floor::Graph, String), Vec<Diagnostic>> {
-    let (mut modules, root_key, _, _) =
+    let (mut modules, root_key, _, _, _) =
         load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
     Ok((floor_graph(&mut modules), root_key))
 }
@@ -1065,7 +1049,7 @@ pub fn module_graph(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, Vec<String>)>, Vec<Diagnostic>> {
-    let (modules, _, _, _) =
+    let (modules, _, _, _, _) =
         load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
@@ -1084,7 +1068,7 @@ pub fn module_graph_with_sources(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, Vec<String>, Option<String>)>, Vec<Diagnostic>> {
-    let (modules, _, _, _) =
+    let (modules, _, _, _, _) =
         load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
@@ -1111,15 +1095,11 @@ fn load_modules(
         String,
         crate::origin::OriginMaps,
         Vec<Diagnostic>,
+        Option<crate::floor::Pending>,
     ),
     (Vec<Diagnostic>, crate::origin::OriginMaps),
 > {
     let root_key = normalize(root_path);
-    // A deferred floor decision belongs to one load. Nobody must check the
-    // program a load returns, so the next outermost load drops it.
-    if LOAD_DEPTH.with(|d| d.get()) <= 1 {
-        crate::floor::forget();
-    }
     let mut w = Work {
         modules: Vec::new(),
         states: HashMap::new(),
@@ -1127,6 +1107,7 @@ fn load_modules(
         origins: crate::origin::OriginMaps::new(),
         warnings: Vec::new(),
         stack: Vec::new(),
+        real_paths: HashMap::new(),
     };
 
     fn visit(
@@ -1377,7 +1358,7 @@ fn load_modules(
                 // An import may not widen audience. Checked before the
                 // target is visited, so the first illegal edge is the one reported.
                 if let Some(d) = audience_objection(key, &target, imp.line, opts)
-                    .or_else(|| runtime_fence(key, &target, imp.line, opts))
+                    .or_else(|| runtime_fence(key, &target, imp.line, opts, &mut w.real_paths))
                 {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
@@ -1499,16 +1480,23 @@ fn load_modules(
     // The floor. Last, so it walks everything the artifact links,
     // injected runtime modules included. It is a whole-artifact rule, because
     // no single import edge knows what the program needs.
+    let mut pending = None;
     if let Some(map) = &opts.artifacts {
         let graph = floor_graph(&mut w.modules);
         // A row a judgment answers cannot be decided here: the judgment reads the
-        // named core, which needs the checker's types. That decision is held and
-        // made after the check; every other row is refused here.
+        // named core, which needs the checker's types. The load returns that
+        // decision for its host to make after the check; every other row is
+        // refused here.
         match crate::floor::objected(&graph, &root_key, map) {
             // A nested generator load is not the artifact; only the outermost
-            // load may hold a decision for the check that follows it.
+            // load may return a decision for the check that follows it.
             Some(c) if crate::floor::is_judged(&c) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
-                crate::floor::defer(graph, root_key.clone(), map.clone(), w.origins.clone());
+                pending = Some(crate::floor::Pending {
+                    graph,
+                    root: root_key.clone(),
+                    map: map.clone(),
+                    origins: w.origins.clone(),
+                });
             }
             _ => {
                 if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
@@ -1521,7 +1509,7 @@ fn load_modules(
         }
     }
 
-    Ok((w.modules, root_key, w.origins, w.warnings))
+    Ok((w.modules, root_key, w.origins, w.warnings, pending))
 }
 
 /// A load's failure: every diagnostic remapped onto the input file a generator
@@ -1735,7 +1723,7 @@ fn run_generator(
     // Cache miss: load and check the generator as a runnable program. Skipping
     // this on a hit is sound: an entry is written only after a run that passed
     // this check, and an edit to the generator's sources misses.
-    let (loaded, _, _, gen_graph) = load_with_origins(&gen_source, &gen_mod_key, opts, resolver);
+    let (loaded, _, _, gen_graph, _) = load_with_origins(&gen_source, &gen_mod_key, opts, resolver);
     let mut gen_program = loaded?;
     // A generator is a runnable program compiled to wasm, so it gets
     // the check and synthesis a root gets.
@@ -1888,8 +1876,8 @@ fn generator_cache_key(
 }
 
 /// The current hash of a recorded generation input: a file (`resolver.read`) or
-/// a directory listing (a `dir/` marker, `resolver.list`). `None` when it cannot
-/// be read; validation reads that as [`ABSENT`].
+/// a directory listing (a `dir/` marker, `resolver.list_kinds`). `None` when it
+/// cannot be read; validation reads that as [`ABSENT`].
 ///
 /// Memoized for one outermost load, because a root that imports several
 /// generators validates the same std modules once each, and files do not change
@@ -1915,7 +1903,7 @@ fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<Strin
 
 fn current_input_hash_uncached(resolver: &dyn ModuleResolver, path: &str) -> Option<String> {
     if let Some(dir) = path.strip_suffix('/') {
-        let mut names = resolver.list(dir).ok()?;
+        let mut names = resolver.list_kinds(dir).ok()?;
         names.sort();
         Some(crate::hash::sha256_hex(names.join("\n").as_bytes()))
     } else {
@@ -4158,7 +4146,7 @@ mod tests {
         // mints growing arguments never trips the cycle check. The nesting
         // counter refuses it.
         LOAD_DEPTH.with(|d| d.set(GEN_DEPTH_MAX + 1));
-        let (r, _, _, _) = load_with_origins(
+        let (r, _, _, _, _) = load_with_origins(
             "fn main() -> Int64 { return 0 }",
             "main.vyrn",
             &opts(),

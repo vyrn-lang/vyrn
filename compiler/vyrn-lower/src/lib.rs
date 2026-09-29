@@ -27,7 +27,6 @@ pub use pipeline::{check_and_synthesize, load, load_warned, refusals, JUDGE};
 pub fn install() {
     vyrn_frontend::own::install_must_use(typed::obligation::judge);
     vyrn_frontend::own::install_typed(core::typed_diagnostics);
-    vyrn_frontend::floor::install_judge(effects::reaches);
 }
 
 /// Analyses ownership across `program` and places the releases the plan did
@@ -255,7 +254,7 @@ impl<'a> Lowered<'a> {
 }
 
 /// The named core of `program`'s root-module instances, as `vyrn emit-lowered`
-/// prints it: the version line, then each body's [`core::Body::render`], or the
+/// prints it: the version line, then each body's [`vyrn_frontend::core::Body::render`], or the
 /// gap that stopped it. Root-module only, `vyrn why --memory`'s rule: a linked
 /// program's imports are another file's answer.
 pub fn render(program: &Program, source: &str) -> String {

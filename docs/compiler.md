@@ -41,8 +41,8 @@ sysroot. A crate is judged on what it costs, not on a rule against crates.
 
 | Crate | Owns | Depends on |
 |---|---|---|
-| `vyrn-frontend` | lexer, parser, AST, loader, checker, the ownership vocabulary, the editor queries, the formatter, the manifest and lock reader | nothing |
-| `vyrn-lower` | the lowered form, the named core, the placer, the three judgments | `vyrn-frontend` |
+| `vyrn-frontend` | lexer, parser, AST, loader, checker, the ownership vocabulary, the core's data types (`core`), the editor queries, the formatter, the manifest and lock reader | nothing |
+| `vyrn-lower` | the lowered form, the builder of the named core, the placer, the three judgments | `vyrn-frontend` |
 | `vyrn-codegen` | the wasm emitter, layout, the module encoder, the toolchain finder, the WASI host in C for the native route | `vyrn-frontend`, `vyrn-lower`, `wasm-encoder`, `wasmprinter` |
 | `vyrn-cli` | the `vyrn` driver and the in-process WASI host | all of the above, `vyrn-genwasm`, `wasmtime` |
 | `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load; without its `host` feature, builds the module a host runs (`run_pure`) | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` (feature `host`) |
@@ -61,15 +61,14 @@ then its own judgments. The editor passes the ownership judgments into
 end still needs a judgment, it declares a slot and the lowering fills it:
 `vyrn_lower::install` installs the must-use judgment
 (`own::install_must_use`) and the typed judgment's drain
-(`own::install_typed`) for a generator's own check and run, and the effect
-judgment into the floor (`floor::install_judge`). `vyrn_genwasm::install`
-installs the generation engine (`gen::set_gen_engine`); the playground
-installs its own, which runs the module in the page. Every process that
-compiles calls both first: the CLI's `install`, the language server's `main`,
-the playground's `load`, and any test that asserts a refusal. A process that
-skips `vyrn_lower::install` runs a different compiler: the floor refuses every
-carrier it scans, reached or not. A process with no engine fails every
-`derive` and generator import.
+(`own::install_typed`) for a generator's own check and run.
+`vyrn_genwasm::install` installs the generation engine
+(`gen::set_gen_engine`); the playground installs its own, which runs the
+module in the page. Every process that compiles calls both first: the CLI's
+`install`, the language server's `main`, the playground's `load`, and any
+test that asserts a refusal. A process that skips `vyrn_lower::install` gets
+no must-use or typed refusal for a generator's own program. A process with no
+engine fails every `derive` and generator import.
 `tests/hosts.rs` holds each host to both, and names the hosts without an
 engine with the reason.
 

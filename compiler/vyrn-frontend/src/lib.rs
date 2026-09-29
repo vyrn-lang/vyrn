@@ -8,6 +8,7 @@ pub mod checker;
 pub mod codec;
 pub mod consteval;
 pub mod contracts;
+pub mod core;
 pub mod ctor;
 pub mod declared;
 pub mod diagnostics;
@@ -163,9 +164,10 @@ pub fn check_and_synthesize(
     (diags, refused)
 }
 
-/// Checks a generator's own program: [`check_and_synthesize`], the must-use
-/// judgment, and the floor. `vyrn_lower::refusals` judges nothing else under
-/// [`movecheck::comptime`].
+/// Checks a generator's own program: [`check_and_synthesize`] and the must-use
+/// judgment. `vyrn_lower::refusals` judges nothing else under
+/// [`movecheck::comptime`]. The floor does not judge it: a generator's load is
+/// nested, so it refuses inside the load.
 pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     movecheck::comptime(|| {
         let (mut diags, _) = check_and_synthesize(program);
@@ -176,7 +178,6 @@ pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Di
             movecheck::in_source_order(&mut owed);
             diags.extend(owed);
         }
-        floor::settle(program, &mut diags);
         diags
     })
 }

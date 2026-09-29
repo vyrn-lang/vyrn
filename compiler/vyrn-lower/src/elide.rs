@@ -25,9 +25,9 @@ use vyrn_frontend::ast::{BinOp, Capability, Type, TypeDecl, UnOp};
 use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
-use crate::check::{Guard, Verdict};
-use crate::core::{Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 use crate::facts::{Lin, State, Term};
+use vyrn_frontend::core::check::{Guard, Verdict};
+use vyrn_frontend::core::{Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 
 /// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
 /// premise or goal of the prover itself leaves `i64`.

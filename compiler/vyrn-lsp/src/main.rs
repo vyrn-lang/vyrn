@@ -172,9 +172,6 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
 
     /// The listings and the generator cache are the disk's; only `read` differs
     /// from a build. The shared cache lets a keystroke reuse a build's generation.
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        vyrn_frontend::loader::DiskResolver.list(resolved)
-    }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
         vyrn_frontend::loader::DiskResolver.list_kinds(resolved)
     }

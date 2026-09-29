@@ -29,7 +29,7 @@ pub fn load_warned(
     resolver: &dyn loader::ModuleResolver,
 ) -> (Result<ast::Program, Vec<Diagnostic>>, loader::Warnings) {
     let load_span = prof::phase("load (total)");
-    let (loaded, origins, warnings, _graph) =
+    let (loaded, origins, warnings, _graph, pending) =
         loader::load_with_origins(root_source, root_path, opts, resolver);
     drop(load_span);
     // The loader has already remapped its own diagnostics.
@@ -37,7 +37,7 @@ pub fn load_warned(
         Ok(p) => p,
         Err(diags) => return (Err(diags), warnings),
     };
-    let mut diags = check_and_synthesize(&mut program);
+    let mut diags = check(&mut program, pending);
     if diags.is_empty() {
         (Ok(program), warnings)
     } else {
@@ -58,6 +58,11 @@ pub fn load_warned(
 /// ([`vyrn_frontend::check_and_synthesize`]), then judges ownership and the
 /// floor. Returns every diagnostic found.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
+    check(program, None)
+}
+
+/// [`check_and_synthesize`] with the floor decision the load returned, if any.
+fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> Vec<Diagnostic> {
     let (mut diags, refused) = vyrn_frontend::check_and_synthesize(program);
     // One type record for the readers below. The synthesis is over, so no node
     // moves under its keys, and the guard closes before the caller can extend
@@ -82,8 +87,13 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
         }
     }
     // The floor row a judgment answers: the load deferred the decision until
-    // the check supplied the types.
-    floor::settle(program, &mut diags);
+    // the check supplied the types. Last, so a type error is not answered twice.
+    if diags.is_empty() {
+        if let Some(p) = pending {
+            let _p = prof::phase("floor");
+            diags.extend(floor::decide(p, Some(&crate::effects::reaches(program))));
+        }
+    }
     diags
 }
 
