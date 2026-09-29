@@ -7259,8 +7259,7 @@ fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
     None
 }
 
-/// The typed judgment's refusals, drained. Installed into `own`'s slot by
-/// [`crate::install`].
+/// The typed judgment's refusals, drained.
 pub fn typed_diagnostics() -> Vec<Diagnostic> {
     TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
 }

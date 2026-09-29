@@ -13,7 +13,6 @@ mod common;
 use vyrn_frontend::ast::{Block, NodeId, Stmt};
 
 fn analyze(src: &str) -> vyrn_frontend::ast::Program {
-    vyrn_lower::install();
     let dir = common::scratch("stores");
     let path = dir.join("m.vyrn");
     std::fs::write(&path, src).expect("write the source");

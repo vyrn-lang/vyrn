@@ -191,7 +191,6 @@ fn run_corpus() {
     // Generation is the driver's engine, not the frontend's. Without it an example
     // that imports through a generator fails to link and the gate measures less.
     vyrn_genwasm::install();
-    vyrn_lower::install();
     let dump = std::env::var("VYRN_EFFECTS_DUMP").ok();
     // The LAST colon: a Windows path carries one after its drive letter.
     let dump_target = dump.as_deref().and_then(|d| d.rsplit_once(':'));

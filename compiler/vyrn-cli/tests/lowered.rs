@@ -350,7 +350,6 @@ fn gate() {
     // Without this every generator example fails to link and the gate silently
     // measures a smaller corpus.
     vyrn_genwasm::install();
-    vyrn_lower::install();
     let mut t = Tally::default();
     // The residue by engine and expression kind. Reported, never asserted: the
     // raw count is not reproducible (see [`Tally::synthesized`]).

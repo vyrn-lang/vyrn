@@ -1,0 +1,1 @@
+a_generator_program_must_dispose_its_streams.vyrn:0:0: generator `g` does not check: line 7: `s` is a `Stream<Int64>` and is never disposed

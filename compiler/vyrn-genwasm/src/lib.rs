@@ -36,7 +36,7 @@ const RESULT_END: &str = "<<vyrn-genwasm-result-end>>";
 /// Installs the wasm generation engine. Called once from `main`.
 #[cfg(feature = "host")]
 pub fn install() {
-    vyrn_frontend::gen::set_gen_engine(Box::new(engine));
+    vyrn_frontend::gen::set_gen_engine(vyrn_lower::gen_engine(engine));
 }
 
 /// Claims a generation run, or declines it with `None`, which the frontend
