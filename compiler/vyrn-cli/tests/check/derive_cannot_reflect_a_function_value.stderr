@@ -1,0 +1,1 @@
+derive_cannot_reflect_a_function_value.vyrn:11:0: `derive(names, ..)` cannot reflect `fn() -> Int64`: it has no wire form

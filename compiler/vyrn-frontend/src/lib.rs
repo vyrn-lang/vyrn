@@ -78,7 +78,9 @@ pub fn check(source: &str) -> Result<ast::Program, String> {
             // path adds the constructors too. The JSON walks need the checker's
             // record, so they stay on the linked path.
             let types = types::decl_map(&program);
+            let from = program.functions.len();
             program.functions.extend(ctor::constructors(&types));
+            program.number_appended(from);
             Ok(program)
         }
         Some(d) => Err(d.render()),
@@ -116,10 +118,36 @@ pub fn load(
 /// backend has built its function table from the program yet.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
     let check_span = prof::phase("check");
-    let (mut diags, json_types, json_dec_types, refused) =
+    let (mut diags, mut json_types, mut json_dec_types, derived, mut refused) =
         checker::check_accum_with_json_types(program);
+    // What a `derive` generator writes joins the program and is checked with
+    // it, so the second check's answers stand.
+    if diags.is_empty() && !derived.is_empty() {
+        match gen::derive(program, &derived) {
+            Ok(fns) => {
+                let at = program.functions.len();
+                program.functions.extend(fns);
+                // Parsed apart, so numbered from 1: renumbered, or their ids
+                // would key the second check's types over the program's own.
+                program.number_appended(at);
+                let again;
+                (diags, json_types, json_dec_types, again, refused) =
+                    checker::check_accum_with_json_types(program);
+                if diags.is_empty() && again.len() != derived.len() {
+                    diags.push(diagnostics::Diagnostic::error(
+                        0,
+                        0,
+                        "check",
+                        "a `derive` generator wrote a `derive` call".to_string(),
+                    ));
+                }
+            }
+            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
+        }
+    }
     drop(check_span);
     let synth_span = prof::phase("synthesize");
+    let from = program.functions.len();
     if diags.is_empty() {
         let types = types::decl_map(program);
         match jsonenc::encoders(&json_types, &types) {
@@ -142,6 +170,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
             .collect();
         program.functions.extend(fresh);
     }
+    program.number_appended(from);
     // The checker's ownership refusals and the kernel's form one list, in
     // source order. The core builds bodies only for a program that type-checks.
     drop(synth_span);
@@ -220,7 +249,7 @@ fn lower_typed(
                     return;
                 };
                 let Some(recv) = args.first() else { return };
-                hit |= match record.node_types.get(&(recv as *const ast::Expr as usize)) {
+                hit |= match record.node_types.get(&recv.id()) {
                     Some(ast::Type::Param(_)) => refused_method(out, name, None),
                     Some(t) => {
                         types::type_key(t).is_some_and(|k| refused_method(out, name, Some(&k)))

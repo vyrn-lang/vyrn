@@ -1,0 +1,1 @@
+derive_needs_a_type_arg_generator.vyrn:6:0: `derive` needs a `gen fn describe(t: TypeArg) -> String`; `describe` is not one

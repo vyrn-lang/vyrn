@@ -7,8 +7,11 @@
 //! because the checker types every expression against its destination.
 
 pub mod append;
+pub mod check;
 pub mod core;
 pub mod effects;
+pub mod elide;
+pub mod facts;
 mod fixpoint;
 pub mod kernel;
 pub mod typed;
@@ -32,7 +35,7 @@ pub use core::{refuses as kernel_refuses, take_refusals};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use vyrn_frontend::ast::{Block, Expr, Function, LambdaBody, Program, Stmt, Type};
+use vyrn_frontend::ast::{Expr, Function, LambdaBody, NodeId, Program, Stmt, Type};
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types::{
@@ -50,13 +53,13 @@ pub const VERSION: &str = "v2";
 pub struct NodeTypes<'a> {
     /// The type each expression must END UP as: the destination the checker
     /// validated it against, or [`NodeTypes::produced`] where it recorded none.
-    pub types: HashMap<usize, Type>,
+    pub types: HashMap<NodeId, Type>,
     /// The type each expression HAS when its code has run, before the coercion
     /// to its destination.
-    pub produced: HashMap<usize, Type>,
+    pub produced: HashMap<NodeId, Type>,
     /// At a generic call or a `?` on a generic `Fallible`, the type arguments
     /// the checker solved, by parameter name in the callee's order.
-    pub solved: HashMap<usize, Vec<(String, Type)>>,
+    pub solved: HashMap<NodeId, Vec<(String, Type)>>,
     /// Every expression the body holds, expansions included, in reading
     /// order, each with its line. A literal has no line of its own and takes
     /// the line of the statement or binding around it.
@@ -67,11 +70,11 @@ pub struct NodeTypes<'a> {
 /// classified on.
 pub fn kind(e: &Expr) -> &'static str {
     match e {
-        Expr::Int(_) => "int",
-        Expr::Byte(_) => "byte",
-        Expr::Float(_) => "float",
-        Expr::Bool(_) => "bool",
-        Expr::Str(_) => "str",
+        Expr::Int(_, _) => "int",
+        Expr::Byte(_, _) => "byte",
+        Expr::Float(_, _) => "float",
+        Expr::Bool(_, _) => "bool",
+        Expr::Str(_, _) => "str",
         Expr::Var { .. } => "var",
         Expr::Unary { .. } => "unary",
         Expr::Binary { .. } => "binary",
@@ -197,9 +200,9 @@ pub struct Lowered<'a> {
     /// Its calls are not followed into the worklist: that would add instances
     /// the backends' own worklists do not have.
     pub predicates: NodeTypes<'a>,
-    /// Every `Block` that is a lambda's body, by node address, so an engine
+    /// Every `Block` that is a lambda's body, by node, so an engine
     /// can tell those blocks apart without a second AST walk.
-    pub lambda_bodies: std::collections::HashSet<usize>,
+    pub lambda_bodies: std::collections::HashSet<NodeId>,
     /// The `test` and `bench` bodies, in declaration order. Not followed into
     /// the worklist, like [`Lowered::predicates`]: a generic only a test calls
     /// is an instantiation no backend emits.
@@ -255,7 +258,7 @@ pub fn render(program: &Program, source: &str) -> String {
     for inst in lowered.root() {
         out.push('\n');
         match core::build(program, inst, &own) {
-            Ok(body) => out.push_str(&body.render()),
+            Ok(body) => out.push_str(&core::checked(program, own.proto.types(), &body).render()),
             Err(g) => out.push_str(&format!(
                 "; {}: not lowered at line {}: {} {}\n",
                 inst.spelling(),
@@ -327,7 +330,7 @@ struct Walk<'a, 'r> {
     facts: NodeTypes<'a>,
     /// `(callee, its solved type arguments by name)`, already concrete.
     calls: Vec<(&'r str, HashMap<String, Type>)>,
-    lambda_bodies: std::collections::HashSet<usize>,
+    lambda_bodies: std::collections::HashSet<NodeId>,
     chain: Chain,
     /// Per open expression: its recorded type, and whether it pushed a
     /// substitution onto `chain`.
@@ -336,7 +339,7 @@ struct Walk<'a, 'r> {
     lines: Vec<u32>,
     /// The scrutinee of each open `if let`, innermost last. An optional
     /// projection there expands after the scrutinee and before the blocks.
-    scrutinees: Vec<usize>,
+    scrutinees: Vec<NodeId>,
 }
 
 impl<'a, 'r> Walk<'a, 'r> {
@@ -359,7 +362,7 @@ impl<'a, 'r> Walk<'a, 'r> {
     }
 
     fn recorded(&self, e: &Expr) -> Option<Type> {
-        let key = e as *const Expr as usize;
+        let key = e.id();
         self.recorded
             .node_types
             .get(&key)
@@ -372,13 +375,8 @@ impl<'a, 'r> Walk<'a, 'r> {
         let Some((ty, pushed)) = self.open.pop() else {
             unreachable!("every closed expression was opened");
         };
-        let key = e as *const Expr as usize;
-        let has = has_of(e, |k| {
-            self.facts
-                .produced
-                .get(&(k as *const Expr as usize))
-                .cloned()
-        });
+        let key = e.id();
+        let has = has_of(e, |k| self.facts.produced.get(&k.id()).cloned());
         if let Some(t) = ty.clone().or_else(|| has.clone()) {
             self.facts.types.insert(key, t);
         }
@@ -456,7 +454,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
     fn stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
         self.lines.push(s.line() as u32);
         if let Stmt::IfLet { scrutinee, .. } = s {
-            self.scrutinees.push(scrutinee as *const Expr as usize);
+            self.scrutinees.push(scrutinee.id());
         }
     }
 
@@ -498,7 +496,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
     }
 
     fn expr(&mut self, e: &'a Expr, locals: &std::collections::HashSet<String>) -> bool {
-        let key = e as *const Expr as usize;
+        let key = e.id();
         let line = match e.line() {
             0 => self.lines.last().copied().unwrap_or(0),
             l => l as u32,
@@ -535,7 +533,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                 body: LambdaBody::Block(b),
                 ..
             } => {
-                self.lambda_bodies.insert(b as *const Block as usize);
+                self.lambda_bodies.insert(b.id());
             }
             // `schemaOf<T>()` lowers through the literal the checker expanded
             // for it, and has no arguments of its own to walk.
@@ -566,7 +564,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
             }
         }
         self.close(e);
-        if self.scrutinees.last() == Some(&(e as *const Expr as usize)) {
+        if self.scrutinees.last() == Some(&e.id()) {
             self.scrutinees.pop();
             let line = self.lines.last().copied().unwrap_or(0) as usize;
             self.optional_site(e, line);
@@ -592,8 +590,8 @@ fn has_of<'e>(e: &'e Expr, kid: impl Fn(&'e Expr) -> Option<Type>) -> Option<Typ
         // A numeric literal is its own width, and the destination is a coercion
         // away. `Byte` too: both backends spell `'a'` as an `i64` immediate and
         // narrow at the use, which the checker does not; it answers `UInt8`.
-        Expr::Int(_) | Expr::Byte(_) => Type::Int,
-        Expr::Float(_) => Type::Float,
+        Expr::Int(_, _) | Expr::Byte(_, _) => Type::Int,
+        Expr::Float(_, _) => Type::Float,
         // A pass-through: the node emits its child's value.
         Expr::Consume { place: inner, .. } | Expr::Unary { expr: inner, .. } => kid(inner)?,
         // A join carries the type of a branch, not of its destination. `panic`
@@ -683,7 +681,7 @@ fn build<'a>(
 
     let mut instances: Vec<Instance<'a>> = Vec::new();
     let mut unresolved: Vec<Unresolved> = Vec::new();
-    let mut lambda_bodies: std::collections::HashSet<usize> = Default::default();
+    let mut lambda_bodies: std::collections::HashSet<NodeId> = Default::default();
 
     // Module state is the second root: an initializer instantiates generics
     // like any body. It is an expression, so it has no exit to place a release
@@ -1056,7 +1054,7 @@ pub fn lint(l: &Lowered) -> Vec<String> {
         }
         let concrete = [&i.facts.types, &i.facts.produced];
         for (e, line) in &i.facts.exprs {
-            let key = *e as *const Expr as usize;
+            let key = e.id();
             for t in concrete.iter().filter_map(|m| m.get(&key)) {
                 if matches!(t, Type::Err) {
                     bad.push(format!(
@@ -1111,7 +1109,7 @@ mod tests {
                 .facts
                 .exprs
                 .iter()
-                .filter_map(|(e, _)| inst.facts.types.get(&(*e as *const Expr as usize)))
+                .filter_map(|(e, _)| inst.facts.types.get(&e.id()))
                 .collect();
             assert_eq!(tys, vec![&want], "{}", inst.spelling());
         }
@@ -1129,9 +1127,9 @@ mod tests {
         let pairs: Vec<(String, String)> = f
             .exprs
             .iter()
-            .filter(|(e, _)| matches!(e, Expr::Int(_)))
+            .filter(|(e, _)| matches!(e, Expr::Int(_, _)))
             .map(|(e, _)| {
-                let key = *e as *const Expr as usize;
+                let key = e.id();
                 (f.produced[&key].to_string(), f.types[&key].to_string())
             })
             .collect();

@@ -30,6 +30,7 @@ use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
+use vyrn_lower::check::{Check, Guard, Verdict};
 use vyrn_lower::core::{Arg, Callee, Ctor, Lit, Op, Rhs, Spec, St, Target, Val};
 
 use crate::layout::{self, Layout};
@@ -54,7 +55,7 @@ fn too_big(what: &str, bytes: u64, line: usize) -> String {
     format!(
         "direct backend: {what} needs {bytes} bytes at line {line}, past the {} one value may \
          occupy; a fixed array this big belongs on the heap as `Array<T>`",
-        i32::MAX
+        vyrn_frontend::trap::LENGTH_LIMIT
     )
 }
 
@@ -254,6 +255,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // `wasm::Module` panics if one arrives late.
     let wasi = Wasi::declare(&mut m);
     let gen = crate::gen_host().then(|| gen_imports(&mut m));
+    let oracle = (matches!(vyrn_lower::check::mode(), vyrn_lower::check::Mode::Count(_))
+        && gen.is_none())
+    .then(|| Oracle {
+        hit: m.import("vyrn_check", "hit", &[ValType::I32], &[]),
+        fail: m.import("vyrn_check", "fail", &[ValType::I32], &[]),
+        labels: RefCell::new(Vec::new()),
+        ids: RefCell::new(HashMap::new()),
+    });
     // Every `extern fn` is one import from the `vyrn` namespace, which `web/wasi-min.js` fills
     // from the page's hooks. This is not a pre-scan: an `extern fn` is its import, one for one,
     // and `Module::sweep` drops the ones a program never calls.
@@ -332,8 +341,8 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
-        kept: RefCell::new(Vec::new()),
         layouts: RefCell::default(),
+        oracle,
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -353,9 +362,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         args_in_place: false,
         gappend: HashMap::new(),
         externs,
-        // The call-argument temporaries released at the call, cloned before `ownership` is
-        // moved from.
-        plan: ownership.plan.clone(),
         // The core's answers, folded once by the placer inside `own::analyze` above.
         facts: vyrn_lower::core::facts(),
         releases: ownership.releases,
@@ -671,6 +677,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // interned data.
     m.sweep();
     abi_section(&mut m, &user, program);
+    if let Some(o) = &cx.oracle {
+        m.custom("vyrn:checks", o.labels.borrow().join("\n").into_bytes());
+    }
     m.finish()
 }
 
@@ -847,10 +856,10 @@ enum Key {
     /// A specialization over `fn`-typed parameters: the callee, its type arguments, and each `fn` parameter's
     /// target. A different lambda makes a different function.
     Ho(String, Vec<Type>, Vec<FnTarget>),
-    /// A lifted lambda: the literal's node address, its concrete shape (captures, parameters,
+    /// A lifted lambda: the literal's node, its concrete shape (captures, parameters,
     /// return), and its substitution. One literal in a generic body lifts once per
     /// instantiation, even when the shape does not differ.
-    Lambda(usize, Vec<Type>, Vec<(String, Type)>),
+    Lambda(NodeId, Vec<Type>, Vec<(String, Type)>),
 }
 
 /// The statements a queued body walks. Each is the program's own AST, because a walk over a copy
@@ -873,8 +882,8 @@ enum Body<'a> {
 struct Pending<'a> {
     key: Key,
     /// The shell: the name, line and signature the body is lowered under. It carries the
-    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Rc` because
-    /// [`Key::Lambda`] keys on a node address inside it, which a clone per drain turn would move.
+    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Rc`, so a
+    /// drain turn shares the shell instead of copying it.
     f: Rc<Function>,
     /// The statements to walk, borrowed from the checked program.
     body: Body<'a>,
@@ -961,18 +970,27 @@ struct FnBinding {
     cap_srcs: Vec<String>,
 }
 
+/// The oracle's side of a module: `vyrn_check.hit(id)` counts a row, `vyrn_check.fail(id)`
+/// ends the run where a proved row would have trapped. Row `id` is line `id` of the custom
+/// section `vyrn:checks`: body, line, ordinal, rule and verdict, tab-separated.
+struct Oracle {
+    hit: u32,
+    fail: u32,
+    labels: RefCell<Vec<String>>,
+    ids: RefCell<HashMap<(String, usize, u32), i32>>,
+}
+
 struct Cx<'a> {
     types: HashMap<String, TypeDecl>,
     /// Every lambda literal the program holds, by node address, so [`Fn_::lift_lambda`] can queue
     /// the literal's own body instead of a clone. A hit is the program's node, since the program
     /// outlives every walk. A miss is a literal in a leaked desugar, and the caller clones it.
-    lambdas: HashMap<usize, (&'a str, &'a Expr)>,
-    /// The nodes this backend makes or copies and then hands to a walk that
-    /// keys on their addresses, kept alive for the compile: a key built from a
-    /// node's address is sound only while the node lives (#444).
-    kept: RefCell<Vec<Rc<dyn std::any::Any>>>,
+    lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
     /// Every layout, parsed once, keyed by `llt_of`'s string: a layout is a function of it alone.
     layouts: RefCell<HashMap<String, Rc<Layout>>>,
+    /// The check oracle's host imports and its row labels, under
+    /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
+    oracle: Option<Oracle>,
     /// Every `impl` block, for `place` projection lookup: a projection is not a function, so
     /// `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -1027,8 +1045,6 @@ struct Cx<'a> {
     mem: HashMap<&'a str, &'a Function>,
     /// Per function: every release step placed, at the exit that runs it, in run order.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
-    /// The per-node release decisions.
-    plan: vyrn_frontend::own::ReleasePlan,
     /// The core's statement of the releases this emitter emits, and their only source. `None`
     /// in a host that never installed the placer, and then no such release is emitted.
     facts: Option<vyrn_lower::core::Facts>,
@@ -1052,10 +1068,10 @@ struct Cx<'a> {
 impl<'a> Cx<'a> {
     /// Whether the container's release at this `for` walks the buffer alone, as the core states
     /// ([`vyrn_lower::core::Facts::loop_buffer_only`]).
-    fn loop_buffer_only(&self, node: usize) -> bool {
+    fn loop_buffer_only(&self, node: NodeId) -> bool {
         self.facts
             .as_ref()
-            .is_some_and(|f| f.loop_buffer_only.contains(&self.plan.key_of(node)))
+            .is_some_and(|f| f.loop_buffer_only.contains(&node))
     }
 
     /// Substitutes the monomorphization this lowering is inside.
@@ -1111,14 +1127,6 @@ impl<'a> Cx<'a> {
     /// a copy are one walk per sum, not per spelling.
     fn sum_vs(&self, ty: &Type) -> Option<Vec<EnumVariant>> {
         crate::sum_variants_of(&self.sub(ty), &self.types)
-    }
-
-    /// `node`, moved where it lives as long as this `Cx`, so its address keys
-    /// nothing else for the whole compile.
-    fn keep<T: 'static>(&self, node: T) -> Rc<T> {
-        let kept = Rc::new(node);
-        self.kept.borrow_mut().push(kept.clone());
-        kept
     }
 
     /// The load of a scalar `ty` at `off` bytes. It sign-extends as `ty` does, because `llt_of`
@@ -1629,7 +1637,10 @@ fn f_shell(line: usize) -> Function {
         type_bounds: HashMap::new(),
         params: Vec::new(),
         ret: Type::Unit,
-        body: Block { stmts: Vec::new() },
+        body: Block {
+            id: Id::NEW,
+            stmts: Vec::new(),
+        },
         line,
         col: 0,
         is_extern: false,
@@ -1679,10 +1690,10 @@ struct Fn_<'a, 'p> {
     /// What each owned binding is released with, keyed by `own`'s key: the `Stmt::Let`'s node
     /// address, or the construct's for a temporary it owns. The order is
     /// [`vyrn_frontend::own::Ownership::releases`]'; this is a lookup table.
-    rel_slots: HashMap<usize, RelSlot>,
+    rel_slots: HashMap<NodeId, RelSlot>,
     /// The release steps placed at every exit of this body, keyed by the node the exit is at.
     /// Read, never derived.
-    placed: HashMap<(ExitKind, usize), Vec<(usize, Option<Vec<String>>)>>,
+    placed: HashMap<(ExitKind, NodeId), Vec<(NodeId, Option<Vec<String>>)>>,
     /// Lexical `region` depth in this body, so an exit edge knows how many arena scopes it leaves.
     /// The runtime counter is dynamic; this is the part this body's own `br`s unwind past.
     region_depth: u32,
@@ -1781,7 +1792,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
         // The accumulator owns its buffer unless the initializer is a literal, which lives in
         // the data segment.
         if let Some(&at) = cx.gappend.get(&g.name) {
-            let owns = !matches!(g.init, Expr::Str(_));
+            let owns = !matches!(g.init, Expr::Str(_, _));
             b.ins(&Instruction::I32Const(at as i32))
                 .ins(&Instruction::I32Const(owns as i32))
                 .ins(&Instruction::I32Store(word()));
@@ -1946,7 +1957,7 @@ fn lower_body(
             let name = (cx_fn.fn_binds.iter())
                 .find(|(_, bnd)| bnd.cap_srcs == [p.name.as_str()])
                 .map_or(&p.name, |(n, _)| n);
-            let key = cx.declared_param(f, name, p) as *const vyrn_frontend::ast::Param as usize;
+            let key = cx.declared_param(f, name, p).id();
             if cx_fn.releases_whole(key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
                     cx_fn.register_rel(key, place, r);
@@ -2454,7 +2465,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Record how one owned binding is released; the placement decides where and when.
-    fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {
+    fn register_rel(&mut self, key: NodeId, place: Place, rel: Rel) {
         self.rel_slots.insert(key, RelSlot { place, rel });
     }
 
@@ -2647,7 +2658,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The release a value of `ty` bound at node `key` owes: [`Fn_::rel_for`]'s, or the buffer
     /// alone where `key` is a `for` whose elements all left through the loop variable
     /// ([`Cx::loop_buffer_only`]).
-    fn rel_owed(&mut self, key: usize, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
+    fn rel_owed(&mut self, key: NodeId, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
         let buffer = self.cx.loop_buffer_only(key);
         Ok(self
             .rel_for(ty, line)?
@@ -3155,12 +3166,13 @@ impl<'p> Fn_<'_, 'p> {
     /// `bytes(s)` and `bytes(s, start, end)`: a call to `std/runtime`'s `bytesOf`, which checks
     /// the range and copies. The one-argument form is the range `0..s.byteLength`.
     ///
-    /// `operand` writes argument `i` at the type asked for; `ranged` is the three-argument form.
+    /// `operand` writes argument `i` at the type asked for. `rule` is the three-argument form's
+    /// check row's; `None` is the one-argument form, whose range cannot trap.
     fn bytes_of(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        ranged: bool,
+        rule: Option<vyrn_frontend::trap::Rule>,
         operand: &mut dyn FnMut(
             &mut Self,
             &mut Module,
@@ -3178,7 +3190,7 @@ impl<'p> Fn_<'_, 'p> {
         let off = b.alloc(l.size, l.align);
         b.slot(off);
         operand(self, m, b, 0, &Type::Str)?;
-        if ranged {
+        if rule.is_some() {
             operand(self, m, b, 1, &Type::Int)?;
             operand(self, m, b, 2, &Type::Int)?;
         } else {
@@ -3189,9 +3201,8 @@ impl<'p> Fn_<'_, 'p> {
             str_len(b);
             b.ins(&Instruction::I64ExtendI32U);
         }
-        b.ins(&Instruction::I32Const(
-            vyrn_frontend::trap::Rule::StringIndex.index() as i32,
-        ));
+        let rule = rule.unwrap_or(vyrn_frontend::trap::Rule::StringIndex);
+        b.ins(&Instruction::I32Const(rule.index() as i32));
         b.ins(&Instruction::I32Const(self.cx.rt.trap_table as i32));
         b.ins(&Instruction::Call(self.cx.rt.bytes_of));
         b.slot(off);
@@ -3313,7 +3324,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// It starts owned only when this `let` owns its initializer: `let mut s = r.name` is a
     /// borrow, and a `literal` initializer is a data-segment address that must not grow.
-    fn str_append_shadow(&mut self, b: &mut Frame, l: u32, at: u32, site: usize, literal: bool) {
+    fn str_append_shadow(&mut self, b: &mut Frame, l: u32, at: u32, site: NodeId, literal: bool) {
         let owns = !literal && self.releases_whole(site);
         self.str_append.insert(l, at);
         b.slot(at)
@@ -3791,12 +3802,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The checker's type for `e`, read by node. [`Fn_::peek_inner`] answers for the AST this
     /// backend builds itself.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        // A tree this backend cloned has no node record; the plan's clone -> original alias
-        // finds the node it copies.
-        let at = e as *const Expr as usize;
-        let t = match vyrn_lower::core::node_ty(at)
-            .or_else(|| vyrn_lower::core::node_ty(self.cx.plan.key_of(at)))
-        {
+        let t = match vyrn_lower::core::node_ty(e.id()) {
             Some(t) => self.cx.sub(&t),
             None => self.peek_inner(e, line)?,
         };
@@ -3804,7 +3810,7 @@ impl<'p> Fn_<'_, 'p> {
             crate::observe::record(
                 crate::observe::Site::Peek,
                 crate::observe::kind_of(e),
-                e as *const Expr as usize,
+                e.id(),
                 &self.cx.subst,
                 &t,
             );
@@ -3817,10 +3823,10 @@ impl<'p> Fn_<'_, 'p> {
     /// dispatched call. Any other kind is a gap, not a guess.
     fn peek_inner(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
         Ok(match e {
-            Expr::Int(_) | Expr::Byte(_) => Type::Int,
-            Expr::Float(_) => Type::Float,
-            Expr::Bool(_) => Type::Bool,
-            Expr::Str(_) => Type::Str,
+            Expr::Int(_, _) | Expr::Byte(_, _) => Type::Int,
+            Expr::Float(_, _) => Type::Float,
+            Expr::Bool(_, _) => Type::Bool,
+            Expr::Str(_, _) => Type::Str,
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
                 let base = self.peek(expr, line)?;
@@ -3830,7 +3836,12 @@ impl<'p> Fn_<'_, 'p> {
                     None => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
                 }
             }
-            Expr::StructLit { name, fields, line } => self.applied_record(name, fields, *line)?,
+            Expr::StructLit {
+                name,
+                fields,
+                line,
+                id: _,
+            } => self.applied_record(name, fields, *line)?,
             Expr::Call { name, args, .. } => match name.as_str() {
                 "blackBox" if args.len() == 1 => self.peek(&args[0], line)?,
                 // `vyrn_frontend::project::AT` and `ELEM`; a match pattern cannot name a path.
@@ -4013,16 +4024,44 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Traps where the row's divisor `d` is zero or its shift amount is outside `0..bits`.
+    fn divisor_check(&mut self, b: &mut Frame, n: Num, d: u32, row: &Check) {
+        b.ins(&Instruction::LocalGet(d));
+        if let Guard::Shift(_, bits) = row.guard {
+            // A shift by `>= bits` or a negative amount traps. One unsigned `>=` covers
+            // both, because a negative amount reads as a huge unsigned.
+            if n.wide() {
+                b.ins(&Instruction::I64Const(i64::from(bits)));
+                b.ins(&Instruction::I64GeU);
+            } else {
+                b.ins(&Instruction::I32Const(i32::from(bits)));
+                b.ins(&Instruction::I32GeU);
+            }
+        } else if n.wide() {
+            b.ins(&Instruction::I64Eqz);
+        } else {
+            b.ins(&Instruction::I32Eqz);
+        }
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.check_trap(b, row, None);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+    }
+
     /// Emits a binary operator over two operands on the stack at `opty`. `&&`, `||`, `=~` and
     /// `String` or `Code` operators are absent: they interleave work between the operands.
     ///
-    /// `spell` is the left operand's type as written, for a gap's wording.
+    /// `spell` is the left operand's type as written, for a gap's wording. `rows` are the kept
+    /// check rows of an integer `/`, `%`, `<<` or `>>`: the divisor's or the amount's, then the
+    /// quotient's ([`Guard::NoOverflow`]).
     fn bin_ins(
         &mut self,
         b: &mut Frame,
         op: BinOp,
         opty: &Type,
         spell: &Type,
+        rows: [Option<Check>; 2],
         line: usize,
     ) -> Result<Type, String> {
         let lt = opty.clone();
@@ -4139,41 +4178,25 @@ impl<'p> Fn_<'_, 'p> {
         };
         // Every trap case is checked here rather than left to wasm, so stderr carries our
         // wording, not wasmtime's. The operands go to scratch so the checks can read them.
-        if matches!(op, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr) {
+        if rows.iter().any(Option::is_some) {
+            let [first, over] = rows;
             let c = if n.wide() { ValType::I64 } else { ValType::I32 };
             let (d, num) = (self.scratch(b, c, 0), self.scratch(b, c, 1));
-            let rule = match op {
-                BinOp::Div => vyrn_frontend::trap::Rule::DivZero,
-                BinOp::Rem => vyrn_frontend::trap::Rule::RemZero,
-                _ => vyrn_frontend::trap::Rule::ShiftRange,
-            };
             b.ins(&Instruction::LocalSet(d));
             b.ins(&Instruction::LocalSet(num));
-            b.ins(&Instruction::LocalGet(d));
-            if matches!(op, BinOp::Shl | BinOp::Shr) {
-                // A shift by `>= bits` or a negative amount traps. One unsigned `>=` covers
-                // both, because a negative amount reads as a huge unsigned.
-                if n.wide() {
-                    b.ins(&Instruction::I64Const(i64::from(n.bits)));
-                    b.ins(&Instruction::I64GeU);
-                } else {
-                    b.ins(&Instruction::I32Const(i32::from(n.bits)));
-                    b.ins(&Instruction::I32GeU);
-                }
-            } else if n.wide() {
-                b.ins(&Instruction::I64Eqz);
-            } else {
-                b.ins(&Instruction::I32Eqz);
+            if let Some(first) = first {
+                self.divisor_check(b, n, d, &first);
             }
-            b.ins(&Instruction::If(BlockType::Empty));
-            self.depth += 1;
-            self.trap_row(b, rule, None);
-            self.depth -= 1;
-            b.ins(&Instruction::End);
-            if op == BinOp::Div && n.signed {
-                // The minimum over -1 has no representable answer. `%` is exempt: wasm's
-                // `rem_s` gives 0 there, as the interpreter does.
-                let min = i64::MIN >> (64 - n.bits);
+            // The minimum over -1 has no representable answer. `%` is exempt: wasm's `rem_s`
+            // gives 0 there, as the interpreter does.
+            if let Some(
+                over @ Check {
+                    guard: Guard::NoOverflow(_, _, bits),
+                    ..
+                },
+            ) = over
+            {
+                let min = i64::MIN >> (64 - bits);
                 b.ins(&Instruction::LocalGet(d));
                 if n.wide() {
                     b.ins(&Instruction::I64Const(-1)).ins(&Instruction::I64Eq);
@@ -4188,7 +4211,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32And);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.trap_row(b, vyrn_frontend::trap::Rule::DivOverflow, None);
+                self.check_trap(b, &over, None);
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
@@ -4746,7 +4769,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The program's own body for the lambda literal at `at`, or `None` if the program does
     /// not hold it ([`Cx::lambdas`]).
     fn lambda(&self, at: &Expr) -> Option<&'p LambdaBody> {
-        match self.cx.lambdas.get(&(at as *const Expr as usize))?.1 {
+        match self.cx.lambdas.get(&at.id())?.1 {
             Expr::Lambda { body, .. } => Some(body),
             _ => None,
         }
@@ -4779,15 +4802,17 @@ impl<'p> Fn_<'_, 'p> {
         caps: Option<&[(String, Type)]>,
         line: usize,
     ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
-        // The key is the literal's address. A literal outside the program dies with its tree
-        // and its address can be reused, so the key names a copy this `Cx` keeps.
-        let kept = self.lambda(at).is_none().then(|| self.cx.keep(at.clone()));
-        let at = kept.as_deref().unwrap_or(at);
+        assert_ne!(
+            at.id(),
+            NodeId::NONE,
+            "a lambda lifted from an unnumbered tree"
+        );
         let Expr::Lambda {
             params,
             body,
             line: at_line,
             col: at_col,
+            id: _,
         } = at
         else {
             return unsupported("a lambda lifted from another expression", line);
@@ -4844,6 +4869,7 @@ impl<'p> Fn_<'_, 'p> {
             .iter()
             .zip(&cap_tys)
             .map(|(n, t)| Param {
+                id: Id::NEW,
                 name: n.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
@@ -4851,6 +4877,7 @@ impl<'p> Fn_<'_, 'p> {
                 col: 0,
             })
             .chain(params.iter().zip(ptys).map(|(n, t)| Param {
+                id: Id::NEW,
                 name: n.name.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
@@ -4865,40 +4892,20 @@ impl<'p> Fn_<'_, 'p> {
             sf.body = match body {
                 LambdaBody::Block(b) => b.clone(),
                 LambdaBody::Expr(e) if self.cx.repr(&ret, line)? == Repr::Unit => Block {
-                    stmts: vec![Stmt::Expr((**e).clone())],
+                    id: Id::NEW,
+                    stmts: vec![Stmt::Expr((**e).clone(), Id::NEW)],
                 },
                 LambdaBody::Expr(e) => Block {
+                    id: Id::NEW,
                     stmts: vec![Stmt::Return {
+                        id: Id::NEW,
                         value: Some((**e).clone()),
                         line,
                     }],
                 },
             };
         }
-        // A shell's body is a clone, so its nodes are aliased to the source's for plan queries.
-        // Statements live in the Vec's buffer and expressions behind boxes, so the addresses
-        // survive the move into the queue's `Rc`.
-        if let Body::Shell = queued {
-            let (mut orig, mut clone) = (Vec::new(), Vec::new());
-            match body {
-                LambdaBody::Block(src) => {
-                    vyrn_frontend::ast::node_addrs(src, &mut orig);
-                    vyrn_frontend::ast::node_addrs(&sf.body, &mut clone);
-                }
-                LambdaBody::Expr(src) => {
-                    vyrn_frontend::ast::node_addrs_val(src, &mut orig);
-                    match sf.body.stmts.first() {
-                        Some(Stmt::Expr(e)) | Some(Stmt::Return { value: Some(e), .. }) => {
-                            vyrn_frontend::ast::node_addrs_val(e, &mut clone)
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let pairs: Vec<(usize, usize)> = clone.into_iter().zip(orig).collect();
-            self.cx.plan.alias_clones(&pairs);
-        }
-        // Keyed by address, shape and substitution: a literal in a generic body lifts once per
+        // Keyed by node, shape and substitution: a literal in a generic body lifts once per
         // instantiation, even when the type parameter appears only in a statement.
         let mut shape: Vec<Type> = cap_tys.clone();
         shape.extend(ptys.iter().cloned());
@@ -4910,7 +4917,7 @@ impl<'p> Fn_<'_, 'p> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         under.sort_by(|a, b| a.0.cmp(&b.0));
-        let key = Key::Lambda(at as *const Expr as usize, shape, under);
+        let key = Key::Lambda(at.id(), shape, under);
         let sig = self.cx.enqueue(
             m,
             key,
@@ -4923,6 +4930,7 @@ impl<'p> Fn_<'_, 'p> {
         let srcs = cap_names
             .iter()
             .map(|n| Expr::Var {
+                id: Id::NEW,
                 name: n.clone(),
                 line,
             })
@@ -5178,12 +5186,12 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Returns the size in bytes of `n` elements of `elem`, for every count-times-stride
-    /// allocation and `memory.copy` length. The bound is `i32::MAX`, not `u32::MAX`: every
-    /// consumer is an `i32`, and a product in `[2^31, 2^32)` goes negative, so `malloc`
-    /// returns a small block that `memory.copy` then overruns.
+    /// allocation and `memory.copy` length. The bound is [`vyrn_frontend::trap::LENGTH_LIMIT`],
+    /// not `u32::MAX`: every consumer is an `i32`, and a product in `[2^31, 2^32)` goes
+    /// negative, so `malloc` returns a small block that `memory.copy` then overruns.
     fn extent(&self, elem: &Type, n: usize, line: usize) -> Result<u32, String> {
         let bytes = self.stride(elem, line)? as u64 * n as u64;
-        if bytes > i32::MAX as u64 {
+        if bytes > u64::from(vyrn_frontend::trap::LENGTH_LIMIT) {
             return Err(too_big(&format!("{n} × `{elem}`"), bytes, line));
         }
         Ok(bytes as u32)
@@ -5882,19 +5890,54 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Traps unless `idx` is in `0..len`; the compare is unsigned, so it catches a negative.
-    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, string: bool) {
-        let rule = if string {
-            vyrn_frontend::trap::Rule::StringIndex
-        } else {
-            vyrn_frontend::trap::Rule::ArrayIndex
+    /// The check a construct runs for `c`: the row when it is kept, `None` when a pass proved
+    /// it. The oracle ([`vyrn_lower::check::Mode::Count`]) counts every row here and runs a
+    /// proved one too, which [`Fn_::check_trap`] turns into a failed run.
+    fn row(&mut self, b: &mut Frame, c: Check) -> Option<Check> {
+        let Some(o) = &self.cx.oracle else {
+            return (c.verdict == Verdict::Kept).then_some(c);
         };
+        let key = (self.core_key.clone(), c.site.line, c.site.ordinal);
+        let mut labels = o.labels.borrow_mut();
+        let id = labels.len() as i32;
+        let verdict = match c.verdict {
+            Verdict::Kept => "kept",
+            Verdict::Proved => "proved",
+        };
+        labels.push(format!(
+            "{}\t{}\t{}\t{}\t{verdict}",
+            key.0,
+            key.1,
+            key.2,
+            c.rule.census()
+        ));
+        o.ids.borrow_mut().insert(key, id);
+        b.ins(&Instruction::I32Const(id));
+        b.ins(&Instruction::Call(o.hit));
+        Some(c)
+    }
+
+    /// The failing branch of `row`'s check: its trap, or under the oracle the failure of a
+    /// proved row.
+    fn check_trap(&mut self, b: &mut Frame, row: &Check, val: Option<u32>) {
+        match &self.cx.oracle {
+            Some(o) if row.verdict == Verdict::Proved => {
+                let key = (self.core_key.clone(), row.site.line, row.site.ordinal);
+                b.ins(&Instruction::I32Const(o.ids.borrow()[&key]));
+                b.ins(&Instruction::Call(o.fail));
+            }
+            _ => self.trap_row(b, row.rule, val),
+        }
+    }
+
+    /// Traps unless `idx` is in `0..len`; the compare is unsigned, so it catches a negative.
+    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.trap_row(b, rule, Some(idx));
+        self.check_trap(b, row, Some(idx));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -5902,7 +5945,10 @@ impl<'p> Fn_<'_, 'p> {
     /// Traps unless all of `idx..idx+span-1` are in `0..len`, with one branch per vector.
     /// `span` is 4 for the four-lane shapes and 2 for `@f64x2`. It needs two compares:
     /// `idx + span` wraps for a huge `idx`, but `len - span` cannot, because `len >= 0`.
-    fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, span: i64) {
+    fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
+        let Guard::Span(_, _, span) = row.guard else {
+            unreachable!("`core_check` matched a span row")
+        };
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
@@ -5925,7 +5971,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64LtS);
         b.ins(&Instruction::Select);
         b.ins(&Instruction::LocalSet(at));
-        self.trap_row(b, vyrn_frontend::trap::Rule::ArrayIndex, Some(at));
+        self.check_trap(b, row, Some(at));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -6360,6 +6406,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         slot: u32,
         aty: &Type,
+        row: Option<Check>,
         index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
         line: usize,
     ) -> Result<Type, String> {
@@ -6375,7 +6422,9 @@ impl<'p> Fn_<'_, 'p> {
         index(self, m, b)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
-        self.bounds_check(b, &w, idx, false);
+        if let Some(row) = row {
+            self.bounds_check(b, &w, idx, &row);
+        }
         let elem = w.elem.clone();
         // Take the removed element before the last one overwrites it; they can be one address.
         let r = self.cx.repr(&elem, line)?;
@@ -7283,7 +7332,7 @@ impl<'p> Fn_<'_, 'p> {
     /// a release exists; only a row says one runs here. A construct that took its scrutinee
     /// has no row, so it frees the boxes its binders came out of (`releaseacrossexit`'s
     /// `overIfLet`).
-    fn releases_whole(&self, key: usize) -> bool {
+    fn releases_whole(&self, key: NodeId) -> bool {
         self.placed
             .values()
             .any(|rows| rows.iter().any(|(binding, _)| *binding == key))
@@ -8134,6 +8183,7 @@ impl<'p> Fn_<'_, 'p> {
             Option<&Type>,
         ) -> Result<Type, String>,
         lane_at: &dyn Fn(usize, i64) -> Option<u8>,
+        span: Result<Option<Check>, String>,
         line: usize,
     ) -> Result<Type, String> {
         match name {
@@ -8251,19 +8301,22 @@ impl<'p> Fn_<'_, 'p> {
             | "@f64x2Store"
                 if argc == 2 + usize::from(name.ends_with("Store")) =>
             {
-                let (vec, span) = if name.starts_with("@i32x4") {
-                    (Type::I32x4, 4)
+                let span = span?;
+                let vec = if name.starts_with("@i32x4") {
+                    Type::I32x4
                 } else if name.starts_with("@f64x2") {
-                    (Type::F64x2, 2)
+                    Type::F64x2
                 } else {
-                    (Type::F32x4, 4)
+                    Type::F32x4
                 };
                 let aty = operand(self, m, b, 0, None)?;
                 let w = self.walk(b, &aty, line)?;
                 operand(self, m, b, 1, Some(&Type::Int))?;
                 let idx = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(idx));
-                self.bounds_check_span(b, &w, idx, span);
+                if let Some(row) = span {
+                    self.bounds_check_span(b, &w, idx, &row);
+                }
                 if name.ends_with("Load") {
                     self.elem_addr(b, &w, idx);
                     // `align: 0` is a log2 exponent: one byte. Nothing guarantees 16-byte
@@ -9323,6 +9376,9 @@ struct Walked {
     /// The place a stream's pull wrote its element to, by the pull's name,
     /// until the read at that name binds it ([`Spec::Pulls`]).
     pulled: Vec<Option<(Place, Type)>>,
+    /// The check rows walked so far, in row order, and whether a construct ran each
+    /// ([`core_check`]).
+    checks: Vec<(Check, bool)>,
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -9517,6 +9573,7 @@ impl<'p> Fn_<'_, 'p> {
             bufs: vec![None; core.names.len()],
             over: Vec::new(),
             pulled: vec![None; core.names.len()],
+            checks: Vec::new(),
         };
     }
 
@@ -9533,8 +9590,17 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         let mut w = std::mem::take(&mut self.core_w);
         let r = self.core_stmts(m, b, body, &mut w, &body.stmts);
+        let idle = w
+            .checks
+            .iter()
+            .find(|(_, ran)| !ran)
+            .map(|(c, _)| c.site.line);
         self.core_w = w;
-        r
+        r?;
+        match idle {
+            Some(line) => unsupported("a check row no construct ran", line),
+            None => Ok(()),
+        }
     }
 
     /// Lift each lambda literal a call row in `rows` targets, at its slot's type, so the screen
@@ -9542,23 +9608,21 @@ impl<'p> Fn_<'_, 'p> {
     /// screen.
     fn core_lift_targets(&mut self, m: &mut Module, rows: &[St]) {
         let mut lambdas = Vec::new();
-        for r in rows {
-            core_leaf_rows(r, &mut |x| {
-                let (St::Let(_, rhs) | St::Do { rhs, .. }) = x else {
-                    return;
-                };
-                if let Rhs::Call {
-                    targets,
-                    kind: Callee::Fn,
-                    ..
-                } = rhs
-                {
-                    lambdas.extend(targets.iter().filter_map(|t| match t {
-                        Target::Lambda(key, caps, slot) => Some((key, caps, slot)),
-                        _ => None,
-                    }));
-                }
-            });
+        for (x, _) in rows.iter().flat_map(St::rows) {
+            let (St::Let(_, rhs) | St::Do { rhs, .. }) = x else {
+                continue;
+            };
+            if let Rhs::Call {
+                targets,
+                kind: Callee::Fn,
+                ..
+            } = rhs
+            {
+                lambdas.extend(targets.iter().filter_map(|t| match t {
+                    Target::Lambda(key, caps, slot) => Some((key, caps, slot)),
+                    _ => None,
+                }));
+            }
         }
         for (key, caps, slot) in lambdas {
             let Type::Fn(ptys, ret) = slot else { continue };
@@ -9605,6 +9669,10 @@ impl<'p> Fn_<'_, 'p> {
         let mut due = Vec::new();
         let (mut last, mut mark): (Option<usize>, u32) = (None, b.mark());
         for (i, s) in ss.iter().enumerate() {
+            if let St::Check(c) = s {
+                w.checks.push((c.clone(), false));
+                continue;
+            }
             if let Some(j) = last {
                 core_row_done(b, w, &ss[j], mark);
                 self.core_give_back(b, w, &mut due, &ends[j]);
@@ -10002,7 +10070,7 @@ impl<'p> Fn_<'_, 'p> {
                     // stays on the operand stack. Every other name takes a local, in row order.
                     if info.binding.is_none()
                         && w.reads[*n as usize] == 1
-                        && self.core_first_read(body, ss.get(i + 1)) == Some(*n)
+                        && self.core_first_read(body, next_row(ss, i)) == Some(*n)
                     {
                         w.held = Some(*n);
                         continue;
@@ -10138,9 +10206,15 @@ impl<'p> Fn_<'_, 'p> {
                     cond,
                     then,
                     els,
-                    site: 0,
+                    site: NodeId::NONE,
                 } if then.is_empty()
-                    && matches!(els.as_slice(), [St::Break { site: 0, .. }])
+                    && matches!(
+                        els.as_slice(),
+                        [St::Break {
+                            site: NodeId::NONE,
+                            ..
+                        }]
+                    )
                     && !self.loops.is_empty() =>
                 {
                     self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
@@ -10271,7 +10345,7 @@ impl<'p> Fn_<'_, 'p> {
                 St::Row { name, holes, .. } => {
                     self.core_rows.push((*name, holes.clone()));
                     if !matches!(
-                        ss.get(i + 1),
+                        next_row(ss, i),
                         Some(St::Row { .. } | St::Return { value: Some(_), .. })
                     ) {
                         self.core_releases(m, b, body)?;
@@ -10288,6 +10362,8 @@ impl<'p> Fn_<'_, 'p> {
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
+                // Pushed to `w.checks` at the head of the loop.
+                St::Check(_) => {}
                 // An expression for its effect. What it leaves on the stack
                 // is dropped, or the enclosing block's type will not check.
                 St::Do { rhs, line, .. } if self.core_checks_made(body, rhs).is_some() => {
@@ -10346,7 +10422,7 @@ impl<'p> Fn_<'_, 'p> {
         w: &mut Walked,
         n: vyrn_lower::core::Name,
         l: u32,
-        site: usize,
+        site: NodeId,
         literal: bool,
     ) {
         let from = b.mark();
@@ -10680,6 +10756,15 @@ impl<'p> Fn_<'_, 'p> {
             }
             // A SIMD builtin's lane index is the literal the row carries.
             Some(Spec::Lanes) => {
+                let span = match args {
+                    [(Val::Name(x), _), (i, _), ..] => core_check(
+                        w,
+                        line,
+                        |g| matches!(g, Guard::Span(vyrn_lower::core::Place::Name(p), v, _) if p == x && v == i),
+                    )
+                    .map(|c| self.row(b, c)),
+                    _ => unsupported("a runtime check the core did not state", line),
+                };
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
                         let Some((v, _)) = args.get(i) else {
@@ -10693,7 +10778,7 @@ impl<'p> Fn_<'_, 'p> {
                         Ok(t)
                     };
                 let lane_at = |i: usize, lanes: i64| core_lane(args, i, lanes);
-                return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, line);
+                return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, span, line);
             }
             // A generator host import: `@codeSplice` takes its tag from the type the row put
             // on its operand.
@@ -10743,6 +10828,23 @@ impl<'p> Fn_<'_, 'p> {
             // Built in a slot of the call's own, which [`agg_landed`] copies into the
             // destination.
             Some(Spec::Builds(_)) => {
+                let range = match (callee, args) {
+                    ("bytes", [(s, _), (from, _), (to, _)]) => {
+                        let c = core_check(
+                            w,
+                            line,
+                            |g| matches!(g, Guard::Range(x, y, z) if (x, y, z) == (s, from, to)),
+                        )?;
+                        if c.verdict == Verdict::Proved {
+                            return Err(gap(
+                                "a proved `bytes` range: `bytesOf` checks inside",
+                                line,
+                            ));
+                        }
+                        self.row(b, c).map(|c| c.rule)
+                    }
+                    _ => None,
+                };
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
                         .get(i)
@@ -10751,7 +10853,7 @@ impl<'p> Fn_<'_, 'p> {
                         None => unsupported(&format!("`{callee}` with too few operands"), line),
                     };
                 return match (callee, args) {
-                    ("bytes", _) => self.bytes_of(m, b, args.len() == 3, &mut operand, line),
+                    ("bytes", _) => self.bytes_of(m, b, range, &mut operand, line),
                     ("stringFromBytes", _) => self.string_from_bytes(m, b, &mut operand, line),
                     ("@toArray", [(v, _)]) => {
                         let aty = self.core_ty(body, v, &Type::Int);
@@ -11028,10 +11130,12 @@ impl<'p> Fn_<'_, 'p> {
         match (callee, rest) {
             ("@pop", []) => self.pop_at(b, slot, aty, line),
             ("@swapRemove", [(i, _)]) => {
+                let row = core_check(w, line, |g| matches!(g, Guard::Index(_, v) if v == i))?;
+                let row = self.row(b, row);
                 let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
                     s.core_val(m, b, body, w, i, &Type::Int, line)
                 };
-                self.swap_remove_at(m, b, slot, aty, &mut index, line)
+                self.swap_remove_at(m, b, slot, aty, row, &mut index, line)
             }
             ("@remove", [(k, _)]) => {
                 let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
@@ -11109,10 +11213,18 @@ impl<'p> Fn_<'_, 'p> {
                         self.walk(b, &bty, line)?
                     }
                 };
+                let row = core_check(
+                    w,
+                    line,
+                    |g| matches!(g, Guard::Index(p, v) if p == &**base && v == i),
+                )?;
+                let row = self.row(b, row);
                 self.core_val(m, b, body, w, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
-                self.bounds_check(b, &walk, ix, walk.byte);
+                if let Some(row) = row {
+                    self.bounds_check(b, &walk, ix, &row);
+                }
                 self.elem_addr(b, &walk, ix);
                 let byte = Type::IntN {
                     bits: 8,
@@ -12415,7 +12527,27 @@ impl<'p> Fn_<'_, 'p> {
                     self.coerce(m, b, None, &lt, &opty, line)?;
                 }
                 self.core_val(m, b, body, w, r, &opty, line)?;
-                self.bin_ins(b, *o, &opty, &lt, line)
+                let mut rows = [None, None];
+                if matches!(o, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr)
+                    && Num::of(&opty).is_some()
+                {
+                    let Some(k) = w.checks.iter().rposition(|(c, _)| {
+                        matches!(&c.guard, Guard::NonZero(d) | Guard::Shift(d, _) if d == r)
+                    }) else {
+                        return unsupported("a runtime check the core did not state", line);
+                    };
+                    // A signed quotient's row follows its divisor's.
+                    let quotient = |c: &Check| matches!(&c.guard, Guard::NoOverflow(x, d, _) if x == l && d == r);
+                    for (j, row) in [k, k + 1].into_iter().zip(&mut rows) {
+                        if let Some((c, ran)) =
+                            w.checks.get_mut(j).filter(|(c, _)| j == k || quotient(c))
+                        {
+                            *ran = true;
+                            *row = self.row(b, c.clone());
+                        }
+                    }
+                }
+                self.bin_ins(b, *o, &opty, &lt, rows, line)
             }
             _ => unsupported("an operator of this arity", line),
         }
@@ -12519,13 +12651,10 @@ impl<'p> Fn_<'_, 'p> {
         // A result checked where it is returned is refused, because the row states no check;
         // a value of the result's own validated type was checked where it was made.
         if matches!(self.ret, Repr::Agg(_)) && self.checks(&self.ret_ty) {
-            let mut crosses = false;
-            for st in &body.stmts {
-                core_leaf_rows(st, &mut |x| {
-                    crosses |= matches!(x, St::Return { value: Some(v), .. }
-                        if !matches!(v, Val::Name(r) if body.names[*r as usize].ty == self.ret_ty));
-                });
-            }
+            let crosses = body.stmts.iter().flat_map(St::rows).any(|(x, _)| {
+                matches!(x, St::Return { value: Some(v), .. }
+                    if !matches!(v, Val::Name(r) if body.names[*r as usize].ty == self.ret_ty))
+            });
             if crosses {
                 return false;
             }
@@ -12597,11 +12726,11 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The annotation of each annotated `let` `walk` reaches, keyed as the plan keys a binding.
-    fn annotations(&self, walk: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<(usize, Type)> {
+    fn annotations(&self, walk: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<(NodeId, Type)> {
         let mut out = Vec::new();
         walk(&mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = self.cx.plan.key_of(s as *const Stmt as usize);
+                let at = s.id();
                 out.push((at, t.clone()));
             }
         });
@@ -12612,7 +12741,7 @@ impl<'p> Fn_<'_, 'p> {
     /// as is ([`Fn_::core_as_is`]). The row then does not state the annotation's layout.
     fn annotated_apart(
         &self,
-        annotated: &[(usize, Type)],
+        annotated: &[(NodeId, Type)],
         info: &vyrn_lower::core::NameInfo,
     ) -> bool {
         info.binding.is_some_and(|at| {
@@ -12628,7 +12757,7 @@ impl<'p> Fn_<'_, 'p> {
         let mut found = false;
         each_block(blk, &mut |_| {}, &mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = s as *const Stmt as usize;
+                let at = s.id();
                 found |= self.checks(t)
                     && !body
                         .names
@@ -12837,7 +12966,7 @@ impl<'p> Fn_<'_, 'p> {
                 let ty = &body.names[*n as usize].ty;
                 self.core_framed(ty) || matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
             }
-            St::Trap => true,
+            St::Trap | St::Check(_) => true,
         })
     }
 
@@ -13065,16 +13194,7 @@ impl<'p> Fn_<'_, 'p> {
         (1..ss.len()).any(|i| {
             matches!(ss[i], St::Store { .. })
                 && self.core_rebuilt(body, ss, i).is_some_and(|(r, _)| r == n)
-        }) || ss.iter().any(|s| match s {
-            St::If { then, els, .. } => {
-                self.core_hands_back(body, then, n) || self.core_hands_back(body, els, n)
-            }
-            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-                self.core_hands_back(body, inner, n)
-            }
-            St::Switch { arms, .. } => arms.iter().any(|a| self.core_hands_back(body, &a.body, n)),
-            _ => false,
-        })
+        }) || (ss.iter().flat_map(St::lists)).any(|l| self.core_hands_back(body, l, n))
     }
 
     /// Whether a value of `from` is one of `to` with no instruction ([`crate::coerce_plan`]):
@@ -13104,7 +13224,8 @@ impl<'p> Fn_<'_, 'p> {
             && reads[*n as usize] == 1
             && self.core_as_is(&info.ty, &self.ret_ty)
             && matches!(ss[i + 1..].iter().find(|s| {
-                    !matches!(s, St::Row { .. }) && !matches!(s, St::Drop(d, ..) if d != n)
+                    !matches!(s, St::Row { .. } | St::Check(_))
+                        && !matches!(s, St::Drop(d, ..) if d != n)
                 }),
                 Some(St::Return { value: Some(Val::Name(r)), .. }) if r == n)
     }
@@ -13397,7 +13518,7 @@ fn core_moves_on(body: &vyrn_lower::core::Body, n: vyrn_lower::core::Name) -> bo
         else {
             return;
         };
-        found = match ss.get(i + 1) {
+        found = match next_row(ss, i) {
             Some(St::Store {
                 place,
                 value: Val::Name(v),
@@ -13435,38 +13556,16 @@ fn value_scalar(t: &Type) -> Option<&'static str> {
 
 /// Every `let` a statement's rows bind, itself and everything under it.
 fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
-    match s {
-        St::Let(n, rhs) => out.push((*n, rhs)),
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_lets(s, out));
-            els.iter().for_each(|s| core_lets(s, out));
-        }
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_lets(s, out));
-        }
-        St::Switch { arms, .. } => {
-            for a in arms {
-                a.body.iter().for_each(|s| core_lets(s, out));
-            }
-        }
-        _ => {}
-    }
+    out.extend(s.rows().filter_map(|(r, _)| match r {
+        St::Let(n, rhs) => Some((*n, rhs)),
+        _ => None,
+    }));
 }
 
 /// `ss` and every list of rows inside it, each before the lists inside it.
 fn each_list(ss: &[St], f: &mut dyn FnMut(&[St])) {
     f(ss);
-    for s in ss {
-        match s {
-            St::If { then, els, .. } => {
-                each_list(then, f);
-                each_list(els, f);
-            }
-            St::Loop { body: inner, .. } | St::Block { body: inner, .. } => each_list(inner, f),
-            St::Switch { arms, .. } => arms.iter().for_each(|a| each_list(&a.body, f)),
-            _ => {}
-        }
-    }
+    ss.iter().flat_map(St::lists).for_each(|l| each_list(l, f));
 }
 
 /// The parts of the header `base` names, when it is a borrow a loop walks.
@@ -13514,29 +13613,19 @@ fn core_written(
             }
         }
     };
-    match s {
-        St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
-        St::Store { place, .. } => out.extend(
-            vyrn_lower::kernel::root_of(place)
-                .filter(|(n, path)| {
-                    !(vyrn_lower::kernel::in_element(path)
-                        && matches!(names[*n as usize].ty, Type::Array(_)))
-                })
-                .map(|(n, _)| (n, None)),
-        ),
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_written(names, s, out));
-            els.iter().for_each(|s| core_written(names, s, out));
+    for (s, _) in s.rows() {
+        match s {
+            St::Let(_, r) | St::Do { rhs: r, .. } => args(r, out),
+            St::Store { place, .. } => out.extend(
+                vyrn_lower::kernel::root_of(place)
+                    .filter(|(n, path)| {
+                        !(vyrn_lower::kernel::in_element(path)
+                            && matches!(names[*n as usize].ty, Type::Array(_)))
+                    })
+                    .map(|(n, _)| (n, None)),
+            ),
+            _ => {}
         }
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_written(names, s, out));
-        }
-        St::Switch { arms, .. } => {
-            for a in arms {
-                a.body.iter().for_each(|s| core_written(names, s, out));
-            }
-        }
-        _ => {}
     }
 }
 
@@ -13548,10 +13637,7 @@ fn core_after(ss: &[St], n: vyrn_lower::core::Name) -> Option<Vec<&St>> {
     ss.iter().enumerate().find_map(|(i, s)| {
         let mut after = match s {
             St::Let(b, _) if *b == n => Vec::new(),
-            St::Loop { body, .. } | St::Block { body, .. } => core_after(body, n)?,
-            St::If { then, els, .. } => core_after(then, n).or_else(|| core_after(els, n))?,
-            St::Switch { arms, .. } => arms.iter().find_map(|a| core_after(&a.body, n))?,
-            _ => return None,
+            s => s.lists().find_map(|l| core_after(l, n))?,
         };
         after.extend(&ss[i + 1..]);
         Some(after)
@@ -13570,14 +13656,7 @@ fn core_extent<'r>(ss: &'r [St], n: vyrn_lower::core::Name, occurs: &[u32]) -> O
         let end = ends.iter().position(|e| e.contains(&n))?;
         return Some(&ss[at..=end]);
     }
-    ss.iter().find_map(|s| match s {
-        St::If { then, els, .. } => {
-            core_extent(then, n, occurs).or_else(|| core_extent(els, n, occurs))
-        }
-        St::Loop { body, .. } | St::Block { body, .. } => core_extent(body, n, occurs),
-        St::Switch { arms, .. } => arms.iter().find_map(|a| core_extent(&a.body, n, occurs)),
-        _ => None,
-    })
+    (ss.iter().flat_map(St::lists)).find_map(|l| core_extent(l, n, occurs))
 }
 
 /// The signature of one instance of the generic `f`: its parameters and its
@@ -13586,6 +13665,7 @@ fn instance_shell(f: &Function, subst: &HashMap<String, Type>) -> Function {
     let mut sf = shell_of(f);
     for p in &f.params {
         sf.params.push(Param {
+            id: Id::NEW,
             name: p.name.clone(),
             capability: p.capability,
             ty: ftypes::substitute(&p.ty, subst),
@@ -13628,6 +13708,7 @@ fn ho_shell(
     for p in &f.params {
         if !matches!(p.ty, Type::Fn(..)) {
             sf.params.push(Param {
+                id: Id::NEW,
                 name: p.name.clone(),
                 capability: p.capability,
                 ty: ftypes::substitute(&p.ty, subst),
@@ -13644,6 +13725,7 @@ fn ho_shell(
         for t in &target.sig.params[..target.ncaps] {
             let n = format!("@cap{}", sf.params.len());
             sf.params.push(Param {
+                id: Id::NEW,
                 name: n.clone(),
                 capability: match p.capability {
                     Capability::Consume if value => Capability::Consume,
@@ -13671,24 +13753,14 @@ fn ho_shell(
 /// `ons`. [`Fn_::core_switch`] binds a payload binder on entering the arm and reads a
 /// scrutinee as an address, so the screen's place clause asks about neither.
 fn core_switched(s: &St, ons: bool, out: &mut Vec<vyrn_lower::core::Name>) {
-    match s {
-        St::Switch { on, arms, .. } => {
-            if let (Val::Name(n), true) = (on, ons) {
-                out.push(*n);
-            }
-            for a in arms {
-                out.extend(a.binds.iter().copied());
-                a.body.iter().for_each(|s| core_switched(s, ons, out));
-            }
+    for (r, _) in s.rows() {
+        let St::Switch { on, arms, .. } = r else {
+            continue;
+        };
+        if let (Val::Name(n), true) = (on, ons) {
+            out.push(*n);
         }
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| core_switched(s, ons, out));
-            els.iter().for_each(|s| core_switched(s, ons, out));
-        }
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_switched(s, ons, out));
-        }
-        _ => {}
+        arms.iter().for_each(|a| out.extend(&a.binds));
     }
 }
 
@@ -13707,39 +13779,14 @@ fn around(rel: Rel, holes: &[String]) -> Rel {
     }
 }
 
-/// Whether a run leaves the FUNCTION anywhere under it.
-fn core_returns(s: &St) -> bool {
-    let mut out = false;
-    core_leaf_rows(s, &mut |r| out |= matches!(r, St::Return { .. }));
-    out
-}
-
-/// Every row under `s` that holds no rows of its own, `s` itself included,
-/// in row order.
-fn core_leaf_rows<'r>(s: &'r St, f: &mut dyn FnMut(&'r St)) {
-    match s {
-        St::If { then, els, .. } => then.iter().chain(els).for_each(|s| core_leaf_rows(s, f)),
-        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
-            inner.iter().for_each(|s| core_leaf_rows(s, f))
-        }
-        St::Switch { arms, .. } => arms
-            .iter()
-            .flat_map(|a| &a.body)
-            .for_each(|s| core_leaf_rows(s, f)),
-        _ => f(s),
-    }
-}
-
 /// Whether a run leaves the list it stands in anywhere under it: a `return`,
 /// or a `break` or a `continue` outside a loop of its own.
 fn core_leaves(s: &St) -> bool {
-    match s {
-        St::Break { .. } | St::Continue { .. } => true,
-        St::If { then, els, .. } => then.iter().chain(els).any(core_leaves),
-        St::Block { body: inner, .. } => inner.iter().any(core_leaves),
-        St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_leaves)),
-        s => core_returns(s),
-    }
+    s.rows().any(|(r, depth)| match r {
+        St::Return { .. } => true,
+        St::Break { .. } | St::Continue { .. } => depth == 0,
+        _ => false,
+    })
 }
 
 /// Pushes the `i64` word at `off` past the address in local `a` as an `i32`: a length, a
@@ -13765,9 +13812,31 @@ fn payload_at(b: &mut Frame, addr: u32, off: u32, inline: bool) {
 }
 
 /// How many releases lead `ss`: the argument temporaries the builder releases
-/// between a rebuild and its store ([`Fn_::core_rebuilt`]).
+/// between a rebuild and its store ([`Fn_::core_rebuilt`]). A check row emits
+/// nothing where it stands, so it counts with them.
 fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
-    ss.take_while(|s| matches!(s, St::Drop(..))).count()
+    ss.take_while(|s| matches!(s, St::Drop(..) | St::Check(_)))
+        .count()
+}
+
+/// The row after `ss[i]` that emits where it stands: a check row runs inside
+/// the row it guards.
+fn next_row(ss: &[St], i: usize) -> Option<&St> {
+    ss[i + 1..].iter().find(|s| !matches!(s, St::Check(_)))
+}
+
+/// The latest check row walked whose guard `hit` accepts: the row a check the
+/// emitter is about to run stands for ([`Fn_::row`] says whether it runs). A row
+/// stands before the row it guards, and a store that puts a taken element back
+/// follows the take's row.
+fn core_check(w: &mut Walked, line: usize, hit: impl Fn(&Guard) -> bool) -> Result<Check, String> {
+    match w.checks.iter_mut().rev().find(|(c, _)| hit(&c.guard)) {
+        Some((c, ran)) => {
+            *ran = true;
+            Ok(c.clone())
+        }
+        None => unsupported("a runtime check the core did not state", line),
+    }
 }
 
 fn core_scalar(t: &Type) -> bool {
@@ -13867,12 +13936,11 @@ mod tests {
 
     fn cx() -> Cx<'static> {
         Cx {
-            plan: Default::default(),
             facts: None,
             types: HashMap::new(),
             lambdas: HashMap::new(),
-            kept: RefCell::new(Vec::new()),
             layouts: RefCell::default(),
+            oracle: None,
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,

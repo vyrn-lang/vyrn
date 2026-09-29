@@ -13,7 +13,7 @@ description = "Runs `gen fn` generators as compiled wasm in an embedded wasmtime
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-codegen = { path = "../vyrn-codegen" }
-wasmtime = { version = "47", default-features = false, features = [
+wasmtime = { version = "47", optional = true, default-features = false, features = [
     "cranelift",
     "runtime",
     "std",
@@ -23,6 +23,13 @@ wasmtime = { version = "47", default-features = false, features = [
     # cold open's five artifacts against 250 ms with it on.
     "parallel-compilation",
 ] }
+
+# `host` is the embedded wasmtime engine. Without it the crate is the half a
+# host without wasmtime reuses: the wrapper program, the decoders and the atom
+# encoding, driven by `run_pure` (the playground's engine).
+[features]
+default = ["host"]
+host = ["dep:wasmtime"]
 
 [lib]
 name = "vyrn_genwasm"

@@ -1,0 +1,13 @@
+export gen fn names(t: TypeArg) -> String {
+    return ""
+}
+
+fn one() -> Int64 {
+    return 1
+}
+
+fn main() -> Int64 {
+    let f = one
+    print(derive(names, f))
+    return 0
+}

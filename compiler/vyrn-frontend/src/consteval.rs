@@ -47,13 +47,13 @@ impl ConstVal {
 /// an unbound variable, a division by zero.
 pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
     match expr {
-        Expr::Int(n) => Some(ConstVal::Int(*n)),
+        Expr::Int(n, _) => Some(ConstVal::Int(*n)),
         // A byte literal folds to its integer, so a predicate can inspect
         // bytes (`value[0] == 'H'`).
-        Expr::Byte(b) => Some(ConstVal::Int(*b as i64)),
-        Expr::Bool(b) => Some(ConstVal::Bool(*b)),
-        Expr::Str(s) => Some(ConstVal::Str(s.clone())),
-        Expr::Float(f) => Some(ConstVal::Float(*f)),
+        Expr::Byte(b, _) => Some(ConstVal::Int(*b as i64)),
+        Expr::Bool(b, _) => Some(ConstVal::Bool(*b)),
+        Expr::Str(s, _) => Some(ConstVal::Str(s.clone())),
+        Expr::Float(f, _) => Some(ConstVal::Float(*f)),
         Expr::Var { name, .. } => env.get(name).cloned(),
         Expr::Unary { op, expr, .. } => {
             let v = eval(expr, env)?;

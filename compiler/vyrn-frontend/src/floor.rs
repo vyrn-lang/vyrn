@@ -377,6 +377,16 @@ pub fn forget() {
     PENDING.with(|p| *p.borrow_mut() = None);
 }
 
+/// Runs `f` with this load's held decision set aside, so a nested check (a
+/// derived-code generator's program, `gen::derive`) neither answers it nor
+/// drops it.
+pub fn aside<R>(f: impl FnOnce() -> R) -> R {
+    let held = PENDING.with(|p| p.borrow_mut().take());
+    let r = f();
+    PENDING.with(|p| *p.borrow_mut() = held);
+    r
+}
+
 /// Returns the floor's objection to a checked program whose objection was
 /// deferred; `None` for every load that decided for itself.
 ///

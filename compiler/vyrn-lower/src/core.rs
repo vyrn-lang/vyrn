@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
-    ArmBody, BinOp, Binder, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern,
-    Program, Stmt, Type, TypeDecl, UnOp,
+    ArmBody, BinOp, Binder, Block, Capability, Expr, Function, Id, LambdaBody, MatchArm, NodeId,
+    Pattern, Program, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::Owned;
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
@@ -54,20 +54,20 @@ pub struct NameInfo {
     pub line: usize,
     /// The node the plan keys this binding by (a `Stmt::Let`, a parameter).
     /// `None` for a temporary this pass minted.
-    pub binding: Option<usize>,
+    pub binding: Option<NodeId>,
     /// For the unnamed receiver of a field read (`parse(q).sels`): the
     /// `Expr::Field` node that keys the plan's receiver-free row. The placer
     /// frees the receiver right after the read, minus the field it took.
-    pub receiver: Option<usize>,
+    pub receiver: Option<NodeId>,
     /// For the unnamed receiver of a heap field or element read the consumer
     /// borrows (`f(x).rhs.startsWith("{")`): the producing node, which keys
     /// the argument-temporary drop. Set only where the consumer is a call or
     /// an operator, the two sites the compiled backends drain temporaries at.
-    pub producer: Option<usize>,
+    pub producer: Option<NodeId>,
     /// For a call-argument temporary the caller releases after the call: the
     /// argument's node, the key of the plan's `arg_drops` row. The release is
     /// the `St::Drop` the binding after the call queues.
-    pub arg_drop: Option<usize>,
+    pub arg_drop: Option<NodeId>,
     /// The holes the plan's release walk skips for this binding, spelled
     /// `.f.g`. A `Drop` of the name walks around exactly these; a placed row
     /// may carry its own.
@@ -270,10 +270,10 @@ impl BorrowKind {
 pub enum Site {
     #[default]
     None,
-    Node(usize),
+    Node(NodeId),
     /// The join whose edge owes this release, and the edge: 0/1 for an
     /// `if`'s then/else, the arm's source index for a `match`.
-    Edge(usize, u32),
+    Edge(NodeId, u32),
 }
 
 /// The value of a literal. The width is not here: an integer literal's type
@@ -313,11 +313,11 @@ pub enum Opaque {
 /// exhaustive on purpose, and asks here for the answer.
 fn lit_of(e: &Expr) -> Option<Lit> {
     Some(match e {
-        Expr::Int(v) => Lit::Int(*v),
-        Expr::Byte(v) => Lit::Byte(*v),
-        Expr::Float(v) => Lit::Float(*v),
-        Expr::Bool(v) => Lit::Bool(*v),
-        Expr::Str(s) => Lit::Str(s.clone()),
+        Expr::Int(v, _) => Lit::Int(*v),
+        Expr::Byte(v, _) => Lit::Byte(*v),
+        Expr::Float(v, _) => Lit::Float(*v),
+        Expr::Bool(v, _) => Lit::Bool(*v),
+        Expr::Str(s, _) => Lit::Str(s.clone()),
         _ => return None,
     })
 }
@@ -601,7 +601,7 @@ pub enum St {
         name: Name,
         holes: Vec<String>,
         exit: Exit,
-        site: usize,
+        site: NodeId,
     },
     If {
         cond: Val,
@@ -609,18 +609,18 @@ pub enum St {
         els: Vec<St>,
         /// The `if` statement, the plan's key for its edge releases; 0 for
         /// an `if` this pass made up.
-        site: usize,
+        site: NodeId,
     },
     /// A loop, and the `while` or `for` it came from; `0` for a loop this pass
     /// made up. A `while`'s exit is a two-way branch at the head.
     Loop {
         body: Vec<St>,
-        site: usize,
+        site: NodeId,
     },
     /// A source block: its own scope, and the site the plan keys its
     /// fall-through release rows by.
     Block {
-        site: usize,
+        site: NodeId,
         body: Vec<St>,
         /// `region { .. }`: an arena scope whose values the exit
         /// frees together. The kernel judges it as a plain block; an emitter
@@ -630,17 +630,17 @@ pub enum St {
     /// `site` is the statement's node and `line` its line; both 0 for a break
     /// this pass made up.
     Break {
-        site: usize,
+        site: NodeId,
         line: usize,
     },
     Continue {
-        site: usize,
+        site: NodeId,
         line: usize,
     },
     Return {
         value: Option<Val>,
         /// The `return` statement, or the `?` expression when `is_try`.
-        site: usize,
+        site: NodeId,
         is_try: bool,
         line: usize,
     },
@@ -664,7 +664,7 @@ pub enum St {
         /// The node the plan keys this switch and its [`Arm`]s by: the `if
         /// let` statement, or the `match` or `?` expression. `0` for a switch
         /// this pass made up.
-        site: usize,
+        site: NodeId,
         line: usize,
     },
     /// An expression for its effect, its line, and the statement it came
@@ -673,10 +673,14 @@ pub enum St {
     Do {
         rhs: Rhs,
         line: usize,
-        site: usize,
+        site: NodeId,
     },
     /// A refusal or a `panic`: the path ends here and owes nothing.
     Trap,
+    /// A runtime check of the row after it ([`crate::check`]). Only
+    /// [`crate::check::state`] writes one, into the bodies an emitter reads;
+    /// the kernel never judges one.
+    Check(crate::check::Check),
 }
 
 #[derive(Debug, Clone)]
@@ -692,7 +696,7 @@ pub struct Arm {
     pub test: Test,
     /// The `match`, `if let` or `?` this arm belongs to, and which arm: the
     /// plan's key for an arm payload free and an edge release.
-    pub site: usize,
+    pub site: NodeId,
     pub index: u32,
 }
 
@@ -747,6 +751,202 @@ impl Test {
     }
 }
 
+/// What a row does with a value it names ([`St::operands`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Use {
+    /// Reads the value and leaves it where it is.
+    Read,
+    /// Hands the value on: a `consume` argument, a part of a literal, a
+    /// stored or returned value.
+    Hand,
+    /// The key a store writes at, which the container keeps.
+    Key,
+    /// The name a place is rooted at.
+    Root,
+    /// An index or a key that selects a place.
+    Index,
+    Bind,
+    Release,
+}
+
+impl St {
+    /// The lists of rows this row holds, in program order: an `if`'s then
+    /// and else, a loop's or a block's body, each arm's body.
+    pub fn lists(&self) -> impl Iterator<Item = &Vec<St>> {
+        let (a, b, arms): (Option<&Vec<St>>, Option<&Vec<St>>, &[Arm]) = match self {
+            St::If { then, els, .. } => (Some(then), Some(els), &[]),
+            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &[]),
+            St::Switch { arms, .. } => (None, None, arms),
+            St::Let(..)
+            | St::Store { .. }
+            | St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. }
+            | St::Do { .. }
+            | St::Trap
+            | St::Check(_) => (None, None, &[]),
+        };
+        a.into_iter().chain(b).chain(arms.iter().map(|a| &a.body))
+    }
+
+    /// [`St::lists`], to write to.
+    pub fn lists_mut(&mut self) -> impl Iterator<Item = &mut Vec<St>> {
+        let (a, b, arms): (Option<&mut Vec<St>>, Option<&mut Vec<St>>, &mut [Arm]) = match self {
+            St::If { then, els, .. } => (Some(then), Some(els), &mut []),
+            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &mut []),
+            St::Switch { arms, .. } => (None, None, arms),
+            St::Let(..)
+            | St::Store { .. }
+            | St::Drop(..)
+            | St::Row { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Return { .. }
+            | St::Do { .. }
+            | St::Trap
+            | St::Check(_) => (None, None, &mut []),
+        };
+        a.into_iter()
+            .chain(b)
+            .chain(arms.iter_mut().map(|a| &mut a.body))
+    }
+
+    /// This row and every row under it, as [`rows`] walks them.
+    pub fn rows(&self) -> Rows<'_> {
+        rows(std::slice::from_ref(self))
+    }
+
+    /// Every value this row names, in the order it evaluates them, with what
+    /// it does with each. The rows it holds name their own, and an arm's
+    /// binders are the arm's ([`Arm::binds`]).
+    pub fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            St::Let(n, rhs) => {
+                rhs.operands(f);
+                f(&Val::Name(*n), Use::Bind);
+            }
+            St::Do { rhs, .. } => rhs.operands(f),
+            St::Store { place, value, .. } => {
+                place.stored(f);
+                f(value, Use::Hand);
+            }
+            St::Drop(n, ..) | St::Row { name: n, .. } => f(&Val::Name(*n), Use::Release),
+            St::If { cond, .. } => f(cond, Use::Read),
+            St::Switch { on, arms, .. } => {
+                for n in arms.iter().filter_map(|a| a.test.reads()) {
+                    f(&Val::Name(n), Use::Read);
+                }
+                f(on, Use::Read);
+            }
+            St::Return { value: Some(v), .. } => f(v, Use::Hand),
+            St::Return { value: None, .. }
+            | St::Loop { .. }
+            | St::Block { .. }
+            | St::Break { .. }
+            | St::Continue { .. }
+            | St::Trap => {}
+            // A check reads what the row it guards reads, so no walker counts
+            // its guard as a second read.
+            St::Check(_) => {}
+        }
+    }
+}
+
+impl Rhs {
+    fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Rhs::Val(v) => f(v, Use::Read),
+            Rhs::Read(p) | Rhs::Take(p) => p.operands(f),
+            Rhs::Call { args, kind, .. } => {
+                if let Some(n) = kind.value() {
+                    f(&Val::Name(n), Use::Read);
+                }
+                for (a, c) in args {
+                    match a {
+                        Arg::Place(p) => p.operands(f),
+                        Arg::Val(v) if *c == Capability::Consume => f(v, Use::Hand),
+                        Arg::Val(v) => f(v, Use::Read),
+                    }
+                }
+            }
+            Rhs::Prim(_, vs, _) => vs.iter().for_each(|v| f(v, Use::Read)),
+            Rhs::Make(_, vs) => vs.iter().for_each(|v| f(v, Use::Hand)),
+        }
+    }
+}
+
+impl Place {
+    fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Place::Name(n) => f(&Val::Name(*n), Use::Root),
+            Place::Global(_) => {}
+            Place::Field(b, _) => b.operands(f),
+            Place::Elem(b, v) | Place::Key(b, v) => {
+                b.operands(f);
+                f(v, Use::Index);
+            }
+        }
+    }
+
+    /// [`Place::operands`] of a place a store writes: the key it writes at,
+    /// below any fields and elements, is [`Use::Key`].
+    fn stored(&self, f: &mut dyn FnMut(&Val, Use)) {
+        match self {
+            Place::Key(b, v) => {
+                b.operands(f);
+                f(v, Use::Key);
+            }
+            Place::Field(b, _) => b.stored(f),
+            Place::Elem(b, v) => {
+                b.stored(f);
+                f(v, Use::Index);
+            }
+            Place::Name(_) | Place::Global(_) => self.operands(f),
+        }
+    }
+}
+
+/// Every row of `ss` and every row under it, in program order, each before
+/// the rows it holds, with the number of loops between the row and `ss`.
+pub fn rows(ss: &[St]) -> Rows<'_> {
+    Rows(vec![(ss.iter(), 0)])
+}
+
+/// The iterator [`rows`] returns: a stack of the lists still being walked,
+/// the innermost last, each with its loop depth.
+pub struct Rows<'a>(Vec<(std::slice::Iter<'a, St>, u32)>);
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = (&'a St, u32);
+
+    fn next(&mut self) -> Option<(&'a St, u32)> {
+        loop {
+            let (list, depth) = self.0.last_mut()?;
+            let depth = *depth;
+            let Some(s) = list.next() else {
+                self.0.pop();
+                continue;
+            };
+            let inner = depth + u32::from(matches!(s, St::Loop { .. }));
+            let at = self.0.len();
+            self.0.extend(s.lists().map(|l| (l.iter(), inner)));
+            self.0[at..].reverse();
+            return Some((s, depth));
+        }
+    }
+}
+
+/// Calls `f` on every row of `ss` and every row under it, in program order,
+/// each before the rows it holds.
+pub fn each_row_mut(ss: &mut [St], f: &mut dyn FnMut(&mut St)) {
+    for s in ss {
+        f(s);
+        s.lists_mut().for_each(|l| each_row_mut(l, f));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
@@ -767,12 +967,12 @@ pub struct Body {
     /// Every construct that may take the value it was handed: its node, the
     /// value's name here, and its shape. [`last_owner`] decides whether it
     /// does, and the second build acts on that.
-    pub(crate) cands: Vec<(usize, Name, Cand)>,
+    pub(crate) cands: Vec<(NodeId, Name, Cand)>,
     /// The `for` statements whose container release frees the buffer alone,
     /// keyed by the loop's node: every element left through the loop
     /// variable ([`Cand::Elem`]), so a deep walk would free values somebody
     /// else owns. The buffer is field 0 of the growable array's triple.
-    pub(crate) loop_buffers: Vec<usize>,
+    pub(crate) loop_buffers: Vec<NodeId>,
     /// A `drop` whose name no binding in scope answers: the name and the
     /// line. The core has no row for it; [`crate::typed::drops`] refuses it.
     pub unbound_drops: Vec<(String, usize)>,
@@ -886,6 +1086,31 @@ impl Body {
             Place::Elem(b, i) => format!("{}[{}]", self.place(b), self.val(i)),
             Place::Key(b, k) => format!("{}[key {}]", self.place(b), self.val(k)),
         }
+    }
+
+    fn check(&self, c: &crate::check::Check) -> String {
+        use crate::check::Guard as G;
+        let what = match &c.guard {
+            G::Index(p, i) => format!("{}[{}]", self.place(p), self.val(i)),
+            G::Span(p, i, n) => format!("{}[{} +{n}]", self.place(p), self.val(i)),
+            G::Range(s, a, b) => format!("{}[{}..{}]", self.val(s), self.val(a), self.val(b)),
+            G::NonZero(d) => format!("{} != 0", self.val(d)),
+            G::NoOverflow(n, d, bits) => {
+                format!("({}, {}) != (min{bits}, -1)", self.val(n), self.val(d))
+            }
+            G::Shift(k, bits) => format!("{} in 0..{bits}", self.val(k)),
+        };
+        let at = c.site;
+        let word = match c.verdict {
+            crate::check::Verdict::Kept => "check",
+            crate::check::Verdict::Proved => "proved",
+        };
+        format!(
+            "{word} {} {what}  (line {} #{})",
+            c.rule.census(),
+            at.line,
+            at.ordinal
+        )
     }
 
     fn rhs(&self, r: &Rhs) -> String {
@@ -1018,6 +1243,7 @@ impl Body {
                 }
                 St::Do { rhs: r, .. } => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
                 St::Trap => out.push_str(&format!("{pad}trap\n")),
+                St::Check(c) => out.push_str(&format!("{pad}{}\n", self.check(c))),
             }
         }
     }
@@ -1113,7 +1339,7 @@ fn borrow_root(sv: &Val, owns: bool) -> Option<Name> {
 /// A release row is not a read. The rows are derived from the take; letting
 /// a row decide the take made the answer depend on rows the placer had just
 /// added, and the second build then seeded a different take.
-fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
+fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
     let mut out = std::collections::HashSet::new();
     for f in top.frames() {
         if f.cands.is_empty() {
@@ -1126,7 +1352,6 @@ fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
             handed: vec![false; f.names.len()],
             switches: Vec::new(),
             order: 0,
-            depth: 0,
         };
         w.stmts(&f.stmts, 0);
         for p in &f.params {
@@ -1171,150 +1396,55 @@ struct Reads {
     bound: Vec<usize>,
     /// Whether the name was handed on rather than only read ([`Cand::Elem`]).
     handed: Vec<bool>,
-    switches: Vec<(usize, Name, usize, usize)>,
+    switches: Vec<(NodeId, Name, usize, usize)>,
     order: usize,
-    depth: usize,
 }
 
 impl Reads {
-    /// A value in a position that transfers it: a declared `consume`
-    /// argument, a part of a literal, a stored value, a map key a store
-    /// writes at, a returned value.
-    fn hand(&mut self, v: &Val) {
-        if let Val::Name(n) = v {
-            self.handed[*n as usize] = true;
-        }
-        self.val(v);
-    }
-
-    /// The place of a store: the key it writes at is handed to the container.
-    fn store_place(&mut self, p: &Place) {
-        match p {
-            Place::Key(b, v) => {
-                self.place(b);
-                self.hand(v);
+    fn stmts(&mut self, stmts: &[St], depth: usize) {
+        for st in stmts {
+            // A row is the plan's, not the core's: see [`last_owner`].
+            if matches!(st, St::Row { .. }) {
+                continue;
             }
-            Place::Field(b, _) | Place::Elem(b, _) => self.store_place(b),
-            _ => self.place(p),
-        }
-        if let Place::Elem(_, v) = p {
-            self.val(v);
-        }
-    }
-
-    fn val(&mut self, v: &Val) {
-        self.order += 1;
-        if let Val::Name(n) = v {
-            self.last[*n as usize] = self.order;
-            self.deep[*n as usize] = self.depth;
-        }
-    }
-
-    fn place(&mut self, p: &Place) {
-        match p {
-            Place::Name(n) => {
+            st.operands(&mut |v, u| {
+                let Val::Name(n) = *v else { return };
+                let n = n as usize;
+                if u == Use::Bind {
+                    self.bound[n] = depth;
+                    return;
+                }
                 self.order += 1;
-                self.last[*n as usize] = self.order;
-                self.deep[*n as usize] = self.depth;
-            }
-            Place::Global(_) => {}
-            Place::Field(b, _) => self.place(b),
-            Place::Elem(b, v) | Place::Key(b, v) => {
-                self.place(b);
-                self.val(v);
-            }
-        }
-    }
-
-    fn rhs(&mut self, r: &Rhs) {
-        match r {
-            Rhs::Val(v) => self.val(v),
-            Rhs::Read(p) => self.place(p),
+                self.last[n] = self.order;
+                self.deep[n] = depth;
+                self.handed[n] |= matches!(u, Use::Hand | Use::Key);
+            });
             // A take out of a sub-place hands that part on, so what is left
             // is this turn's: `out.push(consume p.value)` in a `for p in ..`.
-            Rhs::Take(p) => {
-                self.place(p);
+            if let St::Let(_, Rhs::Take(p))
+            | St::Do {
+                rhs: Rhs::Take(p), ..
+            } = st
+            {
                 if let Some(Val::Name(n)) = root_name(p) {
                     self.handed[n as usize] = true;
                 }
             }
-            Rhs::Call { args, kind, .. } => {
-                if let Some(f) = kind.value() {
-                    self.val(&Val::Name(f));
-                }
-                for (a, c) in args {
-                    match a {
-                        Arg::Place(p) => self.place(p),
-                        Arg::Val(v) if *c == vyrn_frontend::ast::Capability::Consume => {
-                            self.hand(v)
-                        }
-                        Arg::Val(v) => self.val(v),
-                    }
-                }
+            let St::Switch { on, arms, .. } = st else {
+                let inner = depth + usize::from(matches!(st, St::Loop { .. }));
+                st.lists().for_each(|l| self.stmts(l, inner));
+                continue;
+            };
+            if let (Val::Name(n), Some(a)) = (on, arms.first()) {
+                self.switches.push((a.site, *n, depth, self.order));
             }
-            Rhs::Prim(_, vs, _) => {
-                for v in vs {
-                    self.val(v);
+            for a in arms {
+                for b in &a.binds {
+                    self.bound[*b as usize] = depth;
                 }
-            }
-            Rhs::Make(_, vs) => {
-                for v in vs {
-                    self.hand(v);
-                }
-            }
-        }
-    }
-
-    fn name(&mut self, n: Name) {
-        self.order += 1;
-        self.last[n as usize] = self.order;
-        self.deep[n as usize] = self.depth;
-    }
-
-    fn stmts(&mut self, stmts: &[St], depth: usize) {
-        for st in stmts {
-            self.depth = depth;
-            match st {
-                St::Let(n, r) => {
-                    self.rhs(r);
-                    self.bound[*n as usize] = depth;
-                }
-                St::Store { place, value, .. } => {
-                    self.store_place(place);
-                    self.hand(value);
-                }
-                St::Drop(n, _, _, _) => self.name(*n),
-                // A row is the plan's, not the core's: see [`last_owner`].
-                St::Row { .. } => {}
-                St::If {
-                    cond, then, els, ..
-                } => {
-                    self.val(cond);
-                    self.stmts(then, depth);
-                    self.stmts(els, depth);
-                }
-                St::Loop { body: b, .. } => self.stmts(b, depth + 1),
-                St::Block { body, .. } => self.stmts(body, depth),
-                St::Return { value: Some(v), .. } => self.hand(v),
-                St::Switch { on, arms, .. } => {
-                    arms.iter()
-                        .filter_map(|a| a.test.reads())
-                        .for_each(|n| self.val(&Val::Name(n)));
-                    self.val(on);
-                    if let (Val::Name(n), Some(a)) = (on, arms.first()) {
-                        self.switches.push((a.site, *n, depth, self.order));
-                    }
-                    for a in arms {
-                        for b in &a.binds {
-                            self.bound[*b as usize] = depth;
-                        }
-                        // The rows that read a binder out of the scrutinee
-                        // are the binder's, not a read of the scrutinee.
-                        self.stmts(&a.body[a.reads(on).len()..], depth);
-                    }
-                }
-                St::Do { rhs: r, .. } => self.rhs(r),
-                _ => {}
+                // The rows that read a binder out of the scrutinee
+                // are the binder's, not a read of the scrutinee.
+                self.stmts(&a.body[a.reads(on).len()..], depth);
             }
         }
     }
@@ -1335,7 +1465,11 @@ fn arms_span(line: usize, arms: &[MatchArm]) -> (usize, usize) {
 /// the five literals answer as one and a builtin call is named apart.
 fn expr_kind(e: &Expr) -> &'static str {
     match e {
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => "literal",
+        Expr::Int(_, _)
+        | Expr::Byte(_, _)
+        | Expr::Float(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Str(_, _) => "literal",
         Expr::Call { name, .. } if name.starts_with('@') => "builtin call",
         _ => crate::kind(e),
     }
@@ -1411,7 +1545,16 @@ pub fn builtin_row(name: &str) -> Option<&'static Spec> {
 /// them, and `VYRN_GAP_TALLY` tables them.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
-    gaps_of(body, &body.stmts, &mut out);
+    for (s, _) in rows(&body.stmts) {
+        if let St::Let(_, r) | St::Do { rhs: r, .. } = s {
+            gaps_rhs(body, r, &mut out);
+        }
+        s.operands(&mut |v, _| {
+            if let Val::Lit(Lit::Opaque(k)) = v {
+                out.push(format!("Opaque:{k:?}"));
+            }
+        });
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|t| seen.insert(t.clone()));
     out
@@ -1424,25 +1567,7 @@ pub fn gaps(body: &Body) -> Vec<String> {
 /// store, the call it feeds, an arm's releases), and a builder cannot cut its
 /// own list because its caller extends it afterwards.
 fn cut(ss: &mut Vec<St>) {
-    for s in ss.iter_mut() {
-        match s {
-            St::If { then, els, .. } => {
-                cut(then);
-                cut(els);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => cut(body),
-            St::Switch { arms, .. } => arms.iter_mut().for_each(|a| cut(&mut a.body)),
-            St::Let(..)
-            | St::Do { .. }
-            | St::Store { .. }
-            | St::Drop(..)
-            | St::Row { .. }
-            | St::Return { .. }
-            | St::Break { .. }
-            | St::Continue { .. }
-            | St::Trap => {}
-        }
-    }
+    ss.iter_mut().flat_map(St::lists_mut).for_each(cut);
     if let Some(i) = ss.iter().position(traps) {
         ss.truncate(i + 1);
     }
@@ -1477,7 +1602,8 @@ fn returns(ss: &[St]) -> bool {
         | St::Row { .. }
         | St::Loop { .. }
         | St::Break { .. }
-        | St::Continue { .. } => false,
+        | St::Continue { .. }
+        | St::Check(_) => false,
     })
 }
 
@@ -1489,58 +1615,12 @@ fn falls_through(body: &mut Body, owes: &Type, line: usize, what: impl FnOnce() 
     }
 }
 
-fn gaps_of(body: &Body, ss: &[St], out: &mut Vec<String>) {
-    for s in ss {
-        match s {
-            St::Let(_, r) | St::Do { rhs: r, .. } => gaps_rhs(body, r, out),
-            St::Store { place, value, .. } => {
-                gaps_place(place, out);
-                gaps_val(value, out);
-            }
-            St::Drop(..) | St::Row { .. } => {}
-            St::If {
-                cond, then, els, ..
-            } => {
-                gaps_val(cond, out);
-                gaps_of(body, then, out);
-                gaps_of(body, els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => gaps_of(body, b, out),
-            St::Break { .. } | St::Continue { .. } | St::Trap => {}
-            St::Return { value, .. } => {
-                if let Some(v) = value {
-                    gaps_val(v, out);
-                }
-            }
-            St::Switch { on, arms, .. } => {
-                gaps_val(on, out);
-                for a in arms {
-                    gaps_of(body, &a.body, out);
-                }
-            }
-        }
-    }
-}
-
+/// The tags of a right-hand side the emitter has no reader for.
 fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
-    let vals = |vs: &[Val], out: &mut Vec<String>| {
-        for v in vs {
-            gaps_val(v, out);
-        }
-    };
     match r {
-        Rhs::Val(v) => gaps_val(v, out),
         // A take of a key has no reader; every other place read or take has.
-        Rhs::Read(p) => gaps_place(p, out),
-        Rhs::Take(p) => {
-            if matches!(p, Place::Key(..)) {
-                out.push("Take:Key".into());
-            }
-            gaps_place(p, out);
-        }
-        Rhs::Call {
-            callee, args, kind, ..
-        } => {
+        Rhs::Take(Place::Key(..)) => out.push("Take:Key".into()),
+        Rhs::Call { callee, kind, .. } => {
             // The emitter reads a declared function, a constructor, a builtin
             // with a row, and a call through a stored value (one call to its
             // signature's dispatcher). A call through a `fn`-typed parameter
@@ -1557,37 +1637,10 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
                 };
                 out.push(format!("Call:{tag}:{callee}"));
             }
-            for (a, _) in args {
-                match a {
-                    Arg::Val(v) => gaps_val(v, out),
-                    Arg::Place(p) => gaps_place(p, out),
-                }
-            }
         }
-        Rhs::Prim(Op::Closure(_), vs, _) => {
-            out.push("Lambda".into());
-            vals(vs, out);
-        }
-        Rhs::Prim(_, vs, _) => vals(vs, out),
+        Rhs::Prim(Op::Closure(_), ..) => out.push("Lambda".into()),
         // A part the emitter cannot place is the emitter's own screen, not a gap.
-        Rhs::Make(_, vs) => vals(vs, out),
-    }
-}
-
-fn gaps_val(v: &Val, out: &mut Vec<String>) {
-    if let Val::Lit(Lit::Opaque(k)) = v {
-        out.push(format!("Opaque:{k:?}"));
-    }
-}
-
-fn gaps_place(p: &Place, out: &mut Vec<String>) {
-    match p {
-        Place::Name(_) | Place::Global(_) => {}
-        Place::Field(b, _) => gaps_place(b, out),
-        Place::Elem(b, v) | Place::Key(b, v) => {
-            gaps_place(b, out);
-            gaps_val(v, out);
-        }
+        Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) | Rhs::Prim(..) | Rhs::Make(..) => {}
     }
 }
 
@@ -1696,12 +1749,7 @@ fn build_twice(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Resul
 /// rule the node breaks (an operator, a field, a construction, a variant, a
 /// record literal, or a call's arity, type arguments and arguments).
 fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usize, String)> {
-    let recorded = |e: &Expr| {
-        facts
-            .types
-            .get(&(e as *const Expr as usize))
-            .filter(|t| **t != Type::Err)
-    };
+    let recorded = |e: &Expr| facts.types.get(&e.id()).filter(|t| **t != Type::Err);
     let resolved = |e: &Expr| recorded(e).map(|t| vyrn_frontend::types::resolve(t, decls));
     // Rules over a literal as written, whatever the checker typed it, so that
     // `vyrn check` refuses what the build would.
@@ -1712,22 +1760,24 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
             _ => None,
         };
         match e {
-            Expr::Int(n) => sized(e).and_then(|(b, s)| misfit("integer", literal_value(*n), b, s)),
+            Expr::Int(n, _) => {
+                sized(e).and_then(|(b, s)| misfit("integer", literal_value(*n), b, s))
+            }
             Expr::Unary {
                 op: vyrn_frontend::ast::UnOp::Neg,
                 expr,
                 ..
-            } if matches!(**expr, Expr::Int(_)) => {
+            } if matches!(**expr, Expr::Int(_, _)) => {
                 let v = int_literal_value(e)?;
                 sized(e).and_then(|(b, s)| misfit("integer", v, b, s))
             }
-            Expr::Byte(v) => sized(e).and_then(|(b, s)| misfit("byte", i128::from(*v), b, s)),
+            Expr::Byte(v, _) => sized(e).and_then(|(b, s)| misfit("byte", i128::from(*v), b, s)),
             Expr::Binary {
                 op: BinOp::Match,
                 rhs,
                 ..
             } => Some(match &**rhs {
-                Expr::Str(pat) => {
+                Expr::Str(pat, _) => {
                     let err = vyrn_frontend::regex::compile(pat).err()?;
                     format!("invalid regex `{pat}`: {err}")
                 }
@@ -1789,7 +1839,7 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
         if let Some(s) = constant(e) {
             return Some(s);
         }
-        if facts.types.get(&(e as *const Expr as usize)) != Some(&Type::Err) {
+        if facts.types.get(&e.id()) != Some(&Type::Err) {
             return None;
         }
         match e {
@@ -1873,7 +1923,7 @@ fn judged(facts: &NodeTypes<'_>, decls: &HashMap<String, TypeDecl>) -> Vec<(usiz
                 dot,
                 ..
             } => {
-                let d = call_decl(e as *const Expr as usize)?;
+                let d = call_decl(e.id())?;
                 let shown = &d.shown;
                 // Counts are of what the reader wrote after the dot (#577). A
                 // callee with no parameters has no receiver slot.
@@ -1974,9 +2024,9 @@ fn unbound(
                 return None;
             };
             let bounds = &signature(name)?.type_bounds;
-            let written = node_solved(*e as *const Expr as usize).unwrap_or_default();
+            let written = node_solved(e.id()).unwrap_or_default();
             let shown = prelude::method_surface(name).trim_start_matches('@');
-            let solved = facts.solved.get(&(*e as *const Expr as usize))?;
+            let solved = facts.solved.get(&e.id())?;
             solved.iter().find_map(|(tp, t)| {
                 let w = written.iter().find(|(p, _)| p == tp).map_or(t, |(_, w)| w);
                 if [t, w].iter().any(|t| types::resolve(t, decls) == Type::Err) {
@@ -2040,16 +2090,12 @@ fn fn_slot(
     args: &[Expr],
     line: usize,
     solved: &[(String, Type)],
-    types: &HashMap<usize, Type>,
+    types: &HashMap<NodeId, Type>,
     decls: &HashMap<String, TypeDecl>,
     bound: &dyn Fn(&str) -> bool,
 ) -> Option<(usize, String)> {
     use vyrn_frontend::types::{resolve, substitute};
-    let recorded = |e: &Expr| {
-        types
-            .get(&(e as *const Expr as usize))
-            .filter(|t| **t != Type::Err)
-    };
+    let recorded = |e: &Expr| types.get(&e.id()).filter(|t| **t != Type::Err);
     let f = program.functions.iter().find(|f| f.name == name)?;
     let callee = prelude::method_surface(name).trim_start_matches('@');
     let subst: HashMap<String, Type> = solved.iter().cloned().collect();
@@ -2197,7 +2243,7 @@ fn build_seeded(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
-    seed: &std::collections::HashSet<usize>,
+    seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     let (types, produced, solved) = (
         inst.facts.types.clone(),
@@ -2215,7 +2261,7 @@ fn build_seeded(
     // rows [`augment`] places. The copy adds only the substituted type a
     // `Deep` walks, and nothing below reads a kind.
     let no_steps: Vec<Release> = Vec::new();
-    let mut placed: HashMap<(Exit, usize), Vec<&Release>> = HashMap::new();
+    let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
     for r in own.releases.get(&inst.func.name).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
@@ -2292,7 +2338,7 @@ fn build_seeded(
         b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
         b.body.names[n as usize].mutable = p.capability == Capability::Modify;
         b.scope.push((p.name.clone(), n));
-        b.keyed(n, p as *const _ as usize);
+        b.keyed(n, p.id());
         b.body.params.push(n);
     }
     b.appends = crate::append::append_candidates(&f.body);
@@ -2381,12 +2427,12 @@ fn build_outside_seeded<'a>(
     file: Option<String>,
     block: &Block,
     facts: &NodeTypes<'a>,
-    seed: &std::collections::HashSet<usize>,
+    seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     // No substitution: the body has no type parameters.
     let no_steps: Vec<Release> = Vec::new();
     let steps = own.releases.get(name).unwrap_or(&no_steps);
-    let mut placed: HashMap<(Exit, usize), Vec<&Release>> = HashMap::new();
+    let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
     for r in steps {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
@@ -2427,13 +2473,13 @@ pub fn build_root<'a>(
 ) -> Result<Body, Gap> {
     // `facts` holds every root's; a refusal belongs to the root it is in.
     let mut mine = Vec::new();
-    vyrn_frontend::ast::node_addrs_val(e, &mut mine);
-    let mine: std::collections::HashSet<usize> = mine.into_iter().collect();
+    vyrn_frontend::ast::node_ids(e, &mut mine);
+    let mine: std::collections::HashSet<NodeId> = mine.into_iter().collect();
     let facts = NodeTypes {
         exprs: facts
             .exprs
             .iter()
-            .filter(|(x, _)| mine.contains(&(*x as *const Expr as usize)))
+            .filter(|(x, _)| mine.contains(&x.id()))
             .copied()
             .collect(),
         ..facts.clone()
@@ -2470,22 +2516,22 @@ struct Builder<'a> {
     program: &'a Program,
     own: &'a Ownership,
     proto: &'a Owned,
-    types: HashMap<usize, Type>,
+    types: HashMap<NodeId, Type>,
     /// The producer type of every typed expression, before the destination's
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
-    produced: HashMap<usize, Type>,
-    solved: HashMap<usize, Vec<(String, Type)>>,
-    placed: HashMap<(Exit, usize), Vec<&'a Release>>,
+    produced: HashMap<NodeId, Type>,
+    solved: HashMap<NodeId, Vec<(String, Type)>>,
+    placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     body: Body,
     scope: Vec<(String, Name)>,
     /// The plan keys a release by the node that owns the value: a `Stmt::Let`,
     /// a parameter, or the construct that owns a temporary.
-    by_binding: HashMap<usize, Name>,
+    by_binding: HashMap<NodeId, Name>,
     temps: u32,
     /// An unnamed receiver minted for a field or element read, with the node
     /// that produced it, so the read can release it when the plan says the
     /// frame owns it.
-    pending_receiver: Option<(Name, usize, bool)>,
+    pending_receiver: Option<(Name, NodeId, bool)>,
     /// How many non-lending calls and operators enclose the expression being
     /// built. The compiled backends drain argument temporaries at each, so a
     /// receiver borrowed under one can be freed there.
@@ -2508,7 +2554,7 @@ struct Builder<'a> {
     walks: Vec<Option<Unreached>>,
     /// The constructs this build may take their named scrutinee at, as
     /// [`last_owner`] decided over the previous build. Empty on the first.
-    seed: &'a std::collections::HashSet<usize>,
+    seed: &'a std::collections::HashSet<NodeId>,
     /// One entry per enclosing loop: the name count when its body opened. A
     /// name below the innermost entry is bound outside the loop, so handing
     /// it out of a join arm frees it once per turn ([`Builder::alias_out`]).
@@ -2558,10 +2604,10 @@ impl<'a> Builder<'a> {
         program: &'a Program,
         own: &'a Ownership,
         facts: &NodeTypes<'a>,
-        seed: &'a std::collections::HashSet<usize>,
+        seed: &'a std::collections::HashSet<NodeId>,
         name: String,
         file: Option<String>,
-        placed: HashMap<(Exit, usize), Vec<&'a Release>>,
+        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     ) -> Self {
         let (types, produced, solved) = (
             facts.types.clone(),
@@ -2666,13 +2712,14 @@ impl<'a> Builder<'a> {
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
     fn keyed_let(&mut self, n: Name, s: &Stmt) {
-        self.keyed(n, s as *const Stmt as usize);
+        self.keyed(n, s.id());
         self.body.names[n as usize].bound_by_let = true;
         self.body.names[n as usize].mutable = matches!(s, Stmt::Let { mutable: true, .. });
     }
 
     /// Records the plan's key for a name, and the name for the key.
-    fn keyed(&mut self, n: Name, binding: usize) {
+    fn keyed(&mut self, n: Name, binding: NodeId) {
+        assert_ne!(binding, NodeId::NONE, "a binding keyed by no node");
         self.body.names[n as usize].binding = Some(binding);
         self.by_binding.insert(binding, n);
     }
@@ -2909,7 +2956,7 @@ impl<'a> Builder<'a> {
         scrutinee: &'a Expr,
         then_block: &'a Block,
         else_block: Option<&'a Block>,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<bool, Gap> {
@@ -2965,7 +3012,7 @@ impl<'a> Builder<'a> {
         pattern: &Pattern,
         then_block: &'a Block,
         else_block: Option<&'a Block>,
-        sid: usize,
+        sid: NodeId,
         name: &str,
         line: usize,
         out: &mut Vec<St>,
@@ -3143,7 +3190,7 @@ impl<'a> Builder<'a> {
                     targets: Vec::new(),
                 },
                 line,
-                site: 0,
+                site: NodeId::NONE,
             });
         }
         for t in std::mem::take(&mut self.after_of_rhs) {
@@ -3164,7 +3211,7 @@ impl<'a> Builder<'a> {
     /// such a store rather than guessing.
     fn produced(&self, e: &Expr) -> Option<Type> {
         self.produced
-            .get(&(e as *const Expr as usize))
+            .get(&e.id())
             .cloned()
             // Fills only a projection expanded at the site, which has no row;
             // `ty_of` refuses everything else.
@@ -3172,7 +3219,7 @@ impl<'a> Builder<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Type, Gap> {
-        match self.types.get(&(e as *const Expr as usize)) {
+        match self.types.get(&e.id()) {
             Some(t) => Ok(t.clone()),
             // A call to a projection the checker expanded at the site
             // (`people.tryAt(h)`): its declared result, under the
@@ -3200,7 +3247,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The releases the plan placed at one exit, as drops, in the plan's order.
-    fn drops_at(&self, exit: Exit, site: usize, out: &mut Vec<St>) -> Result<(), Gap> {
+    fn drops_at(&self, exit: Exit, site: NodeId, out: &mut Vec<St>) -> Result<(), Gap> {
         self.drops_at_but(exit, site, None, out)
     }
 
@@ -3209,7 +3256,7 @@ impl<'a> Builder<'a> {
     fn drops_at_but(
         &self,
         exit: Exit,
-        site: usize,
+        site: NodeId,
         keep: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3260,7 +3307,7 @@ impl<'a> Builder<'a> {
     fn return_exit(
         &mut self,
         v: Option<Val>,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3296,7 +3343,7 @@ impl<'a> Builder<'a> {
     fn return_through(
         &mut self,
         e: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<bool, Gap> {
@@ -3306,8 +3353,9 @@ impl<'a> Builder<'a> {
                 then_branch,
                 else_branch: Some(else_branch),
                 line: at,
+                id: _,
             } => {
-                let site = e as *const Expr as usize;
+                let site = e.id();
                 let c = self.condition(cond, "if", *at, out)?;
                 let mut t = Vec::new();
                 self.arm_returns(then_branch, sid, line, &mut t)?;
@@ -3328,7 +3376,7 @@ impl<'a> Builder<'a> {
                 ..
             } if arms.iter().all(|a| matches!(a.body, ArmBody::Expr(_))) => {
                 let sty = self.ty_of(scrutinee)?;
-                let mid = e as *const Expr as usize;
+                let mid = e.id();
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
@@ -3385,7 +3433,7 @@ impl<'a> Builder<'a> {
     fn arm_returns(
         &mut self,
         e: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3405,7 +3453,7 @@ impl<'a> Builder<'a> {
     /// the block's site and a row for it can be keyed there.
     fn block_with(&mut self, blk: &'a Block, head: Vec<St>, out: &mut Vec<St>) -> Result<(), Gap> {
         let mark = self.scope.len();
-        let site = blk as *const Block as usize;
+        let site = blk.id();
         let mut body = head;
         self.stmt_list(&blk.stmts, &mut body)?;
         self.drops_at(Exit::Block, site, &mut body)?;
@@ -3455,6 +3503,7 @@ impl<'a> Builder<'a> {
                 cond,
                 body: inner,
                 line,
+                id: _,
             },
             head,
         )) = blk.stmts.split_last()
@@ -3462,7 +3511,7 @@ impl<'a> Builder<'a> {
             return gap("an `Iterate` expansion that is no loop", 0);
         };
         let mark = self.scope.len();
-        let site = blk as *const Block as usize;
+        let site = blk.id();
         let mut rows = Vec::new();
         let lent = match iter {
             Expr::Var { name, .. } => self.lookup(name).map(|n| {
@@ -3479,8 +3528,11 @@ impl<'a> Builder<'a> {
         l.push(St::If {
             cond: c,
             then: Vec::new(),
-            els: vec![St::Break { site: 0, line: 0 }],
-            site: 0,
+            els: vec![St::Break {
+                site: NodeId::NONE,
+                line: 0,
+            }],
+            site: NodeId::NONE,
         });
         self.loop_marks.push(self.body.names.len());
         self.walks.push(None);
@@ -3497,7 +3549,7 @@ impl<'a> Builder<'a> {
         self.hoist_headers(&mut l, *line, &mut rows);
         rows.push(St::Loop {
             body: l,
-            site: w as *const Stmt as usize,
+            site: w.id(),
         });
         self.drops_at(Exit::Block, site, &mut rows)?;
         self.scope.truncate(mark);
@@ -3555,7 +3607,7 @@ impl<'a> Builder<'a> {
                 for s in &ss[k..k + span] {
                     vyrn_frontend::ast::exprs_one(s, &mut |e, locals| {
                         let local = matches!(e, Expr::Var { name, .. } if locals.contains(name));
-                        let typed = self.types.get(&(e as *const Expr as usize));
+                        let typed = self.types.get(&e.id());
                         if !local && matches!(typed, None | Some(Type::Err)) {
                             named.extend(self.unknown_of(e));
                         }
@@ -3596,7 +3648,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         let store = &ss[lets];
-        let sid = store as *const Stmt as usize;
+        let sid = store.id();
         match store {
             Stmt::SetField {
                 field, value, line, ..
@@ -3676,7 +3728,7 @@ impl<'a> Builder<'a> {
         };
         let into = match store {
             Stmt::SetField { name, .. } | Stmt::IndexSet { name, .. } => Some(name),
-            Stmt::Expr(e) | Stmt::Let { value: e, .. } => removal(e),
+            Stmt::Expr(e, _) | Stmt::Let { value: e, .. } => removal(e),
             _ => None,
         };
         if into != Some(last) {
@@ -3717,6 +3769,7 @@ impl<'a> Builder<'a> {
                         index,
                         value,
                         line,
+                        id: _,
                     } = &ss[2 * lets]
                     else {
                         return Ok(None);
@@ -3842,7 +3895,7 @@ impl<'a> Builder<'a> {
     }
 
     fn stmt_rows(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
-        let sid = s as *const Stmt as usize;
+        let sid = s.id();
         match s {
             Stmt::Let {
                 name,
@@ -3851,7 +3904,7 @@ impl<'a> Builder<'a> {
                 ty: annotation,
                 ..
             } => {
-                if let Some(vty) = node_ty(value as *const Expr as usize) {
+                if let Some(vty) = node_ty(value.id()) {
                     let decls = self.proto.types();
                     let refusal = match annotation {
                         Some(t) if !vyrn_frontend::types::coercible(&vty, t, decls) => {
@@ -3957,7 +4010,12 @@ impl<'a> Builder<'a> {
                 self.scope.push((name.clone(), n));
                 self.keyed_let(n, s);
             }
-            Stmt::Assign { name, value, line } => {
+            Stmt::Assign {
+                name,
+                value,
+                line,
+                id: _,
+            } => {
                 if !self.known(name, *line, "assignment to unknown variable") {
                     return Ok(());
                 }
@@ -3965,7 +4023,7 @@ impl<'a> Builder<'a> {
                     Some(n) => Some(self.body.names[n as usize].ty.clone()),
                     None => self.named_place(name, *line).ok().map(|(_, t)| t),
                 };
-                if let (Some(to), Some(vty)) = (&to, node_ty(value as *const Expr as usize)) {
+                if let (Some(to), Some(vty)) = (&to, node_ty(value.id())) {
                     if !vyrn_frontend::types::coercible(&vty, to, self.proto.types()) {
                         let refusal = format!("`{name}` is {to} but assigned {vty}");
                         self.body.mistyped.push((*line, refusal));
@@ -4033,8 +4091,7 @@ impl<'a> Builder<'a> {
                 let mentions = vyrn_frontend::ast::mentions_place(value, name);
                 let fresh_str = self.fresh_str(&ty, value);
                 let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
-                let key = self.store_key(sid);
-                let releases = !handed_back && placed_store(key);
+                let releases = !handed_back && placed_store(sid);
                 // Module state owns what it holds and nothing may `consume`
                 // it, so a store into one releases what it replaces whenever
                 // that owns heap.
@@ -4069,10 +4126,10 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
-                    site: Site::Node(key),
+                    site: Site::Node(sid),
                     releases,
                     holes: if releases {
-                        store_holes(key)
+                        store_holes(sid)
                     } else {
                         Vec::new()
                     },
@@ -4088,6 +4145,7 @@ impl<'a> Builder<'a> {
                 field,
                 value,
                 line,
+                id: _,
             } => {
                 if !self.known(name, *line, "assignment to field of unknown variable") {
                     return Ok(());
@@ -4100,6 +4158,7 @@ impl<'a> Builder<'a> {
                 index,
                 value,
                 line,
+                id: _,
             } => {
                 if !self.known(name, *line, "index-assignment to unknown variable") {
                     return Ok(());
@@ -4107,9 +4166,9 @@ impl<'a> Builder<'a> {
                 let base = self.named_place(name, *line)?;
                 self.index_set(base, name, index, value, sid, *line, out)?;
             }
-            Stmt::Return { value, line } => {
+            Stmt::Return { value, line, id: _ } => {
                 let vty = match value {
-                    Some(e) => node_ty(e as *const Expr as usize),
+                    Some(e) => node_ty(e.id()),
                     None => Some(Type::Unit),
                 };
                 if let (Some(vty), Some(ret)) = (vty, &self.ret) {
@@ -4130,7 +4189,7 @@ impl<'a> Builder<'a> {
                 };
                 self.return_exit(v, sid, *line, out)?;
             }
-            Stmt::Break { line } => {
+            Stmt::Break { line, id: _ } => {
                 if let Some(Some(u)) = self.walks.last().cloned() {
                     self.release_unreached(&u, out);
                 }
@@ -4140,7 +4199,7 @@ impl<'a> Builder<'a> {
                     line: *line,
                 });
             }
-            Stmt::Continue { line } => {
+            Stmt::Continue { line, id: _ } => {
                 self.drops_at(Exit::Continue, sid, out)?;
                 out.push(St::Continue {
                     site: sid,
@@ -4152,6 +4211,7 @@ impl<'a> Builder<'a> {
                 then_block,
                 else_block,
                 line,
+                id: _,
             } => {
                 let c = self.condition(cond, "if", *line, out)?;
                 let mut t = Vec::new();
@@ -4175,6 +4235,7 @@ impl<'a> Builder<'a> {
                 then_block,
                 else_block,
                 line,
+                id: _,
             } => {
                 if self.optional_if_let(
                     pattern,
@@ -4231,14 +4292,22 @@ impl<'a> Builder<'a> {
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
-            Stmt::While { cond, body, line } => {
+            Stmt::While {
+                cond,
+                body,
+                line,
+                id: _,
+            } => {
                 let mut l = Vec::new();
                 let c = self.condition(cond, "while", *line, &mut l)?;
                 l.push(St::If {
                     cond: c,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0, line: 0 }],
-                    site: 0,
+                    els: vec![St::Break {
+                        site: NodeId::NONE,
+                        line: 0,
+                    }],
+                    site: NodeId::NONE,
                 });
                 self.loop_marks.push(self.body.names.len());
                 self.walks.push(None);
@@ -4256,6 +4325,7 @@ impl<'a> Builder<'a> {
                 line,
                 consuming,
                 col: _,
+                id: _,
             } => {
                 let ity = self.ty_of(iter)?;
                 // A user container's element is what its `nth` projection
@@ -4408,8 +4478,11 @@ impl<'a> Builder<'a> {
                 l.push(St::If {
                     cond,
                     then: Vec::new(),
-                    els: vec![St::Break { site: 0, line: 0 }],
-                    site: 0,
+                    els: vec![St::Break {
+                        site: NodeId::NONE,
+                        line: 0,
+                    }],
+                    site: NodeId::NONE,
                 });
                 // Each turn owns its element where the element type owns heap
                 // and either the container is a stream (a pulled element has
@@ -4418,7 +4491,7 @@ impl<'a> Builder<'a> {
                 // this frame owns. A named container outlives the loop, so
                 // `for r in ns` only borrows; a lender's result is somebody
                 // else's buffer.
-                let ekey = vyrn_frontend::own::for_var_key(var);
+                let ekey = body.id();
                 let ic = &self.body.names[owner.unwrap_or(it) as usize];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 let owned =
@@ -4456,9 +4529,9 @@ impl<'a> Builder<'a> {
                         .unwrap_or_default();
                     self.body.names[x as usize].loop_var = Some(of);
                 }
-                // The variable has no `let` node; the plan keys it by its
-                // spelling's buffer, which is one address per loop.
-                self.keyed(x, vyrn_frontend::own::for_var_key(var));
+                // The variable has no node of its own; the body that binds it
+                // keys it.
+                self.keyed(x, ekey);
                 let mut head = vec![St::Let(
                     x,
                     Rhs::Read(Place::Elem(Box::new(Place::Name(it)), index)),
@@ -4490,7 +4563,7 @@ impl<'a> Builder<'a> {
                 }
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
-            Stmt::Drop { name, line } => {
+            Stmt::Drop { name, line, id: _ } => {
                 let Some(n) = self.lookup(name) else {
                     self.body.unbound_drops.push((name.clone(), *line));
                     return Ok(());
@@ -4501,10 +4574,10 @@ impl<'a> Builder<'a> {
             }
             // An unaudited build states neither the audit hook nor its operand;
             // `p + 8` alone costs four instructions per allocation.
-            Stmt::Expr(Expr::Call { name, .. })
+            Stmt::Expr(Expr::Call { name, .. }, _)
                 if vyrn_frontend::loader::audit_hook(name)
                     && !vyrn_frontend::loader::audit_build() => {}
-            Stmt::Expr(e) => {
+            Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
                 if self.owns(&ty) || self.owed.is_some() {
@@ -4630,13 +4703,6 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// The node a store's row is keyed by, which is the node its readers key
-    /// it by: the statement itself, except for a user container's `c[h] = v`,
-    /// whose store statements the `place at` rewrite builds.
-    fn store_key(&self, sid: usize) -> usize {
-        self.own.plan.key_of(sid)
-    }
-
     fn old_for(&self, ty: &Type, releases: bool) -> Old {
         if !self.owns(ty) {
             Old::Nothing
@@ -4653,7 +4719,13 @@ impl<'a> Builder<'a> {
     /// arm ends. The first build states none, so [`crate::kernel::placement`]
     /// reports every held binder, and the second build reads the rows back
     /// out of [`Placed`].
-    fn arm_frees(&mut self, site: usize, arm: u32, binds: &[Name], out: &mut Vec<St>) -> Vec<Name> {
+    fn arm_frees(
+        &mut self,
+        site: NodeId,
+        arm: u32,
+        binds: &[Name],
+        out: &mut Vec<St>,
+    ) -> Vec<Name> {
         let mut frees: Vec<Name> = Vec::new();
         let Some(rows) = placed_arm(site, arm) else {
             return frees;
@@ -4708,8 +4780,11 @@ impl<'a> Builder<'a> {
             St::If {
                 cond: Val::Name(c),
                 then: Vec::new(),
-                els: vec![St::Break { site: 0, line: 0 }],
-                site: 0,
+                els: vec![St::Break {
+                    site: NodeId::NONE,
+                    line: 0,
+                }],
+                site: NodeId::NONE,
             },
         ];
         let e = self.temp(u.elem.clone(), u.line);
@@ -4719,11 +4794,14 @@ impl<'a> Builder<'a> {
         ));
         self.step(u.i, &mut l);
         l.push(St::Drop(e, Site::None, 0, None));
-        out.push(St::Loop { body: l, site: 0 });
+        out.push(St::Loop {
+            body: l,
+            site: NodeId::NONE,
+        });
     }
 
     /// Rule N: the drops one edge of a join owes.
-    fn edge_drops(&mut self, join: usize, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
+    fn edge_drops(&mut self, join: NodeId, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
         let Some(ers) = placed_edges(join) else {
             return Ok(());
         };
@@ -4771,7 +4849,7 @@ impl<'a> Builder<'a> {
         name: &str,
         field: &str,
         value: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -4783,8 +4861,7 @@ impl<'a> Builder<'a> {
         // `s.dense = s.dense.push(i)` releases nothing.
         let handed_back =
             vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
-        let key = self.store_key(sid);
-        let releases = !handed_back && placed_store(key);
+        let releases = !handed_back && placed_store(sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
@@ -4794,10 +4871,10 @@ impl<'a> Builder<'a> {
                 self.old_for(&fty, releases)
             },
             line,
-            site: Site::Node(key),
+            site: Site::Node(sid),
             releases,
             holes: if releases {
-                store_holes(key)
+                store_holes(sid)
             } else {
                 Vec::new()
             },
@@ -4828,7 +4905,7 @@ impl<'a> Builder<'a> {
                 Some(None) => format!("record `{name}` has no field `{field}`"),
                 Some(Some(f)) => {
                     let fty = &f.ty;
-                    let Some(vty) = node_ty(value as *const Expr as usize) else {
+                    let Some(vty) = node_ty(value.id()) else {
                         return Ok(());
                     };
                     let validated = matches!(fty, Type::Named(n)
@@ -4865,10 +4942,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), Gap> {
         let decls = self.proto.types();
         let coercible = |a: &Type, b: &Type| vyrn_frontend::types::coercible(a, b, decls);
-        let (ity, vty) = (
-            node_ty(index as *const Expr as usize),
-            node_ty(value as *const Expr as usize),
-        );
+        let (ity, vty) = (node_ty(index.id()), node_ty(value.id()));
         let refusal = match vyrn_frontend::types::resolve(bty, decls) {
             Type::Err => None,
             Type::Map(key, val) => {
@@ -4938,7 +5012,7 @@ impl<'a> Builder<'a> {
         name: &str,
         index: &'a Expr,
         value: &'a Expr,
-        sid: usize,
+        sid: NodeId,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -4973,15 +5047,14 @@ impl<'a> Builder<'a> {
             Some(to) => Val::Name(self.checked_temp(&to, stored, line, out)?),
             None => self.val(stored, out)?,
         };
-        let key = self.store_key(sid);
-        let site = Site::Node(key);
+        let site = Site::Node(sid);
         // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
         // `xs[xs.length - 1] = v` read the buffer the store writes into.
         // `xs[i] = xs[j].copy()` hands nothing back.
         let handed_back = (vyrn_frontend::ast::mentions_place(value, name)
             && !self.store_is_fresh(value, name))
             || vyrn_frontend::ast::mentions_place(index, name);
-        let releases = !handed_back && placed_store(key);
+        let releases = !handed_back && placed_store(sid);
         out.push(St::Store {
             place,
             value: v,
@@ -4994,7 +5067,7 @@ impl<'a> Builder<'a> {
             site,
             releases,
             holes: if releases {
-                store_holes(key)
+                store_holes(sid)
             } else {
                 Vec::new()
             },
@@ -5040,7 +5113,7 @@ impl<'a> Builder<'a> {
     /// module state answers, or `T?(..)` of an undeclared type.
     fn unknown_of(&self, e: &Expr) -> Option<(usize, String)> {
         match e {
-            Expr::Var { name, line } if !self.answers(name) && !self.is_variant(name) => {
+            Expr::Var { name, line, id: _ } if !self.answers(name) && !self.is_variant(name) => {
                 Some((*line, format!("unknown variable `{name}`")))
             }
             Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
@@ -5090,11 +5163,7 @@ impl<'a> Builder<'a> {
             return Ok((Place::Name(n), self.body.names[n as usize].ty.clone()));
         }
         match self.program.globals.iter().find(|g| &g.name == name) {
-            Some(g) => match g
-                .ty
-                .clone()
-                .or_else(|| node_ty(&g.init as *const Expr as usize))
-            {
+            Some(g) => match g.ty.clone().or_else(|| node_ty(g.init.id())) {
                 Some(t) => Ok((Place::Global(name.to_string()), t)),
                 None => gap_d("a global the checker did not type", name, line),
             },
@@ -5110,7 +5179,7 @@ impl<'a> Builder<'a> {
     /// call that stores into it counts as a write.
     fn hoist_headers(&mut self, l: &mut [St], line: usize, out: &mut Vec<St>) {
         let mut read = Vec::new();
-        l.iter_mut().for_each(|s| header_reads(s, None, &mut read));
+        header_reads(l, None, &mut read);
         read.sort_unstable_by(|a, b| match (a, b) {
             (Root::N(x), Root::N(y)) => x.cmp(y),
             (Root::G(x), Root::G(y)) => x.cmp(y),
@@ -5153,8 +5222,7 @@ impl<'a> Builder<'a> {
             self.body.names[h as usize].walked = Some(Walk::While);
             self.body.names[h as usize].path = Some(path);
             out.push(St::Let(h, Rhs::Read(from)));
-            l.iter_mut()
-                .for_each(|s| header_reads(s, Some((&r, h)), &mut Vec::new()));
+            header_reads(l, Some((&r, h)), &mut Vec::new());
         }
     }
 
@@ -5335,7 +5403,7 @@ impl<'a> Builder<'a> {
     fn scrutinee(
         &mut self,
         e: &'a Expr,
-        construct: usize,
+        construct: NodeId,
         lines: Option<(usize, usize)>,
         out: &mut Vec<St>,
     ) -> Result<(Val, bool), Gap> {
@@ -5362,7 +5430,7 @@ impl<'a> Builder<'a> {
                 self.keyed(t, construct);
                 Ok((Val::Name(t), true))
             }
-            Expr::Consume { place, line } => match &**place {
+            Expr::Consume { place, line, id: _ } => match &**place {
                 Expr::Var { name, .. } => {
                     let Some(n) = self.lookup(name) else {
                         // `consume` of module state: the same read and refusal.
@@ -5414,7 +5482,7 @@ impl<'a> Builder<'a> {
     /// moved into the arms' binders and the boxes were freed there. Where it
     /// did not, the binders borrowed and the value is released whole. Records
     /// the candidate; only a site [`last_owner`] seeded takes.
-    fn taken_by(&mut self, t: Name, construct: usize) -> bool {
+    fn taken_by(&mut self, t: Name, construct: NodeId) -> bool {
         if !self.body.names[t as usize].releases {
             return false;
         }
@@ -5424,7 +5492,7 @@ impl<'a> Builder<'a> {
 
     /// [`Builder::taken_by`] at a `for`: whether the loop is the last owner of
     /// its container, so it releases it where it ends ([`Cand::Loop`]).
-    fn taken_by_loop(&mut self, it: Name, sid: usize) -> bool {
+    fn taken_by_loop(&mut self, it: Name, sid: NodeId) -> bool {
         self.body.cands.push((sid, it, Cand::Loop));
         self.seed.contains(&sid)
     }
@@ -5508,9 +5576,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Vec<Name>, Gap> {
         let decls = self.proto.types();
         let rt = vyrn_frontend::types::resolve(sty, &decls);
-        // Each binder's key is the address of the name the reader wrote: one
-        // per binder, the same on every build.
-        let (payloads, variant): (Vec<(String, Type, usize)>, String) = match p {
+        let (payloads, variant): (Vec<(String, Type, NodeId)>, String) = match p {
             Pattern::Other => (Vec::new(), String::new()),
             // `??`'s pair names a tag: variant 1 succeeds, 0 fails.
             Pattern::Success(n) | Pattern::Failure(n) => match &rt {
@@ -5519,13 +5585,7 @@ impl<'a> Builder<'a> {
                     let ps = vs[at]
                         .payload
                         .first()
-                        .map(|t| {
-                            vec![(
-                                n.name.clone(),
-                                t.clone(),
-                                vyrn_frontend::own::binder_key(&n.name),
-                            )]
-                        })
+                        .map(|t| vec![(n.name.clone(), t.clone(), n.id())])
                         .unwrap_or_default();
                     (ps, vs[at].name.clone())
                 }
@@ -5542,7 +5602,7 @@ impl<'a> Builder<'a> {
                     let ps = names
                         .iter()
                         .zip(var.payload.iter().cloned())
-                        .map(|(n, t)| (n.name.clone(), t, vyrn_frontend::own::binder_key(&n.name)))
+                        .map(|(n, t)| (n.name.clone(), t, n.id()))
                         .collect();
                     (ps, var.name.clone())
                 }
@@ -5649,7 +5709,7 @@ impl<'a> Builder<'a> {
         if let (Val::Name(t), Some((callee, ix))) = (&v, at) {
             let t = *t;
             if self.arg_released(e, t, callee, ix) {
-                self.body.names[t as usize].arg_drop = Some(e as *const Expr as usize);
+                self.body.names[t as usize].arg_drop = Some(e.id());
             }
         }
         Ok(v)
@@ -5790,7 +5850,7 @@ impl<'a> Builder<'a> {
                     | Type::Stream(ref et) if !self.proto.owns_heap(et)
             );
         let s = mc::ArgTemp {
-            id: e as *const Expr as usize,
+            id: e.id(),
             callee: callee.to_string(),
             ix,
             line: e.line(),
@@ -5927,7 +5987,7 @@ impl<'a> Builder<'a> {
         let Some((r, producer, malloc)) = self.pending_receiver.take() else {
             return;
         };
-        let node = e as *const Expr as usize;
+        let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
             if placed_producer(producer) {
@@ -5986,7 +6046,7 @@ impl<'a> Builder<'a> {
             return Ok(Val::Lit(l));
         }
         match e {
-            Expr::Var { name, line } => match self.lookup(name) {
+            Expr::Var { name, line, id: _ } => match self.lookup(name) {
                 Some(n) => Ok(Val::Name(n)),
                 // A nullary constructor (`None`, a fieldless variant) parses
                 // as a bare name. Like a literal, it owns and borrows nothing.
@@ -6001,17 +6061,14 @@ impl<'a> Builder<'a> {
                     .functions
                     .iter()
                     .any(|f| &f.name == name && f.type_params.is_empty())
-                    && self
-                        .types
-                        .get(&(e as *const Expr as usize))
-                        .is_some_and(|t| {
-                            matches!(
-                                vyrn_frontend::types::resolve(t, self.proto.types()),
-                                Type::Fn(..)
-                            )
-                        }) =>
+                    && self.types.get(&e.id()).is_some_and(|t| {
+                        matches!(
+                            vyrn_frontend::types::resolve(t, self.proto.types()),
+                            Type::Fn(..)
+                        )
+                    }) =>
                 {
-                    let ty = self.types[&(e as *const Expr as usize)].clone();
+                    let ty = self.types[&e.id()].clone();
                     let f = self.program.functions.iter().find(|f| &f.name == name);
                     let decls = self.proto.types();
                     let refusal = stored_slot(None, f, &ty, &decls, *line);
@@ -6036,7 +6093,7 @@ impl<'a> Builder<'a> {
                 // is a borrow in any position.
                 None => self.global_read(e, name, *line, out),
             },
-            Expr::Consume { place, line } => match &**place {
+            Expr::Consume { place, line, id: _ } => match &**place {
                 Expr::Var { name, .. } => match self.lookup(name) {
                     Some(n) => Ok(Val::Name(n)),
                     // `consume <module state>`: a borrow whose take the
@@ -6130,6 +6187,7 @@ impl<'a> Builder<'a> {
             body,
             line,
             col,
+            id: _,
         } = e
         else {
             return gap("a lambda frame of no lambda literal", e.line());
@@ -6163,7 +6221,7 @@ impl<'a> Builder<'a> {
                     .map(|p| {
                         vars.iter()
                             .find(|v| matches!(v, Expr::Var { name, .. } if *name == p.name))
-                            .and_then(|v| self.types.get(&(*v as *const Expr as usize)))
+                            .and_then(|v| self.types.get(&v.id()))
                             .cloned()
                             .unwrap_or(Type::Unit)
                     })
@@ -6228,7 +6286,7 @@ impl<'a> Builder<'a> {
             LambdaBody::Expr(x) => self.val(x, &mut stmts).map(|v| {
                 stmts.push(St::Return {
                     value: Some(v),
-                    site: 0,
+                    site: NodeId::NONE,
                     is_try: false,
                     line: *line,
                 })
@@ -6567,7 +6625,7 @@ impl<'a> Builder<'a> {
             cond,
             then,
             els,
-            site: 0,
+            site: NodeId::NONE,
         });
         Ok(Rhs::Val(Val::Name(res)))
     }
@@ -6576,15 +6634,19 @@ impl<'a> Builder<'a> {
         match e {
             // Named again because this match is exhaustive on purpose: a new
             // `Expr` variant must fail to compile. `lit_of` says what each is.
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
-                match lit_of(e) {
-                    Some(l) => Ok(Rhs::Val(Val::Lit(l))),
-                    None => gap("a literal form `lit_of` does not answer", e.line()),
-                }
-            }
+            Expr::Int(_, _)
+            | Expr::Byte(_, _)
+            | Expr::Float(_, _)
+            | Expr::Bool(_, _)
+            | Expr::Str(_, _) => match lit_of(e) {
+                Some(l) => Ok(Rhs::Val(Val::Lit(l))),
+                None => gap("a literal form `lit_of` does not answer", e.line()),
+            },
             // A `let` builds a nullary constructor in its own slot, as it
             // builds `Some(v)`; [`Builder::nullary`] names one elsewhere.
-            Expr::Var { name, line } if self.lookup(name).is_none() && self.is_nullary(name) => {
+            Expr::Var { name, line, id: _ }
+                if self.lookup(name).is_none() && self.is_nullary(name) =>
+            {
                 let ty = self.ty_of(e)?;
                 self.call(name, &[], *line, Some(ty), out)
             }
@@ -6594,7 +6656,13 @@ impl<'a> Builder<'a> {
                 vec![self.read_val(expr, out)?],
                 self.produced(e),
             )),
-            Expr::Binary { op, lhs, rhs, line } => {
+            Expr::Binary {
+                op,
+                lhs,
+                rhs,
+                line,
+                id: _,
+            } => {
                 // `&&` and `||` are control flow: the right operand may not run.
                 if matches!(op, BinOp::And | BinOp::Or) {
                     return self.short_circuit(*op, lhs, rhs, *line, out);
@@ -6637,7 +6705,7 @@ impl<'a> Builder<'a> {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
-                    self.body.names[r as usize].receiver = Some(e as *const Expr as usize);
+                    self.body.names[r as usize].receiver = Some(e.id());
                 }
                 if self.owns(&fty) {
                     // `let sels = parse(q).sels`: the binding takes the field
@@ -6653,6 +6721,7 @@ impl<'a> Builder<'a> {
                 args,
                 line,
                 type_args: _,
+                id: _,
             } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
                 let r = if name == "serveStream" {
                     // A compiled build has no accept loop.
@@ -6672,7 +6741,7 @@ impl<'a> Builder<'a> {
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
-                    site: 0,
+                    site: NodeId::NONE,
                 });
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
@@ -6685,6 +6754,7 @@ impl<'a> Builder<'a> {
                 args,
                 line,
                 type_args,
+                id: _,
             } => {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
@@ -6736,7 +6806,7 @@ impl<'a> Builder<'a> {
                 if let Some(lit) = vyrn_frontend::project::schema_at(e) {
                     return self.rhs(lit, out);
                 }
-                let id = e as *const Expr as usize;
+                let id = e.id();
                 // Every call, accepted ones too: the solve binds a caller's
                 // own type parameter where a slot names it (#566).
                 let solved = self.solved.get(&id).map_or(&[][..], Vec::as_slice);
@@ -6763,7 +6833,7 @@ impl<'a> Builder<'a> {
                     ..
                 } = &mut r
                 {
-                    if let Some(s) = self.solved.get(&(e as *const Expr as usize)) {
+                    if let Some(s) = self.solved.get(&e.id()) {
                         *solved = s.clone();
                     }
                     let subst: HashMap<String, Type> = solved.iter().cloned().collect();
@@ -6784,7 +6854,7 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Make(Ctor::Try(name.clone()), vs))
             }
             // A part crosses into its slot's type as a stored value does.
-            Expr::ArrayLit { elems, line } => {
+            Expr::ArrayLit { elems, line, id: _ } => {
                 let ety = self
                     .ty_of(e)
                     .ok()
@@ -6795,7 +6865,12 @@ impl<'a> Builder<'a> {
                 }
                 Ok(Rhs::Make(Ctor::Array, vs))
             }
-            Expr::StructLit { name, fields, line } => {
+            Expr::StructLit {
+                name,
+                fields,
+                line,
+                id: _,
+            } => {
                 let ty = self.ty_of(e).ok();
                 let mut vs = Vec::new();
                 for (f, a) in fields {
@@ -6820,7 +6895,11 @@ impl<'a> Builder<'a> {
                     vs,
                 ))
             }
-            Expr::MapLit { entries, line } => {
+            Expr::MapLit {
+                entries,
+                line,
+                id: _,
+            } => {
                 let (kty, vty) = match self
                     .ty_of(e)
                     .map(|t| vyrn_frontend::types::resolve(&t, self.proto.types()))
@@ -6840,10 +6919,11 @@ impl<'a> Builder<'a> {
                 then_branch,
                 else_branch,
                 line,
+                id: _,
             } => {
                 let ty = self.ty_of(e)?;
                 // The plan keys an if-expression's edge rows by the expression.
-                let site = e as *const Expr as usize;
+                let site = e.id();
                 let res = self.temp(ty, *line);
                 let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
@@ -6900,7 +6980,7 @@ impl<'a> Builder<'a> {
             } => {
                 let ty = self.ty_of(e)?;
                 let sty = self.ty_of(scrutinee)?;
-                let mid = e as *const Expr as usize;
+                let mid = e.id();
                 let res = self.temp(ty, *line);
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
@@ -6964,10 +7044,10 @@ impl<'a> Builder<'a> {
                 self.drops_at(Exit::Scrutinee, mid, out)?;
                 Ok(Rhs::Val(Val::Name(res)))
             }
-            Expr::Try { expr, line } => {
+            Expr::Try { expr, line, id: _ } => {
                 let ty = self.ty_of(e)?;
                 let ity = self.ty_of(expr)?;
-                let tid = e as *const Expr as usize;
+                let tid = e.id();
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
                 let owns = self.owns_boxes(expr, consuming);
@@ -6985,8 +7065,13 @@ impl<'a> Builder<'a> {
                 // Failure: the exit's drops, then the propagated value leaves.
                 let mut fail = Vec::new();
                 let mark = self.scope.len();
+                // Each binder is keyed by a node of the `?`: the error by the
+                // `?` itself, the value by its operand.
                 let fb = self.bind_pattern(
-                    &Pattern::Failure(Binder::synthetic("@err")),
+                    &Pattern::Failure(Binder {
+                        id: Id(tid.0),
+                        ..Binder::synthetic("@err")
+                    }),
                     &ity,
                     consuming,
                     *line,
@@ -7028,7 +7113,10 @@ impl<'a> Builder<'a> {
                 let mut ok = Vec::new();
                 let mark = self.scope.len();
                 let ob = self.bind_pattern(
-                    &Pattern::Success(Binder::synthetic("@ok")),
+                    &Pattern::Success(Binder {
+                        id: Id(expr.id().0),
+                        ..Binder::synthetic("@ok")
+                    }),
                     &ity,
                     consuming,
                     *line,
@@ -7098,7 +7186,7 @@ impl<'a> Builder<'a> {
         sv: Val,
         owns: bool,
         res: Name,
-        tid: usize,
+        tid: NodeId,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         let line = self.body.names[res as usize].line;
@@ -7241,7 +7329,7 @@ impl<'a> Builder<'a> {
                                 e,
                                 Expr::Call { name, .. } if !name.starts_with('@')
                             );
-                            self.pending_receiver = Some((t, e as *const Expr as usize, malloc));
+                            self.pending_receiver = Some((t, e.id(), malloc));
                         }
                         Ok(Place::Name(t))
                     }
@@ -7521,7 +7609,7 @@ impl<'a> Builder<'a> {
                 // checks it again.
                 let t = self.checked_temp(&to, a, line, out)?;
                 if self.arg_released(a, t, name, k) {
-                    self.body.names[t as usize].arg_drop = Some(a as *const Expr as usize);
+                    self.body.names[t as usize].arg_drop = Some(a.id());
                 }
                 Val::Name(t)
             } else if *cap == Capability::Consume {
@@ -7824,6 +7912,11 @@ thread_local! {
     /// bodies share.
     static BODIES: std::cell::RefCell<HashMap<String, Option<Body>>> =
         std::cell::RefCell::new(HashMap::new());
+    /// The type declarations of the program in [`BODIES`], and the bodies
+    /// whose check rows are not decided yet: [`body_of`] decides a body when
+    /// an emitter first reads it, so `vyrn check` decides none of its own.
+    static UNDECIDED: std::cell::RefCell<(HashMap<String, TypeDecl>, std::collections::HashSet<String>)> =
+        std::cell::RefCell::new((HashMap::new(), std::collections::HashSet::new()));
     static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
     /// What the checker decided about a program, under [`Key`]. Held as the
     /// checker's `Rc`, so serving it costs a refcount, not a copy of a map
@@ -7893,7 +7986,7 @@ pub fn set_decided(program: &Program, made: &std::rc::Rc<vyrn_frontend::checker:
 /// `None` for a node the checker never typed: one of a program no lowering
 /// ran over on this thread (a host that never linked this crate), or an
 /// expression an emitter built. A reader then falls back to its own derivation.
-pub fn node_ty(node: usize) -> Option<Type> {
+pub fn node_ty(node: NodeId) -> Option<Type> {
     DECIDED.with(|d| {
         d.borrow()
             .as_ref()
@@ -7903,7 +7996,7 @@ pub fn node_ty(node: usize) -> Option<Type> {
 
 /// The type arguments the checker solved at the call `node`, as it typed the
 /// body: before an instance's substitution.
-fn node_solved(node: usize) -> Option<Vec<(String, Type)>> {
+fn node_solved(node: NodeId) -> Option<Vec<(String, Type)>> {
     DECIDED.with(|d| {
         d.borrow()
             .as_ref()
@@ -7913,7 +8006,7 @@ fn node_solved(node: usize) -> Option<Vec<(String, Type)>> {
 
 /// The declaration the checker recorded at the call `node` it typed `Err`
 /// for the typed judgment ([`vyrn_frontend::checker::Recorded::calls`]).
-fn call_decl(node: usize) -> Option<vyrn_frontend::checker::CallDecl> {
+fn call_decl(node: NodeId) -> Option<vyrn_frontend::checker::CallDecl> {
     DECIDED.with(|d| {
         d.borrow()
             .as_ref()
@@ -7924,7 +8017,7 @@ fn call_decl(node: usize) -> Option<vyrn_frontend::checker::CallDecl> {
 /// The checker's type for the `match` or `if` expression at `node`: the join
 /// subset of [`node_ty`]. A merge holds one value, so an emitter must not
 /// take the type one arm happened to produce (`["z"]` for `Array<String>`).
-pub fn join_ty(node: usize) -> Option<Type> {
+pub fn join_ty(node: NodeId) -> Option<Type> {
     DECIDED.with(|d| {
         d.borrow()
             .as_ref()
@@ -7940,50 +8033,51 @@ pub fn join_ty(node: usize) -> Option<Type> {
 pub struct Facts {
     /// The `Expr::Field` node of an unnamed receiver the core releases after
     /// the read, and the holes the release walks around.
-    pub receivers: std::collections::HashMap<usize, Vec<String>>,
+    pub receivers: std::collections::HashMap<NodeId, Vec<String>>,
     /// `(match, arm) -> [(binder, holes, kind)]`: the payload binders the
     /// arm's body releases at its end. The kind is the binder type's release
     /// rule, which the interpreter needs; the compiled backends read the type.
-    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>, Option<DropKind>)>>,
+    pub arms:
+        std::collections::HashMap<(NodeId, u32), Vec<(String, Vec<String>, Option<DropKind>)>>,
     /// The store statements and whether each releases its old value: a
     /// `St::Store`'s `releases` at a [`Site::Node`]. An absent site has no
     /// answer here, and a reader falls back to the plan.
-    pub stores: std::collections::HashMap<usize, bool>,
+    pub stores: std::collections::HashMap<NodeId, bool>,
     /// The stores the core stands down at whatever the judgment says: the
     /// value hands the place back (`xs = xs.push(v)`), or the place owns no
     /// heap (`w = 2`). No emitter reads it (`stores` folds both in); the
     /// corpus test uses it to check that every plan row is either released
     /// or stood down.
-    pub stood_down: std::collections::HashSet<usize>,
+    pub stood_down: std::collections::HashSet<NodeId>,
     /// The statement-position calls whose unbound owned result the core
     /// releases: a `St::Drop` at the statement's [`Site::Node`].
-    pub discarded: std::collections::HashSet<usize>,
+    pub discarded: std::collections::HashSet<NodeId>,
     /// The `for x in consume xs` loops that release their container where the
     /// loop ends: a `St::Drop` of a `for_consume` name at the loop's
     /// [`Site::Node`]. No row names this release, and it excludes an exit row
     /// for the container.
-    pub loop_gives_back: std::collections::HashSet<usize>,
+    pub loop_gives_back: std::collections::HashSet<NodeId>,
     /// The `for` statements whose container release frees the buffer alone
     /// ([`Body::loop_buffers`]), keyed by the loop's node. The release is a
     /// placed row at the loop, or [`Facts::loop_gives_back`].
-    pub loop_buffer_only: std::collections::HashSet<usize>,
+    pub loop_buffer_only: std::collections::HashSet<NodeId>,
     /// The call-argument nodes whose temporary the caller releases after the
     /// call ([`NameInfo::arg_drop`]).
-    pub arg_drops: std::collections::HashSet<usize>,
+    pub arg_drops: std::collections::HashSet<NodeId>,
     /// Per join node, the `(name, edge, holes)` releases one edge owes
     /// because another edge took the name: a `St::Drop` at
     /// a [`Site::Edge`].
-    pub edges: std::collections::HashMap<usize, Vec<EdgeRow>>,
+    pub edges: std::collections::HashMap<NodeId, Vec<EdgeRow>>,
     /// The receivers a callee allocated ([`NameInfo::receiver_malloc`]). An
     /// emitter still asks its own region depth.
-    pub receiver_malloc: std::collections::HashSet<usize>,
+    pub receiver_malloc: std::collections::HashSet<NodeId>,
     /// Per `match`, `if let` or `?` node: whether the construct took its
     /// scrutinee ([`St::Switch`]'s `consuming`). An absent site has no
     /// answer here.
-    pub consuming: std::collections::HashMap<usize, bool>,
+    pub consuming: std::collections::HashMap<NodeId, bool>,
     /// The `match`, `if let` or `?` nodes that own the boxes their binders
     /// come out of ([`St::Switch`]'s `owns`, [`Builder::owns_boxes`]).
-    pub owns_scrutinee: std::collections::HashSet<usize>,
+    pub owns_scrutinee: std::collections::HashSet<NodeId>,
 }
 
 /// One edge release: the name, the edge, and the holes the release walks
@@ -7998,43 +8092,43 @@ pub type EdgeRow = (String, u32, Vec<String>);
 pub(crate) struct Placed {
     /// `(switch site, arm) -> [(binder, holes)]`: the payload binders still
     /// held where their arm ends.
-    arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+    arms: std::collections::HashMap<(NodeId, u32), Vec<(String, Vec<String>)>>,
     /// Per join node, the releases one edge owes because another edge took
     /// the name. A sub-place row is spelled `d.line`.
-    edges: std::collections::HashMap<usize, Vec<EdgeRow>>,
+    edges: std::collections::HashMap<NodeId, Vec<EdgeRow>>,
     /// The store nodes the kernel found a held place at: the stores that
     /// release what they displace, with the holes each release walks around.
-    stores: std::collections::HashMap<usize, Vec<String>>,
+    stores: std::collections::HashMap<NodeId, Vec<String>>,
     /// The nodes that produced a borrowed receiver still held, whose free
     /// rides as an argument-temporary drop.
-    producers: std::collections::HashSet<usize>,
+    producers: std::collections::HashSet<NodeId>,
 }
 
 /// Whether the kernel found this store's place still holding. Empty on the
 /// first build, where every store says [`Old::Pending`].
-fn placed_store(site: usize) -> bool {
+fn placed_store(site: NodeId) -> bool {
     PLACED.with(|p| p.borrow().stores.contains_key(&site))
 }
 
 /// The holes the release at a placed store walks around.
-fn store_holes(site: usize) -> Vec<String> {
+fn store_holes(site: NodeId) -> Vec<String> {
     PLACED.with(|p| p.borrow().stores.get(&site).cloned().unwrap_or_default())
 }
 
 /// The binders the kernel found held at the end of one arm. Empty on the
 /// first build.
-fn placed_arm(site: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
+fn placed_arm(site: NodeId, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
     PLACED.with(|p| p.borrow().arms.get(&(site, arm)).cloned())
 }
 
 /// Whether the placer wrote an argument-temporary drop for the receiver this
 /// node produced. Empty on the first build.
-fn placed_producer(node: usize) -> bool {
+fn placed_producer(node: NodeId) -> bool {
     PLACED.with(|p| p.borrow().producers.contains(&node))
 }
 
 /// Rule N's rows for one join, as the kernel equalized its edges.
-fn placed_edges(join: usize) -> Option<Vec<EdgeRow>> {
+fn placed_edges(join: NodeId) -> Option<Vec<EdgeRow>> {
     PLACED.with(|p| p.borrow().edges.get(&join).cloned())
 }
 
@@ -8064,7 +8158,17 @@ pub fn lambda_line(name: &str) -> Option<usize> {
 /// name for module state). `None` for a [`Gap`] and for a name two bodies
 /// share; a reader then walks the source.
 pub fn body_of(name: &str) -> Option<Body> {
-    BODIES.with(|b| b.borrow().get(name).cloned().flatten())
+    BODIES.with(|b| {
+        let mut b = b.borrow_mut();
+        let body = b.get_mut(name)?.as_mut()?;
+        UNDECIDED.with(|u| {
+            let (decls, pending) = &mut *u.borrow_mut();
+            if pending.remove(name) {
+                crate::elide::decide(body, decls);
+            }
+        });
+        Some(body.clone())
+    })
 }
 
 /// The instance of `body` whose `fn`-typed parameters are bound:
@@ -8147,12 +8251,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: bool) -> bool {
     let mut reads = vec![0; names];
     for i in 0..ss.len() {
-        let nested = match &mut ss[i] {
-            St::If { then, els, .. } => vec![then, els],
-            St::Loop { body, .. } | St::Block { body, .. } => vec![body],
-            St::Switch { arms, .. } => arms.iter_mut().map(|a| &mut a.body).collect(),
-            _ => Vec::new(),
-        };
+        let nested: Vec<&mut Vec<St>> = ss[i].lists_mut().collect();
         let mut inner = 0;
         for b in &nested {
             count_reads(b, &mut reads);
@@ -8183,118 +8282,66 @@ fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: 
 }
 
 fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name>)]) {
-    for s in ss {
-        match s {
-            St::Let(_, rhs) | St::Do { rhs, .. } => {
-                let Rhs::Call {
-                    callee,
-                    args,
-                    kind,
-                    targets,
-                    ..
-                } = rhs
-                else {
-                    continue;
-                };
-                if let Some(v) = kind.value() {
-                    match bound.iter().find(|(n, _)| *n == v) {
-                        Some((_, Target::Fn(f))) => {
-                            *kind = Callee::Fn;
-                            *callee = f.clone();
-                        }
-                        Some((_, Target::Lambda(key, ..))) => {
-                            *kind = Callee::Fn;
-                            *callee = key.clone();
-                            let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
-                            let lead = names.into_iter().flatten();
-                            let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
-                            args.splice(0..0, lead.collect::<Vec<_>>());
-                        }
-                        Some((_, Target::Value(source))) => *callee = source.clone(),
-                        _ => {}
-                    }
+    each_row_mut(ss, &mut |s| {
+        let (St::Let(_, rhs) | St::Do { rhs, .. }) = s else {
+            return;
+        };
+        let Rhs::Call {
+            callee,
+            args,
+            kind,
+            targets,
+            ..
+        } = rhs
+        else {
+            return;
+        };
+        if let Some(v) = kind.value() {
+            match bound.iter().find(|(n, _)| *n == v) {
+                Some((_, Target::Fn(f))) => {
+                    *kind = Callee::Fn;
+                    *callee = f.clone();
                 }
-                for t in targets.iter_mut() {
-                    let Target::Param(p) = t else { continue };
-                    let p = *p;
-                    let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
-                        continue;
-                    };
-                    *t = to.clone();
-                    // A stored value forwards itself, the parameter that
-                    // stays under its name.
-                    if matches!(to, Target::Value(_)) {
-                        args.push((Arg::Val(Val::Name(p)), Capability::Read));
-                    }
-                    let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
-                    let forwarded = forwarded.into_iter().flatten();
-                    args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
+                Some((_, Target::Lambda(key, ..))) => {
+                    *kind = Callee::Fn;
+                    *callee = key.clone();
+                    let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
+                    let lead = names.into_iter().flatten();
+                    let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
+                    args.splice(0..0, lead.collect::<Vec<_>>());
                 }
+                Some((_, Target::Value(source))) => *callee = source.clone(),
+                _ => {}
             }
-            St::If { then, els, .. } => {
-                bind_targets(then, bound, caps);
-                bind_targets(els, bound, caps);
-            }
-            St::Loop { body, .. } | St::Block { body, .. } => bind_targets(body, bound, caps),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    bind_targets(&mut a.body, bound, caps);
-                }
-            }
-            _ => {}
         }
-    }
+        for t in targets.iter_mut() {
+            let Target::Param(p) = t else { continue };
+            let p = *p;
+            let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
+                continue;
+            };
+            *t = to.clone();
+            // A stored value forwards itself, the parameter that
+            // stays under its name.
+            if matches!(to, Target::Value(_)) {
+                args.push((Arg::Val(Val::Name(p)), Capability::Read));
+            }
+            let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
+            let forwarded = forwarded.into_iter().flatten();
+            args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
+        }
+    });
 }
 
 fn count_reads(ss: &[St], out: &mut [u32]) {
-    fn hit(v: &Val, out: &mut [u32]) {
-        if let Val::Name(n) = v {
-            out[*n as usize] += 1;
-        }
-    }
-    for s in ss {
-        match s {
-            St::Let(_, rhs) | St::Do { rhs, .. } => match rhs {
-                Rhs::Val(v) => hit(v, out),
-                Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
-                    vs.iter().for_each(|v| hit(v, out));
-                }
-                Rhs::Call { args, kind, .. } => {
-                    kind.value().iter().for_each(|f| hit(&Val::Name(*f), out));
-                    args.iter().for_each(|(a, _)| {
-                        if let Arg::Val(v) = a {
-                            hit(v, out)
-                        }
-                    })
-                }
-                Rhs::Read(_) | Rhs::Take(_) => {}
-            },
-            St::Store { value, .. } => hit(value, out),
-            St::Return { value: Some(v), .. } => hit(v, out),
-            St::If { cond, .. } => hit(cond, out),
-            St::Switch { on, arms, .. } => {
-                hit(on, out);
-                arms.iter()
-                    .filter_map(|a| a.test.reads())
-                    .for_each(|n| out[n as usize] += 1);
+    // A release reads the name, so the name holds a place until then. A
+    // release row (`St::Row`) and a place's names are not counted.
+    for (s, _) in rows(ss).filter(|(s, _)| !matches!(s, St::Row { .. })) {
+        s.operands(&mut |v, u| {
+            if let (Val::Name(n), Use::Read | Use::Hand | Use::Release) = (v, u) {
+                out[*n as usize] += 1;
             }
-            // A release reads the name, so the name holds a place until then.
-            St::Drop(n, ..) => out[*n as usize] += 1,
-            _ => {}
-        }
-        match s {
-            St::If { then, els, .. } => {
-                count_reads(then, out);
-                count_reads(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => count_reads(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    count_reads(&a.body, out);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 }
 
@@ -8317,36 +8364,12 @@ pub fn runs<'a>(s: &St, names: &'a [NameInfo]) -> &'a [String] {
 /// Every name a statement names, itself and everything under it: what it binds
 /// and what it reads.
 pub fn names_in(s: &St, out: &mut Vec<Name>) {
-    match s {
-        St::Let(n, rhs) => {
-            out.push(*n);
-            names_in_rhs(rhs, out);
-        }
-        St::Do { rhs, .. } => names_in_rhs(rhs, out),
-        St::Store { place, value, .. } => {
-            names_in_place(place, out);
-            names_in_val(value, out);
-        }
-        St::Drop(n, ..) | St::Row { name: n, .. } => out.push(*n),
-        St::If {
-            cond, then, els, ..
-        } => {
-            names_in_val(cond, out);
-            then.iter().for_each(|s| names_in(s, out));
-            els.iter().for_each(|s| names_in(s, out));
-        }
-        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
-            b.iter().for_each(|s| names_in(s, out))
-        }
-        St::Switch { on, arms, .. } => {
-            names_in_val(on, out);
-            for a in arms {
-                out.extend(a.test.reads());
-                a.body.iter().for_each(|s| names_in(s, out));
+    for (r, _) in s.rows() {
+        r.operands(&mut |v, _| {
+            if let Val::Name(n) = v {
+                out.push(*n);
             }
-        }
-        St::Return { value: Some(v), .. } => names_in_val(v, out),
-        St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap => {}
+        });
     }
 }
 
@@ -8394,12 +8417,12 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
     out
 }
 
-/// The names and the module state whose header a read in `s` walks: an
+/// The names and the module state whose header a read in `ss` walks: an
 /// element read, or a length read, straight off one. With `rebase`, each
 /// such read of the first reads the name instead. A store and a take keep
 /// their place, so a store into an element writes the container and not its
 /// header.
-fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
+fn header_reads(ss: &mut [St], rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
     fn place(p: &mut Place, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
         let header = match p {
             Place::Elem(b, _) => Some(b),
@@ -8426,42 +8449,25 @@ fn header_reads(s: &mut St, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) 
             Place::Name(_) | Place::Global(_) => {}
         }
     }
-    let each = |ss: &mut Vec<St>, out: &mut Vec<Root>| {
-        ss.iter_mut().for_each(|s| header_reads(s, rebase, out))
-    };
-    match s {
-        St::Let(_, Rhs::Read(p))
+    each_row_mut(ss, &mut |s| {
+        if let St::Let(_, Rhs::Read(p))
         | St::Do {
             rhs: Rhs::Read(p), ..
-        } => place(p, rebase, out),
-        St::If { then, els, .. } => {
-            each(then, out);
-            each(els, out);
+        } = s
+        {
+            place(p, rebase, out);
         }
-        St::Loop { body, .. } | St::Block { body, .. } => each(body, out),
-        St::Switch { arms, .. } => arms.iter_mut().for_each(|a| each(&mut a.body, out)),
-        _ => {}
-    }
+    });
 }
 
 /// Every name `s` binds, at any depth: a `let` and a switch arm's binders.
 pub fn names_bound(s: &St, out: &mut Vec<Name>) {
-    match s {
-        St::Let(n, _) => out.push(*n),
-        St::If { then, els, .. } => {
-            then.iter().for_each(|s| names_bound(s, out));
-            els.iter().for_each(|s| names_bound(s, out));
+    for (r, _) in s.rows() {
+        match r {
+            St::Let(n, _) => out.push(*n),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| out.extend(&a.binds)),
+            _ => {}
         }
-        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
-            b.iter().for_each(|s| names_bound(s, out))
-        }
-        St::Switch { arms, .. } => {
-            for a in arms {
-                out.extend(&a.binds);
-                a.body.iter().for_each(|s| names_bound(s, out));
-            }
-        }
-        _ => {}
     }
 }
 
@@ -8479,39 +8485,6 @@ fn removal(e: &Expr) -> Option<&String> {
             _ => None,
         },
         _ => None,
-    }
-}
-
-fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
-    match r {
-        Rhs::Val(v) => names_in_val(v, out),
-        Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().for_each(|v| names_in_val(v, out)),
-        Rhs::Call { args, kind, .. } => {
-            out.extend(kind.value());
-            args.iter().for_each(|(a, _)| match a {
-                Arg::Val(v) => names_in_val(v, out),
-                Arg::Place(p) => names_in_place(p, out),
-            })
-        }
-        Rhs::Read(p) | Rhs::Take(p) => names_in_place(p, out),
-    }
-}
-
-fn names_in_val(v: &Val, out: &mut Vec<Name>) {
-    if let Val::Name(n) = v {
-        out.push(*n);
-    }
-}
-
-fn names_in_place(p: &Place, out: &mut Vec<Name>) {
-    match p {
-        Place::Name(n) => out.push(*n),
-        Place::Global(_) => {}
-        Place::Field(b, _) => names_in_place(b, out),
-        Place::Elem(b, v) | Place::Key(b, v) => {
-            names_in_place(b, out);
-            names_in_val(v, out);
-        }
     }
 }
 
@@ -8549,7 +8522,7 @@ fn rebound(b: &Block, out: &mut std::collections::HashSet<String>) {
             Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
                 rebound(body, out)
             }
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 for a in arms {
                     if let ArmBody::Block(b) = &a.body {
                         rebound(b, out);
@@ -8572,14 +8545,9 @@ fn plan_holes(holes: &[String]) -> Vec<String> {
 
 /// Folds one frame's statements into the side table. Called after the placer
 /// has added every row, so this is the core the emitters run.
-fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
-    for s in stmts {
+fn fold_facts(body: &Body, proto: &Owned, out: &mut Facts) {
+    for (s, _) in rows(&body.stmts) {
         match s {
-            St::If { then, els, .. } => {
-                fold_facts(body, proto, then, out);
-                fold_facts(body, proto, els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => fold_facts(body, proto, b, out),
             St::Store {
                 releases,
                 site: Site::Node(at),
@@ -8641,7 +8609,6 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
                         // "not stated".
                         out.arms.entry((a.site, a.index)).or_default().extend(rows);
                     }
-                    fold_facts(body, proto, &a.body, out);
                 }
             }
             _ => {}
@@ -8649,21 +8616,65 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
     }
 }
 
+/// The declared type of the module-state name `g`, or the checker's type for
+/// its initializer.
+fn global_ty(program: &Program, g: &str) -> Option<Type> {
+    let d = program.globals.iter().find(|d| d.name == g)?;
+    d.ty.clone().or_else(|| node_ty(d.init.id()))
+}
+
+/// `body` with its check rows, each decided unless the build keeps them all
+/// ([`crate::check::mode`]): the form an emitter reads.
+pub fn checked(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> Body {
+    let mut out = stated(program, decls, body);
+    if decides() {
+        crate::elide::decide(&mut out, decls);
+    }
+    out
+}
+
+fn decides() -> bool {
+    *crate::check::mode() != crate::check::Mode::Keep
+}
+
+/// `body` with its check rows, every one kept.
+fn stated(program: &Program, decls: &HashMap<String, TypeDecl>, body: &Body) -> Body {
+    let global = |g: &str| global_ty(program, g);
+    let mut out = body.clone();
+    crate::check::state(
+        &mut out,
+        &crate::check::Types {
+            decls,
+            global: &global,
+        },
+    );
+    out
+}
+
 /// Every frame's answers, added to the table.
-fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
+fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
     // Filled at the same site as the fold, so a body the fold does not see is
     // one no emitter may walk either.
     BODIES.with(|b| {
         b.borrow_mut()
             .entry(body.name.clone())
             .and_modify(|had| *had = None)
-            .or_insert_with(|| Some(body.clone()));
+            .or_insert_with(|| {
+                if decides() {
+                    UNDECIDED.with(|u| u.borrow_mut().1.insert(body.name.clone()));
+                }
+                Some(stated(program, proto.types(), body))
+            });
     });
-    fold_facts(body, proto, &body.stmts, out);
+    fold_facts(body, proto, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
-    let mut released = std::collections::HashSet::new();
-    collect_drops(&body.stmts, &mut released);
+    let released: std::collections::HashSet<Name> = (rows(&body.stmts))
+        .filter_map(|(s, _)| match s {
+            St::Drop(n, ..) => Some(*n),
+            _ => None,
+        })
+        .collect();
     for (i, info) in body.names.iter().enumerate() {
         if !released.contains(&(i as Name)) {
             continue;
@@ -8680,27 +8691,6 @@ fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
         // binds a borrow, and the caller still frees the value.
         if let Some(node) = info.arg_drop {
             out.arg_drops.insert(node);
-        }
-    }
-}
-
-fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
-    for s in stmts {
-        match s {
-            St::Drop(n, _, _, _) => {
-                out.insert(*n);
-            }
-            St::If { then, els, .. } => {
-                collect_drops(then, out);
-                collect_drops(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => collect_drops(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    collect_drops(&a.body, out);
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -8723,7 +8713,7 @@ pub fn take_refusals() -> Vec<Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
-type Typed = (Vec<Diagnostic>, std::collections::HashSet<usize>);
+type Typed = (Vec<Diagnostic>, std::collections::HashSet<NodeId>);
 
 thread_local! {
     /// What the typed judgment refused about the program last analysed on
@@ -8743,11 +8733,7 @@ fn typed(
     as_written: bool,
 ) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
-    let global_ty = |g: &str| {
-        let d = program.globals.iter().find(|d| d.name == g)?;
-        d.ty.clone()
-            .or_else(|| node_ty(&d.init as *const Expr as usize))
-    };
+    let global_ty = |g: &str| global_ty(program, g);
     let projected =
         |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
     let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
@@ -9106,7 +9092,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // judgment alone. An initializer the checker did not type has no core;
     // the checker's refusal is its sentence.
     for g in &program.globals {
-        if node_ty(&g.init as *const Expr as usize).is_none() {
+        if node_ty(g.init.id()).is_none() {
             continue;
         }
         match build_root(
@@ -9191,13 +9177,14 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
     BODIES.with(|b| b.borrow_mut().clear());
+    UNDECIDED.with(|u| *u.borrow_mut() = (own.proto.types().clone(), Default::default()));
     // `vyrn check` emits nothing, so it folds no facts; the worklist below
     // still places its rows.
     let folds = vyrn_frontend::movecheck::emitting();
     if folds {
         if let Ok(top) = build_module_state(program, own, &lowered.globals) {
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
         for (i, inst) in lowered.instances.iter().enumerate() {
@@ -9213,7 +9200,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
         // The same for `test` and `bench` bodies, whose nodes an emitter looks up
@@ -9236,7 +9223,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
     }
@@ -9271,7 +9258,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
+                fold_frame(program, body, &own.proto, &mut facts);
             }
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
@@ -9543,7 +9530,7 @@ fn place_frames(
                 });
                 if fresh {
                     if trace {
-                        eprintln!("placer: {} store at {} releases", body.name, m.site);
+                        eprintln!("placer: {} store at {} releases", body.name, m.site.0);
                     }
                     touched.insert(owner.to_string());
                 }
@@ -9554,7 +9541,7 @@ fn place_frames(
             if trace {
                 eprintln!(
                     "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
-                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
+                    body.name, info.source, info.line, m.kind, m.exit, m.site.0, kind, m.holes
                 );
             }
             // A receiver a consumer borrowed out of ([`NameInfo::producer`]):
@@ -9566,7 +9553,7 @@ fn place_frames(
                 }
                 continue;
             }
-            if m.site == 0 {
+            if m.site == NodeId::NONE {
                 continue;
             }
             let Some(kind) = kind else {

@@ -60,6 +60,22 @@ pub const STACK_EXHAUSTED: &str = "Call stack exhausted";
 /// table belongs in a data segment, which no backend lowers.
 pub const ARRAY_LIT_LIMIT: usize = FRAME_LIMIT as usize / 16;
 
+/// The most bytes one value may occupy, and one less than the most one
+/// allocation may: every address and size on the wasm route is an `i32`, and
+/// every element takes at least one byte. A pass may assume
+/// `length <= LENGTH_LIMIT + 1` (the check-elision length postulate): `append`
+/// fills a block of `LENGTH_LIMIT + 1` bytes with that many `UInt8`s.
+///
+/// Two homes enforce it. The emitter refuses a larger size it lays out
+/// (`vyrn_codegen::direct::Fn_::extent`). At run time `std/runtime`'s `malloc`
+/// traps `out of memory` past `LENGTH_LIMIT + 1` bytes, a Vyrn literal no Rust
+/// constant reaches. Memory64 would move both.
+pub const LENGTH_LIMIT: u32 = i32::MAX as u32;
+
+/// What the check oracle (`vyrn_lower::check::Mode::Count`) says where a check
+/// the compiler proved would have trapped: a compiler defect, never a program's.
+pub const PROVED_CHECK_FAILED: &str = "a check the compiler proved failed";
+
 /// How many `region` scopes may be open at once, on every engine: the size of
 /// the backends' fixed region stack, and the number in the trap wording.
 pub const REGION_MAX: u32 = 64;

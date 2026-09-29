@@ -175,6 +175,92 @@ mod std_modules {
     include!(concat!(env!("OUT_DIR"), "/std_modules.rs"));
 }
 
+thread_local! {
+    /// The page's answer to [`run_generator`]: the module's stdout, or why it
+    /// did not run.
+    static GEN_OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Reserves `len` bytes for the page's answer to `run_generator` and returns
+/// where to write them.
+#[no_mangle]
+pub extern "C" fn gen_output_ptr(len: usize) -> *mut u8 {
+    GEN_OUT.with(|o| {
+        let mut b = o.borrow_mut();
+        b.clear();
+        b.resize(len, 0);
+        b.as_mut_ptr()
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "vyrn_play")]
+extern "C" {
+    /// Runs a generator module in the page. The request is [`gen_request`]'s
+    /// bytes; the page writes stdout, or the error, through [`gen_output_ptr`]
+    /// and answers 0 for stdout, 1 for an error.
+    #[link_name = "run_generator"]
+    fn page_run_generator(req: *const u8, len: usize) -> u32;
+}
+
+/// Runs a generator module in the page and answers its stdout.
+fn run_generator(
+    module: &[u8],
+    argv: &[String],
+    atoms: &[vyrn_genwasm::Atom],
+) -> Result<Vec<u8>, String> {
+    let status = page_run(&gen_request(module, argv, atoms))?;
+    let out = GEN_OUT.with(|o| std::mem::take(&mut *o.borrow_mut()));
+    match status {
+        0 => Ok(out),
+        _ => Err(String::from_utf8_lossy(&out).into_owned()),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn page_run(req: &[u8]) -> Result<u32, String> {
+    // SAFETY: the page reads `len` bytes at `req`, which stay borrowed for the
+    // call, and writes only through `gen_output_ptr`.
+    Ok(unsafe { page_run_generator(req.as_ptr(), req.len()) })
+}
+
+/// On the host (`cargo test`) there is no page to run a module.
+#[cfg(not(target_arch = "wasm32"))]
+fn page_run(_: &[u8]) -> Result<u32, String> {
+    Err("a generator runs only in the page".to_string())
+}
+
+/// The request `run_generator` hands the page, little-endian: the module
+/// (`u32` length, bytes), argv (`u32` count, then `u32` length and bytes
+/// each) and the atoms (`u32` count, then a tag byte each: 0 and an `i64`, or
+/// 1 and a `u32` length and bytes).
+fn gen_request(module: &[u8], argv: &[String], atoms: &[vyrn_genwasm::Atom]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let bytes = |out: &mut Vec<u8>, b: &[u8]| {
+        out.extend((b.len() as u32).to_le_bytes());
+        out.extend(b);
+    };
+    bytes(&mut out, module);
+    out.extend((argv.len() as u32).to_le_bytes());
+    for a in argv {
+        bytes(&mut out, a.as_bytes());
+    }
+    out.extend((atoms.len() as u32).to_le_bytes());
+    for a in atoms {
+        match a {
+            vyrn_genwasm::Atom::Int(n) => {
+                out.push(0);
+                out.extend(n.to_le_bytes());
+            }
+            vyrn_genwasm::Atom::Str(s) => {
+                out.push(1);
+                bytes(&mut out, s);
+            }
+        }
+    }
+    out
+}
+
 /// Loads `src` as a one-file program through `load_warned`, the CLI's entry
 /// point, with a resolver that holds `std/` alone.
 ///
@@ -187,6 +273,9 @@ fn load(
     Vec<Diagnostic>,
 ) {
     vyrn_lower::install();
+    vyrn_frontend::gen::set_gen_engine(Box::new(|p, f, a, i| {
+        vyrn_genwasm::run_pure(p, f, a, i, run_generator)
+    }));
     let opts = LoadOptions {
         std_root: Some("std".into()),
         aliases: Default::default(),

@@ -341,9 +341,9 @@ pub fn predicate_multiple_of(pred: &Expr) -> Option<i64> {
                 } = &**lhs
                 {
                     if matches!(&**base, Expr::Var { name, .. } if name == "value")
-                        && matches!(&**rhs, Expr::Int(0))
+                        && matches!(&**rhs, Expr::Int(0, _))
                     {
-                        if let Expr::Int(kv) = &**k {
+                        if let Expr::Int(kv, _) = &**k {
                             return Some(*kv);
                         }
                     }
@@ -389,7 +389,7 @@ pub fn predicate_pattern(pred: &Expr) -> Option<String> {
             BinOp::And => return predicate_pattern(lhs).or_else(|| predicate_pattern(rhs)),
             BinOp::Match => {
                 if matches!(&**lhs, Expr::Var { name, .. } if name == "value") {
-                    if let Expr::Str(pat) = &**rhs {
+                    if let Expr::Str(pat, _) = &**rhs {
                         return Some(pat.clone());
                     }
                 }
@@ -453,37 +453,42 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
     let pattern = pred.and_then(predicate_pattern);
     let opt = |n: Option<i64>| match n {
         Some(v) => Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: "Some".to_string(),
-            args: vec![Expr::Int(v)],
+            args: vec![Expr::Int(v, Id::NEW)],
             line: 0,
         },
         None => Expr::Var {
+            id: Id::NEW,
             name: "None".to_string(),
             line: 0,
         },
     };
     let opt_str = |s: Option<String>| match s {
         Some(v) => Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: "Some".to_string(),
-            args: vec![Expr::Str(v)],
+            args: vec![Expr::Str(v, Id::NEW)],
             line: 0,
         },
         None => Expr::Var {
+            id: Id::NEW,
             name: "None".to_string(),
             line: 0,
         },
     };
     Expr::StructLit {
+        id: Id::NEW,
         name: "Schema".to_string(),
         fields: vec![
-            ("name".to_string(), Expr::Str(decl.name.clone())),
+            ("name".to_string(), Expr::Str(decl.name.clone(), Id::NEW)),
             (
                 "base".to_string(),
-                Expr::Str(base_spelling(&decl.base).to_string()),
+                Expr::Str(base_spelling(&decl.base).to_string(), Id::NEW),
             ),
             ("doc".to_string(), opt_str(decl.doc.clone())),
             ("min".to_string(), opt(min)),
@@ -778,7 +783,7 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
     // means the same in ECMA-262.
     if *op == BinOp::Match {
         if is_value(lhs) {
-            if let Expr::Str(pat) = &**rhs {
+            if let Expr::Str(pat, _) = &**rhs {
                 out.push((
                     "pattern".to_string(),
                     format!("\"{}\"", json_escape(&format!("^{pat}$"))),
@@ -810,15 +815,15 @@ fn is_length_of_value(e: &Expr) -> bool {
 /// An integer or byte literal, possibly negated, as an `i64`.
 fn int_lit(e: &Expr) -> Option<i64> {
     match e {
-        Expr::Int(n) => Some(*n),
-        Expr::Byte(b) => Some(*b as i64),
+        Expr::Int(n, _) => Some(*n),
+        Expr::Byte(b, _) => Some(*b as i64),
         Expr::Unary {
             op: UnOp::Neg,
             expr,
             ..
         } => match &**expr {
-            Expr::Int(n) => Some(-n),
-            Expr::Byte(b) => Some(-(*b as i64)),
+            Expr::Int(n, _) => Some(-n),
+            Expr::Byte(b, _) => Some(-(*b as i64)),
             _ => None,
         },
         _ => None,
@@ -951,22 +956,22 @@ fn is_value(e: &Expr) -> bool {
 }
 
 fn is_zero(e: &Expr) -> bool {
-    matches!(e, Expr::Int(0)) || matches!(e, Expr::Float(f) if *f == 0.0)
+    matches!(e, Expr::Int(0, _)) || matches!(e, Expr::Float(f, _) if *f == 0.0)
 }
 
 /// A numeric literal, possibly negated, as a JSON number.
 fn num_lit(e: &Expr) -> Option<String> {
     match e {
-        Expr::Int(n) => Some(n.to_string()),
+        Expr::Int(n, _) => Some(n.to_string()),
         // A literal is finite, so `{}` is valid JSON.
-        Expr::Float(f) => Some(format!("{f}")),
+        Expr::Float(f, _) => Some(format!("{f}")),
         Expr::Unary {
             op: UnOp::Neg,
             expr,
             ..
         } => match &**expr {
-            Expr::Int(n) => Some((-n).to_string()),
-            Expr::Float(f) => Some(format!("{}", -f)),
+            Expr::Int(n, _) => Some((-n).to_string()),
+            Expr::Float(f, _) => Some(format!("{}", -f)),
             _ => None,
         },
         _ => None,

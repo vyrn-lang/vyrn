@@ -29,6 +29,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
+use crate::codec::Wire;
 
 /// Name columns per module, for the `Origin` of every reflected declaration.
 ///
@@ -81,10 +82,10 @@ impl Origins {
         struct_lit(
             "Origin",
             vec![
-                ("file", Expr::Str(file)),
-                ("line", Expr::Int(line as i64)),
-                ("col", Expr::Int(col as i64)),
-                ("name", Expr::Str(name.to_string())),
+                ("file", Expr::Str(file, Id::NEW)),
+                ("line", Expr::Int(line as i64, Id::NEW)),
+                ("col", Expr::Int(col as i64, Id::NEW)),
+                ("name", Expr::Str(name.to_string(), Id::NEW)),
             ],
         )
     }
@@ -200,16 +201,16 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
             struct_lit(
                 "MemberInfo",
                 vec![
-                    ("name", Expr::Str(m.name.clone())),
-                    ("kind", Expr::Str(kind.to_string())),
-                    ("spelling", Expr::Str(m.spelling())),
+                    ("name", Expr::Str(m.name.clone(), Id::NEW)),
+                    ("kind", Expr::Str(kind.to_string(), Id::NEW)),
+                    ("spelling", Expr::Str(m.spelling(), Id::NEW)),
                     (
                         "params",
-                        array_lit(params.into_iter().map(Expr::Str).collect()),
+                        array_lit(params.into_iter().map(|s| Expr::Str(s, Id::NEW)).collect()),
                     ),
-                    ("ret", Expr::Str(ret)),
-                    ("optional", Expr::Bool(m.optional())),
-                    ("variadic", Expr::Bool(variadic)),
+                    ("ret", Expr::Str(ret, Id::NEW)),
+                    ("optional", Expr::Bool(m.optional(), Id::NEW)),
+                    ("variadic", Expr::Bool(variadic, Id::NEW)),
                     ("doc", opt_str(m.doc.as_deref())),
                 ],
             )
@@ -218,10 +219,13 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
     struct_lit(
         "ContractInfo",
         vec![
-            ("name", Expr::Str(c.name.clone())),
-            ("module", Expr::Str(c.module.clone().unwrap_or_default())),
+            ("name", Expr::Str(c.name.clone(), Id::NEW)),
+            (
+                "module",
+                Expr::Str(c.module.clone().unwrap_or_default(), Id::NEW),
+            ),
             ("doc", opt_str(c.doc.as_deref())),
-            ("open", Expr::Bool(c.open_rule().is_some())),
+            ("open", Expr::Bool(c.open_rule().is_some(), Id::NEW)),
             ("members", array_lit(members)),
         ],
     )
@@ -284,10 +288,13 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origin
             struct_lit(
                 "ParamInfo",
                 vec![
-                    ("name", Expr::Str(p.name.clone())),
-                    ("spelling", Expr::Str(p.ty.to_string())),
+                    ("name", Expr::Str(p.name.clone(), Id::NEW)),
+                    ("spelling", Expr::Str(p.ty.to_string(), Id::NEW)),
                     ("schema", schema_lit_for_type(&p.ty, types)),
-                    ("uncodable", Expr::Str(uncodable_of(&p.ty, types, true))),
+                    (
+                        "uncodable",
+                        Expr::Str(uncodable_of(&p.ty, types, true), Id::NEW),
+                    ),
                 ],
             )
         })
@@ -301,15 +308,15 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origin
     struct_lit(
         "FnInfo",
         vec![
-            ("name", Expr::Str(f.name.clone())),
+            ("name", Expr::Str(f.name.clone(), Id::NEW)),
             ("params", array_lit(params)),
-            ("ret", Expr::Str(ret_spelling)),
+            ("ret", Expr::Str(ret_spelling, Id::NEW)),
             ("retSchema", schema_lit_for_type(&f.ret, types)),
             (
                 "retUncodable",
-                Expr::Str(uncodable_of(&f.ret, types, false)),
+                Expr::Str(uncodable_of(&f.ret, types, false), Id::NEW),
             ),
-            ("mutates", Expr::Bool(f.is_mut)),
+            ("mutates", Expr::Bool(f.is_mut, Id::NEW)),
             ("origin", origins.lit(&f.module, &f.name, f.line)),
         ],
     )
@@ -339,9 +346,9 @@ fn type_info_lit(
     struct_lit(
         "TypeInfo",
         vec![
-            ("name", Expr::Str(t.name.clone())),
-            ("source", Expr::Str(render_type_decl(t, types))),
-            ("module", Expr::Str(module_spec.to_string())),
+            ("name", Expr::Str(t.name.clone(), Id::NEW)),
+            ("source", Expr::Str(render_type_decl(t, types), Id::NEW)),
+            ("module", Expr::Str(module_spec.to_string(), Id::NEW)),
             ("schema", crate::types::schema_struct_lit(t)),
             ("origin", origins.lit(&t.module, &t.name, t.line)),
             ("shape", shape_lit(t, types)),
@@ -419,7 +426,7 @@ fn push_node(
             .iter()
             .map(|t| {
                 let (i, s) = push_node(t, None, types, nodes);
-                (Expr::Int(i), s)
+                (Expr::Int(i, Id::NEW), s)
             })
             .unzip();
         (array_lit(ix), spelled)
@@ -431,7 +438,7 @@ fn push_node(
         let (margs, s) = kids(&ts);
         lits.push(struct_lit(
             "TypeMember",
-            vec![("name", Expr::Str(m.clone())), ("args", margs)],
+            vec![("name", Expr::Str(m.clone(), Id::NEW)), ("args", margs)],
         ));
         spelled.push(match (kind, s.is_empty()) {
             ("record", _) => format!("{m}: {}", s.join("")),
@@ -453,20 +460,161 @@ fn push_node(
         vec![
             (
                 "kind",
-                Expr::Str(if kind.is_empty() {
-                    written
-                } else {
-                    kind.to_string()
-                }),
+                Expr::Str(
+                    if kind.is_empty() {
+                        written
+                    } else {
+                        kind.to_string()
+                    },
+                    Id::NEW,
+                ),
             ),
-            ("name", Expr::Str(name.to_string())),
-            ("spelling", Expr::Str(spelling.clone())),
+            ("name", Expr::Str(name.to_string(), Id::NEW)),
+            ("spelling", Expr::Str(spelling.clone(), Id::NEW)),
             ("args", args),
             ("members", array_lit(lits)),
-            ("predicate", Expr::Str(pred.unwrap_or_default())),
+            ("predicate", Expr::Str(pred.unwrap_or_default(), Id::NEW)),
         ],
     );
     (at as i64, spelling)
+}
+
+/// Builds the `TypeArg` literal for the types a derived-code generator's call
+/// sites need, and returns it with the node of each root, `None` for a root
+/// with no node.
+///
+/// A node is one checked type, identified by [`crate::types::struct_key`]; its
+/// kind is [`crate::codec::wire`]'s verdict in the encode direction, the rule
+/// `toJson` uses. A root whose walk reaches a type with no wire form or no
+/// source spelling (an anonymous enum, a bare `lazy`) gets no node, and nothing
+/// its walk added stays: the call site refuses it, and a program that never
+/// reaches it must not fail.
+pub fn type_arg_lit(roots: &[Type], types: &HashMap<String, TypeDecl>) -> (Expr, Vec<Option<i64>>) {
+    let mut w = ArgWalk {
+        types,
+        nodes: Vec::new(),
+        at: HashMap::new(),
+    };
+    let mut placed = Vec::new();
+    for ty in roots {
+        let (len, at) = (w.nodes.len(), w.at.clone());
+        match w.node(ty) {
+            Some(i) => placed.push(Some(i as i64)),
+            None => {
+                w.nodes.truncate(len);
+                w.at = at;
+                placed.push(None);
+            }
+        }
+    }
+    let mut rooted: Vec<i64> = Vec::new();
+    for i in placed.iter().flatten() {
+        if !rooted.contains(i) {
+            rooted.push(*i);
+        }
+    }
+    let rooted = rooted.into_iter().map(|i| Expr::Int(i, Id::NEW)).collect();
+    let lit = struct_lit(
+        "TypeArg",
+        vec![("roots", array_lit(rooted)), ("nodes", array_lit(w.nodes))],
+    );
+    (lit, placed)
+}
+
+struct ArgWalk<'a> {
+    types: &'a HashMap<String, TypeDecl>,
+    nodes: Vec<Expr>,
+    /// Node index by `struct_key`. A type is entered before its children, so a
+    /// recursive type finds its own node.
+    at: HashMap<String, usize>,
+}
+
+impl ArgWalk<'_> {
+    fn node(&mut self, ty: &Type) -> Option<usize> {
+        if (matches!(ty, Type::Enum(_)) && !crate::types::is_sum_alias(ty))
+            || crate::jsonenc::unspellable_lazy(ty)
+        {
+            return None;
+        }
+        let key = crate::types::struct_key(ty);
+        if let Some(i) = self.at.get(&key) {
+            return Some(*i);
+        }
+        let i = self.nodes.len();
+        self.nodes.push(none());
+        self.at.insert(key.clone(), i);
+        let ints = |ix: Vec<usize>| {
+            array_lit(
+                ix.into_iter()
+                    .map(|i| Expr::Int(i as i64, Id::NEW))
+                    .collect(),
+            )
+        };
+        let scalar = |t: Type| (t.to_string(), Vec::new(), Vec::new());
+        let (kind, args, members): (String, Vec<usize>, Vec<(String, Vec<usize>)>) =
+            match crate::codec::wire(ty, self.types, false).ok()? {
+                Wire::Int => scalar(Type::Int),
+                Wire::IntN { bits, signed } => scalar(Type::IntN { bits, signed }),
+                Wire::Float => scalar(Type::Float),
+                Wire::Float32 => scalar(Type::Float32),
+                Wire::Bool => scalar(Type::Bool),
+                Wire::Str => scalar(Type::Str),
+                Wire::Option(t) => ("option".into(), vec![self.node(&t)?], Vec::new()),
+                Wire::Array(t) | Wire::FixedArray(t, _) => {
+                    ("array".into(), vec![self.node(&t)?], Vec::new())
+                }
+                Wire::Map(v) => (
+                    "map".into(),
+                    vec![self.node(&Type::Str)?, self.node(&v)?],
+                    Vec::new(),
+                ),
+                Wire::MapI(v) => (
+                    "map".into(),
+                    vec![self.node(&Type::Int)?, self.node(&v)?],
+                    Vec::new(),
+                ),
+                Wire::Record(fs) => {
+                    let mut ms = Vec::new();
+                    for f in fs {
+                        let n = self.node(&crate::types::forced(&f.ty))?;
+                        ms.push((f.name, vec![n]));
+                    }
+                    ("record".into(), Vec::new(), ms)
+                }
+                Wire::Enum(vs) => {
+                    let mut ms = Vec::new();
+                    for v in vs {
+                        let mut ps = Vec::new();
+                        for p in &v.payload {
+                            ps.push(self.node(p)?);
+                        }
+                        ms.push((v.name, ps));
+                    }
+                    ("enum".into(), Vec::new(), ms)
+                }
+            };
+        let members = members
+            .into_iter()
+            .map(|(n, ix)| {
+                struct_lit(
+                    "TypeMember",
+                    vec![("name", Expr::Str(n, Id::NEW)), ("args", ints(ix))],
+                )
+            })
+            .collect();
+        self.nodes[i] = struct_lit(
+            "TypeNode",
+            vec![
+                ("kind", Expr::Str(kind, Id::NEW)),
+                ("name", Expr::Str(format!("t{key}"), Id::NEW)),
+                ("spelling", Expr::Str(crate::jsonenc::spell(ty), Id::NEW)),
+                ("args", ints(args)),
+                ("members", array_lit(members)),
+                ("predicate", Expr::Str(String::new(), Id::NEW)),
+            ],
+        );
+        Some(i)
+    }
 }
 
 /// Returns a `Schema` literal for any type: a declared type reflects through
@@ -481,8 +629,8 @@ fn schema_lit_for_type(ty: &Type, types: &HashMap<String, TypeDecl>) -> Expr {
     struct_lit(
         "Schema",
         vec![
-            ("name", Expr::Str(spelling.clone())),
-            ("base", Expr::Str(spelling)),
+            ("name", Expr::Str(spelling.clone(), Id::NEW)),
+            ("base", Expr::Str(spelling, Id::NEW)),
             ("doc", none()),
             ("min", none()),
             ("max", none()),
@@ -580,6 +728,7 @@ fn render_field_type(
 
 fn struct_lit(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
     Expr::StructLit {
+        id: Id::NEW,
         name: name.to_string(),
         fields: fields
             .into_iter()
@@ -590,11 +739,16 @@ fn struct_lit(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
 }
 
 fn array_lit(elems: Vec<Expr>) -> Expr {
-    Expr::ArrayLit { elems, line: 0 }
+    Expr::ArrayLit {
+        id: Id::NEW,
+        elems,
+        line: 0,
+    }
 }
 
 fn none() -> Expr {
     Expr::Var {
+        id: Id::NEW,
         name: "None".to_string(),
         line: 0,
     }
@@ -603,10 +757,11 @@ fn none() -> Expr {
 fn opt_str(s: Option<&str>) -> Expr {
     match s {
         Some(v) => Expr::Call {
+            id: Id::NEW,
             dot: false,
             type_args: Vec::new(),
             name: "Some".to_string(),
-            args: vec![Expr::Str(v.to_string())],
+            args: vec![Expr::Str(v.to_string(), Id::NEW)],
             line: 0,
         },
         None => none(),
@@ -682,7 +837,7 @@ mod tests {
     }
     fn str_of(e: &Expr) -> &str {
         match e {
-            Expr::Str(s) => s,
+            Expr::Str(s, _) => s,
             other => panic!("expected a string, got {other:?}"),
         }
     }
@@ -699,7 +854,7 @@ mod tests {
             elems(e)
                 .iter()
                 .map(|x| match x {
-                    Expr::Int(n) => *n,
+                    Expr::Int(n, _) => *n,
                     other => panic!("expected an int, got {other:?}"),
                 })
                 .collect()
@@ -758,6 +913,41 @@ mod tests {
     }
 
     #[test]
+    fn type_arg_is_one_graph_over_the_roots() {
+        let t = types_of("type Node = { v: Int64, kids: Array<Node> }\n");
+        let node = Type::Named("Node".into());
+        let unencodable = Type::Fn(Vec::new(), Box::new(Type::Int));
+        let (lit, placed) = type_arg_lit(
+            &[node.clone(), Type::option(Type::Str), unencodable, node],
+            &t,
+        );
+        assert_eq!(placed, [Some(0), Some(3), None, Some(0)]);
+        let ints: Vec<String> = elems(field(&lit, "roots"))
+            .iter()
+            .map(|e| format!("{e:?}"))
+            .collect();
+        assert_eq!(ints, ["Int(0, _)", "Int(3, _)"]);
+        let rows: Vec<String> = shape_rows(field(&lit, "nodes"))
+            .into_iter()
+            .map(|r| {
+                let (kind, rest) = r.split_once(' ').unwrap();
+                let (_key, rest) = rest.split_once(' ').unwrap();
+                format!("{kind} {rest}")
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "record `Node` [] v[1] kids[2]",
+                "Int64 `Int64` [] ",
+                "array `Array<Node>` [0] ",
+                "option `Option<String>` [4] ",
+                "String `String` [] ",
+            ]
+        );
+    }
+
+    #[test]
     fn module_interface_captures_exported_surface() {
         let src = "export type Id = Int64 where value >= 1 \
                    export fn ping(id: Id, times: Int64) -> String { return \"pong\" } \
@@ -790,11 +980,11 @@ mod tests {
     /// its name is written.
     fn assert_points_at(src: &str, origin: &Expr) {
         let line: usize = match field(origin, "line") {
-            Expr::Int(n) => *n as usize,
+            Expr::Int(n, _) => *n as usize,
             other => panic!("line is not an int: {other:?}"),
         };
         let col: usize = match field(origin, "col") {
-            Expr::Int(n) => *n as usize,
+            Expr::Int(n, _) => *n as usize,
             other => panic!("col is not an int: {other:?}"),
         };
         let name = str_of(field(origin, "name"));

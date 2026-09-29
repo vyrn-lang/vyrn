@@ -160,6 +160,7 @@ fn a_program_compiled_after_another_in_one_process_is_the_same_bytes() {
         }
     }
     vyrn_lower::install();
+    vyrn_genwasm::install();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(root.join("std").to_string_lossy().replace('\\', "/")),

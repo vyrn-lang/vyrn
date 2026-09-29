@@ -169,6 +169,9 @@ pull request.
 - Monomorphization happens once, above the emitter, and an instance is identified by its type arguments, never a mangled string. A mangle collision once miscompiled silently.
 - Monomorphization has two bounds: 64 levels of nesting and 65,536 parts. `vyrn check` runs them, so a passing `check` means `build` terminates.
 - Every trap wording lives in one table (`vyrn_frontend::trap`), and a test fails on a re-spelled wording. An engine chooses how to raise a trap, never what it says.
+- Every runtime check is its own core row, stated once before the row it guards; one runtime check is one row. The emitter runs no check without a row, and a row no construct runs is an error.
+- A change that proves checks is licensed by the check oracle (`VYRN_CHECKS`, `scripts/check-elision.sh`): no proved row fails a run, and the elided, kept and oracle builds print the same.
+- A check row is proved only with a certificate that a checker sharing no code with the search accepts. Until builtin rows state length effects (#12), every `modify` or `consume` argument forgets its name.
 - Every limit is one constant, derived where it is used, and a test checks the derivations.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
@@ -185,6 +188,9 @@ pull request.
 - A generator is comptime-pure: no `extern`, module state, file writes, stdin, `args` or logging. It reads files only under its constant path arguments, and every file it reads joins its cache key.
 - The generator cache is keyed by everything a generation observed and authenticated with a per-user secret. It is never restored across CI runs: a restored cache is untrusted compiler input.
 - Type reflection is a flat array of `TypeNode`s whose edges are indices, so no recursive Vyrn type and no new decoder shape is needed. A declared name is a leaf; kinds are strings, like `Schema.base`.
+- A derived-code generator receives one `TypeArg`: a graph over the checked types its call sites need, a node per `struct_key`, each node's kind `codec::wire`'s verdict. The codec rules stay in Rust; the generator only writes text.
+- A `derive` generator runs once per program over every type its sites need, cached in-process by its program and argument. A run per type would write a shared subtype twice. Its compiled module persists across processes under a hash of the trimmed program's canonical text, which sorts the AST's hash containers. What it writes is checked with the program.
+- The playground runs a generator in the page: `vyrn-genwasm` without `host` builds the module and the `TypeArg` atoms, and `play-wasm.js` runs it. The page serves no read, no module reflection and no code quote, so only a `derive` generator runs there.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
 - Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.

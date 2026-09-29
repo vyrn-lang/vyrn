@@ -10,7 +10,7 @@
 //! `value`, `@list` and `pullAt` allocate but have no contract, because their
 //! result type is one no signature spells.
 
-use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type, TypeDecl};
+use crate::ast::{Block, Capability, Expr, Function, Id, Param, Stmt, Type, TypeDecl};
 use crate::effects::Effect;
 use crate::project::ELEM;
 use std::sync::OnceLock;
@@ -60,6 +60,7 @@ fn row(
         params: params
             .iter()
             .map(|(n, c, t)| Param {
+                id: Id::NEW,
                 name: n.to_string(),
                 capability: *c,
                 ty: t.clone(),
@@ -69,18 +70,22 @@ fn row(
             .collect(),
         ret,
         body: Block {
+            id: Id::NEW,
             stmts: match place.is_empty() {
                 true => Vec::new(),
                 false => vec![Stmt::Return {
+                    id: Id::NEW,
                     value: Some(Expr::Call {
+                        id: Id::NEW,
                         dot: false,
                         type_args: Vec::new(),
                         name: ELEM.to_string(),
                         args: place
                             .iter()
                             .map(|a| match a.parse::<i64>() {
-                                Ok(n) => Expr::Int(n),
+                                Ok(n) => Expr::Int(n, Id::NEW),
                                 Err(_) => Expr::Var {
+                                    id: Id::NEW,
                                     name: (*a).to_string(),
                                     line: 0,
                                 },
@@ -760,6 +765,14 @@ fn table() -> Vec<Builtin> {
         // Every allocating builtin needs a row, or an unannotated binding to its
         // result has no type and leaks. `toJson`'s parameter is a union: inert.
         b("toJson").sig(row("toJson", &[], &[("x", Read, Unit)], Str, &[])),
+        // The generator is a name, not a value, and `x` any type: both inert.
+        b("derive").sig(row(
+            "derive",
+            &[],
+            &[("g", Read, Unit), ("x", Read, Unit)],
+            Str,
+            &[],
+        )),
         // Both fold to literals, whose release is a no-op (`cap == 0`); the
         // rows exist so the declared reading names the type at every site.
         b("jsonSchema").sig(row("jsonSchema", &["T"], &[], Str, &[])),
@@ -1123,7 +1136,7 @@ mod tests {
     /// reordered prelude moves every declaration index. Anything but a type
     /// here would enter every program.
     #[test]
-    fn the_prelude_declares_seventeen_types_and_nothing_else() {
+    fn the_prelude_declares_eighteen_types_and_nothing_else() {
         let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1145,6 +1158,7 @@ mod tests {
                 "Response",
                 "TypeNode",
                 "TypeMember",
+                "TypeArg",
             ]
         );
         assert!(

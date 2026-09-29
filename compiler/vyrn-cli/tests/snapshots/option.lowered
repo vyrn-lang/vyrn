@@ -69,6 +69,8 @@ fn safeDiv(a, b)
         return @nullary
       }
     else
+    check int-div-zero b != 0  (line 12 #0)
+    check int-div-overflow (a, b) != (min64, -1)  (line 12 #1)
     let @t2 = prim div(a, b)
     let @t3 = ctor Some(consume @t2)
     return @t3

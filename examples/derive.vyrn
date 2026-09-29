@@ -1,0 +1,22 @@
+/// derive: a generator run on a checked type.
+///
+/// `derive(shapeOf, x)` hands `shapeOf` the type the checker gave `x`, as a
+/// `TypeArg`, and calls the function it wrote for that type. The generator
+/// runs once for the whole program; a type used twice shares one function.
+
+import { shapeOf } from "./lib/gen_shape"
+
+type Point = { x: Int64, y: Int64 }
+type Shade = | Light | Dark | Custom(String)
+
+fn main() -> Int64 {
+    let p = Point { x: 1, y: 2 }
+    print(derive(shapeOf, p))
+    print(derive(shapeOf, Point { x: 3, y: 4 }))
+    let names: Array<String> = ["a", "b"]
+    print(derive(shapeOf, names))
+    let maybe: Option<Int64> = Some(3)
+    print(derive(shapeOf, maybe))
+    print(derive(shapeOf, Dark))
+    return 0
+}
