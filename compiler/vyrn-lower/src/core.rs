@@ -8537,14 +8537,9 @@ fn plan_holes(holes: &[String]) -> Vec<String> {
 
 /// Folds one frame's statements into the side table. Called after the placer
 /// has added every row, so this is the core the emitters run.
-fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
-    for s in stmts {
+fn fold_facts(body: &Body, proto: &Owned, out: &mut Facts) {
+    for (s, _) in rows(&body.stmts) {
         match s {
-            St::If { then, els, .. } => {
-                fold_facts(body, proto, then, out);
-                fold_facts(body, proto, els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => fold_facts(body, proto, b, out),
             St::Store {
                 releases,
                 site: Site::Node(at),
@@ -8606,7 +8601,6 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
                         // "not stated".
                         out.arms.entry((a.site, a.index)).or_default().extend(rows);
                     }
-                    fold_facts(body, proto, &a.body, out);
                 }
             }
             _ => {}
@@ -8646,11 +8640,15 @@ fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
             .and_modify(|had| *had = None)
             .or_insert_with(|| Some(checked(program, proto.types(), body)));
     });
-    fold_facts(body, proto, &body.stmts, out);
+    fold_facts(body, proto, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
-    let mut released = std::collections::HashSet::new();
-    collect_drops(&body.stmts, &mut released);
+    let released: std::collections::HashSet<Name> = (rows(&body.stmts))
+        .filter_map(|(s, _)| match s {
+            St::Drop(n, ..) => Some(*n),
+            _ => None,
+        })
+        .collect();
     for (i, info) in body.names.iter().enumerate() {
         if !released.contains(&(i as Name)) {
             continue;
@@ -8667,27 +8665,6 @@ fn fold_frame(program: &Program, body: &Body, proto: &Owned, out: &mut Facts) {
         // binds a borrow, and the caller still frees the value.
         if let Some(node) = info.arg_drop {
             out.arg_drops.insert(node);
-        }
-    }
-}
-
-fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
-    for s in stmts {
-        match s {
-            St::Drop(n, _, _, _) => {
-                out.insert(*n);
-            }
-            St::If { then, els, .. } => {
-                collect_drops(then, out);
-                collect_drops(els, out);
-            }
-            St::Loop { body: b, .. } | St::Block { body: b, .. } => collect_drops(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    collect_drops(&a.body, out);
-                }
-            }
-            _ => {}
         }
     }
 }
