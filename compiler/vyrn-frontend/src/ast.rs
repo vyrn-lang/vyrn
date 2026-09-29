@@ -17,32 +17,37 @@ pub fn is_panic(name: &str) -> bool {
 
 /// Names one syntax node for the side tables that passes key by node.
 ///
-/// [`Program::number`] gives every `Expr`, `Stmt`, `Block`, `Param` and `Binder` of a
-/// program its id: dense from 1, in declaration order and then pre-order, so
-/// no two nodes of one program share an id and none is 0. An id survives a
-/// clone and a move of the tree. A projection expansion is not in the program:
-/// [`crate::project`] numbers it from [`NodeId::EXPANDED`] up.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NodeId(pub u32);
+/// An id is the node's unit and its index in that unit. [`Program::number`]
+/// makes each declaration it walks a unit, in declaration order, and numbers
+/// a unit's nodes from 1 in pre-order. So an edit inside one unit renumbers no
+/// other, and no numbered node is [`NodeId::NONE`]. An id survives a clone and
+/// a move of the tree. It is a storage index, never an order, so it has no
+/// `Ord`. A projection expansion is not in the program: [`crate::project`]
+/// makes each one a unit from [`NodeId::EXPANDED`] up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct NodeId {
+    unit: u32,
+    local: u32,
+}
 
 impl NodeId {
     /// No node: the site of a row the core synthesizes.
-    pub const NONE: NodeId = NodeId(0);
+    pub const NONE: NodeId = NodeId { unit: 0, local: 0 };
 
-    /// The first id of the expansion range, above every program's own ids.
+    /// The first unit of the expansion range, above every program's own units.
     pub const EXPANDED: u32 = 1 << 31;
 }
 
-/// A node's slot for its [`NodeId`]; 0 until numbered. Any two slots compare
-/// equal, so two trees compare by structure alone. `{:?}` prints every slot
-/// alike, so a fingerprint over a tree's debug text ignores ids too; `{:#?}`
-/// prints the id.
+/// A node's slot for its [`NodeId`]; [`NodeId::NONE`] until numbered. Any two
+/// slots compare equal, so two trees compare by structure alone. `{:?}`
+/// prints every slot alike, so a fingerprint over a tree's debug text ignores
+/// ids too; `{:#?}` prints the id as `#unit.local`.
 #[derive(Clone, Copy, Default)]
-pub struct Id(pub u32);
+pub struct Id(pub NodeId);
 
 impl Id {
     /// The slot a node is built with.
-    pub const NEW: Id = Id(0);
+    pub const NEW: Id = Id(NodeId::NONE);
 }
 
 impl PartialEq for Id {
@@ -54,7 +59,7 @@ impl PartialEq for Id {
 impl std::fmt::Debug for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if f.alternate() {
-            write!(f, "#{}", self.0)
+            write!(f, "#{}.{}", self.0.unit, self.0.local)
         } else {
             f.write_str("_")
         }
@@ -96,8 +101,9 @@ pub struct Program {
     /// Kept out of `functions`, like [`Program::tests`]. `vyrn bench` lowers
     /// them to functions and a synthesized harness `main`.
     pub benches: Vec<NamedBlock>,
-    /// The largest [`NodeId`] the program holds.
-    pub nodes: u32,
+    /// The number of units [`Program::number`] and
+    /// [`Program::number_appended`] gave.
+    pub units: u32,
 }
 
 /// A `test "name" { body }` or `bench "name" { body }` declaration.
@@ -1345,7 +1351,7 @@ macro_rules! stmt_slot {
 
 impl Expr {
     pub fn id(&self) -> NodeId {
-        NodeId(slot!(self, &).0)
+        slot!(self, &).0
     }
 
     /// The pattern, scrutinee and two blocks of a parsed `if let`: a statement
@@ -1375,51 +1381,57 @@ impl Expr {
 
 impl Stmt {
     pub fn id(&self) -> NodeId {
-        NodeId(stmt_slot!(self, &).0)
+        stmt_slot!(self, &).0
     }
 }
 
 impl Block {
     pub fn id(&self) -> NodeId {
-        NodeId(self.id.0)
+        self.id.0
     }
 }
 
 impl Param {
     pub fn id(&self) -> NodeId {
-        NodeId(self.id.0)
+        self.id.0
     }
 }
 
 impl Binder {
     pub fn id(&self) -> NodeId {
-        NodeId(self.id.0)
+        self.id.0
     }
 }
 
 impl Program {
-    /// Numbers every node of the program from 1, overwriting any id it held.
-    /// The parser and the loader call it once the tree is whole; a side table
+    /// Numbers every node of the program, overwriting any id it held. The
+    /// parser and the loader call it once the tree is whole; a side table
     /// built before it is stale.
     pub fn number(&mut self) {
-        let mut n = Numbering(0);
+        let mut units = 0;
+        let mut unit = || {
+            units += 1;
+            Numbering::unit(units - 1)
+        };
         for t in &mut self.type_decls {
+            let mut n = unit();
             if let Some(p) = &mut t.predicate {
                 n.expr(p);
             }
         }
         for f in &mut self.functions {
-            n.function(f);
+            unit().function(f);
         }
         for i in &mut self.impls {
             for f in i.methods.iter_mut().chain(&mut i.places) {
-                n.function(f);
+                unit().function(f);
             }
         }
         for g in &mut self.globals {
-            n.expr(&mut g.init);
+            unit().expr(&mut g.init);
         }
         for m in self.contracts.iter_mut().flat_map(|c| &mut c.members) {
+            let mut n = unit();
             if let ContractMemberKind::Value {
                 default: Some(d), ..
             }
@@ -1431,28 +1443,32 @@ impl Program {
             }
         }
         for b in self.tests.iter_mut().chain(&mut self.benches) {
-            n.block(&mut b.body);
+            unit().block(&mut b.body);
         }
-        self.nodes = n.0;
+        self.units = units;
     }
 
-    /// Numbers `functions[from..]` on from [`Program::nodes`], for a synthesis
-    /// that appends functions to a numbered program.
+    /// Numbers `functions[from..]` as units after [`Program::units`], for a
+    /// synthesis that appends functions to a numbered program.
     pub fn number_appended(&mut self, from: usize) {
-        let mut n = Numbering(self.nodes);
         for f in &mut self.functions[from..] {
-            n.function(f);
+            Numbering::unit(self.units).function(f);
+            self.units += 1;
         }
-        self.nodes = n.0;
     }
 }
 
-/// The walk behind [`Program::number`]: `.0` is the last id given.
-pub struct Numbering(pub u32);
+/// The walk behind [`Program::number`]: numbers the nodes of one unit.
+pub struct Numbering(NodeId);
 
 impl Numbering {
+    /// Starts unit `unit`, whose first node gets index 1.
+    pub fn unit(unit: u32) -> Numbering {
+        Numbering(NodeId { unit, local: 0 })
+    }
+
     fn next(&mut self, slot: &mut Id) {
-        self.0 += 1;
+        self.0.local += 1;
         *slot = Id(self.0);
     }
 

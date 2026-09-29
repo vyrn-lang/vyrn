@@ -3430,7 +3430,8 @@ impl<'a> Checker<'a> {
         let t = self.expr_inner(expr, scope, expected, fn_ret)?;
         let key = expr.id();
         assert_ne!(
-            key.0, 0,
+            key,
+            NodeId::NONE,
             "the checker typed a node no numbering reached: {expr:?}"
         );
         let pending = self.pending_subst.take();
