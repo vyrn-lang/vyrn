@@ -312,6 +312,8 @@ fn lower_typed(
             program.functions.push(f);
         }
     }
+    // The held record typed the functions just moved out.
+    checker::hold_forget();
     let _ = own::kernel_refusals();
     let _ = own::typed_refusals();
     let _ = own::analyze(program);
@@ -321,6 +323,8 @@ fn lower_typed(
     let mut back: Vec<(usize, ast::Function)> = at.into_iter().zip(kept).chain(gone).collect();
     back.sort_by_key(|(i, _)| *i);
     program.functions = back.into_iter().map(|(_, f)| f).collect();
+    // The analysis held a record of the program without them.
+    checker::hold_forget();
     typed
 }
 
