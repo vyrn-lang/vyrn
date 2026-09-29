@@ -212,7 +212,16 @@ fn spans(file: &str, lines: &[String], secs: &[Section]) -> Vec<(usize, usize, u
 fn diags(lines: &[String], a: usize, b: usize) -> usize {
     lines[a - 1..b]
         .iter()
-        .filter(|l| l.contains("Diagnostic::error(") || l.contains("Diagnostic::warning("))
+        .filter(|l| {
+            [
+                "Diagnostic::error(",
+                "Diagnostic::warning(",
+                "Diagnostic::refusal(",
+                "refuse!(",
+            ]
+            .iter()
+            .any(|site| l.contains(site))
+        })
         .count()
 }
 

@@ -8745,7 +8745,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
-    let mut added: Vec<(String, Release)> = Vec::new();
+    let mut added: Added = Added::new();
     // Every body built, for the `Facts` fold below, and the functions this
     // pass wrote a row for. A row's node belongs to one function, so only
     // those need a rebuild.
@@ -9017,11 +9017,11 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
-    let placed: Vec<Release> = added.iter().map(|(_, r)| r.clone()).collect();
+    let placed: Vec<Release> = added.values().flatten().cloned().collect();
     let mut dispatches = !crate::dispatched(&placed, &by_name).is_empty();
-    for (f, row) in added {
+    for (f, rows) in added {
         touched.insert(f.clone());
-        own.releases.entry(f).or_default().push(row);
+        own.releases.entry(f).or_default().extend(rows);
     }
     // A second build for the emitters, after every row the placer added: the
     // core above read the plan before this pass filled it. A host that armed
@@ -9101,11 +9101,11 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             }
             if let Ok(top) = build(program, inst, own) {
-                let mut rows = Vec::new();
+                let mut rows = Added::new();
                 place_frames(&top, &inst.func.name, own, &mut rows, &mut touched, trace);
-                for (f, row) in rows {
-                    placed.push(row.clone());
-                    own.releases.entry(f).or_default().push(row);
+                for (f, rows) in rows {
+                    placed.extend(rows.iter().cloned());
+                    own.releases.entry(f).or_default().extend(rows);
                 }
             }
             if !folds {
@@ -9339,6 +9339,9 @@ fn discharged(l: &Linear) -> String {
     }
 }
 
+/// The rows `augment` places, by owner, each owner's in placement order.
+type Added = std::collections::BTreeMap<String, Vec<Release>>;
+
 /// Places what one built body owes, frame by frame. `owner` keys the plan's
 /// tables: the function's name, or the synthetic `test@<i>` / `bench@<i>`.
 /// A lambda frame is keyed by its enclosing body's name.
@@ -9346,7 +9349,7 @@ fn place_frames(
     top: &Body,
     owner: &str,
     own: &mut Ownership,
-    added: &mut Vec<(String, Release)>,
+    added: &mut Added,
     touched: &mut std::collections::HashSet<String>,
     trace: bool,
 ) {
@@ -9499,28 +9502,26 @@ fn place_frames(
                 touched.insert(owner.to_string());
                 continue;
             }
-            let dup = added.iter().any(|(f, r)| {
-                *f == owner && r.exit == m.exit && r.site == m.site && r.binding == binding
-            });
-            if dup {
+            let added = added.entry(owner.to_string()).or_default();
+            if added
+                .iter()
+                .any(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
+            {
                 continue;
             }
-            added.push((
-                owner.to_string(),
-                Release {
-                    site: m.site,
-                    binding,
-                    name: info.source.clone(),
-                    kind: kind.clone(),
-                    exit: m.exit,
-                    line: info.line as u32,
-                    // The kernel's set at this exit, even when empty: `None`
-                    // would fall back to the binding's set, which is not per
-                    // path (`regexredux`'s early `Err` returns walk the whole
-                    // record).
-                    holes: Some(holes),
-                },
-            ));
+            added.push(Release {
+                site: m.site,
+                binding,
+                name: info.source.clone(),
+                kind: kind.clone(),
+                exit: m.exit,
+                line: info.line as u32,
+                // The kernel's set at this exit, even when empty: `None`
+                // would fall back to the binding's set, which is not per
+                // path (`regexredux`'s early `Err` returns walk the whole
+                // record).
+                holes: Some(holes),
+            });
         }
     }
 }

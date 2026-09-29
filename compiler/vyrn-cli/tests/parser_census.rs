@@ -177,7 +177,16 @@ fn spans(file: &str, lines: &[String], secs: &[Section]) -> Vec<(usize, usize, u
 fn diags(lines: &[String], a: usize, b: usize) -> usize {
     lines[a - 1..b]
         .iter()
-        .filter(|l| l.contains("Diagnostic::error(") || l.contains("Diagnostic::warning("))
+        .filter(|l| {
+            [
+                "Diagnostic::error(",
+                "Diagnostic::warning(",
+                "Diagnostic::refusal(",
+                "refuse!(",
+            ]
+            .iter()
+            .any(|site| l.contains(site))
+        })
         .count()
 }
 
@@ -226,17 +235,17 @@ fn the_parser_census_matches_its_pin() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3264, 52),
-        ("parser.rs", "a desugar the parser states", 1036, 7),
+        ("parser.rs", "the grammar's own arm", 3044, 52),
+        ("parser.rs", "a desugar the parser states", 998, 7),
         ("parser.rs", "a table stated a second time", 0, 0),
-        ("parser.rs", "recovery and the diagnostic sentences", 152, 2),
-        ("parser.rs", "shared machinery", 181, 1),
+        ("parser.rs", "recovery and the diagnostic sentences", 148, 2),
+        ("parser.rs", "shared machinery", 182, 1),
         ("parser.rs", "tests", 1656, 0),
-        ("lexer.rs", "the grammar's own arm", 595, 11),
+        ("lexer.rs", "the grammar's own arm", 557, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
         ("lexer.rs", "a table stated a second time", 0, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
-        ("lexer.rs", "shared machinery", 204, 2),
+        ("lexer.rs", "shared machinery", 203, 2),
         ("lexer.rs", "tests", 234, 0),
     ];
     assert_eq!(got, want, "the parser census has moved");

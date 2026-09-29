@@ -19,17 +19,11 @@ use crate::types::FALLIBLE;
 /// `cerr!(line, Rule, hole = expr, ..)` fills each hole with `expr`'s
 /// `Display`; a bare `hole` reads the binding of that name.
 macro_rules! cerr {
-    (@hole $h:ident) => {
-        $h.to_string()
-    };
-    (@hole $h:ident $e:expr) => {
-        $e.to_string()
-    };
     ($line:expr; $rule:expr) => {
         $crate::diagnostics::Diagnostic::refusal($crate::checker::line_of($line), 0, "check", $rule)
     };
     ($line:expr, $rule:ident $(, $h:ident $(= $e:expr)?)* $(,)?) => {
-        cerr!($line; $crate::rules::Rule::$rule { $($h: cerr!(@hole $h $($e)?)),* })
+        $crate::rules::refuse!("check", $crate::checker::line_of($line), 0, $rule $(, $h $(= $e)?)*)
     };
 }
 
@@ -253,9 +247,13 @@ pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<Loca
 }
 
 /// Returns the stored-function-value collection the `--workers`
-/// gate needs. Diagnostics are discarded: callers have already checked.
+/// gate needs: the held record's, else a check's. Diagnostics are discarded:
+/// callers have already checked.
 pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
-    check_accum_full(program).2
+    match held_now(program) {
+        Some(r) => r.stored.clone(),
+        None => check_accum_full(program).2,
+    }
 }
 
 /// Names the compiler owns: builtin functions, builtin type names and the sum
@@ -1253,7 +1251,10 @@ fn check_accum_inner(
     };
     let binders = local_index(program, &checker.binder_types.borrow());
     let typed = (in_bodies == out.len()).then_some(refused);
-    let record = checker.record.map(RefCell::into_inner);
+    let record = checker.record.map(|r| Recorded {
+        stored: effects.clone(),
+        ..r.into_inner()
+    });
     (
         out,
         binders,
@@ -1610,6 +1611,8 @@ pub struct Recorded {
     /// A declared call whose arity, type-argument count or argument the typed
     /// judgment refuses, keyed by the [`Expr::Call`] node.
     pub calls: HashMap<NodeId, CallDecl>,
+    /// What a check that records nothing returns as [`stored_fn_effects`].
+    pub stored: StoredFnEffects,
 }
 
 /// One pass that returns the diagnostics, the root's bindings and the record.
@@ -1649,13 +1652,19 @@ pub(crate) type HeldRecord = (bool, bool, std::rc::Rc<Recorded>);
 /// so a record lives as long as its analysis.
 pub(crate) fn hold_open(program: &Program) {
     HOLDING.with(|h| h.set(program as *const Program as usize));
+    hold_forget();
+}
+
+/// Drops the held record and keeps the slot open, for a caller that changes
+/// the program the record typed.
+pub(crate) fn hold_forget() {
     HELD.with(|h| *h.borrow_mut() = None);
 }
 
 /// Closes the record slot. Called by [`crate::own::Memo`]'s `Drop`.
 pub(crate) fn hold_close() {
     HOLDING.with(|h| h.set(0));
-    HELD.with(|h| *h.borrow_mut() = None);
+    hold_forget();
 }
 
 /// The record slot as `crate::check_and_synthesize` holds it, from synthesis
@@ -1706,11 +1715,17 @@ pub(crate) fn held(program: &Program) -> Option<HeldRecord> {
     })
 }
 
+/// The record held for `program` under the host flags in force.
+fn held_now(program: &Program) -> Option<std::rc::Rc<Recorded>> {
+    held(program)
+        .filter(|(g, t, _)| (*g, *t) == (gen_host(), test_host()))
+        .map(|(_, _, r)| r)
+}
+
 /// Returns the record of `program`: the held one if it matches the program
 /// and host flags, else a new one, held for the next ask.
 pub fn recorded(program: &Program) -> std::rc::Rc<Recorded> {
-    if let Some((_, _, r)) = held(program).filter(|(g, t, _)| (*g, *t) == (gen_host(), test_host()))
-    {
+    if let Some(r) = held_now(program) {
         return r;
     }
     let made = std::rc::Rc::new(record(program));
@@ -2988,11 +3003,19 @@ impl<'a> Checker<'a> {
     /// reads `pending_subst` for the access site's own node.
     fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope)) {
         let mark = self.errors.borrow().len();
+        let stored = (
+            self.stored_sources.borrow().len(),
+            self.arg_sources.borrow().len(),
+            self.stored_calls.borrow().len(),
+        );
         let saved = self.pending_subst.take();
         let mut sc = scope.clone();
         run(self, &mut sc);
         *self.pending_subst.borrow_mut() = saved;
         self.errors.borrow_mut().truncate(mark);
+        self.stored_sources.borrow_mut().truncate(stored.0);
+        self.arg_sources.borrow_mut().truncate(stored.1);
+        self.stored_calls.borrow_mut().truncate(stored.2);
     }
 
     fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) {
@@ -3130,10 +3153,7 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
-                if matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()))
-                {
-                    return Ok(());
-                }
+                let ruled = matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
                 let Some(fty) = crate::types::record_fields(&b.ty, self.types)
                     .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
                     .map(|f| f.ty)
@@ -3141,6 +3161,9 @@ impl<'a> Checker<'a> {
                     return Ok(());
                 };
                 let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
+                if ruled {
+                    return Ok(());
+                }
                 // A predicated field takes only a value of its own type.
                 let validated = matches!(&fty, Type::Named(n)
                     if self.types.get(n).is_some_and(|d| d.predicate.is_some()));

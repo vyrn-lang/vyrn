@@ -1,7 +1,7 @@
-//! The rules the checker states, one row each: the rule, the holes its
-//! sentence names, the sentence, and the fixes `vyrn fix` reads under it.
-//! A [`Diagnostic`](crate::diagnostics::Diagnostic) built from a [`Rule`]
-//! carries it, and its message is [`Rule::render`].
+//! The rules the lexer, parser, loader and checker state, one row each: the
+//! rule, the holes its sentence names, the sentence, and the fixes `vyrn fix`
+//! reads under it. A [`Diagnostic`](crate::diagnostics::Diagnostic) built from
+//! a [`Rule`] carries it, and its message is [`Rule::render`].
 
 use crate::diagnostics::menu;
 use crate::types::{FALLIBLE, SHOW, SHOW_SHOW};
@@ -12,7 +12,7 @@ const HINT: &str = "generators run at compile time — they may not use `extern`
 
 macro_rules! rules {
     ($($rule:ident { $($hole:ident),* } $text:literal $(fix $fix:literal)*;)*) => {
-        /// A rule the checker states, with the rendered text of each hole.
+        /// A rule the compiler states, with the rendered text of each hole.
         #[derive(Debug, Clone)]
         pub enum Rule {
             $($rule { $($hole: String),* },)*
@@ -30,6 +30,29 @@ macro_rules! rules {
         }
     };
 }
+
+/// Builds `Rule::$rule`. A hole is filled by the variable of its name or by
+/// `hole = expr`, either through `Display`.
+macro_rules! rule {
+    (@hole $h:ident) => {
+        $h.to_string()
+    };
+    (@hole $h:ident $e:expr) => {
+        $e.to_string()
+    };
+    ($rule:ident $(, $h:ident $(= $e:expr)?)* $(,)?) => {
+        $crate::rules::Rule::$rule { $($h: $crate::rules::rule!(@hole $h $($e)?)),* }
+    };
+}
+pub(crate) use rule;
+
+/// Builds the error that states `Rule::$rule` for `$stage` at `($line, $col)`.
+macro_rules! refuse {
+    ($stage:expr, $line:expr, $col:expr, $($rule:tt)*) => {
+        $crate::diagnostics::Diagnostic::refusal($line, $col, $stage, $crate::rules::rule!($($rule)*))
+    };
+}
+pub(crate) use refuse;
 
 rules! {
     RedefinesBuiltinType { name } "cannot redefine built-in type `{name}`";
@@ -525,4 +548,251 @@ rules! {
         same call — a `modify` borrow is exclusive"
         fix "`{root}.copy()` for the second argument"
         fix "or split the call so the two accesses do not overlap";
+    NulInString {}
+        "string literal contains a NUL byte; a Vyrn String is NUL-terminated and \
+        cannot hold one";
+    UnterminatedString {} "unterminated string literal";
+    UnterminatedEscape {} "unterminated escape in string";
+    UnterminatedInterpString {} "unterminated string in interpolation";
+    UnterminatedInterpChar {} "unterminated character literal in interpolation";
+    UnterminatedInterp {} "unterminated `\\{{` interpolation";
+    EmptyInterp {} "empty `\\{{ }}` interpolation";
+    UnknownEscape { other } "unknown escape `\\{other}`";
+    InvalidFloat { text } "invalid float literal: {text}";
+    IntOutOfRange { text } "integer literal out of range: {text}";
+    UnexpectedChar { c } "unexpected character {c}";
+    ExpectedIdent { found } "expected identifier, found {found}";
+    DuplicateLogging {} "duplicate `logging` config block";
+    TopLevelExpected { found }
+        "expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or \
+        `logging` at top level, found {found}";
+    AssocTypeRhs { aname }
+        "`type {aname}` in a protocol declares an associated type and takes no \
+        right-hand side — the implementing type supplies it, so \
+        `type {aname} = ..` belongs in the `impl`";
+    AssocTypeAfterMethods { aname, name }
+        "`type {aname}` must be declared before the methods of `{name}` — an \
+        associated type is resolved where it is named, so a signature above \
+        it cannot see it";
+    ProjectionReceiver { name, want }
+        "`fn {name}` returns `{want} T`, so its receiver must be \
+        `{want} self` — the result is a place inside the receiver, \
+        and the two capabilities name one access";
+    ContractMemberExpected { name, found }
+        "expected `let` or `fn` in contract `{name}`, found {found} \
+        (a contract member is `let name: Type [= default]`, \
+        `fn name(..) -> T [= default]`, or the open rule `fn *(..) -> T`)";
+    ContractOpenRuleTwice { name, line }
+        "contract `{name}` already has an open rule (line {line}) — \
+        a contract has at most one";
+    ContractMemberFormChange { name, member, line }
+        "contract `{name}` declares `{member}` as both a value and a function \
+        (line {line}) — alternative signatures are alternatives, not a \
+        change of member form";
+    ContractMemberTwice { name, member, line }
+        "contract `{name}` already declares `{member}` (line {line}) — only \
+        `fn` members may have alternative signatures";
+    ContractMemberNeedsType { name }
+        "contract member `{name}` needs a type: write `let {name}: Type` \
+        (a contract states the shape of an export, so the type is never inferred)";
+    ContractMemberParams { name }
+        "contract member `{name}` cannot take `(..)` — only the open rule \
+        `fn *(..)` may leave its parameters open, because a named member's \
+        arity is part of what the name promises";
+    ContractOpenRuleDefault {}
+        "a contract's open rule cannot have a default — it describes the shape of \
+        exports whose names the contract does not know, so there is no absent \
+        member for a default to supply";
+    ImplAssocTypeOrder { aname, protocol, ty }
+        "`type {aname} = ..` must be declared before the methods of \
+        `impl {protocol} for {ty}` — an associated type is resolved where it \
+        is named, so a method above it cannot see it";
+    ImplAssocTypeClash { aname }
+        "`type {aname}` collides with the `{aname}` this impl's head binds — \
+        an associated type and a type variable are different things and \
+        cannot share a name";
+    ConsumeResult {}
+        "a result is owned by its caller already — `-> consume T` is spelled `-> T`";
+    UnknownLogLevel { name } "unknown log level `{name}` (trace/debug/info/warn/error)";
+    UnknownLoggingField { other }
+        "unknown `logging` field `{other}` (expected `level` or `sink`)";
+    FileSinkPath { found } "`file(..)` sink needs a string path, found {found}";
+    UnknownSink { other } "unknown sink `{other}` (expected stderr, stdout, or file(\"..\"))";
+    ImportStarAs { found } "expected `as` after `import *`, found {found}";
+    ImportStarFrom { ns, found } "expected `from` after `import * as {ns}`, found {found}";
+    ImportEmpty {} "an import must name at least one binding: `import {{ name }} from \"..\"`";
+    ImportFrom { found } "expected `from` after the import list, found {found}";
+    ImportPathExpected { found }
+        "expected a module path string or a generator call after `from`, \
+        found {found}";
+    InlineWhereBase { name }
+        "an inline field `where` refines one record's fields, so the base of \
+        `type {name}` must be exactly `{{ .. }}` — a merge (`&`) or enum \
+        variant cannot carry refinements";
+    LazyAnonymous {}
+        "a `lazy` field needs a named record type \
+        (`type T = {{ field: lazy U }}`); an anonymous record \
+        has no declaration to defer against";
+    WhereAnonymous {}
+        "an inline field `where` needs a named record type \
+        (`type T = {{ field: .. where .. }}`); an anonymous record \
+        has no name to attach the refinement to";
+    LazyWhere {}
+        "a `lazy` field may not carry an inline `where`: name the \
+        validated type and defer that (`field: lazy Body`)";
+    FreeFnCapability { name }
+        "`fn {name}` cannot return a capability — a projection's result \
+        is a place inside its receiver, and a free function has none. \
+        Declare it on an `impl`.";
+    NameStringExpected { word, found } "expected a {word} name string, found {found}";
+    ExportedExternBody {}
+        "an exported extern needs a body — a body-less `extern fn` is an import";
+    ExternBody {} "an `extern fn` has no body";
+    IntUnsized {}
+        "`Int` has no size; write `Int64` (or `Int8`/`Int16`/`Int32`, \
+        `UInt8`..`UInt64`)";
+    FloatUnsized {} "`Float` has no size; write `Float64` (or `Float32`)";
+    ArraySize {} "`Array<T, N>` needs a non-negative integer size";
+    SmallArrayNeedsCapacity {}
+        "`SmallArray<T, N>` needs an inline capacity, e.g. \
+        `SmallArray<Int64, 16>`";
+    SmallArrayCapacityType {} "`SmallArray<T, N>` needs a non-negative integer capacity";
+    NeedsField { name } "`{name}` needs at least one field, e.g. `{name}<T, field>`";
+    NestingTooDeep { max } "nesting exceeds {max} levels";
+    GlobalNeedsInit { name }
+        "module state `{name}` needs an initializer: write `let {name} = <value>` \
+        (top-level `let` has no default value)";
+    LetMutPattern { variant }
+        "`let mut {variant}(..)` — a pattern binder is a borrow of the \
+        scrutinee's payload; bind it, then `copy()` what you mutate";
+    LetPatternScrutinee { variant }
+        "the scrutinee of `let {variant}(..)` must be a name — a \
+        multi-payload pattern reads it once per binder, so bind the \
+        value with an ordinary `let` first";
+    LetEmptyVariant { variant }
+        "`let {variant}()` binds nothing — a payload-free variant is a \
+        question, and `if let`/`match` are how it is asked";
+    IndexAssignTarget {}
+        "the left side of an index assignment `[i] = ..` must be \
+        an array variable, a record field, or an array element";
+    FieldAssignTarget {}
+        "the left side of `[i].field = ..` must be an array \
+        variable, a record field, or an array element";
+    FieldWriteDepth {}
+        "only a single field write-through is supported: \
+        `a[i].field = v` (not `a[i].field.field = v`)";
+    PushNoPlace {}
+        "this `push` has no place to write back to, so it \
+        would silently do nothing. Its receiver must be an \
+        assignable place: a variable (`xs.push(v)`), a \
+        record field (`r.xs.push(v)`), or an array element \
+        (`a[i].push(v)`) — not a temporary or a deeper chain.";
+    TemplateNoHole { name }
+        "a tagged template `{name}\"..\"` needs at least one `\\{{ }}` \
+        interpolation; use a plain string otherwise";
+    UnexpectedToken { found } "unexpected token in expression: {found}";
+    InInterpolation { detail } "in interpolation: {detail}";
+    InterpolationTrailing { src } "unexpected tokens after interpolation expression `{src}`";
+    IfLetExpr {}
+        "`if let` is a statement, not an expression — use `match` to bind \
+        a pattern in an expression position";
+    IfExprStatements {}
+        "an `if` used as an expression takes a single expression in each \
+        branch, not statements — use the statement form or a function for \
+        multi-statement branches";
+    FloorCannotInclude { artifact, target, module, what }
+        "artifact `{artifact}` ({target}) cannot include `{module}`: {what}";
+    FormatterInvariant {}
+        "internal formatter error: output would change the token sequence \
+        (source left unchanged)";
+    DeriveWroteDerive {} "a `derive` generator wrote a `derive` call";
+    AudienceCannotImport { importer, from, imported, to }
+        "`{importer}` is {from} and cannot import `{imported}`, which is {to}";
+    AudienceRuntime { shown, fenced }
+        "`{shown}` cannot import `{fenced}`, whose audience is the runtime";
+    GenImportsDeep { max }
+        "generator imports nest more than {max} deep — a generator \
+        likely imports itself with a growing argument";
+    ImportCycle { cycle, key } "import cycle: {cycle} -> {key}";
+    CannotLoad { key, why } "cannot load `{key}`: {why}";
+    LoggingRootOnly { key } "`{key}`: only the root module may configure `logging {{ .. }}`";
+    DeclaredByBoth { name, first, second }
+        "`{name}` is declared by both `{first}` and `{second}`";
+    DeclaredByBothLinked { name, first, second }
+        "`{name}` is declared by both `{first}` and `{second}` — a top-level name is \
+        program-wide, so two linked modules cannot share one";
+    SourceTooLong { src_len } "src_len {src_len} exceeds the input buffer";
+    NotUtf8 {} "the source is not valid UTF-8";
+    UnicodeEscapeBrace {} "`\\u` must be followed by `{{HEX}}`";
+    UnterminatedUnicodeEscape {} "unterminated `\\u{{` escape";
+    UnicodeEscapeDigits {} "`\\u{{}}` needs hex digits";
+    UnicodeEscapeScalar {} "invalid Unicode scalar in `\\u{{}}`";
+    UnterminatedByte {} "unterminated byte literal";
+    EmptyByte {}
+        "empty byte literal; a byte literal holds exactly one byte, e.g. 'a' or '\\x0a'";
+    UnterminatedByteEscape {} "unterminated byte escape";
+    ByteHexDigits {} "`\\x` needs two hex digits";
+    UnknownByteEscape { other } "unknown byte escape `\\{other}`";
+    ByteNewline {} "raw newline in byte literal; write '\\n'";
+    ByteNotAscii {}
+        "byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly";
+    SingleQuotedString {}
+        "single-quoted strings are not allowed: '…' is a single byte \
+        (e.g. 'a', '\\n', '\\x41'); use \"…\" for text";
+    ModuleStateExport {}
+        "module state is not exportable — export accessor functions \
+        (a top-level `let` is module-private in every module)";
+    ExportNeedsDecl {}
+        "`export` must be followed by `fn`, `type`, `protocol`, `contract`, \
+        `extern fn`, `gen fn`, or `mut fn`";
+    LambdaNotHere { form, fix }
+        "`{form} ...` is not a lambda here; a lambda takes its parameters before an arrow"
+        fix "{fix}";
+    SkeletonDetail { detail } "`vyrn\"…\"` skeleton does not parse: {detail}";
+    SkeletonUnparsable {} "`vyrn\"…\"` skeleton does not parse as Vyrn code";
+    ImportNamespaceBuiltin { spec }
+        "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
+        are builtins; import them by name or use them directly";
+    ImportNoExport { spec, name } "{spec} has no export `{name}`";
+    GenImportConstArgs { name }
+        "generator import `{name}(..)` needs compile-time-constant arguments (v1: \
+        string / integer / boolean literals)";
+    GenImportNotGen { name }
+        "`{name}` is not an imported `gen fn` — a generator import target must be an \
+        exported `gen fn` in a module this file imports";
+    GenImportArity { name, want, got } "generator `{name}` takes {want} argument(s), got {got}";
+    GenModuleReread { module, why } "cannot re-read generator module `{module}`: {why}";
+    GenFailed { name, args, trap } "generator `{name}({args})` failed: {trap}";
+    NamespaceBoundTwice { ns } "namespace `{ns}` is bound twice in this module";
+    NamespaceCollides { ns }
+        "namespace `{ns}` collides with a top-level declaration or import \
+        of the same name in this module";
+    ImportedTwice { local } "`{local}` is imported twice into this module";
+    AliasClashes { local }
+        "import alias `{local}` clashes with a top-level declaration of \
+        the same name in this module";
+    ImportedUnderAlias { orig, local }
+        "`{orig}` is not in scope — it was imported as `{local}`; use \
+        that name (or import `{orig}` too)";
+    NamespaceNoMember { ns, target, member }
+        "namespace `{ns}` (module `{target}`) has no exported member `{member}` — \
+        namespaces reach exported declarations only, one level deep";
+    NotNamespace { ns } "`{ns}` is not an in-scope namespace";
+    NamespacedVariant { head, enum_name, variant }
+        "`{head}.{enum_name}.{variant}` is not a namespaced enum \
+        variant (namespaces are one level deep)";
+    NamespaceNotValue { name } "namespace `{name}` is not a value";
+    NotExported { name, target }
+        "`{name}` exists in `{target}` but is not exported — \
+        add `export` to its declaration";
+    NotDefinedIn { name, target, def_module }
+        "`{name}` is not defined in `{target}` (it lives in \
+        `{def_module}`)";
+    TargetLacks { target, name } "`{target}` does not define `{name}`";
+    NotImported { what, name, def_module }
+        "{what} `{name}` is defined in `{def_module}` but not \
+        imported here — add it to an `import {{ .. }} from` list";
+    NotImportedList { what, name, list }
+        "{what} `{name}` is defined in `{list}` but not imported here — add \
+        it to an `import {{ .. }} from` list";
 }

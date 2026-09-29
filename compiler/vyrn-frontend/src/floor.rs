@@ -24,6 +24,7 @@
 use crate::artifacts::{Artifact, ArtifactMap, Target};
 use crate::ast::{LogSink, Program};
 use crate::diagnostics::Diagnostic;
+use crate::rules::refuse;
 
 /// A way out of the program that some target lacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -457,17 +458,15 @@ fn refusal(
             crossing(importer, module)
         ));
     }
-    Diagnostic::error(
+    refuse!(
+        "floor",
         c.line,
         0,
-        "floor",
-        format!(
-            "artifact `{}` ({}) cannot include `{}`: {}",
-            artifact.name,
-            artifact.target,
-            map.display_path(module),
-            c.cap.does()
-        ),
+        FloorCannotInclude,
+        artifact = artifact.name,
+        target = artifact.target,
+        module = map.display_path(module),
+        what = c.cap.does()
     )
     .in_file(Some(module.to_string()))
     .with_note(note)

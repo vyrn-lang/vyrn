@@ -1,0 +1,8 @@
+type Range = { lo: Int64, hi: Int64 } where lo <= hi
+
+fn main() -> Int64 {
+    let mut r: Range = Range { lo: 1, hi: 20 }
+    r.lo = 10 + args().length
+    print(r.lo)
+    return 0
+}

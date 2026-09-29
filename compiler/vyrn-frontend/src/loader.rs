@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
+use crate::rules::{refuse, rule, Rule};
 use crate::{lexer, parser};
 
 /// Provides module source text for a resolved specifier: a normalized,
@@ -574,17 +575,15 @@ fn audience_objection(
     if !audience::widens(from.audience, to.audience) {
         return None;
     }
-    let d = Diagnostic::error(
+    let d = refuse!(
+        "audience",
         line,
         0,
-        "audience",
-        format!(
-            "`{}` is {} and cannot import `{}`, which is {}",
-            audience::display_path(importer, map),
-            from.audience.phrase(),
-            audience::display_path(imported, map),
-            to.audience.phrase()
-        ),
+        AudienceCannotImport,
+        importer = audience::display_path(importer, map),
+        from = from.audience.phrase(),
+        imported = audience::display_path(imported, map),
+        to = to.audience.phrase()
     );
     Some(d.with_note(format!(
         "audience `{}` is declared by vyrn.json:{} — {}; the importer's own audience comes from {}",
@@ -635,12 +634,7 @@ fn runtime_fence(
         Some(map) => crate::audience::display_path(importer, map),
         None => importer.to_string(),
     };
-    let d = Diagnostic::error(
-        line,
-        0,
-        "audience",
-        format!("`{shown}` cannot import `{fenced}`, whose audience is the runtime"),
-    );
+    let d = refuse!("audience", line, 0, AudienceRuntime, shown, fenced);
     Some(d.with_note(format!(
         "audience `{RUNTIME_SPEC}` is declared by the compiler, not by \
          vyrn.json; the safe surface over `std/mem` is what `{RUNTIME_SPEC}` exports, \
@@ -965,14 +959,12 @@ pub fn load_with_origins(
         // argument (`g(x + "1")` from `g(x)`). The depth bound turns that stack
         // overflow into a named error.
         return (
-            Err(vec![Diagnostic::error(
-                0,
-                0,
+            Err(vec![refuse!(
                 "load",
-                format!(
-                    "generator imports nest more than {GEN_DEPTH_MAX} deep — a generator \
-                     likely imports itself with a growing argument"
-                ),
+                0,
+                0,
+                GenImportsDeep,
+                max = GEN_DEPTH_MAX
             )]),
             crate::origin::OriginMaps::default(),
             Vec::new(),
@@ -1149,11 +1141,13 @@ fn load_modules(
             Some(true) => return Ok(()), // already loaded
             Some(false) => {
                 let cycle: Vec<&str> = w.stack.iter().map(|s| s.as_str()).collect();
-                return Err(vec![Diagnostic::error(
-                    0,
-                    0,
+                return Err(vec![refuse!(
                     "load",
-                    format!("import cycle: {} -> {key}", cycle.join(" -> ")),
+                    0,
+                    0,
+                    ImportCycle,
+                    cycle = cycle.join(" -> "),
+                    key
                 )]);
             }
             None => {}
@@ -1164,14 +1158,9 @@ fn load_modules(
         let _read = crate::prof::phase("read");
         let text = match source {
             Some(t) => t.to_string(),
-            None => resolver.read(key).map_err(|e| {
-                vec![Diagnostic::error(
-                    0,
-                    0,
-                    "load",
-                    format!("cannot load `{key}`: {e}"),
-                )]
-            })?,
+            None => resolver
+                .read(key)
+                .map_err(|e| vec![refuse!("load", 0, 0, CannotLoad, key, why = e)])?,
         };
         drop(_read);
         crate::prof::read_lines(text.lines().count());
@@ -1306,12 +1295,7 @@ fn load_modules(
         if !is_root
             && (program.log_level != DEFAULT_LOG_LEVEL || program.log_sink != LogSink::Stderr)
         {
-            return Err(vec![Diagnostic::error(
-                0,
-                0,
-                "load",
-                format!("`{key}`: only the root module may configure `logging {{ .. }}`"),
-            )]);
+            return Err(vec![refuse!("load", 0, 0, LoggingRootOnly, key)]);
         }
 
         // Module state is legal in any module: module-private, one
@@ -1365,16 +1349,13 @@ fn load_modules(
                 continue;
             };
             let load_err =
-                |msg: String| -> Vec<Diagnostic> { vec![load_error(key, root_key, line, msg)] };
+                |rule: Rule| -> Vec<Diagnostic> { vec![load_error(key, root_key, line, rule)] };
             if is_namespace {
-                return Err(load_err(format!(
-                    "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
-                     are builtins; import them by name or use them directly"
-                )));
+                return Err(load_err(rule!(ImportNamespaceBuiltin, spec)));
             }
             for n in &names {
                 if !exports.contains(&n.original.as_str()) {
-                    return Err(load_err(format!("{spec} has no export `{}`", n.original)));
+                    return Err(load_err(rule!(ImportNoExport, spec, name = n.original)));
                 }
             }
             program.imports.remove(idx);
@@ -1386,8 +1367,13 @@ fn load_modules(
         let mut import_targets: Vec<Option<String>> = vec![None; program.imports.len()];
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Path(path) = &imp.source {
-                let target = resolve_spec(path, key, opts)
-                    .map_err(|e| vec![load_error(key, root_key, imp.line, e)])?;
+                let target = resolve_spec(path, key, opts).map_err(|e| {
+                    vec![in_module(
+                        Diagnostic::error(imp.line, 0, "load", e),
+                        key,
+                        root_key,
+                    )]
+                })?;
                 // An import may not widen audience. Checked before the
                 // target is visited, so the first illegal edge is the one reported.
                 if let Some(d) = audience_objection(key, &target, imp.line, opts)
@@ -1603,7 +1589,7 @@ fn run_generator(
     identities: &mut HashMap<String, String>,
     root_key: &str,
 ) -> Result<(String, Option<String>), Vec<Diagnostic>> {
-    let err = |msg: String| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, msg)] };
+    let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
 
     // Arguments must be compile-time constants.
     let empty = HashMap::new();
@@ -1611,12 +1597,7 @@ fn run_generator(
     for a in args {
         match crate::consteval::eval(a, &empty) {
             Some(c) => consts.push(c),
-            None => {
-                return Err(err(format!(
-                    "generator import `{name}(..)` needs compile-time-constant arguments (v1: \
-                     string / integer / boolean literals)"
-                )))
-            }
+            None => return Err(err(rule!(GenImportConstArgs, name))),
         }
     }
     let arg_repr = consts
@@ -1674,32 +1655,26 @@ fn run_generator(
                 .any(|f| f.name == name && f.is_gen && f.exported)
         })
         .map(|m| m.key.clone())
-        .ok_or_else(|| {
-            err(format!(
-                "`{name}` is not an imported `gen fn` — a generator import target must be an \
-                 exported `gen fn` in a module this file imports"
-            ))
-        })?;
+        .ok_or_else(|| err(rule!(GenImportNotGen, name)))?;
     let gen_fn = modules
         .iter()
         .flat_map(|m| &m.program.functions)
         .find(|f| f.name == name && f.is_gen)
         .expect("generator found above");
     if gen_fn.params.len() != consts.len() {
-        return Err(err(format!(
-            "generator `{name}` takes {} argument(s), got {}",
-            gen_fn.params.len(),
-            consts.len()
+        return Err(err(rule!(
+            GenImportArity,
+            name,
+            want = gen_fn.params.len(),
+            got = consts.len()
         )));
     }
 
     // The generator's own source, for the cache key. Loading and checking it
     // waits for a cache miss: it is the most expensive step of a warm keystroke.
-    let gen_source = resolver.read(&gen_mod_key).map_err(|e| {
-        err(format!(
-            "cannot re-read generator module `{gen_mod_key}`: {e}"
-        ))
-    })?;
+    let gen_source = resolver
+        .read(&gen_mod_key)
+        .map_err(|e| err(rule!(GenModuleReread, module = gen_mod_key, why = e)))?;
 
     // Each constant string path argument is an allowed input root; a path with
     // no extension also admits its `.vyrn` file. A path that names a manifest
@@ -1840,7 +1815,7 @@ fn run_generator(
         // refuses the program.
         let typed = crate::own::typed_refusals();
         if typed.is_empty() {
-            err(format!("generator `{name}({arg_repr})` failed: {trap}"))
+            err(rule!(GenFailed, name, args = arg_repr, trap))
         } else {
             typed
         }
@@ -2318,7 +2293,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     &m.key,
                     root_key,
                     imp.line,
-                    format!("namespace `{ns}` is bound twice in this module"),
+                    rule!(NamespaceBoundTwice, ns),
                 ));
                 ok = false;
             }
@@ -2327,10 +2302,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     &m.key,
                     root_key,
                     imp.line,
-                    format!(
-                        "namespace `{ns}` collides with a top-level declaration or import \
-                             of the same name in this module"
-                    ),
+                    rule!(NamespaceCollides, ns),
                 ));
                 ok = false;
             }
@@ -2459,7 +2431,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                             &m.key,
                             root_key,
                             imp.line,
-                            format!("`{local}` is imported twice into this module"),
+                            rule!(ImportedTwice, local),
                         ));
                     }
                 }
@@ -2468,10 +2440,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                         &m.key,
                         root_key,
                         imp.line,
-                        format!(
-                            "import alias `{local}` clashes with a top-level declaration of \
-                                 the same name in this module"
-                        ),
+                        rule!(AliasClashes, local),
                     ));
                 }
             }
@@ -2512,11 +2481,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                             &m.key,
                             root_key,
                             imp.line,
-                            format!(
-                                "`{orig}` is not in scope — it was imported as `{}`; use \
-                                     that name (or import `{orig}` too)",
-                                n.local()
-                            ),
+                            rule!(ImportedUnderAlias, orig, local = n.local()),
                         ));
                     }
                 }
@@ -2833,9 +2798,9 @@ struct NsResolver<'a> {
 }
 
 impl NsResolver<'_> {
-    fn err(&mut self, line: usize, msg: String) {
+    fn err(&mut self, line: usize, rule: Rule) {
         self.errors
-            .push(load_error(&self.module_key, &self.root_key, line, msg));
+            .push(load_error(&self.module_key, &self.root_key, line, rule));
     }
 
     /// The program-wide symbol a namespace member resolves to, after any
@@ -2847,13 +2812,7 @@ impl NsResolver<'_> {
             .get(&target)
             .is_some_and(|s| s.contains(member));
         if !exported {
-            self.err(
-                line,
-                format!(
-                    "namespace `{ns}` (module `{target}`) has no exported member `{member}` — \
-                     namespaces reach exported declarations only, one level deep"
-                ),
-            );
+            self.err(line, rule!(NamespaceNoMember, ns, target, member));
             return None;
         }
         Some(resolved_name(self.foreign_renames, &target, member))
@@ -3022,7 +2981,7 @@ impl BodyVisitMut for NsResolver<'_> {
                         }
                     } else {
                         let (ns, line) = (ns.to_string(), *line);
-                        self.err(line, format!("`{ns}` is not an in-scope namespace"));
+                        self.err(line, rule!(NotNamespace, ns));
                     }
                 }
             }
@@ -3071,13 +3030,7 @@ impl BodyVisitMut for NsResolver<'_> {
                                     line: l,
                                 };
                             } else {
-                                self.err(
-                                    l,
-                                    format!(
-                                        "`{head}.{enum_name}.{variant}` is not a namespaced enum \
-                                         variant (namespaces are one level deep)"
-                                    ),
-                                );
+                                self.err(l, rule!(NamespacedVariant, head, enum_name, variant));
                             }
                             return false;
                         }
@@ -3087,7 +3040,7 @@ impl BodyVisitMut for NsResolver<'_> {
             Expr::Var { name, line, id: _ } => {
                 if self.is_ns(name, locals) {
                     let (name, line) = (name.clone(), *line);
-                    self.err(line, format!("namespace `{name}` is not a value"));
+                    self.err(line, rule!(NamespaceNotValue, name));
                 }
             }
             _ => {}
@@ -3245,10 +3198,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                                 &m.key,
                                 root_key,
                                 imp.line,
-                                format!(
-                                    "`{name}` exists in `{target}` but is not exported — \
-                                         add `export` to its declaration"
-                                ),
+                                rule!(NotExported, name, target),
                             ));
                         }
                         // Importing an enum brings its variants, and a protocol its
@@ -3260,10 +3210,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                             &m.key,
                             root_key,
                             imp.line,
-                            format!(
-                                "`{name}` is not defined in `{target}` (it lives in \
-                                     `{def_module}`)"
-                            ),
+                            rule!(NotDefinedIn, name, target, def_module),
                         ));
                     }
                     // A clashed name: `clash_diagnostics` reported the pair. It
@@ -3277,7 +3224,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                             &m.key,
                             root_key,
                             imp.line,
-                            format!("`{target}` does not define `{name}`"),
+                            rule!(TargetLacks, target, name),
                         ));
                     }
                 }
@@ -3365,10 +3312,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                             &m.key,
                             root_key,
                             line,
-                            format!(
-                                "{what} `{name}` is defined in `{def_module}` but not \
-                                     imported here — add it to an `import {{ .. }} from` list"
-                            ),
+                            rule!(NotImported, what, name, def_module),
                         ));
                     }
                 }
@@ -3394,10 +3338,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 &m.key,
                 root_key,
                 line,
-                format!(
-                    "{what} `{name}` is defined in `{list}` but not imported here — add \
-                         it to an `import {{ .. }} from` list"
-                ),
+                rule!(NotImportedList, what, name, list),
             ));
         };
 
@@ -3532,8 +3473,8 @@ fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {
 }
 
 /// A load error at `line` of `key`, located by [`in_module`].
-fn load_error(key: &str, root_key: &str, line: usize, msg: String) -> Diagnostic {
-    in_module(Diagnostic::error(line, 0, "load", msg), key, root_key)
+fn load_error(key: &str, root_key: &str, line: usize, rule: Rule) -> Diagnostic {
+    in_module(Diagnostic::refusal(line, 0, "load", rule), key, root_key)
 }
 
 /// The import of `target` a diagnostic should point at, with its module.
@@ -3609,14 +3550,14 @@ fn clash_diagnostics(
             // A linked module was imported, so a site exists; the diagnostic
             // survives even if it does not.
             None => {
-                out.push(Diagnostic::error(
-                    0,
-                    0,
+                out.push(refuse!(
                     "load",
-                    format!(
-                        "`{}` is declared by both `{first}` and `{second}`",
-                        names[0]
-                    ),
+                    0,
+                    0,
+                    DeclaredByBoth,
+                    name = names[0],
+                    first,
+                    second
                 ));
                 continue;
             }
@@ -3635,15 +3576,14 @@ fn clash_diagnostics(
             ImportSource::Generator { .. } => None,
         };
         let line = imp.line;
-        let d = Diagnostic::error(
+        let d = refuse!(
+            "load",
             line,
             0,
-            "load",
-            format!(
-                "`{}` is declared by both `{first}` and `{second}` — a top-level name is \
-                 program-wide, so two linked modules cannot share one",
-                names[0]
-            ),
+            DeclaredByBothLinked,
+            name = names[0],
+            first,
+            second
         );
         let fix = match spec {
             Some(s) => format!(
