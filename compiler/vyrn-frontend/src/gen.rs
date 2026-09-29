@@ -531,13 +531,13 @@ pub fn derive(
             ));
         }
         let gen_program = generator_program(program, g);
-        let key =
-            crate::hash::sha256_hex(format!("{g}\u{0}{gen_program:?}\u{0}{arg:?}").as_bytes());
+        let fingerprint = crate::hash::sha256_hex(canonical(&gen_program).as_bytes());
+        let key = crate::hash::sha256_hex(format!("{g}\u{0}{fingerprint}\u{0}{arg:?}").as_bytes());
         let cached = DERIVED.with(|d| d.borrow().get(&key).cloned());
         let fns = match cached {
             Some(fns) => fns,
             None => {
-                let fns = run_derive(gen_program, g, arg)?;
+                let fns = run_derive(gen_program, g, arg, fingerprint)?;
                 DERIVED.with(|d| d.borrow_mut().insert(key, fns.clone()));
                 fns
             }
@@ -596,12 +596,37 @@ fn generator_program(program: &Program, g: &str) -> Program {
     p
 }
 
+/// Returns a text that names `p` alike in every process: its `Debug`, with the
+/// AST's three hash containers (`surface_shadows` and each function's and
+/// impl's `type_bounds`) moved out and sorted, because a hash container's
+/// `Debug` order differs per process.
+fn canonical(p: &Program) -> String {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut c = p.clone();
+    let shadows: BTreeSet<_> = c.surface_shadows.drain().collect();
+    let mut bounds: Vec<BTreeMap<String, Vec<String>>> = Vec::new();
+    for i in &mut c.impls {
+        bounds.push(i.type_bounds.drain().collect());
+    }
+    let methods = c
+        .impls
+        .iter_mut()
+        .flat_map(|i| i.methods.iter_mut().chain(i.places.iter_mut()));
+    for f in c.functions.iter_mut().chain(methods) {
+        bounds.push(f.type_bounds.drain().collect());
+    }
+    format!("{c:?}\u{0}{shadows:?}\u{0}{bounds:?}")
+}
+
 /// Checks and runs generator `g` on `arg`, parses what it wrote, and renames
-/// each function it defines to `derive$g$<name>`.
+/// each function it defines to `derive$g$<name>`. `fingerprint` names the
+/// generator's program, so the engine keeps its compiled module across
+/// processes.
 fn run_derive(
     mut gen_program: Program,
     g: &str,
     arg: Expr,
+    fingerprint: String,
 ) -> Result<Vec<crate::ast::Function>, String> {
     let diags = crate::floor::aside(|| {
         crate::movecheck::comptime(|| crate::check_and_synthesize(&mut gen_program))
@@ -625,7 +650,7 @@ fn run_derive(
                 aliased: Vec::new(),
                 fuel: crate::loader::GEN_FUEL,
                 max_output: crate::loader::GEN_MAX_OUTPUT,
-                sources_fingerprint: None,
+                sources_fingerprint: Some(fingerprint),
                 type_arg: Some(arg),
             },
         )
