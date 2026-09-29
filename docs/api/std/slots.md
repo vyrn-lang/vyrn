@@ -69,8 +69,9 @@ fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool
 ```
 
 Whether `h` still names a live element of `s`. False for a handle from
-another container, an out-of-range slot, and a slot whose generation has
-moved on.
+another container, an out-of-range slot, a slot whose generation has moved
+on, and a free slot: `remove` sets the generation the next `insert` will
+issue, so a handle built by hand can match a free slot's generation.
 
 ## get
 
