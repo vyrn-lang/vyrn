@@ -325,6 +325,46 @@ fn census() -> Vec<Row> {
             "`f` was moved here into a literal\nline 7: ... and `f` is used again here",
             Kernel::Its,
         ),
+        row(
+            "r43_function_value_of_a_consume_parameter.vyrn",
+            "a function value reads every argument, so its target takes each by `read`",
+            "`grow` cannot be used as a function value: it takes `c` by `consume`, and a `fn` \
+             type reads every argument",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r44_consume_and_read_in_one_call.vyrn",
+            "a `consume` argument may not overlap another argument of the same call",
+            "`x` is consumed by `g(..)`, and `x` is passed to the same call, so the callee could \
+             read what it frees",
+            Kernel::Its,
+        ),
+        row(
+            "r45_a_group_record_read_whole_before_its_check.vyrn",
+            "a group of stores into a `where` record reads the record whole",
+            "`c` is read whole while a store into its field leaves its `where` rule unchecked",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r46_a_call_while_a_callers_group_is_open.vyrn",
+            "a group of stores into a `modify` parameter calls a function",
+            "`next` may read the caller's `c` while a store into its field leaves its `where` \
+             rule unchecked",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r47_an_exit_while_a_callers_group_is_open.vyrn",
+            "a group of stores into a `modify` parameter has an exit",
+            "`?` leaves `c` with its `where` rule unchecked",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r48_read_whole_with_a_hole.vyrn",
+            "a name with a hole may not be read whole",
+            "`p.name` was taken out of `p` here\nline 10: ... and `p` is used as a whole here, \
+             with the hole still in it",
+            Kernel::Its,
+        ),
     ]
 }
 

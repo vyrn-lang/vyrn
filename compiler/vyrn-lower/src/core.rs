@@ -1185,6 +1185,7 @@ fn build_seeded(
         scrutinee: None,
         after: Vec::new(),
         after_of_rhs: Vec::new(),
+        held: Vec::new(),
         owed: None,
         stream_loops: Vec::new(),
         walks: Vec::new(),
@@ -1451,6 +1452,11 @@ struct Builder<'a> {
     after: Vec<Name>,
     /// What `rhs` left for the binding that follows it.
     after_of_rhs: Vec<Name>,
+    /// The owning temporaries evaluated for a consumer that has not run yet,
+    /// which a `?` in a later operand releases on its failure exit
+    /// ([`Builder::leave_try`]). An `rhs` and a join arm truncate it to its
+    /// length at entry; a statement and a lambda frame start it empty.
+    held: Vec<Name>,
     /// The check `rhs` owes a record literal of a validated type, with its
     /// line: [`Builder::bind`] states it after the literal's row.
     owed: Option<(String, usize)>,
@@ -1564,6 +1570,7 @@ impl<'a> Builder<'a> {
             scrutinee: None,
             after: Vec::new(),
             after_of_rhs: Vec::new(),
+            held: Vec::new(),
             owed: None,
             stream_loops: Vec::new(),
             walks: Vec::new(),
@@ -2114,19 +2121,7 @@ impl<'a> Builder<'a> {
         // A validated record literal the checker did not prove is checked
         // whole once it is made: its constructor reads it.
         if let Some((to, line)) = owed {
-            out.push(St::Do {
-                rhs: Rhs::Call {
-                    ret: Some(Type::Named(to.clone())),
-                    callee: to,
-                    args: vec![(Arg::Val(Val::Name(n)), Capability::Read)],
-                    write_back: false,
-                    kind: Callee::Named,
-                    solved: Vec::new(),
-                    targets: Vec::new(),
-                },
-                line,
-                site: NodeId::NONE,
-            });
+            out.push(rule_check(to, n, line));
         }
         for t in std::mem::take(&mut self.after_of_rhs) {
             out.push(St::Drop(t, Site::None, 0, None));
@@ -2315,8 +2310,10 @@ impl<'a> Builder<'a> {
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
+                let held = self.held.len();
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
+                    self.held.truncate(held);
                     let mut body = Vec::new();
                     let mark = self.scope.len();
                     let binds = self.bind_pattern(
@@ -2375,7 +2372,9 @@ impl<'a> Builder<'a> {
         if self.return_through(e, sid, line, out)? {
             return Ok(());
         }
+        let held = self.held.len();
         let v = self.val(e, out)?;
+        self.held.truncate(held);
         self.return_exit(Some(v), sid, line, out)
     }
 
@@ -2408,7 +2407,15 @@ impl<'a> Builder<'a> {
     /// per level, the store, and one store back per temp
     /// ([`vyrn_frontend::parser::store_stmts`]). The rows state the store
     /// alone, into `b[i].vx`, and the part's old value is its to release.
+    ///
+    /// A run of statements that each store into a field of one record name
+    /// with a `where` rule is a group ([`crate::typed::groups`]): the rule is
+    /// checked once, after the run's last statement. A statement that ends
+    /// the path ends the run with no check.
     fn stmt_list(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<(), Gap> {
+        // Per open group: the record name, its type and the line of its last
+        // statement.
+        let mut open: Vec<(Name, String, usize)> = Vec::new();
         let mut k = 0;
         while k < ss.len() {
             let (scope, at) = (self.scope.len(), out.len());
@@ -2456,9 +2463,60 @@ impl<'a> Builder<'a> {
                     self.scope.push((name.clone(), n));
                 }
             }
+            let members = self.grouped_in(&out[at..]);
+            let (kept, closed): (Vec<_>, Vec<_>) =
+                (open.into_iter()).partition(|(c, ..)| members.iter().any(|(m, _)| m == c));
+            let checks = (closed.into_iter()).map(|(c, to, line)| rule_check(to, c, line));
+            out.splice(at..at, checks);
+            open = kept;
+            let line = ss[k + span - 1].line();
+            for (c, to) in members {
+                match open.iter_mut().find(|(o, ..)| *o == c) {
+                    Some(g) => g.2 = line,
+                    None => open.push((c, to, line)),
+                }
+            }
+            let ends = matches!(
+                out.last(),
+                Some(St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap)
+            );
+            if ends {
+                open.clear();
+            }
             k += span;
         }
+        out.extend(
+            open.into_iter()
+                .map(|(c, to, line)| rule_check(to, c, line)),
+        );
         Ok(())
+    }
+
+    /// The record names `rows` store into a field of as a group member
+    /// ([`grouped`]), each once, with the record's type. The rows of a nested
+    /// block or loop are left out: a block checks its own groups.
+    fn grouped_in(&self, rows: &[St]) -> Vec<(Name, String)> {
+        fn shallow<'s>(ss: &'s [St], out: &mut Vec<&'s St>) {
+            for s in ss {
+                out.push(s);
+                if !matches!(s, St::Block { .. } | St::Loop { .. }) {
+                    s.lists().for_each(|l| shallow(l, out));
+                }
+            }
+        }
+        let mut flat = Vec::new();
+        shallow(rows, &mut flat);
+        let mut out: Vec<(Name, String)> = Vec::new();
+        for s in flat {
+            crate::typed::row_stores(s, &self.body.names, &mut |place, _, _, _| {
+                if let Some((c, to)) = group_of(self.proto, &self.body.names, place) {
+                    if !out.iter().any(|(m, _)| *m == c) {
+                        out.push((c, to));
+                    }
+                }
+            });
+        }
+        out
     }
 
     /// The store or removal at the head of `ss` when it is a move-out window
@@ -2708,7 +2766,10 @@ impl<'a> Builder<'a> {
     }
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
-        self.stmt_rows(s, out)?;
+        let held = std::mem::take(&mut self.held);
+        let r = self.stmt_rows(s, out);
+        self.held = held;
+        r?;
         match self.owed.take() {
             Some((to, line)) => gap_d("a check of a validated record no binding took", &to, line),
             None => Ok(()),
@@ -5011,6 +5072,7 @@ impl<'a> Builder<'a> {
                 };
                 self.record_fields(t, e);
                 self.bind(t, rhs, out);
+                self.hold(t);
                 if reads_a_part(e) {
                     self.release_receiver(e, out, false);
                 }
@@ -5142,6 +5204,7 @@ impl<'a> Builder<'a> {
             std::mem::replace(&mut self.drain, 0),
             std::mem::take(&mut self.stream_loops),
             std::mem::take(&mut self.walks),
+            std::mem::take(&mut self.held),
         );
         let outer_ret = std::mem::replace(&mut self.ret, ret);
         for c in caps {
@@ -5188,6 +5251,7 @@ impl<'a> Builder<'a> {
             self.drain,
             self.stream_loops,
             self.walks,
+            self.held,
         ) = saved;
         self.ret = outer_ret;
         r?;
@@ -5366,6 +5430,7 @@ impl<'a> Builder<'a> {
         }
         let t = self.temp(ty, e.line());
         out.push(St::Let(t, Rhs::Take(place)));
+        self.hold(t);
         Ok(Val::Name(t))
     }
 
@@ -5470,7 +5535,9 @@ impl<'a> Builder<'a> {
     /// nested read cannot drop what an outer one is about to read.
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         let outer = std::mem::take(&mut self.after);
+        let held = self.held.len();
         let r = self.rhs_inner(e, out);
+        self.held.truncate(held);
         let mine = std::mem::replace(&mut self.after, outer);
         self.after_of_rhs = mine;
         r
@@ -5482,6 +5549,26 @@ impl<'a> Builder<'a> {
         for t in self.after.split_off(mark) {
             out.push(St::Drop(t, Site::None, 0, None));
         }
+    }
+
+    /// Holds the temporary `t` until its consumer runs, where it owns heap.
+    fn hold(&mut self, t: Name) {
+        if self.body.names[t.index()].releases {
+            self.held.push(t);
+        }
+    }
+
+    /// The rows a `?`'s failure exit runs before its return: the enclosing
+    /// loops, the held temporaries, then the plan's releases. A keyed
+    /// temporary (a scrutinee) is the plan's.
+    fn leave_try(&mut self, tid: NodeId, out: &mut Vec<St>) -> Result<(), Gap> {
+        self.leave_loops(out);
+        for &t in &self.held {
+            if self.body.names[t.index()].binding.is_none() {
+                out.push(St::Drop(t, Site::None, 0, None));
+            }
+        }
+        self.drops_at(Exit::Try, tid, out)
     }
 
     /// `a && b` as `if a { b } else { false }`, and `a || b` as
@@ -5816,6 +5903,7 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
+                let held = self.held.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
                 let mut aliased = self.alias_out(&tv, mark);
@@ -5831,6 +5919,7 @@ impl<'a> Builder<'a> {
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
+                self.held.truncate(held);
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
@@ -5875,9 +5964,11 @@ impl<'a> Builder<'a> {
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
                 let outer = self.body.names.len();
+                let held = self.held.len();
                 let mut core_arms = Vec::new();
                 let mut yields = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
+                    self.held.truncate(held);
                     let mut body = Vec::new();
                     let mark = self.scope.len();
                     let binds = self.bind_pattern(
@@ -5967,8 +6058,7 @@ impl<'a> Builder<'a> {
                     borrow_root(&sv, owns),
                     &mut fail,
                 )?;
-                self.leave_loops(&mut fail);
-                self.drops_at(Exit::Try, tid, &mut fail)?;
+                self.leave_try(tid, &mut fail)?;
                 // An `Option` fails with `None` of the frame's result; a
                 // `Result` with its error binder taken into `Err`.
                 let value = match (fb.first(), self.ret.clone()) {
@@ -6114,8 +6204,7 @@ impl<'a> Builder<'a> {
             Rhs::Prim(Op::Un(UnOp::Not), vec![Val::Name(held)], Some(Type::Bool)),
         ));
         let mut fail = Vec::new();
-        self.leave_loops(&mut fail);
-        self.drops_at(Exit::Try, tid, &mut fail)?;
+        self.leave_try(tid, &mut fail)?;
         fail.push(St::Return {
             value: Some(sv.clone()),
             site: tid,
@@ -6304,7 +6393,8 @@ impl<'a> Builder<'a> {
             )
         });
         let mut caps: Vec<Capability> = if let Some(n) = bound {
-            // A lambda captures by read and takes by read.
+            // A function value reads every argument: the checker refuses a
+            // target that takes one otherwise (`Checker::reads_every_param`).
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
         } else if let Some(id) = self.fn_id(name) {
@@ -7415,18 +7505,25 @@ fn typed(
     let projected =
         |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
     let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
+    let grouped = |t: &Type, path: &[&Place]| grouped(&own.proto, t, path);
     let rules = crate::typed::StoreRules {
         global_mutable: &global_mutable,
         global_ty: &global_ty,
         projected: &projected,
         ruled_within: &ruled_within,
+        grouped: &grouped,
     };
     let (out, seen) = (&mut r.typed, &mut r.seen);
     let mut found = crate::typed::stores(top, &rules, seen);
     found.extend(crate::typed::loops(top, seen));
     // One sentence per line: a declaration's predicate is also the body
-    // of its constructor.
-    for u in crate::typed::refused(top, as_written) {
+    // of its constructor, and the instances of a generic function share
+    // their groups.
+    let groups = crate::typed::groups(top, &rules);
+    for u in crate::typed::refused(top, as_written)
+        .into_iter()
+        .chain(groups)
+    {
         let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
         if !out.iter().any(said) && !found.contains(&u) {
             found.push(u);
@@ -7450,7 +7547,36 @@ fn typed(
 /// A store into an element of an array field passes through: it keeps the
 /// field's length, and the rule reads the field through its length alone.
 fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
+    ruled_steps(own, ty, path)
+        .into_iter()
+        .next()
+        .map(|(_, n)| n)
+}
+
+/// The type a store into a field of a record name belongs to a group of
+/// ([`crate::typed::groups`]): the name's own type, when it is the one record
+/// with a `where` rule the path passes through.
+fn grouped(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
+    match ruled_steps(own, ty, path).as_slice() {
+        [(0, n)] => Some(n.clone()),
+        _ => None,
+    }
+}
+
+/// The record name and type of a store into `place` that belongs to a group
+/// ([`grouped`]).
+fn group_of(own: &Owned, names: &[NameInfo], place: &Place) -> Option<(Name, String)> {
+    let (Place::Name(c), path) = crate::typed::split(place) else {
+        return None;
+    };
+    Some((*c, grouped(own, &names[c.index()].ty, &path)?))
+}
+
+/// Each step of `path` that leaves a record type with a `where` rule
+/// ([`ruled_within`]), by its index, with the type.
+fn ruled_steps(own: &Owned, ty: &Type, path: &[&Place]) -> Vec<(usize, String)> {
     let decls = own.types();
+    let mut out = Vec::new();
     let mut at = ty.clone();
     for (k, step) in path.iter().enumerate() {
         if let Type::Named(n) = &at {
@@ -7471,23 +7597,42 @@ fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
                     _ => false,
                 };
                 if !elem_of_length_only {
-                    return Some(n.clone());
+                    out.push((k, n.clone()));
                 }
             }
         }
-        at = match (step, vyrn_frontend::types::resolve(&at, decls)) {
-            (Place::Field(_, f), _) => {
-                vyrn_frontend::types::record_fields(&at, decls)?
-                    .into_iter()
-                    .find(|x| &x.name == f)?
-                    .ty
+        let next = match (step, vyrn_frontend::types::resolve(&at, decls)) {
+            (Place::Field(_, f), _) => vyrn_frontend::types::record_fields(&at, decls)
+                .and_then(|fs| fs.into_iter().find(|x| &x.name == f))
+                .map(|x| x.ty),
+            (Place::Elem(..), Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _)) => {
+                Some(*e)
             }
-            (Place::Elem(..), Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _)) => *e,
-            (Place::Key(..), Type::Map(_, v)) => *v,
-            _ => return None,
+            (Place::Key(..), Type::Map(_, v)) => Some(*v),
+            _ => None,
         };
+        let Some(next) = next else { break };
+        at = next;
     }
-    None
+    out
+}
+
+/// The row that checks record name `n` against its type `to`'s `where` rule:
+/// the constructor reads it, and traps as at a boundary.
+fn rule_check(to: String, n: Name, line: usize) -> St {
+    St::Do {
+        rhs: Rhs::Call {
+            ret: Some(Type::Named(to.clone())),
+            callee: to,
+            args: vec![(Arg::Val(Val::Name(n)), Capability::Read)],
+            write_back: false,
+            kind: Callee::Named,
+            solved: Vec::new(),
+            targets: Vec::new(),
+        },
+        line,
+        site: NodeId::NONE,
+    }
 }
 
 /// Reports a body the core did not build. A gap with a rule is the program's
@@ -8478,7 +8623,8 @@ fn place_frames(
             }
             // An owed release of a temporary has no row to key: the builder
             // states it (`Builder::discards`, `Builder::drop_receiver`,
-            // `Builder::drop_since`), so one found here is a defect.
+            // `Builder::drop_since`, `Builder::leave_try`), so one found here
+            // is a defect.
             let Some(binding) = info.binding else {
                 panic!(
                     "placer: `{}` (line {}) in `{}` owes a release at {:?} and has no binding",

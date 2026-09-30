@@ -10,7 +10,9 @@
 ///   name, with a `where` rule that every column has the first one's length.
 ///   `c.f[i]` reads a field and `c.f[i] = v` writes one in place.
 /// - `tColumns(capacity)`: empty columns with room for `capacity` rows.
-/// - `pushT(c, v)`: `c` with the row `v` appended, as `c = pushT(c, v)`.
+/// - `pushT(c, v)`: appends the row `v` to `c` in place. The pushes are one
+///   group of stores, so the rule is checked once, after the last column
+///   grows, and the check is proved.
 /// - `tAt(c, i)`: row `i` read back as a `T`.
 ///
 /// `c.f.length` counts the rows. Because of the rule, a loop bounded by one
@@ -48,7 +50,7 @@ gen fn columnsOf(t: TypeInfo) -> String {
     let mut rule: Array<String> = []
     let mut names: Array<String> = []
     let mut empty = ""
-    let mut take = ""
+    let mut push = ""
     let mut row: Array<String> = []
     for m in t.shape[0].members {
         let f = m.name
@@ -59,7 +61,7 @@ gen fn columnsOf(t: TypeInfo) -> String {
         }
         names.push(f + ": " + f)
         empty = empty + "    let mut " + f + ": " + ty + " = []\n    " + f + ".reserve(capacity)\n"
-        take = take + "    let mut " + f + " = consume c." + f + "\n    " + f + ".push(v." + f + ".copy())\n"
+        push = push + "    c." + f + ".push(v." + f + ".copy())\n"
         row.push(f + ": c." + f + "[i].copy()")
     }
     let mut out = "export type " + cols + " = { " + joinWith(decl, ", ") + " }"
@@ -68,7 +70,7 @@ gen fn columnsOf(t: TypeInfo) -> String {
     }
     let build = "    return " + cols + " { " + joinWith(names, ", ") + " }\n}\n"
     out = out + "\nexport fn " + lower + "Columns(capacity: Int64) -> " + cols + " {\n" + empty + build
-    out = out + "export fn push" + name + "(c: consume " + cols + ", v: " + name + ") -> " + cols + " {\n" + take + build
+    out = out + "export fn push" + name + "(c: modify " + cols + ", v: " + name + ") {\n" + push + "}\n"
     out = out + "export fn " + lower + "At(c: " + cols + ", i: Int64) -> " + name + " {\n"
     return out + "    return " + name + " { " + joinWith(row, ", ") + " }\n}\n"
 }

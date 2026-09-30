@@ -3,7 +3,8 @@
 //!
 //! [`state`] inserts a [`St::Check`] before each row whose operation can trap:
 //! an element place on an array or a String, an integer `/`, `%`, `<<` or
-//! `>>`, `@swapRemove`, a SIMD span load or store, and `bytes(s, a, b)`. The
+//! `>>`, `@swapRemove`, a SIMD span load or store, `bytes(s, a, b)`, and a
+//! record type's constructor run on a name to check its `where` rule. The
 //! emitter emits each check from its row and from nowhere else. A check row
 //! emits nothing where it stands: the emitter runs it inside the row it
 //! guards, where the operands are on hand, so it reads no name and no walker
@@ -18,7 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use vyrn_frontend::ast::{BinOp, Type, TypeDecl};
 use vyrn_frontend::trap::Rule;
 
-use vyrn_frontend::core::check::{Check, Guard, Site, Verdict};
+use vyrn_frontend::core::check::{Check, Guard, Raises, Site, Verdict};
 use vyrn_frontend::core::{Arg, Body, Op, Place, Rhs, St, Val};
 
 /// What a build does with its check rows, from the environment variable
@@ -70,6 +71,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
     let mut taken: Vec<Place> = Vec::new();
     for mut s in std::mem::take(ss) {
         let mut guards = Vec::new();
+        let mut ruled = None;
         let line = match &s {
             St::Let(n, rhs) => {
                 rhs_guards(body, tys, rhs, &mut guards);
@@ -80,6 +82,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             }
             St::Do { rhs, line, .. } => {
                 rhs_guards(body, tys, rhs, &mut guards);
+                ruled = rhs.checks_rule(&body.names);
                 *line
             }
             St::Store { place, line, .. } => {
@@ -90,6 +93,9 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             }
             _ => 0,
         };
+        let guards = (guards.into_iter())
+            .map(|(r, g)| (Raises::Row(r), g))
+            .chain(ruled.map(|n| (Raises::Where, Guard::Rule(n))));
         for (rule, guard) in guards {
             let ordinal = lines.entry(line).or_insert(0);
             let site = Site {

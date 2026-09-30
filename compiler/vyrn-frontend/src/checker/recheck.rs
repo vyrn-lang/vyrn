@@ -21,8 +21,7 @@
 //! only under the same fingerprint: the other modules' texts, which also
 //! decide how the linker rewrites their bodies, the names of their protocols
 //! and contracts, the root's protocols and contracts, every `impl` head, the
-//! root's projection bodies, the host, the surface shadows and the `consume`
-//! slots of stored function signatures. A rename apart of another module's
+//! root's projection bodies, the host and the surface shadows. A rename apart of another module's
 //! declaration changes a name its readers read, so their reads answer
 //! differently. A body whose record rows name a node of another unit (an
 //! inlined projection's expansion) or that read a protocol is checked on
@@ -45,7 +44,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash as _, Hasher as _};
 
 use crate::ast::SourceBody;
-use crate::ast::{Capability, DeclId, DeclKind, Function, Key, NamedBlock, Program, ScopeId};
+use crate::ast::{DeclId, DeclKind, Function, Key, NamedBlock, Program, ScopeId};
 use crate::diagnostics::Diagnostic;
 
 use super::{Checker, Recorded, Typed};
@@ -146,11 +145,8 @@ pub(super) struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// The session of a check of `program` that records read rows.
-    pub(super) fn open(
-        program: &'a Program,
-        caps_by_sig: &HashMap<String, Vec<Capability>>,
-    ) -> Session<'a> {
-        let world = world(program, caps_by_sig);
+    pub(super) fn open(program: &'a Program) -> Session<'a> {
+        let world = world(program);
         CACHE.with(|c| {
             let c = &mut *c.borrow_mut();
             let (last, opens) = c.worlds.entry(world).or_default();
@@ -453,16 +449,12 @@ fn in_unit(r: &Recorded, unit: u32) -> Recorded {
 }
 
 /// The fingerprint of what a body reads that no read row records.
-fn world(p: &Program, caps_by_sig: &HashMap<String, Vec<Capability>>) -> u64 {
+fn world(p: &Program) -> u64 {
     let mut h = Sip::default();
     let mut shadows: Vec<_> = p.surface_shadows.iter().collect();
     shadows.sort();
-    let mut consume: Vec<_> = (caps_by_sig.iter())
-        .filter(|(_, cs)| cs.contains(&Capability::Consume))
-        .collect();
-    consume.sort_by(|a, b| a.0.cmp(b.0));
     let (hashes, host) = (&p.module_hashes, p.host);
-    let _ = write!(h, "{hashes:?}|{host:?}|{shadows:?}|{consume:?}|");
+    let _ = write!(h, "{hashes:?}|{host:?}|{shadows:?}|");
     for x in &p.protocols {
         let _ = match x.module {
             Some(_) => write!(h, "{}|", x.name),

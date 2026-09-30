@@ -114,6 +114,8 @@ pull request.
 - A type that owns heap, directly or transitively, moves on assignment, argument passing and return. Scalars and records of scalars copy.
 - A parameter is `read` (the default), `modify` or `consume`. The capability is the API contract, and bodies need no annotation.
 - `read` and `modify` borrows are second-class. They cannot be stored, captured by an escaping closure, returned or handed to `consume`, so no lifetime annotation exists.
+- A `fn` type carries no capabilities: a function value reads every argument, and a function with a `consume` or `modify` parameter is no function value.
+- A `consume` argument is exclusive in its call, as a `modify` argument is: no other argument names it or a place overlapping it. The kernel states it; a rebuilding builtin's receiver is put back, not consumed.
 - A function returns an owned value. No borrowed return; projections cover in-place access.
 - A place owns its contents. A store releases what the place held, and releasing an aggregate releases its places.
 - Copying is explicit, spelled `x.copy()`. A hidden copy is an unbounded cost that nothing at the call site shows.
@@ -198,7 +200,8 @@ pull request.
 - Every runtime check is its own core row, stated once before the row it guards; one runtime check is one row. The emitter runs no check without a row, and a row no construct runs is an error.
 - A change that proves checks is licensed by the check oracle (`VYRN_CHECKS`, `scripts/check-elision.sh`): no proved row fails a run, and the elided, kept and oracle builds print the same.
 - A check row is proved only with a certificate that a checker sharing no code with the search accepts. Until builtin rows state length effects (#12), every `modify` or `consume` argument forgets its name.
-- The prover reads a record's `where` rule: `a.length == b.length` makes one length term of both fields. The rule holds wherever the record is, because every boundary checks it and the only store into the record in place is into an element of an array field the rule reads through its length.
+- The prover reads a record's `where` rule: `a.length == b.length` makes one length term of both fields. The rule holds wherever the record is read, because every boundary checks it and every in-place store into a field ends in a check before the next read. From a group's first store to its check, each field's length is a term of its own.
+- In-place stores into the fields of one `where` record group: the maximal run of consecutive statements in one block that each store into a field is checked once, after its last statement, and nothing reads the record whole in between. A `modify` parameter's group calls no declared function or function value and has no exit. A group is found in the core's rows (`core::Builder::stmt_list` writes the check, `typed::groups` judges the rows), and module state keeps the refusal, because every call may read it.
 - Every limit is one constant, derived where it is used, and a test checks the derivations.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
@@ -225,7 +228,7 @@ pull request.
 - The playground runs a generator in the page: `vyrn-genwasm` without `host` builds the module and the `TypeArg` atoms, and `play-wasm.js` runs it. The page serves no read, no module reflection and no code quote, so only a `derive` generator runs there.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
-- A column layout (one array per field of a record) is `std/columns`, an import-target generator over `moduleInterface`, not a language feature. Its container's `where` rule states that every column has the first one's length, so a loop bounded by one column indexes all of them unchecked. `derive` cannot write it, because its call answers `String` and renames the types it writes. A push rebuilds the container, because a push on one column breaks the rule until the last column grows.
+- A column layout (one array per field of a record) is `std/columns`, an import-target generator over `moduleInterface`, not a language feature. Its container's `where` rule states that every column has the first one's length, so a loop bounded by one column indexes all of them unchecked. `derive` cannot write it, because its call answers `String` and renames the types it writes. A push appends to every column in place, as one group of stores whose rule check the prover drops.
 - Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.
 - A generator reports a diagnostic by writing `//@diag <severity> <anchor> <message>` into its output, so the report survives the cache. Two severities; an unknown word is a warning.
 - The compiler knows no lint rule names, codes, registry or suppression syntax.

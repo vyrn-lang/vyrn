@@ -63,6 +63,10 @@ pub const RELEASED: &str = "`{s}` is {what} here after it was released";
 pub const ALIAS_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
                           {here}: ... and `{s}` is {what} again here|`{src}.copy()` on line \
                           {at}, so `{s}` is a value of its own";
+/// A `consume` argument and a place overlapping it, handed to one call.
+pub const CONSUMED_AND_PASSED: &str = "`{s}` is consumed by {by}, and `{o}` is passed to the \
+                                       same call, so the callee could read what it \
+                                       frees|`{s}.copy()` for the `consume` parameter";
 /// An argument that reads a global the callee stores into.
 pub const STATE_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
                           {here}: ... and `{s}` is {what} again here";
@@ -197,6 +201,14 @@ pub const CONSUMED_BORROW: &str = "`{root}` may not be consumed — it is {what}
 
 pub const STORE_RULED: &str = "cannot mutate a field of `{n}` in place (its `where` invariant \
                                could be broken mid-update); rebuild it: `{name} = {n} {{ .. }}`";
+pub const GROUP_READ: &str = "`{name}` is read whole while a store into its field leaves its \
+                              `where` rule unchecked|read `{name}` before the first store into its \
+                              fields, or after the last";
+pub const GROUP_CALL: &str = "`{f}` may read the caller's `{name}` while a store into its field \
+                              leaves its `where` rule unchecked|call `{f}` before the first store \
+                              into the fields of `{name}`, or after the last";
+pub const GROUP_EXIT: &str = "`{what}` leaves `{name}` with its `where` rule unchecked|finish the \
+                              stores into the fields of `{name}` before the `{what}`";
 pub const REMOVE_NOT_MUT: &str = "cannot `{op}` from `{name}` (declared without `mut`)";
 pub const ASSIGN_NOT_MUT: &str = "cannot assign to `{name}` (declared without `mut`)";
 pub const FIELD_NOT_MUT: &str = "cannot mutate a field of `{name}` (declared without `mut`)";

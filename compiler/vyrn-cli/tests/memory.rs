@@ -2785,3 +2785,87 @@ fn main() -> Int64 {
         (Some(0), "102\n101\n101\n101\n".to_string())
     );
 }
+
+// A `?` in a later operand leaves before the consumer of the earlier ones runs,
+// so its failure exit releases what they hold: a receiver taken for a
+// write-back, a key, an argument, a part of a literal, an operand in a join arm.
+#[test]
+fn a_try_releases_the_operands_evaluated_before_it() {
+    let src = r#"type C = { b: Array<String> }
+type P = { x: String, y: String }
+type R = { s: String }
+
+fn f(s: String) -> Result<String, String> {
+    if s == "bad" { return Err("no".copy()) }
+    return Ok(s.copy())
+}
+
+fn o(s: String) -> Option<String> {
+    if s == "bad" { return None }
+    return Some(s.copy())
+}
+
+fn mk() -> R { return R { s: "m".copy() } }
+fn g2(a: String, b: String) -> Int64 { return a.byteLength + b.byteLength }
+fn h(a: consume String, b: consume String) -> Int64 { return a.byteLength + b.byteLength }
+
+fn field(s: String) -> Result<Int64, String> {
+    let mut c = C { b: [] }
+    c.b.push(f(s)?)
+    return Ok(c.b.length)
+}
+
+fn key(s: String) -> Result<Int64, String> {
+    let mut m: Map<String, String> = [:]
+    m["k".copy()] = f(s)?
+    return Ok(m.length)
+}
+
+fn operands(s: String) -> Result<Int64, String> {
+    return Ok(g2("a".copy(), f(s)?) + h("a".copy(), f(s)?) + g2(mk().s, f(s)?))
+}
+
+fn parts(s: String) -> Result<Int64, String> {
+    let xs = ["a".copy(), f(s)?]
+    let p = P { x: "a".copy(), y: "b".copy() + f(s)? }
+    return Ok(xs.length + p.y.byteLength)
+}
+
+fn arms(s: String) -> Result<Int64, String> {
+    let n = g2("a".copy(), if s == "q" { "x".copy() } else { f(s)? })
+    return Ok(n + g2("a".copy(), match o(s) { Some(v) => "x".copy() + v, None => f(s)? }))
+}
+
+fn option(s: String) -> Option<Int64> {
+    let mut c = C { b: [] }
+    c.b.push(o(s)?)
+    return Some(g2("a".copy(), o(s)?))
+}
+
+fn show(r: Result<Int64, String>) {
+    match r {
+        Ok(n) => print(n),
+        Err(e) => print(e),
+    }
+}
+
+fn main() -> Int64 {
+    for s in ["a", "bad"] {
+        show(field(s))
+        show(key(s))
+        show(operands(s))
+        show(parts(s))
+        show(arms(s))
+        print(option(s) ?? 0)
+    }
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("tryheld", src),
+        (
+            Some(0),
+            "1\n1\n6\n4\n5\n2\nno\nno\nno\nno\nno\n0\n".to_string()
+        )
+    );
+}

@@ -337,9 +337,6 @@ const HANDED: &str =
     q.x = q.x + s\n\
     return q\n\
     }\n\
-    fn apply(f: fn(P, Float64) -> P, p: consume P) -> P {\n\
-    return f(p, 2.0)\n\
-    }\n\
     fn inc<T>(b: consume Box<T>) -> Box<T> {\n\
     let mut c = b\n\
     c.n = c.n + 3456789\n\
@@ -362,10 +359,9 @@ const HANDED: &str =
     let kept = pick(e, false)\n\
     print(kept.tag)\n\
     print(pick(kept, true).tag)\n\
-    let q = apply(shift, P { x: 1.0, y: 0.0, z: 0.0, w: 0.0 })\n\
-    let g: fn(P, Float64) -> P = shift\n\
-    let r = g(q, 5.0)\n\
+    let q = shift(P { x: 1.0, y: 0.0, z: 0.0, w: 0.0 }, 2.0)\n\
     print(q.x)\n\
+    let r = shift(q, 5.0)\n\
     print(r.x)\n\
     let mut bx = Box { v: \"s\", n: 0, m: 0, k: 0 }\n\
     bx = inc(bx)\n\
@@ -406,9 +402,7 @@ fn a_generic_instance_hands_back_its_parameter() {
     assert_eq!(copies_of(&body, 32), 0, "`inc` copied its record:\n{body}");
 }
 
-/// The convention moves no output and no release: through a direct call, a
-/// specialization over `fn` (`apply`) and a stored `fn` value (`g`), under the free
-/// audit.
+/// The convention moves no output and no release, under the free audit.
 #[test]
 fn a_parameter_handed_back_prints_what_a_copy_prints() {
     let dir = scratch("handed");
@@ -451,39 +445,7 @@ fn an_argument_handed_back_is_still_consumed() {
     let out = vyrn().arg("check").arg(&file).output().expect("vyrn check");
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains("`e.a` is used here but was already consumed by `pick(..)` on line 44"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// `x = g(x, x)` reads `x` in the call that takes it. The call runs in a copy of `x`,
-/// so `r.a` is the value before the callee's store.
-#[test]
-fn a_read_beside_the_argument_handed_back_sees_the_old_value() {
-    let dir = scratch("handed");
-    let file = dir.join("r.vyrn");
-    std::fs::write(
-        &file,
-        "type Cell = { a: Float64, b: Float64, tag: String }\n\
-         fn g(r: Cell, c: consume Cell) -> Cell {\n\
-         let mut d = c\n\
-         d.a = 5.0\n\
-         d.b = r.a\n\
-         return d\n\
-         }\n\
-         fn main() -> Int64 {\n\
-         let mut x = Cell { a: 1.0, b: 0.0, tag: \"t\" }\n\
-         x = g(x, x)\n\
-         print(x.b)\n\
-         return 0\n\
-         }\n",
-    )
-    .unwrap();
-    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
-        "1.000000\n",
+            .contains("`e.a` is used here but was already consumed by `pick(..)` on line 41"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );

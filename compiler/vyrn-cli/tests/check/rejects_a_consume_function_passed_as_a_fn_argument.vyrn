@@ -1,0 +1,18 @@
+// A `fn` parameter reads every argument, so `grow`, which consumes, is no
+// value of it: `apply`'s call through `f` would leave `c` with its caller.
+type Cell = { name: String, v: Float64 }
+
+fn grow(c: consume Cell, by: Float64) -> Cell {
+    return Cell { name: consume c.name, v: c.v + by }
+}
+
+fn apply(f: fn(Cell, Float64) -> Cell, c: Cell) -> Float64 {
+    let d = f(c, 2.0)
+    return d.v
+}
+
+fn main() -> Int64 {
+    let e = Cell { name: 1234567.toString(), v: 1.0 }
+    print(apply(grow, e))
+    return 0
+}

@@ -603,6 +603,25 @@ struct Kernel<'b> {
     /// taker is read only for a row's operand ([`Kernel::stmt`]) or a name
     /// with a fact ([`State::named`]), so the check covers every read.
     ended: Vec<bool>,
+    /// By name: the place a `take` moved its value out of, followed through
+    /// the names it was moved into ([`taken_from`]).
+    taken_from: Vec<Option<(Name, String)>>,
+}
+
+/// The place each name's value was taken out of: a `let` of a `take`, or of
+/// a name that holds one. The hole the take left says whether it still does.
+fn taken_from(body: &Body) -> Vec<Option<(Name, String)>> {
+    let mut from = vec![None; body.names.len()];
+    for (s, _) in vyrn_frontend::core::rows(&body.stmts) {
+        if let St::Let(n, r) = s {
+            from[n.index()] = match r {
+                Rhs::Take(p) => root_of(p),
+                Rhs::Val(Val::Name(m)) => from[m.index()].clone(),
+                _ => None,
+            };
+        }
+    }
+    from
 }
 
 /// What took one name, for the memory report.
@@ -716,6 +735,7 @@ fn run(
         released: std::cell::RefCell::new(vec![None; body.names.len()]),
         read_out: vec![false; body.names.len()],
         ended: vec![false; body.names.len()],
+        taken_from: taken_from(body),
     };
     let mut st = State::default();
     for p in &body.params {
@@ -1102,6 +1122,69 @@ impl<'b> Kernel<'b> {
         let gs = release_state(runs, self.body.id, self.state);
         self.end(st, Write::State(gs));
         self.missing.push(m);
+    }
+
+    /// Refuses a call that is handed a `consume` argument and, at another
+    /// position, a place overlapping it: the callee could free the one and
+    /// read the other. A name holding a part taken out of a place, while the
+    /// hole is open, is that place. Two `consume` positions are the take
+    /// rule's: the second take is refused. A rebuilding builtin's receiver
+    /// (`write_back`) is put back, not consumed ([`Kernel::take_arg`]).
+    fn consumed_once(
+        &self,
+        st: &State,
+        args: &[(Arg, Capability)],
+        write_back: bool,
+    ) -> Result<(), Refusal> {
+        let place = |a: &Arg| match a {
+            Arg::Place(p) => root_of(p),
+            Arg::Val(Val::Name(n)) => match (st.alias.get(n), &self.taken_from[n.index()]) {
+                (
+                    Some(Alias {
+                        root: Root::N(r),
+                        path,
+                        ..
+                    }),
+                    _,
+                ) => Some((*r, path.clone())),
+                (Some(_), _) => None,
+                (None, Some(from)) if st.holes.contains(from) => Some(from.clone()),
+                (None, _) => Some((*n, String::new())),
+            },
+            Arg::Val(_) => None,
+        };
+        let consumed = (args.iter().enumerate())
+            .filter(|(i, (_, c))| *c == Capability::Consume && !(write_back && *i == 0));
+        for (i, (a, _)) in consumed {
+            let Some((r, path)) = place(a) else {
+                continue;
+            };
+            let others = (args.iter().enumerate())
+                .filter(|(j, (_, c))| *j != i && *c != Capability::Consume);
+            for (_, (b, _)) in others {
+                if place(b).is_some_and(|(q, p)| q == r && overlaps(&p, &path)) {
+                    let (s, o) = (self.arg_text(st, a), self.arg_text(st, b));
+                    let args = [("s", s.as_str()), ("o", o.as_str()), ("by", &self.by)];
+                    return Err(self.say(CONSUMED_AND_PASSED, self.here, &args));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An argument, spelled for a refusal. A temporary a `take` bound is
+    /// spelled by the place it took (`consume x.name`).
+    fn arg_text(&self, st: &State, a: &Arg) -> String {
+        match a {
+            Arg::Place(p) => self.place_text(p),
+            Arg::Val(Val::Name(n)) => match &self.taken_from[n.index()] {
+                Some((r, path)) if self.src(*n).starts_with('@') => {
+                    format!("{}{}", self.src(*r), path.replace(".[]", "[..]"))
+                }
+                _ => self.src_text(st, *n),
+            },
+            Arg::Val(_) => String::new(),
+        }
     }
 
     /// Refuses an argument that reads a global `gs` names. The callee reads
@@ -1676,9 +1759,27 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
-    /// A read of a name: it must be held, and an alias's place unwritten.
+    /// A read of a name: it must be held, whole, and an alias's place
+    /// unwritten.
     fn read(&self, st: &State, v: &Val) -> Result<(), Refusal> {
-        self.read_at(st, v, "")
+        self.read_at(st, v, "")?;
+        match v {
+            Val::Name(n) => self.whole(st, *n),
+            Val::Lit(_) => Ok(()),
+        }
+    }
+
+    /// Refuses a use of `n` as a whole while a `consume` hole is open in it.
+    fn whole(&self, st: &State, n: Name) -> Result<(), Refusal> {
+        match st.holes.iter().find(|(h, _)| *h == n) {
+            Some((_, path)) => {
+                let l = self.hole_line(st, n, path);
+                let line = l.to_string();
+                let args = [("s", self.src(n)), ("path", path), ("l", &line)];
+                Err(self.say(WHOLE_WITH_HOLE, l, &args))
+            }
+            None => Ok(()),
+        }
     }
 
     /// [`Kernel::read`], with the path read for the wording.
@@ -1821,12 +1922,7 @@ impl<'b> Kernel<'b> {
                 if self.used_up(st, *n) {
                     return Err(self.used_after(st, *n, "used", ""));
                 }
-                if let Some((_, path)) = st.holes.iter().find(|(h, _)| h == n) {
-                    let l = self.hole_line(st, *n, path);
-                    let line = l.to_string();
-                    let args = [("s", self.src(*n)), ("path", path), ("l", &line)];
-                    return Err(self.say(WHOLE_WITH_HOLE, l, &args));
-                }
+                self.whole(st, *n)?;
                 if self.moves(*n, consume) {
                     self.gone(st, *n);
                 }
@@ -1932,7 +2028,9 @@ impl<'b> Kernel<'b> {
         let Some((n, path)) = root_of(p) else {
             return Ok(());
         };
-        self.read(st, &Val::Name(n))?;
+        // Not `read`: the root may have a hole open, and this store is what
+        // fills it (`p.xs = @push(consume p.xs, v)`).
+        self.read_at(st, &Val::Name(n), "")?;
         if !self.owned(n) {
             return Ok(());
         }
@@ -1990,6 +2088,7 @@ impl<'b> Kernel<'b> {
                 if !gs.is_empty() {
                     self.state_args(st, args, &gs)?;
                 }
+                self.consumed_once(st, args, *write_back)?;
                 for (i, (a, cap)) in args.iter().enumerate() {
                     if let (Arg::Val(v), Capability::Consume) = (a, cap) {
                         // Only a declared `consume` parameter moves a heapless

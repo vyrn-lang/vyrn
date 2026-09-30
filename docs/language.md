@@ -207,7 +207,9 @@ type User = {
 - `Port(n)` constructs. A constant that satisfies the rule is proven at compile time and costs nothing; a constant that breaks it is refused; a runtime value that breaks it traps.
 - `Port?(n)` answers `Option<Port>`: `None` when the rule fails. Use it for input the program does not control.
 - Every boundary checks the rule without a call: a `let` annotation, an assignment, an argument, a return, a record field, an array element and a map insert.
-- A field of a record with a trailing `where` is not assigned in place, because the rule could break mid-update; rebuild the record. An element of an array field the rule reads only as `.length` is assigned in place: `c.xs[i] = v` keeps every length.
+- A run of consecutive statements that store into (assign, push onto, or otherwise modify) the fields of one record with a trailing `where` is a group. The rule is checked once, after the group's last statement, with the trap of any boundary; the prover drops the check where it proves the rule, as when each column grows by one from equal lengths. Any other statement ends the group, so `c.a.push(1)` then `print(c.a.length)` checks `c` before the `print`.
+- Between a group's first store and its check, nothing reads the record whole. When the record is a `modify` parameter, the group also calls no function the program declares and no function value, and has no `?`, because the caller would see the record with the rule unchecked. A `?` or a trap inside the group leaves a record the function owns unobserved, so both are allowed there. A `return` statement ends the group, so the check runs before it.
+- An element of an array field the rule reads only as `.length` is assigned in place with no check: `c.xs[i] = v` keeps every length. A store into a field of module state, or into a field of a nested record with its own rule, is refused; rebuild the record.
 - A validated value decays to its base type, so a `Port` is usable as an `Int64`.
 - An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a record with one field.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
@@ -216,7 +218,7 @@ type User = {
 
 ### Function types
 
-`fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state.
+`fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state. A function value reads every argument, so a function with a `consume` or `modify` parameter is not a value of any `fn` type.
 
 ```vyrn
 type Transform = fn(Int64) -> Int64
@@ -299,7 +301,7 @@ fn redeem(t: consume Ticket) -> Int64 {
 
 - A method receiver takes the same words: `read self` (a bare `self`), `modify self`, `consume self`.
 - Using a consumed value is refused, naming the line that took it.
-- A `modify` argument read again in the same call is refused, because the callee has exclusive access.
+- A `modify` argument read again in the same call is refused, because the callee has exclusive access. So is a `consume` argument passed again, whole or in part, because the callee could free it before it reads the other argument.
 - The words are erased before the program runs.
 
 `consume place` in an expression moves a value out of a binding or a field chain; the place is dead afterwards. `drop x` releases a value and ends the binding. `region { .. }` frees every allocation made inside it at its closing brace; storing a heap value made inside into a binding that outlives the region is refused. [memory.md](memory.md) states when the compiler releases each value.
