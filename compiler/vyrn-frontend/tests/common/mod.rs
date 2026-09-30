@@ -5,11 +5,8 @@
 /// Returns `main`'s return value as the process exit code, a byte. A trap's
 /// `error: ..` line on the guest's stderr comes back as `Err`, the split
 /// `Resident::call_body` makes for a test body.
-pub fn run_compiled(
-    program: &vyrn_frontend::ast::Program,
-    memo: &vyrn_frontend::project::Memo,
-) -> Result<i64, String> {
-    let bytes = vyrn_codegen::direct::compile(program, memo)?;
+pub fn run_compiled(program: &vyrn_frontend::ast::Program) -> Result<i64, String> {
+    let bytes = vyrn_codegen::direct::compile(program)?;
     let out = vyrn_cli::wasmrun::run(
         &bytes,
         vyrn_cli::wasmrun::Run {

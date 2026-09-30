@@ -97,14 +97,15 @@ fn check_here(root: &str) -> String {
     let std_root = check_dir().join("../../../../std");
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(std_root.to_string_lossy().replace('\\', "/")),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
     let engine = vyrn_genwasm::engine();
     let mut out = String::new();
-    let loaded = vyrn_frontend::project::Memo::load(|| {
+    let loaded = {
         let resolver = vyrn_frontend::loader::DiskResolver;
         vyrn_lower::load_warned(&src, root, &opts, &resolver, Some(&*engine)).0
-    });
+    };
     for d in loaded.err().expect("the program is refused") {
         let file = d.file.as_deref().unwrap_or(root);
         out += &format!("{file}:{}:{}: {}\n", d.line, d.col, d.message);

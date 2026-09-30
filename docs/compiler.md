@@ -410,8 +410,8 @@ Rust style).
 |---|---|
 | `VYRN_NO_KERNEL=1` | stands the kernel aside, to attribute a refusal |
 | `VYRN_KERNEL_TRACE=1` | prints each release the placer adds or cannot place |
-| `VYRN_THREADS=<n>` | builds and places bodies on `n` threads; `1` keeps a trace in body order |
-| `VYRN_SHUFFLE=<seed>` | permutes the order the placer's threads take bodies in |
+| `VYRN_THREADS=<n>` | types, builds and places bodies on `n` threads; `1` keeps a trace in body order |
+| `VYRN_SHUFFLE=<seed>` | permutes the order the checker's and the placer's threads take bodies in |
 | `VYRN_LEAK_CHECK=1` | builds with the free audit |
 | `VYRN_WASM_NAMES=1` | writes function names into the module |
 | `VYRN_GENWASM_TRACE=1` | prints the generation engine's phase timings |

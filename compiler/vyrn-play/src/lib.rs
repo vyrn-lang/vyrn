@@ -270,6 +270,7 @@ fn gen_request(module: &[u8], argv: &[String], atoms: &[vyrn_genwasm::Atom]) -> 
 /// Runs each generator on the playground's own engine.
 fn load(
     src: &str,
+    expansions: std::sync::Arc<vyrn_frontend::project::Expansions>,
 ) -> (
     Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>,
     Vec<Diagnostic>,
@@ -282,6 +283,7 @@ fn load(
         alias_base: String::new(),
         audience: None,
         artifacts: None,
+        expansions,
     };
     let resolver = MapResolver(
         std_modules::STD
@@ -293,7 +295,7 @@ fn load(
 }
 
 fn check_json(src: &str) -> String {
-    let (result, warnings) = load(src);
+    let (result, warnings) = load(src, Default::default());
     let mut all = match result {
         Ok(_) => Vec::new(),
         Err(diags) => diags,
@@ -308,11 +310,11 @@ fn compile_result(src: &str) -> Vec<u8> {
     // The load and the backend must walk one expansion of each desugared site
     // (`schemaOf<T>()`, a user container's `a[i]`), or the core's rows, keyed
     // by the load's nodes, miss the backend's.
-    let (program, memo) = match vyrn_frontend::project::Memo::load(|| load(src).0) {
+    let program = match load(src, vyrn_frontend::project::Expansions::shared()).0 {
         Ok(p) => p,
         Err(diags) => return format!("{{\"diagnostics\":{}}}", diags_json(&diags)).into_bytes(),
     };
-    match vyrn_codegen::direct::compile(&program, &memo) {
+    match vyrn_codegen::direct::compile(&program) {
         Ok(bytes) => bytes,
         // A backend refusal is a diagnostic with no position.
         Err(e) => {

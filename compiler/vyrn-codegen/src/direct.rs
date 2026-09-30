@@ -32,7 +32,6 @@ use vyrn_frontend::gen::GenError;
 use vyrn_frontend::own::DropKind;
 /// Shared with `vyrn-lower` and the other engines, so exits compare without a translation.
 use vyrn_frontend::own::Exit as ExitKind;
-use vyrn_frontend::project::Memo;
 use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
 use vyrn_lower::core::Spec;
@@ -182,17 +181,23 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
 /// The module defines its own memory, heap and runtime, and imports only the WASI calls it makes
 /// and the `extern`s it declares, so `vyrn build --target wasm` needs no clang and no sysroot.
 ///
-/// `_memo` is the one `program` was loaded under ([`Memo::load`]): outside it a projection or a
-/// `schemaOf` has no row in the core.
-pub fn compile(program: &Program, _memo: &Memo) -> Result<Vec<u8>, String> {
+/// # Errors
+///
+/// Refuses a program whose expansions are unshared
+/// ([`vyrn_frontend::project::Expansions::shared`]): in it a projection or a `schemaOf` has no row
+/// in the core.
+pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
+    if !program.expansions.is_shared() {
+        return Err("a compile needs the load's shared projection expansions".to_string());
+    }
     crate::set_gen_host(false);
     compile_inner(program, vyrn_lower::analyze(program))
 }
 
 /// Returns the module [`compile`] emits, as WAT (`vyrn emit-wat`), so a test can pin its shape.
 /// Printing stays off `compile`, because `vyrn build` writes bytes only.
-pub fn wat(program: &Program, memo: &Memo) -> Result<String, String> {
-    let bytes = compile(program, memo)?;
+pub fn wat(program: &Program) -> Result<String, String> {
+    let bytes = compile(program)?;
     wasmprinter::print_bytes(&bytes).map_err(|e| e.to_string())
 }
 
@@ -234,8 +239,8 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
 /// Compiles `program` as a generator: [`compile`] plus the `vyrn_gen` imports and the
 /// lowerings that need them (`listDir`, and `Code` as an opaque `i64` handle).
 ///
-/// Takes no [`Memo`]: a generator runs inside a load, the LSP opens none on purpose, and the
-/// generation engine declines a refusal to the interpreter.
+/// Takes a program of either table: a generator's program carries the load's, the LSP's is
+/// unshared on purpose, and the generation engine declines a refusal to the interpreter.
 ///
 /// # Errors
 ///
@@ -13884,7 +13889,7 @@ mod tests {
 
     /// A single-source program loaded as the CLI loads it, with the `std/runtime` the loader
     /// injects into every program.
-    fn linked(src: &str) -> Result<(Program, Memo), String> {
+    fn linked(src: &str) -> Result<Program, String> {
         let files = vyrn_frontend::loader::MapResolver(
             [
                 ("main.vyrn", src),
@@ -13903,9 +13908,10 @@ mod tests {
         );
         let opts = vyrn_frontend::loader::LoadOptions {
             std_root: Some("std".into()),
+            expansions: vyrn_frontend::project::Expansions::shared(),
             ..Default::default()
         };
-        Memo::load(|| vyrn_lower::load(src, "main.vyrn", &opts, &files, None))
+        vyrn_lower::load(src, "main.vyrn", &opts, &files, None)
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))
     }
 
@@ -13941,7 +13947,7 @@ mod tests {
     /// before the table.
     #[test]
     fn every_mem_declaration_has_a_row() {
-        let (program, _) = linked("fn main() -> Int64 {\n    return 0\n}\n").unwrap();
+        let program = linked("fn main() -> Int64 {\n    return 0\n}\n").unwrap();
         let c = cx();
         for f in program.functions.iter().filter(|f| f.exported) {
             if let Some(prim) = f.name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
@@ -14074,8 +14080,8 @@ mod tests {
                       fn f(n: Int64) -> Int64 { let u = U { age: n } return u.age }
                       fn main() -> Int64 { return f(20) }";
         for (what, src) in [("bare", bare), ("in a record", hidden)] {
-            let (p, memo) = linked(src).expect(what);
-            let bytes = compile(&p, &memo).expect(what);
+            let p = linked(src).expect(what);
+            let bytes = compile(&p).expect(what);
             assert!(
                 bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
                 "{what}: no `where` check was emitted"
@@ -14086,10 +14092,10 @@ mod tests {
         // so its module is the smaller.
         let proved = "type Age = Int64 where value >= 18                       fn f(n: Int64) -> Int64 { let a = Age(20) return a }
                       fn main() -> Int64 { return f(20) }";
-        let (p, memo) = linked(proved).unwrap();
-        let small = compile(&p, &memo).unwrap();
-        let (p, memo) = linked(bare).unwrap();
-        let big = compile(&p, &memo).unwrap();
+        let p = linked(proved).unwrap();
+        let small = compile(&p).unwrap();
+        let p = linked(bare).unwrap();
+        let big = compile(&p).unwrap();
         assert!(
             big.len() > small.len(),
             "a proven constant emitted a check: {} against {}",
@@ -14110,8 +14116,8 @@ mod tests {
                        } } \
                    fn main() -> Int64 { \
                        return match f(bytes(\"hi\")) { Ok(s) => s.byteLength, Err(e) => 0 - 1 } }";
-        let (p, memo) = linked(src).unwrap();
-        assert!(compile(&p, &memo).is_ok());
+        let p = linked(src).unwrap();
+        assert!(compile(&p).is_ok());
     }
 
     /// `.length` in a branch, on every receiver that has one. [`Fn_::length_of`] and
@@ -14131,11 +14137,11 @@ mod tests {
                      let o: Option<Int64> = Some(1) \
                      return match o {{ Some(n) => v.{field}, None => 0 }} }}"
             );
-            let (p, memo) = linked(&src).expect(what);
+            let p = linked(&src).expect(what);
             assert!(
-                compile(&p, &memo).is_ok(),
+                compile(&p).is_ok(),
                 "{what}: {:?}",
-                compile(&p, &memo).unwrap_err()
+                compile(&p).unwrap_err()
             );
         }
     }
@@ -14167,8 +14173,8 @@ mod tests {
             ),
         ];
         for (what, src) in cases {
-            let (p, memo) = linked(src).expect(what);
-            let r = compile(&p, &memo);
+            let p = linked(src).expect(what);
+            let r = compile(&p);
             assert!(r.is_ok(), "{what}: {}", r.unwrap_err());
         }
     }

@@ -976,6 +976,7 @@ impl Parser {
                 host: Host::default(),
                 module_hashes: std::collections::BTreeMap::new(),
                 units: 0,
+                expansions: Default::default(),
             },
             errors,
         )

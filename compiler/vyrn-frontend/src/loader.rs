@@ -521,6 +521,10 @@ pub struct LoadOptions {
     /// The artifacts the manifest declares, or `None`. The floor
     /// ([`crate::floor`]) runs only when the root is one artifact's entry point.
     pub artifacts: Option<crate::artifacts::ArtifactMap>,
+    /// The projection expansions of this compile, stamped on every program
+    /// the load links, a generator's included. A compile passes
+    /// [`crate::project::Expansions::shared`].
+    pub expansions: std::sync::Arc<crate::project::Expansions>,
 }
 
 /// Returns the objection, if any, to `importer` importing `imported`.
@@ -983,7 +987,11 @@ fn load_with_origins_inner(
         Ok((modules, root_key, origins, warnings, pending)) => {
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
-            (link(modules, &root_key), origins, warnings, graph, pending)
+            let linked = link(modules, &root_key).map(|mut p| {
+                p.expansions = opts.expansions.clone();
+                p
+            });
+            (linked, origins, warnings, graph, pending)
         }
     }
 }
@@ -1222,6 +1230,7 @@ fn load_modules(
                     units: 0,
                     host: Host::default(),
                     module_hashes: BTreeMap::new(),
+                    expansions: Default::default(),
                 },
                 import_targets: Vec::new(),
                 gen_source: None,

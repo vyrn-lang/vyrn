@@ -8,7 +8,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use vyrn_frontend::ast::Program;
 use vyrn_frontend::core::{Body, Callee, Rhs, St};
-use vyrn_frontend::project::Memo;
 
 struct Fs;
 
@@ -25,21 +24,20 @@ fn repo_root() -> PathBuf {
     d
 }
 
-fn load_src(src: &str, root: &str) -> Result<(Program, Memo), String> {
+fn load_src(src: &str, root: &str) -> Result<Program, String> {
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
-    Memo::load(|| vyrn_lower::load(src, root, &opts, &Fs, Some(&*vyrn_genwasm::engine()))).map_err(
-        |d| {
-            d.first()
-                .map(|d| d.render())
-                .unwrap_or_else(|| "load failed".into())
-        },
-    )
+    vyrn_lower::load(src, root, &opts, &Fs, Some(&*vyrn_genwasm::engine())).map_err(|d| {
+        d.first()
+            .map(|d| d.render())
+            .unwrap_or_else(|| "load failed".into())
+    })
 }
 
-fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
+fn load(path: &std::path::Path) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     load_src(&src, &path.to_string_lossy().replace('\\', "/"))
 }
@@ -201,7 +199,7 @@ fn run() {
         if !mine(i) {
             continue;
         }
-        let Ok((program, memo)) = load(&path) else {
+        let Ok(program) = load(&path) else {
             continue;
         };
         programs += 1;
@@ -239,7 +237,7 @@ fn run() {
                 }
             }
         }
-        let out = emit(&program, &memo);
+        let out = emit(&program);
         let (f, e) = vyrn_codegen::direct::walks();
         from_core += f;
         emitted += e;
@@ -259,11 +257,11 @@ fn run() {
     {
         let root = repo_root().join("examples/@shape.vyrn");
         let src = format!("{src}\n{WRAP}\n");
-        let (program, memo) = match load_src(&src, &root.to_string_lossy().replace('\\', "/")) {
+        let program = match load_src(&src, &root.to_string_lossy().replace('\\', "/")) {
             Ok(p) => p,
             Err(e) => panic!("{what} does not load: {e}"),
         };
-        let out = emit(&program, &memo);
+        let out = emit(&program);
         let (f, e) = vyrn_codegen::direct::walks();
         from_core += f;
         emitted += e;
@@ -313,8 +311,8 @@ fn run() {
     );
 }
 
-fn emit(program: &Program, memo: &Memo) -> Result<Vec<u8>, String> {
+fn emit(program: &Program) -> Result<Vec<u8>, String> {
     let _lowered = vyrn_lower::lower(program);
     vyrn_codegen::direct::forget_walks();
-    vyrn_codegen::direct::compile(program, memo)
+    vyrn_codegen::direct::compile(program)
 }

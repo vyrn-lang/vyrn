@@ -12,7 +12,6 @@
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that body's core.
 
 use vyrn_frontend::loader::DiskResolver;
-use vyrn_frontend::project::Memo;
 
 use std::path::PathBuf;
 
@@ -25,23 +24,22 @@ fn repo_root() -> PathBuf {
     d
 }
 
-fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
+fn load(path: &std::path::Path) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let root = path.to_string_lossy().replace('\\', "/");
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
     // Without the engine, an example that imports through a generator fails to
     // load, and the gate measures a smaller corpus.
     let engine = vyrn_genwasm::engine();
-    Memo::load(|| vyrn_lower::load(&src, &root, &opts, &DiskResolver, Some(&*engine))).map_err(
-        |d| {
-            d.first()
-                .map(|d| d.render())
-                .unwrap_or_else(|| "load failed".into())
-        },
-    )
+    vyrn_lower::load(&src, &root, &opts, &DiskResolver, Some(&*engine)).map_err(|d| {
+        d.first()
+            .map(|d| d.render())
+            .unwrap_or_else(|| "load failed".into())
+    })
 }
 
 fn corpus() -> Vec<PathBuf> {
@@ -93,7 +91,7 @@ fn run_corpus() {
     let mut unexpected: Vec<String> = Vec::new();
     let mut programs = 0usize;
     for path in corpus() {
-        let (program, _memo) = match load(&path) {
+        let program = match load(&path) {
             Ok(p) => p,
             Err(e) => {
                 // A program the load refuses is left out only when its fixture

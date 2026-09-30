@@ -202,7 +202,7 @@ pub struct Placed {
 /// The guard borrows its program, so no other `Program` can take that address
 /// while it is held: a hit is the same program. Any other program analysed
 /// inside the guard (a generator's, during a load) misses and is not cached.
-/// Only the CLI and the editor open one, beside [`crate::project::Memo`].
+/// Only the CLI and the editor open one.
 pub struct Memo<'a> {
     program: std::marker::PhantomData<&'a Program>,
 }
@@ -228,12 +228,13 @@ thread_local! {
 
 /// Hands the load's checker record to the [`Memo`] the command opens next.
 ///
-/// Only inside a compile scope ([`crate::project::memo_open`]): there a
+/// Only for a program with shared expansions
+/// ([`crate::project::Expansions::is_shared`]): there a
 /// projection site keeps one expansion, so the load's nodes are the ones the
 /// command lowers. The editor opens none, because a reused `functions` buffer
 /// would make [`ident`] match two different texts.
 pub fn hand_on(program: &Program) {
-    if !crate::project::memo_open() {
+    if !program.expansions.is_shared() {
         return;
     }
     let record = crate::checker::held(program);
@@ -263,13 +264,14 @@ pub fn memo_scope() -> Option<(usize, u64)> {
 impl<'a> Memo<'a> {
     /// Holds the checker's record of `program` until the guard drops,
     /// adopting the load's when it was made for this program. The CLI must
-    /// open [`crate::project::Memo`] before the load, or a projection site is
-    /// inlined twice under different tags and the adopted rows key nothing.
+    /// load with shared expansions ([`crate::project::Expansions::shared`]),
+    /// or a projection site is inlined twice under different tags and the
+    /// adopted rows key nothing.
     pub fn open(program: &'a Program) -> Memo<'a> {
         MEMO_FOR.with(|p| p.set((program as *const Program as usize, p.get().1 + 1)));
         let adopted = LOADED
             .with(|l| l.borrow_mut().take())
-            .filter(|_| crate::project::memo_open())
+            .filter(|_| program.expansions.is_shared())
             .filter(|(id, _)| *id == ident(program))
             .and_then(|(_, r)| r);
         // The lowering reads the checker's record (`checker::recorded`)

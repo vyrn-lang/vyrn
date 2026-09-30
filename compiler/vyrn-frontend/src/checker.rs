@@ -1049,7 +1049,7 @@ fn check_accum_inner(
         .map(|c| (c.name.clone(), c.clone()))
         .collect();
 
-    let checker = Checker {
+    let cx = Cx {
         host: program.host,
         sigs: &sigs,
         caps: &caps,
@@ -1063,30 +1063,12 @@ fn check_accum_inner(
         protocol_places: &protocol_places,
         impls: &impls,
         impl_blocks: &program.impls,
-        cur_bounds: RefCell::new(HashMap::new()),
-        region_floor: RefCell::new(Vec::new()),
-        binder_types: RefCell::new(HashMap::new()),
-        in_root: std::cell::Cell::new(false),
-        errors: RefCell::new(Vec::new()),
-        globals: RefCell::new(HashMap::new()),
-        in_test: RefCell::new(false),
-        in_bench: RefCell::new(false),
-        in_gen: RefCell::new(false),
-        unknown: std::cell::Cell::new(false),
-        here: RefCell::new(None),
-        shadows: program.surface_shadows.clone(),
-        stmt_line: RefCell::new(0),
+        expansions: &program.expansions,
+        shadows: &program.surface_shadows,
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
-        cur_fn: RefCell::new(String::new()),
-        stored_sources: RefCell::new(Vec::new()),
-        arg_sources: RefCell::new(Vec::new()),
-        stored_calls: RefCell::new(Vec::new()),
-        derive_sites: RefCell::new(Vec::new()),
-        record: recording.then(RefCell::default),
-        pending_subst: RefCell::new(None),
-        pending_call: RefCell::new(None),
     };
+    let checker = Checker::new(&cx, recording);
 
     // 2b. Module state, in declaration order. A failed global still binds, as
     //     `Err`, so bodies that read it do not cascade "unknown variable".
@@ -1137,58 +1119,36 @@ fn check_accum_inner(
         _ => {}
     }
 
-    // 5. Check functions, each independently. In a body, errors accumulate
-    //    per statement in `errors`; `function` returns the first and this
-    //    drains the rest. Within one expression the check is first-error.
-    for f in &program.functions[bodies_from..] {
-        let produced_from = out.len();
-
-        // Signature validation runs outside `function()` and must accept a
-        // `Code` type in a `gen fn` signature.
-        *checker.in_gen.borrow_mut() = in_gen_of(f, checker.host);
-        *checker.here.borrow_mut() = f.module.clone();
-        let r = (|| -> Result<(), Diagnostic> {
-            for p in &f.params {
-                // A function value cannot cross the host boundary, nor a
-                // generation-time signature.
-                if checker.contains_fn(&p.ty) && (f.is_extern || f.is_export_extern) {
-                    return Err(cerr_at!(f.line, f.name_span(), ExternTakesFn));
-                }
-                if checker.contains_fn(&p.ty) && f.is_gen {
-                    return Err(cerr_at!(f.line, f.name_span(), GenTakesFn));
-                }
-                checker.ensure_type_exists(&p.ty, f.line)?;
-            }
-            if checker.contains_fn(&f.ret) && (f.is_extern || f.is_export_extern) {
-                return Err(cerr_at!(f.line, f.name_span(), ExternReturnsFn));
-            }
-            if checker.contains_fn(&f.ret) && f.is_gen {
-                return Err(cerr_at!(f.line, f.name_span(), GenReturnsFn));
-            }
-            checker.ensure_type_exists(&f.ret, f.line)?;
-            // An `extern` import has no body; an `export extern` has one. Both
-            // signatures must fit the host ABI.
-            if f.is_extern {
-                checker.check_extern_sig(f)?;
-            } else {
-                if f.is_export_extern {
-                    checker.check_extern_sig(f)?;
-                }
-                checker.function(f)?;
-            }
-            Ok(())
-        })();
-        if let Err(s) = r {
-            out.push(s.in_file(f.module.clone()));
-        }
-        for s in checker.errors.borrow_mut().drain(..) {
-            out.push(s.in_file(f.module.clone()));
-        }
-        if out.len() > produced_from {
-            refused.insert(f.name.clone());
-            in_bodies += out.len() - produced_from;
-        }
+    // 5. Check functions, each independently, on every thread. A body reads
+    //    another only through `sigs`, so none waits for another. A worker
+    //    types into a checker of its own, and the merge takes each body's
+    //    diagnostics and record in source order, as one thread would.
+    let typing = crate::prof::phase("check: bodies");
+    let bodies = &program.functions[bodies_from..];
+    let globals = checker.globals.borrow().clone();
+    let typed = crate::par::in_parallel(
+        bodies,
+        weight,
+        || {
+            let c = Checker::new(&cx, recording);
+            *c.globals.borrow_mut() = globals.clone();
+            c
+        },
+        |c, f| c.signature_and_body(f),
+    );
+    // One allocation for the types the bodies add, not one per doubling.
+    if let Some(r) = &checker.record {
+        let n = (typed.iter().filter_map(|t| t.record.as_ref())).map(|p| p.node_types.len());
+        r.borrow_mut().node_types.reserve(n.sum());
     }
+    for (f, t) in bodies.iter().zip(typed) {
+        if !t.diags.is_empty() {
+            refused.insert(f.name.clone());
+            in_bodies += t.diags.len();
+        }
+        out.extend(checker.absorb(t));
+    }
+    drop(typing);
 
     // 6. Projection, test and bench bodies. A test or bench is a Unit body
     //    under an unspellable name (`test@<index>`), absent from `sigs`, so no
@@ -1228,6 +1188,33 @@ fn check_accum_inner(
         typed,
         record,
     )
+}
+
+/// What typing one body added to its checker, for [`Checker::absorb`].
+struct Typed {
+    diags: Vec<Diagnostic>,
+    record: Option<Recorded>,
+    binders: HashMap<(usize, usize), Type>,
+    stored: StoredFnEffects,
+    derive: Vec<crate::gen::Site>,
+}
+
+/// The expressions `f`'s body holds, the measure
+/// [`crate::par::in_parallel`] orders by.
+fn weight(f: &Function) -> usize {
+    crate::body_scope_descent!(Count, count_block, count_stmt, count_expr);
+    struct N(usize);
+    impl Count<'_> for N {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, _: &Expr, _: &HashSet<String>) -> bool {
+            self.0 += 1;
+            true
+        }
+    }
+    let mut n = N(0);
+    count_block(&f.body, &mut HashSet::new(), &mut n);
+    n.0
 }
 
 /// Checks every projection body as a function body, plus three rules of its
@@ -1717,7 +1704,9 @@ pub fn recorded(program: &Program) -> std::sync::Arc<Recorded> {
     made
 }
 
-struct Checker<'a> {
+/// What every body is typed against: the declarations and tables steps 1 to 2
+/// of [`check_accum_inner`] build. Shared by the threads that type bodies.
+struct Cx<'a> {
     sigs: &'a HashMap<String, (Vec<Type>, Type)>,
     caps: &'a HashMap<String, Vec<Capability>>,
     /// Parameter capabilities by the Debug text of a stored function value's
@@ -1739,6 +1728,20 @@ struct Checker<'a> {
     /// Every `impl` block, for resolving a projection, which has no mangled
     /// name, by receiver type.
     impl_blocks: &'a [crate::ast::ImplBlock],
+    /// The program's projection expansions, which the checker makes.
+    expansions: &'a crate::project::Expansions,
+    /// The program's [`Host`].
+    host: Host,
+    shadows: &'a std::collections::HashSet<(Option<String>, String)>,
+    /// `extern` functions, which cannot be function values.
+    extern_fns: &'a std::collections::HashSet<String>,
+    /// `gen fn`s, which cannot be function values.
+    gen_fns: &'a std::collections::HashSet<String>,
+}
+
+/// One body's typing state over a [`Cx`], which it reads through `Deref`.
+struct Checker<'a> {
+    cx: &'a Cx<'a>,
     /// Bounds of the function being checked.
     cur_bounds: RefCell<HashMap<String, Vec<String>>>,
     /// Scope depths at each enclosing `region` entry. A binding below the top
@@ -1764,8 +1767,6 @@ struct Checker<'a> {
     /// Inside a `gen fn` body: `Code` and the code-quote builtins are legal.
     /// A `gen fn` body is never emitted.
     in_gen: RefCell<bool>,
-    /// The program's [`Host`].
-    host: Host,
     /// Whether the unit [`Checker::unit`] runs typed a node [`Checker::judged`],
     /// or read a name typed [`Type::Err`].
     unknown: std::cell::Cell<bool>,
@@ -1774,13 +1775,8 @@ struct Checker<'a> {
     /// whether `render`, `rawAt`, `raw` or `lex` is the builtin or a function
     /// this module declares or imports.
     here: RefCell<Option<String>>,
-    shadows: std::collections::HashSet<(Option<String>, String)>,
     /// The line of the enclosing statement, for a literal, which carries none.
     stmt_line: RefCell<usize>,
-    /// `extern` functions, which cannot be function values.
-    extern_fns: &'a std::collections::HashSet<String>,
-    /// `gen fn`s, which cannot be function values.
-    gen_fns: &'a std::collections::HashSet<String>,
     cur_fn: RefCell<String>,
     /// Every lambda or named function that flows into a stored function value.
     stored_sources: RefCell<Vec<StoredSource>>,
@@ -1801,6 +1797,14 @@ struct Checker<'a> {
     /// The declaration of the call [`Checker::check_declared_call`] just typed
     /// `Err`, for the same wrapper.
     pending_call: RefCell<Option<CallDecl>>,
+}
+
+impl<'a> std::ops::Deref for Checker<'a> {
+    type Target = Cx<'a>;
+
+    fn deref(&self) -> &Cx<'a> {
+        self.cx
+    }
 }
 
 /// A declaration a call is checked against: a user function, a seeded builtin
@@ -1891,6 +1895,33 @@ enum Reach {
 }
 
 impl<'a> Checker<'a> {
+    /// A checker with no body typed yet, recording when `recording`.
+    fn new(cx: &'a Cx<'a>, recording: bool) -> Checker<'a> {
+        Checker {
+            cx,
+            cur_bounds: Default::default(),
+            region_floor: Default::default(),
+            binder_types: Default::default(),
+            in_root: Default::default(),
+            errors: Default::default(),
+            globals: Default::default(),
+            in_test: Default::default(),
+            in_bench: Default::default(),
+            in_gen: Default::default(),
+            unknown: Default::default(),
+            here: Default::default(),
+            stmt_line: Default::default(),
+            cur_fn: Default::default(),
+            stored_sources: Default::default(),
+            arg_sources: Default::default(),
+            stored_calls: Default::default(),
+            derive_sites: Default::default(),
+            record: recording.then(RefCell::default),
+            pending_subst: Default::default(),
+            pending_call: Default::default(),
+        }
+    }
+
     fn recording(&self) -> bool {
         self.record.is_some()
     }
@@ -2030,7 +2061,7 @@ impl<'a> Checker<'a> {
         let subst =
             self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
         if self.recording() {
-            if let Ok(Some(p)) = crate::project::optional_site(
+            if let Ok(Some(p)) = self.expansions.optional_site(
                 self.impl_blocks,
                 Some(&recv),
                 name,
@@ -2926,6 +2957,80 @@ impl<'a> Checker<'a> {
         out.len() - before
     }
 
+    /// Types `f`'s signature and body, and hands back what that added: its
+    /// diagnostics, each in `f`'s file, and its part of the record. In a
+    /// body, errors accumulate per statement in `errors`; `function` returns
+    /// the first and this drains the rest. Within one expression the check
+    /// is first-error.
+    fn signature_and_body(&self, f: &Function) -> Typed {
+        // Signature validation runs outside `function()` and must accept a
+        // `Code` type in a `gen fn` signature.
+        *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
+        let r = (|| -> Result<(), Diagnostic> {
+            for p in &f.params {
+                // A function value cannot cross the host boundary, nor a
+                // generation-time signature.
+                if self.contains_fn(&p.ty) && (f.is_extern || f.is_export_extern) {
+                    return Err(cerr_at!(f.line, f.name_span(), ExternTakesFn));
+                }
+                if self.contains_fn(&p.ty) && f.is_gen {
+                    return Err(cerr_at!(f.line, f.name_span(), GenTakesFn));
+                }
+                self.ensure_type_exists(&p.ty, f.line)?;
+            }
+            if self.contains_fn(&f.ret) && (f.is_extern || f.is_export_extern) {
+                return Err(cerr_at!(f.line, f.name_span(), ExternReturnsFn));
+            }
+            if self.contains_fn(&f.ret) && f.is_gen {
+                return Err(cerr_at!(f.line, f.name_span(), GenReturnsFn));
+            }
+            self.ensure_type_exists(&f.ret, f.line)?;
+            // An `extern` import has no body; an `export extern` has one. Both
+            // signatures must fit the host ABI.
+            if f.is_extern {
+                self.check_extern_sig(f)?;
+            } else {
+                if f.is_export_extern {
+                    self.check_extern_sig(f)?;
+                }
+                self.function(f)?;
+            }
+            Ok(())
+        })();
+        let mut diags: Vec<Diagnostic> = r.err().into_iter().collect();
+        diags.append(&mut self.errors.borrow_mut());
+        Typed {
+            diags: (diags.into_iter())
+                .map(|d| d.in_file(f.module.clone()))
+                .collect(),
+            record: self.record.as_ref().map(|r| r.take()),
+            binders: self.binder_types.take(),
+            stored: StoredFnEffects {
+                sources: self.stored_sources.take(),
+                arg_sources: self.arg_sources.take(),
+                calls: self.stored_calls.take(),
+            },
+            derive: self.derive_sites.take(),
+        }
+    }
+
+    /// Adds one body's [`Typed`] to this checker's accumulations, as typing
+    /// it here would have, and returns its diagnostics.
+    fn absorb(&self, t: Typed) -> Vec<Diagnostic> {
+        if let (Some(r), Some(part)) = (&self.record, t.record) {
+            r.borrow_mut().extend(part);
+        }
+        let mut binders = self.binder_types.borrow_mut();
+        for (at, ty) in t.binders {
+            binders.entry(at).or_insert(ty);
+        }
+        self.stored_sources.borrow_mut().extend(t.stored.sources);
+        self.arg_sources.borrow_mut().extend(t.stored.arg_sources);
+        self.stored_calls.borrow_mut().extend(t.stored.calls);
+        self.derive_sites.borrow_mut().extend(t.derive);
+        t.diags
+    }
+
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
         self.function_body(f, &f.body)
     }
@@ -2949,6 +3054,7 @@ impl<'a> Checker<'a> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
         *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
+        *self.here.borrow_mut() = f.module.clone();
         self.in_root.set(f.module.is_none());
         self.errors.borrow_mut().clear();
         // A local shadows a global of the same name.
@@ -2980,9 +3086,9 @@ impl<'a> Checker<'a> {
     }
 
     /// Types an expansion (an inlined projection) in the caller's scope,
-    /// recording its node types and nothing else. `project` leaks each
-    /// expansion once ([`crate::project::Memo`]), so its node addresses are
-    /// stable keys.
+    /// recording its node types and nothing else. A shared
+    /// [`crate::project::Expansions`] leaks each expansion once, so its node
+    /// addresses are stable keys.
     ///
     /// Diagnostics, scope changes and [`Checker::pending_subst`] stay inside: an
     /// expansion fails only where its source already did, and the wrapper
@@ -3227,7 +3333,8 @@ impl<'a> Checker<'a> {
                 // inlined, with the move-out and move-back around it.
                 if self.recording() {
                     if let Ok(Some(blk)) =
-                        crate::project::store_index(self.impl_blocks, name, index, value, &b.ty)
+                        self.expansions
+                            .store_index(self.impl_blocks, name, index, value, &b.ty)
                     {
                         self.record_desugar(scope, |c, sc| {
                             c.block(blk, ret, sc);
@@ -3319,7 +3426,8 @@ impl<'a> Checker<'a> {
                 // `nth`; record that read.
                 if self.recording() {
                     if let Ok(Some(p)) =
-                        crate::project::for_element(self.impl_blocks, &ity, iter, *line)
+                        self.expansions
+                            .for_element(self.impl_blocks, &ity, iter, *line)
                     {
                         self.record_desugar(scope, |c, sc| {
                             let bind = |ty| Binding { ty, mutable: false };
@@ -3651,7 +3759,7 @@ impl<'a> Checker<'a> {
                     if let Some(lit) = self
                         .types
                         .get(tn)
-                        .and_then(|d| crate::project::schema(expr, d))
+                        .and_then(|d| self.expansions.schema(expr, d))
                     {
                         self.record_desugar(scope, |c, sc| {
                             let _ = c.expr(lit, sc, Some(&t), fn_ret);
@@ -4889,7 +4997,7 @@ impl<'a> Checker<'a> {
                     // Record the nodes the site lowers through: the
                     // projection's body inlined here ([`record_desugar`]).
                     if self.recording() {
-                        if let Ok(Some(p)) = crate::project::site(
+                        if let Ok(Some(p)) = self.expansions.site(
                             self.impl_blocks,
                             Some(&at),
                             "at",
@@ -5481,7 +5589,7 @@ impl<'a> Checker<'a> {
             if let Some(t) = self.place_result(&recv, name, args, scope, fn_ret, line)? {
                 self.refuse_chained_projection(&args[0], scope, line)?;
                 if self.recording() {
-                    if let Ok(Some(p)) = crate::project::site(
+                    if let Ok(Some(p)) = self.expansions.site(
                         self.impl_blocks,
                         Some(&recv),
                         name,

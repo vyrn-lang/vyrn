@@ -6,7 +6,6 @@
 //! second copy of this crate.
 
 use std::collections::HashMap;
-use vyrn_frontend::project::Memo;
 use vyrn_genwasm::engine;
 
 mod common;
@@ -125,29 +124,28 @@ fn main() -> Int64 {{
         .collect();
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some("std".into()),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
     // The compile scope `vyrn run` opens before its load: the checker types a
     // `schemaOf<T>()` literal inside it; outside it the call has no row.
     // `load_warned`, not `loader::load`, because it synthesizes validated types'
     // constructors and JSON codecs, as the CLI does.
-    let (program, memo) = Memo::load(|| {
-        vyrn_lower::load_warned(
-            &wrapped,
-            "main.vyrn",
-            &opts,
-            &vyrn_frontend::loader::MapResolver(files),
-            Some(&*engine()),
-        )
-        .0
-    })
+    let program = vyrn_lower::load_warned(
+        &wrapped,
+        "main.vyrn",
+        &opts,
+        &vyrn_frontend::loader::MapResolver(files),
+        Some(&*engine()),
+    )
+    .0
     .map_err(|ds| {
         ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
             "
 ",
         )
     })?;
-    let bytes = vyrn_codegen::direct::compile(&program, &memo)?;
+    let bytes = vyrn_codegen::direct::compile(&program)?;
     let out = vyrn_cli::wasmrun::run(
         &bytes,
         vyrn_cli::wasmrun::Run {
@@ -189,25 +187,24 @@ fn run_without(missing: &str, source: &str) -> Result<i64, String> {
         .collect();
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some("std".into()),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
-    let (program, memo) = Memo::load(|| {
-        vyrn_lower::load_warned(
-            source,
-            "main.vyrn",
-            &opts,
-            &vyrn_frontend::loader::MapResolver(files),
-            Some(&*engine()),
-        )
-        .0
-    })
+    let program = vyrn_lower::load_warned(
+        source,
+        "main.vyrn",
+        &opts,
+        &vyrn_frontend::loader::MapResolver(files),
+        Some(&*engine()),
+    )
+    .0
     .map_err(|ds| {
         ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
             "
 ",
         )
     })?;
-    run_compiled(&program, &memo)
+    run_compiled(&program)
 }
 
 fn run_json(source: &str) -> Result<i64, String> {

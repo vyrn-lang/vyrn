@@ -160,22 +160,21 @@ fn a_program_compiled_after_another_in_one_process_is_the_same_bytes() {
         }
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let opts = vyrn_frontend::loader::LoadOptions {
-        std_root: Some(root.join("std").to_string_lossy().replace('\\', "/")),
-        ..Default::default()
-    };
     // The `vyrn run` sequence.
     let build = |name: &str| -> Vec<u8> {
         let path = root.join("examples").join(name);
         let src = std::fs::read_to_string(&path).expect("the example reads");
         let key = path.to_string_lossy().replace('\\', "/");
-        let (program, memo) = vyrn_frontend::project::Memo::load(|| {
-            vyrn_lower::load(&src, &key, &opts, &Disk, Some(&*vyrn_genwasm::engine()))
-        })
-        .expect("the example loads");
+        let opts = vyrn_frontend::loader::LoadOptions {
+            std_root: Some(root.join("std").to_string_lossy().replace('\\', "/")),
+            expansions: vyrn_frontend::project::Expansions::shared(),
+            ..Default::default()
+        };
+        let program = vyrn_lower::load(&src, &key, &opts, &Disk, Some(&*vyrn_genwasm::engine()))
+            .expect("the example loads");
         let _own = vyrn_frontend::own::Memo::open(&program);
         vyrn_codegen::check_instantiations(&program).expect("the example instantiates");
-        vyrn_codegen::direct::compile(&program, &memo).expect("the example compiles")
+        vyrn_codegen::direct::compile(&program).expect("the example compiles")
     };
     let first = build("fnvalarg.vyrn");
     let _other = build("closures2.vyrn");
