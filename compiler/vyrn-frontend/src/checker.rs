@@ -42,53 +42,15 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
     *l.borrow()
 }
 
-thread_local! {
-    /// Whether this thread checks a generator host: the program the engine
-    /// compiles to run a `gen fn` as wasm. Its functions have
-    /// `is_gen` cleared, so this flag marks the whole program as generation
-    /// code. It only enables generation-only names; nothing reads it to refuse.
-    static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Marks this thread as checking a generator host, or stops. Called by
-/// `vyrn_codegen::set_gen_host`, so the checker and the emitter read one flag.
-pub fn set_gen_host(on: bool) {
-    GEN_HOST.with(|g| g.set(on));
-}
-
-/// Whether this thread is checking a generator host. Part of [`recorded`]'s
-/// key and of `vyrn_lower::core::decide`'s, because it changes what a check
-/// decides.
-pub fn gen_host() -> bool {
-    GEN_HOST.with(|g| g.get())
-}
-
-thread_local! {
-    /// Whether this thread checks a test host: the program `vyrn test` and
-    /// `vyrn bench` compile, whose functions are lifted `test` and `bench`
-    /// bodies. It only enables test-only names such as `assert`.
-    static TEST_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Marks this thread as checking a test host, or stops.
-pub fn set_test_host(on: bool) {
-    TEST_HOST.with(|t| t.set(on));
-}
-
-/// Whether this thread is checking a test host. Part of [`recorded`]'s key.
-pub fn test_host() -> bool {
-    TEST_HOST.with(|t| t.get())
-}
-
 /// Whether a body is checked as generation code: its own `gen fn` marker, or a
 /// whole-program generator host.
-fn in_gen_of(f: &Function) -> bool {
-    f.is_gen || GEN_HOST.with(|g| g.get())
+fn in_gen_of(f: &Function, host: Host) -> bool {
+    f.is_gen || host.gen
 }
 
 /// The atom-stream primitives a generator host's decoders call: one starts a
 /// reflected answer, two take the next atom. `vyrn-codegen` lowers them. They
-/// exist only under [`set_gen_host`], so no program can name them.
+/// exist only in a generator host ([`Host::gen`]), so no program can name them.
 pub const GEN_REFLECT: &str = "__vyrnGenReflect";
 pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
 pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
@@ -106,8 +68,8 @@ pub fn gen_entry_contract_of(contract: &str) -> String {
 }
 
 /// The type a gen-host primitive returns at that arity.
-fn gen_host_primitive(name: &str, argc: usize) -> Option<Type> {
-    if !GEN_HOST.with(|g| g.get()) {
+fn gen_host_primitive(name: &str, argc: usize, host: Host) -> Option<Type> {
+    if !host.gen {
         return None;
     }
     match (name, argc) {
@@ -1088,6 +1050,7 @@ fn check_accum_inner(
         .collect();
 
     let checker = Checker {
+        host: program.host,
         sigs: &sigs,
         caps: &caps,
         caps_by_sig: &caps_by_sig,
@@ -1182,7 +1145,7 @@ fn check_accum_inner(
 
         // Signature validation runs outside `function()` and must accept a
         // `Code` type in a `gen fn` signature.
-        *checker.in_gen.borrow_mut() = in_gen_of(f);
+        *checker.in_gen.borrow_mut() = in_gen_of(f, checker.host);
         *checker.here.borrow_mut() = f.module.clone();
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
@@ -1663,9 +1626,9 @@ thread_local! {
     static HELD: RefCell<Option<(usize, HeldRecord)>> = const { RefCell::new(None) };
 }
 
-/// `(generator host, test host, record)`. The host flags change what a check
-/// decides, so a record answers only under the flags it was made with.
-pub(crate) type HeldRecord = (bool, bool, std::sync::Arc<Recorded>);
+/// A record with the [`Host`] it was made under. The host changes what a
+/// check decides, so a record answers only under the host it was made with.
+pub(crate) type HeldRecord = (Host, std::sync::Arc<Recorded>);
 
 /// Opens the record slot for `program`. Called by [`crate::own::Memo::open`],
 /// so a record lives as long as its analysis.
@@ -1709,10 +1672,10 @@ impl Drop for Held {
     }
 }
 
-/// Holds `made`, a record of `program` made under the host flags in force,
-/// where the slot is open for it.
+/// Holds `made`, a record of `program` made under its host, where the slot
+/// is open for it.
 pub fn hold(program: &Program, made: std::sync::Arc<Recorded>) {
-    adopt(program, (gen_host(), test_host(), made));
+    adopt(program, (program.host, made));
 }
 
 /// Holds `record` for `program` where the slot is open for it. The CLI adopts
@@ -1736,11 +1699,11 @@ pub(crate) fn held(program: &Program) -> Option<HeldRecord> {
     })
 }
 
-/// The record held for `program` under the host flags in force.
+/// The record held for `program` under its host.
 fn held_now(program: &Program) -> Option<std::sync::Arc<Recorded>> {
     held(program)
-        .filter(|(g, t, _)| (*g, *t) == (gen_host(), test_host()))
-        .map(|(_, _, r)| r)
+        .filter(|(h, _)| *h == program.host)
+        .map(|(_, r)| r)
 }
 
 /// Returns the record of `program`: the held one if it matches the program
@@ -1801,6 +1764,8 @@ struct Checker<'a> {
     /// Inside a `gen fn` body: `Code` and the code-quote builtins are legal.
     /// A `gen fn` body is never emitted.
     in_gen: RefCell<bool>,
+    /// The program's [`Host`].
+    host: Host,
     /// Whether the unit [`Checker::unit`] runs typed a node [`Checker::judged`],
     /// or read a name typed [`Type::Err`].
     unknown: std::cell::Cell<bool>,
@@ -2983,7 +2948,7 @@ impl<'a> Checker<'a> {
     fn function_body(&self, f: &Function, body: &Block) -> Result<(), Diagnostic> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
-        *self.in_gen.borrow_mut() = in_gen_of(f);
+        *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
         self.in_root.set(f.module.is_none());
         self.errors.borrow_mut().clear();
         // A local shadows a global of the same name.
@@ -4694,7 +4659,7 @@ impl<'a> Checker<'a> {
         if let Some(g @ Gone::Removed(_)) = moved_to_std(name) {
             return Err(cerr!(line; g.rule(name)));
         }
-        if (name == "assert" || name == "assertEq") && !*self.in_test.borrow() && !test_host() {
+        if (name == "assert" || name == "assertEq") && !*self.in_test.borrow() && !self.host.test {
             return Err(cerr!(line, TestOnly, name));
         }
         if name == "assertEq" {
@@ -4726,7 +4691,7 @@ impl<'a> Checker<'a> {
         // `blackBox<T>(v: T) -> T`: identity the optimizer cannot see through,
         // so the work producing `v` survives and does not fold.
         if name == "blackBox" {
-            if !*self.in_test.borrow() && !*self.in_bench.borrow() && !test_host() {
+            if !*self.in_test.borrow() && !*self.in_bench.borrow() && !self.host.test {
                 return Err(cerr!(line, BlackBoxOutsideBench));
             }
             if args.len() != 1 {
@@ -5548,7 +5513,7 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, ProjectionOnBound, name));
             }
         }
-        if let Some(t) = gen_host_primitive(name, args.len()) {
+        if let Some(t) = gen_host_primitive(name, args.len(), self.host) {
             for a in args {
                 self.expr(a, scope, None, fn_ret)?;
             }

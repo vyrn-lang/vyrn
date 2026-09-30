@@ -133,6 +133,28 @@ pub struct Program {
     /// The number of units [`Program::number`] and
     /// [`Program::number_appended`] gave.
     pub units: u32,
+    /// What the program is compiled as, beyond an ordinary build.
+    pub host: Host,
+    /// `module key -> content hash` for every module the loader parsed into
+    /// this program. The kernel's judgment memo keys a body on it
+    /// ([`crate::movecheck::Judgments`]). Empty for a program no load linked.
+    /// Ordered, because a generator program's `Debug` text keys its compiled
+    /// module (`vyrn_genwasm`).
+    pub module_hashes: std::collections::BTreeMap<String, String>,
+}
+
+/// What a program is compiled as, beyond an ordinary build. A flag only
+/// enables names; nothing reads it to refuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Host {
+    /// A generator host: the program the engine compiles to run a `gen fn`
+    /// as wasm. Its functions have `is_gen` cleared, so this flag marks the
+    /// whole program as generation code. `vyrn_genwasm::prepare` sets it.
+    pub gen: bool,
+    /// A test host: the program `vyrn test` and `vyrn bench` compile, whose
+    /// functions are lifted `test` and `bench` bodies. It enables test-only
+    /// names such as `assert`.
+    pub test: bool,
 }
 
 /// A `test "name" { body }` or `bench "name" { body }` declaration.

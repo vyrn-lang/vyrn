@@ -6,7 +6,6 @@
 //! import (importing an enum or protocol brings its variants or methods), a
 //! `logging` block outside the root, and two impls of one `(protocol, type)`.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ast::*;
@@ -625,6 +624,9 @@ struct Module {
     /// it. Its declarations are renamed to that reserved prefix (see
     /// [`RT_PREFIX`]), so they neither collide with nor are captured by a user's.
     injected: Option<&'static str>,
+    /// The parsed text's hash ([`Program::module_hashes`]); `None` for a
+    /// module synthesized from JSON Schema.
+    hash: Option<String>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -724,9 +726,8 @@ pub const RUNTIME_PREFIX: &str = "runtime$";
 /// under `VYRN_WASM_MANIFEST=check`. The emitter and the lowering both read it
 /// here. A generator host is never audited: its exit code is a protocol with
 /// the compiler, and a residue report would fail the build.
-pub fn audit_build() -> bool {
-    std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0")
-        && !crate::checker::gen_host()
+pub fn audit_build(gen_host: bool) -> bool {
+    std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0") && !gen_host
 }
 
 /// Whether `name` is one of `std/runtime`'s audit hooks, which a build emits
@@ -826,11 +827,9 @@ pub const STRING_FAULT: &str = "text$stringFault";
 /// a name no runtime module implements. A generator host takes the row's
 /// generation twin, which reads the resource through the loader's resolver
 /// (`vyrn_gen.read`) rather than WASI.
-pub fn routed_builtin(name: &str) -> Option<&'static str> {
+pub fn routed_builtin(name: &str, gen_host: bool) -> Option<&'static str> {
     let b = crate::prelude::builtin(name)?;
-    b.gen_route
-        .filter(|_| crate::checker::gen_host())
-        .or(b.route)
+    b.gen_route.filter(|_| gen_host).or(b.route)
 }
 
 /// Returns the function a builtin call calls where its argument's type or name
@@ -937,7 +936,6 @@ pub fn load_with_origins(
     });
     if depth == 1 {
         LOAD_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
-        MODULE_HASHES.with(|m| m.borrow_mut().clear());
     }
     if depth > GEN_DEPTH_MAX {
         LOAD_DEPTH.with(|d| d.set(d.get() - 1));
@@ -992,13 +990,6 @@ fn load_with_origins_inner(
 
 /// `(module key, resolved import targets, synthesized source)` per loaded module.
 pub type ModuleGraph = Vec<(String, Vec<String>, Option<String>)>;
-
-/// `module key -> content hash` for the modules the last outermost load visited.
-/// The kernel's judgment memo keys a body on it ([`crate::movecheck::Judgments`]).
-/// Valid until the next load begins.
-pub fn last_module_hashes() -> HashMap<String, String> {
-    MODULE_HASHES.with(|m| m.borrow().clone())
-}
 
 /// The floor's [`crate::floor::Graph`] for a linked load: every module the
 /// artifact contains, including a generator's output and the runtime
@@ -1229,10 +1220,13 @@ fn load_modules(
                     surface_shadows: std::collections::HashSet::new(),
                     log_sink: LogSink::Stderr,
                     units: 0,
+                    host: Host::default(),
+                    module_hashes: BTreeMap::new(),
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
                 injected: None,
+                hash: None,
             });
             w.stack.pop();
             w.states.insert(key.to_string(), true);
@@ -1243,17 +1237,16 @@ fn load_modules(
         // attribution below depends on `key`, so it runs after the cache: one
         // text loaded under two keys gives two modules from one parse. Only
         // successes are cached.
+        // Non-cryptographic: this key never leaves the process.
+        let hash = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in text.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            format!("{h:x}:{}", text.len())
+        };
         let mut program = {
-            // Non-cryptographic: this key never leaves the process.
-            let hash = {
-                let mut h: u64 = 0xcbf29ce484222325;
-                for b in text.as_bytes() {
-                    h ^= *b as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                }
-                format!("{h:x}:{}", text.len())
-            };
-            MODULE_HASHES.with(|m| m.borrow_mut().insert(key.to_string(), hash.clone()));
             if let Some(hit) = {
                 let _p = crate::prof::phase("parse (cache hit)");
                 PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned())
@@ -1276,7 +1269,7 @@ fn load_modules(
                     if c.len() > 512 {
                         c.clear();
                     }
-                    c.insert(hash, parsed.clone());
+                    c.insert(hash.clone(), parsed.clone());
                 });
                 parsed
             }
@@ -1424,6 +1417,7 @@ fn load_modules(
             import_targets,
             gen_source,
             injected: None,
+            hash: Some(hash),
         });
         Ok(())
     }
@@ -1543,13 +1537,6 @@ fn failed(
 /// A generator's step budget and output-size cap.
 pub(crate) const GEN_FUEL: u64 = 20_000_000;
 pub(crate) const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
-
-thread_local! {
-    /// `module key -> content hash` for the load in progress, so the checker can
-    /// tell which modules are byte-identical to last time.
-    static MODULE_HASHES: std::cell::RefCell<HashMap<String, String>> =
-        std::cell::RefCell::new(HashMap::new());
-}
 
 /// How deep nested generator loads may go. Far past any honest pipeline, and low
 /// enough that the refusal is a diagnostic instead of a stack overflow.
@@ -3413,7 +3400,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // Every module's state joins the linked program and initializes before
     // `main` in linker order: dependencies first.
     let mut extra_globals = Vec::new();
+    let mut module_hashes = BTreeMap::new();
     for m in modules {
+        if let Some(h) = m.hash {
+            module_hashes.insert(m.key.clone(), h);
+        }
         if m.key == root_key {
             merged = Some(m.program);
         } else {
@@ -3460,6 +3451,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.tests.extend(extra_tests);
     program.benches.extend(extra_benches);
     program.imports.clear(); // consumed
+    program.module_hashes = module_hashes;
     program.number();
     Ok(program)
 }
@@ -3620,7 +3612,11 @@ fn clash_diagnostics(
 /// since a value local never shadows a type. The scope starts with the
 /// function's params.
 fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {
-    let mut v = RefNames { out: Vec::new() };
+    let mut v = RefNames {
+        out: Vec::new(),
+        ns: &HashSet::new(),
+        amb: None,
+    };
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
     body_block(&f.body, &mut locals, &mut v);
     v.out
@@ -3633,11 +3629,18 @@ fn is_sum_arm(name: &str) -> bool {
 }
 
 /// The reference collector at each site of [`body_scope_descent`].
-struct RefNames {
+struct RefNames<'a> {
     out: Vec<(String, usize)>,
+    /// The module's namespace bindings, so method sugar `ns.f(x)` is recorded
+    /// qualified and a flat call of the same spelling bare.
+    ns: &'a HashSet<String>,
+    /// Each argument-bearing call callee with its occurrence count, for
+    /// [`program_ref_kinds`]. `f(x)` may be method sugar for `x.f()`, so it
+    /// alone cannot prove a flat use of `f`.
+    amb: Option<&'a mut HashMap<String, usize>>,
 }
 
-impl BodyVisit<'_> for RefNames {
+impl BodyVisit<'_> for RefNames<'_> {
     fn stmt(&mut self, s: &Stmt, _locals: &HashSet<String>) {
         // A `let x: T` annotation is a reference: a value local never shadows a
         // type.
@@ -3666,7 +3669,7 @@ impl BodyVisit<'_> for RefNames {
             } => {
                 let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                    sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
+                    sugar = !locals.contains(recv) && self.ns.contains(recv);
                 }
                 if sugar {
                     if let Some(Expr::Var { name: recv, .. }) = args.first() {
@@ -3678,12 +3681,8 @@ impl BodyVisit<'_> for RefNames {
                     // `program_ref_kinds`, count it, so a name seen only here is
                     // told apart from one also used as a variable, a type or a
                     // zero-argument call, none of which can be method dispatch.
-                    if !args.is_empty() {
-                        SCOPE_AMB.with(|a| {
-                            if let Some(amb) = a.borrow_mut().as_mut() {
-                                *amb.entry(name.clone()).or_default() += 1;
-                            }
-                        });
+                    if let Some(amb) = self.amb.as_mut().filter(|_| !args.is_empty()) {
+                        *amb.entry(name.clone()).or_default() += 1;
                     }
                 }
             }
@@ -3973,19 +3972,6 @@ fn rewrite_module_refs(
 // declarations, for the check that an aliased import's original is not
 // used directly. Bodies are scanned scope-aware, so a local does not count as a
 // reference; type positions always count.
-// `//` and not `///`: a doc comment on `thread_local!` documents nothing and
-// rustc warns.
-thread_local! {
-    /// The namespace bindings of the module `program_ref_names` is walking, so
-    /// the walk tells method sugar (`ns.f(x)`, recorded qualified) from a flat
-    /// call of the same spelling (recorded bare).
-    static SCOPE_NS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    /// While [`program_ref_kinds`] walks: each argument-bearing call callee with
-    /// its occurrence count. `f(x)` may be method sugar for `x.f()`, so it alone
-    /// cannot prove a flat use of `f`. `None` while other walkers run.
-    static SCOPE_AMB: RefCell<Option<HashMap<String, usize>>> = const { RefCell::new(None) };
-}
-
 fn program_ref_names(p: &Program) -> HashSet<String> {
     program_ref_kinds(p, false).0
 }
@@ -3996,31 +3982,29 @@ fn program_ref_names(p: &Program) -> HashSet<String> {
 fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, HashSet<String>) {
     let mut out: HashSet<String> = HashSet::new();
     let mut totals: HashMap<String, usize> = HashMap::new();
-    // The walker reads this module's namespaces through `SCOPE_NS`.
-    SCOPE_NS.with(|s| {
-        *s.borrow_mut() = p
-            .imports
-            .iter()
-            .filter_map(|i| i.namespace.clone())
-            .collect()
-    });
-    SCOPE_AMB.with(|s| {
-        *s.borrow_mut() = split_ambiguous.then(HashMap::new);
-    });
-    fn add_scoped_block<I: Iterator<Item = String>>(
-        b: &Block,
-        params: I,
-        out: &mut HashSet<String>,
-        totals: &mut HashMap<String, usize>,
-    ) {
-        let mut locals: HashSet<String> = params.collect();
-        let mut v = RefNames { out: Vec::new() };
-        body_block(b, &mut locals, &mut v);
-        for (n, _) in v.out {
-            *totals.entry(n.clone()).or_default() += 1;
-            out.insert(n);
-        }
-    }
+    let ns: HashSet<String> = p
+        .imports
+        .iter()
+        .filter_map(|i| i.namespace.clone())
+        .collect();
+    let mut amb: HashMap<String, usize> = HashMap::new();
+    let mut add_scoped_block =
+        |b: &Block,
+         params: &mut dyn Iterator<Item = String>,
+         out: &mut HashSet<String>,
+         totals: &mut HashMap<String, usize>| {
+            let mut locals: HashSet<String> = params.collect();
+            let mut v = RefNames {
+                out: Vec::new(),
+                ns: &ns,
+                amb: split_ambiguous.then_some(&mut amb),
+            };
+            body_block(b, &mut locals, &mut v);
+            for (n, _) in v.out {
+                *totals.entry(n.clone()).or_default() += 1;
+                out.insert(n);
+            }
+        };
     let add_type = |t: &Type, out: &mut HashSet<String>, totals: &mut HashMap<String, usize>| {
         for n in type_names(t) {
             *totals.entry(n.clone()).or_default() += 1;
@@ -4034,7 +4018,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
         add_type(&f.ret, &mut out, &mut totals);
         add_scoped_block(
             &f.body,
-            f.params.iter().map(|p| p.name.clone()),
+            &mut f.params.iter().map(|p| p.name.clone()),
             &mut out,
             &mut totals,
         );
@@ -4050,7 +4034,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
             add_type(&m.ret, &mut out, &mut totals);
             add_scoped_block(
                 &m.body,
-                m.params.iter().map(|p| p.name.clone()),
+                &mut m.params.iter().map(|p| p.name.clone()),
                 &mut out,
                 &mut totals,
             );
@@ -4064,7 +4048,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
             add_type(&pl.ret, &mut out, &mut totals);
             add_scoped_block(
                 &pl.body,
-                pl.params.iter().map(|p| p.name.clone()),
+                &mut pl.params.iter().map(|p| p.name.clone()),
                 &mut out,
                 &mut totals,
             );
@@ -4079,14 +4063,11 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
         }
     }
     for t in &p.tests {
-        add_scoped_block(&t.body, std::iter::empty(), &mut out, &mut totals);
+        add_scoped_block(&t.body, &mut std::iter::empty(), &mut out, &mut totals);
     }
     for b in &p.benches {
-        add_scoped_block(&b.body, std::iter::empty(), &mut out, &mut totals);
+        add_scoped_block(&b.body, &mut std::iter::empty(), &mut out, &mut totals);
     }
-    // Clear the thread-locals the walker read.
-    SCOPE_NS.with(|s| s.borrow_mut().clear());
-    let amb = SCOPE_AMB.with(|s| s.borrow_mut().take().unwrap_or_default());
     // Ambiguity-only names stay in `out`: the hidden-original check
     // must still fire for a name that is not a protocol method. The one caller
     // with the method surface applies the narrower skip itself.

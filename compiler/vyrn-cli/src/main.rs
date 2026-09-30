@@ -3438,6 +3438,10 @@ import {{ benchOne }} from \"std/bench\"
     program.benches.clear();
     program.tests.clear();
     program.number();
+    // As a test host: the lifted bodies are checked again for the lowering's
+    // record, and outside a host `blackBox` is refused, so the core cannot
+    // lower the bodies and their locals leak.
+    program.host.test = true;
 
     // The route and target `vyrn build` ships, so the timing describes the
     // artifact.
@@ -3470,12 +3474,7 @@ import {{ benchOne }} from \"std/bench\"
         stem.to_string()
     };
     let out_path = dir.join(&exe_name);
-    // As a test host: the lifted bodies are checked again for the lowering's
-    // record, and outside a host `blackBox` is refused, so the core cannot
-    // lower the bodies and their locals leak.
-    vyrn_frontend::checker::set_test_host(true);
     let built = build_wasm2c(path, &program, &dsg, &out_path.to_string_lossy(), target);
-    vyrn_frontend::checker::set_test_host(false);
     if built.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
@@ -5352,7 +5351,7 @@ fn bodies_wasm(
     // A body that reaches a `gen fn` compiles the module as a generator host;
     // otherwise it pays for no `vyrn_gen` import. As a test host, the checker
     // accepts `assert`, `assertEq` and `blackBox` in the lifted bodies.
-    vyrn_frontend::checker::set_test_host(true);
+    prog.host.test = true;
     let reach = vyrn_codegen::direct::gen_reach(&prog);
     let generation = (0..bodies.len()).any(|k| reach.contains(&format!("__vyrn_body_{k}")));
     let compiled = if generation {
@@ -5369,7 +5368,6 @@ fn bodies_wasm(
     } else {
         vyrn_codegen::direct::compile(&prog, memo)
     };
-    vyrn_frontend::checker::set_test_host(false);
     let bytes = match compiled {
         Ok(b) => b,
         Err(e) => {

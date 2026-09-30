@@ -345,7 +345,7 @@ fn compile_inner(
     }
 
     // The leak instrument; a generator host never carries it.
-    let audited = vyrn_frontend::loader::audit_build();
+    let audited = vyrn_frontend::loader::audit_build(program.host.gen);
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
@@ -3878,7 +3878,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A dispatched method or a builtin routed to a Vyrn function: the callee's
                 // signature answers.
-                _ => match vyrn_frontend::loader::routed_builtin(name)
+                _ => match vyrn_frontend::loader::routed_builtin(name, crate::gen_host())
                     .and_then(|rt| self.cx.sigs.get(rt))
                     .or_else(|| self.cx.sigs.get(name))
                 {
@@ -9223,7 +9223,8 @@ fn builtin_spec(
     name: &str,
     argc: usize,
 ) -> Option<(&'static [Type], Instruction<'static>, &'static Type)> {
-    let Some(Spec::Typed(params, ret)) = vyrn_lower::core::builtin_row(name) else {
+    let Some(Spec::Typed(params, ret)) = vyrn_lower::core::builtin_row(name, crate::gen_host())
+    else {
         return None;
     };
     if params.len() != argc {
@@ -9316,7 +9317,7 @@ fn logs_arity(name: &str) -> usize {
 /// function this program declares or a callee with no row.
 fn core_builtin(callee: &str, kind: Callee) -> Option<&'static Spec> {
     matches!(kind, Callee::Builtin | Callee::Reserved)
-        .then(|| vyrn_lower::core::builtin_row(callee))
+        .then(|| vyrn_lower::core::builtin_row(callee, crate::gen_host()))
         .flatten()
 }
 

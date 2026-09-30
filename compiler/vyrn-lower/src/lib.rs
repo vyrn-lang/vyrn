@@ -753,7 +753,7 @@ fn build<'a>(
     // an instantiation. It is solved from the declared type, which the
     // teardown drops by; an unannotated global of such a type fails the gate
     // as a missing instantiation. Only an audited build emits the teardown.
-    if vyrn_frontend::loader::audit_build() {
+    if vyrn_frontend::loader::audit_build(program.host.gen) {
         let mut teardown_calls: Vec<(String, HashMap<String, Type>)> = Vec::new();
         for g in &program.globals {
             let Some(gty) = &g.ty else { continue };

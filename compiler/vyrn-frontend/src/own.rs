@@ -148,6 +148,9 @@ pub struct Ownership {
     /// See [`crate::movecheck::Facts::fnval_clear`]. The core asks it at a call
     /// through a fn value, where no capability row answers.
     pub fnval_clear: std::collections::HashSet<String>,
+    /// The program's user projection names ([`crate::project::place_names`]),
+    /// which the core reads as element reads.
+    pub place_names: std::collections::HashSet<String>,
     /// See [`crate::declared::ArgCaps`].
     pub arg_caps: crate::declared::ArgCaps,
     /// What the kernel decided over the placer's first build of each body,
@@ -306,6 +309,7 @@ pub fn analyze(program: &Program) -> Ownership {
         // Only the placer writes release rows.
         releases: HashMap::new(),
         fnval_clear: facts.fnval_clear.clone(),
+        place_names: crate::project::place_names(program),
         arg_caps: crate::declared::ArgCaps::new(program),
         placed: Placed::default(),
         record: crate::checker::recorded(program),

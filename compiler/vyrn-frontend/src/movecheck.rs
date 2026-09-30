@@ -22,6 +22,9 @@ pub struct ArgTemp {
     pub ix: usize,
     /// The call that built the value, or `None` where a String `+` did.
     pub producer: Option<String>,
+    /// The callee hands out a place inside its argument
+    /// ([`lends_result`]).
+    pub views: bool,
     /// The callee is a view whose element type owns no heap, so the scalar it
     /// hands out cannot alias the temporary (`bytes(l)[0]`).
     pub view_copies: bool,
@@ -90,11 +93,8 @@ pub fn facts(program: &Program) -> Facts {
 }
 
 /// Runs the checker's record for its effect too: it expands each `place atSet`
-/// store into `project`'s memo, which [`Lets`] reads. It also records the
-/// projection names that `views` and `project::element_path` read, including
-/// from the core where no walk of this file has run.
+/// store into `project`'s memo, which [`Lets`] reads.
 fn declarations(program: &Program) -> Declared {
-    crate::project::note_place_names(program);
     let rec_span = crate::prof::phase("movecheck: checker::record");
     let rec = crate::checker::recorded(program);
     drop(rec_span);
@@ -232,7 +232,8 @@ pub fn hands_back(name: &str) -> bool {
 /// Whether a call to `name` may return storage one of its arguments holds.
 /// `@concat`, `@str`, `@copy` and a seeded row that neither hands back, views
 /// nor lends build a fresh value. Anything else may, which errs toward a leak.
-pub fn call_may_forward(name: &str) -> bool {
+/// `places` are the program's user projection names.
+pub fn call_may_forward(name: &str, places: &HashSet<String>) -> bool {
     if matches!(name, "@concat" | "@str" | "@copy") {
         return false;
     }
@@ -242,14 +243,14 @@ pub fn call_may_forward(name: &str) -> bool {
         return true;
     }
     if crate::prelude::signature(name).is_some() {
-        return hands_back(name) || views(name) || crate::prelude::lends(name);
+        return hands_back(name) || views(name, places) || crate::prelude::lends(name);
     }
     true
 }
 
 /// Whether `name` hands back a pointer into its argument.
-pub fn lends_result(name: &str) -> bool {
-    views(name)
+pub fn lends_result(name: &str, places: &HashSet<String>) -> bool {
+    views(name, places)
 }
 
 /// What a callee does with a temporary at an argument position: the verdict
@@ -266,7 +267,7 @@ const ARG_ROWS: [(ArgVerdict, fn(&ArgTemp) -> bool); 7] = [
     // A constructor has no signature, so it is asked first.
     (ArgVerdict::Retained, |s| s.constructs),
     // A view lends, unless the element it hands out is a heap-free copy.
-    (ArgVerdict::Lent, |s| views(&s.callee) && !s.view_copies),
+    (ArgVerdict::Lent, |s| s.views && !s.view_copies),
     // A row that returns this argument's bare type parameter may hand the
     // argument back (`blackBox`), so freeing it here is a use-after-free
     // (`examples/membench.vyrn`). `lends` cannot say this: the row yields the
@@ -299,8 +300,8 @@ pub fn arg_verdict(s: &ArgTemp) -> ArgVerdict {
 /// Whether `name` hands back a pointer into its argument: a seeded row whose
 /// body yields a place inside a parameter (`@at`), or a user projection.
 /// A binding to its result owns nothing, so nothing releases it.
-fn views(name: &str) -> bool {
-    crate::prelude::lends(name) || crate::project::named_projection(name)
+fn views(name: &str, places: &HashSet<String>) -> bool {
+    crate::prelude::lends(name) || places.contains(name)
 }
 
 /// Sorts refusals into source order, since no walk order is one a reader can
@@ -406,10 +407,10 @@ pub fn judging<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// The judgment cache, open for one analysis. It copies the loader's module
+/// The judgment cache, open for one analysis. It copies the program's module
 /// hashes once rather than cloning the map per body.
 pub struct Judgments {
-    hashes: HashMap<String, String>,
+    hashes: std::collections::BTreeMap<String, String>,
 }
 
 impl Judgments {
@@ -428,7 +429,7 @@ impl Judgments {
             }
         });
         Some(Judgments {
-            hashes: crate::loader::last_module_hashes(),
+            hashes: program.module_hashes.clone(),
         })
     }
 
@@ -557,9 +558,10 @@ mod tests {
 
     #[test]
     fn views_read_the_seeded_rows() {
-        assert!(views(crate::project::AT));
+        let none = HashSet::new();
+        assert!(views(crate::project::AT, &none));
         // Every engine copies `bytes`, so its result is owned.
-        assert!(!views("bytes"), "a copy is not a view");
-        assert!(!views("stringFromBytes"), "its inverse allocates");
+        assert!(!views("bytes", &none), "a copy is not a view");
+        assert!(!views("stringFromBytes", &none), "its inverse allocates");
     }
 }

@@ -856,8 +856,9 @@ fn each_store(
     fn modified(rhs: &Rhs) -> Vec<(Place, Option<&str>)> {
         match rhs {
             Rhs::Call { callee, args, .. } => {
+                // A routed row is never a removal, so the host is not read.
                 let removal = matches!(
-                    crate::core::builtin_row(callee),
+                    crate::core::builtin_row(callee, false),
                     Some(crate::core::Spec::Removes)
                 )
                 .then_some(callee.as_str());
