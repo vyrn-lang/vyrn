@@ -344,9 +344,9 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
 }
 
 /// The row [`builtin_rows`] holds for `name`. A routed name has a row per
-/// route; this build takes [`vyrn_frontend::loader::routed_builtin`]'s.
-pub fn builtin_row(name: &str) -> Option<&'static Spec> {
-    let routed = vyrn_frontend::loader::routed_builtin(name);
+/// route; a generator host's build takes [`vyrn_frontend::loader::routed_builtin`]'s.
+pub fn builtin_row(name: &str, gen_host: bool) -> Option<&'static Spec> {
+    let routed = vyrn_frontend::loader::routed_builtin(name, gen_host);
     builtin_rows()
         .iter()
         .find(|(n, s)| *n == name && routed.is_none_or(|f| matches!(s, Spec::Routes(g) if *g == f)))
@@ -440,11 +440,12 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
             // The emitter reads a declared function, a constructor, a builtin
             // with a row, and a call through a stored value (one call to its
             // signature's dispatcher). A call through a `fn`-typed parameter
-            // waits on the specialization.
+            // waits on the specialization. A routed name has a row under
+            // either host, so the host is not read.
             if !matches!(
                 kind,
                 Callee::Fn | Callee::Ctor | Callee::Named | Callee::Proven
-            ) && builtin_row(callee).is_none()
+            ) && builtin_row(callee, false).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
                 let tag = match kind {
@@ -3215,7 +3216,7 @@ impl<'a> Builder<'a> {
             // `p + 8` alone costs four instructions per allocation.
             Stmt::Expr(Expr::Call { name, .. }, _)
                 if vyrn_frontend::loader::audit_hook(name)
-                    && !vyrn_frontend::loader::audit_build() => {}
+                    && !vyrn_frontend::loader::audit_build(self.program.host.gen) => {}
             Stmt::Expr(e, _) if self.optional_if_let(e, sid, out)? => {}
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
@@ -6145,7 +6146,7 @@ impl<'a> Builder<'a> {
                 | vyrn_frontend::checker::GEN_NEXT_STR
         ) {
             // The generation host's primitives, which exist only
-            // under `checker::set_gen_host`. The host reads what it is
+            // in a generator host (`Host::gen`). The host reads what it is
             // handed, so the guest keeps every argument it owns.
             vec![Capability::Read; args.len()]
         } else if let Some(g) = self.program.globals.iter().find(|g| {

@@ -723,9 +723,8 @@ pub const RUNTIME_PREFIX: &str = "runtime$";
 /// under `VYRN_WASM_MANIFEST=check`. The emitter and the lowering both read it
 /// here. A generator host is never audited: its exit code is a protocol with
 /// the compiler, and a residue report would fail the build.
-pub fn audit_build() -> bool {
-    std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0")
-        && !crate::checker::gen_host()
+pub fn audit_build(gen_host: bool) -> bool {
+    std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0") && !gen_host
 }
 
 /// Whether `name` is one of `std/runtime`'s audit hooks, which a build emits
@@ -825,11 +824,9 @@ pub const STRING_FAULT: &str = "text$stringFault";
 /// a name no runtime module implements. A generator host takes the row's
 /// generation twin, which reads the resource through the loader's resolver
 /// (`vyrn_gen.read`) rather than WASI.
-pub fn routed_builtin(name: &str) -> Option<&'static str> {
+pub fn routed_builtin(name: &str, gen_host: bool) -> Option<&'static str> {
     let b = crate::prelude::builtin(name)?;
-    b.gen_route
-        .filter(|_| crate::checker::gen_host())
-        .or(b.route)
+    b.gen_route.filter(|_| gen_host).or(b.route)
 }
 
 /// Returns the function a builtin call calls where its argument's type or name
@@ -1228,6 +1225,7 @@ fn load_modules(
                     surface_shadows: std::collections::HashSet::new(),
                     log_sink: LogSink::Stderr,
                     units: 0,
+                    host: Host::default(),
                 },
                 import_targets: Vec::new(),
                 gen_source: None,

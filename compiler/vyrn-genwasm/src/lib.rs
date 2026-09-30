@@ -436,6 +436,7 @@ pub fn prepare(p: &mut Program) -> Option<()> {
     for f in p.functions.iter_mut() {
         f.is_gen = false;
     }
+    p.host.gen = true;
     // Synthesized before the emitter sees the program, so every pass covers
     // them like any other function.
     reflect_entries(p)

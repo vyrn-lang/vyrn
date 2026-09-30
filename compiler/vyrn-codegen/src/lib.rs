@@ -71,9 +71,6 @@ pub(crate) fn gen_host() -> bool {
 
 pub(crate) fn set_gen_host(on: bool) {
     GEN_HOST.with(|g| g.set(on));
-    // The checker needs the same answer: a generator host's bodies are
-    // generation code even with `is_gen` cleared, so this sets both flags.
-    vyrn_frontend::checker::set_gen_host(on);
 }
 
 /// Records the types the emitter derives for expressions, the instances it

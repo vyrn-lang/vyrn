@@ -69,7 +69,7 @@ fn sections() -> Vec<Section> {
     use Kind::*;
     vec![
         sec("macro_rules! cerr", Shared),
-        sec("fn set_gen_host", Shared),
+        sec("fn in_gen_of", Shared),
         sec("struct LocalBinding", Shared),
         sec("const RESERVED", Surface),
         sec("fn check_accum_with_sites", Shared),

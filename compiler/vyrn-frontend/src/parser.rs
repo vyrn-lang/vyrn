@@ -973,6 +973,7 @@ impl Parser {
                 log_sink,
                 // The loader fills this once every module is linked.
                 surface_shadows: std::collections::HashSet::new(),
+                host: Host::default(),
                 units: 0,
             },
             errors,
