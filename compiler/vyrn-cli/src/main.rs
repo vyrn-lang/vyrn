@@ -5357,7 +5357,14 @@ fn bodies_wasm(
     let compiled = if generation {
         vyrn_genwasm::prepare(&mut prog)
             .ok_or_else(|| "a `test` block calls a generator this route cannot compile".to_string())
-            .and_then(|()| vyrn_codegen::direct::compile_gen_host(&prog))
+            .and_then(|()| {
+                vyrn_codegen::direct::compile_gen_host(&prog).map_err(|e| match e {
+                    vyrn_frontend::gen::GenError::Failed(e) => e,
+                    vyrn_frontend::gen::GenError::Refused(ds) => {
+                        ds.iter().map(|d| d.render()).collect()
+                    }
+                })
+            })
     } else {
         vyrn_codegen::direct::compile(&prog, memo)
     };

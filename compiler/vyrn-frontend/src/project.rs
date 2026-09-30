@@ -235,17 +235,16 @@ thread_local! {
 }
 
 thread_local! {
-    /// The last id [`numbered`] gave.
+    /// The unit [`numbered`] gives next.
     static EXPANDED: std::cell::Cell<u32> = const { std::cell::Cell::new(NodeId::EXPANDED) };
 }
 
-/// Numbers an expansion's nodes above every program's own ids, so a
-/// substituted argument is a node apart from the one it copies.
+/// Numbers an expansion's nodes as a unit of its own above every program's
+/// units, so a substituted argument is a node apart from the one it copies.
 fn numbered(f: impl FnOnce(&mut Numbering)) {
     EXPANDED.with(|c| {
-        let mut n = Numbering(c.get());
-        f(&mut n);
-        c.set(n.0);
+        f(&mut Numbering::unit(c.get()));
+        c.set(c.get() + 1);
     });
 }
 
@@ -628,7 +627,7 @@ pub fn for_element(
     line: usize,
 ) -> Result<Option<&'static Projection>, String> {
     let var = |name: &str| Expr::Var {
-        id: Id(iter.id().0),
+        id: Id(iter.id()),
         name: name.to_string(),
         line,
     };

@@ -1217,7 +1217,7 @@ fn load_modules(
                     log_level: DEFAULT_LOG_LEVEL,
                     surface_shadows: std::collections::HashSet::new(),
                     log_sink: LogSink::Stderr,
-                    nodes: 0,
+                    units: 0,
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
@@ -1727,7 +1727,7 @@ fn run_generator(
     let mut gen_program = loaded?;
     // A generator is a runnable program compiled to wasm, so it gets
     // the check and synthesis a root gets.
-    let (gdiags, _) = crate::check_and_synthesize(&mut gen_program);
+    let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program);
     if !gdiags.is_empty() {
         return Err(gdiags);
     }
@@ -1795,7 +1795,15 @@ fn run_generator(
         },
     )
     .map_err(|e| match e {
-        crate::gen::GenError::Refused(ds) => ds,
+        // The generator's module is the root of its own load, so a refusal
+        // there carries no file; in this load it names the module.
+        crate::gen::GenError::Refused(ds) => ds
+            .into_iter()
+            .map(|d| match d.file {
+                Some(_) => d,
+                None => in_module(d, &gen_mod_key, root_key),
+            })
+            .collect(),
         crate::gen::GenError::Failed(trap) => err(rule!(GenFailed, name, args = arg_repr, trap)),
     })?;
     bump_gen_runs();

@@ -291,8 +291,9 @@ linker. `vyrn deps` records its path and version instead.
 
 `vyrn-lsp` (`compiler/vyrn-lsp`) is a synchronous server over `lsp-server`,
 with no async runtime. It is a pure adapter: it calls the front end's
-`analyze_linked` once per change, caches the result and answers every request
-from the cache, so the editor and `vyrn check` report the same errors. It
+`analyze_judged` with `vyrn_lower::JUDGE`, the pipeline `vyrn check` runs, once
+per change, caches the result and answers every request from the cache, so the
+editor and `vyrn check` report the same errors. It
 resolves imports through the same loader as the CLI, including manifest aliases
 and pinned remotes read from `vyrn_vendor/` or the cache. The editor never
 fetches; an unpinned remote gets a diagnostic that says to run `vyrn check`

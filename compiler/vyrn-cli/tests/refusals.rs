@@ -1759,14 +1759,101 @@ fn a_gen_body_is_refused_once_at_its_own_line_cold_and_warm() {
          fn main() -> Int64 { return v() }\n",
     )
     .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, &["check", "host.vyrn"]);
+    assert_eq!(cold.matches("is used here but").count(), 1, "{cold}");
+    assert!(cold.starts_with("lib.vyrn:8:"), "{cold}");
+}
+
+/// A failed generator's error is the typed refusal its compile states, also
+/// when a warm cache skips that compile.
+#[test]
+fn a_failed_generator_says_its_typed_refusal_cold_and_warm() {
+    let dir = common::scratch("gen-typed-trap");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export gen fn g() -> String {\n\
+         \x20   let n = 1\n\
+         \x20   n = 2\n\
+         \x20   panic(\"stop\")\n\
+         \x20   return \"export fn f() -> Int64 { return 1 }\"\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { g } from \"./lib\"\n\
+         import { f } from g()\n\
+         \n\
+         fn main() -> Int64 { return f() }\n",
+    )
+    .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, &["check", "host.vyrn"]);
+    assert!(cold.contains("cannot assign to `n`"), "{cold}");
+}
+
+/// A generator program's must-use refusal names the generator's module and
+/// line, not the importer's.
+#[test]
+fn a_generator_programs_must_use_refusal_names_its_module() {
+    let dir = common::scratch("gen-must-use");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export gen fn g() -> String {\n\
+         \x20   let xs: Array<Int64> = [1, 2]\n\
+         \x20   let s = fromArray(xs)\n\
+         \x20   return \"export fn f() -> Int64 { return 1 }\"\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { g } from \"./lib\"\n\
+         import { f } from g()\n\
+         \n\
+         fn main() -> Int64 { return f() }\n",
+    )
+    .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, &["check", "host.vyrn"]);
+    assert!(cold.starts_with("lib.vyrn:3:"), "{cold}");
+}
+
+/// A generator program the typed judgment refuses is refused even when its
+/// run succeeds. `emit-gen` checks no host, so only the engine can say it.
+#[test]
+fn a_refused_generator_program_is_refused_when_its_run_succeeds() {
+    let dir = common::scratch("gen-typed-ran");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export gen fn g() -> String {\n\
+         \x20   let n = 1\n\
+         \x20   n = 2\n\
+         \x20   return \"export fn f() -> Int64 { return 1 }\"\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { g } from \"./lib\"\n\
+         import { f } from g()\n\
+         \n\
+         fn main() -> Int64 { return f() }\n",
+    )
+    .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, &["emit-gen", "host.vyrn"]);
+    assert!(cold.starts_with("lib.vyrn:3:0: cannot assign"), "{cold}");
+}
+
+/// Runs `vyrn` with `args` in `dir` twice over one generator cache, cold then
+/// warm, and returns the refusal's stderr, which must not depend on the cache.
+fn refused_cold_and_warm(dir: &Path, args: &[&str]) -> String {
     let check = || {
         let out = vyrn()
-            .current_dir(&*dir)
+            .current_dir(dir)
             .env("VYRN_GEN_CACHE_DIR", dir.join("cache"))
             .env_remove("VYRN_NO_GEN_CACHE")
-            .args(["check", "host.vyrn"])
+            .args(args)
             .output()
-            .expect("vyrn check");
+            .expect("run vyrn");
         (
             out.status.success(),
             String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"),
@@ -1776,8 +1863,7 @@ fn a_gen_body_is_refused_once_at_its_own_line_cold_and_warm() {
     let (warm_ok, warm) = check();
     assert!(!cold_ok && !warm_ok, "accepted:\n{cold}\n{warm}");
     assert_eq!(cold, warm, "the answer depends on the generator cache");
-    assert_eq!(cold.matches("is used here but").count(), 1, "{cold}");
-    assert!(cold.starts_with("lib.vyrn:8:"), "{cold}");
+    cold
 }
 
 /// A gen fn no program runs as a generator is judged by the program that

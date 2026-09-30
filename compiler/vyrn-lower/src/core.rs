@@ -5752,7 +5752,7 @@ impl<'a> Builder<'a> {
                 // `?` itself, the value by its operand.
                 let fb = self.bind_pattern(
                     &Pattern::Failure(Binder {
-                        id: Id(tid.0),
+                        id: Id(tid),
                         ..Binder::synthetic("@err")
                     }),
                     &ity,
@@ -5797,7 +5797,7 @@ impl<'a> Builder<'a> {
                 let mark = self.scope.len();
                 let ob = self.bind_pattern(
                     &Pattern::Success(Binder {
-                        id: Id(expr.id().0),
+                        id: Id(expr.id()),
                         ..Binder::synthetic("@ok")
                     }),
                     &ity,
@@ -7929,7 +7929,7 @@ fn place_frames(
                     .is_none();
                 if fresh {
                     if trace {
-                        eprintln!("placer: {} store at {} releases", body.name, m.site.0);
+                        eprintln!("placer: {} store at {:?} releases", body.name, m.site);
                     }
                     touched.insert(owner.to_string());
                 }
@@ -7939,8 +7939,8 @@ fn place_frames(
             let kind = own.proto.release_kind(&info.ty);
             if trace {
                 eprintln!(
-                    "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
-                    body.name, info.source, info.line, m.kind, m.exit, m.site.0, kind, m.holes
+                    "placer: {} `{}` (line {}) {:?} at {:?} site {:?} kind {:?} holes {:?}",
+                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
                 );
             }
             // A receiver a consumer borrowed out of ([`NameInfo::producer`]):

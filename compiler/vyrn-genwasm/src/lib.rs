@@ -19,7 +19,7 @@ use vyrn_frontend::ast::{Block, Expr, Function, Id, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
 #[cfg(feature = "host")]
 use vyrn_frontend::gen::{compiler_identity, CodePiece, GenRead, Spliced};
-use vyrn_frontend::gen::{GenInputs, GenOutput};
+use vyrn_frontend::gen::{GenError, GenInputs, GenOutput};
 
 /// Calls this path cannot serve; a module containing one is declined (see
 /// [`engine`]). A `gen fn` may not call the write capabilities, so this only
@@ -47,14 +47,15 @@ fn engine(
     fn_name: &str,
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
-) -> Option<Result<GenOutput, String>> {
+) -> Option<Result<GenOutput, GenError>> {
     if let Some(what) = reaches_unserved(program) {
         decline(&format!("the module reaches `{what}`"));
         return None;
     }
     match run(program, fn_name, args, inputs) {
         Err(EngineError::Unsupported) => None,
-        Err(EngineError::Failed(e)) => Some(Err(e)),
+        Err(EngineError::Failed(e)) => Some(Err(GenError::Failed(e))),
+        Err(EngineError::Refused(ds)) => Some(Err(GenError::Refused(ds))),
         Ok(out) => Some(Ok(out)),
     }
 }
@@ -83,6 +84,8 @@ enum EngineError {
     Unsupported,
     /// The generator itself failed.
     Failed(String),
+    /// The typed judgment refused the generator's program.
+    Refused(Vec<vyrn_frontend::diagnostics::Diagnostic>),
 }
 
 /// The first call anywhere in the program this path cannot serve.
@@ -255,7 +258,7 @@ pub fn run_pure(
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
     exec: impl FnOnce(&[u8], &[String], &[Atom]) -> Result<Vec<u8>, String>,
-) -> Option<Result<GenOutput, String>> {
+) -> Option<Result<GenOutput, GenError>> {
     let target = program.functions.iter().find(|f| f.name == fn_name)?;
     let arg = inputs.type_arg.as_ref()?;
     if !dispatchable(target) || !takes_type_arg(target) || !args.is_empty() {
@@ -270,15 +273,17 @@ pub fn run_pure(
         .map(|t| (t.name.clone(), t.clone()))
         .collect();
     let mut atoms = Vec::new();
-    let run = || -> Result<GenOutput, String> {
-        encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)?;
-        let wrapper =
-            wrapper_program(program).ok_or("the wrapper program cannot be synthesized")?;
+    let run = || -> Result<GenOutput, GenError> {
+        encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)
+            .map_err(GenError::Failed)?;
+        let wrapper = wrapper_program(program).ok_or(GenError::Failed(
+            "the wrapper program cannot be synthesized".into(),
+        ))?;
         let bytes = vyrn_codegen::direct::compile_gen_host(&wrapper)?;
-        let stdout = exec(&bytes, &[fn_name.to_string()], &atoms)?;
-        let (_, source) = unframe_result(&stdout)?;
-        let source =
-            String::from_utf8(source).map_err(|_| "generator emitted invalid UTF-8".to_string())?;
+        let stdout = exec(&bytes, &[fn_name.to_string()], &atoms).map_err(GenError::Failed)?;
+        let (_, source) = unframe_result(&stdout).map_err(|e| GenError::Failed(e.into()))?;
+        let source = String::from_utf8(source)
+            .map_err(|_| GenError::Failed("generator emitted invalid UTF-8".into()))?;
         Ok(GenOutput {
             source,
             reads: Vec::new(),
@@ -865,7 +870,10 @@ fn mangle(ty: &Type) -> Option<String> {
 /// cannot compile declines.
 #[cfg(feature = "host")]
 fn compile_to_wasm(_key: &str, program: &Program) -> Result<Vec<u8>, EngineError> {
-    vyrn_codegen::direct::compile_gen_host(program).map_err(|e| decline(&e))
+    vyrn_codegen::direct::compile_gen_host(program).map_err(|e| match e {
+        GenError::Refused(ds) => EngineError::Refused(ds),
+        GenError::Failed(e) => decline(&e),
+    })
 }
 
 /// `__vyrn_gen_read`'s modes, shared with the emitter.
@@ -1542,6 +1550,8 @@ fn run_module(
                     m
                 }
                 None => {
+                    // A compile the typed judgment refused fails here, so no
+                    // cache holds a module for it (`direct::compile_gen_host`).
                     let bytes = build()?;
                     trace("emit", t.elapsed());
                     let t = std::time::Instant::now();

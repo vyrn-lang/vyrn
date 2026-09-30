@@ -28,6 +28,7 @@ use vyrn_frontend::core::check::{Check, Guard, Verdict};
 use vyrn_frontend::core::{
     Arg, Arm, Callee, Ctor, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
 };
+use vyrn_frontend::gen::GenError;
 use vyrn_frontend::own::DropKind;
 /// Shared with `vyrn-lower` and the other engines, so exits compare without a translation.
 use vyrn_frontend::own::Exit as ExitKind;
@@ -185,7 +186,7 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
 /// `schemaOf` has no row in the core.
 pub fn compile(program: &Program, _memo: &Memo) -> Result<Vec<u8>, String> {
     crate::set_gen_host(false);
-    compile_inner(program)
+    compile_inner(program, vyrn_lower::analyze(program))
 }
 
 /// Returns the module [`compile`] emits, as WAT (`vyrn emit-wat`), so a test can pin its shape.
@@ -235,16 +236,29 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
 ///
 /// Takes no [`Memo`]: a generator runs inside a load, the LSP opens none on purpose, and the
 /// generation engine declines a refusal to the interpreter.
-pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
+///
+/// # Errors
+///
+/// [`GenError::Refused`] when the typed judgment refused the program, whether or not it would
+/// run, so no engine caches a module for it; [`GenError::Failed`] when a body has no lowering.
+pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
     // Thread-local because `llt_of` reads it, and `llt_of` has other callers: a `Code` is an
     // `i64` handle only here. Cleared after, so a later `compile` on this thread is unaffected.
     crate::set_gen_host(true);
-    let r = compile_inner(program);
+    let world = vyrn_lower::analyze(program);
+    let r = if world.typed_diagnostics().is_empty() {
+        compile_inner(program, world).map_err(GenError::Failed)
+    } else {
+        Err(GenError::Refused(world.typed_diagnostics().to_vec()))
+    };
     crate::set_gen_host(false);
     r
 }
 
-fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
+fn compile_inner(
+    program: &Program,
+    world: std::sync::Arc<vyrn_lower::World>,
+) -> Result<Vec<u8>, String> {
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -330,7 +344,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         user.push(f);
     }
 
-    let world = vyrn_lower::analyze(program);
     // The leak instrument; a generator host never carries it.
     let audited = vyrn_frontend::loader::audit_build();
     let mut cx = Cx {
