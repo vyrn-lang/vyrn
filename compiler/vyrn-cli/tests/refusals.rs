@@ -325,6 +325,13 @@ fn census() -> Vec<Row> {
             "`f` was moved here into a literal\nline 7: ... and `f` is used again here",
             Kernel::Its,
         ),
+        row(
+            "r43_read_whole_with_a_hole.vyrn",
+            "a name with a hole may not be read whole",
+            "`p.name` was taken out of `p` here\nline 10: ... and `p` is used as a whole here, \
+             with the hole still in it",
+            Kernel::Its,
+        ),
     ]
 }
 
