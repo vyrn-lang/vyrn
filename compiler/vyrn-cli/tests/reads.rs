@@ -21,6 +21,7 @@ fn main() -> Int64 {
     print(a() + b() + c())
     return 0
 }
+test \"a doubles\" { assertEq(a(), 2) }
 ";
 
 /// The edit: the root declares `half`.
@@ -63,4 +64,10 @@ fn a_miss_is_a_read_before_the_edit_and_a_hit_after_it() {
     assert_eq!(w.readers(&miss), ids(&w, &["c"]));
     let (w, p) = world(&format!("{ROOT}{HALF}"));
     assert_eq!(w.readers(&decl(&p, "half")), ids(&w, &["c"]));
+}
+
+#[test]
+fn a_test_block_reads_the_function_it_calls() {
+    let (w, p) = world(&format!("{ROOT}{HALF}"));
+    assert_eq!(w.readers(&decl(&p, "a")), ids(&w, &["main", "test@0"]));
 }

@@ -1099,11 +1099,13 @@ fn check_accum_inner(
     in_bodies += checker.check_globals(program, &mut out, &mut refused);
 
     // 3. Validate each type decl (base kind, referenced-type existence, predicate).
-    for t in &program.type_decls {
+    for (i, t) in (0..).zip(&program.type_decls) {
+        checker.reading(SourceBody::TypeDecl(i));
         if let Err(s) = checker.unit(|| checker.check_type_decl(t)) {
             out.extend(s);
         }
     }
+    checker.reader.set(None);
 
     // 3b. Validate each contract decl: member types exist, defaults match.
     for c in &program.contracts {
@@ -1149,8 +1151,7 @@ fn check_accum_inner(
     //    drains the rest. Within one expression the check is first-error.
     for (i, f) in program.functions.iter().enumerate().skip(bodies_from) {
         let produced_from = out.len();
-        let reader = checker.record.is_some().then(|| FnId::nth(i));
-        checker.reader.set(reader);
+        checker.reading(SourceBody::Fn(i as u32));
 
         // Signature validation runs outside `function()` and must accept a
         // `Code` type in a `gen fn` signature.
@@ -1205,14 +1206,18 @@ fn check_accum_inner(
     //    code can call it.
     if bodies_from == 0 {
         check_places(&checker, program, &mut out);
-        check_named_blocks(&checker, &program.tests, "test", &checker.in_test, &mut out);
+        let (tests, benches) = (&program.tests, &program.benches);
+        let (in_test, in_bench) = (&checker.in_test, &checker.in_bench);
+        check_named_blocks(&checker, tests, "test", in_test, SourceBody::Test, &mut out);
         check_named_blocks(
             &checker,
-            &program.benches,
+            benches,
             "bench",
-            &checker.in_bench,
+            in_bench,
+            SourceBody::Bench,
             &mut out,
         );
+        checker.reader.set(None);
     }
 
     // 7. Comptime purity of every `gen fn` and its callees, after
@@ -1249,7 +1254,8 @@ fn check_accum_inner(
 /// a place, because a value would be a hidden copy. The place is
 /// rooted in `self` or a parameter, which the access site owns.
 fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    for (imp, f) in crate::project::all(program) {
+    for (i, (imp, f)) in (0..).zip(crate::project::all(program)) {
+        checker.reading(SourceBody::Place(i));
         let mut push = |d: Diagnostic| out.push(d.in_file(f.module.clone()));
         if crate::project::is_optional(f) {
             check_optional_place(checker, f, &mut push);
@@ -1499,6 +1505,7 @@ fn check_named_blocks(
     blocks: &[NamedBlock],
     noun: &str,
     host: &RefCell<bool>,
+    body: fn(u32) -> SourceBody,
     out: &mut Vec<Diagnostic>,
 ) {
     let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
@@ -1513,6 +1520,7 @@ fn check_named_blocks(
     }
     *host.borrow_mut() = true;
     for (i, t) in blocks.iter().enumerate() {
+        checker.reading(body(i as u32));
         // The head is synthetic but the body is the real node, so what the
         // checker records lands on the nodes `own` and the lowering walk.
         let synthetic = Function {
@@ -1592,9 +1600,10 @@ pub struct Recorded {
     pub calls: HashMap<NodeId, CallDecl>,
     /// What a check that records nothing returns as [`stored_fn_effects`].
     pub stored: StoredFnEffects,
-    /// Each function body's name lookups, each key once per function, in
-    /// the order read ([`Checker::resolve_fn`], [`Checker::resolve_global`]).
-    pub reads: Vec<(FnId, Key)>,
+    /// Each source body's name lookups, each key once per body, in the order
+    /// read ([`Checker::resolve_fn`], [`Checker::resolve_global`]). A body
+    /// the check typed again repeats its rows.
+    pub reads: Vec<(SourceBody, Key)>,
 }
 
 impl Recorded {
@@ -1816,11 +1825,11 @@ struct Checker<'a> {
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
     record: Option<RefCell<Recorded>>,
-    /// The function whose body is being checked, when the check records:
-    /// every name lookup then records a read row for it.
-    reader: std::cell::Cell<Option<FnId>>,
+    /// The source body being checked, when the check records: every name
+    /// lookup then records a read row for it ([`Checker::reading`]).
+    reader: std::cell::Cell<Option<SourceBody>>,
     /// The read rows, in the order read ([`Recorded::reads`]).
-    reads: RefCell<Vec<(FnId, Key)>>,
+    reads: RefCell<Vec<(SourceBody, Key)>>,
     /// The substitution the innermost generic call just solved, for the
     /// [`Checker::expr`] wrapper that knows the call node's address. A nested
     /// call consumes and clears it before its caller writes one.
@@ -2881,6 +2890,7 @@ impl<'a> Checker<'a> {
         let all_globals: HashSet<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
         let mut ready: HashSet<String> = HashSet::new();
         for (i, g) in program.globals.iter().enumerate() {
+            self.reading(SourceBody::Global(i as u32));
             // A literal initializer's range error names the global's line.
             *self.stmt_line.borrow_mut() = g.line;
             let bty = self.unit(|| -> Result<Type, Diagnostic> {
@@ -2953,6 +2963,7 @@ impl<'a> Checker<'a> {
                 .insert(g.name.clone(), (decl, binding));
             ready.insert(g.name.clone());
         }
+        self.reader.set(None);
         out.len() - before
     }
 
@@ -6512,7 +6523,13 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// Records that the function being checked read `hit` under `name`, or
+    /// Makes `body` the reader of every lookup until the next call, when the
+    /// check records.
+    fn reading(&self, body: SourceBody) {
+        self.reader.set(self.record.is_some().then_some(body));
+    }
+
+    /// Records that the body being checked read `hit` under `name`, or
     /// missed it in this module ([`Key`]).
     fn read<T>(&self, name: &str, hit: Option<(DeclId, T)>) -> Option<T> {
         if let Some(f) = self.reader.get() {

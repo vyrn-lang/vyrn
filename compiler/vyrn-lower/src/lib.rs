@@ -26,7 +26,9 @@ pub use world::{analyze, forget_loaded, hand_on, FnRow, Fns, World};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use vyrn_frontend::ast::{Expr, FnId, Function, LambdaBody, NodeId, Program, Stmt, Type};
+use vyrn_frontend::ast::{
+    Expr, FnId, Function, LambdaBody, NodeId, Program, SourceBody, Stmt, Type,
+};
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types::{
@@ -207,9 +209,8 @@ pub struct Lowered<'a> {
     pub places: Vec<PlaceBody<'a>>,
     /// The checker's record every [`NodeTypes`] here was read off.
     pub recorded: std::sync::Arc<checker::Recorded>,
-    /// The name of each [`FnId`] this form numbers, in id order: every
-    /// program function, then every [`PlaceBody`], then every
-    /// [`OutsideBody`]. The World's function table starts with these rows.
+    /// [`Program::source_names`]: the World's function table starts with
+    /// these rows.
     pub source: Vec<String>,
 }
 
@@ -697,28 +698,24 @@ fn build<'a>(
         }
     }
     let predicates = pw.facts;
-    let mut source: Vec<String> = program.functions.iter().map(|f| f.name.clone()).collect();
-    let mut mint = |name: &str| {
-        source.push(name.to_string());
-        FnId::nth(source.len() - 1)
-    };
+    let id = |body| program.source_id(body);
     let mut places: Vec<PlaceBody<'a>> = Vec::new();
-    for (_, f) in vyrn_frontend::project::all(program) {
+    for (i, (_, f)) in (0..).zip(vyrn_frontend::project::all(program)) {
         let mut w = Walk::new(recorded, &program.impls, HashMap::new());
         facts_block(&f.body, &mut Default::default(), &mut w);
         places.push(PlaceBody {
             func: f,
-            id: mint(&f.name),
+            id: id(SourceBody::Place(i)),
             facts: w.facts,
         });
     }
     let mut outside: Vec<OutsideBody<'a>> = Vec::new();
-    for (i, t) in program.tests.iter().enumerate() {
+    for (i, t) in (0..).zip(&program.tests) {
         let mut w = Walk::new(recorded, &program.impls, HashMap::new());
         facts_block(&t.body, &mut Default::default(), &mut w);
         let name = format!("test@{i}");
         outside.push(OutsideBody {
-            id: mint(&name),
+            id: id(SourceBody::Test(i)),
             name,
             block: &t.body,
             module: t.module.clone(),
@@ -726,12 +723,12 @@ fn build<'a>(
             facts: w.facts,
         });
     }
-    for (i, b) in program.benches.iter().enumerate() {
+    for (i, b) in (0..).zip(&program.benches) {
         let mut w = Walk::new(recorded, &program.impls, HashMap::new());
         facts_block(&b.body, &mut Default::default(), &mut w);
         let name = format!("bench@{i}");
         outside.push(OutsideBody {
-            id: mint(&name),
+            id: id(SourceBody::Bench(i)),
             name,
             block: &b.body,
             module: b.module.clone(),
@@ -852,7 +849,7 @@ fn build<'a>(
         bodies: outside,
         places,
         recorded: recorded.clone(),
-        source,
+        source: program.source_names(),
     }
 }
 

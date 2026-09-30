@@ -40,8 +40,9 @@ impl NodeId {
 
 /// Names one function for the tables keyed by function: an index into
 /// `vyrn_lower::World`'s function rows, never reused within one World.
-/// `Program::functions[i]` is `FnId(i)`; the lowering numbers the rest. A
-/// storage index, never an order, so it has no `Ord`.
+/// [`Program::source_id`] numbers the source bodies, `Program::functions[i]`
+/// first as `FnId(i)`; the lowering numbers its instances and lambda frames
+/// after them. A storage index, never an order, so it has no `Ord`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FnId(pub u32);
 
@@ -58,6 +59,27 @@ impl FnId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+}
+
+/// One source body of a linked program, by its position in its own list.
+/// [`Program::source_id`] numbers it. Stable when synthesis appends
+/// functions, which the id of every body after the functions is not, so the
+/// checker records a read against this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceBody {
+    /// `Program::functions[i]`.
+    Fn(u32),
+    /// The `i`th `impl` projection, in [`crate::project::all`] order.
+    Place(u32),
+    /// `Program::tests[i]`.
+    Test(u32),
+    /// `Program::benches[i]`.
+    Bench(u32),
+    /// The initializer of `Program::globals[i]`.
+    Global(u32),
+    /// The check of `Program::type_decls[i]`: its base, the types it names
+    /// and its predicate.
+    TypeDecl(u32),
 }
 
 /// Names one declaration of a linked program: its kind and its position in
@@ -1511,6 +1533,42 @@ impl Binder {
 }
 
 impl Program {
+    /// The id of `body`: the functions, then the projections, tests,
+    /// benches, module-state initializers and type-declaration checks, each
+    /// in its list's order. The one numbering of source bodies; the lowering
+    /// and the World take it.
+    pub fn source_id(&self, body: SourceBody) -> FnId {
+        let fns = self.functions.len();
+        let places = fns + crate::project::all(self).count();
+        let tests = places + self.tests.len();
+        let benches = tests + self.benches.len();
+        let globals = benches + self.globals.len();
+        let (from, i) = match body {
+            SourceBody::Fn(i) => (0, i),
+            SourceBody::Place(i) => (fns, i),
+            SourceBody::Test(i) => (places, i),
+            SourceBody::Bench(i) => (tests, i),
+            SourceBody::Global(i) => (benches, i),
+            SourceBody::TypeDecl(i) => (globals, i),
+        };
+        FnId::nth(from + i as usize)
+    }
+
+    /// The name each [`Program::source_id`] is emitted and looked up under,
+    /// in id order: a function's or projection's own, `test@i`, `bench@i`,
+    /// `global@i` and `type@i`.
+    pub fn source_names(&self) -> Vec<String> {
+        let own = self.functions.iter().map(|f| f.name.clone());
+        let places = crate::project::all(self).map(|(_, f)| f.name.clone());
+        let nth = |kind: &'static str, n: usize| (0..n).map(move |i| format!("{kind}@{i}"));
+        (own.chain(places))
+            .chain(nth("test", self.tests.len()))
+            .chain(nth("bench", self.benches.len()))
+            .chain(nth("global", self.globals.len()))
+            .chain(nth("type", self.type_decls.len()))
+            .collect()
+    }
+
     /// Numbers every node of the program, overwriting any id it held. The
     /// parser and the loader call it once the tree is whole; a side table
     /// built before it is stale.

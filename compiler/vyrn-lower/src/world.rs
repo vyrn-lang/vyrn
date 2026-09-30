@@ -129,14 +129,14 @@ impl Fns {
     }
 }
 
-/// The call relation between source functions. A caller is the function a
-/// body belongs to: every instance of a generic and every lambda frame count
-/// under the function's own row, the module-state initializers under the
-/// empty name's. A callee is a [`Callee::Fn`] row or a declared release a
-/// name runs. A call through a value, an undispatched method and a
-/// projection resolve to no function, so they are no edge. A `where`
-/// predicate has no row, and a body the judgment memo serves is not built,
-/// so neither has edges.
+/// The call relation between source bodies ([`Program::source_id`]). A
+/// caller is the body a frame belongs to: every instance of a generic and
+/// every lambda frame count under the function's own row, a module-state
+/// initializer and a `where` predicate under their own. A callee is a
+/// [`Callee::Fn`] row or a declared release a name runs. A call through a
+/// value, an undispatched method and a projection resolve to no function, so
+/// they are no edge. A body the judgment memo serves is not built, so it has
+/// no edges.
 #[derive(Default)]
 pub(crate) struct Calls {
     /// By caller: its callees in source order, each once.
@@ -178,11 +178,9 @@ impl Calls {
     }
 }
 
-/// The read relation between functions and the name lookups their text
+/// The read relation between source bodies and the name lookups their text
 /// makes ([`vyrn_frontend::checker::Recorded::reads`]): a declaration found,
-/// or a name missed in a scope. A reader is a `Program::functions` row; a
-/// `test` or `bench` body, a projection, module state and a type
-/// declaration read no row.
+/// or a name missed in a scope. A reader is a [`Program::source_id`] row.
 #[derive(Default)]
 pub(crate) struct Reads {
     /// By reader: its keys in the order read, each once.
@@ -280,12 +278,15 @@ const _: () = {
 };
 
 impl World {
-    /// The World of `ownership`, with the read relation of its checker's
-    /// record.
-    pub(crate) fn new(ownership: Ownership) -> World {
+    /// The World of `program`'s `ownership`, with the read relation of its
+    /// checker's record.
+    pub(crate) fn new(program: &Program, ownership: Ownership) -> World {
         let mut rows: HashMap<FnId, Vec<Key>> = HashMap::new();
-        for (f, k) in &ownership.record.reads {
-            rows.entry(*f).or_default().push(k.clone());
+        for (body, k) in &ownership.record.reads {
+            let ks = rows.entry(program.source_id(*body)).or_default();
+            if !ks.contains(k) {
+                ks.push(k.clone());
+            }
         }
         let mut world = World {
             ownership,
@@ -476,7 +477,7 @@ pub fn analyze(program: &Program) -> Arc<World> {
             return w;
         }
     }
-    let mut world = World::new(own::analyze(program));
+    let mut world = World::new(program, own::analyze(program));
     crate::core::augment(program, &mut world);
     #[cfg(debug_assertions)]
     world.check();

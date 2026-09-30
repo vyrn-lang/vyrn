@@ -122,7 +122,7 @@ the playground serves an embedded `std/`. The loader:
    `analyze` returns the World (`vyrn_lower::World`): the `Ownership` with
    the checker's record, the function table, the call relation
    (`World::callees` and `World::callers`), the read relation
-   (`World::readers`: the declarations and misses each function's name
+   (`World::readers`: the declarations and misses each source body's name
    lookups read), the core's bodies and facts,
    and both refusal lists. The plan's rows, the bodies and the effect
    judgment's state rows are keyed by `FnId`; a frame carries its row

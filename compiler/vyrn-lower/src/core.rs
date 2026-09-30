@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
-    NodeId, Pattern, Program, Stmt, Type, TypeDecl, UnOp,
+    NodeId, Pattern, Program, SourceBody, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
@@ -7573,7 +7573,7 @@ pub fn augment(program: &Program, w: &mut World) {
     // Each module-state initializer and each `where` predicate, for the
     // judgment alone. An initializer the checker did not type has no core;
     // the checker's refusal is its sentence.
-    for g in &program.globals {
+    for (i, g) in (0..).zip(&program.globals) {
         if node_ty(own, g.init.id()).is_none() {
             continue;
         }
@@ -7588,8 +7588,8 @@ pub fn augment(program: &Program, w: &mut World) {
             &g.init,
         ) {
             Ok(top) => {
-                let state = w.fns.add("");
-                crate::world::add_callees(&top, &by_name, calls.entry(state).or_default());
+                let at = program.source_id(SourceBody::Global(i));
+                crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
                 typed(program, own, &mut r, &top, &g.module, true);
             }
             Err(e) => {
@@ -7597,7 +7597,7 @@ pub fn augment(program: &Program, w: &mut World) {
             }
         }
     }
-    for d in &program.type_decls {
+    for (i, d) in (0..).zip(&program.type_decls) {
         let Some(p) = &d.predicate else { continue };
         let binds: Vec<(String, Type)> = match &d.base {
             Type::Record(fields) => fields
@@ -7617,6 +7617,8 @@ pub fn augment(program: &Program, w: &mut World) {
             p,
         ) {
             Ok(top) => {
+                let at = program.source_id(SourceBody::TypeDecl(i));
+                crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
                 typed(program, own, &mut r, &top, &d.module, true);
             }
             Err(e) => {
