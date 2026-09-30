@@ -365,6 +365,12 @@ fn census() -> Vec<Row> {
              with the hole still in it",
             Kernel::Its,
         ),
+        row(
+            "r49_lambda_returns_its_read_parameter.vyrn",
+            "rule 2: a lambda takes each parameter by `read`",
+            "`s` may not be returned — it is a `read` parameter, and a return is owned",
+            Kernel::Its,
+        ),
     ]
 }
 

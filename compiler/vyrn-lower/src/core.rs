@@ -5221,6 +5221,7 @@ impl<'a> Builder<'a> {
         }
         for (p, pt) in params.iter().zip(ptys) {
             let m = self.name(&p.name, pt, false, *line);
+            self.body.names[m.index()].borrow_kind = param_borrow(Capability::Read, &p.name);
             self.scope.push((p.name.clone(), m));
             self.body.params.push(m);
         }
