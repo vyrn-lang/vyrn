@@ -1,0 +1,13 @@
+// The same for the checker's refusals of a global's declaration and use.
+import { addLog } from "./a_module_with_globals_a_root_also_names.vyrn"
+let fixed = 1
+let early = later
+let later = 2
+let unit = print("x")
+let typed: String = 5
+let selfRead = selfRead
+fn main() -> Int64 {
+    fixed = 2
+    drop later
+    return 0
+}

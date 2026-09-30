@@ -1,0 +1,11 @@
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:7:0: `c` declared Cfg but initializer is Int64
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:8:0: `helper` argument 1 expects Int64, found String
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:9:0: return type mismatch: expected Cfg, found Int64
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:10:0: `helper` expects 1 argument(s), got 2
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:12:0: array elements must share a type: expected Cfg, found Int64
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:16:0: `helper` expects a Int64 argument, but `fn(String) -> Int64` will pass it String
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:19:0: type Cfg has no field `m`
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:22:0: `grow` argument 1 is `modify`, so `xs` must be declared `mut`
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:26:0: `value` boxes an Int64, Bool, or String, found { n: Int64 } — say how it renders with `impl Show for Cfg`
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:27:0: `value` boxes an Int64, Bool, or String, found { n: Int64 }
+a_renamed_function_and_type_read_as_written_in_the_checker.vyrn:29:0: `print` needs a number, Bool, or String, found Cfg — say how it renders with `impl Show for Cfg`

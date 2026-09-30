@@ -3,6 +3,7 @@
 //! reads under it. A [`Diagnostic`](crate::diagnostics::Diagnostic) built from
 //! a [`Rule`] carries it, and its message is [`Rule::render`].
 
+use crate::ast::{Speech, Spellings, Type};
 use crate::diagnostics::menu;
 use crate::types::{FALLIBLE, SHOW, SHOW_SHOW};
 
@@ -12,17 +13,28 @@ const HINT: &str = "generators run at compile time — they may not use `extern`
 
 macro_rules! rules {
     ($($rule:ident { $($hole:ident),* } $text:literal $(fix $fix:literal)*;)*) => {
-        /// A rule the compiler states, with the rendered text of each hole.
+        /// A rule the compiler states, with each hole's value.
         #[derive(Debug, Clone)]
         pub enum Rule {
-            $($rule { $($hole: String),* },)*
+            $($rule { $($hole: Hole),* },)*
         }
 
         impl Rule {
-            /// Renders the sentence, then one fix line per way out.
+            /// Renders the sentence by linked names, then one fix line per way
+            /// out.
             pub fn render(&self) -> String {
+                self.render_in(&Spellings::default().speech(&None))
+            }
+
+            /// Renders the sentence as `speech` spells it, then one fix line
+            /// per way out.
+            // A rule without holes reads no speech.
+            #[allow(unused_variables)]
+            pub fn render_in(&self, speech: &Speech) -> String {
                 match self {
                     $(Rule::$rule { $($hole),* } => {
+                        let speech = Hole::sentence(speech, &[$($hole),*]);
+                        $(let $hole = $hole.said(&speech);)*
                         menu(format!($text), Vec::<String>::from([$(format!($fix)),*]))
                     })*
                 }
@@ -31,14 +43,99 @@ macro_rules! rules {
     };
 }
 
+/// A rule hole's value. A type and a declaration keep their linked names
+/// until the sentence renders, which spells them ([`Speech`]).
+#[derive(Debug, Clone)]
+pub enum Hole {
+    Text(String),
+    Type(Type),
+    Decl(String),
+}
+
+/// A declaration's linked name, to fill a rule hole ([`Hole::Decl`]).
+pub struct DeclName<'a>(pub &'a str);
+
+impl Hole {
+    fn sentence<'a>(speech: &Speech<'a>, holes: &[&Hole]) -> Speech<'a> {
+        let (mut types, mut names) = (Vec::new(), Vec::new());
+        for h in holes {
+            match h {
+                Hole::Text(_) => {}
+                Hole::Type(t) => types.push(t),
+                Hole::Decl(n) => names.push(n.as_str()),
+            }
+        }
+        speech.sentence(&types, &names)
+    }
+
+    fn said(&self, speech: &Speech) -> String {
+        match self {
+            Hole::Text(s) => s.clone(),
+            Hole::Type(t) => speech.ty(t).to_string(),
+            Hole::Decl(n) => speech.name(n),
+        }
+    }
+}
+
+/// What fills a rule hole: text through `Display`, a [`Type`] or a
+/// [`DeclName`] as itself.
+pub trait IntoHole {
+    fn hole(&self) -> Hole;
+}
+
+macro_rules! text_holes {
+    ($($t:ty),*) => {
+        $(impl IntoHole for $t {
+            fn hole(&self) -> Hole {
+                Hole::Text(self.to_string())
+            }
+        })*
+    };
+}
+text_holes!(
+    String,
+    str,
+    usize,
+    u32,
+    u64,
+    i64,
+    char,
+    crate::consteval::ConstVal,
+    crate::artifacts::Target
+);
+
+impl<T: IntoHole + ?Sized> IntoHole for &T {
+    fn hole(&self) -> Hole {
+        (**self).hole()
+    }
+}
+
+impl<T: IntoHole + ?Sized> IntoHole for Box<T> {
+    fn hole(&self) -> Hole {
+        (**self).hole()
+    }
+}
+
+impl IntoHole for Type {
+    fn hole(&self) -> Hole {
+        Hole::Type(self.clone())
+    }
+}
+
+impl IntoHole for DeclName<'_> {
+    fn hole(&self) -> Hole {
+        Hole::Decl(self.0.to_string())
+    }
+}
+
 /// Builds `Rule::$rule`. A hole is filled by the variable of its name or by
-/// `hole = expr`, either through `Display`.
+/// `hole = expr`, either through [`IntoHole`].
 macro_rules! rule {
     (@hole $h:ident) => {
-        $h.to_string()
+        $crate::rules::IntoHole::hole(&$h)
     };
     (@hole $h:ident $e:expr) => {
-        $e.to_string()
+        $crate::rules::IntoHole::hole(&$e)
     };
     ($rule:ident $(, $h:ident $(= $e:expr)?)* $(,)?) => {
         $crate::rules::Rule::$rule { $($h: $crate::rules::rule!(@hole $h $($e)?)),* }
@@ -430,7 +527,10 @@ rules! {
     DeriveUncodable { g, off } "`derive({g}, ..)` cannot reflect `{off}`: it has no wire form";
     DeriveEntryMismatch { g, got, want }
         "generator `{g}` wrote the entry `{got}`, and this call needs `{want}`";
-    ValueType { t, hint } "`value` boxes an Int64, Bool, or String, found {t}{hint}";
+    ValueType { t } "`value` boxes an Int64, Bool, or String, found {t}";
+    ValueTypeNoShow { t, key }
+        "`value` boxes an Int64, Bool, or String, found {t} \u{2014} say how it renders \
+        with `impl {SHOW} for {key}`";
     ListType { other } "`@list` needs an Array, found {other}";
     SomePayload { aty, want } "`Some` payload is {aty} but Option<{want}> was expected";
     InferVariant { name }
@@ -526,8 +626,10 @@ rules! {
     GoneDesugared { name, module, sugar }
         "`{name}` is `{module}`'s, and `{sugar}` writes through it — add \
         `import {{ {name} }} from \"{module}\"`";
-    NeedsShow { shown, found, hint }
-        "`{shown}` needs a number, Bool, or String, found {found}{hint}";
+    NeedsShow { shown, found } "`{shown}` needs a number, Bool, or String, found {found}";
+    NeedsShowImpl { shown, found, key }
+        "`{shown}` needs a number, Bool, or String, found {found} \u{2014} say how it \
+        renders with `impl {SHOW} for {key}`";
     LambdaAssignsCapture { name, line }
         "a lambda captures by read; it cannot assign to the captured \
         binding `{name}` (line {line})";

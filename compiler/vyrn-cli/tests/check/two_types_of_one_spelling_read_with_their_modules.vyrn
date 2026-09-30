@@ -1,0 +1,9 @@
+// A sentence that shows the root's `Cfg` and the import's names the
+// import's by the path the root imports it by.
+import * as lib from "./a_module_exporting_a_type_a_root_also_names.vyrn"
+type Cfg = { n: Int64 }
+fn use(c: Cfg) -> Int64 { return c.n }
+fn main() -> Int64 {
+    let c: Cfg = lib.make()
+    return use(lib.make())
+}

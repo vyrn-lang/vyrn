@@ -8,7 +8,6 @@
 //! the read rows, and read the same open buffers.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::mpsc;
 
 use vyrn_frontend::loader::{DiskResolver, LoadOptions, ModuleResolver};

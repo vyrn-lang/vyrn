@@ -1252,6 +1252,7 @@ fn load_modules(
                     host: Host::default(),
                     module_hashes: BTreeMap::new(),
                     expansions: Default::default(),
+                    spellings: Default::default(),
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
@@ -2300,7 +2301,11 @@ fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>
 ///
 /// Afterwards every import is a bare import of a unique decl name. The LSP
 /// indexes a separate parse of the root, which keeps its aliases.
-fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_key: &str) {
+fn resolve_aliases(
+    modules: &mut [Module],
+    errors: &mut Vec<Diagnostic>,
+    root_key: &str,
+) -> Spellings {
     // Top-level decl names per module.
     let mut module_decls: HashMap<String, HashSet<String>> = HashMap::new();
     // `all_names` only lets `rename_apart` mint a collision-free `__fromN`, and
@@ -2671,6 +2676,8 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
+    let spellings = spellings(modules, &foreign_renames, &name_module_count, root_key);
+
     // Pass 3: apply the foreign-decl renames to the definition and its module's
     // references. The module's own namespace bindings keep its `ns.member(..)`
     // sugar out of the plain-name rewrite; pass 5 owns those.
@@ -2755,6 +2762,39 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         };
         nr.resolve_program(&mut m.program);
     }
+    spellings
+}
+
+/// The [`Spellings`] of a load: each declaration of a name two modules
+/// declare, by the name `renames` links it under, and the path of each
+/// import. Read before `renames` is applied. An injected module's reserved
+/// spellings stay out: no source wrote them.
+fn spellings(
+    modules: &[Module],
+    renames: &HashMap<(String, String), String>,
+    name_module_count: &HashMap<String, usize>,
+    root_key: &str,
+) -> Spellings {
+    let mut out = Spellings {
+        root: root_key.to_string(),
+        ..Spellings::default()
+    };
+    for m in modules.iter().filter(|m| m.injected.is_none()) {
+        for d in decls(&m.program).filter(|d| !d.injected) {
+            if name_module_count.get(d.name).is_some_and(|&n| n >= 2) {
+                let linked = resolved_name(renames, &m.key, d.name);
+                out.decls
+                    .insert(linked, (d.name.to_string(), m.key.clone()));
+            }
+        }
+        for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
+            if let ImportSource::Path(p) = &imp.source {
+                let key = (m.key.clone(), target.clone());
+                out.paths.insert(key, p.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Hands every part of a type to a visitor, outermost first: the one descent
@@ -2821,7 +2861,7 @@ type_head_descent!(type_nodes_mut, mut);
 
 /// The same descent, with the hook on a type's head name. `Named` and `App` are
 /// the two constructors that carry one.
-fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
+pub(crate) fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
     type_nodes(ty, &mut |t| {
         if let Type::Named(n) | Type::App(n, _) = t {
             f(n)
@@ -3138,7 +3178,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     let mut errors: Vec<Diagnostic> = Vec::new();
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
-    resolve_aliases(&mut modules, &mut errors, root_key);
+    let spellings = resolve_aliases(&mut modules, &mut errors, root_key);
     drop(alias_span);
     let index_span = crate::prof::phase("link: index");
 
@@ -3531,6 +3571,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.benches.extend(extra_benches);
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
+    program.spellings = std::sync::Arc::new(spellings);
     program.number();
     Ok(program)
 }

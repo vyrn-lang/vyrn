@@ -772,17 +772,17 @@ impl<'b> Kernel<'b> {
     /// broke it: [`NEVER_DISPOSED`], or with `twice` [`DISPOSED_TWICE`].
     fn obligation(&self, n: Name, twice: bool) -> Refusal {
         let i = &self.body.names[n.index()];
-        let ty = i.ty.to_string();
+        let (note, by) = match &i.linear {
+            Some(Linear::Declared(by)) if *by == i.ty.to_string() => (OWED_DECLARED, by.as_str()),
+            Some(Linear::Declared(by)) => (OWED_HELD, by.as_str()),
+            _ => (OWED_STREAM, ""),
+        };
+        let ([ty], [by]) = self.body.speech().say([&i.ty], [by]);
         let a = match ty.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) {
             true => "an",
             false => "a",
         };
-        let (note, by) = match &i.linear {
-            Some(Linear::Declared(by)) if *by == ty => (OWED_DECLARED, by.as_str()),
-            Some(Linear::Declared(by)) => (OWED_HELD, by.as_str()),
-            _ => (OWED_STREAM, ""),
-        };
-        let args = [("s", i.source.as_str()), ("a", a), ("ty", &ty), ("by", by)];
+        let args = [("s", i.source.as_str()), ("a", a), ("ty", &ty), ("by", &by)];
         let rule = if twice {
             DISPOSED_TWICE
         } else {
@@ -886,7 +886,7 @@ impl<'b> Kernel<'b> {
                     Some(Alias { via: Some(m), .. }) => self.src(*m),
                     _ => b,
                 };
-                let args = [("b", b), ("ty", ty.as_str()), ("m", m)];
+                let args = [("b", b), ("ty", self.body.spelled(ty)), ("m", m)];
                 return Err(self.say(SEALED_PAYLOAD, self.here, &args));
             }
             Some(Payload::Hole(p)) => p,
@@ -1006,7 +1006,7 @@ impl<'b> Kernel<'b> {
     fn alias_text(&self, a: &Alias) -> String {
         let root = match &a.root {
             Root::N(m) => self.src(*m).to_string(),
-            Root::G(g) => g.clone(),
+            Root::G(g) => self.body.spelled(g).to_string(),
         };
         format!("{root}{}", a.path.replace(".[]", "[..]"))
     }
@@ -1015,7 +1015,7 @@ impl<'b> Kernel<'b> {
     fn place_text(&self, p: &Place) -> String {
         match p {
             Place::Name(n) => self.src(*n).to_string(),
-            Place::Global(g) => g.clone(),
+            Place::Global(g) => self.body.spelled(g).to_string(),
             Place::Field(b, f) => format!("{}.{f}", self.place_text(b)),
             Place::Elem(b, _) | Place::Key(b, _) => format!("{}[..]", self.place_text(b)),
         }
@@ -1123,7 +1123,8 @@ impl<'b> Kernel<'b> {
                     (Root::N(n), _) => n,
                     (Root::G(g), _) if gs.contains(&g) => {
                         let s = self.place_text(p);
-                        let args = [("place", g.as_str()), ("s", &s), ("what", &what)];
+                        let place = self.body.spelled(&g);
+                        let args = [("place", place), ("s", &s), ("what", &what)];
                         return Err(self.say(STATE_READ, self.here, &args));
                     }
                     (Root::G(_), _) => continue,
@@ -1178,6 +1179,7 @@ impl<'b> Kernel<'b> {
         }) = st.alias.get(&n)
         {
             if path.is_empty() {
+                let g = self.body.spelled(g);
                 let never = "nothing may take ownership of module state \
                              (it lives for the whole module and is never dropped)";
                 let msg = if by == "a `return`" {
@@ -2100,12 +2102,13 @@ impl<'b> Kernel<'b> {
             },
             // An impl method is named by its protocol member, so an instance
             // and the generic body word one refusal alike.
-            Rhs::Call { callee, .. } => format!(
-                "`{}(..)`",
-                vyrn_frontend::types::impl_method_member(callee)
-                    .unwrap_or(callee)
-                    .trim_start_matches('@')
-            ),
+            Rhs::Call { callee, .. } => {
+                let member = vyrn_frontend::types::impl_method_member(callee).unwrap_or(callee);
+                format!(
+                    "`{}(..)`",
+                    self.body.spelled(member.trim_start_matches('@'))
+                )
+            }
             Rhs::Take(_) => "`consume`".to_string(),
             Rhs::Make(..) => "a literal".to_string(),
             Rhs::Read(_) | Rhs::Prim(..) => String::new(),
@@ -2161,7 +2164,7 @@ impl<'b> Kernel<'b> {
                     Place::Field(_, f) => format!("the field `{f}`"),
                     // An element or key store names its container, as the
                     // checker does.
-                    Place::Global(g) => format!("module state `{g}`"),
+                    Place::Global(g) => format!("module state `{}`", self.body.spelled(g)),
                     p => match root_of(p) {
                         Some((n, _)) if !self.src(n).starts_with('@') => {
                             format!("`{}`", self.src(n))

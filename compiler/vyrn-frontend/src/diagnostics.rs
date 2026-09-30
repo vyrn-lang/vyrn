@@ -91,6 +91,14 @@ impl Diagnostic {
         }
     }
 
+    /// Renders the rule's sentence again, as `spellings` spell it in the
+    /// diagnostic's module. A diagnostic without a rule keeps its message.
+    pub fn speak(&mut self, spellings: &crate::ast::Spellings) {
+        if let Some(rule) = &self.rule {
+            self.message = rule.render_in(&spellings.speech(&self.file));
+        }
+    }
+
     /// Places the diagnostic in `file`; `None` means the root module.
     pub fn in_file(self, file: Option<String>) -> Self {
         Diagnostic { file, ..self }

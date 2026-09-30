@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::lexer::{self, Tok, Triv, TrivKind};
 use vyrn_frontend::loader::{LoadOptions, MapResolver};
-use vyrn_frontend::rules::Rule;
+use vyrn_frontend::rules::{IntoHole, Rule};
 
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -70,7 +70,7 @@ fn with_input(src_len: usize, f: impl FnOnce(&str) -> Vec<u8>) -> usize {
             0,
             "host",
             Rule::SourceTooLong {
-                src_len: src_len.to_string(),
+                src_len: src_len.hole(),
             },
         );
         return publish_json(format!("{{\"diagnostics\":[{}]}}", diag_json(&d)));

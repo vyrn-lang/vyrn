@@ -918,6 +918,9 @@ pub struct Body {
     pub id: Option<FnId>,
     /// The module file the function came from; `None` for the root.
     pub file: Option<String>,
+    /// The program's [`crate::ast::Spellings`]. A refusal quotes a
+    /// declaration through [`Body::speech`].
+    pub spellings: std::sync::Arc<crate::ast::Spellings>,
     /// `export extern fn`: the JS caller releases every String the call hands
     /// back, so returning a borrow has its own refusal
     /// and `.copy()` is the only way out. A lambda frame carries its holder's
@@ -967,6 +970,16 @@ pub enum Cand {
 }
 
 impl Body {
+    /// The name the reader wrote for the declaration `linked`.
+    pub fn spelled<'a>(&'a self, linked: &'a str) -> &'a str {
+        self.spellings.written(linked)
+    }
+
+    /// How a sentence in this body's module spells a declaration.
+    pub fn speech(&self) -> crate::ast::Speech<'_> {
+        self.spellings.speech(&self.file)
+    }
+
     /// The must-use row a linear value bound by a `let` or a parameter owes:
     /// the reader disposes of it exactly once on every path. A receiver owes
     /// none, since `fn release(self)` is the disposal.

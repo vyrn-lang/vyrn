@@ -156,22 +156,18 @@ pub fn renders(t: &Type) -> bool {
 
 /// The refusal of `shown` at `t`, a type that does not render.
 pub fn needs_show(shown: &str, t: &Type) -> crate::rules::Rule {
-    crate::rules::Rule::NeedsShow {
-        shown: shown.to_string(),
-        found: t.to_string(),
-        hint: show_hint(t),
+    use crate::rules::{rule, DeclName};
+    let (shown, found) = (DeclName(shown), t);
+    match show_key(t) {
+        Some(key) => rule!(NeedsShowImpl, shown, found, key = DeclName(&key)),
+        None => rule!(NeedsShow, shown, found),
     }
 }
 
-/// The hint to add `impl Show` to a refusal. A module-prefixed type has no
-/// spelling at the call site, so it gets no hint.
-pub fn show_hint(t: &Type) -> String {
-    match type_key(t) {
-        Some(k) if !k.contains('$') => {
-            format!(" \u{2014} say how it renders with `impl {SHOW} for {k}`")
-        }
-        _ => String::new(),
-    }
+/// The type key a refusal names in its `impl Show` hint. A module-prefixed
+/// type has no spelling at the call site, so it gets no hint.
+pub fn show_key(t: &Type) -> Option<String> {
+    type_key(t).filter(|k| !k.contains('$'))
 }
 
 /// The `impl Show` method a value renders through, or `None` where the

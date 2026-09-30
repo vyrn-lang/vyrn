@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use crate::ast::*;
 use crate::consteval;
 use crate::diagnostics::Diagnostic;
-use crate::rules::Rule;
+use crate::rules::{rule, DeclName, Rule};
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
 use crate::types::Decls;
@@ -318,20 +318,10 @@ pub enum Gone {
 impl Gone {
     /// Returns the rule a program that wrote `name` breaks.
     pub fn rule(&self, name: &str) -> Rule {
-        let name = name.to_string();
         match self {
-            Gone::Module(m) => Rule::GoneModule {
-                name,
-                module: m.to_string(),
-            },
-            Gone::Removed(s) => Rule::GoneRemoved {
-                hint: s.to_string(),
-            },
-            Gone::Desugared { module, sugar } => Rule::GoneDesugared {
-                name,
-                module: module.to_string(),
-                sugar: sugar.to_string(),
-            },
+            Gone::Module(module) => rule!(GoneModule, name, module),
+            Gone::Removed(hint) => rule!(GoneRemoved, hint),
+            Gone::Desugared { module, sugar } => rule!(GoneDesugared, name, module, sugar),
         }
     }
 }
@@ -561,12 +551,13 @@ fn check_accum_inner(
     // 1. Collect and validate type declarations.
     let mut types: HashMap<String, (DeclId, TypeDecl)> = HashMap::new();
     for (i, t) in program.type_decls.iter().enumerate() {
+        let name = DeclName(&t.name);
         if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
-            out.push(cerr!(t.line, RedefinesBuiltinType, name = t.name).in_file(t.module.clone()));
+            out.push(cerr!(t.line, RedefinesBuiltinType, name).in_file(t.module.clone()));
             continue;
         }
         if types.contains_key(&t.name) {
-            out.push(cerr!(t.line, TypeDefinedTwice, name = t.name).in_file(t.module.clone()));
+            out.push(cerr!(t.line, TypeDefinedTwice, name).in_file(t.module.clone()));
             continue;
         }
         types.insert(t.name.clone(), (DeclId::nth(DeclKind::Type, i), t.clone()));
@@ -1183,6 +1174,9 @@ fn check_accum_inner(
     // 7. Comptime purity of every `gen fn` and its callees, after
     //    the body checks so a generator's type errors come first.
     check_comptime_purity(program, &mut out);
+    for d in &mut out {
+        d.speak(&program.spellings);
+    }
 
     let effects = StoredFnEffects {
         sources: checker.stored_sources.borrow().clone(),
@@ -2714,7 +2708,7 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(t.line, EnumWhere));
             }
             if vs.is_empty() {
-                return Err(cerr!(t.line, EnumEmpty, name = t.name));
+                return Err(cerr!(t.line, EnumEmpty, name = DeclName(&t.name)));
             }
             for v in vs {
                 for p in &v.payload {
@@ -2759,7 +2753,7 @@ impl<'a> Checker<'a> {
             }
             self.ensure_type_exists(&t.base, t.line)?;
             if crate::types::record_fields(&t.base, self).is_none() {
-                return Err(cerr!(t.line, NotRecord, name = t.name));
+                return Err(cerr!(t.line, NotRecord, name = DeclName(&t.name)));
             }
             return Ok(());
         }
@@ -2767,7 +2761,8 @@ impl<'a> Checker<'a> {
             t.base,
             Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
         ) {
-            return Err(cerr!(t.line, ValidatedBaseNotScalar, name = t.name));
+            let name = DeclName(&t.name);
+            return Err(cerr!(t.line, ValidatedBaseNotScalar, name));
         }
         // A refinement sees `value` at the base type.
         self.check_predicate(
@@ -2789,8 +2784,9 @@ impl<'a> Checker<'a> {
         let Some(pred) = &t.predicate else {
             return Ok(());
         };
+        let decl = DeclName(&t.name);
         if consteval::contains_call(pred) {
-            return Err(cerr!(t.line, PredicateCalls, kind, name = t.name));
+            return Err(cerr!(t.line, PredicateCalls, kind, name = decl));
         }
         let mut scope = Scope::closed();
         for (name, ty) in binds {
@@ -2798,7 +2794,7 @@ impl<'a> Checker<'a> {
         }
         let pty = self.expr(pred, &scope, None, None)?;
         if self.base(&pty) != Type::Bool {
-            return Err(cerr!(t.line, PredicateNotBool, kind, name = t.name, pty));
+            return Err(cerr!(t.line, PredicateNotBool, kind, name = decl, pty));
         }
         Ok(())
     }
@@ -2965,17 +2961,17 @@ impl<'a> Checker<'a> {
                 let scope = Scope::open();
                 let vty = self.expr(&g.init, &scope, g.ty.as_ref(), None)?;
                 if self.base(&vty) == Type::Unit {
-                    return Err(cerr!(g.line, GlobalUnit, name = g.name));
+                    return Err(cerr!(g.line, GlobalUnit, name = DeclName(&g.name)));
                 }
                 if matches!(self.base(&vty), Type::Stream(_)) {
-                    return Err(cerr!(g.line, GlobalStream, name = g.name));
+                    return Err(cerr!(g.line, GlobalStream, name = DeclName(&g.name)));
                 }
                 if let Some(declared) = &g.ty {
                     if !self.coercible(&vty, declared) {
                         return Err(cerr!(
                             g.line,
                             GlobalInitMismatch,
-                            name = g.name,
+                            name = DeclName(&g.name),
                             declared,
                             vty
                         ));
@@ -3572,6 +3568,7 @@ impl<'a> Checker<'a> {
         if self.region_floor.borrow().is_empty() || !self.contains_heap(arg_ty) {
             return Ok(());
         }
+        let callee = DeclName(callee);
         Err(cerr!(line, RegionConsume, arg = idx + 1, callee))
     }
 
@@ -5375,12 +5372,10 @@ impl<'a> Checker<'a> {
                 if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
                     return Ok(Type::Named("Value".to_string()));
                 }
-                return Err(cerr!(
-                    line,
-                    ValueType,
-                    t,
-                    hint = crate::types::show_hint(&written)
-                ));
+                return Err(match crate::types::show_key(&written) {
+                    Some(key) => cerr!(line, ValueTypeNoShow, t, key = DeclName(&key)),
+                    None => cerr!(line, ValueType, t),
+                });
             }
             return Ok(Type::Named("Value".to_string()));
         }
@@ -5895,7 +5890,7 @@ impl<'a> Checker<'a> {
                     if atys.iter().any(|t| matches!(t, Type::Err)) {
                         return Ok(Type::Err);
                     }
-                    return Err(cerr!(line, InferParam, tp, name = shown));
+                    return Err(cerr!(line, InferParam, tp, name = DeclName(shown)));
                 }
             }
             if let Some(bounds) = d.bounds {
@@ -5914,6 +5909,7 @@ impl<'a> Checker<'a> {
                             if b == crate::types::SHOW {
                                 return Err(cerr!(line; crate::types::needs_show(shown, concrete)));
                             }
+                            let shown = DeclName(shown);
                             return Err(cerr!(line, BoundUnsatisfied, shown, tp, b, concrete));
                         }
                     }
@@ -6125,9 +6121,9 @@ impl<'a> Checker<'a> {
                 {
                     return value_matches(&vptys, &vret, subst);
                 }
-                let sig = self
-                    .sig(vn)
-                    .ok_or_else(|| cerr!(line, ArgNotFn, callee, arg = i + 1, vn))?;
+                let sig = self.sig(vn).ok_or_else(|| {
+                    cerr!(line, ArgNotFn, callee = DeclName(callee), arg = i + 1, vn)
+                })?;
                 // A generic function is no value: its type parameters have
                 // nothing to solve against.
                 if self.type_params(vn).is_some()
@@ -6362,28 +6358,16 @@ impl<'a> Checker<'a> {
             fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
                 match s {
                     Stmt::Assign { name, line, .. } if self.is_capture(name, locals) => {
-                        self.fail(Rule::LambdaAssignsCapture {
-                            name: name.clone(),
-                            line: line.to_string(),
-                        });
+                        self.fail(rule!(LambdaAssignsCapture, name, line));
                     }
                     Stmt::SetField { name, line, .. } if self.is_capture(name, locals) => {
-                        self.fail(Rule::LambdaMutatesCapture {
-                            name: name.clone(),
-                            line: line.to_string(),
-                        });
+                        self.fail(rule!(LambdaMutatesCapture, name, line));
                     }
                     Stmt::IndexSet { name, line, .. } if self.is_capture(name, locals) => {
-                        self.fail(Rule::LambdaStoresIntoCapture {
-                            name: name.clone(),
-                            line: line.to_string(),
-                        });
+                        self.fail(rule!(LambdaStoresIntoCapture, name, line));
                     }
                     Stmt::Drop { name, line, id: _ } if self.is_capture(name, locals) => {
-                        self.fail(Rule::LambdaDropsCapture {
-                            name: name.clone(),
-                            line: line.to_string(),
-                        });
+                        self.fail(rule!(LambdaDropsCapture, name, line));
                     }
                     _ => {}
                 }
@@ -6409,10 +6393,7 @@ impl<'a> Checker<'a> {
                             if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
                                 if let Expr::Var { name: vn, .. } = a {
                                     if self.is_capture(vn, locals) {
-                                        self.fail(Rule::LambdaConsumesCapture {
-                                            name: vn.clone(),
-                                            line: line.to_string(),
-                                        });
+                                        self.fail(rule!(LambdaConsumesCapture, name = vn, line));
                                         return false;
                                     }
                                 }
@@ -6426,9 +6407,7 @@ impl<'a> Checker<'a> {
                     }
                     // Nesting would compound monomorphization.
                     Expr::Lambda { line, .. } => {
-                        self.fail(Rule::LambdaNestsLambda {
-                            line: line.to_string(),
-                        });
+                        self.fail(rule!(LambdaNestsLambda, line));
                         false
                     }
                     _ => true,
@@ -6468,6 +6447,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         line: usize,
     ) -> Result<(), Diagnostic> {
+        let fname = DeclName(fname);
         if let Some((root, path)) = crate::ast::place_path(arg) {
             for (j, b) in args.iter().enumerate() {
                 if j != i && crate::ast::mentions(b, &root) {
@@ -6980,10 +6960,12 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             let (violation, edges) = &facts[cur];
             if let Some(reason) = violation.clone() {
                 let msg = if path.len() == 1 {
-                    cerr!(g.line, GenImpure, name = g.name, reason)
+                    cerr!(g.line, GenImpure, name = DeclName(&g.name), reason)
                 } else {
-                    let chain = path.join(" -> ");
-                    cerr!(g.line, GenImpureVia, name = g.name, cur, chain, reason)
+                    let written = path.iter().map(|n| program.spellings.written(n));
+                    let chain = written.collect::<Vec<_>>().join(" -> ");
+                    let (name, cur) = (DeclName(&g.name), DeclName(cur));
+                    cerr!(g.line, GenImpureVia, name, cur, chain, reason)
                 };
                 out.push(msg.in_file(g.module.clone()));
                 break;
@@ -7141,7 +7123,8 @@ pub fn module_state_use(
             chain.push(prev);
         }
         chain.reverse();
-        chain
+        let written = |n: String| program.spellings.written(&n).to_string();
+        chain.into_iter().map(written).collect::<Vec<String>>()
     };
     while let Some(cur) = queue.pop_front() {
         if let Some(sig) = pseudo_sigs.iter().find(|s| pseudo_id(s) == cur) {
@@ -7155,7 +7138,10 @@ pub fn module_state_use(
                 }
                 if let Some(l) = &src.lambda {
                     if let Some(g) = &l.touches_global {
-                        return Some((chain_to(&cur, &parent), g.clone()));
+                        return Some((
+                            chain_to(&cur, &parent),
+                            program.spellings.written(g).to_string(),
+                        ));
                     }
                     callees.extend(l.calls.iter().cloned());
                     callees.extend(l.nested_sigs.iter().map(&pseudo_id));
@@ -7187,7 +7173,10 @@ pub fn module_state_use(
                 })
                 .cloned()
                 .unwrap_or_default();
-            return Some((chain_to(&cur, &parent), which));
+            return Some((
+                chain_to(&cur, &parent),
+                program.spellings.written(&which).to_string(),
+            ));
         }
         let mut callees: Vec<String> = Vec::new();
         for c in fn_calls(&f.body) {
@@ -7355,15 +7344,15 @@ impl BodyVisit<'_> for InitRules<'_> {
         if self.err.is_some() {
             return false;
         }
-        let (own_name, line) = (self.own_name, self.line);
+        let (own_name, line) = (DeclName(self.own_name), self.line);
         match e {
             Expr::Var { name, .. }
                 if self.all_globals.contains(name.as_str()) && !self.ready.contains(name) =>
             {
-                if name == own_name {
+                if name == self.own_name {
                     self.fail(cerr!(line, GlobalReadsItself, own_name));
                 } else {
-                    self.fail(cerr!(line, GlobalReadsLater, own_name, name));
+                    self.fail(cerr!(line, GlobalReadsLater, own_name, name = DeclName(name)));
                 }
                 false
             }
