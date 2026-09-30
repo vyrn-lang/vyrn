@@ -2012,3 +2012,25 @@ fn main() -> Int64 {
 ";
     release_refused("release-generic", rest, 21);
 }
+
+// A refused store into a join's temporary leaves the temporary filled, so the
+// join and the `let` after it draw no second sentence about it. Before, each
+// program drew a second one that named the temporary (`@t1`).
+#[test]
+fn a_refused_join_draws_one_sentence_and_names_no_temporary() {
+    for f in [
+        "r37_join_of_a_borrow_then_an_owned_if_arm.vyrn",
+        "r38_join_of_an_owned_then_a_borrowed_if_arm.vyrn",
+        "r39_join_of_a_borrowed_then_an_owned_match_arm.vyrn",
+        "r40_join_of_an_owned_then_a_borrowed_match_arm.vyrn",
+    ] {
+        let (ok, text) = refusal(f, false);
+        assert!(!ok, "{f}: the checker accepted it");
+        assert_eq!(
+            text.matches(f).count(),
+            1,
+            "{f}: more than one sentence:\n{text}"
+        );
+        assert!(!text.contains('@'), "{f}: names a temporary:\n{text}");
+    }
+}

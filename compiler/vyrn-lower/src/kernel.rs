@@ -1964,6 +1964,18 @@ impl<'b> Kernel<'b> {
                         bound_here.push(*n);
                     }
                 }
+                // A refused store into a join's temporary leaves it filled,
+                // or the join and the `let` after it would be refused for
+                // reading a temporary the reader never wrote.
+                if let St::Store {
+                    place: Place::Name(n),
+                    ..
+                } = s
+                {
+                    if self.releases(*n) {
+                        st.set_own(*n, Own::Held);
+                    }
+                }
             }
             self.also(one);
         }
