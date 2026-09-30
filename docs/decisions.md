@@ -82,7 +82,7 @@ pull request.
 - The loader flattens modules into one program; the checker and emitter never see a module. Import cycles are refused, and impl coherence is global.
 - `import * as ns` binds a compile-time name that is not a value, one level deep. No `import * from` wildcard and no re-exports.
 - A private name that collides across modules is renamed by the linker. A collision with a name the module itself imports is an error.
-- A sentence quotes a declaration as its module wrote it, never by the linker's name, through the loader's one rename table (`ast::Spellings`). Where one sentence shows two declarations of one spelling, each declared outside the sentence's module adds the path its module imports it by: `Cfg from "./lib/cfg"`.
+- A sentence quotes a declaration as its module wrote it, never by the linker's name, through the loader's one rename table (`ast::Spellings`). Where one sentence shows two declarations of one spelling, each declared outside the sentence's module adds the path its module imports it by: `Cfg from "./lib/cfg"`. Hover, completion details and type hints follow the same rule.
 - Importing `Result` or `Option` from `std/result` or `std/option` is legal and changes nothing; ambient use stays legal.
 - A name whose body lives in std is an import, not a global, and a missing import names its module. `print`, `bytes`, `panic` and `parse` stay global.
 - Module state is a top-level `let` in any module, one instance per process and private to its module. `export let` is refused: export accessor functions.

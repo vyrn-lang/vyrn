@@ -1735,7 +1735,7 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
         let Some(line) = lines.get(b.line - 1) else {
             continue;
         };
-        let Some(label) = type_hint_label(b, line, b.end_col) else {
+        let Some(label) = type_hint_label(b, &analysis.spellings, line, b.end_col) else {
             continue;
         };
         out.push(type_hint_at(line, b.line, b.end_col, label));
@@ -1748,12 +1748,17 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
 ///
 /// `end_col` is the 1-based column just past the name in `line`. The spelling is
 /// hover's renderer, [`vyrn_frontend::type_to_string`].
-fn type_hint_label(b: &vyrn_frontend::LocalBinding, line: &str, end_col: usize) -> Option<String> {
+fn type_hint_label(
+    b: &vyrn_frontend::LocalBinding,
+    spellings: &vyrn_frontend::ast::Spellings,
+    line: &str,
+    end_col: usize,
+) -> Option<String> {
     // Only `let`s and `for` variables can hide a type.
     if !matches!(b.kind, LocalKind::Let { .. } | LocalKind::ForVar) {
         return None;
     }
-    let label = vyrn_frontend::type_to_string(b.ty.as_ref()?);
+    let label = vyrn_frontend::type_to_string(b.ty.as_ref()?, spellings);
     if spells_type(line, end_col, &label) {
         return None;
     }
@@ -1848,7 +1853,7 @@ fn vyx_type_hints(server: &Server, vyx_uri: &Url, from: usize, to: usize) -> Vec
             if !name_ends_at(vyx_line, col, &b.name) {
                 continue;
             }
-            let Some(label) = type_hint_label(b, vyx_line, col) else {
+            let Some(label) = type_hint_label(b, &synth.analysis.spellings, vyx_line, col) else {
                 continue;
             };
             out.push(type_hint_at(vyx_line, region.origin.line, col, label));
@@ -3547,9 +3552,14 @@ mod tests {
             end_col: 6,
             fn_line: 1,
         };
-        let label = type_hint_label(&b, "let e = pick()", 6).expect("the call hides the type");
+        let label = type_hint_label(&b, &Default::default(), "let e = pick()", 6)
+            .expect("the call hides the type");
         assert_eq!(label, "{ A(Int64) | B }", "the arms, as hover writes them");
-        assert_eq!(label, vyrn_frontend::type_to_string(&ty), "one renderer");
+        assert_eq!(
+            label,
+            vyrn_frontend::type_to_string(&ty, &Default::default()),
+            "one renderer"
+        );
         assert_ne!(label, ty.to_string(), "`Display` drops the payloads");
     }
 
