@@ -26,6 +26,9 @@ pub use vyrn_frontend::prelude::Spec;
 use vyrn_frontend::project::is_place_read;
 
 use crate::kernel::{MissingKind, Root};
+use crate::rules::{
+    say, CONSUMED_BORROW, CONSUME_TAKES_NOTHING, ELEMENT_TAKEN, LOOP_TAKES_NOTHING, SWAP_REMOVE,
+};
 use crate::world::Stated;
 use crate::{Instance, NodeTypes, World};
 use vyrn_frontend::core::{
@@ -120,31 +123,14 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
         return Ok(());
     }
     if let Some((root, path)) = vyrn_frontend::project::element_path(e) {
-        return refuse(
-            menu(
-                format!("`{path}` may not be taken — an element is not a place a take reaches"),
-                [format!(
-                    "`{root}.swapRemove(..)` returns the element and leaves the container one \
-                     shorter"
-                )],
-            ),
-            line,
-        );
+        let rule = [ELEMENT_TAKEN, SWAP_REMOVE].join("|");
+        return refuse(say(&rule, &[("path", &path), ("root", &root)]), line);
     }
-    let (says, drop_it) = if by_loop {
-        (
-            "`consume` here has nothing to take — the loop already owns a container that is \
-             not a binding",
-            "drop the `consume`: the elements are already owned",
-        )
-    } else {
-        (
-            "`consume` here has nothing to take — the value is already owned, so there is no \
-             place to leave a hole in",
-            "drop the `consume`: the value is already owned",
-        )
+    let rule = match by_loop {
+        true => LOOP_TAKES_NOTHING,
+        false => CONSUME_TAKES_NOTHING,
     };
-    refuse(menu(says.to_string(), [drop_it]), line)
+    refuse(say(rule, &[]), line)
 }
 
 /// The scrutinee a binder borrows: its name, where the construct does not
@@ -4512,9 +4498,9 @@ impl<'a> Builder<'a> {
         } else {
             info.ty.clone()
         };
-        let Some(kind) = self.proto.release_kind(&ty) else {
+        if self.proto.release_kind(&ty).is_none() {
             return false;
-        };
+        }
         // The producer as `arg_verdict` partitions it: a call's name, `None`
         // for the allocating operator, else a name no user function can have.
         let producer = match e {
@@ -4537,20 +4523,15 @@ impl<'a> Builder<'a> {
                     | Type::Stream(ref et) if !self.proto.owns_heap(et)
             );
         let s = mc::ArgTemp {
-            id: e.id(),
             callee: callee.to_string(),
             ix,
-            line: e.line(),
-            module: self.body.file.clone(),
             producer,
-            kind,
-            verdict: mc::ArgVerdict::Unknown,
             view_copies,
+            constructs: matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
+                || self.is_variant(callee),
+            cap: vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix),
         };
-        let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
-            || self.is_variant(callee);
-        let cap = vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix);
-        if mc::arg_verdict(&s, constructs, cap) == mc::ArgVerdict::Released {
+        if mc::arg_verdict(&s) == mc::ArgVerdict::Released {
             return true;
         }
         // A call through a fn value has no capability row; the answer is the
@@ -5097,7 +5078,10 @@ impl<'a> Builder<'a> {
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow && !info.must_use_param => {
-                let msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
+                let msg = say(
+                    CONSUMED_BORROW,
+                    &[("root", &root), ("what", &k.what(&root))],
+                );
                 refuse(menu(msg, k.fixes(&path)), line)
             }
             _ => Ok(()),

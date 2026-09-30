@@ -15,6 +15,7 @@ pub mod facts;
 mod fixpoint;
 pub mod kernel;
 mod pipeline;
+pub mod rules;
 pub mod typed;
 mod world;
 
