@@ -167,6 +167,7 @@ pull request.
 - Each relation has one writer, which sets both directions and deletes in a batch. No hooks and no second storage shape for one relation.
 - The call relation is between source functions, as an edit is: every instance of a generic and every lambda frame call under their function's row. A call through a value is no edge; the effect judgment keeps its own per-instance graph with the values' closed sets.
 - A recheck pulls: each result records what it read (a signature, a summary, a name lookup in a scope, misses included), and a cache that records no reads is off in incremental mode.
+- A declaration id is its kind and its position in the linked program's list of that kind; a function's is its `FnId`. A name lookup records `Key::Decl` or `Key::Miss(scope, name)`, and a miss names no table, so a declaration of that name in any table reaches its readers.
 - Function bodies check in parallel in callee-first waves. Workers create no ids; a serial merge does. Output is byte-identical on one thread, many threads and a shuffled order.
 - A worker reads the loading thread's thread-local inputs only through `project::Lent`. A projection site its lent memo lacks expands nothing, and the body is built again on the loading thread, in body order.
 - The World has no query engine, runtime scheduler, archetype storage or on-disk snapshot. Each pass is a function over the tables it borrows.

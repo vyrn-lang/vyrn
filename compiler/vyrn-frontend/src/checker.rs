@@ -615,9 +615,16 @@ fn check_accum_inner(
     }
 
     // 2. Collect function signatures (forward references allowed).
-    let mut sigs: HashMap<String, (Vec<Type>, Type)> = HashMap::new();
-    let mut generics: HashMap<String, Vec<String>> = HashMap::new();
-    for f in &program.functions {
+    let sigs: Vec<(Vec<Type>, Type)> = (program.functions.iter())
+        .map(|f| {
+            (
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                f.ret.clone(),
+            )
+        })
+        .collect();
+    let mut fn_decls: HashMap<String, DeclId> = HashMap::new();
+    for (i, f) in program.functions.iter().enumerate() {
         if RESERVED.contains(&f.name.as_str()) {
             out.push(cerr_at!(f.line, f.name_span(), ReservedName, name = f.name));
             continue;
@@ -631,7 +638,7 @@ fn check_accum_inner(
             ));
             continue;
         }
-        if sigs.contains_key(&f.name) {
+        if fn_decls.contains_key(&f.name) {
             out.push(cerr_at!(
                 f.line,
                 f.name_span(),
@@ -649,11 +656,7 @@ fn check_accum_inner(
             ));
             continue;
         }
-        let params = f.params.iter().map(|p| p.ty.clone()).collect();
-        sigs.insert(f.name.clone(), (params, f.ret.clone()));
-        if !f.type_params.is_empty() {
-            generics.insert(f.name.clone(), f.type_params.clone());
-        }
+        fn_decls.insert(f.name.clone(), DeclId::nth(DeclKind::Fn, i));
     }
     let all_bounds: HashMap<String, HashMap<String, Vec<String>>> = program
         .functions
@@ -1051,13 +1054,14 @@ fn check_accum_inner(
 
     let checker = Checker {
         host: program.host,
+        functions: &program.functions,
+        fn_decls: &fn_decls,
         sigs: &sigs,
         caps: &caps,
         caps_by_sig: &caps_by_sig,
         types: &types,
         contracts: &contracts,
         variants: &variants,
-        generics: &generics,
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
         protocol_places: &protocol_places,
@@ -1084,6 +1088,8 @@ fn check_accum_inner(
         stored_calls: RefCell::new(Vec::new()),
         derive_sites: RefCell::new(Vec::new()),
         record: recording.then(RefCell::default),
+        reader: std::cell::Cell::new(None),
+        reads: RefCell::new(Vec::new()),
         pending_subst: RefCell::new(None),
         pending_call: RefCell::new(None),
     };
@@ -1117,7 +1123,8 @@ fn check_accum_inner(
     // 4. `main`, a whole-program error at line 0. A library (any export), a
     // file with tests or benches, and a served module (exactly
     // `fn handle(req: Request) -> Response`) need none.
-    let has_served_handle = sigs.get("handle").is_some_and(|(params, ret)| {
+    let sig = |name: &str| fn_decls.get(name).map(|d| &sigs[d.index()]);
+    let has_served_handle = sig("handle").is_some_and(|(params, ret)| {
         params.as_slice() == [Type::Named("Request".to_string())]
             && *ret == Type::Named("Response".to_string())
     });
@@ -1128,7 +1135,7 @@ fn check_accum_inner(
         || !program.tests.is_empty()
         || !program.benches.is_empty()
         || has_served_handle;
-    match sigs.get("main") {
+    match sig("main") {
         None if !is_library => out.push(cerr!(0, NoMain)),
         None => {}
         Some(main) if !main.0.is_empty() || main.1 != Type::Int => {
@@ -1140,8 +1147,10 @@ fn check_accum_inner(
     // 5. Check functions, each independently. In a body, errors accumulate
     //    per statement in `errors`; `function` returns the first and this
     //    drains the rest. Within one expression the check is first-error.
-    for f in &program.functions[bodies_from..] {
+    for (i, f) in program.functions.iter().enumerate().skip(bodies_from) {
         let produced_from = out.len();
+        let reader = checker.record.is_some().then(|| FnId::nth(i));
+        checker.reader.set(reader);
 
         // Signature validation runs outside `function()` and must accept a
         // `Code` type in a `gen fn` signature.
@@ -1189,9 +1198,10 @@ fn check_accum_inner(
             in_bodies += out.len() - produced_from;
         }
     }
+    checker.reader.set(None);
 
     // 6. Projection, test and bench bodies. A test or bench is a Unit body
-    //    under an unspellable name (`test@<index>`), absent from `sigs`, so no
+    //    under an unspellable name (`test@<index>`), absent from `fn_decls`, so no
     //    code can call it.
     if bodies_from == 0 {
         check_places(&checker, program, &mut out);
@@ -1216,8 +1226,12 @@ fn check_accum_inner(
     };
     let binders = local_index(program, &checker.binder_types.borrow());
     let typed = (in_bodies == out.len()).then_some(refused);
+    let mut seen = HashSet::new();
+    let mut reads = checker.reads.take();
+    reads.retain(|r| seen.insert(r.clone()));
     let record = checker.record.map(|r| Recorded {
         stored: effects.clone(),
+        reads,
         ..r.into_inner()
     });
     (
@@ -1578,6 +1592,9 @@ pub struct Recorded {
     pub calls: HashMap<NodeId, CallDecl>,
     /// What a check that records nothing returns as [`stored_fn_effects`].
     pub stored: StoredFnEffects,
+    /// Each function body's name lookups, each key once per function, in
+    /// the order read ([`Checker::resolve_fn`], [`Checker::resolve_global`]).
+    pub reads: Vec<(FnId, Key)>,
 }
 
 impl Recorded {
@@ -1594,6 +1611,7 @@ impl Recorded {
         self.stored.sources.extend(tail.stored.sources);
         self.stored.arg_sources.extend(tail.stored.arg_sources);
         self.stored.calls.extend(tail.stored.calls);
+        self.reads.extend(tail.reads);
     }
 }
 
@@ -1718,7 +1736,12 @@ pub fn recorded(program: &Program) -> std::sync::Arc<Recorded> {
 }
 
 struct Checker<'a> {
-    sigs: &'a HashMap<String, (Vec<Type>, Type)>,
+    functions: &'a [Function],
+    /// The first function declared under each name that the checker accepts;
+    /// [`Checker::resolve_fn`] reads it.
+    fn_decls: &'a HashMap<String, DeclId>,
+    /// Each function's parameter types and result, by [`DeclId::index`].
+    sigs: &'a [(Vec<Type>, Type)],
     caps: &'a HashMap<String, Vec<Capability>>,
     /// Parameter capabilities by the Debug text of a stored function value's
     /// `Type::Fn`, which carries none.
@@ -1726,8 +1749,6 @@ struct Checker<'a> {
     types: &'a HashMap<String, TypeDecl>,
     contracts: &'a HashMap<String, ContractDecl>,
     variants: &'a HashMap<String, VariantInfo>,
-    /// Generic function name to its type-parameter names.
-    generics: &'a HashMap<String, Vec<String>>,
     /// Function name to (type parameter to bounds).
     all_bounds: &'a HashMap<String, HashMap<String, Vec<String>>>,
     /// Method name to (protocol, signature).
@@ -1755,8 +1776,9 @@ struct Checker<'a> {
     /// `for` binds its name to [`Type::Err`] so later uses do not cascade.
     errors: RefCell<Vec<Diagnostic>>,
     /// Module state, filled in declaration order before any body is checked.
-    /// [`Scope`] reads it when its frames run out.
-    globals: RefCell<HashMap<String, Binding>>,
+    /// [`Scope`] reads it when its frames run out
+    /// ([`Checker::resolve_global`]).
+    globals: RefCell<HashMap<String, (DeclId, Binding)>>,
     /// Inside a `test` body: `assert` and `assertEq` are legal.
     in_test: RefCell<bool>,
     /// Inside a `bench` body: `blackBox` is legal, as in a `test`.
@@ -1794,6 +1816,11 @@ struct Checker<'a> {
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
     record: Option<RefCell<Recorded>>,
+    /// The function whose body is being checked, when the check records:
+    /// every name lookup then records a read row for it.
+    reader: std::cell::Cell<Option<FnId>>,
+    /// The read rows, in the order read ([`Recorded::reads`]).
+    reads: RefCell<Vec<(FnId, Key)>>,
     /// The substitution the innermost generic call just solved, for the
     /// [`Checker::expr`] wrapper that knows the call node's address. A nested
     /// call consumes and clears it before its caller writes one.
@@ -1807,7 +1834,7 @@ struct Checker<'a> {
 /// row, an impl method or a protocol member. [`Checker::check_declared_call`]
 /// reads it.
 struct DeclaredCall<'a> {
-    /// The name `generics` and `all_bounds` are keyed by: a function name, or
+    /// The name `all_bounds` is keyed by: a function name, or
     /// an impl method's mangled one.
     key: &'a str,
     /// The name a refusal prints: the surface name the reader wrote, never an
@@ -1948,7 +1975,7 @@ impl<'a> Checker<'a> {
             return Ok(());
         }
         let projection_shaped = name == crate::project::AT
-            || (self.sigs.get(name.as_str()).is_none()
+            || (self.sig(name).is_none()
                 && self
                     .impl_blocks
                     .iter()
@@ -2006,7 +2033,7 @@ impl<'a> Checker<'a> {
             return Ok(None);
         };
         if args.is_empty()
-            || self.sigs.get(name.as_str()).is_some()
+            || self.sig(name).is_some()
             || !self
                 .impl_blocks
                 .iter()
@@ -2276,7 +2303,7 @@ impl<'a> Checker<'a> {
     /// The open parameters in `ty`, by name, in order, without repeats.
     fn open_params(&self, ty: &Type) -> Vec<String> {
         let cur = self.cur_fn.borrow();
-        let rigid = self.generics.get(cur.as_str());
+        let rigid = self.type_params(&cur);
         let mut out: Vec<String> = Vec::new();
         walk_type(ty, &mut |t| {
             if let Type::Param(n) = t {
@@ -2853,7 +2880,7 @@ impl<'a> Checker<'a> {
             .collect();
         let all_globals: HashSet<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
         let mut ready: HashSet<String> = HashSet::new();
-        for g in &program.globals {
+        for (i, g) in program.globals.iter().enumerate() {
             // A literal initializer's range error names the global's line.
             *self.stmt_line.borrow_mut() = g.line;
             let bty = self.unit(|| -> Result<Type, Diagnostic> {
@@ -2920,7 +2947,10 @@ impl<'a> Checker<'a> {
                 }
             }
             out.extend(lambda.into_iter().map(|d| d.in_file(g.module.clone())));
-            self.globals.borrow_mut().insert(g.name.clone(), binding);
+            let decl = DeclId::nth(DeclKind::Global, i);
+            self.globals
+                .borrow_mut()
+                .insert(g.name.clone(), (decl, binding));
             ready.insert(g.name.clone());
         }
         out.len() - before
@@ -3455,8 +3485,7 @@ impl<'a> Checker<'a> {
                 match expr {
                     Expr::Lambda { .. } => return self.stored_fn_lambda(expr, exp, scope, fn_ret),
                     Expr::Var { name, line, id: _ }
-                        if self.lookup(scope, name).is_none()
-                            && self.sigs.contains_key(name.as_str()) =>
+                        if self.lookup(scope, name).is_none() && self.sig(name).is_some() =>
                     {
                         return self.stored_fn_named(name, exp, *line);
                     }
@@ -3538,7 +3567,7 @@ impl<'a> Checker<'a> {
                 }
                 // A bare function name as a value is a stored function value
                 // source: `let g = double` takes its signature.
-                if let Some((sptys, sret)) = self.sigs.get(name.as_str()) {
+                if let Some((sptys, sret)) = self.sig(name) {
                     self.storable_named_fn(name, *line)?;
                     let sig = Type::Fn(sptys.clone(), Box::new(sret.clone()));
                     self.stored_sources.borrow_mut().push(StoredSource {
@@ -5170,7 +5199,7 @@ impl<'a> Checker<'a> {
                 _ => return Err(cerr!(line, DeriveArity)),
             };
             let arg = Type::Named("TypeArg".to_string());
-            if !self.gen_fns.contains(g) || self.sigs.get(g) != Some(&(vec![arg], Type::Str)) {
+            if !self.gen_fns.contains(g) || self.sig(g) != Some(&(vec![arg], Type::Str)) {
                 return Err(cerr!(line, DeriveUnknownGen, g));
             }
             let at = self.expr(&args[1], scope, None, fn_ret)?;
@@ -5441,8 +5470,7 @@ impl<'a> Checker<'a> {
                     // Dispatch ends here; the impl method is read as any
                     // declaration, its receiver's capability at index 0.
                     let (mparams, mret) = self
-                        .sigs
-                        .get(mangled.as_str())
+                        .sig(&mangled)
                         .ok_or_else(|| cerr!(line, NotImplemented, recv, proto, name))?;
                     return self.check_declared_call(
                         &DeclaredCall {
@@ -5450,7 +5478,7 @@ impl<'a> Checker<'a> {
                             shown: name,
                             params: mparams,
                             ret: mret,
-                            type_params: self.generics.get(mangled.as_str()),
+                            type_params: self.type_params(&mangled),
                             caps: self.caps.get(mangled.as_str()),
                             bounds: self.all_bounds.get(mangled.as_str()),
                             recv: Some(&recv),
@@ -5470,7 +5498,7 @@ impl<'a> Checker<'a> {
         // `x.f(..)` naming a projection on `x`'s type is an access, typed as
         // `x[i]` is. Asked only when no function has the name, so
         // a function always wins.
-        if self.sigs.get(name).is_none()
+        if self.sig(name).is_none()
             && !args.is_empty()
             && self
                 .impl_blocks
@@ -5506,8 +5534,7 @@ impl<'a> Checker<'a> {
         }
         // A projection inlines at its access site, and a bounded type
         // variable has no body to inline.
-        if self.sigs.get(name).is_none() && !args.is_empty() && self.protocol_places.contains(name)
-        {
+        if self.sig(name).is_none() && !args.is_empty() && self.protocol_places.contains(name) {
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
             if matches!(self.base(&recv), Type::Param(_)) {
                 return Err(cerr!(line, ProjectionOnBound, name));
@@ -5522,7 +5549,7 @@ impl<'a> Checker<'a> {
         // A seeded builtin's row is its declaration. A row that
         // cannot type its call answers `None` from `prelude::checkable`, and an
         // arm above holds that name. A user declaration shadows the row.
-        let seeded = match self.sigs.contains_key(name) {
+        let seeded = match self.sig(name).is_some() {
             true => None,
             false => crate::prelude::checkable(name),
         };
@@ -5532,7 +5559,7 @@ impl<'a> Checker<'a> {
                 f.ret.clone(),
             )
         });
-        let (params, ret) = match (self.sigs.get(name), &seeded_sig) {
+        let (params, ret) = match (self.sig(name), &seeded_sig) {
             (Some(sig), _) => sig,
             (None, Some(sig)) => sig,
             (None, None) => {
@@ -5561,7 +5588,7 @@ impl<'a> Checker<'a> {
                 shown,
                 params,
                 ret,
-                type_params: self.generics.get(name).or(seeded_generics.as_ref()),
+                type_params: self.type_params(name).or(seeded_generics.as_ref()),
                 caps: self.caps.get(name).or(seeded_caps.as_ref()),
                 // A seeded row's bounds are the typed judgment's.
                 bounds: self.all_bounds.get(name),
@@ -5957,12 +5984,11 @@ impl<'a> Checker<'a> {
                     return value_matches(&vptys, &vret, subst);
                 }
                 let sig = self
-                    .sigs
-                    .get(vn)
+                    .sig(vn)
                     .ok_or_else(|| cerr!(line, ArgNotFn, callee, arg = i + 1, vn))?;
                 // A generic function is no value: its type parameters have
                 // nothing to solve against.
-                if self.generics.contains_key(vn.as_str())
+                if self.type_params(vn).is_some()
                     || sig.0.len() != ptys.len()
                     || !params_accept(&sig.0, &sig.1, subst)?
                 {
@@ -6148,7 +6174,7 @@ impl<'a> Checker<'a> {
 
     /// Refuses a generic, `extern` or `gen` function used as a value.
     fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
-        if self.generics.contains_key(name) {
+        if self.type_params(name).is_some() {
             return Err(cerr!(line, GenericFnValue, name));
         }
         if self.extern_fns.contains(name) {
@@ -6481,9 +6507,51 @@ impl<'a> Checker<'a> {
             }
         }
         if scope.globals {
-            return self.globals.borrow().get(name).cloned();
+            return self.resolve_global(name);
         }
         None
+    }
+
+    /// Records that the function being checked read `hit` under `name`, or
+    /// missed it in this module ([`Key`]).
+    fn read<T>(&self, name: &str, hit: Option<(DeclId, T)>) -> Option<T> {
+        if let Some(f) = self.reader.get() {
+            let key = match &hit {
+                Some((d, _)) => Key::Decl(*d),
+                None => Key::Miss(
+                    ScopeId {
+                        module: self.here.borrow().clone(),
+                    },
+                    name.to_string(),
+                ),
+            };
+            self.reads.borrow_mut().push((f, key));
+        }
+        hit.map(|(_, t)| t)
+    }
+
+    /// The function declared as `name`.
+    fn resolve_fn(&self, name: &str) -> Option<DeclId> {
+        let hit = self.fn_decls.get(name).map(|d| (*d, *d));
+        self.read(name, hit)
+    }
+
+    /// The module state named `name`, once its initializer is checked.
+    fn resolve_global(&self, name: &str) -> Option<Binding> {
+        let hit = self.globals.borrow().get(name).cloned();
+        self.read(name, hit)
+    }
+
+    /// The parameter types and result of the function named `name`.
+    fn sig(&self, name: &str) -> Option<&'a (Vec<Type>, Type)> {
+        let sigs = self.sigs;
+        self.resolve_fn(name).map(|d| &sigs[d.index()])
+    }
+
+    /// The type parameters of the generic function named `name`.
+    fn type_params(&self, name: &str) -> Option<&'a Vec<String>> {
+        let f = &self.functions[self.resolve_fn(name)?.index()];
+        Some(&f.type_params).filter(|ps| !ps.is_empty())
     }
 
     /// The element type of the plain array variable a `pop` or `swapRemove`

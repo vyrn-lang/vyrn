@@ -60,6 +60,62 @@ impl FnId {
     }
 }
 
+/// Names one declaration of a linked program: its kind and its position in
+/// that kind's list, which the loader fixes when it links. A function's
+/// index is its [`FnId`]; a variant's counts every enum's variants in
+/// `Program::type_decls` order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DeclId {
+    pub kind: DeclKind,
+    pub index: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeclKind {
+    /// `Program::functions`.
+    Fn,
+    /// `Program::type_decls`.
+    Type,
+    /// `Program::globals`.
+    Global,
+    /// `Program::protocols`.
+    Protocol,
+    /// An enum's variant.
+    Variant,
+}
+
+impl DeclId {
+    /// Declaration `i` of `kind`.
+    ///
+    /// # Panics
+    ///
+    /// Past `u32::MAX` declarations of one kind.
+    pub fn nth(kind: DeclKind, i: usize) -> DeclId {
+        let index = u32::try_from(i).expect("more than u32::MAX declarations");
+        DeclId { kind, index }
+    }
+
+    pub fn index(self) -> usize {
+        self.index as usize
+    }
+}
+
+/// What one name lookup read: the declaration it found, or the scope and
+/// name it missed in. A miss is a dependency too: a declaration of that name
+/// turns it into a hit.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Key {
+    Decl(DeclId),
+    Miss(ScopeId, String),
+}
+
+/// Where a lookup that missed looked: the reading module, `None` for the
+/// root. Every table a lookup records is module-scoped, so no block path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ScopeId {
+    pub module: Option<String>,
+}
+
 /// Names one protocol member: `Program::protocols[protocol].methods[member]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MethodId {

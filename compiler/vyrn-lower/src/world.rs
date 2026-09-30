@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use vyrn_frontend::ast::{FnId, Function, Program, Type};
+use vyrn_frontend::ast::{FnId, Function, Key, Program, Type};
 use vyrn_frontend::core::{rows, Body, Callee, Facts, Rhs, St};
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::movecheck::Refusal;
@@ -26,6 +26,9 @@ pub struct World {
     /// The call relation over the function table, which [`Calls::replace`]
     /// writes.
     pub(crate) calls: Calls,
+    /// The read relation over the function table, which [`Reads::replace`]
+    /// writes.
+    pub(crate) reads: Reads,
     /// The core's bodies, which [`World::body_of`] serves. `None` under a
     /// name two bodies share. Empty when `facts` is `None`.
     pub(crate) bodies: HashMap<FnId, Option<Stated>>,
@@ -175,6 +178,58 @@ impl Calls {
     }
 }
 
+/// The read relation between functions and the name lookups their text
+/// makes ([`vyrn_frontend::checker::Recorded::reads`]): a declaration found,
+/// or a name missed in a scope. A reader is a `Program::functions` row; a
+/// `test` or `bench` body, a projection, module state and a type
+/// declaration read no row.
+#[derive(Default)]
+pub(crate) struct Reads {
+    /// By reader: its keys in the order read, each once.
+    keys: Vec<Vec<Key>>,
+    /// By key: its readers in id order, each once. A key no function reads
+    /// has no entry.
+    readers: HashMap<Key, Vec<FnId>>,
+}
+
+impl Reads {
+    /// Replaces the keys of every reader in `rows` and the reverse entries
+    /// with them, in one batch. A reader absent from `rows` keeps its keys.
+    /// Each list in `rows` holds a key once.
+    pub(crate) fn replace(&mut self, rows: HashMap<FnId, Vec<Key>>) {
+        let n = (rows.keys().map(|f| f.index() + 1).max().unwrap_or(0)).max(self.keys.len());
+        self.keys.resize_with(n, Vec::new);
+        let mut replaced = vec![false; n];
+        let mut touched: HashSet<Key> = HashSet::new();
+        for f in rows.keys() {
+            replaced[f.index()] = true;
+            touched.extend(std::mem::take(&mut self.keys[f.index()]));
+        }
+        for k in &touched {
+            if let Some(rs) = self.readers.get_mut(k) {
+                rs.retain(|r| !replaced[r.index()]);
+            }
+        }
+        for (f, ks) in rows {
+            for k in &ks {
+                self.readers.entry(k.clone()).or_default().push(f);
+            }
+            touched.extend(ks.iter().cloned());
+            self.keys[f.index()] = ks;
+        }
+        for k in touched {
+            let Some(rs) = self.readers.get_mut(&k) else {
+                continue;
+            };
+            if rs.is_empty() {
+                self.readers.remove(&k);
+            } else {
+                rs.sort_unstable_by_key(|r| r.index());
+            }
+        }
+    }
+}
+
 /// Appends to `out` each function a frame of `top` calls, in source order,
 /// and each declared release a name of it runs, skipping one `out` holds.
 /// `fns` resolves a release's name ([`crate::by_name`]).
@@ -225,11 +280,19 @@ const _: () = {
 };
 
 impl World {
+    /// The World of `ownership`, with the read relation of its checker's
+    /// record.
     pub(crate) fn new(ownership: Ownership) -> World {
-        World {
+        let mut rows: HashMap<FnId, Vec<Key>> = HashMap::new();
+        for (f, k) in &ownership.record.reads {
+            rows.entry(*f).or_default().push(k.clone());
+        }
+        let mut world = World {
             ownership,
             ..World::default()
-        }
+        };
+        world.reads.replace(rows);
+        world
     }
 
     /// The id of the function emitted under `name`: [`crate::spell`] of the
@@ -272,6 +335,11 @@ impl World {
     /// The functions whose bodies call `f` ([`Calls`]).
     pub fn callers(&self, f: FnId) -> &[FnId] {
         self.calls.callers.get(f.index()).map_or(&[], Vec::as_slice)
+    }
+
+    /// The functions whose text read `key` ([`Reads`]).
+    pub fn readers(&self, key: &Key) -> &[FnId] {
+        self.reads.readers.get(key).map_or(&[], Vec::as_slice)
     }
 
     /// The typed judgment's refusals.
@@ -317,9 +385,20 @@ impl World {
     ///
     /// If a name's id is not its row's, if a body is served under a name
     /// other than its own, if bodies exist without facts, if a refusal is
-    /// not an error, or if the callers do not invert the callees.
+    /// not an error, or if the callers do not invert the callees or the
+    /// readers the reads.
     pub fn check(&self) {
         let rows = self.fns.rows.len();
+        for (f, ks) in self.reads.keys.iter().enumerate() {
+            for k in ks {
+                assert!(f < rows, "a read names no row");
+                let once = self.readers(k).iter().filter(|r| r.index() == f).count();
+                assert_eq!(once, 1, "a key lists its reader other than once");
+            }
+        }
+        let reads = self.reads.keys.iter().map(Vec::len).sum::<usize>();
+        let readers = self.reads.readers.values().map(Vec::len).sum::<usize>();
+        assert_eq!(reads, readers, "a reader entry has no read");
         for (f, cs) in self.calls.callees.iter().enumerate() {
             for g in cs {
                 assert!(f < rows && g.index() < rows, "a call edge names no row");

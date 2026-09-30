@@ -121,7 +121,9 @@ the playground serves an embedded `std/`. The loader:
    the judgments, then one list of ownership refusals in source order.
    `analyze` returns the World (`vyrn_lower::World`): the `Ownership` with
    the checker's record, the function table, the call relation
-   (`World::callees` and `World::callers`), the core's bodies and facts,
+   (`World::callees` and `World::callers`), the read relation
+   (`World::readers`: the declarations and misses each function's name
+   lookups read), the core's bodies and facts,
    and both refusal lists. The plan's rows, the bodies and the effect
    judgment's state rows are keyed by `FnId`; a frame carries its row
    (`Body::id`), which the placer's serial merge gives a lambda frame. A
