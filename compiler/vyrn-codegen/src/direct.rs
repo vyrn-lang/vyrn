@@ -8095,7 +8095,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(Type::Unit)
     }
 
-    /// `close(s)` and `boxStream(s)`, the builtins
+    /// `close(s)`, `boxStream(s)` and `serveStream(s)`, the builtins
     /// [`Spec::Effect`] names. `operand` writes the argument at the type asked
     /// for, or at its own where none is, and answers the type it wrote.
     fn effect(
@@ -8113,6 +8113,14 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         match name {
             "boxStream" => return self.stream_box(m, b, operand, line),
+            "serveStream" => {
+                let msg = self.cx.rt.intern(m, vyrn_frontend::trap::SERVE_STREAM);
+                self.panic_line(m, b, None, |_, _, b| {
+                    b.ins(&Instruction::I32Const(msg as i32));
+                    Ok(())
+                })?;
+                b.ins(&Instruction::Unreachable);
+            }
             // A stepped stream owns a cell from a fixed slab of 65536, which a leak would
             // exhaust; the tag tells a stepped stream from a buffer one.
             _ => {

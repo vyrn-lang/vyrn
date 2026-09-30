@@ -1,0 +1,10 @@
+// `serveStream` hands the stream to the serving host and returns, so a
+// function that ends at it has not returned its `Int64`.
+fn go(s: Stream<String>) -> Int64 {
+    serveStream(s)
+}
+
+fn main() -> Int64 {
+    let xs: Array<String> = ["a".copy()]
+    return go(fromArray(xs))
+}

@@ -1,0 +1,1 @@
+a_served_stream_returns_to_its_caller.vyrn:3:0: function `go` must return Int64 on all paths

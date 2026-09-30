@@ -5393,21 +5393,7 @@ impl<'a> Builder<'a> {
                 type_args: _,
                 id: _,
             } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
-                let r = if name == "serveStream" {
-                    // A compiled build has no accept loop.
-                    let msg = Lit::Str(vyrn_frontend::trap::SERVE_STREAM.into());
-                    Rhs::Call {
-                        callee: name.clone(),
-                        args: vec![(Arg::Val(Val::Lit(msg)), Capability::Read)],
-                        write_back: false,
-                        kind: Callee::Builtin,
-                        ret: self.produced(e),
-                        solved: Vec::new(),
-                        targets: Vec::new(),
-                    }
-                } else {
-                    self.call(name, args, *line, self.produced(e), out)?
-                };
+                let r = self.call(name, args, *line, self.produced(e), out)?;
                 out.push(St::Do {
                     rhs: r,
                     line: *line,

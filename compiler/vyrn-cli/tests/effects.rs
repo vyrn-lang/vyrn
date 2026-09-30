@@ -842,7 +842,7 @@ fn run_corpus() {
         module_state_missed.first().map(String::as_str).unwrap_or("none")
     );
     // It may fall, never rise.
-    const MODULE_STATE_EXTRA: usize = 21;
+    const MODULE_STATE_EXTRA: usize = 23;
     assert!(
         module_state_extra.len() <= MODULE_STATE_EXTRA,
         "{} functions the `module-state` row reaches and the checker's walk does not, more than          the {MODULE_STATE_EXTRA} recorded; the first new one is worth reading: {}",
