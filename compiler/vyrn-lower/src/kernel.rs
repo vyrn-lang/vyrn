@@ -603,25 +603,6 @@ struct Kernel<'b> {
     /// taker is read only for a row's operand ([`Kernel::stmt`]) or a name
     /// with a fact ([`State::named`]), so the check covers every read.
     ended: Vec<bool>,
-    /// By name: the place a `take` moved its value out of, followed through
-    /// the names it was moved into ([`taken_from`]).
-    taken_from: Vec<Option<(Name, String)>>,
-}
-
-/// The place each name's value was taken out of: a `let` of a `take`, or of
-/// a name that holds one. The hole the take left says whether it still does.
-fn taken_from(body: &Body) -> Vec<Option<(Name, String)>> {
-    let mut from = vec![None; body.names.len()];
-    for (s, _) in vyrn_frontend::core::rows(&body.stmts) {
-        if let St::Let(n, r) = s {
-            from[n.index()] = match r {
-                Rhs::Take(p) => root_of(p),
-                Rhs::Val(Val::Name(m)) => from[m.index()].clone(),
-                _ => None,
-            };
-        }
-    }
-    from
 }
 
 /// What took one name, for the memory report.
@@ -735,7 +716,6 @@ fn run(
         released: std::cell::RefCell::new(vec![None; body.names.len()]),
         read_out: vec![false; body.names.len()],
         ended: vec![false; body.names.len()],
-        taken_from: taken_from(body),
     };
     let mut st = State::default();
     for p in &body.params {
@@ -1126,10 +1106,12 @@ impl<'b> Kernel<'b> {
 
     /// Refuses a call that is handed a `consume` argument and, at another
     /// position, a place overlapping it: the callee could free the one and
-    /// read the other. A name holding a part taken out of a place, while the
-    /// hole is open, is that place. Two `consume` positions are the take
-    /// rule's: the second take is refused. A rebuilding builtin's receiver
-    /// (`write_back`) is put back, not consumed ([`Kernel::take_arg`]).
+    /// read the other. A part a `take` moved out needs no comparison: while
+    /// its hole is open, the reads of the rest of the call refuse the whole
+    /// name and an overlapping place first (`WHOLE_WITH_HOLE`,
+    /// `READ_IN_HOLE`). Two `consume` positions are the take rule's: the
+    /// second take is refused. A rebuilding builtin's receiver (`write_back`)
+    /// is put back, not consumed ([`Kernel::take_arg`]).
     fn consumed_once(
         &self,
         st: &State,
@@ -1138,18 +1120,14 @@ impl<'b> Kernel<'b> {
     ) -> Result<(), Refusal> {
         let place = |a: &Arg| match a {
             Arg::Place(p) => root_of(p),
-            Arg::Val(Val::Name(n)) => match (st.alias.get(n), &self.taken_from[n.index()]) {
-                (
-                    Some(Alias {
-                        root: Root::N(r),
-                        path,
-                        ..
-                    }),
-                    _,
-                ) => Some((*r, path.clone())),
-                (Some(_), _) => None,
-                (None, Some(from)) if st.holes.contains(from) => Some(from.clone()),
-                (None, _) => Some((*n, String::new())),
+            Arg::Val(Val::Name(n)) => match st.alias.get(n) {
+                Some(Alias {
+                    root: Root::N(r),
+                    path,
+                    ..
+                }) => Some((*r, path.clone())),
+                Some(_) => None,
+                None => Some((*n, String::new())),
             },
             Arg::Val(_) => None,
         };
@@ -1172,17 +1150,11 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
-    /// An argument, spelled for a refusal. A temporary a `take` bound is
-    /// spelled by the place it took (`consume x.name`).
+    /// An argument, spelled for a refusal.
     fn arg_text(&self, st: &State, a: &Arg) -> String {
         match a {
             Arg::Place(p) => self.place_text(p),
-            Arg::Val(Val::Name(n)) => match &self.taken_from[n.index()] {
-                Some((r, path)) if self.src(*n).starts_with('@') => {
-                    format!("{}{}", self.src(*r), path.replace(".[]", "[..]"))
-                }
-                _ => self.src_text(st, *n),
-            },
+            Arg::Val(Val::Name(n)) => self.src_text(st, *n),
             Arg::Val(_) => String::new(),
         }
     }

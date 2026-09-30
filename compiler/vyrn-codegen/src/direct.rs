@@ -4805,13 +4805,13 @@ impl<'p> Fn_<'_, 'p> {
         ) -> Result<Option<Spill>, String>,
         hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
+        // A `fn` type reads every argument, so no target takes a `consume` parameter
+        // (`Checker::reads_every_param`) and no result is left in one.
+        debug_assert!(sig.in_place.is_none(), "a stored `fn` value consumes");
         let dest = self.out_ptr(b, sig, hint);
         let mut spilled = Vec::new();
         for (i, p) in sig.params.iter().take(argc).enumerate() {
-            self.moved_in(b, sig, dest, i, false, |s, b| {
-                spilled.extend(operand(s, m, b, i, p)?);
-                Ok(())
-            })?;
+            spilled.extend(operand(self, m, b, i, p)?);
         }
         b.ins(&Instruction::Call(sig.index));
         reload(b, &spilled);
