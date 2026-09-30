@@ -1,0 +1,1 @@
+rejects_a_consume_function_passed_as_a_fn_argument.vyrn:16:0: `grow` cannot be used as a function value: it takes `c` by `consume`, and a `fn` type reads every argument

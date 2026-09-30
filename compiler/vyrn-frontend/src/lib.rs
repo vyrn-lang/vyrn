@@ -138,22 +138,13 @@ pub fn check_and_synthesize(
                 // Parsed apart, so numbered from 1: renumbered, or their ids
                 // would key the second check's types over the program's own.
                 program.number_appended(at);
-                // Only a whole check counts the program's own sites again.
-                let (again, old_sites);
-                (diags, again, refused, old_sites) = match checker::check_appended(program, at) {
-                    Some(((d, again, r), tail)) => {
-                        if let Some(rec) = record.as_mut() {
-                            rec.extend(tail);
-                        }
-                        (d, again, r, 0)
-                    }
-                    None => {
-                        let ((d, again, r), _, whole) = checker::check_accum_with_sites(program);
-                        record = Some(whole);
-                        (d, again, r, derived.len())
-                    }
-                };
-                if diags.is_empty() && again.len() != old_sites {
+                let again;
+                let tail;
+                ((diags, again, refused), tail) = checker::check_appended(program, at);
+                if let Some(rec) = record.as_mut() {
+                    rec.extend(tail);
+                }
+                if diags.is_empty() && !again.is_empty() {
                     diags.push(rules::refuse!("check", 0, 0, DeriveWroteDerive));
                 }
             }
@@ -178,9 +169,9 @@ pub fn check_and_synthesize(
     // The constructors are typed for the record alone: they are generated
     // from declarations that checked.
     if program.functions.len() > from {
-        match (checker::check_appended(program, from), record.as_mut()) {
-            (Some((_, tail)), Some(rec)) => rec.extend(tail),
-            _ => record = None,
+        let (_, tail) = checker::check_appended(program, from);
+        if let Some(rec) = record.as_mut() {
+            rec.extend(tail);
         }
     }
     drop(synth_span);

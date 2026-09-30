@@ -114,6 +114,7 @@ pull request.
 - A type that owns heap, directly or transitively, moves on assignment, argument passing and return. Scalars and records of scalars copy.
 - A parameter is `read` (the default), `modify` or `consume`. The capability is the API contract, and bodies need no annotation.
 - `read` and `modify` borrows are second-class. They cannot be stored, captured by an escaping closure, returned or handed to `consume`, so no lifetime annotation exists.
+- A `fn` type carries no capabilities: a function value reads every argument, and a function with a `consume` or `modify` parameter is no function value.
 - A function returns an owned value. No borrowed return; projections cover in-place access.
 - A place owns its contents. A store releases what the place held, and releasing an aggregate releases its places.
 - Copying is explicit, spelled `x.copy()`. A hidden copy is an unbounded cost that nothing at the call site shows.

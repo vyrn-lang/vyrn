@@ -435,21 +435,11 @@ fn check_accum_full(
 /// those bodies, and the refused set, as a whole check would, and the record of
 /// those bodies, which [`Recorded::extend`] adds to the earlier check's.
 ///
-/// A body is typed against the declarations alone, so an earlier body keeps
-/// its verdict unless the appended functions change a table it reads by
-/// something other than their names. `None` names the case where a whole
-/// check must run instead: an appended signature makes a stored function
-/// value's parameter `consume`.
-pub fn check_appended(program: &Program, at: usize) -> Option<(Appended, Recorded)> {
-    let before = caps_by_sig(&program.functions[..at]);
-    let widened = caps_by_sig(&program.functions)
-        .into_iter()
-        .any(|(k, caps)| before.get(&k).is_some_and(|b| *b != caps));
-    if widened {
-        return None;
-    }
+/// A body is typed against the declarations alone and reads them by name, so
+/// an earlier body keeps its verdict.
+pub fn check_appended(program: &Program, at: usize) -> (Appended, Recorded) {
     let (out, _, _, derived, typed, made) = check_accum_inner(program, true, at);
-    Some(((out, derived, typed), made.unwrap_or_default()))
+    ((out, derived, typed), made.unwrap_or_default())
 }
 
 pub type Appended = (
@@ -457,36 +447,6 @@ pub type Appended = (
     Vec<crate::gen::Site>,
     Option<HashSet<String>>,
 );
-
-/// Parameter capabilities keyed by the Debug text of a `Type::Fn`, which
-/// carries none, for a call through a stored function value. When two
-/// declarations share a signature, `consume` wins: refusing is the sound side.
-fn caps_by_sig(functions: &[crate::ast::Function]) -> HashMap<String, Vec<Capability>> {
-    let mut caps_by_sig: HashMap<String, Vec<Capability>> = HashMap::new();
-    for f in functions {
-        let key = format!(
-            "{:?}",
-            Type::Fn(
-                f.params.iter().map(|p| p.ty.clone()).collect(),
-                Box::new(f.ret.clone()),
-            )
-        );
-        let cs: Vec<Capability> = f.params.iter().map(|p| p.capability).collect();
-        match caps_by_sig.entry(key) {
-            std::collections::hash_map::Entry::Occupied(mut o) => {
-                for (c, n) in o.get_mut().iter_mut().zip(&cs) {
-                    if *n == Capability::Consume {
-                        *c = *n;
-                    }
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(cs);
-            }
-        }
-    }
-    caps_by_sig
-}
 
 /// An impl head as written (`impl<T> Show for Option<T>`), for the overlap
 /// diagnostic.
@@ -680,7 +640,6 @@ fn check_accum_inner(
             caps.insert(m.name.clone(), cs);
         }
     }
-    let caps_by_sig = caps_by_sig(&program.functions);
 
     // Protocol registries: each method name to its protocol and
     // signature, and which (protocol, type key) pairs are implemented.
@@ -1055,7 +1014,6 @@ fn check_accum_inner(
         fn_decls: &fn_decls,
         sigs: &sigs,
         caps: &caps,
-        caps_by_sig: &caps_by_sig,
         types: &types,
         contracts: &contracts,
         variants: &variants,
@@ -1071,7 +1029,7 @@ fn check_accum_inner(
         record_reads: recording && READS.with(|r| r.get()),
     };
     let mut checker = Checker::new(&cx, recording);
-    checker.recheck = (cx.record_reads).then(|| recheck::Session::open(program, &caps_by_sig));
+    checker.recheck = (cx.record_reads).then(|| recheck::Session::open(program));
 
     // 2b. Module state, in declaration order. A failed global still binds, as
     //     `Err`, so bodies that read it do not cascade "unknown variable".
@@ -1771,9 +1729,6 @@ struct Cx<'a> {
     /// Each function's parameter types and result, by [`DeclId::index`].
     sigs: &'a [(Vec<Type>, Type)],
     caps: &'a HashMap<String, Vec<Capability>>,
-    /// Parameter capabilities by the Debug text of a stored function value's
-    /// `Type::Fn`, which carries none.
-    caps_by_sig: &'a HashMap<String, Vec<Capability>>,
     /// The type declarations by name with their ids, which the checker reads
     /// as [`crate::types::Decls`], recording each lookup.
     types: &'a HashMap<String, (DeclId, TypeDecl)>,
@@ -4838,21 +4793,13 @@ impl<'a> Checker<'a> {
                         got = args.len()
                     ));
                 }
-                // A `Type::Fn` carries no capabilities, so the region rule
-                // reads the signature's `consume` slots from `caps_by_sig`,
-                // keyed on the canonical `fn(..) -> R`.
-                let sig_caps = self
-                    .caps_by_sig
-                    .get(&format!("{:?}", Type::Fn(ptys.clone(), ret.clone())));
+                // Every argument is `read` ([`Checker::reads_every_param`]).
                 for (i, (arg, pty)) in args.iter().zip(&ptys).enumerate() {
                     let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
                     if !self.coercible(&aty, pty) {
                         return Err(cerr!(line, FnValueArgType, name, arg = i + 1, pty, aty));
                     }
                     self.prove_coercion(arg, pty, line)?;
-                    if sig_caps.and_then(|cs| cs.get(i)) == Some(&Capability::Consume) {
-                        self.region_consume_guard(name, i, &aty, line)?;
-                    }
                 }
                 // A call through a stored value (any binding outside the
                 // params frame, index 1) dispatches over the signature's
@@ -6179,6 +6126,7 @@ impl<'a> Checker<'a> {
                 {
                     return Ok(false);
                 }
+                self.reads_every_param(vn, line)?;
                 self.record_arg_fn(
                     &crate::types::substitute(expected_fn, subst),
                     Some(vn),
@@ -6368,7 +6316,26 @@ impl<'a> Checker<'a> {
         if self.gen_fns.contains(name) {
             return Err(cerr!(line, GenFnValue));
         }
-        Ok(())
+        self.reads_every_param(name, line)
+    }
+
+    /// Refuses a function value whose target takes a parameter by other than
+    /// `read`. A `Type::Fn` carries no capabilities, so a call through a
+    /// value passes every argument as `read`.
+    fn reads_every_param(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
+        let Some(d) = self.resolve_fn(name) else {
+            return Ok(());
+        };
+        match (self.functions[d.index()].params.iter()).find(|p| p.capability != Capability::Read) {
+            Some(p) => Err(cerr!(
+                line,
+                FnValueCapability,
+                name = DeclName(name),
+                param = p.name.as_str(),
+                cap = p.capability.word()
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Refuses a lambda body that assigns, `drop`s or `consume`s a captured

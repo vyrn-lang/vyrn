@@ -216,7 +216,7 @@ type User = {
 
 ### Function types
 
-`fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state.
+`fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state. A function value reads every argument, so a function with a `consume` or `modify` parameter is not a value of any `fn` type.
 
 ```vyrn
 type Transform = fn(Int64) -> Int64

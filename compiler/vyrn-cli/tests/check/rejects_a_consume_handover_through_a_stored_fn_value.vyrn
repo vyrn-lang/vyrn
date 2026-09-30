@@ -1,3 +1,0 @@
-// Inside a `region`, `h(s)` through a stored `consume`-taking `h` is refused
-// like the direct `keep(s)`.
-let mut kept: Array<String> = [] fn keep(s: consume String) -> Int64 { kept.push(s) return 0 } fn main() -> Int64 { let h: fn(String) -> Int64 = keep region { h("a" + "b") } return 0 }

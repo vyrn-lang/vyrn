@@ -582,6 +582,9 @@ rules! {
     GenFnValue {}
         "a `gen fn` runs at generation time and cannot be \
         used as a function value";
+    FnValueCapability { name, param, cap }
+        "`{name}` cannot be used as a function value: it takes \
+        `{param}` by `{cap}`, and a `fn` type reads every argument";
     ModifyNotMut { fname, arg, vn }
         "`{fname}` argument {arg} is `modify`, so `{vn}` must be \
         declared `mut`";
