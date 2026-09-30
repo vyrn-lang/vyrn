@@ -938,14 +938,21 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    /// Ends every alias that reads a place overlapping the one `w` writes,
-    /// less the chain the write goes through. A copying take writes nothing;
-    /// a store into a binding writes its own slot; a store into an element
-    /// ends no header a `while` walks ([`in_element`]). A `modify` argument
-    /// writes what it reads and ends a walked borrow whatever it holds.
+    /// Ends every alias that reads a place overlapping the one `w` writes
+    /// ([`overlaps`]), less the chain the write goes through. A copying take
+    /// writes nothing; a store into a binding writes its own slot; a store
+    /// into an element ends no header a `while` walks ([`in_element`]). A
+    /// `modify` argument writes what it reads and ends a walked borrow
+    /// whatever it holds.
     fn end(&self, st: &mut State, w: Write) {
-        if let Write::State(gs) = &w {
-            self.end_state(st, gs);
+        // A call that may store into a global writes the whole of it, as a
+        // `modify` argument naming it would: the judgment names no place
+        // under a global.
+        if let Write::State(gs) = w {
+            for g in gs {
+                let whole = Arg::Place(Place::Global(g));
+                self.end(st, Write::Modify(&whole));
+            }
             return;
         }
         let name;
@@ -1009,24 +1016,9 @@ impl<'b> Kernel<'b> {
     /// is written there ([`writes_of`] for a row already in the body).
     fn owe(&mut self, st: &mut State, m: Missing) {
         let runs = &self.body.names[m.name.index()].runs;
-        self.end_state(st, &release_state(runs, &self.body.name));
+        let gs = release_state(runs, &self.body.name);
+        self.end(st, Write::State(gs));
         self.missing.push(m);
-    }
-
-    /// Ends every borrow of the globals `gs`: the judgment names no place
-    /// under a global, so a borrow of any part of one ends.
-    fn end_state(&self, st: &mut State, gs: &[String]) {
-        for (n, a) in &st.alias {
-            let info = &self.body.names[n.index()];
-            if self.owned(*n) && !self.read_out[n.index()] && info.walked.is_none() {
-                continue;
-            }
-            if let Root::G(g) = &a.root {
-                if gs.contains(g) {
-                    st.dead.entry(*n).or_insert_with(|| (self.here, g.clone()));
-                }
-            }
-        }
     }
 
     /// Refuses an argument that reads a global `gs` names. The callee reads
@@ -1039,7 +1031,7 @@ impl<'b> Kernel<'b> {
         gs: &[String],
     ) -> Result<(), Refusal> {
         let mut after = st.clone();
-        self.end_state(&mut after, gs);
+        self.end(&mut after, Write::State(gs.to_vec()));
         let what = format!("read by {}", self.by);
         for (a, _) in args.iter().filter(|(_, c)| *c != Capability::Consume) {
             let n = match a {
