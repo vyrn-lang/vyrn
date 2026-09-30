@@ -11,9 +11,10 @@
 //! - `comment` (the default) appends a comment to the root;
 //! - `body` adds a `let` after the `{` of the root's last `fn` line;
 //! - `sig` toggles `mut` on the root function other than `main` whose name the
-//!   root spells most often, a signature edit every reader of it sees.
+//!   root spells most often, a signature edit every reader of it sees;
+//! - `line` puts one or two blank lines before the root, moving every line.
 //!
-//! No edit moves a line. Prints the best and the median of `VYRN_RUNS` edits
+//! Only `line` moves a line. Prints the best and the median of `VYRN_RUNS` edits
 //! (5 by default) after three warm-up edits. `VYRN_BUILD_PROFILE=1` adds the
 //! phase table of one more.
 
@@ -139,6 +140,7 @@ fn edit(src: &str, i: usize) -> String {
             src.replacen(&format!("\nfn {name}("), &format!("\nmut fn {name}("), 1)
         }
         Ok("sig") => src.to_string(),
+        Ok("line") => format!("{}{src}", "\n".repeat(1 + i % 2)),
         _ => format!("{src}\n// keystroke {i}\n"),
     }
 }
