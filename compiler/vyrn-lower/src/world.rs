@@ -47,11 +47,12 @@ pub struct FnRow {
 }
 
 /// The function rows in [`FnId`] order: [`crate::Lowered::source`], then
-/// each instance, lambda frame and the module state in the order the placer
-/// meets it. Deterministic, so one program numbers alike on every run; no
-/// output is read in id order.
+/// each instance, then each lambda frame and the module state in the order
+/// the placer's serial merge meets it ([`Fns::number`]). Deterministic, so
+/// one program numbers alike on every run; no output is read in id order.
+/// A worker reads the table and adds no row.
 #[derive(Default)]
-pub(crate) struct Fns {
+pub struct Fns {
     rows: Vec<FnRow>,
     /// The first row under each name. A non-generic instance and its frame
     /// are the function's own row.
@@ -59,32 +60,62 @@ pub(crate) struct Fns {
 }
 
 impl Fns {
-    /// The table of [`crate::Lowered::source`], one row per name even where a
-    /// projection shares a function's name.
-    pub(crate) fn source(names: &[String]) -> Fns {
+    /// The table of `lowered`: a row per [`crate::Lowered::source`] name,
+    /// even where a projection shares a function's name, then a row per
+    /// instance ([`Fns::instance`]).
+    pub(crate) fn lowered(lowered: &crate::Lowered) -> Fns {
         let mut fns = Fns::default();
-        for name in names {
+        for name in &lowered.source {
             fns.push(name.clone(), None);
+        }
+        for inst in &lowered.instances {
+            fns.instance(inst);
         }
         fns
     }
 
-    /// The row named `name`, added with `generic` when there is none.
-    pub(crate) fn add(&mut self, name: &str, generic: Option<(FnId, Vec<Type>)>) -> FnId {
-        match self.ids.get(name) {
-            Some(&id) => id,
-            None => self.push(name.to_string(), generic),
+    /// The first row named `name`.
+    pub(crate) fn id(&self, name: &str) -> Option<FnId> {
+        self.ids.get(name).copied()
+    }
+
+    /// The row named `name`, added when there is none.
+    pub(crate) fn add(&mut self, name: &str) -> FnId {
+        match self.id(name) {
+            Some(id) => id,
+            None => self.push(name.to_string(), None),
+        }
+    }
+
+    /// The row of `inst`, added when there is none.
+    pub(crate) fn instance(&mut self, inst: &crate::Instance) -> FnId {
+        match self.instance_id(inst) {
+            Some(id) => id,
+            None => self.push(
+                inst.spelling(),
+                Some((inst.func_id, inst.type_args.clone())),
+            ),
         }
     }
 
     /// The row of `inst`: its function's own row when it has no type
     /// arguments.
-    pub(crate) fn instance(&mut self, inst: &crate::Instance) -> FnId {
+    pub(crate) fn instance_id(&self, inst: &crate::Instance) -> Option<FnId> {
         if inst.type_args.is_empty() {
-            return inst.func_id;
+            return Some(inst.func_id);
         }
-        let generic = Some((inst.func_id, inst.type_args.clone()));
-        self.add(&inst.spelling(), generic)
+        self.id(&inst.spelling())
+    }
+
+    /// Gives every frame of `top` without a row the row named as the frame
+    /// ([`Fns::add`]), and returns each frame's row in [`Body::frames`]
+    /// order. The serial merge calls it on every body a worker built.
+    pub(crate) fn number(&mut self, top: &mut Body) -> Vec<FnId> {
+        let mut ids = Vec::new();
+        top.each_frame_mut(&mut |b| {
+            ids.push(*b.id.get_or_insert_with(|| self.add(&b.name)));
+        });
+        ids
     }
 
     fn push(&mut self, name: String, generic: Option<(FnId, Vec<Type>)>) -> FnId {
@@ -206,7 +237,7 @@ impl World {
     /// name for module state), or a function's own name. A reader outside
     /// the World looks a name up once, here.
     pub fn fn_id(&self, name: &str) -> Option<FnId> {
-        self.fns.ids.get(name).copied()
+        self.fns.id(name)
     }
 
     /// The row of `id`.
@@ -313,6 +344,11 @@ impl World {
         }
         for (id, s) in &self.bodies {
             if let Some(s) = s {
+                assert_eq!(
+                    s.body.id,
+                    Some(*id),
+                    "a core body is served under another row"
+                );
                 assert_eq!(
                     s.body.name,
                     self.fn_row(*id).name,

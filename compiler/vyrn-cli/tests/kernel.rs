@@ -118,7 +118,12 @@ fn run_corpus() {
         // The module-state initializer is a body but no instance: every `let` at
         // module scope is a store into the global it names.
         if !program.globals.is_empty() {
-            match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
+            match vyrn_lower::core::build_module_state(
+                &program,
+                &own,
+                &Default::default(),
+                &lowered.globals,
+            ) {
                 Err(g) => {
                     // A rule the core states is a refusal, not a gap.
                     if let Some(m) = &g.rule {
@@ -150,7 +155,13 @@ fn run_corpus() {
         }
         // A `test` or `bench` body is a body but no instance: neither is a function.
         for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(&program, &own, &mut Default::default(), ob) {
+            match vyrn_lower::core::build_outside(
+                &program,
+                &own,
+                &Default::default(),
+                &mut Default::default(),
+                ob,
+            ) {
                 Err(g) => {
                     if let Some(m) = &g.rule {
                         refused.push(format!("{file}: {}: line {}: {m}", ob.name, g.line));

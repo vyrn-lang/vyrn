@@ -11403,7 +11403,6 @@ impl<'p> Fn_<'_, 'p> {
                 extent,
                 vyrn_lower::kernel::Root::N(root),
                 &body.names,
-                &body.name,
             ) {
                 return None;
             }

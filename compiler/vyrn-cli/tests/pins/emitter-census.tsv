@@ -1,5 +1,5 @@
 kind	lines	wasm
-the mapping §2.3 names	8163	631
+the mapping §2.3 names	8162	631
 a decision §2.3 says it must not make	460	141
 the runtime it emits by hand	340	7
 one block per builtin name	2756	651

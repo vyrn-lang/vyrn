@@ -910,6 +910,12 @@ impl<'a> Iterator for Rows<'a> {
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
+    /// The frame's row in the World's function table. `None` until the
+    /// table has a row under the frame's name: a lambda frame a worker built
+    /// before `vyrn_lower::core::augment` numbered it, or a frame built
+    /// outside `augment`. A frame without a row was not judged, so it has no
+    /// effect row ([`crate::own::StateCallees`]).
+    pub id: Option<FnId>,
     /// The module file the function came from; `None` for the root.
     pub file: Option<String>,
     /// `export extern fn`: the JS caller releases every String the call hands
@@ -968,6 +974,14 @@ impl Body {
             out.extend(l.frames());
         }
         out
+    }
+
+    /// Calls `f` on every frame in [`Body::frames`] order.
+    pub fn each_frame_mut(&mut self, f: &mut impl FnMut(&mut Body)) {
+        f(self);
+        for l in &mut self.lambdas {
+            l.each_frame_mut(f);
+        }
     }
 
     /// The holes a release row of `n` walks around: the row's own set, else

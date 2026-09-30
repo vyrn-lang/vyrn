@@ -314,13 +314,24 @@ fn run_corpus() {
         // which is what a stored source names.
         let mut outside: Vec<vyrn_frontend::core::Body> = Vec::new();
         if !program.globals.is_empty() {
-            match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
+            match vyrn_lower::core::build_module_state(
+                &program,
+                &own,
+                &Default::default(),
+                &lowered.globals,
+            ) {
                 Ok(b) => outside.push(b),
                 Err(g) => *gaps.entry(g.what).or_default() += 1,
             }
         }
         for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(&program, &own, &mut Default::default(), ob) {
+            match vyrn_lower::core::build_outside(
+                &program,
+                &own,
+                &Default::default(),
+                &mut Default::default(),
+                ob,
+            ) {
                 Ok(b) => outside.push(b),
                 Err(g) => {
                     if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
