@@ -31,9 +31,6 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
         &[
             "vyrn-lower/src/lib.rs",
             "vyrn-lower/src/core.rs",
-            // The must-use judgment; a form it walks is a form this column
-            // states.
-            "vyrn-lower/src/typed.rs",
             // The String accumulator whitelist the builder and the emitter ask.
             "vyrn-lower/src/append.rs",
         ],

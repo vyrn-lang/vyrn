@@ -84,6 +84,7 @@ The compiler injects these declarations into every program, so a file names them
 | Module | Provides |
 |---|---|
 | `std/arrays` | `map`, `filter`, `fold`, `any`, `all`, `includes`, `sortWith` (a comparator), `sortBy` (an `Int64` key). |
+| `std/columns` | `columns("./module")`, a generator: each exported record type `T` gets `TColumns`, one array per field under a `where` rule of equal lengths, with `tColumns(capacity)`, `pushT(c, v)` and `tAt(c, i)`. `c.f[i]` reads and writes one field in place, and a loop bounded by `c.f.length` indexes every column with no check. |
 | `std/slots` | `Slots<T>` and `Handle<T>`: a generational slab. `insert`, `remove`, `get`, `alive`, `count`, `capacity`, `handles`. `s[h]` and `s[h] = v` index it, `for x in s` visits the live elements, and `s.tryAt(h)` reads in place. A stale or foreign handle is dead, never plausible. |
 | `std/stream` | `unfold(seed, step)` over a `Cursor` (`cursorGet`, `cursorSet`), and the lazy combinators `map`, `filter`, `take`, `merge`. Each takes a stream and returns one the caller must dispose. |
 | `std/fallible` | The `Fallible` protocol that `?` resolves through for a user enum. |
@@ -133,4 +134,5 @@ Each of these is a library of `gen fn`s. The compiler knows none of their domain
 | `std/diag` | `report` and `reportHere`: a generator emits a diagnostic at a file and line it read. |
 | `std/hints` | Per-project rule levels and per-line waivers for checking libraries. |
 | `std/vyx-hints` | Accessibility, security and performance rules for `.vyx` files, reported through `std/hints`. |
+| `std/imports` | `importBlock`: the `import` lines of a generated module, one per module that declares a type it uses. |
 | `std/symbolmap` | The symbol map a generated module exports: each symbol's source declaration, as JSON for tools. |

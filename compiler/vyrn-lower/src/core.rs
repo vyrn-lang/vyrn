@@ -1138,6 +1138,7 @@ fn build_seeded(
         temps: 0,
         pending_receiver: None,
         drain: 0,
+        scrutinee: None,
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         owed: None,
@@ -1390,6 +1391,8 @@ struct Builder<'a> {
     /// built. The compiled backends drain argument temporaries at each, so a
     /// receiver borrowed under one can be freed there.
     drain: u32,
+    /// The scrutinee expression being built, which is read and not taken.
+    scrutinee: Option<NodeId>,
     /// Temporaries the expression being built has read and must release once
     /// it is bound (`read_val`, `call`, `rhs`, `bind`).
     after: Vec<Name>,
@@ -1500,6 +1503,7 @@ impl<'a> Builder<'a> {
             temps: 0,
             pending_receiver: None,
             drain: 0,
+            scrutinee: None,
             after: Vec::new(),
             after_of_rhs: Vec::new(),
             owed: None,
@@ -3236,8 +3240,11 @@ impl<'a> Builder<'a> {
                 if streaming {
                     self.stream_loops.pop();
                     // Pulled to its end or left by a `break`, the stream is
-                    // closed here by its last owner, the loop.
-                    if self.stream_owed(it) && self.taken_by_loop(it, sid) {
+                    // closed here by its last owner, the loop. A binding's
+                    // stream is always disposed of here, so a later use is a
+                    // second disposal ([`Body::owes`]).
+                    let owed = self.body.owes(it).is_some();
+                    if self.stream_owed(it) && (owed || self.taken_by_loop(it, sid)) {
                         out.push(St::Drop(it, Site::None, 0, None));
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {
@@ -4185,8 +4192,10 @@ impl<'a> Builder<'a> {
                 }
             },
             _ => {
-                let v = self.val(e, out)?;
-                match v {
+                let outer = self.scrutinee.replace(e.id());
+                let v = self.val(e, out);
+                self.scrutinee = outer;
+                match v? {
                     Val::Name(t) => {
                         self.keyed(t, construct);
                         Ok((Val::Name(t), self.taken_by(t, construct)))
@@ -5263,13 +5272,18 @@ impl<'a> Builder<'a> {
         self.drain += 1;
         let v = self.read_at(e, out, None);
         self.drain -= 1;
+        let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
+        let (callee, kind, solved) = match copied {
+            Some((id, f, solved)) => (f, Callee::Fn(id), solved),
+            None => ("@copy".to_string(), Callee::Reserved, Vec::new()),
+        };
         Ok(Rhs::Call {
-            callee: "@copy".to_string(),
+            callee,
             args: vec![(Arg::Val(v?), Capability::Read)],
             write_back: false,
-            kind: Callee::Reserved,
+            kind,
             ret: Some(self.ty_of(e)?),
-            solved: Vec::new(),
+            solved,
             targets: Vec::new(),
         })
     }
@@ -5277,8 +5291,9 @@ impl<'a> Builder<'a> {
     /// Whether `e` is a heap element of a temporary (`pieces()[0]`) or a
     /// heap field under one (`pieces()[0].s`), stated as `@copy` of the read
     /// (#537): the temporary is released whole after the consumer, so the
-    /// taker must own a copy. A type with `impl Copy` is read as any element
-    /// is.
+    /// taker must own a copy. A type with `impl Copy` is copied by the impl
+    /// only where the borrow has no lowering: an element itself, not a field
+    /// under one and not a scrutinee, which both stay borrows.
     fn copies_a_part(&self, e: &Expr) -> bool {
         let mut at = e;
         while let Expr::Field { expr, .. } = at {
@@ -5287,7 +5302,9 @@ impl<'a> Builder<'a> {
         matches!(at, Expr::Call { name, args, .. }
             if name == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]))
             && self.ty_of(e).is_ok_and(|t| {
-                self.owns(&t) && vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
+                self.owns(&t)
+                    && (vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
+                        || (std::ptr::eq(at, e) && self.scrutinee != Some(e.id())))
             })
     }
 
@@ -5472,21 +5489,7 @@ impl<'a> Builder<'a> {
                 type_args: _,
                 id: _,
             } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
-                let r = if name == "serveStream" {
-                    // A compiled build has no accept loop.
-                    let msg = Lit::Str(vyrn_frontend::trap::SERVE_STREAM.into());
-                    Rhs::Call {
-                        callee: name.clone(),
-                        args: vec![(Arg::Val(Val::Lit(msg)), Capability::Read)],
-                        write_back: false,
-                        kind: Callee::Builtin,
-                        ret: self.produced(e),
-                        solved: Vec::new(),
-                        targets: Vec::new(),
-                    }
-                } else {
-                    self.call(name, args, *line, self.produced(e), out)?
-                };
+                let r = self.call(name, args, *line, self.produced(e), out)?;
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
@@ -7248,15 +7251,32 @@ fn typed(
 
 /// The record type with a `where` rule that `path`, taken from a value of type
 /// `ty`, passes through before its last place ([`crate::typed::StoreRules`]).
+/// A store into an element of an array field passes through: it keeps the
+/// field's length, and the rule reads the field through its length alone.
 fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
     let decls = own.types();
     let mut at = ty.clone();
-    for step in path {
+    for (k, step) in path.iter().enumerate() {
         if let Type::Named(n) = &at {
-            if decls.get(n).is_some_and(|d| d.predicate.is_some())
-                && vyrn_frontend::types::record_fields(&at, decls).is_some()
+            let pred = decls.get(n).and_then(|d| d.predicate.as_ref());
+            if let (Some(pred), Some(fields)) =
+                (pred, vyrn_frontend::types::record_fields(&at, decls))
             {
-                return Some(n.clone());
+                let elem_of_length_only = match (step, path.get(k + 1)) {
+                    (Place::Field(_, f), Some(Place::Elem(..))) => {
+                        fields.iter().any(|x| {
+                            &x.name == f
+                                && matches!(
+                                    vyrn_frontend::types::resolve(&x.ty, decls),
+                                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
+                                )
+                        }) && !vyrn_frontend::consteval::whole_reads(pred).contains(f)
+                    }
+                    _ => false,
+                };
+                if !elem_of_length_only {
+                    return Some(n.clone());
+                }
             }
         }
         at = match (step, vyrn_frontend::types::resolve(&at, decls)) {
@@ -7295,7 +7315,8 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str, r: &mut Refused) {
         return;
     };
     r.kernel.push(Refusal {
-        diagnostic: Diagnostic::error(g.line, 0, "movecheck", message).in_file(file.clone()),
+        diagnostic: Diagnostic::error(g.line, 0, "movecheck", crate::rules::spoken(message))
+            .in_file(file.clone()),
         body: body.to_string(),
     });
 }

@@ -1,0 +1,2 @@
+each_instance_of_a_generic_body_owes_one_refusal.vyrn:2:0: `s` is a `Stream<Int64>` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(s)` — on every path

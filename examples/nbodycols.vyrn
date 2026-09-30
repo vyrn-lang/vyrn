@@ -1,12 +1,12 @@
-/// `nbody.vyrn` on a column layout: `gen_columns` holds the bodies as one
+/// `nbody.vyrn` on a column layout: `std/columns` holds the bodies as one
 /// array per field, and the integration reads `b.x[i]` where `nbody.vyrn`
 /// reads `b[i].x`. The output is `nbody.vyrn`'s, byte for byte.
 ///
 ///     vyrn run examples/nbodycols.vyrn
 
 import { Body } from "./lib/bodies"
-import { columns } from "./lib/gen_columns"
-import { BodyColumns, bodyColumns, pushBody, bodyCount } from columns("./lib/bodies")
+import { columns } from "std/columns"
+import { BodyColumns, bodyColumns, pushBody } from columns("./lib/bodies")
 
 let steps = 1000
 
@@ -38,8 +38,8 @@ fn system() -> BodyColumns {
     let sm = solarMass()
     let dy = 365.24
     let mut b = bodyColumns(5)
-    pushBody(b, Body { x: 0.0, y: 0.0, z: 0.0, vx: 0.0, vy: 0.0, vz: 0.0, mass: sm })
-    pushBody(b, Body {
+    b = pushBody(b, Body { x: 0.0, y: 0.0, z: 0.0, vx: 0.0, vy: 0.0, vz: 0.0, mass: sm })
+    b = pushBody(b, Body {
         x: 4.84143144246472090,
         y: -1.16032004402742839,
         z: -0.103622044471123109,
@@ -48,7 +48,7 @@ fn system() -> BodyColumns {
         vz: -0.0000690460016972063023 * dy,
         mass: 0.000954791938424326609 * sm,
     })
-    pushBody(b, Body {
+    b = pushBody(b, Body {
         x: 8.34336671824457987,
         y: 4.12479856412430479,
         z: -0.403523417114321381,
@@ -57,7 +57,7 @@ fn system() -> BodyColumns {
         vz: 0.0000230417297573763929 * dy,
         mass: 0.000285885980666130812 * sm,
     })
-    pushBody(b, Body {
+    b = pushBody(b, Body {
         x: 12.8943695621391310,
         y: -15.1111514016986312,
         z: -0.223307578892655734,
@@ -66,7 +66,7 @@ fn system() -> BodyColumns {
         vz: -0.0000296589568540237556 * dy,
         mass: 0.0000436624404335156298 * sm,
     })
-    pushBody(b, Body {
+    b = pushBody(b, Body {
         x: 15.3796971148509165,
         y: -25.9193146099879641,
         z: 0.179258772950371181,
@@ -84,7 +84,7 @@ fn offsetMomentum(bodies: consume BodyColumns) -> BodyColumns {
     let mut py = 0.0
     let mut pz = 0.0
     let mut i = 0
-    while i < bodyCount(b) {
+    while i < b.x.length {
         px = px + b.vx[i] * b.mass[i]
         py = py + b.vy[i] * b.mass[i]
         pz = pz + b.vz[i] * b.mass[i]
@@ -97,7 +97,7 @@ fn offsetMomentum(bodies: consume BodyColumns) -> BodyColumns {
 }
 
 fn energy(b: BodyColumns) -> Float64 {
-    let n = bodyCount(b)
+    let n = b.x.length
     let mut e = 0.0
     let mut i = 0
     while i < n {
@@ -117,7 +117,7 @@ fn energy(b: BodyColumns) -> Float64 {
 
 fn advance(bodies: consume BodyColumns, dt: Float64) -> BodyColumns {
     let mut b = bodies
-    let n = bodyCount(b)
+    let n = b.x.length
     let mut i = 0
     while i < n {
         let mut j = i + 1

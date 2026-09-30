@@ -729,7 +729,7 @@ fn table() -> Vec<Builtin> {
         // because the stream escapes the call that made it.
         b("serveStream")
             .sig(row("serveStream", &[], &[("s", Consume, stm(Str))], Unit, &[]))
-            .spec(Spec::Traps)
+            .spec(Spec::Effect(Unit))
             .effect(Serve)
             .hover("serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call"),
         // The argument is an address, so nothing is consumed; the result's
@@ -998,8 +998,7 @@ pub enum Spec {
     Renders(Type),
     /// A message at `String`, and for `@panicAt` the site as a string
     /// literal. The call never returns; the `St::Trap` after it ends the
-    /// path. `serveStream`'s message is the frontend's sentence, a literal in
-    /// place of the stream, which a compiled build never pulls.
+    /// path.
     Traps,
     /// `assert(c)` and `assertEq(a, b)`: a `Bool`, or two operands
     /// at one scalar type. A failure writes the interpreter's line and traps;
@@ -1043,8 +1042,11 @@ pub enum Spec {
     /// own storage, at the stated type with parameters the operands solve.
     Builds(Type),
     /// One operand at its name's type, and a result at the stated type. The
-    /// call releases it (`close`), or boxes it and answers the box's address
-    /// (`boxStream`).
+    /// call releases it (`close`), boxes it and answers the box's address
+    /// (`boxStream`), or hands it to the serving host (`serveStream`). A
+    /// compiled build has no serving host, so its `serveStream` traps with
+    /// the frontend's sentence and never pulls the stream; the path goes on
+    /// in the core, as it does under `vyrn serve`.
     Effect(Type),
     /// The logging facade. `logger(name)` hands its String back as the
     /// `Logger`. A level takes a `Logger` and a message and writes the line,

@@ -1,9 +1,7 @@
 //! Whole-program ownership facts the emitters read: the release vocabulary
-//! ([`Release`], [`Exit`], [`DropKind`]), the `vyrn why --memory` rows, and the
-//! slots through which `vyrn-lower`, which sits above this crate, installs the
-//! must-use judgment and the typed judgment's drain. [`Owned`] answers what
-//! owns; the core's placer decides what is released where. Nodes are keyed by
-//! [`NodeId`], which a clone keeps.
+//! ([`Release`], [`Exit`], [`DropKind`]) and the `vyrn why --memory` rows.
+//! [`Owned`] answers what owns; the core's placer decides what is released
+//! where. Nodes are keyed by [`NodeId`], which a clone keeps.
 
 use std::collections::HashMap;
 

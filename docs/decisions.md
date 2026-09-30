@@ -120,15 +120,18 @@ pull request.
 - No drop flags. An ambiguous join (moved on one path only) gets a release on the other edge or is refused.
 - A join arm that yields a name bound outside the construct moves it; a later use is refused with the `.copy()` fix. Treating the yield as an alias leaked the name on the edges that did not yield it.
 - A projection (a field, element or pattern binder of a place) borrows its root. It may be read, not stored or returned; the fix is `.copy()` or a take.
+- A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `rules::spoken` panics in a debug build on a sentence that does.
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
 - `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`.
 - A statement's value is released where the statement ends. A part read as a statement (`p.f`, `xs[i].f`) takes nothing: only `consume` moves a value out of a place.
-- A heap part of an element of a call's result (`mk()[0]`, `mk()[0].s`) is copied, and the result is released whole: a release cannot skip a hole in one element.
+- A heap part of an element of a call's result (`mk()[0]`, `mk()[0].s`) is copied, and the result is released whole: a release cannot skip a hole in one element. An element of a type with `impl Copy` is copied by the impl where it is taken; a field under one and a scrutinee stay borrows.
 - Iterating a place binds a `read` borrow. `for x in consume xs` takes the container; a loop over a temporary owns its elements.
 - A `let` of a place read from a `read` parameter is a borrow. Writing through the root while it lives is refused, and the fix names `.copy()`.
 - When unsure, the compiler leaks rather than double-frees. A leak is a counted row; a double free is a crash.
 - The system is affine: an undisposed value is released at scope exit. `impl MustUse` is an opt-in obligation, separate from `consume`, and it passes through containers.
 - `Stream<T>` is linear: consume it with `for`, return it, or `close()` it. It cannot be stored in a field, element, type argument or module state.
+- A must-use refusal quotes the binding's resolved type (`Stream<Int64>`), not the producer's spelling. A generic body is judged per instance and refused once per binding.
+- A generic parameter does not launder an obligation: a linear value passed through `T` is owed like any other linear binding.
 - A self-referring type declares `impl Owned`. The declaration gives the structural release walk its bottom.
 - Aliasing is a `Handle<T>` into a container you own (`std/slots`): slot, generation and owner in three plain words. `s[h]` traps on a dead handle and `get` returns `Option`. The library measured 2x faster than the compiler slab it replaced.
 - The run-time memory surface is `malloc`, `realloc`, `free` and `memcpy`, plus the explicit `region` arena. No engine checks a generation counter.
@@ -189,6 +192,7 @@ pull request.
 - Every runtime check is its own core row, stated once before the row it guards; one runtime check is one row. The emitter runs no check without a row, and a row no construct runs is an error.
 - A change that proves checks is licensed by the check oracle (`VYRN_CHECKS`, `scripts/check-elision.sh`): no proved row fails a run, and the elided, kept and oracle builds print the same.
 - A check row is proved only with a certificate that a checker sharing no code with the search accepts. Until builtin rows state length effects (#12), every `modify` or `consume` argument forgets its name.
+- The prover reads a record's `where` rule: `a.length == b.length` makes one length term of both fields. The rule holds wherever the record is, because every boundary checks it and the only store into the record in place is into an element of an array field the rule reads through its length.
 - Every limit is one constant, derived where it is used, and a test checks the derivations.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
@@ -214,7 +218,7 @@ pull request.
 - The playground runs a generator in the page: `vyrn-genwasm` without `host` builds the module and the `TypeArg` atoms, and `play-wasm.js` runs it. The page serves no read, no module reflection and no code quote, so only a `derive` generator runs there.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
-- No column layout (one array per field of a record) in std or the language. On 10^6 64-byte records it reads one field 2.0x to 2.9x faster and updates one from another 3.0x to 3.5x faster on both engines, but nbody runs 43% to 59% slower: the prover proves no index into one column from another column's length. `derive` cannot write the container, because its call answers `String`; `examples/lib/gen_columns.vyrn` is an import-target generator that does. Reopen it with a program that pays.
+- A column layout (one array per field of a record) is `std/columns`, an import-target generator over `moduleInterface`, not a language feature. Its container's `where` rule states that every column has the first one's length, so a loop bounded by one column indexes all of them unchecked. `derive` cannot write it, because its call answers `String` and renames the types it writes. A push rebuilds the container, because a push on one column breaks the rule until the last column grows.
 - Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.
 - A generator reports a diagnostic by writing `//@diag <severity> <anchor> <message>` into its output, so the report survives the cache. Two severities; an unknown word is a warning.
 - The compiler knows no lint rule names, codes, registry or suppression syntax.

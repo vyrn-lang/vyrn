@@ -213,9 +213,137 @@ fn a_halving_loop_bounds_its_counter() {
     );
 }
 
+#[test]
+fn a_where_rule_of_equal_lengths_proves_every_column() {
+    let src = "type C = {
+    a: Array<Int64>,
+    b: Array<Int64>,
+    c: Array<Int64>,
+} where a.length == b.length && c.length == b.length
+
+fn sum(c: modify C) -> Int64 {
+    let mut i: Int64 = 0
+    while i < c.a.length {
+        c.c[i] = c.a[i] + c.b[i]
+        i = i + 1
+    }
+    return 0
+}
+";
+    assert_eq!(
+        verdicts(src, "sum"),
+        [
+            "proved array-index",
+            "proved array-index",
+            "proved array-index"
+        ]
+    );
+}
+
 /// Each witness: a function `w` whose checks must all stay, and the call in
 /// `main` that makes one trap with the wording given.
 const WITNESSES: &[(&str, &str, &str)] = &[
+    // A field's length bounds only that field.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> }
+fn w(p: P) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < p.a.length {
+        s = s + p.b[i]
+        i = i + 1
+    }
+    return s
+}
+",
+        "    print(w(P { a: xs, b: [1] }).toString())",
+        "array index 1 out of bounds",
+    ),
+    // A rule that equates `a` and `b` says nothing of `c`.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64>, c: Array<Int64> } where a.length == b.length
+fn w(p: P) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < p.a.length {
+        s = s + p.c[i]
+        i = i + 1
+    }
+    return s
+}
+",
+        "    print(w(P { a: xs, b: [1, 2, 3], c: [1] }).toString())",
+        "array index 1 out of bounds",
+    ),
+    // An equality under `||` is no rule.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length || b.length == 1
+fn w(p: P) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < p.a.length {
+        s = s + p.b[i]
+        i = i + 1
+    }
+    return s
+}
+",
+        "    print(w(P { a: xs, b: [1] }).toString())",
+        "array index 1 out of bounds",
+    ),
+    // A store into the field forgets its length.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> }
+fn w(p: consume P, i: Int64) -> Int64 {
+    let mut q = p
+    if i >= 0 {
+        if i < q.a.length {
+            q.a = [9]
+            return q.a[i]
+        }
+    }
+    return 0
+}
+",
+        "    print(w(P { a: xs, b: [] }, 2).toString())",
+        "array index 2 out of bounds",
+    ),
+    // A store into the field in a loop forgets its length at the head.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> }
+fn w(p: consume P) -> Int64 {
+    let mut q = p
+    let n = q.a.length
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+        s = s + q.a[i]
+        q.a = [5]
+        i = i + 1
+    }
+    return s
+}
+",
+        "    print(w(P { a: xs, b: [] }).toString())",
+        "array index 1 out of bounds",
+    ),
+    // A builtin shrinks the field in place.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> }
+fn w(p: consume P, i: Int64) -> Int64 {
+    let mut q = p
+    if i >= 0 {
+        if i < q.a.length {
+            q.a.clear()
+            return q.a[i]
+        }
+    }
+    return 0
+}
+",
+        "    print(w(P { a: xs, b: [] }, 0).toString())",
+        "array index 0 out of bounds",
+    ),
     // The bound is one past the end.
     (
         "fn w(xs: Array<Int64>) -> Int64 {\n    let mut s: Int64 = 0\n    let mut i: Int64 = 0\n    \

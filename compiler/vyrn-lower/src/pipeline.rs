@@ -9,8 +9,6 @@ use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::gen::{GenEngine, GenError, GenInputs, GenOutput};
 use vyrn_frontend::{ast, checker, floor, loader, movecheck, prof, symbols, types};
 
-use crate::typed;
-
 /// Loads a multi-module program: parses `root_source`, resolves every
 /// `import` transitively through `resolver`, links one [`ast::Program`], and
 /// checks it. `engine` runs every generator import and `derive` site; with
@@ -122,64 +120,31 @@ fn check(
     }
 }
 
-/// Returns every ownership refusal a program earns, the must-use judgment's
-/// and the kernel's, as one list in source order, and the World the kernel
-/// judged. The caller guarantees the program type-checks.
-///
-/// A kernel refusal is dropped at a line the must-use judgment already
-/// refused, so one mistake is not said twice. It is also dropped when its
-/// subject is a binding the must-use judgment names anywhere in the file: a
-/// `Stream` closed twice is a must-use refusal and a use after a take at two
-/// lines, and still one mistake.
+/// Returns every ownership refusal a program earns, the kernel's, as one
+/// list in source order, and the World the kernel judged. The caller
+/// guarantees the program type-checks.
 pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) {
-    let mut diags = Vec::new();
-    let owed = typed::obligation::judge(program);
-    let mustuse: HashSet<(Option<String>, String)> = owed
-        .iter()
-        .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
-        .collect();
-    diags.extend(owed);
     // The placer judges a core body for every instance, and the World is
     // handed on: a command's next `own::Memo` adopts it. Only this analysis
     // may reuse a judgment (`movecheck::reuse_judgments`).
     let world = movecheck::judging(|| crate::analyze(program));
     crate::hand_on(program, &world);
     // A program the typed judgment refuses gets those refusals alone.
-    if !world.typed_diagnostics().is_empty() {
-        let mut typed = world.typed_diagnostics().to_vec();
-        movecheck::in_source_order(&mut typed);
-        return (typed, world);
-    }
-    let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
-    for d in &diags {
-        lines.insert((d.file.clone(), d.line));
-    }
-    diags.extend(world.refusal_diagnostics().into_iter().filter(|d| {
-        !lines.contains(&(d.file.clone(), d.line))
-            && !subject(&d.message)
-                .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
-    }));
+    let mut diags = match world.typed_diagnostics() {
+        [] => world.refusal_diagnostics(),
+        typed => typed.to_vec(),
+    };
     movecheck::in_source_order(&mut diags);
     (diags, world)
 }
 
-/// Returns the binding a refusal is about: the root of the first path its
-/// message quotes in backticks. Both passes write the subject first, so no
-/// field has to be filled at every refusal site. A message that quotes nothing
-/// has no subject and is never suppressed.
-fn subject(message: &str) -> Option<&str> {
-    let rest = message.split_once('`')?.1;
-    let path = rest.split_once('`')?.0;
-    let root = ast::root_of(path);
-    (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
-}
-
 /// Wraps `run`, an engine that compiles and runs a generator, into the engine
 /// a host passes to [`load`], which judges the generator's own program
-/// under [`movecheck::comptime`]. The must-use judgment refuses before `run`.
-/// The typed judgment runs inside `run`'s compile, which refuses the program
-/// it refused (`direct::compile_gen_host`). The kernel does not judge a generator's
-/// program: nothing prints its refusals.
+/// under [`movecheck::comptime`]. The judgments run inside `run`'s compile
+/// (`direct::compile_gen_host`), which refuses the program the typed judgment
+/// refused, or else the program with a must-use row. A program `run` declines
+/// is refused with its must-use rows here, so it is refused whatever serves
+/// it. The kernel's other refusals of a generator's program are not printed.
 pub fn gen_engine(
     run: impl Fn(&ast::Program, &str, &[ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, GenError>>
         + Send
@@ -188,15 +153,10 @@ pub fn gen_engine(
 ) -> Box<GenEngine> {
     Box::new(move |program, name, args, inputs| {
         movecheck::comptime(|| {
-            let mut owed = {
-                let _held = checker::Held::open(program);
-                typed::obligation::judge(program)
-            };
-            if !owed.is_empty() {
-                movecheck::in_source_order(&mut owed);
-                return Some(Err(GenError::Refused(owed)));
-            }
-            run(program, name, args, inputs)
+            run(program, name, args, inputs).or_else(|| {
+                let owed = crate::analyze(program).owed_diagnostics();
+                (!owed.is_empty()).then_some(Err(GenError::Refused(owed)))
+            })
         })
     })
 }

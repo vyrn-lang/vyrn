@@ -1,8 +1,7 @@
-//! The disposal obligation, asked of `vyrn check`. The rule is about a
-//! type, so the typed judgment (`vyrn_lower::typed::obligation`) states it and a crate
-//! below the lowering cannot; `testsweep` lifts these programs into the corpus. The
-//! census rows are `r30` and `r31` in `tests/refusals.rs`; these are the shapes around
-//! them.
+//! The disposal obligation, asked of `vyrn check`. The kernel states it as two
+//! rows (`vyrn_lower::rules::NEVER_DISPOSED`, `DISPOSED_TWICE`); `testsweep` lifts
+//! these programs into the corpus. The census rows are `r30` and `r31` in
+//! `tests/refusals.rs`; these are the shapes around them.
 
 mod common;
 use common::vyrn;
@@ -71,7 +70,10 @@ fn a_stepped_producer_carries_the_same_obligation() {
         "{STEP} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) return 0 }}"
     ))
     .unwrap_err();
-    assert!(e.contains("`s` is a `Stream` and is never disposed"), "{e}");
+    assert!(
+        e.contains("`s` is a `Stream<Int64>` and is never disposed"),
+        "{e}"
+    );
     assert!(run(&format!(
         "{STEP} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) close(s) return 0 }}"
     ))

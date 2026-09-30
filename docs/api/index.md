@@ -5,6 +5,7 @@
 - [std/bench](std/bench.md) — std/bench: the runtime the `vyrn bench` transform links against.
 - [std/cli](std/cli.md) — std/cli: the command line is a record type.
 - [std/codecs](std/codecs.md) — std/codecs -- hex, base64 and percent encoding over UTF-8 bytes. These are the
+- [std/columns](std/columns.md) — std/columns: a record type laid out as one array per field.
 - [std/connect](std/connect.md) — std/connect -- Connect wire compatibility as a library, built on
 - [std/contract](std/contract.md) — std/contract -- check a module against a module contract.
 - [std/diag](std/diag.md) — std/diag: a generator reports a diagnostic.
@@ -16,6 +17,7 @@
 - [std/http](std/http.md) — std/http -- the REST projection: hand-written routes over the same
 - [std/i18n](std/i18n.md) — std/i18n: typed translations as a generator library.
 - [std/icons](std/icons.md) — Inline SVG icons generated from a pinned Iconify collection, one function
+- [std/imports](std/imports.md) — std/imports: the import block of a generated module.
 - [std/json](std/json.md) — std/json: the JSON value tree and its canonical writer.
 - [std/json5](std/json5.md) — std/json5: a JSON5 reader that builds the `Json` tree of `std/json`.
 - [std/jsondec](std/jsondec.md) — std/jsondec: the untyped half of `fromJson`, and the generator of the

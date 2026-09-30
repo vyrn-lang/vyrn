@@ -1,5 +1,5 @@
 /// The record types `examples/columns.vyrn` and `examples/nbodycols.vyrn` lay
-/// out as columns with `gen_columns`.
+/// out as columns with `std/columns`.
 
 /// One body of `nbody`.
 export type Body = {

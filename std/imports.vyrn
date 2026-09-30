@@ -1,0 +1,63 @@
+/// std/imports: the import block of a generated module.
+///
+/// A generator that emits code over a module's types and procedures writes one
+/// `import` line per declaring module, so each type keeps its identity. A
+/// re-emitted copy would collide in the flat namespace.
+///
+/// ```vyrn
+/// import { importBlock, procImports } from "std/imports"
+///
+/// export gen fn server(contract: String) -> String {
+///     let iface = moduleInterface(contract)
+///     return importBlock(iface, contract, procImports(iface, false)) + "..."
+/// }
+/// ```
+
+import { joinWith } from "std/strings"
+import { includes } from "std/arrays"
+
+/// Returns the names `iface`'s procedures import under: each as is, or with
+/// `procAlias` as `<name> as <name>__real`.
+export fn procImports(iface: ModuleInterface, procAlias: Bool) -> Array<String> {
+    let mut names: Array<String> = []
+    for f in iface.functions {
+        if procAlias {
+            names.push(f.name + " as " + f.name + "__real")
+        } else {
+            names.push(f.name.copy())
+        }
+    }
+    return names
+}
+
+/// Returns one `import { ... } from "<module>"` line for each module that
+/// declares a type of `iface.types`, in first-use order. The module named
+/// `contract` comes first and also imports `procs`. An empty `contract` with
+/// no `procs` imports the types alone.
+export fn importBlock(iface: ModuleInterface, contract: String, procs: Array<String>) -> String {
+    let mut specs: Array<String> = [contract.copy()]
+    for t in iface.types {
+        if includes(specs, t.module) == false {
+            specs.push(t.module.copy())
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        if spec == contract {
+            for p in procs {
+                names.push(p.copy())
+            }
+        }
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name.copy())
+            }
+        }
+        if names.length > 0 {
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"
+"
+        }
+    }
+    return out
+}

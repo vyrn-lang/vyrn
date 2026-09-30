@@ -27,8 +27,8 @@ pub struct Owned {
 }
 
 /// What a binding of a type needs from its release: whether it owns heap,
-/// whether it is linear, and its [`Owned::declared_releases`].
-pub type NameFacts = (bool, bool, Vec<String>);
+/// the row that makes it linear, and its [`Owned::declared_releases`].
+pub type NameFacts = (bool, Option<crate::own::Linear>, Vec<String>);
 
 /// [`Owned::name_facts`] of one program's tables by type, indexed by
 /// `params_own`. The caller owns it, so each thread that builds bodies keeps
@@ -146,7 +146,7 @@ impl Owned {
         }
         let f = (
             self.owns_heap(ty),
-            self.linear_kind(ty).is_some(),
+            self.linear_kind(ty),
             self.declared_releases(ty),
         );
         memo.insert(ty.clone(), f.clone());
