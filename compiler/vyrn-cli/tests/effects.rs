@@ -320,7 +320,7 @@ fn run_corpus() {
             }
         }
         for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(&program, &own, ob) {
+            match vyrn_lower::core::build_outside(&program, &own, &mut Default::default(), ob) {
                 Ok(b) => outside.push(b),
                 Err(g) => {
                     if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {

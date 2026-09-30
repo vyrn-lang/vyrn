@@ -288,36 +288,6 @@ pub fn global_append_candidates(program: &Program) -> std::collections::BTreeSet
     targets.into_iter().collect()
 }
 
-thread_local! {
-    /// [`global_append_candidates`] of the program `core::augment` is
-    /// placing, which every body it builds asks; empty outside it.
-    static HELD: std::cell::RefCell<std::collections::BTreeSet<String>> =
-        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
-}
-
-/// Holds `program`'s module-state accumulators for one placement; drop clears
-/// them.
-pub(crate) struct Held;
-
-impl Held {
-    pub(crate) fn new(program: &Program) -> Held {
-        HELD.with(|h| *h.borrow_mut() = global_append_candidates(program));
-        Held
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        HELD.with(|h| h.borrow_mut().clear());
-    }
-}
-
-/// Whether the module-state binding `name` is a String accumulator of the
-/// program being placed.
-pub(crate) fn global_grows(name: &str) -> bool {
-    HELD.with(|h| h.borrow().contains(name))
-}
-
 struct BoundNames<'a>(&'a mut std::collections::HashSet<String>);
 
 impl BodyVisit<'_> for BoundNames<'_> {
