@@ -1,0 +1,11 @@
+// A stream handed through a generic `T` is still a stream, and still owed.
+fn id<T>(x: consume T) -> T {
+    return x
+}
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    let s = id(fromArray(a))
+    print(1)
+    return 0
+}

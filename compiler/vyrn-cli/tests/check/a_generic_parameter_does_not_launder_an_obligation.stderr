@@ -1,0 +1,2 @@
+a_generic_parameter_does_not_launder_an_obligation.vyrn:8:0: `s` is a `Stream<Int64>` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(s)` — on every path

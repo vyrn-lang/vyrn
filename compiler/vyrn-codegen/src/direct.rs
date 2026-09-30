@@ -246,10 +246,15 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
     // `i64` handle only here. Cleared after, so a later `compile` on this thread is unaffected.
     crate::set_gen_host(true);
     let world = vyrn_lower::analyze(program);
-    let r = if world.typed_diagnostics().is_empty() {
-        compile_inner(program, world).map_err(GenError::Failed)
-    } else {
-        Err(GenError::Refused(world.typed_diagnostics().to_vec()))
+    // The typed judgment's refusals, else the must-use rows: the kernel's
+    // other refusals of a generator's program are not the reader's.
+    let refused = match world.typed_diagnostics() {
+        [] => world.owed_diagnostics(),
+        typed => typed.to_vec(),
+    };
+    let r = match refused.is_empty() {
+        true => compile_inner(program, world).map_err(GenError::Failed),
+        false => Err(GenError::Refused(refused)),
     };
     crate::set_gen_host(false);
     r
@@ -8090,7 +8095,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(Type::Unit)
     }
 
-    /// `close(s)` and `boxStream(s)`, the builtins
+    /// `close(s)`, `boxStream(s)` and `serveStream(s)`, the builtins
     /// [`Spec::Effect`] names. `operand` writes the argument at the type asked
     /// for, or at its own where none is, and answers the type it wrote.
     fn effect(
@@ -8108,6 +8113,14 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         match name {
             "boxStream" => return self.stream_box(m, b, operand, line),
+            "serveStream" => {
+                let msg = self.cx.rt.intern(m, vyrn_frontend::trap::SERVE_STREAM);
+                self.panic_line(m, b, None, |_, _, b| {
+                    b.ins(&Instruction::I32Const(msg as i32));
+                    Ok(())
+                })?;
+                b.ins(&Instruction::Unreachable);
+            }
             // A stepped stream owns a cell from a fixed slab of 65536, which a leak would
             // exhaust; the tag tells a stepped stream from a buffer one.
             _ => {

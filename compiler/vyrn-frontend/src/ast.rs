@@ -2219,86 +2219,52 @@ pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
         .any(|b| b.stmts.iter().any(|s| stmt_mentions(s, name)))
 }
 
-/// Returns whether `e` names the binding on some path.
+/// Returns whether some path through `e` names the binding. A lambda body
+/// counts though it may never run: narrowing it would widen what compiles.
 pub fn mentions(e: &Expr, name: &str) -> bool {
-    paths(e, name).0
-}
-
-/// Returns `(some, every)`: whether some path through `e` names the binding,
-/// and whether every path does.
-///
-/// Only a `match` and an `if` expression skip a subexpression, so only they
-/// make the two differ. The must-use walk needs `every`: with `some`,
-/// `match p { Some(n) => close(h), None => 0 }` would discharge a handle the
-/// `None` path abandons.
-pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
-    // Both run: a mention in either is a mention through the pair.
-    let seq = |a: (bool, bool), b: (bool, bool)| (a.0 || b.0, a.1 || b.1);
-    let all = |m: bool| (m, m);
+    let block = |b: &Block| b.stmts.iter().any(|s| stmt_mentions(s, name));
     match e {
-        Expr::Var { name: n, .. } => all(n == name),
+        Expr::Var { name: n, .. } => n == name,
         Expr::Int(_, _)
         | Expr::Byte(_, _)
         | Expr::Float(_, _)
         | Expr::Bool(_, _)
-        | Expr::Str(_, _) => (false, false),
+        | Expr::Str(_, _) => false,
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            paths(expr, name)
+            mentions(expr, name)
         }
-        Expr::Consume { place, .. } => paths(place, name),
-        Expr::Binary { lhs, rhs, .. } => seq(paths(lhs, name), paths(rhs, name)),
+        Expr::Consume { place, .. } => mentions(place, name),
+        Expr::Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
         Expr::Call { args, .. }
         | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => args
+        | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| mentions(a, name)),
+        Expr::MapLit { entries, .. } => entries
             .iter()
-            .fold((false, false), |acc, a| seq(acc, paths(a, name))),
-        Expr::MapLit { entries, .. } => entries.iter().fold((false, false), |acc, (k, v)| {
-            seq(seq(acc, paths(k, name)), paths(v, name))
-        }),
-        Expr::StructLit { fields, .. } => fields
-            .iter()
-            .fold((false, false), |acc, (_, v)| seq(acc, paths(v, name))),
-        // The scrutinee runs whatever arm is taken, so it is sequenced with
-        // the arms.
+            .any(|(k, v)| mentions(k, name) || mentions(v, name)),
+        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| mentions(v, name)),
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            let s = paths(scrutinee, name);
-            if arms.is_empty() {
-                return s;
-            }
-            // A block arm exists only in statement position; `every` is
-            // conservatively false for it.
-            let any = arms.iter().any(|a| match &a.body {
-                ArmBody::Expr(e) => paths(e, name).0,
-                ArmBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
-            });
-            let every = arms
-                .iter()
-                .all(|a| a.body.as_expr().is_some_and(|e| paths(e, name).1));
-            seq(s, (any, every))
+            mentions(scrutinee, name)
+                || arms.iter().any(|a| match &a.body {
+                    ArmBody::Expr(e) => mentions(e, name),
+                    ArmBody::Block(b) => block(b),
+                })
         }
-        // A missing `else` names nothing. The checker refuses it, so only an
-        // incomplete tree reaches this.
         Expr::IfExpr {
             cond,
             then_branch,
             else_branch,
             ..
         } => {
-            let t = paths(then_branch, name);
-            let e = match else_branch {
-                Some(b) => paths(b, name),
-                None => (false, false),
-            };
-            seq(paths(cond, name), (t.0 || e.0, t.1 && e.1))
+            mentions(cond, name)
+                || mentions(then_branch, name)
+                || else_branch.as_ref().is_some_and(|b| mentions(b, name))
         }
-        // A lambda body may never run, yet it reads as a mention on every
-        // path. Narrowing it would widen what compiles.
-        Expr::Lambda { body, .. } => all(match body {
+        Expr::Lambda { body, .. } => match body {
             LambdaBody::Expr(e) => mentions(e, name),
-            LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
-        }),
+            LambdaBody::Block(b) => block(b),
+        },
     }
 }
 

@@ -3236,8 +3236,11 @@ impl<'a> Builder<'a> {
                 if streaming {
                     self.stream_loops.pop();
                     // Pulled to its end or left by a `break`, the stream is
-                    // closed here by its last owner, the loop.
-                    if self.stream_owed(it) && self.taken_by_loop(it, sid) {
+                    // closed here by its last owner, the loop. A binding's
+                    // stream is always disposed of here, so a later use is a
+                    // second disposal ([`Body::owes`]).
+                    let owed = self.body.owes(it).is_some();
+                    if self.stream_owed(it) && (owed || self.taken_by_loop(it, sid)) {
                         out.push(St::Drop(it, Site::None, 0, None));
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {
@@ -5472,21 +5475,7 @@ impl<'a> Builder<'a> {
                 type_args: _,
                 id: _,
             } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
-                let r = if name == "serveStream" {
-                    // A compiled build has no accept loop.
-                    let msg = Lit::Str(vyrn_frontend::trap::SERVE_STREAM.into());
-                    Rhs::Call {
-                        callee: name.clone(),
-                        args: vec![(Arg::Val(Val::Lit(msg)), Capability::Read)],
-                        write_back: false,
-                        kind: Callee::Builtin,
-                        ret: self.produced(e),
-                        solved: Vec::new(),
-                        targets: Vec::new(),
-                    }
-                } else {
-                    self.call(name, args, *line, self.produced(e), out)?
-                };
+                let r = self.call(name, args, *line, self.produced(e), out)?;
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
