@@ -13,6 +13,7 @@ use crate::diagnostics::Diagnostic;
 use crate::rules::Rule;
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
+use crate::types::Decls;
 use crate::types::FALLIBLE;
 
 /// A checker error on a whole line (column 0): most AST nodes carry no column.
@@ -558,8 +559,8 @@ fn check_accum_inner(
     let mut in_bodies = 0usize;
 
     // 1. Collect and validate type declarations.
-    let mut types: HashMap<String, TypeDecl> = HashMap::new();
-    for t in &program.type_decls {
+    let mut types: HashMap<String, (DeclId, TypeDecl)> = HashMap::new();
+    for (i, t) in program.type_decls.iter().enumerate() {
         if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
             out.push(cerr!(t.line, RedefinesBuiltinType, name = t.name).in_file(t.module.clone()));
             continue;
@@ -568,14 +569,15 @@ fn check_accum_inner(
             out.push(cerr!(t.line, TypeDefinedTwice, name = t.name).in_file(t.module.clone()));
             continue;
         }
-        types.insert(t.name.clone(), t.clone());
+        types.insert(t.name.clone(), (DeclId::nth(DeclKind::Type, i), t.clone()));
     }
 
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
+    let mut ids = (0..).map(|i| DeclId::nth(DeclKind::Variant, i));
     for t in &program.type_decls {
         if let Some(vs) = crate::types::declared_variants(&t.base) {
-            for v in vs {
+            for (v, id) in vs.iter().zip(&mut ids) {
                 if RESERVED.contains(&v.name.as_str()) {
                     out.push(cerr!(t.line, ReservedName, name = v.name));
                     continue;
@@ -584,7 +586,7 @@ fn check_accum_inner(
                     out.push(cerr!(t.line, EnumVariantDefinedTwice, name = v.name));
                     continue;
                 }
-                if let Some(ty) = types.get(&v.name) {
+                if let Some((_, ty)) = types.get(&v.name) {
                     // Type and variant names share one namespace across the
                     // linked program, so the other declaration may be in std.
                     let from = ty
@@ -606,6 +608,7 @@ fn check_accum_inner(
                 variants.insert(
                     v.name.clone(),
                     VariantInfo {
+                        id,
                         enum_name: t.name.clone(),
                         payload: v.payload.clone(),
                     },
@@ -615,9 +618,16 @@ fn check_accum_inner(
     }
 
     // 2. Collect function signatures (forward references allowed).
-    let mut sigs: HashMap<String, (Vec<Type>, Type)> = HashMap::new();
-    let mut generics: HashMap<String, Vec<String>> = HashMap::new();
-    for f in &program.functions {
+    let sigs: Vec<(Vec<Type>, Type)> = (program.functions.iter())
+        .map(|f| {
+            (
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                f.ret.clone(),
+            )
+        })
+        .collect();
+    let mut fn_decls: HashMap<String, DeclId> = HashMap::new();
+    for (i, f) in program.functions.iter().enumerate() {
         if RESERVED.contains(&f.name.as_str()) {
             out.push(cerr_at!(f.line, f.name_span(), ReservedName, name = f.name));
             continue;
@@ -631,7 +641,7 @@ fn check_accum_inner(
             ));
             continue;
         }
-        if sigs.contains_key(&f.name) {
+        if fn_decls.contains_key(&f.name) {
             out.push(cerr_at!(
                 f.line,
                 f.name_span(),
@@ -649,11 +659,7 @@ fn check_accum_inner(
             ));
             continue;
         }
-        let params = f.params.iter().map(|p| p.ty.clone()).collect();
-        sigs.insert(f.name.clone(), (params, f.ret.clone()));
-        if !f.type_params.is_empty() {
-            generics.insert(f.name.clone(), f.type_params.clone());
-        }
+        fn_decls.insert(f.name.clone(), DeclId::nth(DeclKind::Fn, i));
     }
     let all_bounds: HashMap<String, HashMap<String, Vec<String>>> = program
         .functions
@@ -954,7 +960,7 @@ fn check_accum_inner(
             // The two built-in sums, under either spelling.
             _ if crate::types::is_sum_alias(&imp.ty) => true,
             Type::Named(n) | Type::App(n, _) => matches!(
-                types.get(n).map(|d| &d.base),
+                types.get(n).map(|(_, d)| &d.base),
                 Some(Type::Enum(_) | Type::Record(_))
             ),
             _ => false,
@@ -986,7 +992,7 @@ fn check_accum_inner(
                 let named_scalar = match &imp.ty {
                     Type::Named(n) | Type::App(n, _) => types
                         .get(n)
-                        .map(|d| &d.base)
+                        .map(|(_, d)| &d.base)
                         .filter(|b| !matches!(b, Type::Enum(_) | Type::Record(_))),
                     _ => None,
                 };
@@ -1049,55 +1055,41 @@ fn check_accum_inner(
         .map(|c| (c.name.clone(), c.clone()))
         .collect();
 
-    let checker = Checker {
+    let cx = Cx {
         host: program.host,
+        functions: &program.functions,
+        fn_decls: &fn_decls,
         sigs: &sigs,
         caps: &caps,
         caps_by_sig: &caps_by_sig,
         types: &types,
         contracts: &contracts,
         variants: &variants,
-        generics: &generics,
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
         protocol_places: &protocol_places,
         impls: &impls,
         impl_blocks: &program.impls,
-        cur_bounds: RefCell::new(HashMap::new()),
-        region_floor: RefCell::new(Vec::new()),
-        binder_types: RefCell::new(HashMap::new()),
-        in_root: std::cell::Cell::new(false),
-        errors: RefCell::new(Vec::new()),
-        globals: RefCell::new(HashMap::new()),
-        in_test: RefCell::new(false),
-        in_bench: RefCell::new(false),
-        in_gen: RefCell::new(false),
-        unknown: std::cell::Cell::new(false),
-        here: RefCell::new(None),
-        shadows: program.surface_shadows.clone(),
-        stmt_line: RefCell::new(0),
+        expansions: &program.expansions,
+        shadows: &program.surface_shadows,
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
-        cur_fn: RefCell::new(String::new()),
-        stored_sources: RefCell::new(Vec::new()),
-        arg_sources: RefCell::new(Vec::new()),
-        stored_calls: RefCell::new(Vec::new()),
-        derive_sites: RefCell::new(Vec::new()),
-        record: recording.then(RefCell::default),
-        pending_subst: RefCell::new(None),
-        pending_call: RefCell::new(None),
+        record_reads: recording && READS.with(|r| r.get()),
     };
+    let checker = Checker::new(&cx, recording);
 
     // 2b. Module state, in declaration order. A failed global still binds, as
     //     `Err`, so bodies that read it do not cascade "unknown variable".
     in_bodies += checker.check_globals(program, &mut out, &mut refused);
 
     // 3. Validate each type decl (base kind, referenced-type existence, predicate).
-    for t in &program.type_decls {
+    for (i, t) in (0..).zip(&program.type_decls) {
+        checker.reading(SourceBody::TypeDecl(i));
         if let Err(s) = checker.unit(|| checker.check_type_decl(t)) {
             out.extend(s);
         }
     }
+    checker.reader.set(None);
 
     // 3b. Validate each contract decl: member types exist, defaults match.
     for c in &program.contracts {
@@ -1117,7 +1109,8 @@ fn check_accum_inner(
     // 4. `main`, a whole-program error at line 0. A library (any export), a
     // file with tests or benches, and a served module (exactly
     // `fn handle(req: Request) -> Response`) need none.
-    let has_served_handle = sigs.get("handle").is_some_and(|(params, ret)| {
+    let sig = |name: &str| fn_decls.get(name).map(|d| &sigs[d.index()]);
+    let has_served_handle = sig("handle").is_some_and(|(params, ret)| {
         params.as_slice() == [Type::Named("Request".to_string())]
             && *ret == Type::Named("Response".to_string())
     });
@@ -1128,7 +1121,7 @@ fn check_accum_inner(
         || !program.tests.is_empty()
         || !program.benches.is_empty()
         || has_served_handle;
-    match sigs.get("main") {
+    match sig("main") {
         None if !is_library => out.push(cerr!(0, NoMain)),
         None => {}
         Some(main) if !main.0.is_empty() || main.1 != Type::Int => {
@@ -1137,72 +1130,54 @@ fn check_accum_inner(
         _ => {}
     }
 
-    // 5. Check functions, each independently. In a body, errors accumulate
-    //    per statement in `errors`; `function` returns the first and this
-    //    drains the rest. Within one expression the check is first-error.
-    for f in &program.functions[bodies_from..] {
-        let produced_from = out.len();
-
-        // Signature validation runs outside `function()` and must accept a
-        // `Code` type in a `gen fn` signature.
-        *checker.in_gen.borrow_mut() = in_gen_of(f, checker.host);
-        *checker.here.borrow_mut() = f.module.clone();
-        let r = (|| -> Result<(), Diagnostic> {
-            for p in &f.params {
-                // A function value cannot cross the host boundary, nor a
-                // generation-time signature.
-                if checker.contains_fn(&p.ty) && (f.is_extern || f.is_export_extern) {
-                    return Err(cerr_at!(f.line, f.name_span(), ExternTakesFn));
-                }
-                if checker.contains_fn(&p.ty) && f.is_gen {
-                    return Err(cerr_at!(f.line, f.name_span(), GenTakesFn));
-                }
-                checker.ensure_type_exists(&p.ty, f.line)?;
-            }
-            if checker.contains_fn(&f.ret) && (f.is_extern || f.is_export_extern) {
-                return Err(cerr_at!(f.line, f.name_span(), ExternReturnsFn));
-            }
-            if checker.contains_fn(&f.ret) && f.is_gen {
-                return Err(cerr_at!(f.line, f.name_span(), GenReturnsFn));
-            }
-            checker.ensure_type_exists(&f.ret, f.line)?;
-            // An `extern` import has no body; an `export extern` has one. Both
-            // signatures must fit the host ABI.
-            if f.is_extern {
-                checker.check_extern_sig(f)?;
-            } else {
-                if f.is_export_extern {
-                    checker.check_extern_sig(f)?;
-                }
-                checker.function(f)?;
-            }
-            Ok(())
-        })();
-        if let Err(s) = r {
-            out.push(s.in_file(f.module.clone()));
-        }
-        for s in checker.errors.borrow_mut().drain(..) {
-            out.push(s.in_file(f.module.clone()));
-        }
-        if out.len() > produced_from {
-            refused.insert(f.name.clone());
-            in_bodies += out.len() - produced_from;
-        }
+    // 5. Check functions, each independently, on every thread. A body reads
+    //    another only through `sigs`, so none waits for another. A worker
+    //    types into a checker of its own, and the merge takes each body's
+    //    diagnostics and record in source order, as one thread would.
+    let typing = crate::prof::phase("check: bodies");
+    let bodies: Vec<(u32, &Function)> = (0..).zip(&program.functions).skip(bodies_from).collect();
+    let globals = checker.globals.borrow().clone();
+    let typed = crate::par::in_parallel(
+        &bodies,
+        |(_, f)| weight(f),
+        || {
+            let c = Checker::new(&cx, recording);
+            *c.globals.borrow_mut() = globals.clone();
+            c
+        },
+        |c, &(i, f)| c.signature_and_body(SourceBody::Fn(i), f),
+    );
+    // One allocation for the types the bodies add, not one per doubling.
+    if let Some(r) = &checker.record {
+        let n = (typed.iter().filter_map(|t| t.record.as_ref())).map(|p| p.node_types.len());
+        r.borrow_mut().node_types.reserve(n.sum());
     }
+    for ((_, f), t) in bodies.iter().zip(typed) {
+        if !t.diags.is_empty() {
+            refused.insert(f.name.clone());
+            in_bodies += t.diags.len();
+        }
+        out.extend(checker.absorb(t));
+    }
+    drop(typing);
 
     // 6. Projection, test and bench bodies. A test or bench is a Unit body
-    //    under an unspellable name (`test@<index>`), absent from `sigs`, so no
+    //    under an unspellable name (`test@<index>`), absent from `fn_decls`, so no
     //    code can call it.
     if bodies_from == 0 {
         check_places(&checker, program, &mut out);
-        check_named_blocks(&checker, &program.tests, "test", &checker.in_test, &mut out);
+        let (tests, benches) = (&program.tests, &program.benches);
+        let (in_test, in_bench) = (&checker.in_test, &checker.in_bench);
+        check_named_blocks(&checker, tests, "test", in_test, SourceBody::Test, &mut out);
         check_named_blocks(
             &checker,
-            &program.benches,
+            benches,
             "bench",
-            &checker.in_bench,
+            in_bench,
+            SourceBody::Bench,
             &mut out,
         );
+        checker.reader.set(None);
     }
 
     // 7. Comptime purity of every `gen fn` and its callees, after
@@ -1216,8 +1191,12 @@ fn check_accum_inner(
     };
     let binders = local_index(program, &checker.binder_types.borrow());
     let typed = (in_bodies == out.len()).then_some(refused);
+    let mut seen = HashSet::new();
+    let mut reads = checker.reads.take();
+    reads.retain(|r| seen.insert(r.clone()));
     let record = checker.record.map(|r| Recorded {
         stored: effects.clone(),
+        reads,
         ..r.into_inner()
     });
     (
@@ -1230,12 +1209,41 @@ fn check_accum_inner(
     )
 }
 
+/// What typing one body added to its checker, for [`Checker::absorb`].
+struct Typed {
+    diags: Vec<Diagnostic>,
+    record: Option<Recorded>,
+    reads: Vec<(SourceBody, Key)>,
+    binders: HashMap<(usize, usize), Type>,
+    stored: StoredFnEffects,
+    derive: Vec<crate::gen::Site>,
+}
+
+/// The expressions `f`'s body holds, the measure
+/// [`crate::par::in_parallel`] orders by.
+fn weight(f: &Function) -> usize {
+    crate::body_scope_descent!(Count, count_block, count_stmt, count_expr);
+    struct N(usize);
+    impl Count<'_> for N {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, _: &Expr, _: &HashSet<String>) -> bool {
+            self.0 += 1;
+            true
+        }
+    }
+    let mut n = N(0);
+    count_block(&f.body, &mut HashSet::new(), &mut n);
+    n.0
+}
+
 /// Checks every projection body as a function body, plus three rules of its
 /// own. It is inlined, so it returns once, as its last statement. It returns
 /// a place, because a value would be a hidden copy. The place is
 /// rooted in `self` or a parameter, which the access site owns.
 fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    for (imp, f) in crate::project::all(program) {
+    for (i, (imp, f)) in (0..).zip(crate::project::all(program)) {
+        checker.reading(SourceBody::Place(i));
         let mut push = |d: Diagnostic| out.push(d.in_file(f.module.clone()));
         if crate::project::is_optional(f) {
             check_optional_place(checker, f, &mut push);
@@ -1485,6 +1493,7 @@ fn check_named_blocks(
     blocks: &[NamedBlock],
     noun: &str,
     host: &RefCell<bool>,
+    body: fn(u32) -> SourceBody,
     out: &mut Vec<Diagnostic>,
 ) {
     let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
@@ -1499,6 +1508,7 @@ fn check_named_blocks(
     }
     *host.borrow_mut() = true;
     for (i, t) in blocks.iter().enumerate() {
+        checker.reading(body(i as u32));
         // The head is synthetic but the body is the real node, so what the
         // checker records lands on the nodes `own` and the lowering walk.
         let synthetic = Function {
@@ -1578,6 +1588,11 @@ pub struct Recorded {
     pub calls: HashMap<NodeId, CallDecl>,
     /// What a check that records nothing returns as [`stored_fn_effects`].
     pub stored: StoredFnEffects,
+    /// Each source body's name lookups, each key once per body, in the order
+    /// read: a function, module state, a type declaration and an enum
+    /// variant ([`Checker::read`]). A body the check typed again repeats its
+    /// rows.
+    pub reads: Vec<(SourceBody, Key)>,
 }
 
 impl Recorded {
@@ -1594,6 +1609,7 @@ impl Recorded {
         self.stored.sources.extend(tail.stored.sources);
         self.stored.arg_sources.extend(tail.stored.arg_sources);
         self.stored.calls.extend(tail.stored.calls);
+        self.reads.extend(tail.reads);
     }
 }
 
@@ -1624,6 +1640,15 @@ thread_local! {
     /// ([`crate::own::Memo::open`]).
     static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HELD: RefCell<Option<(usize, HeldRecord)>> = const { RefCell::new(None) };
+    /// Set by [`record_reads`].
+    static READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arms the read rows ([`Recorded::reads`]) of this thread's recording
+/// checks. A host that rechecks per function (the editor) arms it; `vyrn
+/// check` does not, and a row costs a push per name lookup.
+pub fn record_reads() {
+    READS.with(|r| r.set(true));
 }
 
 /// A record with the [`Host`] it was made under. The host changes what a
@@ -1717,17 +1742,24 @@ pub fn recorded(program: &Program) -> std::sync::Arc<Recorded> {
     made
 }
 
-struct Checker<'a> {
-    sigs: &'a HashMap<String, (Vec<Type>, Type)>,
+/// What every body is typed against: the declarations and tables steps 1 to 2
+/// of [`check_accum_inner`] build. Shared by the threads that type bodies.
+struct Cx<'a> {
+    functions: &'a [Function],
+    /// The first function declared under each name that the checker accepts;
+    /// [`Checker::resolve_fn`] reads it.
+    fn_decls: &'a HashMap<String, DeclId>,
+    /// Each function's parameter types and result, by [`DeclId::index`].
+    sigs: &'a [(Vec<Type>, Type)],
     caps: &'a HashMap<String, Vec<Capability>>,
     /// Parameter capabilities by the Debug text of a stored function value's
     /// `Type::Fn`, which carries none.
     caps_by_sig: &'a HashMap<String, Vec<Capability>>,
-    types: &'a HashMap<String, TypeDecl>,
+    /// The type declarations by name with their ids, which the checker reads
+    /// as [`crate::types::Decls`], recording each lookup.
+    types: &'a HashMap<String, (DeclId, TypeDecl)>,
     contracts: &'a HashMap<String, ContractDecl>,
     variants: &'a HashMap<String, VariantInfo>,
-    /// Generic function name to its type-parameter names.
-    generics: &'a HashMap<String, Vec<String>>,
     /// Function name to (type parameter to bounds).
     all_bounds: &'a HashMap<String, HashMap<String, Vec<String>>>,
     /// Method name to (protocol, signature).
@@ -1739,6 +1771,23 @@ struct Checker<'a> {
     /// Every `impl` block, for resolving a projection, which has no mangled
     /// name, by receiver type.
     impl_blocks: &'a [crate::ast::ImplBlock],
+    /// The program's projection expansions, which the checker makes.
+    expansions: &'a crate::project::Expansions,
+    /// The program's [`Host`].
+    host: Host,
+    shadows: &'a std::collections::HashSet<(Option<String>, String)>,
+    /// `extern` functions, which cannot be function values.
+    extern_fns: &'a std::collections::HashSet<String>,
+    /// `gen fn`s, which cannot be function values.
+    gen_fns: &'a std::collections::HashSet<String>,
+    /// Whether a recording check records read rows ([`record_reads`]), read
+    /// once on the calling thread so every worker sees the host's choice.
+    record_reads: bool,
+}
+
+/// One body's typing state over a [`Cx`], which it reads through `Deref`.
+struct Checker<'a> {
+    cx: &'a Cx<'a>,
     /// Bounds of the function being checked.
     cur_bounds: RefCell<HashMap<String, Vec<String>>>,
     /// Scope depths at each enclosing `region` entry. A binding below the top
@@ -1755,8 +1804,9 @@ struct Checker<'a> {
     /// `for` binds its name to [`Type::Err`] so later uses do not cascade.
     errors: RefCell<Vec<Diagnostic>>,
     /// Module state, filled in declaration order before any body is checked.
-    /// [`Scope`] reads it when its frames run out.
-    globals: RefCell<HashMap<String, Binding>>,
+    /// [`Scope`] reads it when its frames run out
+    /// ([`Checker::resolve_global`]).
+    globals: RefCell<HashMap<String, (DeclId, Binding)>>,
     /// Inside a `test` body: `assert` and `assertEq` are legal.
     in_test: RefCell<bool>,
     /// Inside a `bench` body: `blackBox` is legal, as in a `test`.
@@ -1764,8 +1814,6 @@ struct Checker<'a> {
     /// Inside a `gen fn` body: `Code` and the code-quote builtins are legal.
     /// A `gen fn` body is never emitted.
     in_gen: RefCell<bool>,
-    /// The program's [`Host`].
-    host: Host,
     /// Whether the unit [`Checker::unit`] runs typed a node [`Checker::judged`],
     /// or read a name typed [`Type::Err`].
     unknown: std::cell::Cell<bool>,
@@ -1774,13 +1822,8 @@ struct Checker<'a> {
     /// whether `render`, `rawAt`, `raw` or `lex` is the builtin or a function
     /// this module declares or imports.
     here: RefCell<Option<String>>,
-    shadows: std::collections::HashSet<(Option<String>, String)>,
     /// The line of the enclosing statement, for a literal, which carries none.
     stmt_line: RefCell<usize>,
-    /// `extern` functions, which cannot be function values.
-    extern_fns: &'a std::collections::HashSet<String>,
-    /// `gen fn`s, which cannot be function values.
-    gen_fns: &'a std::collections::HashSet<String>,
     cur_fn: RefCell<String>,
     /// Every lambda or named function that flows into a stored function value.
     stored_sources: RefCell<Vec<StoredSource>>,
@@ -1794,6 +1837,11 @@ struct Checker<'a> {
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
     record: Option<RefCell<Recorded>>,
+    /// The source body being checked, when the check records: every name
+    /// lookup then records a read row for it ([`Checker::reading`]).
+    reader: std::cell::Cell<Option<SourceBody>>,
+    /// The read rows, in the order read ([`Recorded::reads`]).
+    reads: RefCell<Vec<(SourceBody, Key)>>,
     /// The substitution the innermost generic call just solved, for the
     /// [`Checker::expr`] wrapper that knows the call node's address. A nested
     /// call consumes and clears it before its caller writes one.
@@ -1803,11 +1851,19 @@ struct Checker<'a> {
     pending_call: RefCell<Option<CallDecl>>,
 }
 
+impl<'a> std::ops::Deref for Checker<'a> {
+    type Target = Cx<'a>;
+
+    fn deref(&self) -> &Cx<'a> {
+        self.cx
+    }
+}
+
 /// A declaration a call is checked against: a user function, a seeded builtin
 /// row, an impl method or a protocol member. [`Checker::check_declared_call`]
 /// reads it.
 struct DeclaredCall<'a> {
-    /// The name `generics` and `all_bounds` are keyed by: a function name, or
+    /// The name `all_bounds` is keyed by: a function name, or
     /// an impl method's mangled one.
     key: &'a str,
     /// The name a refusal prints: the surface name the reader wrote, never an
@@ -1827,6 +1883,7 @@ struct DeclaredCall<'a> {
 }
 
 struct VariantInfo {
+    id: DeclId,
     enum_name: String,
     payload: Vec<Type>,
 }
@@ -1890,7 +1947,43 @@ enum Reach {
     Parts,
 }
 
+impl Decls for Checker<'_> {
+    fn decl(&self, name: &str) -> Option<&TypeDecl> {
+        let types = self.types;
+        self.read(name, types.get(name).map(|(d, t)| (*d, t)))
+    }
+}
+
 impl<'a> Checker<'a> {
+    /// A checker with no body typed yet, recording when `recording`.
+    fn new(cx: &'a Cx<'a>, recording: bool) -> Checker<'a> {
+        Checker {
+            cx,
+            cur_bounds: Default::default(),
+            region_floor: Default::default(),
+            binder_types: Default::default(),
+            in_root: Default::default(),
+            errors: Default::default(),
+            globals: Default::default(),
+            in_test: Default::default(),
+            in_bench: Default::default(),
+            in_gen: Default::default(),
+            unknown: Default::default(),
+            here: Default::default(),
+            stmt_line: Default::default(),
+            cur_fn: Default::default(),
+            stored_sources: Default::default(),
+            arg_sources: Default::default(),
+            stored_calls: Default::default(),
+            derive_sites: Default::default(),
+            record: recording.then(RefCell::default),
+            reader: Default::default(),
+            reads: Default::default(),
+            pending_subst: Default::default(),
+            pending_call: Default::default(),
+        }
+    }
+
     fn recording(&self) -> bool {
         self.record.is_some()
     }
@@ -1908,7 +2001,7 @@ impl<'a> Checker<'a> {
 
     /// The representation type: a named type decays to its base.
     fn base(&self, ty: &Type) -> Type {
-        crate::types::resolve(ty, self.types)
+        crate::types::resolve(ty, self)
     }
 
     /// Refuses a user `Map` key that is not heapless all the way down:
@@ -1948,7 +2041,7 @@ impl<'a> Checker<'a> {
             return Ok(());
         }
         let projection_shaped = name == crate::project::AT
-            || (self.sigs.get(name.as_str()).is_none()
+            || (self.sig(name).is_none()
                 && self
                     .impl_blocks
                     .iter()
@@ -2006,7 +2099,7 @@ impl<'a> Checker<'a> {
             return Ok(None);
         };
         if args.is_empty()
-            || self.sigs.get(name.as_str()).is_some()
+            || self.sig(name).is_some()
             || !self
                 .impl_blocks
                 .iter()
@@ -2030,7 +2123,7 @@ impl<'a> Checker<'a> {
         let subst =
             self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
         if self.recording() {
-            if let Ok(Some(p)) = crate::project::optional_site(
+            if let Ok(Some(p)) = self.expansions.optional_site(
                 self.impl_blocks,
                 Some(&recv),
                 name,
@@ -2177,8 +2270,7 @@ impl<'a> Checker<'a> {
     }
 
     fn enum_type_params(&self, enum_name: &str) -> Vec<String> {
-        self.types
-            .get(enum_name)
+        self.decl(enum_name)
             .map(|d| d.type_params.clone())
             .unwrap_or_default()
     }
@@ -2190,7 +2282,7 @@ impl<'a> Checker<'a> {
     fn reaches(&self, ty: &Type, at: &dyn Fn(&Type) -> Reach) -> bool {
         fn go(
             ty: &Type,
-            types: &HashMap<String, TypeDecl>,
+            types: &dyn Decls,
             at: &dyn Fn(&Type) -> Reach,
             seen: &mut Vec<String>,
         ) -> bool {
@@ -2222,7 +2314,7 @@ impl<'a> Checker<'a> {
                     };
                     args.iter().any(|a| go(a, types, at, seen))
                         || (!seen.iter().any(|s| s == n)
-                            && types.get(n).is_some_and(|d| {
+                            && types.decl(n).is_some_and(|d| {
                                 seen.push(n.clone());
                                 let r = go(&d.base, types, at, seen);
                                 seen.pop();
@@ -2232,7 +2324,7 @@ impl<'a> Checker<'a> {
                 _ => false,
             }
         }
-        go(ty, self.types, at, &mut Vec::new())
+        go(ty, self, at, &mut Vec::new())
     }
 
     /// Whether `ty` contains a `Stream<T>` anywhere, through named types and
@@ -2262,7 +2354,7 @@ impl<'a> Checker<'a> {
     }
 
     fn assignable(&self, from: &Type, to: &Type) -> bool {
-        crate::types::assignable(from, to, self.types)
+        crate::types::assignable(from, to, self)
     }
 
     /// Whether `ty` mentions an open type parameter: one that is not the
@@ -2276,7 +2368,7 @@ impl<'a> Checker<'a> {
     /// The open parameters in `ty`, by name, in order, without repeats.
     fn open_params(&self, ty: &Type) -> Vec<String> {
         let cur = self.cur_fn.borrow();
-        let rigid = self.generics.get(cur.as_str());
+        let rigid = self.type_params(&cur);
         let mut out: Vec<String> = Vec::new();
         walk_type(ty, &mut |t| {
             if let Type::Param(n) = t {
@@ -2301,7 +2393,7 @@ impl<'a> Checker<'a> {
     }
 
     fn coercible(&self, from: &Type, to: &Type) -> bool {
-        crate::types::coercible(from, to, self.types)
+        crate::types::coercible(from, to, self)
     }
 
     /// Refuses a constant, or a record literal of constants, that fails the
@@ -2309,7 +2401,7 @@ impl<'a> Checker<'a> {
     /// runtime check.
     fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {
         let decl = match to {
-            Type::Named(n) => match self.types.get(n) {
+            Type::Named(n) => match self.decl(n) {
                 Some(d) if d.predicate.is_some() => d,
                 _ => return Ok(()),
             },
@@ -2346,11 +2438,11 @@ impl<'a> Checker<'a> {
         line: usize,
     ) -> Result<(), Diagnostic> {
         let resolve = |e: &Expr| self.expr(e, scope, None, fn_ret).ok();
-        match crate::finite::prove_string_flow(expr, to, self.types, &resolve) {
+        match crate::finite::prove_string_flow(expr, to, self, &resolve) {
             crate::finite::Proof::Witness(witness) => {
                 // A witness implies a named predicated target.
                 let decl = match to {
-                    Type::Named(n) => self.types.get(n).unwrap(),
+                    Type::Named(n) => self.decl(n).unwrap(),
                     _ => unreachable!("witness implies a named target"),
                 };
                 let pred = decl.predicate.as_ref().unwrap();
@@ -2384,13 +2476,13 @@ impl<'a> Checker<'a> {
         match ty {
             // `Code` and `Token` are builtin and generation-only, so no backend
             // sees them. A user declaration of the name wins.
-            Type::Named(n) if n == "Code" && !self.types.contains_key("Code") => {
+            Type::Named(n) if n == "Code" && self.decl("Code").is_none() => {
                 if !*self.in_gen.borrow() {
                     return Err(cerr!(line, GenOnlyType, name = "Code"));
                 }
                 return Ok(());
             }
-            Type::Named(n) if n == "Token" && !self.types.contains_key("Token") => {
+            Type::Named(n) if n == "Token" && self.decl("Token").is_none() => {
                 if !*self.in_gen.borrow() {
                     return Err(cerr!(line, GenOnlyType, name = "Token"));
                 }
@@ -2398,10 +2490,10 @@ impl<'a> Checker<'a> {
             }
             // `Self` parses as an ordinary name and is not a type. Refused here,
             // so the diagnostic lands on the protocol, not on each impl.
-            Type::Named(n) if n == "Self" && !self.types.contains_key("Self") => {
+            Type::Named(n) if n == "Self" && self.decl("Self").is_none() => {
                 return Err(cerr!(line, SelfNotType))
             }
-            Type::Named(n) => match self.types.get(n) {
+            Type::Named(n) => match self.decl(n) {
                 None => return Err(cerr!(line, UnknownType, n)),
                 Some(d) if !d.type_params.is_empty() => {
                     return Err(cerr!(line, GenericNeedsArgs, n))
@@ -2414,10 +2506,7 @@ impl<'a> Checker<'a> {
                 if args.iter().any(|a| matches!(a, Type::ConstInt(_))) {
                     return Err(cerr!(line, TypeTakesNoInteger, name));
                 }
-                let d = self
-                    .types
-                    .get(name)
-                    .ok_or_else(|| cerr!(line, UnknownType, n = name))?;
+                let d = (self.decl(name)).ok_or_else(|| cerr!(line, UnknownType, n = name))?;
                 if d.type_params.len() != args.len() {
                     return Err(cerr!(
                         line,
@@ -2438,7 +2527,7 @@ impl<'a> Checker<'a> {
             }
             Type::Omit(base, keys) | Type::Pick(base, keys) => {
                 self.ensure_type_exists(base, line)?;
-                let fields = crate::types::record_fields(base, self.types)
+                let fields = crate::types::record_fields(base, self)
                     .ok_or_else(|| cerr!(line, TransformerBaseNotRecord))?;
                 for k in keys {
                     if !fields.iter().any(|f| &f.name == k) {
@@ -2449,15 +2538,15 @@ impl<'a> Checker<'a> {
             Type::Merge(a, b) => {
                 self.ensure_type_exists(a, line)?;
                 self.ensure_type_exists(b, line)?;
-                if crate::types::record_fields(a, self.types).is_none()
-                    || crate::types::record_fields(b, self.types).is_none()
+                if crate::types::record_fields(a, self).is_none()
+                    || crate::types::record_fields(b, self).is_none()
                 {
                     return Err(cerr!(line, MergeNeedsRecords));
                 }
             }
             Type::Partial(base) => {
                 self.ensure_type_exists(base, line)?;
-                if crate::types::record_fields(base, self.types).is_none() {
+                if crate::types::record_fields(base, self).is_none() {
                     return Err(cerr!(line, PartialNeedsRecord));
                 }
             }
@@ -2485,7 +2574,7 @@ impl<'a> Checker<'a> {
             Type::Map(key, val) => {
                 self.ensure_type_exists(key, line)?;
                 self.ensure_type_exists(val, line)?;
-                match crate::types::resolve(key, self.types) {
+                match crate::types::resolve(key, self) {
                     Type::Str | Type::Int => {}
                     shape @ (Type::Float | Type::Float32 | Type::Record(_) | Type::Enum(_)) => {
                         self.check_key_shape(key, &shape, line)?;
@@ -2669,7 +2758,7 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(t.line, RecordWhere));
             }
             self.ensure_type_exists(&t.base, t.line)?;
-            if crate::types::record_fields(&t.base, self.types).is_none() {
+            if crate::types::record_fields(&t.base, self).is_none() {
                 return Err(cerr!(t.line, NotRecord, name = t.name));
             }
             return Ok(());
@@ -2853,7 +2942,8 @@ impl<'a> Checker<'a> {
             .collect();
         let all_globals: HashSet<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
         let mut ready: HashSet<String> = HashSet::new();
-        for g in &program.globals {
+        for (i, g) in program.globals.iter().enumerate() {
+            self.reading(SourceBody::Global(i as u32));
             // A literal initializer's range error names the global's line.
             *self.stmt_line.borrow_mut() = g.line;
             let bty = self.unit(|| -> Result<Type, Diagnostic> {
@@ -2920,10 +3010,93 @@ impl<'a> Checker<'a> {
                 }
             }
             out.extend(lambda.into_iter().map(|d| d.in_file(g.module.clone())));
-            self.globals.borrow_mut().insert(g.name.clone(), binding);
+            let decl = DeclId::nth(DeclKind::Global, i);
+            self.globals
+                .borrow_mut()
+                .insert(g.name.clone(), (decl, binding));
             ready.insert(g.name.clone());
         }
+        self.reader.set(None);
         out.len() - before
+    }
+
+    /// Types `f`'s signature and body as the reader `body`, and hands back
+    /// what that added: its diagnostics, each in `f`'s file, its part of the
+    /// record and its read rows. In a
+    /// body, errors accumulate per statement in `errors`; `function` returns
+    /// the first and this drains the rest. Within one expression the check
+    /// is first-error.
+    fn signature_and_body(&self, body: SourceBody, f: &Function) -> Typed {
+        self.reading(body);
+        // Signature validation runs outside `function()` and must accept a
+        // `Code` type in a `gen fn` signature.
+        *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
+        *self.here.borrow_mut() = f.module.clone();
+        let r = (|| -> Result<(), Diagnostic> {
+            for p in &f.params {
+                // A function value cannot cross the host boundary, nor a
+                // generation-time signature.
+                if self.contains_fn(&p.ty) && (f.is_extern || f.is_export_extern) {
+                    return Err(cerr_at!(f.line, f.name_span(), ExternTakesFn));
+                }
+                if self.contains_fn(&p.ty) && f.is_gen {
+                    return Err(cerr_at!(f.line, f.name_span(), GenTakesFn));
+                }
+                self.ensure_type_exists(&p.ty, f.line)?;
+            }
+            if self.contains_fn(&f.ret) && (f.is_extern || f.is_export_extern) {
+                return Err(cerr_at!(f.line, f.name_span(), ExternReturnsFn));
+            }
+            if self.contains_fn(&f.ret) && f.is_gen {
+                return Err(cerr_at!(f.line, f.name_span(), GenReturnsFn));
+            }
+            self.ensure_type_exists(&f.ret, f.line)?;
+            // An `extern` import has no body; an `export extern` has one. Both
+            // signatures must fit the host ABI.
+            if f.is_extern {
+                self.check_extern_sig(f)?;
+            } else {
+                if f.is_export_extern {
+                    self.check_extern_sig(f)?;
+                }
+                self.function(f)?;
+            }
+            Ok(())
+        })();
+        let mut diags: Vec<Diagnostic> = r.err().into_iter().collect();
+        diags.append(&mut self.errors.borrow_mut());
+        Typed {
+            diags: (diags.into_iter())
+                .map(|d| d.in_file(f.module.clone()))
+                .collect(),
+            record: self.record.as_ref().map(|r| r.take()),
+            reads: self.reads.take(),
+            binders: self.binder_types.take(),
+            stored: StoredFnEffects {
+                sources: self.stored_sources.take(),
+                arg_sources: self.arg_sources.take(),
+                calls: self.stored_calls.take(),
+            },
+            derive: self.derive_sites.take(),
+        }
+    }
+
+    /// Adds one body's [`Typed`] to this checker's accumulations, as typing
+    /// it here would have, and returns its diagnostics.
+    fn absorb(&self, t: Typed) -> Vec<Diagnostic> {
+        if let (Some(r), Some(part)) = (&self.record, t.record) {
+            r.borrow_mut().extend(part);
+        }
+        let mut binders = self.binder_types.borrow_mut();
+        for (at, ty) in t.binders {
+            binders.entry(at).or_insert(ty);
+        }
+        self.stored_sources.borrow_mut().extend(t.stored.sources);
+        self.arg_sources.borrow_mut().extend(t.stored.arg_sources);
+        self.stored_calls.borrow_mut().extend(t.stored.calls);
+        self.derive_sites.borrow_mut().extend(t.derive);
+        self.reads.borrow_mut().extend(t.reads);
+        t.diags
     }
 
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
@@ -2949,6 +3122,7 @@ impl<'a> Checker<'a> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
         *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
+        *self.here.borrow_mut() = f.module.clone();
         self.in_root.set(f.module.is_none());
         self.errors.borrow_mut().clear();
         // A local shadows a global of the same name.
@@ -2980,9 +3154,9 @@ impl<'a> Checker<'a> {
     }
 
     /// Types an expansion (an inlined projection) in the caller's scope,
-    /// recording its node types and nothing else. `project` leaks each
-    /// expansion once ([`crate::project::Memo`]), so its node addresses are
-    /// stable keys.
+    /// recording its node types and nothing else. A shared
+    /// [`crate::project::Expansions`] leaks each expansion once, so its node
+    /// addresses are stable keys.
     ///
     /// Diagnostics, scope changes and [`Checker::pending_subst`] stay inside: an
     /// expansion fails only where its source already did, and the wrapper
@@ -3139,8 +3313,8 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
-                let ruled = matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
-                let Some(fty) = crate::types::record_fields(&b.ty, self.types)
+                let ruled = matches!(&b.ty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
+                let Some(fty) = crate::types::record_fields(&b.ty, self)
                     .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
                     .map(|f| f.ty)
                 else {
@@ -3152,7 +3326,7 @@ impl<'a> Checker<'a> {
                 }
                 // A predicated field takes only a value of its own type.
                 let validated = matches!(&fty, Type::Named(n)
-                    if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
+                    if self.decl(n).is_some_and(|d| d.predicate.is_some()));
                 if !(if validated {
                     self.assignable(&vty, &fty)
                 } else {
@@ -3227,7 +3401,8 @@ impl<'a> Checker<'a> {
                 // inlined, with the move-out and move-back around it.
                 if self.recording() {
                     if let Ok(Some(blk)) =
-                        crate::project::store_index(self.impl_blocks, name, index, value, &b.ty)
+                        self.expansions
+                            .store_index(self.impl_blocks, name, index, value, &b.ty)
                     {
                         self.record_desugar(scope, |c, sc| {
                             c.block(blk, ret, sc);
@@ -3319,7 +3494,8 @@ impl<'a> Checker<'a> {
                 // `nth`; record that read.
                 if self.recording() {
                     if let Ok(Some(p)) =
-                        crate::project::for_element(self.impl_blocks, &ity, iter, *line)
+                        self.expansions
+                            .for_element(self.impl_blocks, &ity, iter, *line)
                     {
                         self.record_desugar(scope, |c, sc| {
                             let bind = |ty| Binding { ty, mutable: false };
@@ -3455,8 +3631,7 @@ impl<'a> Checker<'a> {
                 match expr {
                     Expr::Lambda { .. } => return self.stored_fn_lambda(expr, exp, scope, fn_ret),
                     Expr::Var { name, line, id: _ }
-                        if self.lookup(scope, name).is_none()
-                            && self.sigs.contains_key(name.as_str()) =>
+                        if self.lookup(scope, name).is_none() && self.sig(name).is_some() =>
                     {
                         return self.stored_fn_named(name, exp, *line);
                     }
@@ -3511,7 +3686,7 @@ impl<'a> Checker<'a> {
                         _ => Err(cerr!(line, InferNone)),
                     };
                 }
-                if let Some(info) = self.variants.get(name) {
+                if let Some(info) = self.resolve_variant(name) {
                     if !info.payload.is_empty() {
                         return self.judged();
                     }
@@ -3538,7 +3713,7 @@ impl<'a> Checker<'a> {
                 }
                 // A bare function name as a value is a stored function value
                 // source: `let g = double` takes its signature.
-                if let Some((sptys, sret)) = self.sigs.get(name.as_str()) {
+                if let Some((sptys, sret)) = self.sig(name) {
                     self.storable_named_fn(name, *line)?;
                     let sig = Type::Fn(sptys.clone(), Box::new(sret.clone()));
                     self.stored_sources.borrow_mut().push(StoredSource {
@@ -3648,11 +3823,7 @@ impl<'a> Checker<'a> {
                 if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
                     (name.as_str(), type_args.as_slice(), self.recording())
                 {
-                    if let Some(lit) = self
-                        .types
-                        .get(tn)
-                        .and_then(|d| crate::project::schema(expr, d))
-                    {
+                    if let Some(lit) = self.decl(tn).and_then(|d| self.expansions.schema(expr, d)) {
                         self.record_desugar(scope, |c, sc| {
                             let _ = c.expr(lit, sc, Some(&t), fn_ret);
                         });
@@ -3711,7 +3882,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::TryConstruct { name, args, .. } => {
-                let base = match self.types.get(name) {
+                let base = match self.decl(name) {
                     Some(d) if matches!(d.base, Type::Int | Type::Bool | Type::Str) => {
                         d.base.clone()
                     }
@@ -3846,14 +4017,14 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let decl = self.types.get(name);
+        let decl = self.decl(name);
         // `Token` has no declaration; `types::record_fields` states its
         // fields. A synthesized decoder builds one in generation code
         // (`vyrn_genwasm`'s `Decoders::materialize`).
         if decl.is_none() && !(name == "Token" && *self.in_gen.borrow()) {
             return self.judged();
         }
-        let Some(rfields) = crate::types::record_fields(&Type::Named(name.to_string()), self.types)
+        let Some(rfields) = crate::types::record_fields(&Type::Named(name.to_string()), self)
         else {
             return self.judged();
         };
@@ -4024,9 +4195,9 @@ impl<'a> Checker<'a> {
         };
         // A transparent sum alias matches as its underlying shape.
         let sty = match &raw_sty {
-            Type::Named(n) => match self.types.get(n) {
+            Type::Named(n) => match self.decl(n) {
                 Some(d) if d.predicate.is_none() && crate::types::is_sum_alias(&d.base) => {
-                    crate::types::resolve(&raw_sty, self.types)
+                    crate::types::resolve(&raw_sty, self)
                 }
                 _ => raw_sty.clone(),
             },
@@ -4889,7 +5060,7 @@ impl<'a> Checker<'a> {
                     // Record the nodes the site lowers through: the
                     // projection's body inlined here ([`record_desugar`]).
                     if self.recording() {
-                        if let Ok(Some(p)) = crate::project::site(
+                        if let Ok(Some(p)) = self.expansions.site(
                             self.impl_blocks,
                             Some(&at),
                             "at",
@@ -5046,7 +5217,7 @@ impl<'a> Checker<'a> {
             }
             // A structural copy of a self-referring type never bottoms out (the
             // backends overflowed the stack), so it needs an `impl Copy`.
-            if let Some(name) = crate::declared::self_referring(&t, &self.types) {
+            if let Some(name) = crate::declared::self_referring(&t, self) {
                 return Err(cerr!(line, CopyRecursive, name));
             }
             return Ok(t);
@@ -5112,7 +5283,7 @@ impl<'a> Checker<'a> {
         if written.is_empty() && matches!(name, "schemaOf" | "jsonSchema" | "fromJson") {
             // Name the spelling; the row's arity refusal would not.
             let was = match args.first() {
-                Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => tn.clone(),
+                Some(Expr::Var { name: tn, .. }) if self.decl(tn).is_some() => tn.clone(),
                 _ => "Type".to_string(),
             };
             return Err(cerr!(
@@ -5150,7 +5321,7 @@ impl<'a> Checker<'a> {
             if matches!(at, Type::Err) {
                 return Ok(Type::Str);
             }
-            if let Err(off) = crate::codec::encodable(&at, self.types) {
+            if let Err(off) = crate::codec::encodable(&at, self) {
                 return Err(cerr!(line, ToJsonUncodable, off));
             }
             self.derive_sites.borrow_mut().push(crate::gen::Site {
@@ -5170,14 +5341,14 @@ impl<'a> Checker<'a> {
                 _ => return Err(cerr!(line, DeriveArity)),
             };
             let arg = Type::Named("TypeArg".to_string());
-            if !self.gen_fns.contains(g) || self.sigs.get(g) != Some(&(vec![arg], Type::Str)) {
+            if !self.gen_fns.contains(g) || self.sig(g) != Some(&(vec![arg], Type::Str)) {
                 return Err(cerr!(line, DeriveUnknownGen, g));
             }
             let at = self.expr(&args[1], scope, None, fn_ret)?;
             if matches!(at, Type::Err) {
                 return Ok(Type::Str);
             }
-            if let Err(off) = crate::codec::encodable(&at, self.types) {
+            if let Err(off) = crate::codec::encodable(&at, self) {
                 return Err(cerr!(line, DeriveUncodable, g, off));
             }
             self.derive_sites.borrow_mut().push(crate::gen::Site {
@@ -5255,7 +5426,7 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, TakesOne, name, got = args.len()));
             }
             // Resolved, so an alias of `Result<T, E>` informs the payload.
-            let expected_res = expected.map(|e| crate::types::resolve(e, self.types));
+            let expected_res = expected.map(|e| crate::types::resolve(e, self));
             let res_pair = expected_res
                 .as_ref()
                 .and_then(crate::types::result_payloads)
@@ -5282,7 +5453,7 @@ impl<'a> Checker<'a> {
             return Ok(Type::result(t, e));
         }
 
-        if let Some(info) = self.variants.get(name) {
+        if let Some(info) = self.resolve_variant(name) {
             let payload = info.payload.clone();
             if payload.is_empty() {
                 return Err(cerr!(line, VariantNoArgs, name));
@@ -5324,7 +5495,7 @@ impl<'a> Checker<'a> {
         }
 
         // Only a validated type constructs; an alias has no constructor.
-        if let Some(decl) = self.types.get(name).filter(|d| d.predicate.is_some()) {
+        if let Some(decl) = self.decl(name).filter(|d| d.predicate.is_some()) {
             return self.check_construction(decl, args, line, scope, fn_ret);
         }
 
@@ -5441,8 +5612,7 @@ impl<'a> Checker<'a> {
                     // Dispatch ends here; the impl method is read as any
                     // declaration, its receiver's capability at index 0.
                     let (mparams, mret) = self
-                        .sigs
-                        .get(mangled.as_str())
+                        .sig(&mangled)
                         .ok_or_else(|| cerr!(line, NotImplemented, recv, proto, name))?;
                     return self.check_declared_call(
                         &DeclaredCall {
@@ -5450,7 +5620,7 @@ impl<'a> Checker<'a> {
                             shown: name,
                             params: mparams,
                             ret: mret,
-                            type_params: self.generics.get(mangled.as_str()),
+                            type_params: self.type_params(&mangled),
                             caps: self.caps.get(mangled.as_str()),
                             bounds: self.all_bounds.get(mangled.as_str()),
                             recv: Some(&recv),
@@ -5470,7 +5640,7 @@ impl<'a> Checker<'a> {
         // `x.f(..)` naming a projection on `x`'s type is an access, typed as
         // `x[i]` is. Asked only when no function has the name, so
         // a function always wins.
-        if self.sigs.get(name).is_none()
+        if self.sig(name).is_none()
             && !args.is_empty()
             && self
                 .impl_blocks
@@ -5481,7 +5651,7 @@ impl<'a> Checker<'a> {
             if let Some(t) = self.place_result(&recv, name, args, scope, fn_ret, line)? {
                 self.refuse_chained_projection(&args[0], scope, line)?;
                 if self.recording() {
-                    if let Ok(Some(p)) = crate::project::site(
+                    if let Ok(Some(p)) = self.expansions.site(
                         self.impl_blocks,
                         Some(&recv),
                         name,
@@ -5506,8 +5676,7 @@ impl<'a> Checker<'a> {
         }
         // A projection inlines at its access site, and a bounded type
         // variable has no body to inline.
-        if self.sigs.get(name).is_none() && !args.is_empty() && self.protocol_places.contains(name)
-        {
+        if self.sig(name).is_none() && !args.is_empty() && self.protocol_places.contains(name) {
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
             if matches!(self.base(&recv), Type::Param(_)) {
                 return Err(cerr!(line, ProjectionOnBound, name));
@@ -5522,7 +5691,7 @@ impl<'a> Checker<'a> {
         // A seeded builtin's row is its declaration. A row that
         // cannot type its call answers `None` from `prelude::checkable`, and an
         // arm above holds that name. A user declaration shadows the row.
-        let seeded = match self.sigs.contains_key(name) {
+        let seeded = match self.sig(name).is_some() {
             true => None,
             false => crate::prelude::checkable(name),
         };
@@ -5532,7 +5701,7 @@ impl<'a> Checker<'a> {
                 f.ret.clone(),
             )
         });
-        let (params, ret) = match (self.sigs.get(name), &seeded_sig) {
+        let (params, ret) = match (self.sig(name), &seeded_sig) {
             (Some(sig), _) => sig,
             (None, Some(sig)) => sig,
             (None, None) => {
@@ -5561,7 +5730,7 @@ impl<'a> Checker<'a> {
                 shown,
                 params,
                 ret,
-                type_params: self.generics.get(name).or(seeded_generics.as_ref()),
+                type_params: self.type_params(name).or(seeded_generics.as_ref()),
                 caps: self.caps.get(name).or(seeded_caps.as_ref()),
                 // A seeded row's bounds are the typed judgment's.
                 bounds: self.all_bounds.get(name),
@@ -5957,12 +6126,11 @@ impl<'a> Checker<'a> {
                     return value_matches(&vptys, &vret, subst);
                 }
                 let sig = self
-                    .sigs
-                    .get(vn)
+                    .sig(vn)
                     .ok_or_else(|| cerr!(line, ArgNotFn, callee, arg = i + 1, vn))?;
                 // A generic function is no value: its type parameters have
                 // nothing to solve against.
-                if self.generics.contains_key(vn.as_str())
+                if self.type_params(vn).is_some()
                     || sig.0.len() != ptys.len()
                     || !params_accept(&sig.0, &sig.1, subst)?
                 {
@@ -6148,7 +6316,7 @@ impl<'a> Checker<'a> {
 
     /// Refuses a generic, `extern` or `gen` function used as a value.
     fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
-        if self.generics.contains_key(name) {
+        if self.type_params(name).is_some() {
             return Err(cerr!(line, GenericFnValue, name));
         }
         if self.extern_fns.contains(name) {
@@ -6377,7 +6545,7 @@ impl<'a> Checker<'a> {
             },
             // Collections bind `T` from the element type; an alias resolves
             // first.
-            Type::Array(inner) => match crate::types::resolve(aty, self.types) {
+            Type::Array(inner) => match crate::types::resolve(aty, self) {
                 Type::Array(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
@@ -6385,19 +6553,19 @@ impl<'a> Checker<'a> {
                 Type::ArrayN(a, m) if m == n => self.unify(inner, a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
-            Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
+            Type::Stream(inner) => match crate::types::resolve(aty, self) {
                 Type::Stream(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             // `N` must match: integer arguments do not infer.
-            Type::SmallArray(inner, n) => match crate::types::resolve(aty, self.types) {
+            Type::SmallArray(inner, n) => match crate::types::resolve(aty, self) {
                 Type::SmallArray(a, m) if m == *n => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             // A generic function type binds through the value's signature. Two
             // concrete function types keep the assignability rule below.
             Type::Fn(pps, pr) if type_mentions_param(pty) => {
-                match crate::types::resolve(aty, self.types) {
+                match crate::types::resolve(aty, self) {
                     Type::Fn(aps, ar) if aps.len() == pps.len() => {
                         for (p, a) in pps.iter().zip(&aps) {
                             self.unify(p, a, subst, line)?;
@@ -6412,13 +6580,13 @@ impl<'a> Checker<'a> {
             Type::Lazy(_)
                 if type_mentions_param(pty)
                     && matches!(
-                        crate::types::resolve(aty, self.types),
+                        crate::types::resolve(aty, self),
                         Type::Fn(ps, _) if ps.is_empty()
                     ) =>
             {
-                self.unify(&crate::types::resolve(pty, self.types), aty, subst, line)
+                self.unify(&crate::types::resolve(pty, self), aty, subst, line)
             }
-            Type::Map(pk, pv) => match crate::types::resolve(aty, self.types) {
+            Type::Map(pk, pv) => match crate::types::resolve(aty, self) {
                 Type::Map(ak, av) => {
                     self.unify(pk, &ak, subst, line)?;
                     self.unify(pv, &av, subst, line)
@@ -6481,9 +6649,63 @@ impl<'a> Checker<'a> {
             }
         }
         if scope.globals {
-            return self.globals.borrow().get(name).cloned();
+            return self.resolve_global(name);
         }
         None
+    }
+
+    /// Makes `body` the reader of every lookup until the next call, when the
+    /// check records and the host armed [`record_reads`].
+    fn reading(&self, body: SourceBody) {
+        self.reader.set(self.record_reads.then_some(body));
+    }
+
+    /// Records that the body being checked read `hit` under `name`, or
+    /// missed it in this module ([`Key`]).
+    fn read<T>(&self, name: &str, hit: Option<(DeclId, T)>) -> Option<T> {
+        if let Some(f) = self.reader.get() {
+            let key = match &hit {
+                Some((d, _)) => Key::Decl(*d),
+                None => Key::Miss(
+                    ScopeId {
+                        module: self.here.borrow().clone(),
+                    },
+                    name.to_string(),
+                ),
+            };
+            self.reads.borrow_mut().push((f, key));
+        }
+        hit.map(|(_, t)| t)
+    }
+
+    /// The function declared as `name`.
+    fn resolve_fn(&self, name: &str) -> Option<DeclId> {
+        let hit = self.fn_decls.get(name).map(|d| (*d, *d));
+        self.read(name, hit)
+    }
+
+    /// The enum variant named `name`.
+    fn resolve_variant(&self, name: &str) -> Option<&'a VariantInfo> {
+        let variants = self.variants;
+        self.read(name, variants.get(name).map(|v| (v.id, v)))
+    }
+
+    /// The module state named `name`, once its initializer is checked.
+    fn resolve_global(&self, name: &str) -> Option<Binding> {
+        let hit = self.globals.borrow().get(name).cloned();
+        self.read(name, hit)
+    }
+
+    /// The parameter types and result of the function named `name`.
+    fn sig(&self, name: &str) -> Option<&'a (Vec<Type>, Type)> {
+        let sigs = self.sigs;
+        self.resolve_fn(name).map(|d| &sigs[d.index()])
+    }
+
+    /// The type parameters of the generic function named `name`.
+    fn type_params(&self, name: &str) -> Option<&'a Vec<String>> {
+        let f = &self.functions[self.resolve_fn(name)?.index()];
+        Some(&f.type_params).filter(|ps| !ps.is_empty())
     }
 
     /// The element type of the plain array variable a `pop` or `swapRemove`

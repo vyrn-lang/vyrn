@@ -7,10 +7,8 @@ use vyrn_frontend::ast::{FnId, Program};
 use vyrn_lower::World;
 
 fn world(src: &str) -> (Arc<World>, Program) {
-    let (p, _memo) = vyrn_frontend::project::Memo::load(|| {
-        vyrn_frontend::parser::parse(vyrn_frontend::lexer::lex(src).unwrap())
-    })
-    .unwrap();
+    let mut p = vyrn_frontend::parser::parse(vyrn_frontend::lexer::lex(src).unwrap()).unwrap();
+    p.expansions = vyrn_frontend::project::Expansions::shared();
     let w = vyrn_lower::analyze(&p);
     w.check();
     (w, p)

@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, Expr, Type, TypeDecl};
 use crate::consteval::{self, ConstVal};
 use crate::regex::{self, ConcatPiece, Dfa};
+use crate::types::Decls;
 
 /// Returns the DFA of a validated `String` type whose predicate is a pure
 /// conjunction of `value =~ "lit"` clauses: the intersection of the clause
@@ -86,12 +87,9 @@ fn collect_match_clauses(pred: &Expr, out: &mut Vec<String>) -> Option<()> {
 }
 
 /// Returns the declaration of `ty` when it is a named validated type.
-pub fn string_type_decl<'a>(
-    ty: &Type,
-    types: &'a HashMap<String, TypeDecl>,
-) -> Option<&'a TypeDecl> {
+pub fn string_type_decl<'a>(ty: &Type, types: &'a dyn Decls) -> Option<&'a TypeDecl> {
     match ty {
-        Type::Named(n) => types.get(n).filter(|d| d.predicate.is_some()),
+        Type::Named(n) => types.decl(n).filter(|d| d.predicate.is_some()),
         _ => None,
     }
 }
@@ -142,7 +140,7 @@ pub fn has_hole(pieces: &[Piece]) -> bool {
 /// inferer, or a backend's scope types.
 pub fn template_language(
     pieces: &[Piece],
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     resolve: &dyn Fn(&Expr) -> Option<Type>,
 ) -> Option<Dfa> {
     enum Owned {
@@ -197,7 +195,7 @@ pub enum Proof {
 pub fn prove_string_flow(
     expr: &Expr,
     to: &Type,
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     resolve: &dyn Fn(&Expr) -> Option<Type>,
 ) -> Proof {
     // The target must be a pure-regex validated string type.
@@ -245,7 +243,7 @@ pub fn prove_string_flow(
 pub fn string_flow_proven(
     expr: &Expr,
     to: &Type,
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     resolve: &dyn Fn(&Expr) -> Option<Type>,
 ) -> bool {
     matches!(prove_string_flow(expr, to, types, resolve), Proof::Proven)

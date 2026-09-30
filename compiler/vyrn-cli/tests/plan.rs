@@ -19,10 +19,8 @@ fn analyze_src(src: &str) -> (Ownership, Program) {
 }
 
 fn analyze_world(src: &str) -> (std::sync::Arc<vyrn_lower::World>, Program) {
-    let (p, _memo) = vyrn_frontend::project::Memo::load(|| {
-        vyrn_frontend::parser::parse(vyrn_frontend::lexer::lex(src).unwrap())
-    })
-    .unwrap();
+    let mut p = vyrn_frontend::parser::parse(vyrn_frontend::lexer::lex(src).unwrap()).unwrap();
+    p.expansions = vyrn_frontend::project::Expansions::shared();
     (analyze(&p), p)
 }
 

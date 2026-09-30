@@ -229,6 +229,8 @@ fn main() {
             if std::env::var("VYRN_NO_MEMO").is_err() {
                 vyrn_frontend::movecheck::reuse_judgments();
             }
+            // A per-function recheck reads what each body looked up.
+            vyrn_frontend::checker::record_reads();
             let mut server = Server {
                 docs: HashMap::new(),
                 analyses: HashMap::new(),

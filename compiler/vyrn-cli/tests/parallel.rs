@@ -1,15 +1,16 @@
-//! Holds every output of the placer independent of how many threads build
-//! and place bodies, and of the order they take them in (`VYRN_THREADS`,
-//! `VYRN_SHUFFLE`). Each root is checked, reported by `vyrn why --memory`,
-//! printed by `vyrn emit-lowered` and built to wasm, and every byte must equal
-//! the one-thread run's: the refusals, the memory rows, the placed releases
-//! and the facts the emitter reads.
+//! Holds every output of the checker and the placer independent of how many
+//! threads type, build and place bodies, and of the order they take them in
+//! (`VYRN_THREADS`, `VYRN_SHUFFLE`). Each root is checked, reported by `vyrn
+//! why --memory`, printed by `vyrn emit-lowered` and built to wasm, and every
+//! byte must equal the one-thread run's: the typing refusals, the memory rows,
+//! the placed releases and the facts the emitter reads.
 
 mod common;
 use common::*;
 use std::path::Path;
 
-/// The corpus's largest roots by lines read.
+/// The corpus's largest roots by lines read, and the root the checker
+/// refuses most often: 170 lines of refusals across its bodies.
 const ROOTS: &[&str] = &[
     "site/export.vyrn",
     "site/app/docshell.vyrn",
@@ -17,6 +18,7 @@ const ROOTS: &[&str] = &[
     "examples/pagesdemo.vyrn",
     "examples/graphql.vyrn",
     "examples/rest.vyrn",
+    "compiler/vyrn-cli/tests/checker-rules.vyrn",
 ];
 
 /// `(VYRN_THREADS, VYRN_SHUFFLE)`. The first run is the reference.

@@ -22,11 +22,13 @@ mod world;
 pub use pipeline::{check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE};
 
 pub use core::refuses as kernel_refuses;
-pub use world::{analyze, forget_loaded, hand_on, FnRow, World};
+pub use world::{analyze, forget_loaded, hand_on, FnRow, Fns, World};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use vyrn_frontend::ast::{Expr, FnId, Function, LambdaBody, NodeId, Program, Stmt, Type};
+use vyrn_frontend::ast::{
+    Expr, FnId, Function, LambdaBody, NodeId, Program, SourceBody, Stmt, Type,
+};
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types::{
@@ -207,9 +209,8 @@ pub struct Lowered<'a> {
     pub places: Vec<PlaceBody<'a>>,
     /// The checker's record every [`NodeTypes`] here was read off.
     pub recorded: std::sync::Arc<checker::Recorded>,
-    /// The name of each [`FnId`] this form numbers, in id order: every
-    /// program function, then every [`PlaceBody`], then every
-    /// [`OutsideBody`]. The World's function table starts with these rows.
+    /// [`Program::source_names`]: the World's function table starts with
+    /// these rows.
     pub source: Vec<String>,
 }
 
@@ -324,6 +325,7 @@ fn apply(ty: &Type, chain: &Chain) -> Type {
 struct Walk<'a, 'r> {
     recorded: &'r checker::Recorded,
     impls: &'a [vyrn_frontend::ast::ImplBlock],
+    expansions: &'a vyrn_frontend::project::Expansions,
     facts: NodeTypes<'a>,
     /// `(callee, its solved type arguments by name)`, already concrete.
     calls: Vec<(String, HashMap<String, Type>)>,
@@ -342,12 +344,13 @@ struct Walk<'a, 'r> {
 impl<'a, 'r> Walk<'a, 'r> {
     fn new(
         recorded: &'r checker::Recorded,
-        impls: &'a [vyrn_frontend::ast::ImplBlock],
+        program: &'a Program,
         subst: HashMap<String, Type>,
     ) -> Self {
         Walk {
             recorded,
-            impls,
+            impls: &program.impls,
+            expansions: &program.expansions,
             facts: NodeTypes::default(),
             calls: Vec::new(),
             lambda_bodies: Default::default(),
@@ -395,7 +398,7 @@ impl<'a, 'r> Walk<'a, 'r> {
         let Some(recv) = self.recorded(&args[0]) else {
             return;
         };
-        let Ok(Some(p)) = vyrn_frontend::project::site(
+        let Ok(Some(p)) = self.expansions.site(
             self.impls,
             Some(&recv),
             method,
@@ -426,7 +429,7 @@ impl<'a, 'r> Walk<'a, 'r> {
         let Some(recv) = self.recorded(&args[0]) else {
             return;
         };
-        let Ok(Some(p)) = vyrn_frontend::project::optional_site(
+        let Ok(Some(p)) = self.expansions.optional_site(
             self.impls,
             Some(&recv),
             name,
@@ -469,7 +472,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
             Stmt::IndexSet {
                 name, index, value, ..
             } => {
-                if let Some(blk) = vyrn_frontend::project::stored(name, index, value) {
+                if let Some(blk) = self.expansions.stored(name, index, value) {
                     facts_block(blk, &mut Default::default(), self);
                 }
             }
@@ -483,9 +486,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                         vyrn_frontend::types::solve_param(&imp.ty, &ty, &mut solved);
                         self.calls.push((size, solved));
                     }
-                    if let Ok(Some(p)) =
-                        vyrn_frontend::project::for_element(impls, &ty, iter, *line)
-                    {
+                    if let Ok(Some(p)) = self.expansions.for_element(impls, &ty, iter, *line) {
                         self.projection(p);
                     }
                 }
@@ -538,7 +539,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
             // `schemaOf<T>()` lowers through the literal the checker expanded
             // for it, and has no arguments of its own to walk.
             Expr::Call { name, .. } if name == "schemaOf" => {
-                if let Some(lit) = vyrn_frontend::project::schema_at(e) {
+                if let Some(lit) = self.expansions.schema_at(e) {
                     facts_expr(lit, locals, self);
                 }
                 self.close(e);
@@ -681,7 +682,7 @@ fn build<'a>(
     // Module state is the second root: an initializer instantiates generics
     // like any body. It is an expression, so it has no exit to place a release
     // at.
-    let mut gw = Walk::new(recorded, &program.impls, HashMap::new());
+    let mut gw = Walk::new(recorded, program, HashMap::new());
     for g in &program.globals {
         gw.lines.push(g.line as u32);
         facts_expr(&g.init, &Default::default(), &mut gw);
@@ -690,35 +691,31 @@ fn build<'a>(
     let globals = std::mem::take(&mut gw.facts);
     // Predicates, test and bench bodies, and projections are walked but their
     // calls are not followed ([`Lowered::predicates`]).
-    let mut pw = Walk::new(recorded, &program.impls, HashMap::new());
+    let mut pw = Walk::new(recorded, program, HashMap::new());
     for d in &program.type_decls {
         if let Some(p) = &d.predicate {
             facts_expr(p, &Default::default(), &mut pw);
         }
     }
     let predicates = pw.facts;
-    let mut source: Vec<String> = program.functions.iter().map(|f| f.name.clone()).collect();
-    let mut mint = |name: &str| {
-        source.push(name.to_string());
-        FnId::nth(source.len() - 1)
-    };
+    let id = |body| program.source_id(body);
     let mut places: Vec<PlaceBody<'a>> = Vec::new();
-    for (_, f) in vyrn_frontend::project::all(program) {
-        let mut w = Walk::new(recorded, &program.impls, HashMap::new());
+    for (i, (_, f)) in (0..).zip(vyrn_frontend::project::all(program)) {
+        let mut w = Walk::new(recorded, program, HashMap::new());
         facts_block(&f.body, &mut Default::default(), &mut w);
         places.push(PlaceBody {
             func: f,
-            id: mint(&f.name),
+            id: id(SourceBody::Place(i)),
             facts: w.facts,
         });
     }
     let mut outside: Vec<OutsideBody<'a>> = Vec::new();
-    for (i, t) in program.tests.iter().enumerate() {
-        let mut w = Walk::new(recorded, &program.impls, HashMap::new());
+    for (i, t) in (0..).zip(&program.tests) {
+        let mut w = Walk::new(recorded, program, HashMap::new());
         facts_block(&t.body, &mut Default::default(), &mut w);
         let name = format!("test@{i}");
         outside.push(OutsideBody {
-            id: mint(&name),
+            id: id(SourceBody::Test(i)),
             name,
             block: &t.body,
             module: t.module.clone(),
@@ -726,12 +723,12 @@ fn build<'a>(
             facts: w.facts,
         });
     }
-    for (i, b) in program.benches.iter().enumerate() {
-        let mut w = Walk::new(recorded, &program.impls, HashMap::new());
+    for (i, b) in (0..).zip(&program.benches) {
+        let mut w = Walk::new(recorded, program, HashMap::new());
         facts_block(&b.body, &mut Default::default(), &mut w);
         let name = format!("bench@{i}");
         outside.push(OutsideBody {
-            id: mint(&name),
+            id: id(SourceBody::Bench(i)),
             name,
             block: &b.body,
             module: b.module.clone(),
@@ -794,7 +791,7 @@ fn build<'a>(
             .collect();
         let flat: HashMap<String, Type> = subst.clone().into_iter().collect();
 
-        let mut w = Walk::new(recorded, &program.impls, flat.clone());
+        let mut w = Walk::new(recorded, program, flat.clone());
         facts_block(&func.body, &mut Default::default(), &mut w);
         // `own` decides against the declaration; an engine emits against the
         // instance, so a step's type is substituted here.
@@ -852,7 +849,7 @@ fn build<'a>(
         bodies: outside,
         places,
         recorded: recorded.clone(),
-        source,
+        source: program.source_names(),
     }
 }
 
@@ -880,7 +877,7 @@ pub fn as_written<'a>(
         .map(|(i, func)| {
             let func_id = FnId::nth(i);
             let type_args: Vec<Type> = func.type_params.iter().cloned().map(Type::Param).collect();
-            let mut w = Walk::new(&recorded, &program.impls, HashMap::new());
+            let mut w = Walk::new(&recorded, program, HashMap::new());
             facts_block(&func.body, &mut Default::default(), &mut w);
             Instance {
                 func,

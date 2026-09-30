@@ -10,7 +10,6 @@
 //! answers never cross a process boundary.
 
 use vyrn_frontend::loader::DiskResolver;
-use vyrn_frontend::project::Memo;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,22 +28,21 @@ fn repo_root() -> PathBuf {
     d
 }
 
-fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
+fn load(path: &std::path::Path) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let root = path.to_string_lossy().replace('\\', "/");
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
-    Memo::load(|| {
-        vyrn_lower::load(
-            &src,
-            &root,
-            &opts,
-            &DiskResolver,
-            Some(&*vyrn_genwasm::engine()),
-        )
-    })
+    vyrn_lower::load(
+        &src,
+        &root,
+        &opts,
+        &DiskResolver,
+        Some(&*vyrn_genwasm::engine()),
+    )
     .map_err(|d| {
         d.first()
             .map(|d| d.render())
@@ -403,7 +401,7 @@ fn gate() {
         t.examples += 1;
         // `memo` holds one expansion per access site, shared by the lowering and
         // the backend; without it each walk lands on its own addresses.
-        let Ok((program, memo)) = load(&path) else {
+        let Ok(program) = load(&path) else {
             // An expected check failure or a generator needing a cache.
             t.unloadable += 1;
             continue;
@@ -485,7 +483,7 @@ fn gate() {
         }
 
         observe::start();
-        let wasm = vyrn_codegen::direct::compile(&program, &memo);
+        let wasm = vyrn_codegen::direct::compile(&program);
         let rows = observe::take();
         let insts = observe::take_insts();
         let crossings = observe::take_crossings();

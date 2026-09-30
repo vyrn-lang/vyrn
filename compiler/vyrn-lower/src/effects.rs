@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use vyrn_frontend::ast::{Type, TypeDecl};
+use vyrn_frontend::ast::{FnId, Type, TypeDecl};
 use vyrn_frontend::floor;
 use vyrn_frontend::own::StateCallees;
 
@@ -109,23 +109,22 @@ impl Judged {
         out
     }
 
-    /// [`Judged::state_callees`] of every frame of `refs`, by frame name. A
-    /// frame whose callees store into nothing is left out.
+    /// [`Judged::state_callees`] of every frame of `refs`, by frame id. A
+    /// frame whose callees store into nothing is left out, and so is a frame
+    /// without a row, which no reader can ask for.
     pub(crate) fn state_table(&self, refs: &[&Body]) -> StateCallees {
-        refs.iter()
-            .enumerate()
-            .map(|(i, b)| (b.name.clone(), self.state_callees(i)))
+        (refs.iter().enumerate())
+            .filter_map(|(i, b)| Some((b.id?, self.state_callees(i))))
             .filter(|(_, cs)| !cs.is_empty())
             .collect()
     }
 }
 
-/// The globals a call to `callee` in the body named `body` may store into,
-/// by `state`, the effect judgment of the program being placed. The kernel
-/// ends every borrow of one of them at the call.
-pub fn writes_state(state: &StateCallees, body: &str, callee: &str) -> Vec<String> {
-    state
-        .get(body)
+/// The globals a call to `callee` in the frame `frame` may store into, by
+/// `state`, the effect judgment of the program being placed. A frame without
+/// a row has none. The kernel ends every borrow of one of them at the call.
+pub fn writes_state(state: &StateCallees, frame: Option<FnId>, callee: &str) -> Vec<String> {
+    (frame.and_then(|f| state.get(&f)))
         .and_then(|cs| cs.iter().find(|(c, _)| c == callee))
         .map(|(_, gs)| gs.clone())
         .unwrap_or_default()
@@ -463,25 +462,38 @@ fn with_judgment<R>(
         .zip(&bodies)
         .map(|(i, b)| (i.func.name.as_str(), b))
         .collect();
-    judge_built(program, &lowered, &own, &tops, |judged, refs, top| {
-        then(judged, refs, &insts, top)
-    })
+    let mut fns = crate::Fns::lowered(&lowered);
+    judge_built(
+        program,
+        &lowered,
+        own,
+        &mut fns,
+        &tops,
+        |judged, refs, top| then(judged, refs, &insts, top),
+    )
 }
 
 /// The judgment over bodies the caller built: `tops` holds each body with
-/// the name a call spells it by. The projection bodies are built here, and
-/// `then` is given every frame in the order judged and `top[i]`, the frame
-/// index of `tops[i]`'s own body.
+/// the name a call spells it by. The projection bodies are built here, each
+/// frame numbered in `fns` ([`crate::Fns::number`]), and `then` is given
+/// every frame in the order judged and `top[i]`, the frame index of
+/// `tops[i]`'s own body.
 pub(crate) fn judge_built<R>(
     program: &vyrn_frontend::ast::Program,
     lowered: &crate::Lowered<'_>,
     own: &vyrn_frontend::own::Ownership,
+    fns: &mut crate::Fns,
     tops: &[(&str, &Body)],
     then: impl FnOnce(&Judged, &[&Body], &[usize]) -> R,
 ) -> R {
     // An `impl` projection has no instance but is a call by its own name in
     // the core, so it is judged too.
     let mut place_bodies: Vec<(&str, Body)> = Vec::new();
+    let mut build = |inst: &crate::Instance, own| {
+        let mut b = crate::core::build_in(program, inst, own, fns, &mut Default::default()).ok()?;
+        fns.number(&mut b);
+        Some(b)
+    };
     for pr in &lowered.places {
         let inst = crate::Instance {
             func: pr.func,
@@ -491,7 +503,7 @@ pub(crate) fn judge_built<R>(
             facts: pr.facts.clone(),
             releases: Vec::new(),
         };
-        if let Ok(b) = crate::core::build(program, &inst, own) {
+        if let Some(b) = build(&inst, own) {
             place_bodies.push((pr.func.name.as_str(), b));
         }
     }
@@ -509,7 +521,7 @@ pub(crate) fn judge_built<R>(
             if !generic_release(inst.func) {
                 continue;
             }
-            if let Ok(b) = crate::core::build(program, &inst, &written) {
+            if let Some(b) = build(&inst, &written) {
                 place_bodies.push((inst.func.name.as_str(), b));
             }
         }
@@ -534,7 +546,10 @@ pub(crate) fn judge_built<R>(
     }
     // The module-state initializer's lambdas are keyed under the empty
     // name.
-    let state = crate::core::build_module_state(program, own, &lowered.globals).ok();
+    let mut state = crate::core::build_module_state(program, own, fns, &lowered.globals).ok();
+    if let Some(b) = &mut state {
+        fns.number(b);
+    }
     for f in state.iter().flat_map(|b| b.frames()).skip(1) {
         if let Some(line) = crate::core::lambda_line(&f.name) {
             lambda_frames

@@ -101,7 +101,7 @@ fn releaseacrossexit_lowers_to_its_blessed_dump() {
 
 /// Gates the sharing of projection expansions, not the format. The nodes under
 /// `call @at` are not in the source; if the checker and the lowering expand
-/// separate trees (no shared [`vyrn_frontend::project::Memo`]), `Recorded`
+/// separate trees (no shared [`vyrn_frontend::project::Expansions`]), `Recorded`
 /// answers a type for a freed address and types a `Window` as a `String`.
 #[test]
 fn projection_lowers_to_its_blessed_dump() {

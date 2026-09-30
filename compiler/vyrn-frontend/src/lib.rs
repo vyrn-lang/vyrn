@@ -24,6 +24,7 @@ pub mod manifest;
 pub mod movecheck;
 pub mod origin;
 pub mod own;
+pub mod par;
 pub mod parser;
 pub mod prelude;
 pub mod prim;

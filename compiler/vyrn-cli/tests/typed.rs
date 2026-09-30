@@ -13,7 +13,6 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use vyrn_frontend::project::Memo;
 
 use vyrn_frontend::ast::{Program, Type, TypeDecl};
 use vyrn_frontend::loader::DiskResolver;
@@ -34,22 +33,21 @@ fn manifest(dir: &Path) -> Option<vyrn_frontend::manifest::Manifest> {
     vyrn_frontend::manifest::find(dir).ok().flatten()
 }
 
-fn load(path: &Path, project: Option<&Path>) -> Result<(Program, Memo), String> {
+fn load(path: &Path, project: Option<&Path>) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(slash(&repo_root().join("std"))),
         artifacts: project.and_then(manifest).and_then(|m| m.artifacts),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
-    Memo::load(|| {
-        vyrn_lower::load(
-            &src,
-            &slash(path),
-            &opts,
-            &DiskResolver,
-            Some(&*vyrn_genwasm::engine()),
-        )
-    })
+    vyrn_lower::load(
+        &src,
+        &slash(path),
+        &opts,
+        &DiskResolver,
+        Some(&*vyrn_genwasm::engine()),
+    )
     .map_err(|d| d.first().map(|d| d.render()).unwrap_or_default())
 }
 
@@ -142,7 +140,12 @@ fn bodies_of(program: &Program) -> Vec<vyrn_frontend::core::Body> {
         }
     }
     if !program.globals.is_empty() {
-        if let Ok(b) = vyrn_lower::core::build_module_state(program, &own, &lowered.globals) {
+        if let Ok(b) = vyrn_lower::core::build_module_state(
+            program,
+            &own,
+            &Default::default(),
+            &lowered.globals,
+        ) {
             bodies.push(b);
         }
     }
@@ -187,7 +190,7 @@ fn a_read_of_a_validated_place_produces_its_type() {
          }\n",
     )
     .unwrap();
-    let (program, _memo) = load(&path, None).unwrap();
+    let program = load(&path, None).unwrap();
     let bodies = bodies_of(&program);
     let refs: Vec<&vyrn_frontend::core::Body> = bodies.iter().flat_map(|b| b.frames()).collect();
     let judged = judge(&program, &refs);
@@ -267,7 +270,7 @@ fn run_corpus() {
     let mut programs = 0usize;
     let mut judged = 0usize;
     for (path, project) in &roots {
-        let Ok((program, _memo)) = load(path, project.as_deref()) else {
+        let Ok(program) = load(path, project.as_deref()) else {
             continue;
         };
         programs += 1;

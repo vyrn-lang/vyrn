@@ -1227,15 +1227,14 @@ fn main() -> Int64 {
         );
         let opts = vyrn_frontend::loader::LoadOptions {
             std_root: Some("std".into()),
+            expansions: vyrn_frontend::project::Expansions::shared(),
             ..Default::default()
         };
-        let (mut program, memo) = vyrn_frontend::project::Memo::load(|| {
-            vyrn_lower::load(PROBE, "probe.vyrn", &opts, &files, None)
-        })
-        .expect("the probe loads");
+        let mut program =
+            vyrn_lower::load(PROBE, "probe.vyrn", &opts, &files, None).expect("the probe loads");
         let diags = vyrn_lower::check_and_synthesize(&mut program, None);
         assert!(diags.is_empty(), "the probe checks: {diags:?}");
-        vyrn_codegen::direct::compile(&program, &memo).expect("the probe compiles")
+        vyrn_codegen::direct::compile(&program).expect("the probe compiles")
     }
 
     fn quiet() -> Run {
