@@ -7053,6 +7053,47 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
     out
 }
 
+/// The parameter every `return` of `body` yields: the parameter itself or a
+/// name a `let` bound to it, where no row stores a whole value into any of
+/// those names. `None` when a `return` yields anything else, so a body with
+/// another result keeps its own. The emitter passes a `consume` parameter
+/// this names in the caller's storage (`docs/memory.md`).
+pub fn returned_param(body: &Body) -> Option<Name> {
+    let from: HashMap<Name, Name> = rows(&body.stmts)
+        .filter_map(|(r, _)| match r {
+            St::Let(n, Rhs::Val(Val::Name(x))) => Some((*n, *x)),
+            _ => None,
+        })
+        .collect();
+    // Each step goes from a `let` to a name bound before it, so a chain has at
+    // most `from.len()` steps.
+    let root = |mut n: Name| {
+        for _ in 0..=from.len() {
+            match from.get(&n) {
+                Some(&x) => n = x,
+                None => return n,
+            }
+        }
+        n
+    };
+    let mut back = None;
+    for (r, _) in rows(&body.stmts) {
+        match r {
+            St::Return {
+                value: Some(Val::Name(n)),
+                is_try: false,
+                ..
+            } if back.is_none_or(|p| p == root(*n)) => back = Some(root(*n)),
+            St::Return { .. } => return None,
+            _ => {}
+        }
+    }
+    let back = back.filter(|p| body.params.contains(p))?;
+    let stored = rows(&body.stmts)
+        .any(|(r, _)| matches!(r, St::Store { place: Place::Name(n), .. } if root(*n) == back));
+    (!stored).then_some(back)
+}
+
 /// The headers a read in `ss` walks: an element read, or a length read,
 /// straight off a name, module state, or a chain of fields of one. With
 /// `rebase`, each such read of the first reads the name instead. A store and

@@ -272,7 +272,9 @@ The module's shape:
   address when no module state is an aggregate or owns heap other than a
   `String`'s (`Cx::args_in_place`). Otherwise the callee copies it in at
   entry, and a `modify` one back out at the one exit. A `consume` parameter
-  is always copied in.
+  is copied in, unless every `return` yields it (`Sig::in_place`): then it
+  is the result, the call has no out-pointer, and the caller moves the
+  argument into the destination, or passes `x`'s storage for `x = f(x, ..)`.
 - Layout (`layout.rs`): sizes, alignments and offsets are read from the shape
   string `llt_of` prints, so layout cannot drift from lowering. Every size is
   a checked `u32`.

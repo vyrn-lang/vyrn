@@ -110,7 +110,7 @@ fn sections() -> Vec<Section> {
         sec("struct Sig", Shared, Neither),
         sec("struct Cx", Shared, Neither),
         sec("fn loop_buffer_only", Mapping, Core),
-        sec("fn sub", Shared, Neither),
+        sec("fn sub", Shared, Core),
         sec("fn wasm_sig", Encoding, Neither),
         sec("enum Place", Shared, Neither),
         sec("impl Place", Mapping, Neither),
