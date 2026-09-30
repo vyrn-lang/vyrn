@@ -1,2 +1,0 @@
-consume_in_a_loop_an_element_hole_names_its_take.vyrn:8:0: `xs[..].s` is consumed by `consume` inside a loop, so it would be used again on the next iteration
-  fix: `xs[..].s.copy()` if both sides need a value

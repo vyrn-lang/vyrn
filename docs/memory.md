@@ -84,7 +84,8 @@ A prefix `consume` at an argument takes a field out of a value the caller
 holds: `take(consume p.name)` moves `p.name` and leaves `p` with a hole at
 `.name`. The rest of `p` stays usable. A use of `p` as a whole, or a `drop p`,
 is refused while the hole is open; a store into `p.name` fills it. An element
-is not a place a take reaches: `consume xs[0]` is refused.
+is not a place a take reaches: `consume xs[0]` is refused. A part read as a
+statement, `p.name` or `xs[0].s`, takes nothing and leaves no hole.
 
 ## A result is owned, unless the signature lends it
 

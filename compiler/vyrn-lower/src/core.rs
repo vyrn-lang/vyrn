@@ -45,6 +45,16 @@ fn reader_path(e: &Expr, places: &HashSet<String>) -> Option<String> {
         .map(|(_, p)| p)
 }
 
+/// The path a field read takes out of its unnamed receiver: `.q.s` for
+/// `mk().q.s`. `None` under an element.
+fn taken_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", taken_path(expr)?)),
+        Expr::Call { name, .. } if name == vyrn_frontend::project::AT => None,
+        _ => Some(String::new()),
+    }
+}
+
 /// The borrow a parameter's capability makes; `None` for `consume`.
 fn param_borrow(cap: Capability, name: &str) -> Option<BorrowKind> {
     let cap = match cap {
@@ -1690,7 +1700,7 @@ impl<'a> Builder<'a> {
     fn lends(&self, e: &Expr) -> bool {
         match e {
             Expr::Call { name, args, .. } => {
-                (self.lends_name(name) && !self.copies_an_element(name, args, e))
+                (self.lends_name(name) && !self.copies_a_part(e))
                     || self.hands_back_a_borrow(name, args)
             }
             _ => false,
@@ -2665,6 +2675,7 @@ impl<'a> Builder<'a> {
                     && is_place_read(read)
                     && self.deferred_of(read).is_none()
                 {
+                    let mark = self.after.len();
                     let place = self.place(read, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -2672,6 +2683,7 @@ impl<'a> Builder<'a> {
                         self.report_reason(&rhs, &ty, false, false, self.lends(read));
                     out.push(St::Let(n, rhs));
                     self.release_receiver(read, out, true);
+                    self.drop_since(mark, out);
                     self.grows(n, name);
                     self.scope.push((name.clone(), n));
                     self.keyed_let(n, s);
@@ -3251,6 +3263,21 @@ impl<'a> Builder<'a> {
                 if vyrn_frontend::loader::audit_hook(name)
                     && !vyrn_frontend::loader::audit_build(self.program.host.gen) => {}
             Stmt::Expr(e, _) if self.optional_if_let(e, sid, out)? => {}
+            // A part read as a statement takes nothing: the part stays in its
+            // place, and an unnamed receiver is released whole.
+            Stmt::Expr(e, _) if reads_a_part(e) && self.deferred_of(e).is_none() => {
+                let mark = self.after.len();
+                let rhs = Rhs::Read(self.place(e, out)?);
+                out.push(St::Do {
+                    rhs,
+                    line: e.line(),
+                    site: sid,
+                });
+                if let Some((r, _, malloc)) = self.pending_receiver.take() {
+                    self.drop_receiver(r, malloc, Vec::new(), out);
+                }
+                self.drop_since(mark, out);
+            }
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
@@ -3292,25 +3319,12 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Whether a statement-position call's unbound result is this frame's to
-    /// release right after the call. The caller has checked that the type
-    /// owns heap. Excluded: a lending call, a variant constructor, a `panic`,
-    /// and an `@`-spelled desugar, which the reading site frees,
-    /// except a removal (`@pop`, `@swapRemove`), whose result nothing reads.
+    /// Whether a statement's unbound value is this frame's to release right
+    /// after the statement. The caller has checked that the type owns heap.
+    /// Excluded: a lending call, and a `panic`, which never returns.
     fn discards(&self, e: &Expr) -> bool {
-        let Expr::Call { name, .. } = e else {
-            return false;
-        };
-        !vyrn_frontend::ast::is_panic(name)
-            && (!name.starts_with('@') || prelude::removes(name))
+        !matches!(e, Expr::Call { name, .. } if vyrn_frontend::ast::is_panic(name))
             && !self.lends(e)
-            && !self.constructs(name)
-    }
-
-    /// Whether `name` constructs a sum value: a user enum's variant, or one of
-    /// the five the language declares (`declared::Declared`'s seed).
-    fn constructs(&self, name: &str) -> bool {
-        matches!(name, "Some" | "Ok" | "Err" | "Success" | "Failure") || self.is_variant(name)
     }
 
     /// Marks `n`, bound by a `let` of `name`, as a String accumulator where
@@ -4727,9 +4741,17 @@ impl<'a> Builder<'a> {
         // kernel reports it.
         let holes: Vec<String> = match (took, e) {
             (false, _) => Vec::new(),
-            (true, Expr::Field { field, .. }) => vec![format!(".{field}")],
+            (true, Expr::Field { .. }) => match taken_path(e) {
+                Some(path) => vec![path],
+                None => return,
+            },
             (true, _) => return,
         };
+        self.drop_receiver(r, malloc, holes, out);
+    }
+
+    /// Releases the unnamed receiver `r` of a part read, around `holes`.
+    fn drop_receiver(&mut self, r: Name, malloc: bool, holes: Vec<String>, out: &mut Vec<St>) {
         self.body.names[r.index()].holes = holes;
         self.body.names[r.index()].receiver_malloc = malloc;
         out.push(St::Drop(r, Site::None, 0, None));
@@ -5252,14 +5274,18 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Whether `name(args)` at `e` is a heap element of a temporary
-    /// (`pieces()[0]`), stated as `@copy` of the read (#537): the temporary
-    /// is released whole after the consumer, so the taker must own a copy. A
-    /// type with `impl Copy` is read as any element is.
-    fn copies_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
-        name == vyrn_frontend::project::AT
-            && args.len() == 2
-            && !is_place_read(&args[0])
+    /// Whether `e` is a heap element of a temporary (`pieces()[0]`) or a
+    /// heap field under one (`pieces()[0].s`), stated as `@copy` of the read
+    /// (#537): the temporary is released whole after the consumer, so the
+    /// taker must own a copy. A type with `impl Copy` is read as any element
+    /// is.
+    fn copies_a_part(&self, e: &Expr) -> bool {
+        let mut at = e;
+        while let Expr::Field { expr, .. } = at {
+            at = expr;
+        }
+        matches!(at, Expr::Call { name, args, .. }
+            if name == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]))
             && self.ty_of(e).is_ok_and(|t| {
                 self.owns(&t) && vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
             })
@@ -5297,6 +5323,14 @@ impl<'a> Builder<'a> {
         r
     }
 
+    /// Releases the temporaries queued in `after` since `mark`, where no
+    /// `rhs` drains them: a place read's key (`m["k".copy()]`) or an operand.
+    fn drop_since(&mut self, mark: usize, out: &mut Vec<St>) {
+        for t in self.after.split_off(mark) {
+            out.push(St::Drop(t, Site::None, 0, None));
+        }
+    }
+
     /// `a && b` as `if a { b } else { false }`, and `a || b` as
     /// `if a { true } else { b }`, storing into a `Bool` temporary on each
     /// edge. The checker refuses any operand but `Bool`.
@@ -5328,9 +5362,7 @@ impl<'a> Builder<'a> {
         taken.push(store(v));
         // The right operand's temporaries are released on its edge, the only
         // path that evaluates it.
-        for t in self.after.split_off(mark) {
-            taken.push(St::Drop(t, Site::None, 0, None));
-        }
+        self.drop_since(mark, &mut taken);
         self.drain -= 1;
         let decided = vec![store(Val::Lit(Lit::Bool(op == BinOp::Or)))];
         let (then, els) = if op == BinOp::And {
@@ -5416,6 +5448,9 @@ impl<'a> Builder<'a> {
                 if let Some(inner) = self.deferred_of(e) {
                     return Ok(self.force(e, inner, out)?);
                 }
+                if self.copies_a_part(e) {
+                    return self.copy_of(e, out);
+                }
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
@@ -5473,7 +5508,7 @@ impl<'a> Builder<'a> {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
                 }
-                if self.copies_an_element(name, args, e) {
+                if self.copies_a_part(e) {
                     return self.copy_of(e, out);
                 }
                 // A builtin whose argument names its callee is a call to that
@@ -8197,8 +8232,14 @@ fn place_frames(
             if info.receiver.is_some() {
                 continue;
             }
+            // An owed release of a temporary has no row to key: the builder
+            // states it (`Builder::discards`, `Builder::drop_receiver`,
+            // `Builder::drop_since`), so one found here is a defect.
             let Some(binding) = info.binding else {
-                continue;
+                panic!(
+                    "placer: `{}` (line {}) in `{}` owes a release at {:?} and has no binding",
+                    info.source, info.line, body.name, m.exit
+                );
             };
             // A row the plan already placed here takes the kernel's hole set,
             // which is per path where the plan's is per binding.

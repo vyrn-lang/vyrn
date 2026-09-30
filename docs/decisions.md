@@ -122,6 +122,8 @@ pull request.
 - A projection (a field, element or pattern binder of a place) borrows its root. It may be read, not stored or returned; the fix is `.copy()` or a take.
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
 - `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`.
+- A statement's value is released where the statement ends. A part read as a statement (`p.f`, `xs[i].f`) takes nothing: only `consume` moves a value out of a place.
+- A heap part of an element of a call's result (`mk()[0]`, `mk()[0].s`) is copied, and the result is released whole: a release cannot skip a hole in one element.
 - Iterating a place binds a `read` borrow. `for x in consume xs` takes the container; a loop over a temporary owns its elements.
 - A `let` of a place read from a `read` parameter is a borrow. Writing through the root while it lives is refused, and the fix names `.copy()`.
 - When unsure, the compiler leaks rather than double-frees. A leak is a counted row; a double free is a crash.

@@ -1,0 +1,12 @@
+// A field read as a statement takes nothing, so it may stand inside a loop
+// and the field is read again after it.
+type R = { s: String }
+
+fn main() -> Int64 {
+    let xs = [R { s: "a" }]
+    for i in [1, 2] {
+        xs[0].s
+    }
+    print(xs[0].s)
+    return 0
+}

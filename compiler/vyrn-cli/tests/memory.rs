@@ -2580,3 +2580,166 @@ fn main() -> Int64 {
         (Some(0), "4\n3\n3\n4\n".to_string())
     );
 }
+
+// A part read as a statement takes nothing: the part stays in its place, and
+// an unnamed receiver is released whole. A take there leaks the part, and a
+// hole under an element makes the container's release skip that field in
+// every element.
+#[test]
+fn a_part_read_as_a_statement_takes_nothing() {
+    let src = r#"type In = { s: String }
+type R = { s: String, n: In }
+
+fn mk() -> R { return R { s: "a".copy(), n: In { s: "b".copy() } } }
+fn mks() -> Array<R> { return [mk(), mk()] }
+
+fn main() -> Int64 {
+    let r = mk()
+    let mut xs = [mk(), mk(), mk()]
+    let ss = ["c".copy(), "d".copy()]
+    r.s
+    r.n.s
+    xs[0].s
+    xs[1].n
+    ss[0]
+    mk().s
+    mks()[1].n.s
+    for i in [1, 2] {
+        xs[2].s
+    }
+    xs[0].s = "z".copy()
+    print(r.s + xs[0].s + xs[1].n.s + ss[0])
+    return 0
+}
+"#;
+    assert_eq!(audited_run("part", src), (Some(0), "azbc\n".to_string()));
+}
+
+// A statement's value is released where the statement ends, whatever made it:
+// a builtin, an operator, a constructor, a literal, a call, a name, a take.
+#[test]
+fn a_statement_releases_its_value() {
+    let src = r#"type R = { s: String }
+
+fn mk() -> String { return "a".copy() }
+
+fn main() -> Int64 {
+    let s = "a".copy()
+    let t = "b".copy()
+    "c".copy()
+    s + "d"
+    Some(mk())
+    R { s: mk() }
+    mk()
+    s
+    consume t
+    return 0
+}
+"#;
+    assert_eq!(audited_run("discard", src), (Some(0), String::new()));
+}
+
+// A key read's temporary is released after the read, where a `let` binds a
+// borrow of the entry.
+#[test]
+fn a_key_read_releases_its_key() {
+    let src = r#"fn main() -> Int64 {
+    let m: Map<String, String> = ["k": "v".copy()]
+    let x = m["k".copy()]
+    print(x ?? "none")
+    return 0
+}
+"#;
+    assert_eq!(audited_run("key", src), (Some(0), "v\n".to_string()));
+}
+
+// A map read as a statement reads nothing out of the map: the receiver's
+// checks run, an unnamed receiver and a key temporary are released.
+#[test]
+fn a_key_read_as_a_statement_takes_nothing() {
+    let src = r#"type R = { m: Map<String, String> }
+
+fn mk() -> Map<String, String> { return ["k": "w".copy()] }
+
+fn main() -> Int64 {
+    let m: Map<String, String> = ["k": "v".copy()]
+    let n: Map<String, Int64> = ["k": 1]
+    let xs: Array<Map<String, String>> = [["k": "x".copy()]]
+    let r = R { m: ["k": "y".copy()] }
+    m["k"]
+    n["k"]
+    mk()["k"]
+    xs[0]["k"]
+    r.m["k"]
+    m["k".copy()]
+    print(m["k"] ?? "none")
+    return 0
+}
+"#;
+    assert_eq!(audited_run("keystmt", src), (Some(0), "v\n".to_string()));
+}
+
+// A discarded key read keeps its receiver's index check.
+#[test]
+fn a_key_read_as_a_statement_checks_its_receiver() {
+    let src = r#"fn main() -> Int64 {
+    let xs: Array<Map<String, String>> = [["k": "x".copy()]]
+    xs[1]["k"]
+    return 0
+}
+"#;
+    let (code, text) = audited_run("keytrap", src);
+    assert_eq!(code, Some(1));
+    assert!(text.contains("array index 1 out of bounds"), "{text}");
+}
+
+// A `let` of a nested field of a call's result takes the field; the receiver
+// is released around the whole path.
+#[test]
+fn a_let_takes_a_nested_field_of_a_call() {
+    let src = r#"type Q = { s: String }
+type R = { s: String, q: Q }
+
+fn mk() -> R { return R { s: "a".copy(), q: Q { s: "c".copy() } } }
+
+fn main() -> Int64 {
+    let t = mk().q.s
+    print(t)
+    return 0
+}
+"#;
+    assert_eq!(audited_run("nested", src), (Some(0), "c\n".to_string()));
+}
+
+// A heap field under an element of a call's result is copied, as the element
+// is (#537); the result is released whole.
+#[test]
+fn a_field_of_an_element_of_a_call_is_copied() {
+    let src = r#"type R = { s: String, n: Int64 }
+type H = { s: String }
+
+fn mk() -> Array<R> { return [R { s: "a".copy(), n: 1 }, R { s: "b".copy(), n: 2 }] }
+
+fn first() -> String { return mk()[0].s }
+
+fn eat(s: consume String) -> Int64 {
+    print(s)
+    return 1
+}
+
+fn main() -> Int64 {
+    let t = mk()[1].s
+    let mut h = H { s: "z".copy() }
+    h.s = mk()[0].s
+    let u = first()
+    let k = eat(mk()[1].s)
+    print(t + h.s + u)
+    print(k)
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("elemfield", src),
+        (Some(0), "b\nbaa\n1\n".to_string())
+    );
+}
