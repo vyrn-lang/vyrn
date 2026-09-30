@@ -160,7 +160,6 @@ fn judge(program: &Program, refs: &[&vyrn_frontend::core::Body]) -> typed::Judge
 /// unannotated global).
 #[test]
 fn a_read_of_a_validated_place_produces_its_type() {
-    vyrn_lower::install();
     let dir = std::env::temp_dir().join("vyrn-typed-read");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("read.vyrn");
@@ -239,7 +238,6 @@ fn run_corpus() {
     // through a generator fails to load and the gate silently measures a
     // smaller corpus.
     vyrn_genwasm::install();
-    vyrn_lower::install();
     let dump = std::env::var("VYRN_TYPED_DUMP").ok();
     // The LAST colon: a Windows path carries one after its drive letter.
     let dump_target = dump.as_deref().and_then(|d| d.rsplit_once(':'));

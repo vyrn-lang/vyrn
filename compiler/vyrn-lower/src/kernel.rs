@@ -355,7 +355,7 @@ fn writes_of<'s>(s: &'s St, names: &[NameInfo], body: &str) -> Vec<Write<'s>> {
     let mut w = match s {
         // A second name for a borrow reads it; nothing is handed on.
         St::Let(n, Rhs::Val(Val::Name(m)))
-            if names[*n as usize].borrow && names[*m as usize].borrow =>
+            if names[n.index()].borrow && names[m.index()].borrow =>
         {
             vec![]
         }
@@ -478,7 +478,7 @@ impl Writes<'_> {
     fn under(&self, r: &Root) -> bool {
         self.aliased(r)
             || matches!(r, Root::N(k) if {
-                let info = &self.names[*k as usize];
+                let info = &self.names[k.index()];
                 info.borrow && info.borrow_kind.is_none() && !self.inside.contains(k)
             })
     }
@@ -528,7 +528,7 @@ impl Writes<'_> {
                     _ => None,
                 };
                 if let Some((r, path)) = from {
-                    if self.aliased(&r) && self.names[*k as usize].borrow {
+                    if self.aliased(&r) && self.names[k.index()].borrow {
                         self.alias.push(*k);
                         if matches!(r, Root::N(j) if self.elem.contains(&j)) || in_element(&path) {
                             self.elem.push(*k);
@@ -556,7 +556,7 @@ impl Writes<'_> {
                     // whatever it holds ([`Kernel::read_out`]).
                     if over {
                         let names = self.names;
-                        let binders = (a.binds.iter().filter(|b| names[**b as usize].borrow))
+                        let binders = (a.binds.iter().filter(|b| names[b.index()].borrow))
                             .copied()
                             .chain(a.reads(on).iter().filter_map(|r| match r {
                                 St::Let(b, _) => Some(*b),
@@ -734,7 +734,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
     };
     let mut st = State::default();
     for p in &body.params {
-        let i = &body.names[*p as usize];
+        let i = &body.names[p.index()];
         // Ownership, not release: a `consume` record of `Int64`s is owned.
         if i.releases || !i.borrow {
             st.set_own(*p, Own::Held);
@@ -767,13 +767,13 @@ impl<'b> Kernel<'b> {
     /// a borrow is owned, including a heapless value and static data. A
     /// must-use parameter is owned whatever its capability.
     fn owned(&self, n: Name) -> bool {
-        let i = &self.body.names[n as usize];
+        let i = &self.body.names[n.index()];
         i.releases || !i.borrow || i.must_use_param
     }
 
     /// Whether a held `n` owes a release at an exit: it owns heap.
     fn releases(&self, n: Name) -> bool {
-        self.body.names[n as usize].releases
+        self.body.names[n.index()].releases
     }
 
     /// Whether a take of `n` moves it. A value that owes a release always
@@ -806,7 +806,7 @@ impl<'b> Kernel<'b> {
         // or scope end takes nothing, and a rebind clears the row, so the row
         // is the last take not followed by a rebind.
         if !by.is_empty() && !self.ending.get() {
-            self.took.borrow_mut()[n as usize] = Some(Took {
+            self.took.borrow_mut()[n.index()] = Some(Took {
                 line: self.here,
                 by,
                 how: self.how,
@@ -817,7 +817,7 @@ impl<'b> Kernel<'b> {
 
     /// Clears the report's taker of `n`, which holds a value of its own.
     fn rebound(&self, n: Name) {
-        self.took.borrow_mut()[n as usize] = None;
+        self.took.borrow_mut()[n.index()] = None;
     }
 
     /// Like [`Kernel::gone`], but nothing took `n`: a later mention of it is
@@ -838,24 +838,24 @@ impl<'b> Kernel<'b> {
     /// place, the path the reader wrote ([`NameInfo::path`]);
     /// otherwise the source spelling. No program contains `@borrow`.
     fn src(&self, n: Name) -> &str {
-        let i = &self.body.names[n as usize];
+        let i = &self.body.names[n.index()];
         i.path.as_deref().unwrap_or(&i.source)
     }
 
     fn info(&self, n: Name) -> String {
-        let i = &self.body.names[n as usize];
+        let i = &self.body.names[n.index()];
         format!("`{}` (line {})", i.source, i.line)
     }
 
     fn borrowed(&self, n: Name) -> bool {
-        self.body.names[n as usize].borrow
+        self.body.names[n.index()].borrow
     }
 
     /// Whether `n` is a payload binder read out of a scrutinee the frame
     /// owns. Its payload is the frame's to hand on (`vyxProcessElem` in
     /// `std/vyx.vyrn`), and the name it is handed to reads nothing.
     fn gives(&self, st: &State, n: Name) -> bool {
-        self.read_out[n as usize]
+        self.read_out[n.index()]
             && matches!(st.alias.get(&n),
                 Some(Alias { via: Some(m), .. }) if self.owned(*m))
     }
@@ -865,7 +865,7 @@ impl<'b> Kernel<'b> {
     /// declares `release` owns the whole of its value, so the hand-off is
     /// refused.
     fn leaves_payload(&self, st: &mut State, n: Name) -> Result<(), Refusal> {
-        let payload = match &self.body.names[n as usize].payload {
+        let payload = match &self.body.names[n.index()].payload {
             None => return Ok(()),
             Some(Payload::Sealed(ty)) => {
                 let b = self.src(n);
@@ -899,7 +899,7 @@ impl<'b> Kernel<'b> {
     fn payload_binder(&self, st: &State, n: Name, h: &str) -> Option<Name> {
         st.alias
             .iter()
-            .find_map(|(b, a)| match (&self.body.names[*b as usize].payload, a) {
+            .find_map(|(b, a)| match (&self.body.names[b.index()].payload, a) {
                 (
                     Some(Payload::Hole(p)),
                     Alias {
@@ -930,7 +930,7 @@ impl<'b> Kernel<'b> {
         let mut left: Vec<String> = Vec::new();
         for (arm, out) in arms.iter().zip(outs.iter()) {
             for b in &arm.binds {
-                if let Some(Payload::Hole(p)) = &self.body.names[*b as usize].payload {
+                if let Some(Payload::Hole(p)) = &self.body.names[b.index()].payload {
                     let h = format!("{prefix}{p}");
                     if out.holes.iter().any(|(r, hp)| *r == root && *hp == h) {
                         left.push(h);
@@ -1053,12 +1053,11 @@ impl<'b> Kernel<'b> {
             via = st.alias.get(&n).and_then(|x| x.via);
         }
         for (k, x) in &st.alias {
-            let info = &self.body.names[*k as usize];
+            let info = &self.body.names[k.index()];
             // An owned name holds a copy and aliases nothing, but a payload
             // binder is the payload's address ([`Kernel::read_out`]).
-            let copied = self.owned(*k)
-                && !self.read_out[*k as usize]
-                && !(by_call && info.walked.is_some());
+            let copied =
+                self.owned(*k) && !self.read_out[k.index()] && !(by_call && info.walked.is_some());
             let element = store
                 && info.walked == Some(Walk::While)
                 && path.strip_prefix(x.path.as_str()).is_some_and(in_element);
@@ -1079,7 +1078,7 @@ impl<'b> Kernel<'b> {
     /// it is recorded, so the module state its declared releases store into
     /// is written there ([`writes_of`] for a row already in the body).
     fn owe(&mut self, st: &mut State, m: Missing) {
-        let runs = &self.body.names[m.name as usize].runs;
+        let runs = &self.body.names[m.name.index()].runs;
         self.end_state(st, &release_state(runs, &self.body.name));
         self.missing.push(m);
     }
@@ -1088,8 +1087,8 @@ impl<'b> Kernel<'b> {
     /// under a global, so a borrow of any part of one ends.
     fn end_state(&self, st: &mut State, gs: &[String]) {
         for (n, a) in &st.alias {
-            let info = &self.body.names[*n as usize];
-            if self.owned(*n) && !self.read_out[*n as usize] && info.walked.is_none() {
+            let info = &self.body.names[n.index()];
+            if self.owned(*n) && !self.read_out[n.index()] && info.walked.is_none() {
                 continue;
             }
             if let Root::G(g) = &a.root {
@@ -1144,7 +1143,7 @@ impl<'b> Kernel<'b> {
             return Ok(());
         };
         // The way out copies the place the alias reads, where it was bound.
-        let (src, at) = (self.src_text(st, n), self.body.names[n as usize].line);
+        let (src, at) = (self.src_text(st, n), self.body.names[n.index()].line);
         let at = at.to_string();
         let args = [
             ("place", place.as_str()),
@@ -1225,7 +1224,7 @@ impl<'b> Kernel<'b> {
                 .unwrap_err();
         }
         // A loop variable is worded as the loop variable, not its element.
-        if let Some(of) = &self.body.names[n as usize].loop_var {
+        if let Some(of) = &self.body.names[n.index()].loop_var {
             return self.param_take(n, &BorrowKind::LoopVar { of: of.clone() });
         }
         // A borrowed root is worded by its declaration (a `read` or `modify`
@@ -1242,7 +1241,7 @@ impl<'b> Kernel<'b> {
                 _ => None,
             };
             while let Some(k) = m.or(root) {
-                let info = &self.body.names[k as usize];
+                let info = &self.body.names[k.index()];
                 if let Some(b) = &info.borrow_kind {
                     return self.param_take(n, b);
                 }
@@ -1262,11 +1261,11 @@ impl<'b> Kernel<'b> {
         } else {
             "it is read out of a place that owns it".to_string()
         };
-        let minted = self.body.names[n as usize].path.is_some();
+        let minted = self.body.names[n.index()].path.is_some();
         // A named binding a call takes is refused at the binding, so the
         // `.copy()` lands where the read is. A minted name has no binding.
         if write_back && by.ends_with("(..)`") && !minted {
-            let (here, at) = (self.here, self.body.names[n as usize].line);
+            let (here, at) = (self.here, self.body.names[n.index()].line);
             return self
                 .refuse_at::<()>(
                     at,
@@ -1290,7 +1289,7 @@ impl<'b> Kernel<'b> {
             let kind = match st.alias.get(&n) {
                 Some(Alias {
                     root: Root::N(m), ..
-                }) => self.body.names[*m as usize]
+                }) => self.body.names[m.index()]
                     .borrow_kind
                     .as_ref()
                     .map(|b| b.what(s)),
@@ -1346,7 +1345,7 @@ impl<'b> Kernel<'b> {
     fn place_fixes(&self, st: &State, n: Name) -> Vec<String> {
         let own_name = self.src(n).to_string();
         let read = self.src_text(st, n);
-        let path = match &self.body.names[n as usize].path {
+        let path = match &self.body.names[n.index()].path {
             Some(p) => p.clone(),
             // An unnamed temporary is spelled by the place it reads.
             None if own_name.starts_with('@')
@@ -1365,7 +1364,7 @@ impl<'b> Kernel<'b> {
         let root = match st.alias.get(&n) {
             Some(Alias {
                 root: Root::N(m), ..
-            }) if self.body.names[n as usize].path.is_some() || self.src(n).starts_with('@') => {
+            }) if self.body.names[n.index()].path.is_some() || self.src(n).starts_with('@') => {
                 self.src(*m)
             }
             _ => path.as_str(),
@@ -1396,7 +1395,7 @@ impl<'b> Kernel<'b> {
         matches!(
             st.alias.get(&n),
             Some(Alias { root: Root::N(m), .. })
-                if self.body.names[*m as usize].borrow_kind.is_none()
+                if self.body.names[m.index()].borrow_kind.is_none()
         )
     }
 
@@ -1498,9 +1497,7 @@ impl<'b> Kernel<'b> {
             // value is worded as `consume` even under a builtin (`close(s)`)
             // ([`NameInfo::linear`]).
             Some((_, by, t))
-                if *t == Taker::Declared
-                    || by == "`drop`"
-                    || self.body.names[n as usize].linear =>
+                if *t == Taker::Declared || by == "`drop`" || self.body.names[n.index()].linear =>
             {
                 self.say(CONSUMED, self.here, &args)
             }
@@ -1515,7 +1512,7 @@ impl<'b> Kernel<'b> {
             .rev()
             .find(|(h, p, _)| *h == n && p == path)
             .map(|(_, _, l)| *l)
-            .unwrap_or(self.body.names[n as usize].line)
+            .unwrap_or(self.body.names[n.index()].line)
     }
 
     /// Every name in `names` still held is a leak where the scope ends:
@@ -1573,8 +1570,8 @@ impl<'b> Kernel<'b> {
                 }
                 Some((s, arm, _))
                     if *s != NodeId::NONE
-                        && !self.body.names[n as usize].source.starts_with('@')
-                        && self.body.names[n as usize].holes.is_empty() =>
+                        && !self.body.names[n.index()].source.starts_with('@')
+                        && self.body.names[n.index()].holes.is_empty() =>
                 {
                     (exit, *s, MissingKind::Edge { edge: *arm })
                 }
@@ -1622,7 +1619,7 @@ impl<'b> Kernel<'b> {
             // container's release, so it is worded as the loop, not a `drop`
             // ([`NameInfo::for_consume`]).
             if st.alias.contains_key(&n) {
-                let form = if self.body.names[n as usize].for_consume {
+                let form = if self.body.names[n.index()].for_consume {
                     "the `for .. in consume` loop"
                 } else {
                     "a `drop`"
@@ -1714,13 +1711,13 @@ impl<'b> Kernel<'b> {
                 continue;
             }
             let s = self.src(*c);
-            let (what, fixes) = match &self.body.names[*c as usize].borrow_kind {
+            let (what, fixes) = match &self.body.names[c.index()].borrow_kind {
                 Some(b) => (b.what(s), b.fixes(s)),
                 None => (
                     match st.alias.get(c) {
                         Some(Alias {
                             root: Root::N(m), ..
-                        }) => self.body.names[*m as usize]
+                        }) => self.body.names[m.index()]
                             .borrow_kind
                             .as_ref()
                             .map(|b| b.what(s)),
@@ -1797,7 +1794,7 @@ impl<'b> Kernel<'b> {
     /// ([`Kernel::param_take`]). `None` for a must-use parameter, which the
     /// callee may hand on.
     fn kind_of_borrow(&self, n: Name) -> Option<&BorrowKind> {
-        let i = &self.body.names[n as usize];
+        let i = &self.body.names[n.index()];
         i.borrow_kind
             .as_ref()
             .filter(|_| self.borrowed(n) && !i.must_use_param)
@@ -1847,7 +1844,7 @@ impl<'b> Kernel<'b> {
                 }
                 // A payload binder handed on moves that part, whatever takes
                 // it (#572).
-                if consume || self.body.names[*n as usize].heap {
+                if consume || self.body.names[n.index()].heap {
                     self.leaves_payload(st, *n)?;
                 }
                 return Ok(());
@@ -1942,7 +1939,7 @@ impl<'b> Kernel<'b> {
         self.missing.push(Missing {
             exit: Exit::Block,
             site: *at,
-            name: 0,
+            name: Name(0),
             kind: MissingKind::Store,
             holes,
         });
@@ -2104,7 +2101,7 @@ impl<'b> Kernel<'b> {
             // names one before a `let` binds it again.
             for n in &bound_here {
                 st.taker.remove(n);
-                self.ended[*n as usize] = true;
+                self.ended[n.index()] = true;
             }
         }
         Ok(())
@@ -2118,7 +2115,7 @@ impl<'b> Kernel<'b> {
                     format!("the binding `{}`", self.src(n))
                 }
                 // The reader wrote the loop, not its container temporary.
-                Some(n) if self.body.names[n as usize].for_consume => {
+                Some(n) if self.body.names[n.index()].for_consume => {
                     "the `for .. in consume` loop".to_string()
                 }
                 _ => "a value".to_string(),
@@ -2140,10 +2137,12 @@ impl<'b> Kernel<'b> {
     fn stmt(&mut self, s: &St, st: &mut State, bound_here: &mut Vec<Name>) -> Result<(), Refusal> {
         let (ended, body) = (&mut self.ended, self.body);
         s.operands(&mut |v, how| match v {
-            Val::Name(n) if how == Use::Bind => ended[*n as usize] = false,
-            Val::Name(n) if ended[*n as usize] => panic!(
+            Val::Name(n) if how == Use::Bind => ended[n.index()] = false,
+            Val::Name(n) if ended[n.index()] => panic!(
                 "kernel: a row of `{}` names `{}` (line {}) after its block ended",
-                body.name, body.names[*n as usize].source, body.names[*n as usize].line
+                body.name,
+                body.names[n.index()].source,
+                body.names[n.index()].line
             ),
             _ => {}
         });
@@ -2163,17 +2162,17 @@ impl<'b> Kernel<'b> {
         };
         match s {
             St::Let(n, rhs) => {
-                self.here = self.body.names[*n as usize].line;
+                self.here = self.body.names[n.index()].line;
                 self.by = self.by_of(rhs, Some(*n));
                 self.takes.set(taker_of(rhs));
-                self.made = self.body.names[*n as usize].fields.clone();
+                self.made = self.body.names[n.index()].fields.clone();
                 self.rebound(*n);
-                self.released.borrow_mut()[*n as usize] = None;
+                self.released.borrow_mut()[n.index()] = None;
             }
             St::Store { place, line, .. } => {
                 if let Place::Name(n) = place {
                     self.rebound(*n);
-                    self.released.borrow_mut()[*n as usize] = None;
+                    self.released.borrow_mut()[n.index()] = None;
                 }
                 self.here = *line;
                 self.takes.set(Taker::Stores);
@@ -2215,12 +2214,12 @@ impl<'b> Kernel<'b> {
             }
             // A placed row: "reclaimed at block exit", with its holes.
             St::Row { name: n, holes, .. } => {
-                self.here = self.body.names[*n as usize].line;
+                self.here = self.body.names[n.index()].line;
                 self.by = String::new();
-                self.released.borrow_mut()[*n as usize] = Some(holes.clone());
+                self.released.borrow_mut()[n.index()] = Some(holes.clone());
             }
             St::Drop(n, ..) => {
-                self.here = self.body.names[*n as usize].line;
+                self.here = self.body.names[n.index()].line;
                 self.by = String::new();
             }
             _ => {}
@@ -2246,7 +2245,7 @@ impl<'b> Kernel<'b> {
                 // The core marks which closures escape
                 // ([`NameInfo::closure_escapes`]).
                 if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
-                    let i = &self.body.names[*n as usize];
+                    let i = &self.body.names[n.index()];
                     if let Some(reads) = i.closure_reads.clone() {
                         self.escaping_capture(st, &reads, i.line)?;
                     }
@@ -2256,7 +2255,7 @@ impl<'b> Kernel<'b> {
                 st.dead.remove(n);
                 st.alias.remove(n);
                 match rhs {
-                    Rhs::Read(p) if self.borrowed(*n) || self.read_out[*n as usize] => {
+                    Rhs::Read(p) if self.borrowed(*n) || self.read_out[n.index()] => {
                         st.alias.insert(*n, self.src_of(st, p));
                     }
                     // A read of module state is an alias whatever it holds:
@@ -2411,7 +2410,7 @@ impl<'b> Kernel<'b> {
                                 Root::G(_) => true,
                                 Root::N(n) => {
                                     matches!(
-                                        self.body.names[n as usize].borrow_kind,
+                                        self.body.names[n.index()].borrow_kind,
                                         Some(BorrowKind::Param { cap: "modify", .. })
                                     ) || (self.owned(n) && st.own(n) != Own::Gone)
                                 }
@@ -2473,7 +2472,7 @@ impl<'b> Kernel<'b> {
                 for arm in arms {
                     for r in arm.reads(on) {
                         if let St::Let(b, _) = r {
-                            self.read_out[*b as usize] = true;
+                            self.read_out[b.index()] = true;
                         }
                     }
                     let Arm {
@@ -2692,7 +2691,7 @@ impl<'b> Kernel<'b> {
 
     fn line_of(&self, v: &Val) -> usize {
         match v {
-            Val::Name(n) => self.body.names[*n as usize].line,
+            Val::Name(n) => self.body.names[n.index()].line,
             Val::Lit(_) => 0,
         }
     }

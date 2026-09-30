@@ -269,7 +269,7 @@ impl Walk<'_> {
     fn stmt(&mut self, s: &St) {
         match s {
             St::Let(n, rhs) => {
-                let atom_call = self.rhs(rhs, self.body.names[*n as usize].line);
+                let atom_call = self.rhs(rhs, self.body.names[n.index()].line);
                 if let Rhs::Read(p) | Rhs::Take(p) = rhs {
                     self.place(p);
                 }
@@ -280,7 +280,7 @@ impl Walk<'_> {
                     Rhs::Call { .. } => atom_call,
                     Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) => false,
                 };
-                if born && self.body.names[*n as usize].releases {
+                if born && self.body.names[n.index()].releases {
                     self.own = self.own.with(Effect::Alloc);
                 }
             }
@@ -329,7 +329,7 @@ impl Walk<'_> {
                 }
             };
         };
-        let ty = &self.body.names[n as usize].ty;
+        let ty = &self.body.names[n.index()].ty;
         let key = ty.to_string();
         let c = match self.memo_ty.get(&key) {
             Some(c) => c.clone(),

@@ -82,7 +82,6 @@ fn run_corpus() {
     // that import through a generator fail to load and the gate silently measures
     // a smaller corpus.
     vyrn_genwasm::install();
-    vyrn_lower::install();
     let mut accepted = 0usize;
     let mut refused: Vec<String> = Vec::new();
     let mut gaps: std::collections::BTreeMap<&'static str, usize> = Default::default();
@@ -281,7 +280,6 @@ fn run_corpus() {
 /// left out; so an edit inside one function re-judges only its module's bodies.
 #[test]
 fn one_edit_re_judges_one_body() {
-    vyrn_lower::install();
     vyrn_frontend::movecheck::reuse_judgments();
     let dir = std::env::temp_dir().join(format!("vyrn-judgmemo-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -341,7 +339,6 @@ fn one_edit_re_judges_one_body() {
 /// writes a row for.
 #[test]
 fn a_placed_row_does_not_stop_a_body_being_served() {
-    vyrn_lower::install();
     vyrn_frontend::movecheck::reuse_judgments();
     let dir = std::env::temp_dir().join(format!("vyrn-judgrows-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

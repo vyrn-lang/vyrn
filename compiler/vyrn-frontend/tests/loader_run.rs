@@ -154,8 +154,6 @@ mod tests {
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
         // Under nextest each test is its own process, so every runner installs the engine.
         vyrn_genwasm::install();
-        // The spawn rule is the effect judgment's, reached through a slot.
-        vyrn_lower::install();
         let files: Vec<(&str, &str)> = files
             .iter()
             .copied()
@@ -1483,7 +1481,6 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // `w.fetch()` parses as `fetch(w)` and dispatches to impls first. The name-privacy
         // rename of a private `fetch` declared in two modules must not turn the call into
         // `fetch__from0(w)`, which loses the dispatch.
-        vyrn_lower::install();
         let proto = "export protocol Draw { fn fetch(self) -> Int64 }                      export type W = { v: Int64 }                      impl Draw for W { fn fetch(self) -> Int64 { return self.v } }";
         let other = "fn fetch(n: Int64) -> Int64 { return n + 1 }                      export fn other() -> Int64 { return fetch(1) }";
         let root = "import { W } from \"./proto\"                     import { other } from \"./other\"                     fn fetch(n: Int64) -> Int64 { return n * 2 }                     fn main() -> Int64 { let w = W { v: 7 } return w.fetch() + other() }";
