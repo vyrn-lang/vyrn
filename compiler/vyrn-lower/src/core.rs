@@ -4474,7 +4474,7 @@ impl<'a> Builder<'a> {
                     return gap("a variant the enum does not have", line);
                 };
                 if *seen {
-                    let v = &variants[t as usize].name;
+                    let v = self.body.speech().name(&variants[t as usize].name);
                     self.body
                         .refused
                         .push((line, format!("duplicate `{v}` arm")));
@@ -4487,7 +4487,10 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         if let Some((v, _)) = variants.iter().zip(&taken).find(|(_, t)| !**t) {
-            let refusal = format!("`match` is missing variant `{}`", v.name);
+            let refusal = format!(
+                "`match` is missing variant `{}`",
+                self.body.speech().name(&v.name)
+            );
             self.body.refused.push((line, refusal));
         }
         Ok(())

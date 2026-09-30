@@ -1,0 +1,13 @@
+// The kernel's `match` refusal quotes the variant as `std/json` wrote it.
+import { Json } from "std/json"
+
+fn tag(j: Json) -> Int64 {
+    return match j {
+        JNull => 0,
+        JStr(s) => 1,
+    }
+}
+
+fn main() -> Int64 {
+    return tag(JNull)
+}

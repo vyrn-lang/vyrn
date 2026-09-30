@@ -44,12 +44,14 @@ macro_rules! rules {
 }
 
 /// A rule hole's value. A type and a declaration keep their linked names
-/// until the sentence renders, which spells them ([`Speech`]).
+/// until the sentence renders, which spells them ([`Speech`]). `Parts` is one
+/// quoted form made of several, such as an impl head.
 #[derive(Debug, Clone)]
 pub enum Hole {
     Text(String),
     Type(Type),
     Decl(String),
+    Parts(Vec<Hole>),
 }
 
 /// A declaration's linked name, to fill a rule hole ([`Hole::Decl`]).
@@ -57,13 +59,17 @@ pub struct DeclName<'a>(pub &'a str);
 
 impl Hole {
     fn sentence<'a>(speech: &Speech<'a>, holes: &[&Hole]) -> Speech<'a> {
-        let (mut types, mut names) = (Vec::new(), Vec::new());
-        for h in holes {
+        fn collect<'h>(h: &'h Hole, types: &mut Vec<&'h Type>, names: &mut Vec<&'h str>) {
             match h {
                 Hole::Text(_) => {}
                 Hole::Type(t) => types.push(t),
                 Hole::Decl(n) => names.push(n.as_str()),
+                Hole::Parts(ps) => ps.iter().for_each(|p| collect(p, types, names)),
             }
+        }
+        let (mut types, mut names) = (Vec::new(), Vec::new());
+        for h in holes {
+            collect(h, &mut types, &mut names);
         }
         speech.sentence(&types, &names)
     }
@@ -73,6 +79,7 @@ impl Hole {
             Hole::Text(s) => s.clone(),
             Hole::Type(t) => speech.ty(t).to_string(),
             Hole::Decl(n) => speech.name(n),
+            Hole::Parts(ps) => ps.iter().map(|p| p.said(speech)).collect(),
         }
     }
 }
@@ -119,6 +126,12 @@ impl<T: IntoHole + ?Sized> IntoHole for Box<T> {
 impl IntoHole for Type {
     fn hole(&self) -> Hole {
         Hole::Type(self.clone())
+    }
+}
+
+impl IntoHole for Hole {
+    fn hole(&self) -> Hole {
+        self.clone()
     }
 }
 
