@@ -22,12 +22,11 @@ pub const ELEM: &str = "@slot";
 /// written in source. It dispatches to the method named `at`.
 pub const AT: &str = "@at";
 
-/// A field read or an element read: a place, not a value the reader owns.
+/// A field read or an element read rooted in a name: a place, not a value the
+/// reader owns. A part of a call's result (`mk().q.s`) is none.
 pub fn is_place_read(e: &Expr) -> bool {
     match e {
-        Expr::Field { expr, .. } => {
-            matches!(&**expr, Expr::Var { .. } | Expr::Field { .. }) || is_place_read(expr)
-        }
+        Expr::Field { expr, .. } => is_place_read(expr),
         Expr::Call { name, args, .. } => name == AT && args.len() == 2 && is_place_read(&args[0]),
         Expr::Var { .. } => true,
         _ => false,

@@ -2692,3 +2692,21 @@ fn a_key_read_as_a_statement_checks_its_receiver() {
     assert_eq!(code, Some(1));
     assert!(text.contains("array index 1 out of bounds"), "{text}");
 }
+
+// A `let` of a nested field of a call's result takes the field; the receiver
+// is released around the whole path.
+#[test]
+fn a_let_takes_a_nested_field_of_a_call() {
+    let src = r#"type Q = { s: String }
+type R = { s: String, q: Q }
+
+fn mk() -> R { return R { s: "a".copy(), q: Q { s: "c".copy() } } }
+
+fn main() -> Int64 {
+    let t = mk().q.s
+    print(t)
+    return 0
+}
+"#;
+    assert_eq!(audited_run("nested", src), (Some(0), "c\n".to_string()));
+}

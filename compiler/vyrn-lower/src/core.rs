@@ -45,6 +45,16 @@ fn reader_path(e: &Expr) -> Option<String> {
         .map(|(_, p)| p)
 }
 
+/// The path a field read takes out of its unnamed receiver: `.q.s` for
+/// `mk().q.s`. `None` under an element.
+fn taken_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", taken_path(expr)?)),
+        Expr::Call { name, .. } if name == vyrn_frontend::project::AT => None,
+        _ => Some(String::new()),
+    }
+}
+
 /// The borrow a parameter's capability makes; `None` for `consume`.
 fn param_borrow(cap: Capability, name: &str) -> Option<BorrowKind> {
     let cap = match cap {
@@ -4684,7 +4694,10 @@ impl<'a> Builder<'a> {
         // kernel reports it.
         let holes: Vec<String> = match (took, e) {
             (false, _) => Vec::new(),
-            (true, Expr::Field { field, .. }) => vec![format!(".{field}")],
+            (true, Expr::Field { .. }) => match taken_path(e) {
+                Some(path) => vec![path],
+                None => return,
+            },
             (true, _) => return,
         };
         self.drop_receiver(r, malloc, holes, out);
