@@ -2627,11 +2627,11 @@ impl<'b> Kernel<'b> {
         // A hole a turn made would be taken again next turn. Only a prefix
         // `consume` makes a hole, so the taker is always `consume`.
         let made = ha.iter().find(|h| !hb.contains(h));
-        Err(match (point, made.map(|h| h.replace(".[]", "[..]"))) {
+        Err(match (point, made) {
             (Point::Join, _) => self.say(JOIN_HOLE, self.here, &[("info", &info())]),
             (Point::Back, Some(h)) => {
-                let args = [("s", s), ("h", h.as_str())];
-                self.say(LOOP_HOLE, self.hole_line(a, n, &h), &args)
+                let args = [("s", s), ("h", &h.replace(".[]", "[..]"))];
+                self.say(LOOP_HOLE, self.hole_line(a, n, h), &args)
             }
             (Point::Back, None) => self.say(LOOP_HOLE_AT, self.here, &[("info", &info())]),
         })
