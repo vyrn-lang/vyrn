@@ -32,11 +32,16 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    Memo::load(|| vyrn_lower::load(&src, &root, &opts, &DiskResolver)).map_err(|d| {
-        d.first()
-            .map(|d| d.render())
-            .unwrap_or_else(|| "load failed".into())
-    })
+    // Without the engine, an example that imports through a generator fails to
+    // load, and the gate measures a smaller corpus.
+    let engine = vyrn_genwasm::engine();
+    Memo::load(|| vyrn_lower::load(&src, &root, &opts, &DiskResolver, Some(&*engine))).map_err(
+        |d| {
+            d.first()
+                .map(|d| d.render())
+                .unwrap_or_else(|| "load failed".into())
+        },
+    )
 }
 
 fn corpus() -> Vec<PathBuf> {
@@ -78,10 +83,6 @@ fn the_kernel_over_the_corpus() {
 }
 
 fn run_corpus() {
-    // Generation is the driver's engine, not the frontend's. Without it, examples
-    // that import through a generator fail to load and the gate silently measures
-    // a smaller corpus.
-    vyrn_genwasm::install();
     let mut accepted = 0usize;
     let mut refused: Vec<String> = Vec::new();
     let mut gaps: std::collections::BTreeMap<&'static str, usize> = Default::default();
@@ -111,7 +112,8 @@ fn run_corpus() {
         };
         programs += 1;
         let lowered = vyrn_lower::lower(&program);
-        let own = vyrn_lower::analyze(&program);
+        let world = vyrn_lower::analyze(&program);
+        let own = &world.ownership;
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         // The module-state initializer is a body but no instance: every `let` at
         // module scope is a store into the global it names.

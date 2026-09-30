@@ -267,16 +267,15 @@ fn gen_request(module: &[u8], argv: &[String], atoms: &[vyrn_genwasm::Atom]) -> 
 /// Loads `src` as a one-file program through `load_warned`, the CLI's entry
 /// point, with a resolver that holds `std/` alone.
 ///
-/// Installs the playground's generation engine; the first installation wins.
+/// Runs each generator on the playground's own engine.
 fn load(
     src: &str,
 ) -> (
     Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>,
     Vec<Diagnostic>,
 ) {
-    vyrn_frontend::gen::set_gen_engine(vyrn_lower::gen_engine(|p, f, a, i| {
-        vyrn_genwasm::run_pure(p, f, a, i, run_generator)
-    }));
+    let engine =
+        vyrn_lower::gen_engine(|p, f, a, i| vyrn_genwasm::run_pure(p, f, a, i, run_generator));
     let opts = LoadOptions {
         std_root: Some("std".into()),
         aliases: Default::default(),
@@ -290,7 +289,7 @@ fn load(
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
     );
-    vyrn_lower::load_warned(src, "play.vyrn", &opts, &resolver)
+    vyrn_lower::load_warned(src, "play.vyrn", &opts, &resolver, Some(&*engine))
 }
 
 fn check_json(src: &str) -> String {

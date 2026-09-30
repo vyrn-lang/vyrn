@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use vyrn_frontend::project::Memo;
+use vyrn_genwasm::engine;
 
 mod common;
 use common::run_compiled;
@@ -104,7 +105,6 @@ const STD: &[(&str, &str)] = &[
 /// truncates to a byte: the test's `main` is renamed and a wrapper prints its answer. A
 /// trapping program traps before the print and returns `Err` with the trap's wording.
 fn run(source: &str) -> Result<i64, String> {
-    vyrn_genwasm::install();
     scratch();
     let wrapped = format!(
         "{}
@@ -133,6 +133,7 @@ fn main() -> Int64 {{
             "main.vyrn",
             &opts,
             &vyrn_frontend::loader::MapResolver(files),
+            Some(&*engine()),
         )
         .0
     })
@@ -176,7 +177,6 @@ fn main() -> Int64 {{
 /// std root is refused for fifty names first. Removing only the module under test makes
 /// the refusal name it.
 fn run_without(missing: &str, source: &str) -> Result<i64, String> {
-    vyrn_genwasm::install();
     scratch();
     let files: HashMap<String, String> = STD
         .iter()
@@ -193,6 +193,7 @@ fn run_without(missing: &str, source: &str) -> Result<i64, String> {
             "main.vyrn",
             &opts,
             &vyrn_frontend::loader::MapResolver(files),
+            Some(&*engine()),
         )
         .0
     })

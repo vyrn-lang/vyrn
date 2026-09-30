@@ -5,6 +5,8 @@
 //! index and the identifier tokens; the LSP serves hover, go-to-definition and
 //! completion from that [`Analysis`].
 
+use std::collections::HashMap;
+
 use crate::ast::{
     self, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Stmt, Type,
     TypeDecl,
@@ -132,7 +134,7 @@ pub struct Analysis {
     pub symbol_maps: Vec<crate::symbolmap::MappedSymbol>,
     /// What the ownership analysis decided about every `let` in this document:
     /// reclaimed, or why not. The answer `vyrn why --memory` prints, at the
-    /// cursor. Read from [`Judged::ownership`], never re-derived, so it cannot
+    /// cursor. Read from [`Judged::memory`], never re-derived, so it cannot
     /// disagree with the walk that decided. Empty when the checks did not run
     /// or no [`Judge`] was given.
     pub memory: Vec<MemoryNote>,
@@ -202,7 +204,7 @@ pub struct Completion {
 /// skipped after any parse error, so `diagnostics` then holds parse errors
 /// only. [`analyze_judged`] runs the pipeline `vyrn check` runs instead.
 pub fn analyze(source: &str) -> Analysis {
-    analyze_inner(source, None, None)
+    analyze_inner(source, None, None, None)
 }
 
 /// Like [`analyze`], but resolves the document's imports through the module
@@ -216,8 +218,9 @@ pub fn analyze_linked(
     root_path: &str,
     opts: &crate::loader::LoadOptions,
     resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Analysis {
-    analyze_inner(source, Some((root_path, opts, resolver)), None)
+    analyze_inner(source, Some((root_path, opts, resolver)), engine, None)
 }
 
 /// The pipeline `vyrn check` runs over a loaded program. It lives in
@@ -226,8 +229,20 @@ pub fn analyze_linked(
 pub struct Judge {
     /// Checks and synthesizes the program, judges ownership, and makes the
     /// floor decision the load deferred.
-    pub check: fn(&mut crate::ast::Program, Option<crate::floor::Pending>) -> Judged,
+    pub check: fn(
+        &mut crate::ast::Program,
+        Option<&crate::gen::GenEngine>,
+        Option<crate::floor::Pending>,
+    ) -> Judged,
 }
+
+/// What [`analyze_linked`] links with: the root path, the load options and
+/// the resolver.
+pub type Linker<'a> = (
+    &'a str,
+    &'a crate::loader::LoadOptions,
+    &'a dyn crate::loader::ModuleResolver,
+);
 
 /// What [`Judge::check`] returns.
 pub struct Judged {
@@ -235,21 +250,20 @@ pub struct Judged {
     pub diagnostics: Vec<Diagnostic>,
     /// The root module's bindings, typed.
     pub binders: Vec<LocalBinding>,
-    /// The placed analysis, for a program the kernel judged.
-    pub ownership: Option<crate::own::Ownership>,
+    /// Per function, the placer's memory rows ([`crate::own::Ownership::memory`]);
+    /// empty for a program the kernel did not judge.
+    pub memory: HashMap<String, Vec<crate::own::MemoryRow>>,
 }
 
 /// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
 /// `judge`'s diagnostics, and its memory rows on hover. With no `linker`, the
 /// source loads as `untitled.vyrn` in the working directory, with the default
-/// std root, as `vyrn check` would load that file.
+/// std root, as `vyrn check` would load that file. `engine` runs its
+/// generators.
 pub fn analyze_judged(
     source: &str,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
+    linker: Option<Linker<'_>>,
+    engine: Option<&crate::gen::GenEngine>,
     judge: &Judge,
 ) -> Analysis {
     let opts = crate::loader::LoadOptions {
@@ -257,7 +271,7 @@ pub fn analyze_judged(
         ..Default::default()
     };
     let linker = linker.unwrap_or(("untitled.vyrn", &opts, &crate::loader::DiskResolver));
-    analyze_inner(source, Some(linker), Some(judge))
+    analyze_inner(source, Some(linker), engine, Some(judge))
 }
 
 /// Rewrites a foreign-file diagnostic so it shows in the root document without
@@ -274,11 +288,8 @@ fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
 
 fn analyze_inner(
     source: &str,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
+    linker: Option<Linker<'_>>,
+    engine: Option<&crate::gen::GenEngine>,
     judge: Option<&Judge>,
 ) -> Analysis {
     let tokens = match lexer::lex(source) {
@@ -347,7 +358,7 @@ fn analyze_inner(
         match &linker {
             Some((root_path, opts, resolver)) => {
                 let (loaded, o, load_warnings, g, p) =
-                    crate::loader::load_with_origins(source, root_path, opts, *resolver);
+                    crate::loader::load_with_origins(source, root_path, opts, *resolver, engine);
                 pending = p;
                 graph = g;
                 // The origin maps come back even from a failed load,
@@ -384,14 +395,14 @@ fn analyze_inner(
     };
     // The check returns the diagnostics and every binding it made in the root
     // module, typed, so an unannotated `let x = 5` hovers as `let x: Int64`.
-    let mut ownership = None;
+    let mut memory = HashMap::new();
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
             let (checked_diags, binders) = match judge {
                 Some(judge) => {
-                    let judged = (judge.check)(prog, pending);
-                    ownership = judged.ownership;
+                    let judged = (judge.check)(prog, engine, pending);
+                    memory = judged.memory;
                     (judged.diagnostics, judged.binders)
                 }
                 None => checker::check_accum_recording(prog),
@@ -555,8 +566,8 @@ fn analyze_inner(
     let errored =
         |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
     let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
-    let memory = match (&checked, &ownership) {
-        (Some(prog), Some(own)) if clean => memory_notes(prog, own),
+    let memory = match &checked {
+        Some(prog) if clean => memory_notes(prog, &memory),
         _ => Vec::new(),
     };
 
@@ -586,14 +597,17 @@ fn analyze_inner(
 /// Every `let` in the root module, with what the ownership analysis decided.
 /// A function with no `module` tag belongs to this document, the filter
 /// `vyrn why --memory` uses.
-fn memory_notes(program: &crate::ast::Program, own: &crate::own::Ownership) -> Vec<MemoryNote> {
+fn memory_notes(
+    program: &crate::ast::Program,
+    memory: &HashMap<String, Vec<crate::own::MemoryRow>>,
+) -> Vec<MemoryNote> {
     let mut out = Vec::new();
     for f in program
         .functions
         .iter()
         .filter(|f| f.module.is_none() && !f.is_extern)
     {
-        let Some(notes) = own.memory.get(&f.name) else {
+        let Some(notes) = memory.get(&f.name) else {
             continue;
         };
         for n in notes {
@@ -1759,11 +1773,7 @@ fn index_imported_symbols(
 fn index_namespaces(
     graph: &crate::loader::ModuleGraph,
     root: &ast::Program,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
+    linker: Option<Linker<'_>>,
     origins: &OriginIndex,
 ) -> Vec<NamespaceInfo> {
     let Some((root_path, opts, resolver)) = linker else {
@@ -3238,7 +3248,7 @@ mod tests {
         let resolver = MapResolver(files);
         let root = "import { getUser as fetchUser } from \"./api\"\n\
                     fn main() -> Int64 { return fetchUser(1) }";
-        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
         assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
         let sym = a
             .symbols
@@ -3280,7 +3290,7 @@ mod tests {
         let resolver = MapResolver(files);
         let root = "import * as api from \"./api\"\n\
                     fn main() -> Int64 { let u = api.getUser(1) return u.id }";
-        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
         assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
 
         // The namespace binding and its members are recorded.

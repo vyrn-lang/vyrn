@@ -12,31 +12,23 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 use crate::declared::Declared;
 use crate::diagnostics::Diagnostic;
-use crate::own::DropKind;
 
 /// A call-argument position whose argument expression built the value it hands
-/// over. The value has no `let` to key a release on, so the row is keyed by
-/// the argument's node address.
+/// over, as [`arg_verdict`] reads it.
 #[derive(Clone, Debug)]
 pub struct ArgTemp {
-    /// The argument expression's node, in the AST the backend lowers.
-    pub id: NodeId,
     pub callee: String,
     /// The parameter index it fills.
     pub ix: usize,
-    pub line: usize,
-    /// `None` for the root's own file.
-    pub module: Option<String>,
     /// The call that built the value, or `None` where a String `+` did.
     pub producer: Option<String>,
-    /// A type that releases nothing is never recorded.
-    pub kind: DropKind,
-    /// Decided after the walk: the retention set closes over the call graph
-    /// only when every body has been read.
-    pub verdict: ArgVerdict,
     /// The callee is a view whose element type owns no heap, so the scalar it
     /// hands out cannot alias the temporary (`bytes(l)[0]`).
     pub view_copies: bool,
+    /// The callee is a variant constructor.
+    pub constructs: bool,
+    /// The parameter's declared capability.
+    pub cap: Option<Capability>,
 }
 
 /// What the callee at a call-argument position does with the temporary it is
@@ -263,52 +255,48 @@ pub fn lends_result(name: &str) -> bool {
     views(name)
 }
 
-/// Returns what the callee does with the temporary at `(callee, ix)`.
-/// `constructs` says the callee is a variant constructor; `cap` is the
-/// parameter's declared capability. Rules 2 and 3 make `read` mean "keeps
-/// nothing": a borrow may be neither stored nor returned.
-pub fn arg_verdict(s: &ArgTemp, constructs: bool, cap: Option<Capability>) -> ArgVerdict {
-    // The consumer sites free this operand already; this is where the
-    // two rules partition.
-    let allocating_operand = match s.producer.as_deref() {
-        None => true,
-        Some(p) => p == "@str" || p == "@concat",
-    };
-    if allocating_operand && (s.callee == "@str" || s.callee == "@concat") {
-        return ArgVerdict::AlreadyFreed;
-    }
+/// What a callee does with a temporary at an argument position: the verdict
+/// of the first row that holds, and [`ArgVerdict::Unknown`] where none does.
+/// Rules 2 and 3 make `read` mean "keeps nothing": a borrow may be neither
+/// stored nor returned.
+const ARG_ROWS: [(ArgVerdict, fn(&ArgTemp) -> bool); 7] = [
+    // The consumer sites free this operand already; this is where the two
+    // rules partition.
+    (ArgVerdict::AlreadyFreed, |s| {
+        matches!(s.producer.as_deref(), None | Some("@str" | "@concat"))
+            && matches!(s.callee.as_str(), "@str" | "@concat")
+    }),
     // A constructor has no signature, so it is asked first.
-    if constructs {
-        return ArgVerdict::Retained;
-    }
+    (ArgVerdict::Retained, |s| s.constructs),
     // A view lends, unless the element it hands out is a heap-free copy.
-    if views(&s.callee) && !s.view_copies {
-        return ArgVerdict::Lent;
-    }
+    (ArgVerdict::Lent, |s| views(&s.callee) && !s.view_copies),
     // A row that returns this argument's bare type parameter may hand the
     // argument back (`blackBox`), so freeing it here is a use-after-free
     // (`examples/membench.vyrn`). `lends` cannot say this: the row yields the
     // parameter itself, not a place inside it.
-    if let Some(f) = crate::prelude::signature(&s.callee) {
-        if let (Type::Param(r), Some(Type::Param(p))) = (&f.ret, f.params.get(s.ix).map(|p| &p.ty))
-        {
-            if r == p {
-                return ArgVerdict::Lent;
-            }
-        }
-    }
+    (ArgVerdict::Lent, |s| {
+        crate::prelude::signature(&s.callee).is_some_and(|f| {
+            matches!((&f.ret, f.params.get(s.ix).map(|p| &p.ty)),
+                (Type::Param(r), Some(Type::Param(p))) if r == p)
+        })
+    }),
     // `@copy`'s row is held back from the return table, so no capability
     // answers for its receiver below, and `("" + s).copy()` would leak.
-    if s.callee == "@copy" && s.ix == 0 {
-        return ArgVerdict::Released;
-    }
-    match cap {
-        Some(Capability::Read) => ArgVerdict::Released,
-        Some(Capability::Consume) => ArgVerdict::Transferred,
-        // `modify` and `share` write through the argument, which no temporary
-        // can be the destination of.
-        Some(_) | None => ArgVerdict::Unknown,
-    }
+    (ArgVerdict::Released, |s| s.callee == "@copy" && s.ix == 0),
+    (ArgVerdict::Released, |s| s.cap == Some(Capability::Read)),
+    // `modify` and `share` write through the argument, which no temporary
+    // can be the destination of: no row, so `Unknown`.
+    (ArgVerdict::Transferred, |s| {
+        s.cap == Some(Capability::Consume)
+    }),
+];
+
+/// Returns what the callee does with the temporary `s` ([`ARG_ROWS`]).
+pub fn arg_verdict(s: &ArgTemp) -> ArgVerdict {
+    ARG_ROWS
+        .iter()
+        .find(|(_, holds)| holds(s))
+        .map_or(ArgVerdict::Unknown, |(v, _)| *v)
 }
 
 /// Whether `name` hands back a pointer into its argument: a seeded row whose

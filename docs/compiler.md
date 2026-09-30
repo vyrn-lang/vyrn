@@ -57,15 +57,14 @@ The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
 front end cannot call the lowering. A host enters through `vyrn-lower`
 (`load`, `check_and_synthesize`, `analyze`), which calls the front end and
 then its own judgments. The editor passes the pipeline after the load into
-`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). The one slot
-left is the generation engine (`gen::set_gen_engine`). `vyrn_genwasm::install`
-installs the wasmtime engine; the playground installs its own, which runs the
-module in the page. Both wrap their run in `vyrn_lower::gen_engine`, which
-judges the generator's own program first. Every process that compiles
-installs an engine before it loads a module: the CLI's `real_main`, the
-language server's `main`, the playground's `load`. A process with no engine
-fails every `derive` and generator import. `tests/hosts.rs` holds each host to
-this, and names the hosts without an engine with the reason.
+`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). A host passes the
+generation engine the same way, beside the resolver of each load and check.
+`vyrn_genwasm::engine` is the wasmtime engine; the playground builds its own,
+which runs the module in the page. Both wrap their run in
+`vyrn_lower::gen_engine`, which judges the generator's own program first. The
+engine rides in `gen::GenInputs`, so a generator's own loads and `derive`
+sites run on it too. A load with no engine fails every `derive` and generator
+import.
 
 ## The front end
 
@@ -84,7 +83,7 @@ the playground serves an embedded `std/`. The loader:
 
 - resolves every `import` transitively, from disk, `std/`, the lock and cache
   (`manifest.rs`), or a generator call;
-- runs each generator call (`run_generator`) through the installed engine,
+- runs each generator call (`run_generator`) through the load's engine,
   caches its output under its recorded inputs, and maps generated lines back
   to their origin (`origin.rs`);
 - links the modules (`link`), so no later pass sees a module boundary, and
@@ -120,6 +119,10 @@ the playground serves an embedded `std/`. The loader:
    These are ordinary functions, so every backend compiles one body.
 3. `vyrn_lower::refusals`: `vyrn_lower::analyze`, which runs the placer and
    the judgments, then one list of ownership refusals in source order.
+   `analyze` returns the World (`vyrn_lower::World`): the `Ownership` with
+   the checker's record, the core's bodies and facts, and both refusal
+   lists. The emitter reads the same World, handed on from the load through
+   `own::Memo`.
 4. `floor::decide`: whether each artifact's target provides what its code
    reaches.
 
@@ -127,10 +130,11 @@ For a program that does not type-check, `lower_typed` still builds every
 function the type errors do not reach and adds the typed judgment's refusals,
 so one run reports both kinds. A generator's own program gets steps 1 and 2.
 Its engine (`vyrn_lower::gen_engine`) runs the must-use judgment before the
-run. The typed judgment runs in the engine's compile, and its refusals replace
-the run's output or error: a refused generator program is refused even when it
-runs. The wasm engine caches no compile the typed judgment refused, so a warm
-cache reports the same refusals. The kernel does not judge it.
+run. The typed judgment runs in the engine's compile
+(`direct::compile_gen_host`), which refuses the program the judgment refused
+before it emits, so the program is refused whether or not it would run. A
+refused compile yields no module, so no cache holds one, and a warm cache
+reports the same refusals. The kernel does not judge it.
 
 The editor runs the same pipeline. `symbols::analyze_judged` loads the
 document as `vyrn_lower::load` does, an untitled buffer as `untitled.vyrn` in
@@ -138,8 +142,7 @@ the working directory, and hands the linked program and the load's pending
 floor decision to the `Judge` it is given (`vyrn_lower::JUDGE`: the steps
 above). Around it the editor keeps what only it needs: the parser's recovery,
 so a partial program is still indexed; the per-body judgment memo; the
-diagnostics' columns; and the memory rows of the placed analysis the `Judge`
-returns. `symbols::analyze` and `analyze_linked` run the checker alone. Each
+diagnostics' columns; and the memory rows the `Judge` copies off the World. `symbols::analyze` and `analyze_linked` run the checker alone. Each
 returns diagnostics with columns, the symbol index and the tokens. `vyrn-lsp`
 serves hover, definition, completion, references and rename from that
 `Analysis`, and holds no rule of its own.
@@ -167,7 +170,7 @@ runs into that file and fails a run where a proved row would have trapped.
 `scripts/check-elision.sh` runs the examples, the benchmarks and the site
 export in all three modes. `elide::decide` marks a row proved when linear
 facts over one body's own names (`facts`) show it cannot fail, with a
-certificate `facts::Cert::verify` checks again; `core::body_of` decides a body
+certificate `facts::Cert::verify` checks again; `World::body_of` decides a body
 when an emitter first reads it. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
@@ -228,7 +231,7 @@ text (`vyrn emit-wat`). `direct::compile_gen_host` compiles a generator: the
 same module plus the `vyrn_gen` imports, and `Code` as an `i64` handle.
 
 The emitter walks each body from the core. `lower_body` fetches the body the
-core built under the instance's key (`core::body_of`), and `Fn_::core_walkable`
+core built under the instance's key (`World::body_of`), and `Fn_::core_walkable`
 screens it; a body the screen rejects is refused with "the body of `f` the
 core did not state". The emitter places no release and derives no type: a
 `St::Drop` becomes a call, and an expression's type comes from the checker's

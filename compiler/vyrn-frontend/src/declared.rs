@@ -24,8 +24,9 @@ pub struct Owned {
     types: HashMap<String, TypeDecl>,
     /// Whether a type parameter answers as a String does ([`Owned::as_written`]).
     params_own: bool,
-    /// [`Owned::name_facts`] by type, filled on first ask.
-    name_facts: std::cell::RefCell<HashMap<Type, NameFacts>>,
+    /// [`Owned::name_facts`] by type, filled on first ask. A clone shares it,
+    /// because a clone answers the same; [`Owned::as_written`] starts its own.
+    name_facts: std::sync::Arc<std::sync::Mutex<HashMap<Type, NameFacts>>>,
 }
 
 /// What a binding of a type needs from its release: whether it owns heap,
@@ -138,7 +139,8 @@ impl Owned {
     /// [`Owned::owns_heap`], [`Owned::linear_kind`] and
     /// [`Owned::declared_releases`] of `ty`, each walk made once per type.
     pub fn name_facts(&self, ty: &Type) -> NameFacts {
-        if let Some(f) = self.name_facts.borrow().get(ty) {
+        let memo = || (self.name_facts.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(f) = memo().get(ty) {
             return f.clone();
         }
         let f = (
@@ -146,7 +148,7 @@ impl Owned {
             self.linear_kind(ty).is_some(),
             self.declared_releases(ty),
         );
-        self.name_facts.borrow_mut().insert(ty.clone(), f.clone());
+        memo().insert(ty.clone(), f.clone());
         f
     }
 
@@ -463,7 +465,7 @@ pub fn str_temporary(e: &Expr) -> bool {
 pub struct Declared {
     /// The checker's type for every node, keyed by address. `None` for a
     /// program the checker never saw.
-    rec: Option<std::rc::Rc<crate::checker::Recorded>>,
+    rec: Option<std::sync::Arc<crate::checker::Recorded>>,
     /// Declared parameter types per user function, for an argument whose own
     /// expression has no type (an array literal coerced at the call).
     params: HashMap<String, Vec<Type>>,
@@ -508,7 +510,7 @@ impl Declared {
 
     /// Attaches the checker's record for this program (see
     /// [`crate::checker::recorded`]).
-    pub fn recording(mut self, rec: std::rc::Rc<crate::checker::Recorded>) -> Self {
+    pub fn recording(mut self, rec: std::sync::Arc<crate::checker::Recorded>) -> Self {
         self.rec = Some(rec);
         self
     }

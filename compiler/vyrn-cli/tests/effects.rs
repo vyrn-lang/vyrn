@@ -40,7 +40,16 @@ fn load(path: &Path, project: Option<&Path>) -> Result<(Program, Memo), String> 
         ..Default::default()
     };
     // A floor refusal names the carrier in the note.
-    Memo::load(|| vyrn_lower::load(&src, &slash(path), &opts, &DiskResolver)).map_err(|d| {
+    Memo::load(|| {
+        vyrn_lower::load(
+            &src,
+            &slash(path),
+            &opts,
+            &DiskResolver,
+            Some(&*vyrn_genwasm::engine()),
+        )
+    })
+    .map_err(|d| {
         d.first()
             .map(|d| match &d.note {
                 Some(n) => format!(
@@ -190,7 +199,6 @@ fn the_effect_judgment_over_the_corpus() {
 fn run_corpus() {
     // Generation is the driver's engine, not the frontend's. Without it an example
     // that imports through a generator fails to link and the gate measures less.
-    vyrn_genwasm::install();
     let dump = std::env::var("VYRN_EFFECTS_DUMP").ok();
     // The LAST colon: a Windows path carries one after its drive letter.
     let dump_target = dump.as_deref().and_then(|d| d.rsplit_once(':'));
@@ -275,7 +283,8 @@ fn run_corpus() {
             None => path.file_name().unwrap().to_string_lossy().to_string(),
         };
         let lowered = vyrn_lower::lower(&program);
-        let own = vyrn_lower::analyze(&program);
+        let world = vyrn_lower::analyze(&program);
+        let own = &world.ownership;
         let mut bodies = Vec::new();
         let mut insts = Vec::new();
         for inst in &lowered.instances {
