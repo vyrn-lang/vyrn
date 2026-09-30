@@ -2638,3 +2638,17 @@ fn main() -> Int64 {
 "#;
     assert_eq!(audited_run("discard", src), (Some(0), String::new()));
 }
+
+// A key read's temporary is released after the read, where a `let` binds a
+// borrow of the entry.
+#[test]
+fn a_key_read_releases_its_key() {
+    let src = r#"fn main() -> Int64 {
+    let m: Map<String, String> = ["k": "v".copy()]
+    let x = m["k".copy()]
+    print(x ?? "none")
+    return 0
+}
+"#;
+    assert_eq!(audited_run("key", src), (Some(0), "v\n".to_string()));
+}

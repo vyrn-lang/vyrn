@@ -2631,6 +2631,7 @@ impl<'a> Builder<'a> {
                     && is_place_read(read)
                     && self.deferred_of(read).is_none()
                 {
+                    let mark = self.after.len();
                     let place = self.place(read, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -2638,6 +2639,7 @@ impl<'a> Builder<'a> {
                         self.report_reason(&rhs, &ty, false, false, self.lends(read));
                     out.push(St::Let(n, rhs));
                     self.release_receiver(read, out, true);
+                    self.drop_since(mark, out);
                     self.grows(n, name);
                     self.scope.push((name.clone(), n));
                     self.keyed_let(n, s);
@@ -3220,6 +3222,7 @@ impl<'a> Builder<'a> {
             // A part read as a statement takes nothing: the part stays in its
             // place, and an unnamed receiver is released whole.
             Stmt::Expr(e, _) if reads_a_part(e) && self.deferred_of(e).is_none() => {
+                let mark = self.after.len();
                 let rhs = Rhs::Read(self.place(e, out)?);
                 out.push(St::Do {
                     rhs,
@@ -3229,6 +3232,7 @@ impl<'a> Builder<'a> {
                 if let Some((r, _, malloc)) = self.pending_receiver.take() {
                     self.drop_receiver(r, malloc, Vec::new(), out);
                 }
+                self.drop_since(mark, out);
             }
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
@@ -5255,6 +5259,14 @@ impl<'a> Builder<'a> {
         r
     }
 
+    /// Releases the temporaries queued in `after` since `mark`, where no
+    /// `rhs` drains them: a place read's key (`m["k".copy()]`) or an operand.
+    fn drop_since(&mut self, mark: usize, out: &mut Vec<St>) {
+        for t in self.after.split_off(mark) {
+            out.push(St::Drop(t, Site::None, 0, None));
+        }
+    }
+
     /// `a && b` as `if a { b } else { false }`, and `a || b` as
     /// `if a { true } else { b }`, storing into a `Bool` temporary on each
     /// edge. The checker refuses any operand but `Bool`.
@@ -5286,9 +5298,7 @@ impl<'a> Builder<'a> {
         taken.push(store(v));
         // The right operand's temporaries are released on its edge, the only
         // path that evaluates it.
-        for t in self.after.split_off(mark) {
-            taken.push(St::Drop(t, Site::None, 0, None));
-        }
+        self.drop_since(mark, &mut taken);
         self.drain -= 1;
         let decided = vec![store(Val::Lit(Lit::Bool(op == BinOp::Or)))];
         let (then, els) = if op == BinOp::And {
