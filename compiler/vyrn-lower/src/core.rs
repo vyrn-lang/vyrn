@@ -38,14 +38,6 @@ use vyrn_frontend::core::{
     Walk,
 };
 
-/// The path a reader wrote for a place read, as the checker quotes it
-/// (`p.name`, `xs[i]`). `None` where the expression names no place.
-fn reader_path(e: &Expr, places: &HashSet<String>) -> Option<String> {
-    vyrn_frontend::ast::place_path(e)
-        .or_else(|| vyrn_frontend::project::element_path(e, places))
-        .map(|(_, p)| p)
-}
-
 /// The path a field read takes out of its unnamed receiver: `.q.s` for
 /// `mk().q.s`. `None` under an element.
 fn taken_path(e: &Expr) -> Option<String> {
@@ -1129,6 +1121,7 @@ fn build_seeded(
             id: fns.instance_id(inst),
             name: inst.spelling(),
             file: inst.func.module.clone(),
+            renamed: program.renamed_globals(&inst.func.module),
             export: inst.func.is_export_extern,
             names: Vec::new(),
             params: Vec::new(),
@@ -1506,6 +1499,7 @@ impl<'a> Builder<'a> {
             body: Body {
                 id: fns.id(&name),
                 name,
+                renamed: program.renamed_globals(&file),
                 file,
                 export: false,
                 names: Vec::new(),
@@ -1583,11 +1577,28 @@ impl<'a> Builder<'a> {
         Name((self.body.names.len() - 1) as u32)
     }
 
+    /// The path a reader wrote for a place read, as the checker quotes it
+    /// (`p.name`, `xs[i]`), with a renamed global as its module wrote it.
+    /// `None` where the expression names no place.
+    fn reader_path(&self, e: &Expr) -> Option<String> {
+        let (root, path) = vyrn_frontend::ast::place_path(e)
+            .or_else(|| vyrn_frontend::project::element_path(e, &self.own.place_names))?;
+        if self.lookup(&root).is_some() {
+            return Some(path);
+        }
+        // `path` starts with `root`.
+        Some(format!(
+            "{}{}",
+            self.body.spelled(&root),
+            &path[root.len()..]
+        ))
+    }
+
     /// The `@borrow` a read of a place binds, carrying the path the reader
     /// wrote ([`NameInfo::path`]).
     fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
         let n = self.name("@borrow", ty, false, line);
-        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
+        self.body.names[n.index()].path = self.reader_path(e);
         n
     }
 
@@ -3937,7 +3948,7 @@ impl<'a> Builder<'a> {
                 Root::G(g) => match self.named_place(g, line) {
                     Ok((Place::Global(_), ty)) => {
                         let heap = self.proto.owns_heap(&ty);
-                        (ty, g.clone(), heap)
+                        (ty, self.body.spelled(g).to_string(), heap)
                     }
                     _ => continue,
                 },
@@ -4711,7 +4722,7 @@ impl<'a> Builder<'a> {
         let n = self.name("@thunk", thunk, false, e.line());
         let callee = format!("@thunk{}", n.0);
         self.body.names[n.index()].source = callee.clone();
-        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
+        self.body.names[n.index()].path = self.reader_path(e);
         out.push(St::Let(n, Rhs::Read(place)));
         self.release_receiver(e, out, true);
         Ok(Rhs::Call {
@@ -5031,6 +5042,7 @@ impl<'a> Builder<'a> {
             return gap("a lambda with the wrong arity for its type", *line);
         }
         let file = self.body.file.clone();
+        let renamed = self.body.renamed.clone();
         let export = self.body.export;
         let outer = std::mem::replace(
             &mut self.body,
@@ -5038,6 +5050,7 @@ impl<'a> Builder<'a> {
                 id: None,
                 name: String::new(),
                 file,
+                renamed,
                 export,
                 names: Vec::new(),
                 params: Vec::new(),

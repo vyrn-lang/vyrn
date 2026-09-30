@@ -1,0 +1,7 @@
+// The refusal is this module's, and it names `log` as this module wrote it.
+let mut log: Array<Int64> = [1, 2, 3]
+export fn addLog(v: Int64) -> Int64 {
+    let t = log
+    log = [v]
+    return t[0]
+}

@@ -1,0 +1,9 @@
+// Every global here shares its name with one in a root that imports this
+// module, so the loader renames them apart.
+let mut log: Array<Int64> = [1, 2, 3]
+let fixed = 1
+let later = 2
+let unit = 3
+let typed = 4
+let selfRead = 5
+export fn addLog(v: Int64) { log.push(v) }

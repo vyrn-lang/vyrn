@@ -4184,7 +4184,10 @@ fn rename_decls_in_module(p: &mut Program, map: &HashMap<String, String>, ns: &H
         c.name = ren(map, &c.name);
     }
     for g in &mut p.globals {
-        g.name = ren(map, &g.name);
+        let linked = ren(map, &g.name);
+        if linked != g.name {
+            g.renamed_from = Some(std::mem::replace(&mut g.name, linked));
+        }
     }
     // Construction sites follow the map: a variant guard here never changed a
     // site.

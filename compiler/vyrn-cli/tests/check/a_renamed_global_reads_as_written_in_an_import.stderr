@@ -1,0 +1,3 @@
+a_module_that_refuses_its_own_global.vyrn:5:0: `log` is written here while `t` still reads out of it
+line 6: ... and `t` is used again here
+  fix: `log.copy()` on line 4, so `t` is a value of its own

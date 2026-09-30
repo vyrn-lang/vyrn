@@ -2940,7 +2940,9 @@ impl<'a> Checker<'a> {
             .filter(|f| !f.is_extern && !f.is_export_extern)
             .map(|f| (f.name.clone(), f.module.clone()))
             .collect();
-        let all_globals: HashSet<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
+        let all_globals: HashMap<&str, &str> = (program.globals.iter())
+            .map(|g| (g.name.as_str(), g.spelled()))
+            .collect();
         let mut ready: HashSet<String> = HashSet::new();
         for (i, g) in program.globals.iter().enumerate() {
             self.reading(SourceBody::Global(i as u32));
@@ -2955,7 +2957,7 @@ impl<'a> Checker<'a> {
                     &g.module,
                     &all_globals,
                     &ready,
-                    &g.name,
+                    (&g.name, g.spelled()),
                     g.line,
                 )?;
                 if let Some(declared) = &g.ty {
@@ -2965,17 +2967,17 @@ impl<'a> Checker<'a> {
                 let scope = Scope::open();
                 let vty = self.expr(&g.init, &scope, g.ty.as_ref(), None)?;
                 if self.base(&vty) == Type::Unit {
-                    return Err(cerr!(g.line, GlobalUnit, name = g.name));
+                    return Err(cerr!(g.line, GlobalUnit, name = g.spelled()));
                 }
                 if matches!(self.base(&vty), Type::Stream(_)) {
-                    return Err(cerr!(g.line, GlobalStream, name = g.name));
+                    return Err(cerr!(g.line, GlobalStream, name = g.spelled()));
                 }
                 if let Some(declared) = &g.ty {
                     if !self.coercible(&vty, declared) {
                         return Err(cerr!(
                             g.line,
                             GlobalInitMismatch,
-                            name = g.name,
+                            name = g.spelled(),
                             declared,
                             vty
                         ));
@@ -7155,7 +7157,10 @@ pub fn module_state_use(
                 }
                 if let Some(l) = &src.lambda {
                     if let Some(g) = &l.touches_global {
-                        return Some((chain_to(&cur, &parent), g.clone()));
+                        return Some((
+                            chain_to(&cur, &parent),
+                            program.global_spelled(g).to_string(),
+                        ));
                     }
                     callees.extend(l.calls.iter().cloned());
                     callees.extend(l.nested_sigs.iter().map(&pseudo_id));
@@ -7187,7 +7192,10 @@ pub fn module_state_use(
                 })
                 .cloned()
                 .unwrap_or_default();
-            return Some((chain_to(&cur, &parent), which));
+            return Some((
+                chain_to(&cur, &parent),
+                program.global_spelled(&which).to_string(),
+            ));
         }
         let mut callees: Vec<String> = Vec::new();
         for c in fn_calls(&f.body) {
@@ -7333,9 +7341,10 @@ struct InitRules<'a> {
     forbidden: &'a HashSet<String>,
     fn_module: &'a HashMap<String, Option<String>>,
     own_module: &'a Option<String>,
-    all_globals: &'a HashSet<&'a str>,
+    all_globals: &'a HashMap<&'a str, &'a str>,
     ready: &'a HashSet<String>,
-    own_name: &'a str,
+    /// The own global's linked name and the name its module wrote.
+    own: (&'a str, &'a str),
     line: usize,
     err: Option<Diagnostic>,
 }
@@ -7355,14 +7364,15 @@ impl BodyVisit<'_> for InitRules<'_> {
         if self.err.is_some() {
             return false;
         }
-        let (own_name, line) = (self.own_name, self.line);
+        let (own_name, line) = (self.own.1, self.line);
         match e {
             Expr::Var { name, .. }
-                if self.all_globals.contains(name.as_str()) && !self.ready.contains(name) =>
+                if self.all_globals.contains_key(name.as_str()) && !self.ready.contains(name) =>
             {
-                if name == own_name {
+                if name == self.own.0 {
                     self.fail(cerr!(line, GlobalReadsItself, own_name));
                 } else {
+                    let name = self.all_globals[name.as_str()];
                     self.fail(cerr!(line, GlobalReadsLater, own_name, name));
                 }
                 false
@@ -7397,9 +7407,9 @@ fn init_restrictions(
     forbidden: &HashSet<String>,
     fn_module: &HashMap<String, Option<String>>,
     own_module: &Option<String>,
-    all_globals: &HashSet<&str>,
+    all_globals: &HashMap<&str, &str>,
     ready: &HashSet<String>,
-    own_name: &str,
+    own: (&str, &str),
     line: usize,
 ) -> Result<(), Diagnostic> {
     let mut v = InitRules {
@@ -7408,7 +7418,7 @@ fn init_restrictions(
         own_module,
         all_globals,
         ready,
-        own_name,
+        own,
         line,
         err: None,
     };

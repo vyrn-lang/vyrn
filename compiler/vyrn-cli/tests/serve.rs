@@ -368,6 +368,41 @@ fn handle(req: Request) -> Response {
     );
 }
 
+/// The gate names module state as its module wrote it, though the loader
+/// renamed `hits` apart from the import's.
+#[test]
+fn the_workers_gate_names_a_renamed_global_as_written() {
+    let dir = std::env::temp_dir().join(format!("vyrn-serve-{}-names", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("make the scratch directory");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "let hits: Int64 = 5
+export fn base() -> Int64 { return hits }
+",
+    )
+    .expect("write the module");
+    let src = r#"import { base } from "./lib.vyrn"
+let mut hits: Int64 = 0
+fn handle(req: Request) -> Response {
+    hits = hits + base()
+    return Response { status: 200, contentType: "text/plain", body: hits.toString(), vary: "", headers: [:] }
+}
+"#;
+    std::fs::write(dir.join("srv.vyrn"), src).expect("write the server");
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["serve", "srv.vyrn", "--port", "0", "--workers", "2"])
+        .current_dir(&dir)
+        .output()
+        .expect("run vyrn serve");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        err.contains("`handle` reads or writes module state `hits` (shared"),
+        "the gate quoted a renamed name:
+{err}"
+    );
+}
+
 #[test]
 fn sequential_default_is_unchanged_for_stateful_handles() {
     let s = start_server();

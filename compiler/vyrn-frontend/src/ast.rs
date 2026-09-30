@@ -335,7 +335,18 @@ pub struct GlobalDecl {
     /// `None` for the root module. Globals are root-only; the field keeps
     /// diagnostics uniform.
     pub module: Option<String>,
+    /// The name the module wrote, when the loader renamed this global apart
+    /// from another module's (`log` becomes `log__from0`). A refusal quotes
+    /// [`GlobalDecl::spelled`], never `name`.
+    pub renamed_from: Option<String>,
     pub line: usize,
+}
+
+impl GlobalDecl {
+    /// The name the reader wrote in this global's module.
+    pub fn spelled(&self) -> &str {
+        self.renamed_from.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// One imported binding: `original`, bound locally as `alias` when written
@@ -1543,6 +1554,22 @@ impl Binder {
 }
 
 impl Program {
+    /// The name the reader wrote for the global `linked`; `linked` itself
+    /// when no global has it ([`GlobalDecl::spelled`]).
+    pub fn global_spelled<'a>(&'a self, linked: &'a str) -> &'a str {
+        let g = self.globals.iter().find(|g| g.name == linked);
+        g.map_or(linked, GlobalDecl::spelled)
+    }
+
+    /// `(linked, spelled)` for each renamed global of `module`, the only
+    /// globals a body of that module can name.
+    pub fn renamed_globals(&self, module: &Option<String>) -> Vec<(String, String)> {
+        let renamed = self.globals.iter().filter(|g| g.module == *module);
+        renamed
+            .filter_map(|g| Some((g.name.clone(), g.renamed_from.clone()?)))
+            .collect()
+    }
+
     /// The id of `body`: the functions, then the projections, tests,
     /// benches, module-state initializers and type-declaration checks, each
     /// in its list's order. The one numbering of source bodies; the lowering
