@@ -2401,8 +2401,9 @@ impl<'b> Kernel<'b> {
                         continues: Vec::new(),
                         bound_inside: Vec::new(),
                     });
-                    self.stmts(body, &mut a)?;
+                    let walked = self.stmts(body, &mut a);
                     let mut ctx = self.loops.pop().expect("the walk's own loop");
+                    walked?;
                     let back = (!a.ended).then_some(&a);
                     let mut wider = false;
                     for at in back.into_iter().chain(&ctx.continues) {
