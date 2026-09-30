@@ -216,8 +216,9 @@ pub fn analyze_linked(
     root_path: &str,
     opts: &crate::loader::LoadOptions,
     resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Analysis {
-    analyze_inner(source, Some((root_path, opts, resolver)), None)
+    analyze_inner(source, Some((root_path, opts, resolver, engine)), None)
 }
 
 /// The ownership judgments over a program that type-checks. They live in
@@ -230,18 +231,19 @@ pub struct Judge {
     pub ownership: fn(&crate::ast::Program) -> crate::own::Ownership,
 }
 
+/// What [`analyze_linked`] links with: the root path, the load options, the
+/// resolver and the generation engine.
+pub type Linker<'a> = (
+    &'a str,
+    &'a crate::loader::LoadOptions,
+    &'a dyn crate::loader::ModuleResolver,
+    Option<&'a crate::gen::GenEngine>,
+);
+
 /// Like [`analyze`], or [`analyze_linked`] with `linker`, and also shows what
 /// `judge` decides: its refusals among the diagnostics, its memory rows on
 /// hover.
-pub fn analyze_judged(
-    source: &str,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
-    judge: &Judge,
-) -> Analysis {
+pub fn analyze_judged(source: &str, linker: Option<Linker<'_>>, judge: &Judge) -> Analysis {
     analyze_inner(source, linker, Some(judge))
 }
 
@@ -257,15 +259,7 @@ fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
     d
 }
 
-fn analyze_inner(
-    source: &str,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
-    judge: Option<&Judge>,
-) -> Analysis {
+fn analyze_inner(source: &str, linker: Option<Linker<'_>>, judge: Option<&Judge>) -> Analysis {
     let tokens = match lexer::lex(source) {
         Ok(t) => t,
         Err(d) => return empty_analysis(vec![d]),
@@ -328,11 +322,11 @@ fn analyze_inner(
         None
     } else {
         match (&linker, program.imports.is_empty()) {
-            (Some((root_path, opts, resolver)), false) => {
+            (Some((root_path, opts, resolver, engine)), false) => {
                 // The floor's deferred decision needs the effect judgment; the
                 // editor does not make it.
                 let (loaded, o, load_warnings, g, _) =
-                    crate::loader::load_with_origins(source, root_path, opts, *resolver);
+                    crate::loader::load_with_origins(source, root_path, opts, *resolver, *engine);
                 graph = g;
                 // The origin maps come back even from a failed load,
                 // so a `.vyx` whose template stopped lexing still gets its squiggle.
@@ -409,7 +403,7 @@ fn analyze_inner(
     // that stands for a declaration resolves to it: file, line, doc and wire
     // facts. A module with no map costs a failed substring search.
     let origin_index = match linker {
-        Some((_, _, resolver)) if !graph.is_empty() => OriginIndex::build(&graph, resolver),
+        Some((_, _, resolver, _)) if !graph.is_empty() => OriginIndex::build(&graph, resolver),
         _ => OriginIndex::default(),
     };
 
@@ -1753,14 +1747,10 @@ fn index_imported_symbols(
 fn index_namespaces(
     graph: &crate::loader::ModuleGraph,
     root: &ast::Program,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
+    linker: Option<Linker<'_>>,
     origins: &OriginIndex,
 ) -> Vec<NamespaceInfo> {
-    let Some((root_path, opts, resolver)) = linker else {
+    let Some((root_path, opts, resolver, _)) = linker else {
         return Vec::new();
     };
     if !root.imports.iter().any(|i| i.namespace.is_some()) {
@@ -3232,7 +3222,7 @@ mod tests {
         let resolver = MapResolver(files);
         let root = "import { getUser as fetchUser } from \"./api\"\n\
                     fn main() -> Int64 { return fetchUser(1) }";
-        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
         assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
         let sym = a
             .symbols
@@ -3274,7 +3264,7 @@ mod tests {
         let resolver = MapResolver(files);
         let root = "import * as api from \"./api\"\n\
                     fn main() -> Int64 { let u = api.getUser(1) return u.id }";
-        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
         assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
 
         // The namespace binding and its members are recorded.

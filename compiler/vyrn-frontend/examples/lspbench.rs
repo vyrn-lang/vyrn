@@ -27,7 +27,7 @@ fn main() {
         let res = DiskResolver;
         let run = |i: usize| {
             let edited = format!("{src}\n// keystroke {i}\n");
-            let _ = vyrn_frontend::analyze_linked(&edited, &path, &opts, &res);
+            let _ = vyrn_frontend::analyze_linked(&edited, &path, &opts, &res, None);
         };
         for i in 0..3 {
             run(i);
@@ -37,7 +37,7 @@ fn main() {
         for i in 0..n {
             run(1000 + i);
         }
-        let a = vyrn_frontend::analyze_linked(&src, &path, &opts, &res);
+        let a = vyrn_frontend::analyze_linked(&src, &path, &opts, &res, None);
         println!(
             "{:.1} ms  {} symbols, {} diagnostics  {path}",
             t.elapsed().as_secs_f64() * 1000.0 / n as f64,

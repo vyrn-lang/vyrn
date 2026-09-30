@@ -262,8 +262,8 @@ fn the_structural_census_matches_its_pin() {
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1162, 0),
-        ("shared machinery", 1259, 19),
-        ("tests", 795, 2),
+        ("shared machinery", 1261, 19),
+        ("tests", 794, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
@@ -305,14 +305,14 @@ fn per_command() -> Vec<(&'static str, usize, usize)> {
 #[test]
 fn the_per_command_census_matches_its_pin() {
     let want = vec![
-        ("why", 654, 19),
+        ("why", 655, 19),
         ("bench", 594, 17),
         ("serve, dev", 461, 7),
         ("doc", 370, 13),
         ("routes", 310, 4),
         ("build", 260, 17),
         ("fmt", 248, 13),
-        ("(dispatch)", 229, 12),
+        ("(dispatch)", 228, 12),
         ("dev", 222, 18),
         ("deps", 210, 5),
         ("update", 195, 7),

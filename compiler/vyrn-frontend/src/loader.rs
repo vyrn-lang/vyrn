@@ -868,9 +868,10 @@ pub fn generated_modules(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
     let (modules, _, _, _, _) =
-        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
+        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
         .filter_map(|m| m.gen_source.map(|s| (m.key, s)))
@@ -878,7 +879,8 @@ pub fn generated_modules(
 }
 
 /// Loads `root_source` (read from `root_path`) and every module it imports
-/// transitively, and links them into one [`Program`].
+/// transitively, and links them into one [`Program`]. `engine` runs each
+/// generator import; with `None`, each one fails.
 ///
 /// # Errors
 ///
@@ -889,8 +891,10 @@ pub fn load(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Result<Program, Vec<Diagnostic>> {
-    let (loaded, _, _, _, pending) = load_with_origins(root_source, root_path, opts, resolver);
+    let (loaded, _, _, _, pending) =
+        load_with_origins(root_source, root_path, opts, resolver, engine);
     let program = loaded?;
     // No judgment answers here, so every scanned carrier stands.
     match pending.and_then(|p| crate::floor::decide(p, None)) {
@@ -918,6 +922,7 @@ pub fn load_with_origins(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> (
     Result<Program, Vec<Diagnostic>>,
     crate::origin::OriginMaps,
@@ -954,7 +959,7 @@ pub fn load_with_origins(
             None,
         );
     }
-    let out = load_with_origins_inner(root_source, root_path, opts, resolver);
+    let out = load_with_origins_inner(root_source, root_path, opts, resolver, engine);
     LOAD_DEPTH.with(|d| d.set(d.get() - 1));
     out
 }
@@ -964,6 +969,7 @@ fn load_with_origins_inner(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> (
     Result<Program, Vec<Diagnostic>>,
     crate::origin::OriginMaps,
@@ -972,7 +978,7 @@ fn load_with_origins_inner(
     Option<crate::floor::Pending>,
 ) {
     let read_parse = crate::prof::phase("load: read+parse+resolve");
-    let loaded = load_modules(root_source, root_path, opts, resolver);
+    let loaded = load_modules(root_source, root_path, opts, resolver, engine);
     drop(read_parse);
     match loaded {
         Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new(), None),
@@ -1022,9 +1028,10 @@ pub fn capability_graph(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Result<(crate::floor::Graph, String), Vec<Diagnostic>> {
     let (mut modules, root_key, _, _, _) =
-        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
+        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
     Ok((floor_graph(&mut modules), root_key))
 }
 
@@ -1048,9 +1055,10 @@ pub fn module_graph(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Result<Vec<(String, Vec<String>)>, Vec<Diagnostic>> {
     let (modules, _, _, _, _) =
-        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
+        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
         .map(|m| (m.key, m.import_targets))
@@ -1067,9 +1075,10 @@ pub fn module_graph_with_sources(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Result<Vec<(String, Vec<String>, Option<String>)>, Vec<Diagnostic>> {
     let (modules, _, _, _, _) =
-        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
+        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
         .map(|m| (m.key, m.import_targets, m.gen_source))
@@ -1089,6 +1098,7 @@ fn load_modules(
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Result<
     (
         Vec<Module>,
@@ -1115,6 +1125,7 @@ fn load_modules(
         source: Option<&str>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
+        engine: Option<&crate::gen::GenEngine>,
         w: &mut Work,
         root_key: &str,
     ) -> Result<(), Vec<Diagnostic>> {
@@ -1362,7 +1373,7 @@ fn load_modules(
                 {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                visit(&target, None, opts, resolver, w, root_key)?;
+                visit(&target, None, opts, resolver, engine, w, root_key)?;
                 import_targets[i] = Some(target);
             }
         }
@@ -1379,6 +1390,7 @@ fn load_modules(
                     *line,
                     opts,
                     resolver,
+                    engine,
                     &w.modules,
                     &w.states,
                     &mut w.identities,
@@ -1392,7 +1404,7 @@ fn load_modules(
                     return Err(vec![in_module(d, key, root_key)]);
                 }
                 if let Some(src) = gen_source {
-                    visit(&gen_key, Some(&src), opts, resolver, w, root_key)?;
+                    visit(&gen_key, Some(&src), opts, resolver, engine, w, root_key)?;
                 }
                 import_targets[i] = Some(gen_key);
             }
@@ -1421,6 +1433,7 @@ fn load_modules(
         Some(root_source),
         opts,
         resolver,
+        engine,
         &mut w,
         &root_key,
     ) {
@@ -1465,7 +1478,7 @@ fn load_modules(
             continue;
         }
         if !w.states.contains_key(&target) {
-            if let Err(diags) = visit(&target, None, opts, resolver, &mut w, &root_key) {
+            if let Err(diags) = visit(&target, None, opts, resolver, engine, &mut w, &root_key) {
                 return Err(failed(diags, w.origins));
             }
         }
@@ -1572,6 +1585,7 @@ fn run_generator(
     line: usize,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
     modules: &[Module],
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
@@ -1723,11 +1737,12 @@ fn run_generator(
     // Cache miss: load and check the generator as a runnable program. Skipping
     // this on a hit is sound: an entry is written only after a run that passed
     // this check, and an edit to the generator's sources misses.
-    let (loaded, _, _, gen_graph, _) = load_with_origins(&gen_source, &gen_mod_key, opts, resolver);
+    let (loaded, _, _, gen_graph, _) =
+        load_with_origins(&gen_source, &gen_mod_key, opts, resolver, engine);
     let mut gen_program = loaded?;
     // A generator is a runnable program compiled to wasm, so it gets
     // the check and synthesis a root gets.
-    let (gdiags, _) = crate::check_and_synthesize(&mut gen_program);
+    let (gdiags, _) = crate::check_and_synthesize(&mut gen_program, engine);
     if !gdiags.is_empty() {
         return Err(gdiags);
     }
@@ -1781,6 +1796,7 @@ fn run_generator(
         name,
         &consts,
         crate::gen::GenInputs {
+            engine,
             resolver,
             opts,
             importer_dir,
@@ -4141,6 +4157,7 @@ mod tests {
             "main.vyrn",
             &opts(),
             &map(&[]),
+            None,
         );
         LOAD_DEPTH.with(|d| d.set(0));
         let e = r.unwrap_err();

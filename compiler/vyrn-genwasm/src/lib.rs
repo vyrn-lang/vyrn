@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use vyrn_frontend::ast::{Block, Expr, Function, Id, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
 #[cfg(feature = "host")]
-use vyrn_frontend::gen::{compiler_identity, CodePiece, GenRead, Spliced};
+use vyrn_frontend::gen::{compiler_identity, CodePiece, GenEngine, GenRead, Spliced};
 use vyrn_frontend::gen::{GenInputs, GenOutput};
 
 /// Calls this path cannot serve; a module containing one is declined (see
@@ -33,16 +33,16 @@ const UNSERVED: &[&str] = &["writeFile", "writeAtomic", "renameFile", "fsyncFile
 const RESULT_BEGIN: &str = "<<vyrn-genwasm-result>>";
 const RESULT_END: &str = "<<vyrn-genwasm-result-end>>";
 
-/// Installs the wasm generation engine. Called once from `main`.
+/// Returns the wasm generation engine, which a host passes to each load.
 #[cfg(feature = "host")]
-pub fn install() {
-    vyrn_frontend::gen::set_gen_engine(vyrn_lower::gen_engine(engine));
+pub fn engine() -> Box<GenEngine> {
+    vyrn_lower::gen_engine(claim)
 }
 
 /// Claims a generation run, or declines it with `None`, which the frontend
 /// reports as an error.
 #[cfg(feature = "host")]
-fn engine(
+fn claim(
     program: &Program,
     fn_name: &str,
     args: &[ConstVal],
@@ -173,6 +173,7 @@ fn serve(
     // module the link touched.
     if mode == MODE_MODULE_INTERFACE {
         return vyrn_frontend::gen::gen_module_interface_lit(
+            inputs.engine,
             inputs.resolver,
             inputs.opts,
             &inputs.importer_dir,

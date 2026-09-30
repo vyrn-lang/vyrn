@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use vyrn_genwasm::engine;
 
 mod contracts;
 mod rename;
@@ -55,7 +56,11 @@ fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Ana
         Some(ctx) => ctx,
         None => return analyze_judged(text, None, &vyrn_lower::JUDGE),
     };
-    let mut analysis = analyze_judged(text, Some((&path, &opts, &resolver)), &vyrn_lower::JUDGE);
+    let mut analysis = analyze_judged(
+        text,
+        Some((&path, &opts, &resolver, Some(&*engine()))),
+        &vyrn_lower::JUDGE,
+    );
     // A manifest that does not parse would drop the import map and audience
     // rules silently, so it is an error on the open document.
     if let Some(e) = manifest_error {
@@ -203,10 +208,6 @@ fn dbg_log(msg: &str) {
 }
 
 fn main() {
-    // The only generation engine; install it before any document opens. A
-    // compiled generator is cached for the session.
-    vyrn_genwasm::install();
-
     let (connection, io_threads) = Connection::stdio();
     dbg_log(&format!(
         "=== vyrn-lsp start pid={} cwd={:?} ===",
@@ -1407,6 +1408,7 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
                 &owner_path,
                 &opts,
                 &resolver,
+                Some(&*engine()),
             )
             .ok()?;
             cache.insert(
@@ -1434,7 +1436,7 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
     let synth_path = synth_path_for(&owner_path);
     let analysis = analyze_judged(
         &gen_source,
-        Some((&synth_path, &opts, &resolver)),
+        Some((&synth_path, &opts, &resolver, Some(&*engine()))),
         &vyrn_lower::JUDGE,
     );
     let tokens = vyrn_frontend::semantic_tokens(&analysis);

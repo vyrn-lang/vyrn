@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use vyrn_frontend::loader::*;
+use vyrn_genwasm::engine;
 
 mod common;
 use common::run_compiled;
@@ -152,25 +153,24 @@ mod tests {
     }
 
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
-        // Under nextest each test is its own process, so every runner installs the engine.
-        vyrn_genwasm::install();
         let files: Vec<(&str, &str)> = files
             .iter()
             .copied()
             .chain(RT_FILES.iter().copied())
             .collect();
         let files = &files[..];
-        let (mut program, memo) =
-            vyrn_frontend::project::Memo::load(|| load(root, "main.vyrn", &opts(), &map(files)))
-                .map_err(|ds| {
-                    ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
-                        "
+        let (mut program, memo) = vyrn_frontend::project::Memo::load(|| {
+            load(root, "main.vyrn", &opts(), &map(files), Some(&*engine()))
+        })
+        .map_err(|ds| {
+            ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
+                "
 ",
-                    )
-                })?;
+            )
+        })?;
         // A linked program runs only once the JSON builtins' generated Vyrn is synthesized;
         // `loader::load` stops at the link, so a bare check fails with "no decoder".
-        let diags = vyrn_lower::check_and_synthesize(&mut program);
+        let diags = vyrn_lower::check_and_synthesize(&mut program, Some(&*engine()));
         if let Some(d) = diags.first() {
             return Err(d.render());
         }
@@ -178,8 +178,7 @@ mod tests {
     }
 
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
-        vyrn_genwasm::install();
-        match load(root, "main.vyrn", &opts(), &map(files)) {
+        match load(root, "main.vyrn", &opts(), &map(files), Some(&*engine())) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds
                 .iter()
@@ -348,6 +347,7 @@ mod tests {
             "main.vyrn",
             &opts(),
             &map(&[("a.vyrn", a), ("b.vyrn", b)]),
+            None,
         ) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds,
@@ -404,6 +404,7 @@ mod tests {
             "main.vyrn",
             &opts(),
             &map(&[("a.vyrn", a), ("b.vyrn", b)]),
+            None,
         ) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds,
@@ -923,7 +924,7 @@ mod tests {
                         other()\n\
                         return 0\n\
                     }";
-        let ds = load(root, "main.vyrn", &opts(), &map(&[("lib.vyrn", lib)]))
+        let ds = load(root, "main.vyrn", &opts(), &map(&[("lib.vyrn", lib)]), None)
             .expect_err("expected a load error");
         let hit = ds
             .iter()
@@ -951,6 +952,7 @@ mod tests {
             "main.vyrn",
             &opts(),
             &map(&[("rpc_a.vyrn", rpc_a), ("rpc_b.vyrn", rpc_b)]),
+            None,
         )
         .unwrap();
         let externs: Vec<&str> = program
@@ -980,6 +982,7 @@ mod tests {
             "main.vyrn",
             &opts(),
             &map(&[("ui.vyrn", ui), ("gfx.vyrn", gfx)]),
+            None,
         );
         assert!(
             loaded.is_ok(),
@@ -1023,8 +1026,7 @@ mod remote_tests {
     use super::*;
 
     fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
-        vyrn_genwasm::install();
-        match load(root, "main.vyrn", &opts(), &map(files)) {
+        match load(root, "main.vyrn", &opts(), &map(files), Some(&*engine())) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds
                 .iter()
@@ -1047,6 +1049,7 @@ mod remote_tests {
                 "main.vyrn",
                 &opts(),
                 &map(&[("github:acme/strings@v1/src/pad.vyrn", lib)]),
+                None,
             )
         })
         .unwrap();
@@ -1068,6 +1071,7 @@ mod remote_tests {
                     ("github:acme/x@abc/src/a.vyrn", a),
                     ("github:acme/x@abc/src/b.vyrn", b),
                 ]),
+                None,
             )
         })
         .unwrap();
@@ -1096,6 +1100,7 @@ mod remote_tests {
             "main.vyrn",
             &o,
             &map(&[("gist:demko/abc123/a.vyrn", a)]),
+            None,
         ) {
             Ok(_) => panic!("expected error"),
             Err(ds) => ds[0].message.clone(),
@@ -1176,17 +1181,11 @@ mod gen_tests {
         }
     }
 
-    /// Installs the generation engine, which the driver owns: `gen::generate` refuses
-    /// when none is installed. Idempotent.
-    fn engine() {
-        vyrn_genwasm::install();
-    }
-
     fn run_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
-        engine();
-        let (program, memo) =
-            vyrn_frontend::project::Memo::load(|| load(root, "main.vyrn", &opts(), r))
-                .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
+        let (program, memo) = vyrn_frontend::project::Memo::load(|| {
+            load(root, "main.vyrn", &opts(), r, Some(&*engine()))
+        })
+        .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         let diags = vyrn_frontend::checker::check_accum(&program);
         if let Some(d) = diags.first() {
             return Err(d.render());
@@ -1206,11 +1205,9 @@ mod gen_tests {
     fn run(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
         run_with(root, &map(files))
     }
-    /// The message a load+check produced. `engine()` because a `gen fn` needs
-    /// one and this crate does not have it.
+    /// The message a load+check produced.
     fn gen_err(root: &str, files: &[(&str, &str)]) -> String {
-        engine();
-        match load(root, "main.vyrn", &opts(), &map(files)) {
+        match load(root, "main.vyrn", &opts(), &map(files), Some(&*engine())) {
             Ok(p) => match vyrn_frontend::checker::check_accum(&p).first() {
                 Some(d) => d.message.clone(),
                 None => panic!("expected an error, load+check succeeded"),
@@ -1830,12 +1827,12 @@ fn main() -> Int64 { return shape().byteLength }"#;
         let root = "import { mk } from \"./gen\"
                     import { magic } from mk(\"./data\")
                     fn main() -> Int64 { return magic() }";
-        engine();
         let a = vyrn_frontend::symbols::analyze_linked(
             root,
             "main.vyrn",
             &opts(),
             &map(&[("gen.vyrn", gen)]),
+            Some(&*engine()),
         );
         assert!(
             a.diagnostics.is_empty(),

@@ -1115,8 +1115,8 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let resolver = crate::loader::MapResolver(map.clone());
-        let program =
-            crate::loader::load(&map[root], root, &Default::default(), &resolver).expect("link");
+        let program = crate::loader::load(&map[root], root, &Default::default(), &resolver, None)
+            .expect("link");
         let mut specs: HashMap<Option<String>, String> = HashMap::new();
         specs.insert(None, format!("./{root}"));
         for t in &program.type_decls {

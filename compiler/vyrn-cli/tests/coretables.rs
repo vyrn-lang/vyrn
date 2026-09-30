@@ -28,7 +28,18 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    Memo::load(|| vyrn_lower::load(&src, &root, &opts, &DiskResolver)).map_err(|d| {
+    // Without the engine, an example that imports through a generator fails to
+    // load, and the census counts a smaller corpus.
+    Memo::load(|| {
+        vyrn_lower::load(
+            &src,
+            &root,
+            &opts,
+            &DiskResolver,
+            Some(&*vyrn_genwasm::engine()),
+        )
+    })
+    .map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())
@@ -37,7 +48,7 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
 
 fn core_body(src: &str, which: &str) -> vyrn_frontend::core::Body {
     let (program, _memo) =
-        Memo::load(|| vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver))
+        Memo::load(|| vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver, None))
             .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let lowered = vyrn_lower::lower(&program);
     let own = vyrn_lower::analyze(&program);
@@ -78,7 +89,7 @@ fn core_releases(src: &str, which: &str, binding: &str) -> bool {
 #[test]
 fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
     let analyzed = |src: &str| {
-        let program = vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver)
+        let program = vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver, None)
             .unwrap_or_else(|d| panic!("{}", d[0].render()));
         let own = vyrn_lower::analyze(&program);
         (program, own)
@@ -165,7 +176,7 @@ fn an_if_let_over_a_parameter_owes_no_release() {
 #[test]
 fn a_lender_forwarded_through_an_aggregate_lends_still() {
     let src = "type R = { name: String }                fn pick(xs: Array<String>) -> String                { for x in xs { return x } return \"\" }                fn g(a: Array<String>) -> R { return R { name: pick(a) } }                fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]                let r = g(arr) return r.name.byteLength }";
-    let program = vyrn_lower::load(src, "lend.vyrn", &Default::default(), &DiskResolver);
+    let program = vyrn_lower::load(src, "lend.vyrn", &Default::default(), &DiskResolver, None);
     assert!(
         program.is_err(),
         "a loop variable may not be returned, so `pick` is refused before it can lend"
@@ -296,9 +307,6 @@ fn the_core_states_every_table_the_emitters_read() {
 }
 
 fn run() {
-    // Generation is the driver's engine, not the frontend's. Without it, examples that import
-    // through a generator fail to load and the census silently counts a smaller corpus.
-    vyrn_genwasm::install();
     let mut counted: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut produced: BTreeMap<(&'static str, bool), usize> = BTreeMap::new();
     let mut ops: BTreeMap<String, usize> = BTreeMap::new();

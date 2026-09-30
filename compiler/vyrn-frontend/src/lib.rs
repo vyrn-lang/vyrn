@@ -97,8 +97,8 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
     symbols::analyze(source).diagnostics
 }
 
-/// Type-checks `program` and synthesizes what its builtins need into it.
-/// Returns the check's diagnostics and the refused set
+/// Type-checks `program` and synthesizes what its builtins need into it, with
+/// `engine` running each `derive` site's generator. Returns the check's diagnostics and the refused set
 /// ([`checker::check_accum_with_sites`]). The judgments that follow are
 /// `vyrn_lower::check_and_synthesize`'s.
 ///
@@ -108,6 +108,7 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
 /// backend has built its function table from the program yet.
 pub fn check_and_synthesize(
     program: &mut ast::Program,
+    engine: Option<&gen::GenEngine>,
 ) -> (
     Vec<diagnostics::Diagnostic>,
     Option<std::collections::HashSet<String>>,
@@ -118,7 +119,7 @@ pub fn check_and_synthesize(
     // against it, so the second check's answers stand. The `where`
     // constructors join with it: `fromJson`'s decoders call the predicates.
     if diags.is_empty() && !derived.is_empty() {
-        match gen::derive(program, &derived) {
+        match gen::derive(program, &derived, engine) {
             Ok((fns, decls)) => {
                 let at = program.functions.len();
                 program.functions.extend(fns);
