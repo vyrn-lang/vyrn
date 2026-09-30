@@ -13,11 +13,20 @@
 //! only). A value that owes a release moves at every take; one that owes none
 //! moves only into a `consume` parameter ([`Kernel::moves`]).
 //!
+//! The walk is a forward dataflow solver over the structured core. Its
+//! [`State`] holds five relations per name: gone, static, hole, alias and
+//! dead. A join is the end of an `if` or a `match`, and a back edge is the
+//! end of a loop's body or a `continue`. Each refusal is a rule row (`MOVED`,
+//! `JOIN_HOLE`, ...), judged where a name is used, where a scope ends, where
+//! edges join ([`Kernel::agree`]) and at a back edge. The first rule that
+//! holds refuses the statement; in recover mode the walk steps over it.
+//!
 //! - Joins: every owned name and hole is in the same state on every edge that
 //!   reaches a join. A diverged edge reaches no join.
 //! - Loops: a name bound outside has the same state at the back edge as at
 //!   entry; a name bound inside is consumed before the back edge; every
-//!   `break` agrees.
+//!   `break` agrees. The body is walked again from its entry, widened by
+//!   every back edge, until no back edge widens it.
 //! - Holes: `consume x.f` leaves `x` held with a hole at `.f`. An overlapping
 //!   read or take is refused, a store fills it, a drop releases the rest. An
 //!   element hole is `.[]`, any index.
@@ -82,6 +91,25 @@ enum Mode {
     Place,
 }
 
+/// Where the names of a scope end.
+#[derive(Clone, Copy)]
+enum End {
+    /// An exit of a block, at the node the plan keys the exit's rows by.
+    Exit(Exit, NodeId),
+    /// The end of arm `u32` of the switch at the node, for the arm's binders.
+    Arm(NodeId, u32),
+}
+
+/// Where two states must agree on every owned name ([`Kernel::agree`]).
+#[derive(Clone, Copy)]
+enum Point {
+    /// Two live edges into one join.
+    Join,
+    /// A loop's back edge, the body's end or a `continue`, against the
+    /// loop's entry.
+    Back,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Own {
     Held,
@@ -96,7 +124,8 @@ enum Own {
 /// join costs the facts present, not the names the body declares.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 struct State {
-    /// Every name not [`Own::Gone`].
+    /// Every name not [`Own::Gone`]: gone is absence here, and static is
+    /// [`Own::Static`].
     held: BTreeMap<Name, Own>,
     /// The sub-places taken out of held names, as `(name, path)`, sorted.
     holes: Vec<(Name, String)>,
@@ -145,6 +174,25 @@ impl State {
         }
         out
     }
+
+    /// Widens a loop's entry by the back edge `at`: `Static` to `Held`, and
+    /// an alias ended there stays ended. Returns whether anything changed.
+    fn widen(&mut self, at: &State) -> bool {
+        let mut changed = false;
+        for (n, o) in self.held.iter_mut() {
+            if *o == Own::Static && at.own(*n) == Own::Held {
+                *o = Own::Held;
+                changed = true;
+            }
+        }
+        for (n, d) in &at.dead {
+            if !self.dead.contains_key(n) {
+                self.dead.insert(*n, d.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 /// Whether two paths under one name are equal or one is under the other.
@@ -161,6 +209,78 @@ fn overlaps(a: &str, b: &str) -> bool {
 /// unlike [`overlaps`]: skipping `.line.text` still walks the rest of `.line`.
 fn covers(r: &str, h: &str) -> bool {
     r == h || h.strip_prefix(r).is_some_and(|x| x.starts_with('.'))
+}
+
+// A refusal the flow rules state: its sentence, then each way out after a
+// `|`, with `{key}` holes the rule's site fills ([`Kernel::say`]). The rules
+// are judged at a use (shape A), where a scope ends (B), where edges join (C)
+// and at a loop's back edge (D); the site decides that one holds.
+
+/// A use after a declared `consume`, a `drop`, or a linear value's take.
+const CONSUMED: &str = "`{read}` is {what} here but was already consumed by {by} on line {l}{note}";
+/// A use after any other take, at the take.
+const MOVED: &str = "`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} again \
+                     here|`{s}.copy()` if both sides need a value";
+/// A use after a placed release.
+const RELEASED: &str = "`{s}` is {what} here after it was released";
+/// A read of an alias whose place was written, at the write.
+const ALIAS_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
+                          {here}: ... and `{s}` is {what} again here|`{src}.copy()` on line \
+                          {at}, so `{s}` is a value of its own";
+/// An argument that reads a global the callee stores into.
+const STATE_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
+                          {here}: ... and `{s}` is {what} again here";
+const WHOLE_WITH_HOLE: &str = "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and \
+                               `{s}` is used as a whole here, with the hole still in \
+                               it|`{s}{path}.copy()` on line {l} if `{s}` is still needed \
+                               whole|write `{s}{path}` back before this line";
+const READ_IN_HOLE: &str = "`{s}{h}` was moved here into `consume`\nline {here}: ... and \
+                            `{s}{h}` is used again here|`{s}{h}.copy()` if both sides need a \
+                            value";
+const STORE_UNDER_HOLE: &str = "`{s}{h}` was moved here into `consume`\nline {here}: ... and \
+                                `{s}{path}` is written here, under the hole";
+/// A payload binder handed on out of a type that declares `release`.
+const SEALED_PAYLOAD: &str = "`{b}` may not be handed to a `consume` parameter: `{ty}` declares \
+                              `release`, which reads it; consume `{m}` or copy `{b}`";
+/// A written `drop` of a name with a hole.
+const DROP_WITH_HOLE: &str = "`{s}` may not be dropped — `{s}{h}` was taken out of it on line \
+                              {l}, and `drop` releases the whole binding|write `{s}{h}` back \
+                              before the `drop`, so the binding is whole again|delete the \
+                              `drop` — the parts still here are released when the block exits";
+const RELEASED_WITH_HOLE: &str =
+    "{info} is released whole although a `consume` took `{h}` out of it";
+const RELEASED_AROUND: &str = "{info} is released around `{h}` on a path that did not take it";
+const OVERWRITTEN: &str =
+    "{info} is overwritten while still held — the old value is never released";
+const RELEASED_BEFORE_STORE: &str = "{info} is released before a store although it holds nothing";
+const HELD_AT_EXIT: &str = "{info} is still held at {exit} — no release is placed for it";
+const HELD_AT_ARM_END: &str =
+    "{info} is still held where its arm ends — no release is placed for it";
+const JOIN_MOVED: &str = "`{s}` was moved here into {by} on one path and not on the other, and \
+                          nothing releases it where the paths join";
+const JOIN_RELEASED: &str =
+    "`{s}` is released on one path and still held on another where the paths join";
+const JOIN_HOLE: &str = "{info} has a `consume` hole on one edge of a join and not on another";
+const LOOP_MOVED: &str =
+    "`{s}` is consumed by {by} inside a loop, so it would be used again on the next iteration";
+const LOOP_RELEASED: &str =
+    "`{s}` is released inside a loop, so it would be used again on the next iteration";
+const LOOP_BOUND: &str = "{info} is bound inside a loop that would use it again on the next turn";
+const LOOP_HOLE: &str = "`{s}{h}` is consumed by `consume` inside a loop, so it would be used \
+                         again on the next iteration|`{s}{h}.copy()` if both sides need a value";
+const LOOP_HOLE_AT: &str =
+    "{info} has a `consume` hole at a loop's back edge it did not have at entry";
+
+/// An exit, as [`HELD_AT_EXIT`] names it.
+fn exit_words(e: Exit) -> &'static str {
+    match e {
+        Exit::Block => "the end of its scope",
+        Exit::Return => "a `return`",
+        Exit::Try => "a `?`",
+        Exit::Break => "a `break`",
+        Exit::Continue => "a `continue`",
+        Exit::Scrutinee => "a scrutinee",
+    }
 }
 
 /// What an alias reads out of: a name of this body, or module state.
@@ -557,7 +677,7 @@ struct LoopCtx {
     breaks: Vec<State>,
     /// Every `continue`'s state, checked against the entry after the widen:
     /// a `continue` after the store that promotes a `Static` name is a back
-    /// edge to the second turn's entry.
+    /// edge to the widened entry.
     continues: Vec<State>,
     bound_inside: Vec<Name>,
 }
@@ -629,7 +749,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
             _ => NodeId::NONE,
         };
         let live = st.live();
-        let ended = k.scope_end(&mut st, &live, Exit::Block, site);
+        let ended = k.scope_end(&mut st, &live, End::Exit(Exit::Block, site));
         k.also(ended);
     }
     match k.refusals.is_empty() {
@@ -753,10 +873,8 @@ impl<'b> Kernel<'b> {
                     Some(Alias { via: Some(m), .. }) => self.src(*m),
                     _ => b,
                 };
-                return self.refuse(format!(
-                    "`{b}` may not be handed to a `consume` parameter: `{ty}` declares \
-                     `release`, which reads it; consume `{m}` or copy `{b}`"
-                ));
+                let args = [("b", b), ("ty", ty.as_str()), ("m", m)];
+                return Err(self.say(SEALED_PAYLOAD, self.here, &args));
             }
             Some(Payload::Hole(p)) => p,
         };
@@ -1001,7 +1119,8 @@ impl<'b> Kernel<'b> {
                     (Root::N(n), _) => n,
                     (Root::G(g), _) if gs.contains(&g) => {
                         let s = self.place_text(p);
-                        return self.read_after_write(self.here, &g, &s, &what, vec![]);
+                        let args = [("place", g.as_str()), ("s", &s), ("what", &what)];
+                        return Err(self.say(STATE_READ, self.here, &args));
                     }
                     (Root::G(_), _) => continue,
                 },
@@ -1024,34 +1143,17 @@ impl<'b> Kernel<'b> {
         let Some((l, place)) = st.dead.get(&n) else {
             return Ok(());
         };
-        let s = self.src(n);
         // The way out copies the place the alias reads, where it was bound.
-        let src = self.src_text(st, n);
-        let at = self.body.names[n as usize].line;
-        let fix = format!("`{src}.copy()` on line {at}, so `{s}` is a value of its own");
-        self.read_after_write(*l, place, s, what, vec![fix])
-    }
-
-    /// Refuses a read of `s` after a write on line `l` to the place it reads.
-    fn read_after_write(
-        &self,
-        l: usize,
-        place: &str,
-        s: &str,
-        what: &str,
-        fixes: Vec<String>,
-    ) -> Result<(), Refusal> {
-        let here = self.here;
-        self.refuse_at(
-            l,
-            menu(
-                format!(
-                    "`{place}` is written here while `{s}` still reads out of it\nline {here}: \
-                     ... and `{s}` is {what} again here"
-                ),
-                fixes,
-            ),
-        )
+        let (src, at) = (self.src_text(st, n), self.body.names[n as usize].line);
+        let at = at.to_string();
+        let args = [
+            ("place", place.as_str()),
+            ("s", self.src(n)),
+            ("what", what),
+            ("src", &src),
+            ("at", &at),
+        ];
+        Err(self.say(ALIAS_READ, *l, &args))
     }
 
     /// Refuses a take of an alias, since the place it reads owns the buffer.
@@ -1329,6 +1431,30 @@ impl<'b> Kernel<'b> {
         }
     }
 
+    /// Refuses the rule `r` at `line`, its holes filled from `args` and
+    /// `{here}`, the line of the statement being judged. A hole `args` lacks
+    /// is a defect in the rule's site, so it panics.
+    fn say(&self, r: &str, line: usize, args: &[(&str, &str)]) -> Refusal {
+        let here = self.here.to_string();
+        let args = [args, &[("here", here.as_str())]].concat();
+        let fill = |t: &str| {
+            let (mut out, mut rest) = (String::new(), t);
+            while let Some((head, tail)) = rest.split_once('{') {
+                let (key, after) = tail.split_once('}').expect("a rule's hole is closed");
+                let v = (args.iter().find(|(k, _)| *k == key))
+                    .unwrap_or_else(|| panic!("kernel: the rule's hole `{key}` is not filled"));
+                out.push_str(head);
+                out.push_str(v.1);
+                rest = after;
+            }
+            out + rest
+        };
+        let mut parts = r.split('|');
+        let sentence = fill(parts.next().unwrap_or_default());
+        self.refuse_at::<()>(line, menu(sentence, parts.map(fill)))
+            .unwrap_err()
+    }
+
     fn refuse<T>(&self, msg: String) -> Result<T, Refusal> {
         self.refuse_at(self.here, msg)
     }
@@ -1341,20 +1467,13 @@ impl<'b> Kernel<'b> {
         })
     }
 
-    /// A use after a consume, in the checker's two wordings: "already
-    /// consumed by" for a `consume` parameter, and "was moved here", at the
-    /// move, for any other taker.
-    fn used_after(&self, st: &State, n: Name, what: &str) -> Refusal {
-        self.used_after_at(st, n, what, "")
-    }
-
-    /// [`Kernel::used_after`] for a read at `path`. The `consume` wording
-    /// names the path read, the move wording the storage that moved, as
-    /// `movecheck::check_read` does.
-    fn used_after_at(&self, st: &State, n: Name, what: &str, path: &str) -> Refusal {
+    /// A use at `path` after a consume, in the checker's wordings: "already
+    /// consumed by" for a `consume` parameter, naming the path read; "was
+    /// moved here", at the move, for any other taker, naming the storage that
+    /// moved, as `movecheck::check_read` does; and "after it was released".
+    fn used_after(&self, st: &State, n: Name, what: &str, path: &str) -> Refusal {
         let s = self.src(n);
         let read = format!("{s}{}", path.replace(".[]", "[..]"));
-        let here = self.here;
         // A written `drop` is worded as a `consume` parameter, but the note is
         // about a read, so a second `drop` omits it.
         let note = if what == "dropped" {
@@ -1362,36 +1481,32 @@ impl<'b> Kernel<'b> {
         } else {
             "\n  (a `consume` parameter takes ownership; the value can't be used afterward)"
         };
-        let r = match st.taker.get(&n) {
+        let taker = st.taker.get(&n);
+        let (l, by) = taker.map_or((0, ""), |(l, by, _)| (*l, by.as_str()));
+        let line = l.to_string();
+        let args = [
+            ("s", s),
+            ("read", &read),
+            ("what", what),
+            ("note", note),
+            ("by", by),
+            ("l", &line),
+        ];
+        match taker {
             // A declared `consume` parameter and a `drop` carry no `.copy()`
             // menu; every other taker does, a builtin sink included. A linear
             // value is worded as `consume` even under a builtin (`close(s)`)
             // ([`NameInfo::linear`]).
-            Some((l, by, t))
+            Some((_, by, t))
                 if *t == Taker::Declared
                     || by == "`drop`"
                     || self.body.names[n as usize].linear =>
             {
-                self.refuse_at::<()>(
-                    here,
-                    format!(
-                        "`{read}` is {what} here but was already consumed by {by} on line {l}{note}"
-                    ),
-                )
+                self.say(CONSUMED, self.here, &args)
             }
-            Some((l, by, _)) if !by.is_empty() => self.refuse_at::<()>(
-                *l,
-                menu(
-                    format!(
-                        "`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} \
-                         again here"
-                    ),
-                    vec![format!("`{s}.copy()` if both sides need a value")],
-                ),
-            ),
-            _ => self.refuse_at::<()>(here, format!("`{s}` is {what} here after it was released")),
-        };
-        r.unwrap_err()
+            Some(_) if !by.is_empty() => self.say(MOVED, l, &args),
+            _ => self.say(RELEASED, self.here, &args),
+        }
     }
 
     fn hole_line(&self, st: &State, n: Name, path: &str) -> usize {
@@ -1403,98 +1518,91 @@ impl<'b> Kernel<'b> {
             .unwrap_or(self.body.names[n as usize].line)
     }
 
-    /// Every name in `names` still held is a leak at this scope's end:
-    /// refused when judging, recorded and released when placing.
-    fn scope_end(
-        &mut self,
-        st: &mut State,
-        names: &[Name],
-        exit: Exit,
-        site: NodeId,
-    ) -> Result<(), Refusal> {
-        self.ending.set(true);
+    /// Every name in `names` still held is a leak where the scope ends:
+    /// refused when judging, recorded and released when placing. Every
+    /// caller passes `names` in creation order (`bound_here`, `bound_inside`,
+    /// [`State::live`], an arm's binders).
+    fn scope_end(&mut self, st: &mut State, names: &[Name], end: End) -> Result<(), Refusal> {
+        // A block's exit records no taker; an arm's end keeps the statement's.
+        let exit = matches!(end, End::Exit(..));
+        self.ending.set(exit);
         let mark = self.missing.len();
-        let out = self.scope_end_inner(st, names, exit, site);
-        // Newest binding first, the unwind order. Every caller passes `names`
-        // in creation order (`bound_here`, `bound_inside`, [`State::live`]), so
-        // the reverse releases inner frames first and parameters last, as
-        // an owned `consume` parameter requires.
-        self.missing[mark..].reverse();
+        let out = (names.iter()).try_for_each(|n| self.name_end(st, *n, end));
+        // At a block's exit, newest binding first, the unwind order: inner
+        // frames first and parameters last, as an owned `consume` parameter
+        // requires.
+        if exit {
+            self.missing[mark..].reverse();
+        }
         self.ending.set(false);
         out
     }
 
-    fn scope_end_inner(
-        &mut self,
-        st: &mut State,
-        names: &[Name],
-        exit: Exit,
-        site: NodeId,
-    ) -> Result<(), Refusal> {
-        for n in names {
-            if self.owned(*n) && st.own(*n) == Own::Static {
-                self.gone(st, *n);
-            }
-            // A heapless name leaves its scope with no row placed.
-            if self.owned(*n) && !self.releases(*n) && st.own(*n) == Own::Held {
-                self.unbind(st, *n);
-                continue;
-            }
-            if self.owned(*n) && st.own(*n) == Own::Held {
-                // The row carries this path's holes, which may differ from
-                // the binding's set on another path.
-                if self.mode == Mode::Place {
-                    let holes = self.holes_owned(st, *n);
-                    // An exit row is keyed by the exit alone, so an exit
-                    // inside an arm would also fire on a sibling arm that took
-                    // the name (`std/html.vyrn` `keyed`). Such a name goes to
-                    // an arm-keyed table: the binder's row, or the Rule N edge.
-                    //
-                    // The edge table names a row by its spelling and releases
-                    // it whole, so a minted temporary (`std/hash.vyrn`
-                    // `sha1Hex`) or a name with holes (`graphql.vyrn`
-                    // `gqlResolve`) takes the exit row instead, as
-                    // [`Kernel::equalize`] rules one level down.
-                    let (exit, site, kind) = match self.arms.last() {
-                        Some((s, arm, binds)) if *s != NodeId::NONE && binds.contains(n) => {
-                            (Exit::Block, *s, MissingKind::ArmBinder { arm: *arm })
-                        }
-                        Some((s, arm, _))
-                            if *s != NodeId::NONE
-                                && !self.body.names[*n as usize].source.starts_with('@')
-                                && self.body.names[*n as usize].holes.is_empty() =>
-                        {
-                            (exit, *s, MissingKind::Edge { edge: *arm })
-                        }
-                        _ => (exit, site, MissingKind::Exit),
-                    };
-                    self.owe(
-                        st,
-                        Missing {
-                            exit,
-                            site,
-                            name: *n,
-                            kind,
-                            holes,
-                        },
-                    );
-                    self.gone(st, *n);
-                    continue;
-                }
-                return self.refuse(format!(
-                    "{} is still held at {} — no release is placed for it",
-                    self.info(*n),
-                    match exit {
-                        Exit::Block => "the end of its scope".to_string(),
-                        Exit::Return => "a `return`".to_string(),
-                        Exit::Try => "a `?`".to_string(),
-                        Exit::Break => "a `break`".to_string(),
-                        Exit::Continue => "a `continue`".to_string(),
-                        Exit::Scrutinee => "a scrutinee".to_string(),
-                    }
-                ));
-            }
+    fn name_end(&mut self, st: &mut State, n: Name, end: End) -> Result<(), Refusal> {
+        if !self.owned(n) {
+            return Ok(());
         }
+        if st.own(n) == Own::Static {
+            self.gone(st, n);
+        }
+        if st.own(n) != Own::Held {
+            return Ok(());
+        }
+        // A heapless name leaves its scope with no row placed.
+        if !self.releases(n) {
+            self.unbind(st, n);
+            return Ok(());
+        }
+        let row = match (self.mode, end) {
+            (Mode::Judge, _) | (_, End::Arm(NodeId::NONE, _)) => None,
+            (Mode::Place, End::Arm(site, arm)) => {
+                Some((Exit::Block, site, MissingKind::ArmBinder { arm }))
+            }
+            // An exit row is keyed by the exit alone, so an exit inside an arm
+            // would also fire on a sibling arm that took the name
+            // (`std/html.vyrn` `keyed`). Such a name goes to an arm-keyed
+            // table: the binder's row, or the Rule N edge.
+            //
+            // The edge table names a row by its spelling and releases it
+            // whole, so a minted temporary (`std/hash.vyrn` `sha1Hex`) or a
+            // name with holes (`graphql.vyrn` `gqlResolve`) takes the exit row
+            // instead, as [`Kernel::equalize`] rules one level down.
+            (Mode::Place, End::Exit(exit, site)) => Some(match self.arms.last() {
+                Some((s, arm, binds)) if *s != NodeId::NONE && binds.contains(&n) => {
+                    (Exit::Block, *s, MissingKind::ArmBinder { arm: *arm })
+                }
+                Some((s, arm, _))
+                    if *s != NodeId::NONE
+                        && !self.body.names[n as usize].source.starts_with('@')
+                        && self.body.names[n as usize].holes.is_empty() =>
+                {
+                    (exit, *s, MissingKind::Edge { edge: *arm })
+                }
+                _ => (exit, site, MissingKind::Exit),
+            }),
+        };
+        let Some((exit, site, kind)) = row else {
+            let info = self.info(n);
+            return Err(match end {
+                End::Exit(exit, _) => {
+                    let args = [("info", info.as_str()), ("exit", exit_words(exit))];
+                    self.say(HELD_AT_EXIT, self.here, &args)
+                }
+                End::Arm(..) => self.say(HELD_AT_ARM_END, self.here, &[("info", &info)]),
+            });
+        };
+        // The row carries this path's holes, which may differ from the
+        // binding's set on another path.
+        let holes = self.holes_owned(st, n);
+        let m = Missing {
+            exit,
+            site,
+            name: n,
+            kind,
+            holes,
+        };
+        self.owe(st, m);
+        self.gone(st, n);
         Ok(())
     }
 
@@ -1542,7 +1650,7 @@ impl<'b> Kernel<'b> {
             } else {
                 "released"
             };
-            return Err(self.used_after(st, n, what));
+            return Err(self.used_after(st, n, what, ""));
         }
         if st.own(n) == Own::Held {
             let state = self.holes_owned(st, n);
@@ -1551,35 +1659,16 @@ impl<'b> Kernel<'b> {
                 // A written `drop` releases by type and cannot skip a hole, so
                 // its menu names the write-back and the deletion. A placed
                 // release is worded as a release.
-                if self.by == "`drop`" {
-                    let (s, l) = (self.src(n), self.hole_line(st, n, h));
-                    return self.refuse(menu(
-                        format!(
-                            "`{s}` may not be dropped — `{s}{h}` was taken out of it on \
-                             line {l}, and `drop` releases the whole binding"
-                        ),
-                        vec![
-                            format!(
-                                "write `{s}{h}` back before the `drop`, so the binding is \
-                                 whole again"
-                            ),
-                            "delete the `drop` — the parts still here are released when the \
-                             block exits"
-                                .to_string(),
-                        ],
-                    ));
-                }
-                return self.refuse(format!(
-                    "{} is released whole although a `consume` took `{h}` out of it",
-                    self.info(n)
-                ));
+                let (l, info) = (self.hole_line(st, n, h).to_string(), self.info(n));
+                let args = [("s", self.src(n)), ("h", h), ("l", &l), ("info", &info)];
+                let f = match self.by == "`drop`" {
+                    true => DROP_WITH_HOLE,
+                    false => RELEASED_WITH_HOLE,
+                };
+                return Err(self.say(f, self.here, &args));
             }
             // Every hole the row skips must be under a place that left.
-            let left: Vec<&String> = holes
-                .iter()
-                .filter(|r| !state.iter().any(|h| covers(h, r)))
-                .collect();
-            if let Some(r) = left.first() {
+            if let Some(r) = holes.iter().find(|r| !state.iter().any(|h| covers(h, r))) {
                 match (self.mode, at) {
                     (Mode::Place, Some((exit, site))) => self.missing.push(Missing {
                         exit,
@@ -1589,10 +1678,9 @@ impl<'b> Kernel<'b> {
                         holes: state,
                     }),
                     _ => {
-                        return self.refuse(format!(
-                            "{} is released around `{r}` on a path that did not take it",
-                            self.info(n)
-                        ))
+                        let info = self.info(n);
+                        let args = [("info", info.as_str()), ("h", r)];
+                        return Err(self.say(RELEASED_AROUND, self.here, &args));
                     }
                 }
             }
@@ -1610,7 +1698,7 @@ impl<'b> Kernel<'b> {
     fn read_at(&self, st: &State, v: &Val, path: &str) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if self.owned(*n) && self.used_up(st, *n) {
-                return Err(self.used_after_at(st, *n, "used", path));
+                return Err(self.used_after(st, *n, "used", path));
             }
             self.alias_read(st, *n, "used")?;
         }
@@ -1766,26 +1854,13 @@ impl<'b> Kernel<'b> {
             }
             if self.owned(*n) {
                 if self.used_up(st, *n) {
-                    return Err(self.used_after(st, *n, "used"));
+                    return Err(self.used_after(st, *n, "used", ""));
                 }
                 if let Some((_, path)) = st.holes.iter().find(|(h, _)| h == n) {
-                    let s = self.src(*n);
-                    let (here, l) = (self.here, self.hole_line(st, *n, path));
-                    return self.refuse_at(
-                        l,
-                        menu(
-                            format!(
-                                "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and \
-                                 `{s}` is used as a whole here, with the hole still in it"
-                            ),
-                            vec![
-                                format!(
-                                    "`{s}{path}.copy()` on line {l} if `{s}` is still needed whole"
-                                ),
-                                format!("write `{s}{path}` back before this line"),
-                            ],
-                        ),
-                    );
+                    let l = self.hole_line(st, *n, path);
+                    let line = l.to_string();
+                    let args = [("s", self.src(*n)), ("path", path), ("l", &line)];
+                    return Err(self.say(WHOLE_WITH_HOLE, l, &args));
                 }
                 if self.moves(*n, consume) {
                     self.gone(st, *n);
@@ -1808,20 +1883,10 @@ impl<'b> Kernel<'b> {
                 .iter()
                 .find(|(h, hp)| *h == n && overlaps(hp, &path))
             {
-                let s = self.src(n);
-                let (here, l) = (self.here, self.hole_line(st, n, h));
                 // Both lines name the storage that moved, not the longer path
-                // read, as in `used_after_at` and `movecheck::check_use`.
-                return self.refuse_at(
-                    l,
-                    menu(
-                        format!(
-                            "`{s}{h}` was moved here into `consume`\n\
-                             line {here}: ... and `{s}{h}` is used again here"
-                        ),
-                        vec![format!("`{s}{h}.copy()` if both sides need a value")],
-                    ),
-                );
+                // read, as in `used_after` and `movecheck::check_use`.
+                let args = [("s", self.src(n)), ("h", h)];
+                return Err(self.say(READ_IN_HOLE, self.hole_line(st, n, h), &args));
             }
         }
         Ok(())
@@ -1912,15 +1977,8 @@ impl<'b> Kernel<'b> {
                     .strip_prefix(hp.as_str())
                     .is_some_and(|r| r.starts_with('.'))
         }) {
-            let s = self.src(n);
-            let (here, l) = (self.here, self.hole_line(st, n, h));
-            return self.refuse_at(
-                l,
-                format!(
-                    "`{s}{h}` was moved here into `consume`\nline {here}: ... and `{s}{path}` \
-                     is written here, under the hole"
-                ),
-            );
+            let args = [("s", self.src(n)), ("h", h), ("path", &path)];
+            return Err(self.say(STORE_UNDER_HOLE, self.hole_line(st, n, h), &args));
         }
         st.holes.retain(|(h, hp)| !(*h == n && overlaps(hp, &path)));
         Ok(())
@@ -2041,7 +2099,7 @@ impl<'b> Kernel<'b> {
             self.also(one);
         }
         if !st.ended {
-            self.scope_end(st, &bound_here, Exit::Block, site)?;
+            self.scope_end(st, &bound_here, End::Exit(Exit::Block, site))?;
             // `scope_end` left each binding gone; `stmt` panics on a row that
             // names one before a `let` binds it again.
             for n in &bound_here {
@@ -2311,17 +2369,15 @@ impl<'b> Kernel<'b> {
                             if *old == Old::Pending && self.mode == Mode::Place {
                                 self.owe_store(site, holes);
                             } else {
-                                return self.refuse(format!(
-                                    "{} is overwritten while still held — the old value is never released",
-                                    self.info(*n)
-                                ));
+                                let info = self.info(*n);
+                                let args = [("info", info.as_str())];
+                                return Err(self.say(OVERWRITTEN, self.here, &args));
                             }
                         }
                         if st.own(*n) == Own::Gone && *old == Old::Released {
-                            return self.refuse(format!(
-                                "{} is released before a store although it holds nothing",
-                                self.info(*n)
-                            ));
+                            let info = self.info(*n);
+                            let args = [("info", info.as_str())];
+                            return Err(self.say(RELEASED_BEFORE_STORE, self.here, &args));
                         }
                         st.set_own(*n, if fresh_static { Own::Static } else { Own::Held });
                         // The new value is whole.
@@ -2433,7 +2489,7 @@ impl<'b> Kernel<'b> {
                             a.set_own(*b, Own::Held);
                         }
                     }
-                    // The binders' scope is the arm: `binders_end` checks them.
+                    // The binders' scope is the arm: its `scope_end` checks them.
                     if *carries {
                         self.arms.push((*site, *index, binds.clone()));
                     }
@@ -2443,7 +2499,7 @@ impl<'b> Kernel<'b> {
                     }
                     walked?;
                     if !a.ended {
-                        self.binders_end(&mut a, binds, *site, *index)?;
+                        self.scope_end(&mut a, binds, End::Arm(*site, *index))?;
                     }
                     outs.push(a);
                 }
@@ -2456,46 +2512,43 @@ impl<'b> Kernel<'b> {
                 self.stmts_at(body, st, *site)?;
             }
             St::Loop { body, .. } => {
-                self.loops.push(LoopCtx {
-                    entry: st.clone(),
-                    breaks: Vec::new(),
-                    continues: Vec::new(),
-                    bound_inside: Vec::new(),
-                });
-                let mut a = st.clone();
-                let mark = self.refusals.len();
-                self.stmts(body, &mut a)?;
-                let mut ctx = self.loops.pop().unwrap();
-                // If the body replaced a literal, the second turn starts from
-                // what the first left, widened by every back edge including
-                // each `continue`, and the body is judged again from it.
-                let mut wider = false;
-                if !a.ended {
-                    wider |= self.widen(&mut ctx.entry, &a);
-                }
-                for c in &ctx.continues.clone() {
-                    wider |= self.widen(&mut ctx.entry, c);
-                }
-                if wider {
+                // The body is walked from the loop's entry, then again from
+                // the entry widened by every back edge (the body's end and
+                // each `continue`), until a walk widens nothing. Each walk's
+                // refusals replace the last walk's, or each would be said
+                // twice. A widen that changes the entry turns a `Static` name
+                // `Held` or ends an alias, so there are at most twice as many
+                // walks as the body has names, plus one.
+                let (mut entry, mark) = (st.clone(), self.refusals.len());
+                let (mut a, ctx) = loop {
+                    self.refusals.truncate(mark);
+                    let mut a = entry.clone();
                     self.loops.push(LoopCtx {
-                        entry: ctx.entry.clone(),
+                        entry,
                         breaks: Vec::new(),
                         continues: Vec::new(),
                         bound_inside: Vec::new(),
                     });
-                    a = ctx.entry.clone();
-                    // This walk's refusals replace the first walk's, or each
-                    // would be said twice.
-                    self.refusals.truncate(mark);
                     self.stmts(body, &mut a)?;
-                    ctx = self.loops.pop().unwrap();
-                }
+                    let mut ctx = self.loops.pop().expect("the walk's own loop");
+                    let back = (!a.ended).then_some(&a);
+                    let mut wider = false;
+                    for at in back.into_iter().chain(&ctx.continues) {
+                        wider |= ctx.entry.widen(at);
+                    }
+                    if !wider {
+                        break (a, ctx);
+                    }
+                    entry = ctx.entry;
+                };
                 // The body's end and every `continue` must find the entry state.
                 for c in &ctx.continues {
-                    self.same_outside(c, &ctx.entry, &ctx.bound_inside)?;
+                    self.back(c, &ctx)?;
                 }
                 if !a.ended {
-                    self.back_edge(&mut a, &ctx)?;
+                    let end = End::Exit(Exit::Block, NodeId::NONE);
+                    self.scope_end(&mut a, &ctx.bound_inside, end)?;
+                    self.back(&a, &ctx)?;
                 }
                 if ctx.breaks.is_empty() {
                     st.ended = true;
@@ -2507,7 +2560,7 @@ impl<'b> Kernel<'b> {
             St::Break { .. } | St::Continue { .. } if self.loops.is_empty() => st.ended = true,
             St::Break { site, .. } => {
                 let inside = self.loops.last().expect("a loop").bound_inside.clone();
-                self.scope_end(st, &inside, Exit::Break, *site)?;
+                self.scope_end(st, &inside, End::Exit(Exit::Break, *site))?;
                 self.loops
                     .last_mut()
                     .expect("a loop")
@@ -2517,7 +2570,7 @@ impl<'b> Kernel<'b> {
             }
             St::Continue { site, .. } => {
                 let inside = self.loops.last().expect("a loop").bound_inside.clone();
-                self.scope_end(st, &inside, Exit::Continue, *site)?;
+                self.scope_end(st, &inside, End::Exit(Exit::Continue, *site))?;
                 // Judged by the loop, after it widens its entry.
                 self.loops
                     .last_mut()
@@ -2538,55 +2591,12 @@ impl<'b> Kernel<'b> {
                 }
                 let exit = if *is_try { Exit::Try } else { Exit::Return };
                 let live = st.live();
-                self.scope_end(st, &live, exit, *site)?;
+                self.scope_end(st, &live, End::Exit(exit, *site))?;
                 st.ended = true;
             }
             St::Do { rhs, .. } => self.rhs(st, rhs)?,
             St::Trap => st.ended = true,
             St::Check(_) => {}
-        }
-        Ok(())
-    }
-
-    /// Every arm binder still held at the arm's end: refused when judging,
-    /// recorded against the plan's arm table when placing.
-    fn binders_end(
-        &mut self,
-        st: &mut State,
-        binds: &[Name],
-        site: NodeId,
-        arm: u32,
-    ) -> Result<(), Refusal> {
-        for n in binds {
-            if self.owned(*n) && st.own(*n) == Own::Static {
-                self.gone(st, *n);
-            }
-            if self.owned(*n) && !self.releases(*n) && st.own(*n) == Own::Held {
-                self.unbind(st, *n);
-                continue;
-            }
-            if self.owned(*n) && st.own(*n) == Own::Held {
-                // The arm row carries the binder's holes.
-                if self.mode == Mode::Place && site != NodeId::NONE {
-                    let holes = self.holes_owned(st, *n);
-                    self.owe(
-                        st,
-                        Missing {
-                            exit: Exit::Block,
-                            site,
-                            name: *n,
-                            kind: MissingKind::ArmBinder { arm },
-                            holes,
-                        },
-                    );
-                    self.gone(st, *n);
-                    continue;
-                }
-                return self.refuse(format!(
-                    "{} is still held where its arm ends — no release is placed for it",
-                    self.info(*n)
-                ));
-            }
         }
         Ok(())
     }
@@ -2687,108 +2697,71 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    /// Widens `entry` by `at`: `Static` to `Held`, and ended aliases stay
-    /// ended. Returns whether anything changed.
-    fn widen(&self, entry: &mut State, at: &State) -> bool {
-        let mut changed = false;
-        for (n, o) in entry.held.iter_mut() {
-            if *o == Own::Static && at.own(*n) == Own::Held {
-                *o = Own::Held;
-                changed = true;
-            }
-        }
-        for (n, d) in &at.dead {
-            if !entry.dead.contains_key(n) {
-                entry.dead.insert(*n, d.clone());
-                changed = true;
-            }
-        }
-        changed
+    /// Refuses a name bound outside the loop `ctx` that the back edge `at`
+    /// does not have as the loop's entry has it.
+    fn back(&self, at: &State, ctx: &LoopCtx) -> Result<(), Refusal> {
+        let outside = at.named(&ctx.entry).into_iter();
+        (outside.filter(|n| !ctx.bound_inside.contains(n)))
+            .try_for_each(|n| self.agree(Point::Back, at, &ctx.entry, n))
     }
 
-    fn back_edge(&mut self, at: &mut State, ctx: &LoopCtx) -> Result<(), Refusal> {
-        self.scope_end(at, &ctx.bound_inside, Exit::Block, NodeId::NONE)?;
-        self.same_outside(at, &ctx.entry, &ctx.bound_inside)
-    }
-
-    /// Every owned name bound outside the loop must be as it was at entry.
-    /// A back edge `Static` where the widened entry is `Held` owes less and
-    /// agrees.
-    fn same_outside(&self, at: &State, entry: &State, inside: &[Name]) -> Result<(), Refusal> {
-        for n in at.named(entry) {
-            if !self.owned(n) || inside.contains(&n) {
-                continue;
-            }
-            // A heapless name differs only if a turn consumed it; a turn that
-            // bound it owes the next turn nothing.
-            if !self.releases(n) {
-                if at.own(n) == Own::Gone && entry.own(n) != Own::Gone {
-                    let s = self.src(n);
-                    return match at.taker.get(&n) {
-                        Some((l, by, _)) if !by.is_empty() => self.refuse_at(
-                            *l,
-                            format!(
-                                "`{s}` is consumed by {by} inside a loop, so it would be used \
-                                 again on the next iteration"
-                            ),
-                        ),
-                        _ => Ok(()),
-                    };
-                }
-                continue;
-            }
-            let within = at.own(n) == Own::Static && entry.own(n) == Own::Held;
-            if at.own(n) != entry.own(n) && !within {
-                if at.own(n) == Own::Gone {
-                    let s = self.src(n);
-                    return match at.taker.get(&n) {
-                        Some((l, by, _)) if !by.is_empty() => self.refuse_at(
-                            *l,
-                            format!(
-                                "`{s}` is consumed by {by} inside a loop, so it would be used \
-                                 again on the next iteration"
-                            ),
-                        ),
-                        _ => self.refuse(format!(
-                            "`{s}` is released inside a loop, so it would be used again on \
-                             the next iteration"
-                        )),
-                    };
-                }
-                return self.refuse(format!(
-                    "{} is bound inside a loop that would use it again on the next turn",
-                    self.info(n)
-                ));
-            }
-            // A hole a turn made would be taken again next turn. Only a prefix
-            // `consume` makes a hole, so the taker is always `consume`.
-            let (before, after) = (self.holes_of(entry, n), self.holes_of(at, n));
-            if before != after {
-                let s = self.src(n);
-                let path = after
-                    .iter()
-                    .find(|h| !before.contains(*h))
-                    .map(|h| h.replace(".[]", "[..]"));
-                return match path {
-                    Some(path) => self.refuse_at(
-                        self.hole_line(at, n, &path),
-                        menu(
-                            format!(
-                                "`{s}{path}` is consumed by `consume` inside a loop, so it \
-                                 would be used again on the next iteration"
-                            ),
-                            vec![format!("`{s}{path}.copy()` if both sides need a value")],
-                        ),
-                    ),
-                    None => self.refuse(format!(
-                        "{} has a `consume` hole at a loop's back edge it did not have at \
-                         entry",
-                        self.info(n)
-                    )),
-                };
-            }
+    /// Refuses the first way the name `n` differs between `a` and `b` that
+    /// `point` rules out. At a join, `a` and `b` are two live edges, and a
+    /// heapless name may differ: a later use of it is refused instead. At a
+    /// back edge, `a` is the back edge and `b` the widened entry, and a back
+    /// edge `Static` where the entry is `Held` owes less and agrees.
+    fn agree(&self, point: Point, a: &State, b: &State, n: Name) -> Result<(), Refusal> {
+        if !self.owned(n) {
+            return Ok(());
         }
-        Ok(())
+        let (oa, ob, heap) = (a.own(n), b.own(n), self.releases(n));
+        // The state that took `n` where the other still has it.
+        let took = match point {
+            Point::Join if heap && (oa == Own::Gone) != (ob == Own::Gone) => {
+                Some(if oa == Own::Gone { a } else { b })
+            }
+            Point::Back if oa == Own::Gone && ob != Own::Gone => Some(a),
+            _ => None,
+        };
+        let s = self.src(n);
+        if let Some(g) = took {
+            return Err(match (g.taker.get(&n), point) {
+                (Some((l, by, _)), _) if !by.is_empty() => {
+                    let f = match point {
+                        Point::Join => JOIN_MOVED,
+                        Point::Back => LOOP_MOVED,
+                    };
+                    self.say(f, *l, &[("s", s), ("by", by)])
+                }
+                (_, Point::Join) => self.say(JOIN_RELEASED, self.here, &[("s", s)]),
+                (_, Point::Back) if heap => self.say(LOOP_RELEASED, self.here, &[("s", s)]),
+                _ => return Ok(()),
+            });
+        }
+        let info = || self.info(n);
+        match point {
+            _ if !heap => return Ok(()),
+            Point::Join if oa == Own::Gone => return Ok(()),
+            Point::Back if oa != ob && !(oa == Own::Static && ob == Own::Held) => {
+                return Err(self.say(LOOP_BOUND, self.here, &[("info", &info())]));
+            }
+            _ => {}
+        }
+        let (ha, hb) = (self.holes_of(a, n), self.holes_of(b, n));
+        if ha == hb {
+            return Ok(());
+        }
+        // A hole a turn made would be taken again next turn. Only a prefix
+        // `consume` makes a hole, so the taker is always `consume`.
+        let made = ha.iter().find(|h| !hb.contains(h));
+        Err(match (point, made.map(|h| h.replace(".[]", "[..]"))) {
+            (Point::Join, _) => self.say(JOIN_HOLE, self.here, &[("info", &info())]),
+            (Point::Back, Some(h)) => {
+                let args = [("s", s), ("h", h.as_str())];
+                self.say(LOOP_HOLE, self.hole_line(a, n, &h), &args)
+            }
+            (Point::Back, None) => self.say(LOOP_HOLE_AT, self.here, &[("info", &info())]),
+        })
     }
 
     fn holes_of<'s>(&self, st: &'s State, n: Name) -> Vec<&'s str> {
@@ -2799,7 +2772,11 @@ impl<'b> Kernel<'b> {
             .collect()
     }
 
-    /// The state after a join: every edge that reaches it agrees on every name.
+    /// The state after a join, where every live edge agrees on every name
+    /// ([`Kernel::agree`]). An alias ended or bound on any edge is so after
+    /// the join. A heap name is `Held` unless every edge has it `Static`. A
+    /// heapless name is gone if an edge took it, held if an edge holds it,
+    /// and has every edge's holes.
     fn join(&self, edges: &[State]) -> Result<State, Refusal> {
         let live: Vec<&State> = edges.iter().filter(|s| !s.ended).collect();
         let Some(first) = live.first() else {
@@ -2810,7 +2787,6 @@ impl<'b> Kernel<'b> {
         };
         let mut joined = (*first).clone();
         for other in &live[1..] {
-            // An alias ended or bound on any edge is so after the join.
             for (n, d) in &other.dead {
                 joined.dead.entry(*n).or_insert_with(|| d.clone());
             }
@@ -2818,62 +2794,36 @@ impl<'b> Kernel<'b> {
                 joined.alias.entry(*n).or_insert_with(|| a.clone());
             }
             for n in first.named(other) {
+                self.agree(Point::Join, first, other, n)?;
                 if !self.owned(n) {
                     continue;
                 }
-                // A heapless name needs no release, so nothing is refused
-                // here: consumed on one edge is consumed after the join, and
-                // a later use is refused instead.
-                if !self.releases(n) {
-                    let taken = live
-                        .iter()
-                        .find(|s| s.own(n) == Own::Gone && s.taker.contains_key(&n));
-                    match taken {
-                        Some(s) => {
-                            joined.set_own(n, Own::Gone);
-                            joined.taker.insert(n, s.taker[&n].clone());
-                        }
-                        // An edge that never bound it does not count.
-                        None if live.iter().any(|s| s.own(n) != Own::Gone) => {
-                            joined.set_own(n, Own::Held);
-                        }
-                        None => {}
+                if self.releases(n) {
+                    if first.own(n) != other.own(n) {
+                        joined.set_own(n, Own::Held);
                     }
-                    for h in self.holes_owned(other, n) {
-                        if !joined.holes.iter().any(|(m, p)| *m == n && *p == h) {
-                            joined.holes.push((n, h));
-                        }
-                    }
-                    joined.holes.sort();
                     continue;
                 }
-                let (a, b) = (first.own(n), other.own(n));
-                if (a == Own::Gone) != (b == Own::Gone) {
-                    let gone = if a == Own::Gone { first } else { other };
-                    let s = self.src(n);
-                    return match gone.taker.get(&n) {
-                        Some((l, by, _)) if !by.is_empty() => self.refuse_at(
-                            *l,
-                            format!(
-                                "`{s}` was moved here into {by} on one path and not on the \
-                                 other, and nothing releases it where the paths join"
-                            ),
-                        ),
-                        _ => self.refuse(format!(
-                            "`{s}` is released on one path and still held on another where \
-                             the paths join"
-                        )),
-                    };
+                let taken = live
+                    .iter()
+                    .find(|s| s.own(n) == Own::Gone && s.taker.contains_key(&n));
+                match taken {
+                    Some(s) => {
+                        joined.set_own(n, Own::Gone);
+                        joined.taker.insert(n, s.taker[&n].clone());
+                    }
+                    // An edge that never bound it does not count.
+                    None if live.iter().any(|s| s.own(n) != Own::Gone) => {
+                        joined.set_own(n, Own::Held);
+                    }
+                    None => {}
                 }
-                if a != b {
-                    joined.set_own(n, Own::Held);
+                for h in self.holes_owned(other, n) {
+                    if !joined.holes.iter().any(|(m, p)| *m == n && *p == h) {
+                        joined.holes.push((n, h));
+                    }
                 }
-                if a != Own::Gone && self.holes_of(first, n) != self.holes_of(other, n) {
-                    return self.refuse(format!(
-                        "{} has a `consume` hole on one edge of a join and not on another",
-                        self.info(n)
-                    ));
-                }
+                joined.holes.sort();
             }
         }
         Ok(joined)

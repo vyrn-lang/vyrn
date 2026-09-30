@@ -153,6 +153,7 @@ pull request.
 - A host enters the pipeline through `vyrn_lower::{load, load_warned, check_and_synthesize}`. The frontend's `check_and_synthesize` types and synthesizes and judges nothing; a host that calls it alone skips every ownership and floor refusal.
 - The core binds every intermediate value and makes every memory access a place. A field read is one load, never a record copy; the copy made wasm 13x slower than native.
 - The kernel re-checks every body on every compile with three judgments: ownership, effects and types.
+- The ownership judgment is one forward solver over the structured core, a join at each merge and a widen to a fixpoint at each loop, and every refusal is a rule row judged at a use, a scope end, a join or a back edge. No rule gets its own walk.
 - A whole-program analysis over the call graph runs on `fixpoint::solve` in `vyrn-lower`: components bottom-up, a join the analysis supplies, widening by round number. No analysis writes its own fixpoint loop.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
 - What one analysis decided about a program (the kernel's placement, the checker's record) lives on that program's `own::Ownership`, and a pass reads the one it is handed. A thread-local keyed by a program's address answered for another program.
