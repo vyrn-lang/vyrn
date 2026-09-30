@@ -512,6 +512,7 @@ pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
 
 /// A `derive` site: generator `g` writes an entry for `ty`, and the call at
 /// `line` calls it as `entry`, a [`Type::Fn`](crate::ast::Type::Fn).
+#[derive(Clone)]
 pub struct Site {
     pub g: String,
     pub ty: crate::ast::Type,

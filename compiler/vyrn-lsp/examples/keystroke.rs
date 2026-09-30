@@ -7,10 +7,15 @@
 //! cargo run --release --manifest-path vyrn-lsp/Cargo.toml --example keystroke -- <file.vyrn> ...
 //! ```
 //!
-//! Each edit appends a distinct comment to the root, so the root is checked and
-//! judged again while every other module is reused, as on a keystroke. Prints
-//! the best and the median of `VYRN_RUNS` edits (5 by default) after three
-//! warm-up edits. `VYRN_BUILD_PROFILE=1` adds the phase table of one more.
+//! `VYRN_EDIT` picks the edit, each distinct per run:
+//! - `comment` (the default) appends a comment to the root;
+//! - `body` adds a `let` after the `{` of the root's last `fn` line;
+//! - `sig` toggles `mut` on the root function other than `main` whose name the
+//!   root spells most often, a signature edit every reader of it sees.
+//!
+//! No edit moves a line. Prints the best and the median of `VYRN_RUNS` edits
+//! (5 by default) after three warm-up edits. `VYRN_BUILD_PROFILE=1` adds the
+//! phase table of one more.
 
 use vyrn_frontend::loader::{DiskResolver, LoadOptions, ModuleResolver};
 use vyrn_frontend::manifest::{pinned_blob, Lock};
@@ -54,6 +59,7 @@ fn main() {
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
             vyrn_frontend::movecheck::reuse_judgments();
+            vyrn_frontend::checker::record_reads();
             for path in files {
                 probe(&path, runs);
             }
@@ -93,11 +99,11 @@ fn probe(path: &str, runs: usize) {
         )
     };
     for i in 0..3 {
-        analyze(&format!("{src}\n// warm {i}\n"));
+        analyze(&edit(&src, i));
     }
     let mut ms: Vec<f64> = (0..runs)
         .map(|i| {
-            let edited = format!("{src}\n// keystroke {i}\n");
+            let edited = edit(&src, i + 3);
             let t = std::time::Instant::now();
             analyze(&edited);
             t.elapsed().as_secs_f64() * 1000.0
@@ -105,11 +111,13 @@ fn probe(path: &str, runs: usize) {
         .collect();
     ms.sort_by(|a, b| a.total_cmp(b));
     let _ = vyrn_frontend::prof::phase_table();
-    analyze(&format!("{src}\n// profiled\n"));
+    let _ = vyrn_frontend::checker::recheck::tally();
+    analyze(&edit(&src, runs + 3));
+    let (checked, replayed) = vyrn_frontend::checker::recheck::tally();
     eprint!("{}", vyrn_frontend::prof::phase_table());
     let a = analyze(&src);
     println!(
-        "best {:.1} ms  median {:.1} ms  {} diagnostics, {} memory notes  {path}",
+        "best {:.1} ms  median {:.1} ms  {} diagnostics, {} memory notes,          {checked} bodies checked, {replayed} replayed  {path}",
         ms[0],
         ms[ms.len() / 2],
         a.diagnostics.len(),
@@ -118,4 +126,32 @@ fn probe(path: &str, runs: usize) {
     for d in a.diagnostics.iter().take(3) {
         println!("      {}:{} {}", d.line, d.col, d.message);
     }
+}
+
+/// The root after edit `i` of the kind `VYRN_EDIT` names.
+fn edit(src: &str, i: usize) -> String {
+    match std::env::var("VYRN_EDIT").as_deref() {
+        Ok("body") => {
+            let at = src.rfind("\nfn ").expect("the root declares a function") + 1;
+            let brace = at + src[at..].find("{\n").expect("the body opens on its line");
+            format!("{} let _k{i} = {i}{}", &src[..=brace], &src[brace + 1..])
+        }
+        Ok("sig") if i % 2 == 0 => {
+            let name = most_read(src);
+            src.replacen(&format!("\nfn {name}("), &format!("\nmut fn {name}("), 1)
+        }
+        Ok("sig") => src.to_string(),
+        _ => format!("{src}\n// keystroke {i}\n"),
+    }
+}
+
+/// The root function other than `main` whose name the root spells most often.
+fn most_read(src: &str) -> &str {
+    let names = src
+        .split("\nfn ")
+        .skip(1)
+        .filter_map(|s| s.split('(').next());
+    (names.filter(|n| *n != "main"))
+        .max_by_key(|n| src.matches(&format!("{n}(")).count())
+        .expect("the root declares a function other than `main`")
 }

@@ -3411,12 +3411,12 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     let mut extra_globals = Vec::new();
     let mut module_hashes = BTreeMap::new();
     for m in modules {
-        if let Some(h) = m.hash {
-            module_hashes.insert(m.key.clone(), h);
-        }
         if m.key == root_key {
             merged = Some(m.program);
         } else {
+            if let Some(h) = m.hash {
+                module_hashes.insert(m.key.clone(), h);
+            }
             let p = m.program;
             extra_types.extend(p.type_decls.into_iter().filter(|t| !is_injected(t)));
             extra_fns.extend(p.functions);
