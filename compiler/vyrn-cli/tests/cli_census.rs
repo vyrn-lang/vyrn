@@ -256,16 +256,11 @@ fn the_structural_census_matches_its_pin() {
         )
     })
     .collect();
-    let want = vec![
-        ("a command's own path", 4664, 167),
-        ("a rule another pass also states", 0, 0),
-        ("a path only a deleted route reached", 0, 0),
-        ("machinery with a copy elsewhere", 0, 0),
-        ("the WASI host and the wasmtime embedding", 1162, 0),
-        ("shared machinery", 1261, 19),
-        ("tests", 794, 2),
-    ];
-    assert_eq!(got, want, "the structural census has moved");
+    common::pin(
+        "cli-census",
+        "kind\tlines\tsentences",
+        got.iter().map(|(k, n, m)| format!("{k}\t{n}\t{m}")),
+    );
     assert_eq!(
         got.iter().map(|(_, n, _)| n).sum::<usize>(),
         total,
@@ -304,34 +299,11 @@ fn per_command() -> Vec<(&'static str, usize, usize)> {
 /// is made.
 #[test]
 fn the_per_command_census_matches_its_pin() {
-    let want = vec![
-        ("why", 656, 19),
-        ("bench", 594, 17),
-        ("serve, dev", 461, 7),
-        ("doc", 370, 13),
-        ("routes", 310, 4),
-        ("build", 260, 17),
-        ("fmt", 248, 13),
-        ("(dispatch)", 228, 12),
-        ("dev", 222, 18),
-        ("deps", 210, 5),
-        ("update", 195, 7),
-        ("fix", 194, 1),
-        ("test, bench", 134, 2),
-        ("build, bench", 127, 0),
-        ("serve", 87, 8),
-        ("add", 70, 6),
-        ("vendor", 66, 6),
-        ("run", 61, 3),
-        ("emit-gen", 57, 3),
-        ("test", 46, 2),
-        ("new", 41, 4),
-        ("(global)", 27, 0),
-    ];
-    assert_eq!(per_command(), want, "the per-command census has moved");
-    let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
-    assert_eq!(
-        total, 4664,
-        "the per-command tile does not add up to its kind"
+    common::pin(
+        "cli-commands",
+        "command\tlines\tsentences",
+        per_command()
+            .iter()
+            .map(|(c, n, m)| format!("{c}\t{n}\t{m}")),
     );
 }
