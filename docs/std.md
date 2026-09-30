@@ -133,4 +133,5 @@ Each of these is a library of `gen fn`s. The compiler knows none of their domain
 | `std/diag` | `report` and `reportHere`: a generator emits a diagnostic at a file and line it read. |
 | `std/hints` | Per-project rule levels and per-line waivers for checking libraries. |
 | `std/vyx-hints` | Accessibility, security and performance rules for `.vyx` files, reported through `std/hints`. |
+| `std/imports` | `importBlock`: the `import` lines of a generated module, one per module that declares a type it uses. |
 | `std/symbolmap` | The symbol map a generated module exports: each symbol's source declaration, as JSON for tools. |
