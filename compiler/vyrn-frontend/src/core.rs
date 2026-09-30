@@ -825,6 +825,25 @@ impl St {
 }
 
 impl Rhs {
+    /// The record name this call checks against its type's `where` rule:
+    /// `T(read c)` for a name `c` of type `T`, the call the core writes after
+    /// a record literal and after a group of stores into a record's fields.
+    pub fn checks_rule(&self, names: &[NameInfo]) -> Option<Name> {
+        let Rhs::Call {
+            callee,
+            args,
+            kind: Callee::Named,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let [(Arg::Val(Val::Name(c)), Capability::Read)] = args.as_slice() else {
+            return None;
+        };
+        (names[c.index()].ty == Type::Named(callee.clone())).then_some(*c)
+    }
+
     fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
         match self {
             Rhs::Val(v) => f(v, Use::Read),
@@ -1095,6 +1114,7 @@ impl Body {
                 format!("({}, {}) != (min{bits}, -1)", self.val(n), self.val(d))
             }
             G::Shift(k, bits) => format!("{} in 0..{bits}", self.val(k)),
+            G::Rule(n) => format!("{} holds its rule", self.spell(*n)),
         };
         let at = c.site;
         let word = match c.verdict {

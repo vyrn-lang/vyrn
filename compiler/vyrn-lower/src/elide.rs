@@ -50,6 +50,7 @@ pub fn decide(body: &mut Body, decls: &HashMap<String, TypeDecl>) {
         record: true,
         memo: HashMap::new(),
         relevant: relevant(body, &stmts),
+        open: BTreeSet::new(),
     };
     let mut st = State::default();
     for p in &body.params {
@@ -84,6 +85,10 @@ struct Walk<'a> {
     /// Per name, whether a check's goal can depend on it ([`relevant`]); the
     /// walk states nothing about any other name.
     relevant: Vec<bool>,
+    /// The records a store into a field has left unchecked: from the store to
+    /// the record's rule check ([`Guard::Rule`]), each field's length is a
+    /// term of its own ([`Walk::col`]).
+    open: BTreeSet<Name>,
 }
 
 /// What a primitive row states about its result.
@@ -115,47 +120,82 @@ impl Walk<'_> {
     }
 
     /// The length of `p`: an array or String name, or such a field of a record
-    /// name, named by its class under the record's `where` rule
-    /// ([`Term::Col`]).
+    /// name ([`Walk::col`]).
     fn length(&self, p: &Place) -> Option<Term> {
+        match p {
+            Place::Name(b) if matches!(self.kind(*b), Kind::Seq) => Some(Term::Len(*b)),
+            Place::Field(r, f) => {
+                let Place::Name(r) = &**r else { return None };
+                let (own, least) = self.col(*r, f)?;
+                let at = if self.open.contains(r) { own } else { least };
+                Some(Term::Col(*r, at))
+            }
+            _ => None,
+        }
+    }
+
+    /// The array or String field `f` of record name `r`, by its own index and
+    /// by the least index among the fields the record's `where` rule states of
+    /// equal length. The rule holds wherever the record is checked, so one
+    /// term is the length of every field of a class ([`Term::Col`]).
+    fn col(&self, r: Name, f: &str) -> Option<(u32, u32)> {
         let seq = |t: &Type| {
             matches!(
                 vyrn_frontend::types::resolve(t, self.decls),
                 Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
             )
         };
-        match p {
-            Place::Name(b) if matches!(self.kind(*b), Kind::Seq) => Some(Term::Len(*b)),
-            Place::Field(r, f) => {
-                let Place::Name(r) = &**r else { return None };
-                let ty = &self.body.names[r.index()].ty;
-                let fields = vyrn_frontend::types::record_fields(ty, self.decls)?;
-                let at = |g: &str| fields.iter().position(|x| x.name == g && seq(&x.ty));
-                let mut class = BTreeSet::from([at(f)?]);
-                let pairs = match ty {
-                    Type::Named(n) => self.decls.get(n).and_then(|d| d.predicate.as_ref()),
-                    _ => None,
-                }
-                .map(vyrn_frontend::types::predicate_equal_lengths)
-                .unwrap_or_default();
-                // Each round adds a field or stops.
-                loop {
-                    let before = class.len();
-                    for (a, b) in &pairs {
-                        if let (Some(a), Some(b)) = (at(a), at(b)) {
-                            if class.contains(&a) || class.contains(&b) {
-                                class.extend([a, b]);
-                            }
-                        }
-                    }
-                    if class.len() == before {
-                        break;
+        let ty = &self.body.names[r.index()].ty;
+        let fields = vyrn_frontend::types::record_fields(ty, self.decls)?;
+        let at = |g: &str| fields.iter().position(|x| x.name == g && seq(&x.ty));
+        let own = at(f)?;
+        let mut class = BTreeSet::from([own]);
+        let pairs = self
+            .rule(r)
+            .map(vyrn_frontend::types::predicate_equal_lengths)
+            .unwrap_or_default();
+        // Each round adds a field or stops.
+        loop {
+            let before = class.len();
+            for (a, b) in &pairs {
+                if let (Some(a), Some(b)) = (at(a), at(b)) {
+                    if class.contains(&a) || class.contains(&b) {
+                        class.extend([a, b]);
                     }
                 }
-                let least = *class.first().expect("holds the field itself");
-                Some(Term::Col(*r, u32::try_from(least).ok()?))
             }
+            if class.len() == before {
+                break;
+            }
+        }
+        let least = *class.first().expect("holds the field itself");
+        Some((u32::try_from(own).ok()?, u32::try_from(least).ok()?))
+    }
+
+    fn rule(&self, r: Name) -> Option<&vyrn_frontend::ast::Expr> {
+        match &self.body.names[r.index()].ty {
+            Type::Named(n) => self.decls.get(n)?.predicate.as_ref(),
             _ => None,
+        }
+    }
+
+    /// Tracks the fields of `r` apart from a row that may change the length
+    /// of one ([`Walk::open`]). The rule held until then, so each field's own
+    /// term starts equal to its class's.
+    fn open(&mut self, st: &mut State, p: &Place) {
+        let Place::Field(r, _) = p else { return };
+        let Place::Name(r) = &**r else { return };
+        if self.rule(*r).is_none() || !self.open.insert(*r) {
+            return;
+        }
+        let ty = &self.body.names[r.index()].ty;
+        let fields = vyrn_frontend::types::record_fields(ty, self.decls).unwrap_or_default();
+        for f in &fields {
+            if let Some((own, least)) = self.col(*r, &f.name).filter(|(o, l)| o != l) {
+                let t = Term::Col(*r, own);
+                st.forget(t);
+                st.assume_eq(&Lin::of(t), &Lin::of(Term::Col(*r, least)));
+            }
         }
     }
 
@@ -257,11 +297,31 @@ impl Walk<'_> {
             }
             St::Do { rhs, .. } => {
                 self.effects(&mut st, rhs);
+                // The rule holds again after its check.
+                if let Some(r) = rhs.checks_rule(&self.body.names) {
+                    self.open.remove(&r);
+                }
                 st
             }
             St::Store { place, value, .. } => {
-                if let Some(n) = resized_by_store(place) {
-                    st.kill(n);
+                self.open(&mut st, place);
+                match (&*place, self.length(place)) {
+                    // The field takes the stored array's length.
+                    (Place::Field(..), Some(t)) => {
+                        st.forget(t);
+                        let stored = match value {
+                            Val::Name(v) => self.length(&Place::Name(*v)),
+                            Val::Lit(_) => None,
+                        };
+                        if let Some(l) = stored {
+                            st.define(t, &Lin::of(l));
+                        }
+                    }
+                    _ => {
+                        if let Some(n) = resized_by_store(place) {
+                            st.kill(n);
+                        }
+                    }
                 }
                 if let Place::Name(n) = place {
                     if self.relevant[n.index()] {
@@ -336,7 +396,7 @@ impl Walk<'_> {
                 // divisor's goals are only one way it can pass.
                 if matches!(
                     c.guard,
-                    Guard::Index(..) | Guard::Span(..) | Guard::Shift(..)
+                    Guard::Index(..) | Guard::Span(..) | Guard::Shift(..) | Guard::Rule(..)
                 ) {
                     for g in goals.into_iter().flatten() {
                         st.assume(&g);
@@ -375,6 +435,23 @@ impl Walk<'_> {
             }
             Guard::NoOverflow(_, d, _) => vec![self.lin(d)?],
             Guard::Range(..) => return None,
+            // Only where each field's length is its own term: elsewhere one
+            // term stands for a whole class, and the goal holds by itself.
+            Guard::Rule(r) if self.open.contains(r) => {
+                let rule = self.rule(*r)?;
+                let pairs = vyrn_frontend::types::predicate_equal_lengths(rule);
+                if pairs.len() != conjuncts(rule) {
+                    return None;
+                }
+                let mut out = Vec::new();
+                for (a, b) in pairs {
+                    let own = |f: &str| Some(Lin::of(Term::Col(*r, self.col(*r, f)?.0)));
+                    let (a, b) = (own(&a)?, own(&b)?);
+                    out.extend([a.sub(&b)?, b.sub(&a)?]);
+                }
+                out
+            }
+            Guard::Rule(_) => return None,
         })
     }
 
@@ -395,8 +472,10 @@ impl Walk<'_> {
                     st.define(Term::Val(n), &Lin::of(t));
                 }
             }
-            // A header a loop walks has its field's length.
-            Rhs::Read(p @ Place::Field(..)) if self.body.names[n.index()].walked.is_some() => {
+            // A field's array or String, read or taken, has the field's length.
+            Rhs::Read(p @ Place::Field(..)) | Rhs::Take(p @ Place::Field(..))
+                if matches!(self.kind(n), Kind::Seq) =>
+            {
                 if let Some(t) = self.length(p) {
                     st.define(Term::Len(n), &Lin::of(t));
                 }
@@ -575,7 +654,7 @@ impl Walk<'_> {
 
     /// The receiver of a builtin call in `rhs` whose row states its length
     /// effect, and the bounds of its new length as sums over the old.
-    fn resized(&self, rhs: &Rhs) -> Option<(Name, Lin, Lin)> {
+    fn resized(&self, rhs: &Rhs) -> Option<(Term, Lin, Lin)> {
         let Rhs::Call {
             callee,
             args,
@@ -585,13 +664,13 @@ impl Walk<'_> {
         else {
             return None;
         };
-        let len = |i: usize| match args.get(i)? {
-            (Arg::Val(Val::Name(n)) | Arg::Place(Place::Name(n)), _)
-                if matches!(self.kind(*n), Kind::Seq) =>
-            {
-                Some((*n, Lin::of(Term::Len(*n))))
-            }
-            _ => None,
+        let len = |i: usize| {
+            let t = match args.get(i)? {
+                (Arg::Val(Val::Name(n)), _) => self.length(&Place::Name(*n))?,
+                (Arg::Place(p), _) => self.length(p)?,
+                _ => return None,
+            };
+            Some((t, Lin::of(t)))
         };
         let (r, old) = len(0)?;
         let (lo, hi) = match prelude::builtin(callee)?.length {
@@ -616,21 +695,28 @@ impl Walk<'_> {
     /// `modify` receiver moves its length as its row states; any other
     /// `modify` or `consume` argument rooted at a name that is not a scalar
     /// forgets it.
-    fn effects(&self, st: &mut State, rhs: &Rhs) {
+    fn effects(&mut self, st: &mut State, rhs: &Rhs) {
         let Rhs::Call { args, .. } = rhs else {
             return;
         };
-        let moved = self.resized(rhs).filter(|_| !lands_on_result(args));
         for (a, cap) in args {
+            if let (Arg::Place(p), Capability::Modify) = (a, cap) {
+                self.open(st, p);
+            }
+        }
+        let moved = self.resized(rhs).filter(|_| !lands_on_result(args));
+        for (i, (a, cap)) in args.iter().enumerate() {
             let Some(n) = root(a) else { continue };
             match (cap, &moved) {
                 (Capability::Read, _) => {}
                 // A scalar argument is a copy.
                 (Capability::Consume, _) if matches!(self.kind(n), Kind::Int(..)) => {}
-                (Capability::Modify, Some((r, lo, hi))) if *r == n => {
-                    let old = Lin::of(Term::Len(n));
+                (Capability::Modify, Some((t, lo, hi))) if i == 0 => {
+                    let old = Lin::of(*t);
                     match (lo.sub(&old), hi.sub(&old)) {
-                        (Some(a), Some(b)) if a.is_const() && b.is_const() => st.shift(n, a.c, b.c),
+                        (Some(a), Some(b)) if a.is_const() && b.is_const() => {
+                            st.shift(*t, a.c, b.c)
+                        }
                         _ => st.kill(n),
                     }
                 }
@@ -869,6 +955,19 @@ fn any_continue(ss: &[St]) -> bool {
     })
 }
 
+/// The leaves of a predicate's top-level `&&` tree.
+fn conjuncts(e: &vyrn_frontend::ast::Expr) -> usize {
+    match e {
+        vyrn_frontend::ast::Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => conjuncts(lhs) + conjuncts(rhs),
+        _ => 1,
+    }
+}
+
 /// Whether a builtin's length effect lands on its result: its receiver is not
 /// passed `modify`, so the call hands the resized array back (`@push`).
 fn lands_on_result(args: &[(Arg, Capability)]) -> bool {
@@ -967,17 +1066,14 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
     for s in ss {
         match s {
             St::Check(c) => {
-                let (p, vs): (Option<&Place>, Vec<&Val>) = match &c.guard {
-                    Guard::Index(p, i) | Guard::Span(p, i, _) => (Some(p), vec![i]),
+                let (p, vs): (Option<Name>, Vec<&Val>) = match &c.guard {
+                    Guard::Index(p, i) | Guard::Span(p, i, _) => (place_root(p), vec![i]),
                     Guard::Shift(k, _) | Guard::NonZero(k) => (None, vec![k]),
                     Guard::NoOverflow(_, d, _) => (None, vec![d]),
                     Guard::Range(..) => (None, vec![]),
+                    Guard::Rule(r) => (Some(*r), vec![]),
                 };
-                for n in p
-                    .and_then(place_root)
-                    .into_iter()
-                    .chain(vs.into_iter().filter_map(val))
-                {
+                for n in p.into_iter().chain(vs.into_iter().filter_map(val)) {
                     rel[n.index()] = true;
                 }
             }
@@ -989,7 +1085,7 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
                         Place::Field(b, f) if f == "length" || f == "byteLength" => {
                             place_root(b).into_iter().collect()
                         }
-                        Place::Field(..) if body.names[n.index()].walked.is_some() => {
+                        Place::Field(b, _) if matches!(**b, Place::Name(_)) => {
                             place_root(p).into_iter().collect()
                         }
                         _ => vec![],
@@ -1010,12 +1106,8 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
                     from.iter().for_each(|m| rel[m.index()] = true);
                 }
             }
-            St::Store {
-                place: Place::Name(n),
-                value,
-                ..
-            } => {
-                if let Some(m) = val(value) {
+            St::Store { place, value, .. } => {
+                if let (Some(n), Some(m)) = (resized_by_store(place), val(value)) {
                     if rel[n.index()] || rel[m.index()] {
                         rel[n.index()] = true;
                         rel[m.index()] = true;

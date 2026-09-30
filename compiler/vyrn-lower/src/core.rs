@@ -2121,19 +2121,7 @@ impl<'a> Builder<'a> {
         // A validated record literal the checker did not prove is checked
         // whole once it is made: its constructor reads it.
         if let Some((to, line)) = owed {
-            out.push(St::Do {
-                rhs: Rhs::Call {
-                    ret: Some(Type::Named(to.clone())),
-                    callee: to,
-                    args: vec![(Arg::Val(Val::Name(n)), Capability::Read)],
-                    write_back: false,
-                    kind: Callee::Named,
-                    solved: Vec::new(),
-                    targets: Vec::new(),
-                },
-                line,
-                site: NodeId::NONE,
-            });
+            out.push(rule_check(to, n, line));
         }
         for t in std::mem::take(&mut self.after_of_rhs) {
             out.push(St::Drop(t, Site::None, 0, None));
@@ -2419,7 +2407,15 @@ impl<'a> Builder<'a> {
     /// per level, the store, and one store back per temp
     /// ([`vyrn_frontend::parser::store_stmts`]). The rows state the store
     /// alone, into `b[i].vx`, and the part's old value is its to release.
+    ///
+    /// A run of statements that each store into a field of one record name
+    /// with a `where` rule is a group ([`crate::typed::groups`]): the rule is
+    /// checked once, after the run's last statement. A statement that ends
+    /// the path ends the run with no check.
     fn stmt_list(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<(), Gap> {
+        // Per open group: the record name, its type and the line of its last
+        // statement.
+        let mut open: Vec<(Name, String, usize)> = Vec::new();
         let mut k = 0;
         while k < ss.len() {
             let (scope, at) = (self.scope.len(), out.len());
@@ -2467,9 +2463,60 @@ impl<'a> Builder<'a> {
                     self.scope.push((name.clone(), n));
                 }
             }
+            let members = self.grouped_in(&out[at..]);
+            let (kept, closed): (Vec<_>, Vec<_>) =
+                (open.into_iter()).partition(|(c, ..)| members.iter().any(|(m, _)| m == c));
+            let checks = (closed.into_iter()).map(|(c, to, line)| rule_check(to, c, line));
+            out.splice(at..at, checks);
+            open = kept;
+            let line = ss[k + span - 1].line();
+            for (c, to) in members {
+                match open.iter_mut().find(|(o, ..)| *o == c) {
+                    Some(g) => g.2 = line,
+                    None => open.push((c, to, line)),
+                }
+            }
+            let ends = matches!(
+                out.last(),
+                Some(St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap)
+            );
+            if ends {
+                open.clear();
+            }
             k += span;
         }
+        out.extend(
+            open.into_iter()
+                .map(|(c, to, line)| rule_check(to, c, line)),
+        );
         Ok(())
+    }
+
+    /// The record names `rows` store into a field of as a group member
+    /// ([`grouped`]), each once, with the record's type. The rows of a nested
+    /// block or loop are left out: a block checks its own groups.
+    fn grouped_in(&self, rows: &[St]) -> Vec<(Name, String)> {
+        fn shallow<'s>(ss: &'s [St], out: &mut Vec<&'s St>) {
+            for s in ss {
+                out.push(s);
+                if !matches!(s, St::Block { .. } | St::Loop { .. }) {
+                    s.lists().for_each(|l| shallow(l, out));
+                }
+            }
+        }
+        let mut flat = Vec::new();
+        shallow(rows, &mut flat);
+        let mut out: Vec<(Name, String)> = Vec::new();
+        for s in flat {
+            crate::typed::row_stores(s, &self.body.names, &mut |place, _, _, _| {
+                if let Some((c, to)) = group_of(self.proto, &self.body.names, place) {
+                    if !out.iter().any(|(m, _)| *m == c) {
+                        out.push((c, to));
+                    }
+                }
+            });
+        }
+        out
     }
 
     /// The store or removal at the head of `ss` when it is a move-out window
@@ -7458,18 +7505,25 @@ fn typed(
     let projected =
         |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
     let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
+    let grouped = |t: &Type, path: &[&Place]| grouped(&own.proto, t, path);
     let rules = crate::typed::StoreRules {
         global_mutable: &global_mutable,
         global_ty: &global_ty,
         projected: &projected,
         ruled_within: &ruled_within,
+        grouped: &grouped,
     };
     let (out, seen) = (&mut r.typed, &mut r.seen);
     let mut found = crate::typed::stores(top, &rules, seen);
     found.extend(crate::typed::loops(top, seen));
     // One sentence per line: a declaration's predicate is also the body
-    // of its constructor.
-    for u in crate::typed::refused(top, as_written) {
+    // of its constructor, and the instances of a generic function share
+    // their groups.
+    let groups = crate::typed::groups(top, &rules);
+    for u in crate::typed::refused(top, as_written)
+        .into_iter()
+        .chain(groups)
+    {
         let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
         if !out.iter().any(said) && !found.contains(&u) {
             found.push(u);
@@ -7493,7 +7547,36 @@ fn typed(
 /// A store into an element of an array field passes through: it keeps the
 /// field's length, and the rule reads the field through its length alone.
 fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
+    ruled_steps(own, ty, path)
+        .into_iter()
+        .next()
+        .map(|(_, n)| n)
+}
+
+/// The type a store into a field of a record name belongs to a group of
+/// ([`crate::typed::groups`]): the name's own type, when it is the one record
+/// with a `where` rule the path passes through.
+fn grouped(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
+    match ruled_steps(own, ty, path).as_slice() {
+        [(0, n)] => Some(n.clone()),
+        _ => None,
+    }
+}
+
+/// The record name and type of a store into `place` that belongs to a group
+/// ([`grouped`]).
+fn group_of(own: &Owned, names: &[NameInfo], place: &Place) -> Option<(Name, String)> {
+    let (Place::Name(c), path) = crate::typed::split(place) else {
+        return None;
+    };
+    Some((*c, grouped(own, &names[c.index()].ty, &path)?))
+}
+
+/// Each step of `path` that leaves a record type with a `where` rule
+/// ([`ruled_within`]), by its index, with the type.
+fn ruled_steps(own: &Owned, ty: &Type, path: &[&Place]) -> Vec<(usize, String)> {
     let decls = own.types();
+    let mut out = Vec::new();
     let mut at = ty.clone();
     for (k, step) in path.iter().enumerate() {
         if let Type::Named(n) = &at {
@@ -7514,23 +7597,42 @@ fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
                     _ => false,
                 };
                 if !elem_of_length_only {
-                    return Some(n.clone());
+                    out.push((k, n.clone()));
                 }
             }
         }
-        at = match (step, vyrn_frontend::types::resolve(&at, decls)) {
-            (Place::Field(_, f), _) => {
-                vyrn_frontend::types::record_fields(&at, decls)?
-                    .into_iter()
-                    .find(|x| &x.name == f)?
-                    .ty
+        let next = match (step, vyrn_frontend::types::resolve(&at, decls)) {
+            (Place::Field(_, f), _) => vyrn_frontend::types::record_fields(&at, decls)
+                .and_then(|fs| fs.into_iter().find(|x| &x.name == f))
+                .map(|x| x.ty),
+            (Place::Elem(..), Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _)) => {
+                Some(*e)
             }
-            (Place::Elem(..), Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _)) => *e,
-            (Place::Key(..), Type::Map(_, v)) => *v,
-            _ => return None,
+            (Place::Key(..), Type::Map(_, v)) => Some(*v),
+            _ => None,
         };
+        let Some(next) = next else { break };
+        at = next;
     }
-    None
+    out
+}
+
+/// The row that checks record name `n` against its type `to`'s `where` rule:
+/// the constructor reads it, and traps as at a boundary.
+fn rule_check(to: String, n: Name, line: usize) -> St {
+    St::Do {
+        rhs: Rhs::Call {
+            ret: Some(Type::Named(to.clone())),
+            callee: to,
+            args: vec![(Arg::Val(Val::Name(n)), Capability::Read)],
+            write_back: false,
+            kind: Callee::Named,
+            solved: Vec::new(),
+            targets: Vec::new(),
+        },
+        line,
+        site: NodeId::NONE,
+    }
 }
 
 /// Reports a body the core did not build. A gap with a rule is the program's

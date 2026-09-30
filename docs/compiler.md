@@ -188,7 +188,9 @@ export in all three modes. `elide::decide` marks a row proved when linear
 facts over one body's own names (`facts`) show it cannot fail, with a
 certificate `facts::Cert::verify` checks again. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
-one term of both (`facts::Term::Col`); `World::body_of` decides a body
+one term of both (`facts::Term::Col`), except inside a group of stores into
+the record's fields, where each field has its own term until the row that
+checks the rule (`check::Guard::Rule`); `World::body_of` decides a body
 when an emitter first reads it. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a

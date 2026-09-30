@@ -20,7 +20,8 @@ use vyrn_frontend::core::Name;
 /// String name (bytes for a String), or the length of a record name's array or
 /// String field. A `Col` names its field by the least index among the fields
 /// the record's `where` rule states of equal length, so one term is the
-/// length of each of them.
+/// length of each of them; inside a group of stores into the record's
+/// fields, by the field's own index (`elide::Walk::open`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Term {
     Val(Name),
@@ -71,6 +72,10 @@ impl Lin {
 
     fn mentions_name(&self, n: Name) -> bool {
         self.terms.iter().any(|(t, _)| t.name() == n)
+    }
+
+    fn mentions(&self, t: Term) -> bool {
+        self.coef(t) != 0
     }
 
     pub fn add(&self, o: &Lin) -> Option<Lin> {
@@ -244,10 +249,8 @@ impl State {
     /// rest` with `s` one or minus one first restates every fact about `x`
     /// through `d`, so nothing known is lost to an exact rename.
     pub fn kill(&mut self, n: Name) {
-        let cols: BTreeSet<Term> = self
-            .defs
-            .values()
-            .flat_map(|v| v.terms.iter().map(|(t, _)| *t))
+        let cols: BTreeSet<Term> = (self.defs.iter())
+            .flat_map(|(d, v)| std::iter::once(*d).chain(v.terms.iter().map(|(t, _)| *t)))
             .filter(|t| matches!(t, Term::Col(m, _) if *m == n))
             .collect();
         for t in [Term::Val(n), Term::Len(n)].into_iter().chain(cols) {
@@ -261,11 +264,21 @@ impl State {
             .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions_name(n)));
     }
 
-    /// Moves `n`'s length by an unknown amount in `lo..=hi`. A fact with
-    /// `k * Len(n)` holds of the new length once `-min(k*lo, k*hi)` is added;
-    /// a definition of or through the length becomes its two facts first.
-    pub fn shift(&mut self, n: Name, lo: i64, hi: i64) {
-        let t = Term::Len(n);
+    /// Forgets everything about the one term `t`, restating what a definition
+    /// through it knows as [`State::kill`] does.
+    pub fn forget(&mut self, t: Term) {
+        self.defs.remove(&t);
+        self.restate(t);
+        self.facts.retain(|f| !f.mentions(t));
+        self.defs.retain(|_, v| !v.mentions(t));
+        self.conds
+            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions(t)));
+    }
+
+    /// Moves the length `t` by an unknown amount in `lo..=hi`. A fact with
+    /// `k * t` holds of the new length once `-min(k*lo, k*hi)` is added; a
+    /// definition of or through the length becomes its two facts first.
+    pub fn shift(&mut self, t: Term, lo: i64, hi: i64) {
         let (through, defs) = std::mem::take(&mut self.defs)
             .into_iter()
             .partition(|(d, v)| *d == t || v.coef(t) != 0);
@@ -508,6 +521,15 @@ mod tests {
     }
 
     #[test]
+    fn a_kill_forgets_a_defined_field_length() {
+        let mut st = State::default();
+        let col = Term::Col(Name(0), 1);
+        st.define(col, &Lin::k(3));
+        st.kill(Name(0));
+        assert!(st.ge0(&Lin::of(col).plus(-3).unwrap()).is_none());
+    }
+
+    #[test]
     fn a_kill_of_a_length_keeps_its_axioms_on_the_rename() {
         let mut st = State::default();
         st.define(Term::Val(Name(0)), &Lin::of(Term::Len(Name(1))));
@@ -520,7 +542,7 @@ mod tests {
         let mut st = State::default();
         let len = Lin::of(Term::Len(Name(1)));
         st.define(Term::Val(Name(0)), &len);
-        st.shift(Name(1), -1, 0);
+        st.shift(Term::Len(Name(1)), -1, 0);
         assert!(st.ge0(&v(0).sub(&len).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap().plus(1).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap()).is_none());

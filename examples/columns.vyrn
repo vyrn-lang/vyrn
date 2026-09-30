@@ -36,7 +36,7 @@ fn columnsOf(n: Int64) -> ParticleColumns {
     let mut c = particleColumns(n)
     let mut i = 0
     while i < n {
-        c = pushParticle(c, particle(i))
+        pushParticle(c, particle(i))
         i = i + 1
     }
     return c

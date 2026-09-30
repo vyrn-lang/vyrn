@@ -1,0 +1,29 @@
+// Groups of stores into the fields of a `where` record: each run of statements
+// that store into its fields is checked once, after its last statement.
+type Cols = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+
+fn pushBoth(c: modify Cols, x: Int64) {
+    c.a.push(x)
+    c.b.push(x * 2)
+}
+
+fn returnAfter(c: modify Cols) -> Int64 {
+    c.a.push(1)
+    c.b.push(2)
+    return c.a.length
+}
+
+fn exitOwned(o: Option<Int64>) -> Option<Int64> {
+    let mut c = Cols { a: [], b: [] }
+    c.a.push(1)
+    c.b = [o?]
+    return Some(c.a.length)
+}
+
+fn main() -> Int64 {
+    let mut c = Cols { a: [], b: [] }
+    pushBoth(c, 1)
+    print(returnAfter(c))
+    print(exitOwned(Some(3)) ?? 0)
+    return 0
+}

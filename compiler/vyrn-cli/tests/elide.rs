@@ -240,6 +240,41 @@ fn sum(c: modify C) -> Int64 {
     );
 }
 
+/// A group of stores that grows every column once, from the rule's equal
+/// lengths, keeps the rule.
+#[test]
+fn a_group_that_grows_every_column_once_proves_its_rule() {
+    let src = "type C = { a: Array<Int64>, b: Array<Int64>, c: Array<Int64> } where a.length == b.length && c.length == b.length
+fn w(c: modify C, x: Int64) {
+    c.a.push(x)
+    c.b.push(x)
+    c.c.push(x)
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved where"]);
+}
+
+/// Inside a group each column has its own length: `a`'s length does not
+/// bound an index into `b`, which has not grown yet.
+#[test]
+fn a_group_proves_no_index_by_another_columns_length() {
+    let src = "type C = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+fn w(c: modify C) -> Int64 {
+    c.a.push(1)
+    c.b.push(if 0 < c.a.length { c.b[0] } else { 0 })
+    return 0
+}
+";
+    assert_eq!(verdicts(src, "w"), ["check array-index", "proved where"]);
+    let calls = "    let mut c = C { a: [], b: [] }\n    print(w(c).toString())";
+    let (err, _) = oracle(src, calls, "w");
+    assert!(
+        err.contains("array index 0 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 /// Each witness: a function `w` whose checks must all stay, and the call in
 /// `main` that makes one trap with the wording given.
 const WITNESSES: &[(&str, &str, &str)] = &[
@@ -343,6 +378,47 @@ fn w(p: consume P, i: Int64) -> Int64 {
 ",
         "    print(w(P { a: xs, b: [] }, 0).toString())",
         "array index 0 out of bounds",
+    ),
+    // A call that writes the record forgets the length a store gave a field.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> }
+fn clearA(p: modify P) {
+    p.a = []
+}
+fn w(p: consume P) -> Int64 {
+    let mut q = p
+    q.a = [1, 2, 3]
+    clearA(q)
+    return q.a[2]
+}
+",
+        "    print(w(P { a: xs, b: [] }).toString())",
+        "array index 2 out of bounds",
+    ),
+    // A group that grows one column twice and the other once.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+fn w(p: modify P) -> Int64 {
+    p.a.push(1)
+    p.a.push(2)
+    p.b.push(3)
+    return 0
+}
+",
+        "    let mut p = P { a: [], b: [] }\n    print(w(p).toString())",
+        "violates its `where` clause",
+    ),
+    // A rule with a conjunct beside the lengths is not proved by them.
+    (
+        "type P = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length && a.length < 2
+fn w(p: modify P) -> Int64 {
+    p.a.push(1)
+    p.b.push(2)
+    return 0
+}
+",
+        "    let mut p = P { a: [1], b: [1] }\n    print(w(p).toString())",
+        "violates its `where` clause",
     ),
     // The bound is one past the end.
     (

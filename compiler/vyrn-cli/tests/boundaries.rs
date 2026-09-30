@@ -73,6 +73,12 @@ pub const ROWS: &[Row] = &[
         rule: "where-record",
         carriers: &[Carrier::Vyrn],
     },
+    // The end of a group of stores into a record's fields calls the same
+    // constructor.
+    Row {
+        rule: "where-group",
+        carriers: &[Carrier::Vyrn],
+    },
     // The check over the bytes is `std/text`'s `stringFault`, which every engine
     // calls; each engine keeps only the build, which allocates.
     Row {

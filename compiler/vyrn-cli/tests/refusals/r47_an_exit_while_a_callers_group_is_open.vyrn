@@ -1,0 +1,13 @@
+// A `?` inside the group would hand the caller its record with the rule unchecked.
+type Cols = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+
+fn pushBoth(c: modify Cols, o: Option<Int64>) -> Option<Int64> {
+    c.a.push(1)
+    c.b = [o?]
+    return Some(0)
+}
+
+fn main() -> Int64 {
+    let mut c = Cols { a: [], b: [] }
+    return pushBoth(c, Some(2)) ?? 1
+}
