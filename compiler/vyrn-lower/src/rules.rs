@@ -37,6 +37,17 @@ pub fn say(rule: &str, args: &[(&str, &str)]) -> String {
     menu(sentence, parts.map(fill))
 }
 
+/// Returns `msg`, which a refusal prints. A sentence quotes what the reader
+/// wrote, so a compiler temporary (`@t1`, `@p3`) in backticks is a defect in
+/// the site that named it; debug builds panic on one.
+pub fn spoken(msg: String) -> String {
+    debug_assert!(
+        !msg.contains("`@"),
+        "a refusal names a compiler temporary: {msg}"
+    );
+    msg
+}
+
 // Shapes A to D: the kernel's flow rules.
 
 /// A use after a declared `consume`, a `drop`, or a linear value's take.

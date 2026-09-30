@@ -7252,7 +7252,8 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str, r: &mut Refused) {
         return;
     };
     r.kernel.push(Refusal {
-        diagnostic: Diagnostic::error(g.line, 0, "movecheck", message).in_file(file.clone()),
+        diagnostic: Diagnostic::error(g.line, 0, "movecheck", crate::rules::spoken(message))
+            .in_file(file.clone()),
         body: body.to_string(),
     });
 }

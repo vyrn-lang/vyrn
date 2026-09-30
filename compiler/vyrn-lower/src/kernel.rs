@@ -1358,7 +1358,7 @@ impl<'b> Kernel<'b> {
 
     fn refuse_at<T>(&self, line: usize, msg: String) -> Result<T, Refusal> {
         Err(Refusal {
-            diagnostic: Diagnostic::error(line, 0, "movecheck", msg)
+            diagnostic: Diagnostic::error(line, 0, "movecheck", rules::spoken(msg))
                 .in_file(self.body.file.clone()),
             body: self.body.name.clone(),
         })
