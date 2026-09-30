@@ -2743,3 +2743,45 @@ fn main() -> Int64 {
         (Some(0), "b\nbaa\n1\n".to_string())
     );
 }
+
+// An element of a call's result whose type has `impl Copy` is copied by the
+// impl (here it adds 100 to `taken`) where it is taken: in a `let`, a
+// `return`, a `consume` argument and a store. A field under one stays a
+// borrow, as does a scrutinee.
+#[test]
+fn a_copy_element_of_a_call_is_copied_by_its_impl() {
+    let src = r#"type Pool = { slots: Array<Int64>, taken: Int64 }
+type Holder = { pool: Pool }
+
+impl Copy for Pool {
+    fn copy(self) -> Pool {
+        let mut out: Array<Int64> = []
+        for s in self.slots {
+            out.push(s)
+        }
+        return Pool { slots: out, taken: self.taken + 100 }
+    }
+}
+
+fn mk() -> Array<Pool> { return [Pool { slots: [1, 2], taken: 1 }, Pool { slots: [3], taken: 2 }] }
+
+fn eat(p: consume Pool) -> Int64 { return p.taken }
+
+fn first() -> Pool { return mk()[0] }
+
+fn main() -> Int64 {
+    let a = mk()[1]
+    let mut h = Holder { pool: Pool { slots: [], taken: 0 } }
+    h.pool = mk()[0]
+    print(a.taken)
+    print(h.pool.taken)
+    print(eat(mk()[0]))
+    print(first().taken)
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("copypart", src),
+        (Some(0), "102\n101\n101\n101\n".to_string())
+    );
+}

@@ -1408,7 +1408,7 @@ impl<'b> Kernel<'b> {
 
     fn refuse_at<T>(&self, line: usize, msg: String) -> Result<T, Refusal> {
         Err(Refusal {
-            diagnostic: Diagnostic::error(line, 0, "movecheck", msg)
+            diagnostic: Diagnostic::error(line, 0, "movecheck", rules::spoken(msg))
                 .in_file(self.body.file.clone()),
             body: self.body.name.clone(),
         })
@@ -2023,6 +2023,18 @@ impl<'b> Kernel<'b> {
                     if self.owned(*n) {
                         st.set_own(*n, Own::Held);
                         bound_here.push(*n);
+                    }
+                }
+                // A refused store into a join's temporary leaves it filled,
+                // or the join and the `let` after it would be refused for
+                // reading a temporary the reader never wrote.
+                if let St::Store {
+                    place: Place::Name(n),
+                    ..
+                } = s
+                {
+                    if self.releases(*n) {
+                        st.set_own(*n, Own::Held);
                     }
                 }
             }

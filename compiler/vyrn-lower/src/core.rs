@@ -1138,6 +1138,7 @@ fn build_seeded(
         temps: 0,
         pending_receiver: None,
         drain: 0,
+        scrutinee: None,
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         owed: None,
@@ -1390,6 +1391,8 @@ struct Builder<'a> {
     /// built. The compiled backends drain argument temporaries at each, so a
     /// receiver borrowed under one can be freed there.
     drain: u32,
+    /// The scrutinee expression being built, which is read and not taken.
+    scrutinee: Option<NodeId>,
     /// Temporaries the expression being built has read and must release once
     /// it is bound (`read_val`, `call`, `rhs`, `bind`).
     after: Vec<Name>,
@@ -1500,6 +1503,7 @@ impl<'a> Builder<'a> {
             temps: 0,
             pending_receiver: None,
             drain: 0,
+            scrutinee: None,
             after: Vec::new(),
             after_of_rhs: Vec::new(),
             owed: None,
@@ -4188,8 +4192,10 @@ impl<'a> Builder<'a> {
                 }
             },
             _ => {
-                let v = self.val(e, out)?;
-                match v {
+                let outer = self.scrutinee.replace(e.id());
+                let v = self.val(e, out);
+                self.scrutinee = outer;
+                match v? {
                     Val::Name(t) => {
                         self.keyed(t, construct);
                         Ok((Val::Name(t), self.taken_by(t, construct)))
@@ -5266,13 +5272,18 @@ impl<'a> Builder<'a> {
         self.drain += 1;
         let v = self.read_at(e, out, None);
         self.drain -= 1;
+        let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
+        let (callee, kind, solved) = match copied {
+            Some((id, f, solved)) => (f, Callee::Fn(id), solved),
+            None => ("@copy".to_string(), Callee::Reserved, Vec::new()),
+        };
         Ok(Rhs::Call {
-            callee: "@copy".to_string(),
+            callee,
             args: vec![(Arg::Val(v?), Capability::Read)],
             write_back: false,
-            kind: Callee::Reserved,
+            kind,
             ret: Some(self.ty_of(e)?),
-            solved: Vec::new(),
+            solved,
             targets: Vec::new(),
         })
     }
@@ -5280,8 +5291,9 @@ impl<'a> Builder<'a> {
     /// Whether `e` is a heap element of a temporary (`pieces()[0]`) or a
     /// heap field under one (`pieces()[0].s`), stated as `@copy` of the read
     /// (#537): the temporary is released whole after the consumer, so the
-    /// taker must own a copy. A type with `impl Copy` is read as any element
-    /// is.
+    /// taker must own a copy. A type with `impl Copy` is copied by the impl
+    /// only where the borrow has no lowering: an element itself, not a field
+    /// under one and not a scrutinee, which both stay borrows.
     fn copies_a_part(&self, e: &Expr) -> bool {
         let mut at = e;
         while let Expr::Field { expr, .. } = at {
@@ -5290,7 +5302,9 @@ impl<'a> Builder<'a> {
         matches!(at, Expr::Call { name, args, .. }
             if name == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]))
             && self.ty_of(e).is_ok_and(|t| {
-                self.owns(&t) && vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
+                self.owns(&t)
+                    && (vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
+                        || (std::ptr::eq(at, e) && self.scrutinee != Some(e.id())))
             })
     }
 
@@ -7284,7 +7298,8 @@ fn refuse_gap(g: Gap, file: &Option<String>, body: &str, r: &mut Refused) {
         return;
     };
     r.kernel.push(Refusal {
-        diagnostic: Diagnostic::error(g.line, 0, "movecheck", message).in_file(file.clone()),
+        diagnostic: Diagnostic::error(g.line, 0, "movecheck", crate::rules::spoken(message))
+            .in_file(file.clone()),
         body: body.to_string(),
     });
 }
