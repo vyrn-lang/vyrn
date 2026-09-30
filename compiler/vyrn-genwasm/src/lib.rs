@@ -1549,8 +1549,8 @@ fn run_module(
                         .map_err(|e| EngineError::Failed(format!("wasm: {e}")))?;
                     trace("cranelift", t.elapsed());
                     // Only a compile states the typed judgment's refusals, and they
-                    // are a failed run's error (`vyrn_lower::gen_engine`), so a
-                    // refused compile is never cached: a hit would say the trap.
+                    // are the run's answer (`vyrn_lower::gen_engine`), so a refused
+                    // compile is never cached: a hit would skip them.
                     let refused = vyrn_lower::core::typed_refused();
                     if persist && !refused {
                         store_artifact(key, &m);

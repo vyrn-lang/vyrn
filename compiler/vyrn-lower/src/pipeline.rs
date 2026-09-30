@@ -160,7 +160,7 @@ fn subject(message: &str) -> Option<&str> {
 /// `gen::set_gen_engine` installs, which judges the generator's own program
 /// under [`movecheck::comptime`]. The must-use judgment refuses before `run`.
 /// The typed judgment runs inside `run`'s compile; its refusals replace the
-/// error of a run that failed. The kernel does not judge a generator's
+/// run's output or error. The kernel does not judge a generator's
 /// program: nothing prints its refusals.
 pub fn gen_engine(
     run: impl Fn(&ast::Program, &str, &[ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, String>>
@@ -180,10 +180,7 @@ pub fn gen_engine(
             }
             let _ = core::typed_diagnostics();
             let out = run(program, name, args, inputs);
-            let typed = match out {
-                Some(Ok(_)) => Vec::new(),
-                _ => core::typed_diagnostics(),
-            };
+            let typed = core::typed_diagnostics();
             if typed.is_empty() {
                 out.map(|r| r.map_err(GenError::Failed))
             } else {
