@@ -11477,7 +11477,8 @@ impl<'p> Fn_<'_, 'p> {
     /// of the place, and refuses a read after one.
     ///
     /// A layout that owns no heap is a borrow only where the core minted the name (a `for`
-    /// head or a scrutinee). A `let` the reader wrote binds a value ([`Fn_::core_copies`]).
+    /// head, a scrutinee or an argument). A `let` the reader wrote binds a value, and so does a
+    /// minted name this refuses ([`Fn_::core_copies`]): `x = f(x, x.p)` reads a copy of `x.p`.
     /// An owned name read out of an element is the element: the container's release frees
     /// only the buffer ([`Fn_::rel_owed`]), and the name's release is its own row.
     ///
@@ -11594,12 +11595,7 @@ impl<'p> Fn_<'_, 'p> {
         if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
-        // A name this pass minted (a `for` head's borrow or a scrutinee) is read by address
-        // in the arm. A source `let` copies, including a projection prologue's
-        // (`let @p0.h = h`).
-        let value = (info.bound_by_let || !info.source.starts_with('@'))
-            && !info.heap
-            && !self.owns_heap(&info.ty);
+        let value = !info.heap && !self.owns_heap(&info.ty);
         let mut lets = Vec::new();
         for s in &body.stmts {
             core_lets(s, &mut lets);
