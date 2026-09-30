@@ -682,6 +682,10 @@ fn generator_program(program: &Program, g: &str) -> Program {
         log_sink: program.log_sink.clone(),
         units: program.units,
         host: program.host,
+        // Not the program's: they hash the root's text, and [`canonical`]
+        // keys the derive memo on this program, so any edit would run the
+        // generator again.
+        module_hashes: Default::default(),
     }
 }
 

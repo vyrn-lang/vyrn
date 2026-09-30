@@ -974,6 +974,7 @@ impl Parser {
                 // The loader fills this once every module is linked.
                 surface_shadows: std::collections::HashSet::new(),
                 host: Host::default(),
+                module_hashes: std::collections::BTreeMap::new(),
                 units: 0,
             },
             errors,

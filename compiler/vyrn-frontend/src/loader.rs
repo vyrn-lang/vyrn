@@ -624,6 +624,9 @@ struct Module {
     /// it. Its declarations are renamed to that reserved prefix (see
     /// [`RT_PREFIX`]), so they neither collide with nor are captured by a user's.
     injected: Option<&'static str>,
+    /// The parsed text's hash ([`Program::module_hashes`]); `None` for a
+    /// module synthesized from JSON Schema.
+    hash: Option<String>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -933,7 +936,6 @@ pub fn load_with_origins(
     });
     if depth == 1 {
         LOAD_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
-        MODULE_HASHES.with(|m| m.borrow_mut().clear());
     }
     if depth > GEN_DEPTH_MAX {
         LOAD_DEPTH.with(|d| d.set(d.get() - 1));
@@ -988,13 +990,6 @@ fn load_with_origins_inner(
 
 /// `(module key, resolved import targets, synthesized source)` per loaded module.
 pub type ModuleGraph = Vec<(String, Vec<String>, Option<String>)>;
-
-/// `module key -> content hash` for the modules the last outermost load visited.
-/// The kernel's judgment memo keys a body on it ([`crate::movecheck::Judgments`]).
-/// Valid until the next load begins.
-pub fn last_module_hashes() -> HashMap<String, String> {
-    MODULE_HASHES.with(|m| m.borrow().clone())
-}
 
 /// The floor's [`crate::floor::Graph`] for a linked load: every module the
 /// artifact contains, including a generator's output and the runtime
@@ -1226,10 +1221,12 @@ fn load_modules(
                     log_sink: LogSink::Stderr,
                     units: 0,
                     host: Host::default(),
+                    module_hashes: BTreeMap::new(),
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
                 injected: None,
+                hash: None,
             });
             w.stack.pop();
             w.states.insert(key.to_string(), true);
@@ -1240,17 +1237,16 @@ fn load_modules(
         // attribution below depends on `key`, so it runs after the cache: one
         // text loaded under two keys gives two modules from one parse. Only
         // successes are cached.
+        // Non-cryptographic: this key never leaves the process.
+        let hash = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in text.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            format!("{h:x}:{}", text.len())
+        };
         let mut program = {
-            // Non-cryptographic: this key never leaves the process.
-            let hash = {
-                let mut h: u64 = 0xcbf29ce484222325;
-                for b in text.as_bytes() {
-                    h ^= *b as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                }
-                format!("{h:x}:{}", text.len())
-            };
-            MODULE_HASHES.with(|m| m.borrow_mut().insert(key.to_string(), hash.clone()));
             if let Some(hit) = {
                 let _p = crate::prof::phase("parse (cache hit)");
                 PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned())
@@ -1273,7 +1269,7 @@ fn load_modules(
                     if c.len() > 512 {
                         c.clear();
                     }
-                    c.insert(hash, parsed.clone());
+                    c.insert(hash.clone(), parsed.clone());
                 });
                 parsed
             }
@@ -1421,6 +1417,7 @@ fn load_modules(
             import_targets,
             gen_source,
             injected: None,
+            hash: Some(hash),
         });
         Ok(())
     }
@@ -1540,13 +1537,6 @@ fn failed(
 /// A generator's step budget and output-size cap.
 pub(crate) const GEN_FUEL: u64 = 20_000_000;
 pub(crate) const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
-
-thread_local! {
-    /// `module key -> content hash` for the load in progress, so the checker can
-    /// tell which modules are byte-identical to last time.
-    static MODULE_HASHES: std::cell::RefCell<HashMap<String, String>> =
-        std::cell::RefCell::new(HashMap::new());
-}
 
 /// How deep nested generator loads may go. Far past any honest pipeline, and low
 /// enough that the refusal is a diagnostic instead of a stack overflow.
@@ -3410,7 +3400,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // Every module's state joins the linked program and initializes before
     // `main` in linker order: dependencies first.
     let mut extra_globals = Vec::new();
+    let mut module_hashes = BTreeMap::new();
     for m in modules {
+        if let Some(h) = m.hash {
+            module_hashes.insert(m.key.clone(), h);
+        }
         if m.key == root_key {
             merged = Some(m.program);
         } else {
@@ -3457,6 +3451,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.tests.extend(extra_tests);
     program.benches.extend(extra_benches);
     program.imports.clear(); // consumed
+    program.module_hashes = module_hashes;
     program.number();
     Ok(program)
 }

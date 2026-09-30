@@ -235,7 +235,7 @@ fn the_parser_census_matches_its_pin() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3045, 52),
+        ("parser.rs", "the grammar's own arm", 3046, 52),
         ("parser.rs", "a desugar the parser states", 998, 7),
         ("parser.rs", "a table stated a second time", 0, 0),
         ("parser.rs", "recovery and the diagnostic sentences", 148, 2),

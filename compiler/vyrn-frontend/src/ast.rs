@@ -106,6 +106,12 @@ pub struct Program {
     pub units: u32,
     /// What the program is compiled as, beyond an ordinary build.
     pub host: Host,
+    /// `module key -> content hash` for every module the loader parsed into
+    /// this program. The kernel's judgment memo keys a body on it
+    /// ([`crate::movecheck::Judgments`]). Empty for a program no load linked.
+    /// Ordered, because a generator program's `Debug` text keys its compiled
+    /// module (`vyrn_genwasm`).
+    pub module_hashes: std::collections::BTreeMap<String, String>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only

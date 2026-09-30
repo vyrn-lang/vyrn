@@ -409,10 +409,10 @@ pub fn judging<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// The judgment cache, open for one analysis. It copies the loader's module
+/// The judgment cache, open for one analysis. It copies the program's module
 /// hashes once rather than cloning the map per body.
 pub struct Judgments {
-    hashes: HashMap<String, String>,
+    hashes: std::collections::BTreeMap<String, String>,
 }
 
 impl Judgments {
@@ -431,7 +431,7 @@ impl Judgments {
             }
         });
         Some(Judgments {
-            hashes: crate::loader::last_module_hashes(),
+            hashes: program.module_hashes.clone(),
         })
     }
 
