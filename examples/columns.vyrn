@@ -1,6 +1,6 @@
 /// One field of many records, read row-wise and column-wise.
 ///
-/// `gen_columns` lays `Particle` out as one array per field. The `sum` kernel
+/// `std/columns` lays `Particle` out as one array per field. The `sum` kernel
 /// reads `mass` alone, the case a column layout wins by construction: a row
 /// walk strides 64 bytes for 8 useful ones. The `move` kernel reads two fields
 /// and writes one.
@@ -12,8 +12,8 @@
 /// that on a small size.
 
 import { Particle } from "./lib/bodies"
-import { columns } from "./lib/gen_columns"
-import { ParticleColumns, particleColumns, pushParticle, particleAt, particleCount } from columns("./lib/bodies")
+import { columns } from "std/columns"
+import { ParticleColumns, particleColumns, pushParticle, particleAt } from columns("./lib/bodies")
 import { parseInt64 } from "std/num"
 
 fn particle(i: Int64) -> Particle {
@@ -36,7 +36,7 @@ fn columnsOf(n: Int64) -> ParticleColumns {
     let mut c = particleColumns(n)
     let mut i = 0
     while i < n {
-        pushParticle(c, particle(i))
+        c = pushParticle(c, particle(i))
         i = i + 1
     }
     return c
@@ -131,7 +131,7 @@ fn main() -> Int64 {
 
 test "a row read back from the columns is the row pushed" {
     let c = columnsOf(10)
-    assertEq(particleCount(c), 10)
+    assertEq(c.id.length, 10)
     let p = particleAt(c, 7)
     assertEq(p.id, 7)
     assertEq(p.z, 9.0)

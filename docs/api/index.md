@@ -5,6 +5,7 @@
 - [std/bench](std/bench.md) — std/bench: the runtime the `vyrn bench` transform links against.
 - [std/cli](std/cli.md) — std/cli: the command line is a record type.
 - [std/codecs](std/codecs.md) — std/codecs -- hex, base64 and percent encoding over UTF-8 bytes. These are the
+- [std/columns](std/columns.md) — std/columns: a record type laid out as one array per field.
 - [std/connect](std/connect.md) — std/connect -- Connect wire compatibility as a library, built on
 - [std/contract](std/contract.md) — std/contract -- check a module against a module contract.
 - [std/diag](std/diag.md) — std/diag: a generator reports a diagnostic.
