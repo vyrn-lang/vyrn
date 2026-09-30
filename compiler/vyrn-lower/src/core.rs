@@ -1666,7 +1666,7 @@ impl<'a> Builder<'a> {
     fn lends(&self, e: &Expr) -> bool {
         match e {
             Expr::Call { name, args, .. } => {
-                (self.lends_name(name) && !self.copies_an_element(name, args, e))
+                (self.lends_name(name) && !self.copies_a_part(e))
                     || self.hands_back_a_borrow(name, args)
             }
             _ => false,
@@ -5227,14 +5227,18 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Whether `name(args)` at `e` is a heap element of a temporary
-    /// (`pieces()[0]`), stated as `@copy` of the read (#537): the temporary
-    /// is released whole after the consumer, so the taker must own a copy. A
-    /// type with `impl Copy` is read as any element is.
-    fn copies_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
-        name == vyrn_frontend::project::AT
-            && args.len() == 2
-            && !is_place_read(&args[0])
+    /// Whether `e` is a heap element of a temporary (`pieces()[0]`) or a
+    /// heap field under one (`pieces()[0].s`), stated as `@copy` of the read
+    /// (#537): the temporary is released whole after the consumer, so the
+    /// taker must own a copy. A type with `impl Copy` is read as any element
+    /// is.
+    fn copies_a_part(&self, e: &Expr) -> bool {
+        let mut at = e;
+        while let Expr::Field { expr, .. } = at {
+            at = expr;
+        }
+        matches!(at, Expr::Call { name, args, .. }
+            if name == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]))
             && self.ty_of(e).is_ok_and(|t| {
                 self.owns(&t) && vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
             })
@@ -5397,6 +5401,9 @@ impl<'a> Builder<'a> {
                 if let Some(inner) = self.deferred_of(e) {
                     return Ok(self.force(e, inner, out)?);
                 }
+                if self.copies_a_part(e) {
+                    return self.copy_of(e, out);
+                }
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
@@ -5454,7 +5461,7 @@ impl<'a> Builder<'a> {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
                 }
-                if self.copies_an_element(name, args, e) {
+                if self.copies_a_part(e) {
                     return self.copy_of(e, out);
                 }
                 // A builtin whose argument names its callee is a call to that

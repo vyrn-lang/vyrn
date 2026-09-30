@@ -2710,3 +2710,36 @@ fn main() -> Int64 {
 "#;
     assert_eq!(audited_run("nested", src), (Some(0), "c\n".to_string()));
 }
+
+// A heap field under an element of a call's result is copied, as the element
+// is (#537); the result is released whole.
+#[test]
+fn a_field_of_an_element_of_a_call_is_copied() {
+    let src = r#"type R = { s: String, n: Int64 }
+type H = { s: String }
+
+fn mk() -> Array<R> { return [R { s: "a".copy(), n: 1 }, R { s: "b".copy(), n: 2 }] }
+
+fn first() -> String { return mk()[0].s }
+
+fn eat(s: consume String) -> Int64 {
+    print(s)
+    return 1
+}
+
+fn main() -> Int64 {
+    let t = mk()[1].s
+    let mut h = H { s: "z".copy() }
+    h.s = mk()[0].s
+    let u = first()
+    let k = eat(mk()[1].s)
+    print(t + h.s + u)
+    print(k)
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("elemfield", src),
+        (Some(0), "b\nbaa\n1\n".to_string())
+    );
+}
