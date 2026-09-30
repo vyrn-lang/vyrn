@@ -113,6 +113,10 @@ fn check(
             diags.extend(floor::decide(p, Some(&crate::effects::reaches(program))));
         }
     }
+    let linked = diags
+        .iter()
+        .find_map(|d| program.spellings.linked_in(&d.message));
+    debug_assert!(linked.is_none(), "a refusal names the linked `{linked:?}`");
     symbols::Judged {
         diagnostics: diags,
         binders,

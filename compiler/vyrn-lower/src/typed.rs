@@ -566,7 +566,7 @@ pub fn drops(
                 Type::Param(_) => DROP_TYPE_PARAM,
                 _ => DROP_NOT_HEAP,
             };
-            let t = t.to_string();
+            let t = body.speech().ty(&t).to_string();
             out.push((line, say(rule, &[("name", &info.source), ("t", &t)])));
         }
     }

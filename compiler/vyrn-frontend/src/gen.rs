@@ -598,11 +598,7 @@ pub fn derive(
                 Box::new(f.ret.clone()),
             );
             if got != s.entry {
-                let rule = crate::rules::Rule::DeriveEntryMismatch {
-                    g: g.to_string(),
-                    got: got.to_string(),
-                    want: s.entry.to_string(),
-                };
+                let rule = crate::rules::rule!(DeriveEntryMismatch, g, got, want = s.entry);
                 return Err(Diagnostic::refusal(s.line, 0, "check", rule));
             }
         }
@@ -695,6 +691,7 @@ fn generator_program(program: &Program, g: &str) -> Program {
         // generator again.
         module_hashes: Default::default(),
         expansions: program.expansions.clone(),
+        spellings: program.spellings.clone(),
     }
 }
 

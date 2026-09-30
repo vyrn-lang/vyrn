@@ -1,0 +1,16 @@
+// An ownership refusal quotes a callee and a type as the reader wrote them,
+// though the loader renamed both apart from the import's.
+import { run } from "./a_module_with_a_function_and_a_type_a_root_also_names.vyrn"
+protocol MustUse {}
+type Txn = { label: String }
+impl MustUse for Txn {}
+fn take(a: consume Array<Int64>) { print(a.length) }
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2]
+    take(xs)
+    take(xs)
+    let t = Txn { label: "a" }
+    let mut pool: Array<Txn> = []
+    pool.push(Txn { label: "b" })
+    return run()
+}
