@@ -184,7 +184,6 @@ fn every_body_is_taken_from_the_core() {
 
 fn run() {
     vyrn_genwasm::install();
-    vyrn_lower::install();
     let mut classes = [0usize; CLASSES.len()];
     // Per class, the bodies that name only the scalar types `scalar` admits.
     let mut scalars = [0usize; CLASSES.len()];

@@ -193,16 +193,8 @@ fn main() -> ExitCode {
         .unwrap_or(ExitCode::FAILURE)
 }
 
-/// Installs the generator engine and the lowering into this process. Every
-/// process that compiles calls it before it loads a module, this binary's own
-/// tests included (`tests/hosts.rs`).
-fn install() {
-    vyrn_genwasm::install();
-    vyrn_lower::install();
-}
-
 fn real_main() -> ExitCode {
-    install();
+    vyrn_genwasm::install();
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
     if is_offline {
@@ -6112,7 +6104,7 @@ fn handle(req: Request) -> Response {
         let source = format!("{SRC}\n{SERVE_SHIM}");
         std::fs::write(&file, &source).unwrap();
         let key = file.to_string_lossy().replace('\\', "/");
-        install();
+        vyrn_genwasm::install();
         let (mut program, dsg) = loaded(&key, &source).expect("the doors load and check");
         serve_rewrite(&mut program);
         let bytes = vyrn_codegen::direct::compile(&program, &dsg).expect("the doors compile");

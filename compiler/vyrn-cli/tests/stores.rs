@@ -14,7 +14,6 @@ use vyrn_frontend::ast::{Block, NodeId, Stmt};
 use vyrn_frontend::core::Facts;
 
 fn analyze(src: &str) -> (vyrn_frontend::ast::Program, Facts) {
-    vyrn_lower::install();
     let dir = common::scratch("stores");
     let path = dir.join("m.vyrn");
     std::fs::write(&path, src).expect("write the source");

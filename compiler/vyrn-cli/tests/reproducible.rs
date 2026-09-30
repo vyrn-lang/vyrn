@@ -159,7 +159,6 @@ fn a_program_compiled_after_another_in_one_process_is_the_same_bytes() {
             std::fs::read_to_string(resolved).map_err(|e| e.to_string())
         }
     }
-    vyrn_lower::install();
     vyrn_genwasm::install();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let opts = vyrn_frontend::loader::LoadOptions {

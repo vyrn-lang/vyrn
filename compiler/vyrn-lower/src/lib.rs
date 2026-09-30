@@ -18,17 +18,8 @@ mod pipeline;
 pub mod typed;
 mod world;
 
-pub use pipeline::{check_and_synthesize, load, load_warned, refusals, JUDGE};
+pub use pipeline::{check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE};
 
-/// Installs this crate's judgments into the slots `vyrn-frontend` declares,
-/// because the frontend sits below this crate and cannot call into it: the
-/// must-use judgment and the typed judgment's drain for a generator's own
-/// check and run, and the effect judgment for the floor. Idempotent; the CLI
-/// calls it at start-up, and a test that asserts a refusal calls it itself.
-pub fn install() {
-    vyrn_frontend::own::install_must_use(typed::obligation::judge);
-    vyrn_frontend::own::install_typed(core::typed_diagnostics);
-}
 pub use core::refuses as kernel_refuses;
 pub use world::{analyze, forget_loaded, hand_on, World};
 

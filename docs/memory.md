@@ -278,9 +278,7 @@ Each rule has one home. The names below are the entry points.
   capability per parameter, so a builtin borrows, modifies or consumes by the
   same rule as user code.
 - `vyrn-frontend/src/own.rs`: the release vocabulary (`Release`, `Exit`,
-  `DropKind`), the `vyrn why --memory` rows (`MemoryRow`), and the slots
-  through which `vyrn-lower` installs the must-use judgment and the typed
-  judgment's drain. `own::analyze` makes one `Ownership` per program, hands it
+  `DropKind`), and the `vyrn why --memory` rows (`MemoryRow`). `own::analyze` makes one `Ownership` per program, hands it
   to the placer it is given, and memoizes it for the command.
 - `vyrn-lower/src/core.rs`: `core::build` lowers a body into the named core.
   Every value has a name, every access is a place, and every release is a

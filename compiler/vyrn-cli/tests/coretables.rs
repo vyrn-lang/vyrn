@@ -36,7 +36,6 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
 }
 
 fn core_body(src: &str, which: &str) -> vyrn_frontend::core::Body {
-    vyrn_lower::install();
     let (program, _memo) =
         Memo::load(|| vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver))
             .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
@@ -79,7 +78,6 @@ fn core_releases(src: &str, which: &str, binding: &str) -> bool {
 /// the kernel's placement and the checker's record are that analysis's, not the thread's.
 #[test]
 fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
-    vyrn_lower::install();
     let analyzed = |src: &str| {
         let program = vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver)
             .unwrap_or_else(|d| panic!("{}", d[0].render()));
@@ -167,7 +165,6 @@ fn an_if_let_over_a_parameter_owes_no_release() {
 /// caller reclaims storage the lender's own caller still owns.
 #[test]
 fn a_lender_forwarded_through_an_aggregate_lends_still() {
-    vyrn_lower::install();
     let src = "type R = { name: String }                fn pick(xs: Array<String>) -> String                { for x in xs { return x } return \"\" }                fn g(a: Array<String>) -> R { return R { name: pick(a) } }                fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]                let r = g(arr) return r.name.byteLength }";
     let program = vyrn_lower::load(src, "lend.vyrn", &Default::default(), &DiskResolver);
     assert!(
@@ -303,7 +300,6 @@ fn run() {
     // Generation is the driver's engine, not the frontend's. Without it, examples that import
     // through a generator fail to load and the census silently counts a smaller corpus.
     vyrn_genwasm::install();
-    vyrn_lower::install();
     let mut counted: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut produced: BTreeMap<(&'static str, bool), usize> = BTreeMap::new();
     let mut ops: BTreeMap<String, usize> = BTreeMap::new();

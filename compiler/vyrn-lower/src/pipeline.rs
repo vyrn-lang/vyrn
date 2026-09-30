@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 
+use vyrn_frontend::consteval::ConstVal;
 use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::gen::{GenEngine, GenError, GenInputs, GenOutput};
 use vyrn_frontend::{ast, checker, floor, loader, movecheck, prof, symbols, types};
 
 use crate::typed;
@@ -114,12 +116,6 @@ pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
         .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
         .collect();
     diags.extend(owed);
-    // A generator's program skips the kernel: nothing prints its refusals, and
-    // judging them costs the editor on every keystroke that re-runs one.
-    if movecheck::in_comptime() {
-        movecheck::in_source_order(&mut diags);
-        return diags;
-    }
     // The placer judges a core body for every instance, and the World is
     // handed on: a command's next `own::Memo` adopts it. Only this analysis
     // may reuse a judgment (`movecheck::reuse_judgments`).
@@ -155,6 +151,52 @@ fn subject(message: &str) -> Option<&str> {
     (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
 }
 
+/// Wraps `run`, an engine that compiles and runs a generator, into the engine
+/// `gen::set_gen_engine` installs, which judges the generator's own program
+/// under [`movecheck::comptime`]. The must-use judgment refuses before `run`.
+/// After a run that failed, the typed judgment judges the program, and its
+/// refusals replace the run's error. The kernel does not judge a generator's
+/// program: nothing prints its refusals.
+pub fn gen_engine(
+    run: impl Fn(&ast::Program, &str, &[ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, String>>
+        + Send
+        + Sync
+        + 'static,
+) -> Box<GenEngine> {
+    Box::new(move |program, name, args, inputs| {
+        movecheck::comptime(|| {
+            let mut owed = {
+                let _held = checker::Held::open(program);
+                typed::obligation::judge(program)
+            };
+            if !owed.is_empty() {
+                movecheck::in_source_order(&mut owed);
+                return Some(Err(GenError::Refused(owed)));
+            }
+            let out = run(program, name, args, inputs);
+            let typed = match out {
+                Some(Ok(_)) => Vec::new(),
+                _ => generator_typed(program),
+            };
+            if typed.is_empty() {
+                out.map(|r| r.map_err(GenError::Failed))
+            } else {
+                Some(Err(GenError::Refused(typed)))
+            }
+        })
+    })
+}
+
+/// The typed judgment's refusals of a generator's program, judged under the
+/// generator host as the engine's compile judges it.
+fn generator_typed(program: &ast::Program) -> Vec<Diagnostic> {
+    let host = checker::gen_host();
+    checker::set_gen_host(true);
+    let typed = crate::analyze(program).typed_diagnostics().to_vec();
+    checker::set_gen_host(host);
+    typed
+}
+
 /// The ownership judgments the editor shows: [`refusals`] among the
 /// diagnostics, and the placed analysis's memory rows on hover.
 pub const JUDGE: symbols::Judge = symbols::Judge {
@@ -171,11 +213,6 @@ pub const JUDGE: symbols::Judge = symbols::Judge {
 /// whose type has no key, is not built. The kernel's refusals are dropped,
 /// because typing comes before the judgments.
 fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diagnostic> {
-    // A generator's own program is judged by the checker alone, as in
-    // [`refusals`].
-    if movecheck::in_comptime() {
-        return Vec::new();
-    }
     // A method of a refused impl is reached by name, or by a call the checker
     // dispatched on its receiver's type key. A receiver typed by a type
     // parameter may dispatch to any key.
