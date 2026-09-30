@@ -5,8 +5,9 @@
 //! Both threads run the editor's pipeline (`analyze_judged` with
 //! `vyrn_lower::JUDGE` and the generation engine) and arm the judgment memo.
 //! Only the editing thread arms `record_reads`, so the fresh analysis checks
-//! every body and also witnesses that a replayed body writes what a checked
-//! one writes.
+//! every body and walks every body the lowering reaches. It also witnesses
+//! that a replayed body writes what a checked one writes, and that a reused
+//! walk adds to the worklist what a walk adds.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -62,10 +63,10 @@ struct Edit {
 }
 
 /// What the editor shows of an analysis: diagnostics, relocated diagnostics,
-/// typed bindings and memory notes.
-fn shown(a: &Analysis) -> String {
+/// typed bindings and memory notes; and the lowering's generic `instances`.
+fn shown(a: &Analysis, instances: &[String]) -> String {
     format!(
-        "{:#?}\n{:#?}\n{:#?}\n{:#?}",
+        "{:#?}\n{:#?}\n{:#?}\n{:#?}\n{instances:#?}",
         a.diagnostics, a.remapped, a.locals, a.memory
     )
 }
@@ -73,6 +74,34 @@ fn shown(a: &Analysis) -> String {
 /// The analysis of `e` in the project `path` lies in, loaded as the editor
 /// loads it.
 fn analyze(path: &str, e: &Edit) -> Analysis {
+    let (opts, resolver) = linker(path, e);
+    let engine = vyrn_genwasm::engine();
+    vyrn_frontend::analyze_judged(
+        &e.root,
+        Some((path, &opts, &resolver)),
+        Some(&*engine),
+        &vyrn_lower::JUDGE,
+    )
+}
+
+/// The generic instances the editor's lowering of `e` makes, in the World's
+/// order; none for a program that does not load.
+fn instances(path: &str, e: &Edit) -> Vec<String> {
+    let (opts, resolver) = linker(path, e);
+    let engine = vyrn_genwasm::engine();
+    let Ok(p) = vyrn_lower::load(&e.root, path, &opts, &resolver, Some(&*engine)) else {
+        return Vec::new();
+    };
+    let world = vyrn_lower::refusals(&p).1;
+    (world.fn_rows().iter())
+        .filter(|r| r.generic.is_some())
+        .map(|r| r.name.clone())
+        .collect()
+}
+
+/// The load options and the resolver of `e` in the project `path` lies in,
+/// as the editor loads it.
+fn linker(path: &str, e: &Edit) -> (LoadOptions, Overlaid) {
     let mut opts = LoadOptions {
         std_root: vyrn_frontend::manifest::std_root(),
         ..Default::default()
@@ -89,13 +118,7 @@ fn analyze(path: &str, e: &Edit) -> Analysis {
         opts.artifacts = m.artifacts;
         resolver.project = Some(m.dir);
     }
-    let engine = vyrn_genwasm::engine();
-    vyrn_frontend::analyze_judged(
-        &e.root,
-        Some((path, &opts, &resolver)),
-        Some(&*engine),
-        &vyrn_lower::JUDGE,
-    )
+    (opts, resolver)
 }
 
 /// Runs `f` on a fresh thread with the editor's stack and judgment memo.
@@ -129,7 +152,8 @@ fn replay(path: &Path, edits: Vec<Edit>) -> Vec<(u64, u64)> {
                 let _ = vyrn_frontend::checker::recheck::tally();
                 let a = analyze(&p, &es[i]);
                 let tally = vyrn_frontend::checker::recheck::tally();
-                tell.send((shown(&a), tally)).expect("the test listens");
+                let shown = shown(&a, &instances(&p, &es[i]));
+                tell.send((shown, tally)).expect("the test listens");
             }
         })
         .expect("spawn the editing thread");
@@ -140,7 +164,7 @@ fn replay(path: &Path, edits: Vec<Edit>) -> Vec<(u64, u64)> {
         let (p, es) = (path.clone(), edits.clone());
         let fresh = on_fresh_thread(move || {
             let a = analyze(&p, &es[i]);
-            (shown(&a), a.diagnostics)
+            (shown(&a, &instances(&p, &es[i])), a.diagnostics)
         });
         let parse = fresh.1.iter().find(|d| d.stage == "parse");
         assert!(parse.is_none(), "{path}, {}: {parse:?}", e.what);
@@ -177,6 +201,8 @@ const STATE_STR: &str = "\nlet recheckState: String = \"a\"\n";
 const READER: &str = "\nfn recheckRead() -> Int64 {\n    return recheckState + 1\n}\n";
 const TEST_OK: &str = "\ntest \"recheck\" {\n    assertEq(recheckAdded(1), 1)\n}\n";
 const TEST_BAD: &str = "\ntest \"recheck\" {\n    assertEq(recheckAdded(1), \"a\")\n}\n";
+/// One generic body instantiated at two types, each calling another generic.
+const GENERIC: &str = "\nfn recheckOne<T>(x: T) -> Int64 {\n    return 1\n}\n\nfn recheckPair<T>(x: T) -> Int64 {\n    return recheckOne(x)\n}\n\nfn recheckBoth() -> Int64 {\n    return recheckPair(1) + recheckPair(\"a\")\n}\n";
 /// A private function of `std/strings`: a root declaration of the same name
 /// renames both apart, which rewrites the module's bodies and keeps its text.
 const COLLIDE: &str = "\nfn isAsciiSpace(b: Int64) -> String {\n    return \"\"\n}\n";
@@ -239,6 +265,7 @@ fn edits(base: &str) -> Vec<Edit> {
             false,
         ),
         ("move every line", format!("\n{}", all(&collided)), false),
+        ("instantiate a generic at two types", all(&[GENERIC]), false),
         ("back to the start", base.to_string(), false),
     ];
     (steps.into_iter())

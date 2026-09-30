@@ -1158,8 +1158,8 @@ fn check_accum_inner(
     let mut typed = typed.into_iter();
     for (&(i, f), r) in bodies.iter().zip(replayed) {
         let t = r.unwrap_or_else(|| {
-            let t = typed.next().expect("one typed body per body not replayed");
-            checker.store(SourceBody::Fn(i), Text::Fn(f), &t);
+            let mut t = typed.next().expect("one typed body per body not replayed");
+            checker.store(SourceBody::Fn(i), Text::Fn(f), &mut t);
             t
         });
         if !t.diags.is_empty() {
@@ -1607,6 +1607,10 @@ pub struct Recorded {
     /// variant ([`Checker::read`]). A body the check typed again repeats its
     /// rows.
     pub reads: Vec<(SourceBody, Key)>,
+    /// Each body a [`recheck`] entry holds, replayed or stored by this check,
+    /// with the entry's serial. A serial names one record of one body, so a
+    /// reader keyed by it may reuse what it derived from that record.
+    pub entries: Vec<(SourceBody, u64)>,
 }
 
 impl Recorded {
@@ -1624,6 +1628,7 @@ impl Recorded {
         self.stored.arg_sources.extend(tail.stored.arg_sources);
         self.stored.calls.extend(tail.stored.calls);
         self.reads.extend(tail.reads);
+        self.entries.extend(tail.entries);
     }
 }
 

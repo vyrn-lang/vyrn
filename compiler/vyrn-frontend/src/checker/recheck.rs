@@ -63,6 +63,9 @@ thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
 }
 
+/// The next [`Entry::serial`].
+static SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Default)]
 struct Cache {
     /// Sessions closed on this thread.
@@ -90,6 +93,8 @@ struct Entry {
     /// The unit the body was numbered as when checked; its record rows are
     /// keyed in it.
     unit: u32,
+    /// Unique per stored entry in the process ([`Recorded::entries`]).
+    serial: u64,
     reads: Vec<Read>,
     /// What typing the body gave, its read rows in `reads`.
     typed: Typed,
@@ -343,6 +348,10 @@ impl Checker<'_> {
                 false => in_unit(r, unit),
             });
             let reads = e.reads.iter().map(|r| (body, s.key_of(self, r))).collect();
+            let record = record.map(|r| Recorded {
+                entries: vec![(body, e.serial)],
+                ..r
+            });
             Some(Typed {
                 record,
                 reads,
@@ -352,8 +361,9 @@ impl Checker<'_> {
     }
 
     /// Stores `t`, what typing `body` gave, as an entry, unless a read or a
-    /// record row cannot follow the body to another check.
-    pub(super) fn store(&self, body: SourceBody, text: Text<'_>, t: &Typed) {
+    /// record row cannot follow the body to another check, and names the
+    /// entry in `t`'s record.
+    pub(super) fn store(&self, body: SourceBody, text: Text<'_>, t: &mut Typed) {
         let Some(s) = &self.recheck else {
             return;
         };
@@ -379,14 +389,19 @@ impl Checker<'_> {
             let c = &mut *c.borrow_mut();
             let seen = c.worlds[&s.world].1;
             let (world, key) = (s.world, s.key(body, text));
+            let serial = SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let e = Entry {
                 world,
                 seen,
                 unit,
+                serial,
                 reads,
                 typed,
             };
             c.entries.insert(key, e);
+            if let Some(r) = &mut t.record {
+                r.entries.push((body, serial));
+            }
         });
     }
 
@@ -411,9 +426,9 @@ impl Checker<'_> {
         self.reading(body);
         let mut diags = Vec::new();
         check(&mut diags);
-        let t = self.taken(diags);
+        let mut t = self.taken(diags);
         self.put(aside);
-        self.store(body, text, &t);
+        self.store(body, text, &mut t);
         out.extend(self.absorb(t));
     }
 }
@@ -433,6 +448,7 @@ fn in_unit(r: &Recorded, unit: u32) -> Recorded {
         calls: (r.calls.iter()).map(|(k, d)| (at(k), d.clone())).collect(),
         stored: r.stored.clone(),
         reads: r.reads.clone(),
+        entries: Vec::new(),
     }
 }
 

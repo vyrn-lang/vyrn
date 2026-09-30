@@ -293,9 +293,28 @@ pub fn lower_with<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
+    lowered(program, ownership, false)
+}
+
+/// [`lower_with`] for the placer of a host that runs no emitter. An instance
+/// whose walk [`Walks`] holds takes the calls the walk found, and adds no
+/// facts and no lambda body; [`walked`] gives the facts to a reader that
+/// builds it.
+pub(crate) fn lower_reusing<'a>(
+    program: &'a Program,
+    ownership: &vyrn_frontend::own::Ownership,
+) -> Lowered<'a> {
+    lowered(program, ownership, true)
+}
+
+fn lowered<'a>(
+    program: &'a Program,
+    ownership: &vyrn_frontend::own::Ownership,
+    reuse: bool,
+) -> Lowered<'a> {
     let recorded = ownership.record.clone();
     let build_span = vyrn_frontend::prof::phase("lower: build");
-    let mut lowered = build(program, &recorded, ownership);
+    let mut lowered = build(program, &recorded, ownership, reuse);
     drop(build_span);
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
@@ -649,11 +668,124 @@ fn has_of<'e>(e: &'e Expr, kid: impl Fn(&'e Expr) -> Option<Type>) -> Option<Typ
     })
 }
 
+/// One walk of a body under a substitution: its facts, the generic calls it
+/// makes and its lambda bodies.
+struct Walked<'a> {
+    facts: NodeTypes<'a>,
+    calls: Vec<(String, HashMap<String, Type>)>,
+    lambda_bodies: std::collections::HashSet<NodeId>,
+}
+
+fn walk<'a>(
+    recorded: &checker::Recorded,
+    program: &'a Program,
+    body: &'a vyrn_frontend::ast::Block,
+    subst: HashMap<String, Type>,
+) -> Walked<'a> {
+    let mut w = Walk::new(recorded, program, subst);
+    facts_block(body, &mut Default::default(), &mut w);
+    Walked {
+        facts: w.facts,
+        calls: w.calls,
+        lambda_bodies: w.lambda_bodies,
+    }
+}
+
+/// `inst` with its facts: `inst` itself, or its body walked again where
+/// [`lower_reusing`] left the facts out. A body with no expression walks to
+/// the same empty facts.
+pub(crate) fn walked<'i, 'a>(
+    program: &'a Program,
+    recorded: &checker::Recorded,
+    inst: &'i Instance<'a>,
+) -> std::borrow::Cow<'i, Instance<'a>> {
+    if !inst.facts.exprs.is_empty() {
+        return std::borrow::Cow::Borrowed(inst);
+    }
+    let subst = inst.subst.clone().into_iter().collect();
+    let facts = walk(recorded, program, &inst.func.body, subst).facts;
+    std::borrow::Cow::Owned(Instance {
+        facts,
+        ..inst.clone()
+    })
+}
+
+/// How many lowerings a kept walk outlives unused, so an edit undone at the
+/// next keystroke finds its walk.
+const WALK_STALE: u64 = 2;
+
+thread_local! {
+    static WALKS: std::cell::RefCell<(u64, HashMap<(u64, Vec<Type>), Kept>)> =
+        Default::default();
+}
+
+/// The calls one walk found, and the lowering that last read or wrote them.
+type Kept = (Vec<(String, HashMap<String, Type>)>, u64);
+
+/// The walks a lowering reuses, keyed by the serial of the recheck entry that
+/// holds the body's record ([`checker::Recorded::entries`]) and the type
+/// arguments. Besides the record and the substitution, a walk reads `impls`
+/// and the expansions. An entry answers only under the recheck world, which
+/// holds every `impl`. A body whose typing expanded a site names a node of
+/// another unit, so no entry holds it.
+struct Walks {
+    now: u64,
+    kept: HashMap<(u64, Vec<Type>), Kept>,
+    /// Each function body's serial in this check.
+    serials: HashMap<FnId, u64>,
+}
+
+impl Walks {
+    fn open(recorded: &checker::Recorded) -> Walks {
+        let serials = (recorded.entries.iter())
+            .filter_map(|(body, serial)| match body {
+                SourceBody::Fn(i) => Some((FnId::nth(*i as usize), *serial)),
+                _ => None,
+            })
+            .collect();
+        let (now, kept) = WALKS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        Walks {
+            now: now + 1,
+            kept,
+            serials,
+        }
+    }
+
+    /// The calls the kept walk of `f`'s body at `type_args` found.
+    fn reuse(&mut self, f: FnId, type_args: &[Type]) -> Option<Walked<'static>> {
+        let serial = *self.serials.get(&f)?;
+        let (calls, used) = self.kept.get_mut(&(serial, type_args.to_vec()))?;
+        *used = self.now;
+        Some(Walked {
+            facts: NodeTypes::default(),
+            calls: calls.clone(),
+            lambda_bodies: Default::default(),
+        })
+    }
+
+    fn keep(&mut self, f: FnId, type_args: &[Type], w: &Walked) {
+        if let Some(&serial) = self.serials.get(&f) {
+            let kept = (w.calls.clone(), self.now);
+            self.kept.insert((serial, type_args.to_vec()), kept);
+        }
+    }
+
+    /// Drops every walk unused for [`WALK_STALE`] lowerings and hands the rest
+    /// to the next lowering on this thread.
+    fn close(mut self) {
+        let now = self.now;
+        self.kept.retain(|_, (_, used)| *used + WALK_STALE >= now);
+        WALKS.with(|w| *w.borrow_mut() = (now, self.kept));
+    }
+}
+
 fn build<'a>(
     program: &'a Program,
     recorded: &std::sync::Arc<checker::Recorded>,
     ownership: &vyrn_frontend::own::Ownership,
+    reuse: bool,
 ) -> Lowered<'a> {
+    let mut walks = reuse.then(|| Walks::open(recorded));
     let no_steps: Vec<Release> = Vec::new();
     let by_name = by_name(program);
     let decls = ownership.proto.types();
@@ -791,8 +923,16 @@ fn build<'a>(
             .collect();
         let flat: HashMap<String, Type> = subst.clone().into_iter().collect();
 
-        let mut w = Walk::new(recorded, program, flat.clone());
-        facts_block(&func.body, &mut Default::default(), &mut w);
+        let w = match walks.as_mut().and_then(|ws| ws.reuse(func_id, &type_args)) {
+            Some(w) => w,
+            None => {
+                let w = walk(recorded, program, &func.body, flat.clone());
+                if let Some(ws) = &mut walks {
+                    ws.keep(func_id, &type_args, &w);
+                }
+                w
+            }
+        };
         // `own` decides against the declaration; an engine emits against the
         // instance, so a step's type is substituted here.
         let releases: Vec<Release> = ownership
@@ -813,7 +953,7 @@ fn build<'a>(
             })
             .collect();
 
-        let mut calls = std::mem::take(&mut w.calls);
+        let mut calls = w.calls;
         calls.extend(
             dispatched(&releases, &by_name)
                 .into_iter()
@@ -840,6 +980,9 @@ fn build<'a>(
         });
     }
 
+    if let Some(ws) = walks {
+        ws.close();
+    }
     Lowered {
         instances,
         globals,
@@ -877,8 +1020,7 @@ pub fn as_written<'a>(
         .map(|(i, func)| {
             let func_id = FnId::nth(i);
             let type_args: Vec<Type> = func.type_params.iter().cloned().map(Type::Param).collect();
-            let mut w = Walk::new(&recorded, program, HashMap::new());
-            facts_block(&func.body, &mut Default::default(), &mut w);
+            let facts = walk(&recorded, program, &func.body, HashMap::new()).facts;
             Instance {
                 func,
                 func_id,
@@ -889,7 +1031,7 @@ pub fn as_written<'a>(
                     .zip(type_args.iter().cloned())
                     .collect(),
                 type_args,
-                facts: w.facts,
+                facts,
                 releases: ownership
                     .releases
                     .get(&func_id)
