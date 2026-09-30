@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use vyrn_frontend::ast::{FnId, Program, Type};
-use vyrn_frontend::core::{Body, Facts};
+use vyrn_frontend::ast::{FnId, Function, Program, Type};
+use vyrn_frontend::core::{rows, Body, Callee, Facts, Rhs, St};
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{self, Ownership};
@@ -23,6 +23,9 @@ pub struct World {
     /// The function table: every function, instance and frame the analysis
     /// met, numbered as [`Fns`] says.
     pub(crate) fns: Fns,
+    /// The call relation over the function table, which [`Calls::replace`]
+    /// writes.
+    pub(crate) calls: Calls,
     /// The core's bodies, which [`World::body_of`] serves. `None` under a
     /// name two bodies share. Empty when `facts` is `None`.
     pub(crate) bodies: HashMap<FnId, Option<Stated>>,
@@ -92,6 +95,91 @@ impl Fns {
     }
 }
 
+/// The call relation between source functions. A caller is the function a
+/// body belongs to: every instance of a generic and every lambda frame count
+/// under the function's own row, the module-state initializers under the
+/// empty name's. A callee is a [`Callee::Fn`] row or a declared release a
+/// name runs. A call through a value, an undispatched method and a
+/// projection resolve to no function, so they are no edge. A `where`
+/// predicate has no row, and a body the judgment memo serves is not built,
+/// so neither has edges.
+#[derive(Default)]
+pub(crate) struct Calls {
+    /// By caller: its callees in source order, each once.
+    callees: Vec<Vec<FnId>>,
+    /// By callee: its callers in id order, each once.
+    callers: Vec<Vec<FnId>>,
+}
+
+impl Calls {
+    /// Replaces the callees of every caller in `rows` and the reverse
+    /// entries with them, in one batch. A caller absent from `rows` keeps its
+    /// edges. Each list in `rows` holds a callee once.
+    pub(crate) fn replace(&mut self, rows: HashMap<FnId, Vec<FnId>>) {
+        let ids = rows.keys().chain(rows.values().flatten());
+        let n = (ids.map(|f| f.index() + 1).max().unwrap_or(0)).max(self.callees.len());
+        self.callees.resize_with(n, Vec::new);
+        self.callers.resize_with(n, Vec::new);
+        let mut replaced = vec![false; n];
+        let mut touched = vec![false; n];
+        for f in rows.keys() {
+            replaced[f.index()] = true;
+            for g in &self.callees[f.index()] {
+                touched[g.index()] = true;
+            }
+        }
+        for (g, _) in touched.iter().enumerate().filter(|(_, t)| **t) {
+            self.callers[g].retain(|c| !replaced[c.index()]);
+        }
+        for (f, cs) in rows {
+            for g in &cs {
+                touched[g.index()] = true;
+                self.callers[g.index()].push(f);
+            }
+            self.callees[f.index()] = cs;
+        }
+        for (g, _) in touched.iter().enumerate().filter(|(_, t)| **t) {
+            self.callers[g].sort_unstable_by_key(|c| c.index());
+        }
+    }
+}
+
+/// Appends to `out` each function a frame of `top` calls, in source order,
+/// and each declared release a name of it runs, skipping one `out` holds.
+/// `fns` resolves a release's name ([`crate::by_name`]).
+pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, out: &mut Vec<FnId>) {
+    let mut add = |g: FnId| {
+        if !out.contains(&g) {
+            out.push(g);
+        }
+    };
+    for b in top.frames() {
+        for (s, _) in rows(&b.stmts) {
+            if let St::Let(
+                _,
+                Rhs::Call {
+                    kind: Callee::Fn(g),
+                    ..
+                },
+            )
+            | St::Do {
+                rhs:
+                    Rhs::Call {
+                        kind: Callee::Fn(g),
+                        ..
+                    },
+                ..
+            } = s
+            {
+                add(*g);
+            }
+        }
+        let runs = (b.names.iter()).flat_map(|i| &i.runs);
+        runs.filter_map(|r| fns.get(r.as_str()))
+            .for_each(|(g, _)| add(*g));
+    }
+}
+
 /// One body with its check rows stated, and the same body decided
 /// (`elide::decide`) when an emitter first reads it, so `vyrn check` decides
 /// none.
@@ -145,6 +233,16 @@ impl World {
         }))
     }
 
+    /// The functions `f`'s bodies call ([`Calls`]), in source order.
+    pub fn callees(&self, f: FnId) -> &[FnId] {
+        self.calls.callees.get(f.index()).map_or(&[], Vec::as_slice)
+    }
+
+    /// The functions whose bodies call `f` ([`Calls`]).
+    pub fn callers(&self, f: FnId) -> &[FnId] {
+        self.calls.callers.get(f.index()).map_or(&[], Vec::as_slice)
+    }
+
     /// The typed judgment's refusals.
     pub fn typed_diagnostics(&self) -> &[Diagnostic] {
         &self.typed
@@ -187,9 +285,29 @@ impl World {
     /// # Panics
     ///
     /// If a name's id is not its row's, if a body is served under a name
-    /// other than its own, if bodies exist without facts, or if a refusal is
-    /// not an error.
+    /// other than its own, if bodies exist without facts, if a refusal is
+    /// not an error, or if the callers do not invert the callees.
     pub fn check(&self) {
+        let rows = self.fns.rows.len();
+        for (f, cs) in self.calls.callees.iter().enumerate() {
+            for g in cs {
+                assert!(f < rows && g.index() < rows, "a call edge names no row");
+                assert_eq!(
+                    self.calls.callers[g.index()]
+                        .iter()
+                        .filter(|c| c.index() == f)
+                        .count(),
+                    1,
+                    "a callee lists its caller other than once"
+                );
+            }
+        }
+        let edges = |cs: &Vec<Vec<FnId>>| cs.iter().map(Vec::len).sum::<usize>();
+        assert_eq!(
+            edges(&self.calls.callees),
+            edges(&self.calls.callers),
+            "a caller entry has no call edge"
+        );
         for (name, id) in &self.fns.ids {
             assert_eq!(&self.fn_row(*id).name, name, "a name's id is another row");
         }

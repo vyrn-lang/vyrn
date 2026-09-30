@@ -120,7 +120,8 @@ the playground serves an embedded `std/`. The loader:
 3. `vyrn_lower::refusals`: `vyrn_lower::analyze`, which runs the placer and
    the judgments, then one list of ownership refusals in source order.
    `analyze` returns the World (`vyrn_lower::World`): the `Ownership` with
-   the checker's record, the function table, the core's bodies and facts,
+   the checker's record, the function table, the call relation
+   (`World::callees` and `World::callers`), the core's bodies and facts,
    and both refusal lists. The plan's rows and the bodies are keyed by
    `FnId`; a reader turns a name into an id once, with `World::fn_id`. The
    emitter reads the same World, handed on from the load through

@@ -7296,6 +7296,17 @@ pub fn augment(program: &Program, w: &mut World) {
         made_outside.push(Made::Built(key, build_outside(program, own, ob)));
     }
     drop(os);
+    // The call relation, from the first build of every body; the writes
+    // below add the bodies built for the judgment alone.
+    let by_name = crate::by_name(program);
+    let mut calls: HashMap<FnId, Vec<FnId>> = HashMap::new();
+    let ids = (lowered.instances.iter().map(|i| i.func_id).zip(&made))
+        .chain(lowered.bodies.iter().map(|b| b.id).zip(&made_outside));
+    for (f, m) in ids {
+        if let Made::Built(_, Ok(top)) = m {
+            crate::world::add_callees(top, &by_name, calls.entry(f).or_default());
+        }
+    }
     let ej = vyrn_frontend::prof::phase("placer: effects");
     let mut tops: Vec<(&str, &Body)> = Vec::new();
     for (inst, m) in lowered.instances.iter().zip(&made) {
@@ -7452,6 +7463,7 @@ pub fn augment(program: &Program, w: &mut World) {
         };
         match build(program, &inst, own) {
             Ok(top) => {
+                crate::world::add_callees(&top, &by_name, calls.entry(p.id).or_default());
                 typed(program, own, &mut r, &top, &p.func.module, true);
             }
             Err(g) => {
@@ -7475,6 +7487,8 @@ pub fn augment(program: &Program, w: &mut World) {
             &g.init,
         ) {
             Ok(top) => {
+                let state = w.fns.add("", None);
+                crate::world::add_callees(&top, &by_name, calls.entry(state).or_default());
                 typed(program, own, &mut r, &top, &g.module, true);
             }
             Err(e) => {
@@ -7526,7 +7540,6 @@ pub fn augment(program: &Program, w: &mut World) {
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]) only once the row is in the
     // plan, so such a program is lowered again below.
-    let by_name = crate::by_name(program);
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
     let mut dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     for (f, rows) in added {
@@ -7538,6 +7551,7 @@ pub fn augment(program: &Program, w: &mut World) {
     // the memo runs no emitter, and served bodies would leave the facts
     // partial, so it stops here.
     if memo.is_some() {
+        w.calls.replace(calls);
         crate::effects::set_state_callees(None);
         (w.refusals, w.typed) = (r.kernel, r.typed);
         return;
@@ -7603,6 +7617,7 @@ pub fn augment(program: &Program, w: &mut World) {
             }
             w.fns.instance(inst);
             if let Ok(top) = build(program, inst, own) {
+                crate::world::add_callees(&top, &by_name, calls.entry(inst.func_id).or_default());
                 let mut rows = Added::new();
                 place_frames(
                     &top,
@@ -7630,6 +7645,7 @@ pub fn augment(program: &Program, w: &mut World) {
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     }
+    w.calls.replace(calls);
     w.facts = folds.then_some(facts);
     (w.refusals, w.typed) = (r.kernel, r.typed);
     crate::effects::set_state_callees(None);

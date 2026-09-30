@@ -163,6 +163,7 @@ pull request.
 - A table is keyed by a resolved id (function, type, declaration, name), never by a spelling; two bindings that share a name merged their facts. A node id is a function id and a local index, so an edit to one function renumbers nothing else.
 - An id is a storage index, never an order. Diagnostics and emitted functions follow source order, so an incremental check and a fresh one print the same bytes.
 - Each relation has one writer, which sets both directions and deletes in a batch. No hooks and no second storage shape for one relation.
+- The call relation is between source functions, as an edit is: every instance of a generic and every lambda frame call under their function's row. A call through a value is no edge; the effect judgment keeps its own per-instance graph with the values' closed sets.
 - A recheck pulls: each result records what it read (a signature, a summary, a name lookup in a scope, misses included), and a cache that records no reads is off in incremental mode.
 - Function bodies check in parallel in callee-first waves. Workers create no ids; a serial merge does. Output is byte-identical on one thread, many threads and a shuffled order.
 - The World has no query engine, runtime scheduler, archetype storage or on-disk snapshot. Each pass is a function over the tables it borrows.
