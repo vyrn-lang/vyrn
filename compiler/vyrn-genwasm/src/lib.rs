@@ -1537,10 +1537,10 @@ fn run_module(
         None => {
             let t = std::time::Instant::now();
             let from_disk = persist.then(|| load_artifact(key)).flatten();
-            let m = match from_disk {
+            let (m, refused) = match from_disk {
                 Some(m) => {
                     trace("deserialize", t.elapsed());
-                    m
+                    (m, false)
                 }
                 None => {
                     let bytes = build()?;
@@ -1549,14 +1549,20 @@ fn run_module(
                     let m = wasmtime::Module::new(wasm_engine(), &bytes)
                         .map_err(|e| EngineError::Failed(format!("wasm: {e}")))?;
                     trace("cranelift", t.elapsed());
-                    if persist {
+                    // Only a compile states the typed judgment's refusals, and they
+                    // are the run's answer (`vyrn_lower::gen_engine`), so a refused
+                    // compile is never cached: a hit would skip them.
+                    let refused = vyrn_lower::core::typed_refused();
+                    if persist && !refused {
                         store_artifact(key, &m);
                     }
-                    m
+                    (m, refused)
                 }
             };
-            if let Ok(mut c) = module_cache().lock() {
-                c.insert(key.to_string(), m.clone());
+            if !refused {
+                if let Ok(mut c) = module_cache().lock() {
+                    c.insert(key.to_string(), m.clone());
+                }
             }
             m
         }

@@ -184,20 +184,20 @@ fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
         };
         w.stmts(&f.stmts, 0);
         for p in &f.params {
-            w.bound[*p as usize] = 0;
+            w.bound[p.index()] = 0;
         }
         for (site, n, kind) in &f.cands {
             let takes = match kind {
                 Cand::Switch => {
                     let at = w.switches.iter().find(|(s, m, _, _)| s == site && m == n);
                     at.is_some_and(|(_, _, depth, order)| {
-                        w.last[*n as usize] == *order && w.bound[*n as usize] == *depth
+                        w.last[n.index()] == *order && w.bound[n.index()] == *depth
                     })
                 }
                 Cand::Loop => {
-                    w.bound[*n as usize] != usize::MAX && w.deep[*n as usize] > w.bound[*n as usize]
+                    w.bound[n.index()] != usize::MAX && w.deep[n.index()] > w.bound[n.index()]
                 }
-                Cand::Elem => w.handed[*n as usize],
+                Cand::Elem => w.handed[n.index()],
             };
             if takes {
                 out.insert(*site);
@@ -238,7 +238,7 @@ impl Reads {
             }
             st.operands(&mut |v, u| {
                 let Val::Name(n) = *v else { return };
-                let n = n as usize;
+                let n = n.index();
                 if u == Use::Bind {
                     self.bound[n] = depth;
                     return;
@@ -256,7 +256,7 @@ impl Reads {
             } = st
             {
                 if let Some(Val::Name(n)) = root_name(p) {
-                    self.handed[n as usize] = true;
+                    self.handed[n.index()] = true;
                 }
             }
             let St::Switch { on, arms, .. } = st else {
@@ -269,7 +269,7 @@ impl Reads {
             }
             for a in arms {
                 for b in &a.binds {
-                    self.bound[*b as usize] = depth;
+                    self.bound[b.index()] = depth;
                 }
                 // The rows that read a binder out of the scrutinee
                 // are the binder's, not a read of the scrutinee.
@@ -1153,16 +1153,16 @@ fn build_seeded(
         let n = b.name(&p.name, pty, owned, f.line);
         if is_release {
             b.released = Some(n);
-            b.body.names[n as usize].borrow = false;
+            b.body.names[n.index()].borrow = false;
         }
         // A `read` or `modify` parameter is never taken; the
         // kernel needs the capability to word the refusal. A must-use
         // parameter is excepted from the take only: its capability
         // still words a refusal about a second name for it.
-        b.body.names[n as usize].must_use_param =
-            b.proto.must_use(&b.body.names[n as usize].ty.clone());
-        b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
-        b.body.names[n as usize].mutable = p.capability == Capability::Modify;
+        b.body.names[n.index()].must_use_param =
+            b.proto.must_use(&b.body.names[n.index()].ty.clone());
+        b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name);
+        b.body.names[n.index()].mutable = p.capability == Capability::Modify;
         b.scope.push((p.name.clone(), n));
         b.keyed(n, p.id());
         b.body.params.push(n);
@@ -1525,28 +1525,28 @@ impl<'a> Builder<'a> {
             not_owned: None,
             runs,
         });
-        (self.body.names.len() - 1) as Name
+        Name((self.body.names.len() - 1) as u32)
     }
 
     /// The `@borrow` a read of a place binds, carrying the path the reader
     /// wrote ([`NameInfo::path`]).
     fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
         let n = self.name("@borrow", ty, false, line);
-        self.body.names[n as usize].path = reader_path(e);
+        self.body.names[n.index()].path = reader_path(e);
         n
     }
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
     fn keyed_let(&mut self, n: Name, s: &Stmt) {
         self.keyed(n, s.id());
-        self.body.names[n as usize].bound_by_let = true;
-        self.body.names[n as usize].mutable = matches!(s, Stmt::Let { mutable: true, .. });
+        self.body.names[n.index()].bound_by_let = true;
+        self.body.names[n.index()].mutable = matches!(s, Stmt::Let { mutable: true, .. });
     }
 
     /// Records the plan's key for a name, and the name for the key.
     fn keyed(&mut self, n: Name, binding: NodeId) {
         assert_ne!(binding, NodeId::NONE, "a binding keyed by no node");
-        self.body.names[n as usize].binding = Some(binding);
+        self.body.names[n.index()].binding = Some(binding);
         self.by_binding.insert(binding, n);
     }
 
@@ -1593,7 +1593,7 @@ impl<'a> Builder<'a> {
         }
         match rhs {
             Rhs::Read(_) => false,
-            Rhs::Val(Val::Name(m)) => !self.body.names[*m as usize].borrow,
+            Rhs::Val(Val::Name(m)) => !self.body.names[m.index()].borrow,
             _ => true,
         }
     }
@@ -1616,7 +1616,7 @@ impl<'a> Builder<'a> {
         let borrow = match value {
             Expr::Var { name: m, .. } => self
                 .lookup(m)
-                .is_some_and(|m| self.body.names[m as usize].borrow),
+                .is_some_and(|m| self.body.names[m.index()].borrow),
             e => is_place_read(e) && self.deferred_of(e).is_none(),
         };
         *mutable
@@ -1656,7 +1656,7 @@ impl<'a> Builder<'a> {
         }
         match rhs {
             Rhs::Read(_) => Some(NotOwned::Borrow("read out of a place that owns it".into())),
-            Rhs::Val(Val::Name(m)) if self.body.names[*m as usize].borrow => {
+            Rhs::Val(Val::Name(m)) if self.body.names[m.index()].borrow => {
                 Some(NotOwned::Borrow("a borrow of somebody else's value".into()))
             }
             _ => None,
@@ -1886,17 +1886,17 @@ impl<'a> Builder<'a> {
     /// (`if c { parts[0] } else { "Bool" }`). Where an arm owns its value the
     /// join owns it, and the kernel refuses a borrowed arm's store (#518).
     fn join_borrows(&mut self, res: Name, yields: &[Val]) {
-        let owned = |v: &Val| matches!(v, Val::Name(n) if self.body.names[*n as usize].releases);
+        let owned = |v: &Val| matches!(v, Val::Name(n) if self.body.names[n.index()].releases);
         if yields.iter().any(|v| self.borrows(v)) && !yields.iter().any(owned) {
-            self.body.names[res as usize].releases = false;
-            self.body.names[res as usize].borrow = true;
+            self.body.names[res.index()].releases = false;
+            self.body.names[res.index()].borrow = true;
         }
     }
 
     /// Whether a value is a borrow.
     fn borrows(&self, v: &Val) -> bool {
         match v {
-            Val::Name(n) => self.body.names[*n as usize].borrow,
+            Val::Name(n) => self.body.names[n.index()].borrow,
             Val::Lit(_) => false,
         }
     }
@@ -1918,7 +1918,7 @@ impl<'a> Builder<'a> {
         let resolve = |x: &Expr| match x {
             Expr::Var { name, .. } => self
                 .lookup(name)
-                .map(|n| self.body.names[n as usize].ty.clone()),
+                .map(|n| self.body.names[n.index()].ty.clone()),
             _ => None,
         };
         vyrn_frontend::validate::proven(e, to, self.proto.types(), &resolve)
@@ -1960,8 +1960,8 @@ impl<'a> Builder<'a> {
         let rhs = self.check(to, value, line, out)?;
         let t = self.temp(Type::Named(to.to_string()), line);
         if over_a_literal(&rhs) {
-            self.body.names[t as usize].releases = false;
-            self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+            self.body.names[t.index()].releases = false;
+            self.body.names[t.index()].not_owned = Some(NotOwned::Static);
         }
         self.bind(t, rhs, out);
         Ok(t)
@@ -1992,7 +1992,7 @@ impl<'a> Builder<'a> {
     /// go after it.
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
         if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
-            self.body.names[n as usize].closure_reads = self.pending_closure.take();
+            self.body.names[n.index()].closure_reads = self.pending_closure.take();
         }
         let owed = match (&rhs, self.owed.take()) {
             (Rhs::Make(Ctor::Record(r, _), _), Some((to, line))) if *r == to => Some((to, line)),
@@ -2094,15 +2094,15 @@ impl<'a> Builder<'a> {
                 // container keeps its row, because the row is the loop's take,
                 // which the kernel judges.
                 Some(n)
-                    if !self.body.names[*n as usize].releases
-                        && !self.body.names[*n as usize].for_consume => {}
+                    if !self.body.names[n.index()].releases
+                        && !self.body.names[n.index()].for_consume => {}
                 Some(n) if keep == Some(*n) => {}
                 Some(n) => {
                     // The row's own set (a placer row), else the binding's.
                     let holes = if let Some(h) = &r.holes {
                         h.iter().map(|h| format!(".{h}")).collect()
                     } else {
-                        self.body.names[*n as usize].holes.clone()
+                        self.body.names[n.index()].holes.clone()
                     };
                     out.push(St::Row {
                         name: *n,
@@ -2148,7 +2148,7 @@ impl<'a> Builder<'a> {
     /// The binding of this frame a returned place read reads out of.
     fn reads_out_of(&self, v: &Option<Val>) -> Option<Name> {
         let Some(Val::Name(n)) = v else { return None };
-        let info = &self.body.names[*n as usize];
+        let info = &self.body.names[n.index()];
         if !info.borrow {
             return None;
         }
@@ -2340,7 +2340,7 @@ impl<'a> Builder<'a> {
                 }] = &ss[k..k + span]
                 {
                     let n = self.name(name, Type::Err, false, *line);
-                    self.body.names[n as usize].mutable = *mutable;
+                    self.body.names[n.index()].mutable = *mutable;
                     self.scope.push((name.clone(), n));
                 }
             }
@@ -2558,7 +2558,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), Gap> {
         let t = self.name(temp, ty, false, line);
         // The parser binds the temp `let mut` ([`moves_out`]).
-        self.body.names[t as usize].mutable = true;
+        self.body.names[t.index()].mutable = true;
         self.scope.push((temp.to_string(), t));
         let mut rows = Vec::new();
         let lowered = self.stmt(store, &mut rows);
@@ -2647,7 +2647,7 @@ impl<'a> Builder<'a> {
                     let place = self.place(read, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
-                    self.body.names[n as usize].not_owned =
+                    self.body.names[n.index()].not_owned =
                         self.report_reason(&rhs, &ty, false, false, self.lends(read));
                     out.push(St::Let(n, rhs));
                     self.release_receiver(read, out, true);
@@ -2677,10 +2677,9 @@ impl<'a> Builder<'a> {
                         args,
                         ..
                     } if args.is_empty() => true,
-                    Rhs::Val(Val::Name(m)) => matches!(
-                        self.body.names[*m as usize].not_owned,
-                        Some(NotOwned::Static)
-                    ),
+                    Rhs::Val(Val::Name(m)) => {
+                        matches!(self.body.names[m.index()].not_owned, Some(NotOwned::Static))
+                    }
                     _ => false,
                 };
                 // A lending call binds a borrow whatever its type says; the
@@ -2696,17 +2695,17 @@ impl<'a> Builder<'a> {
                 // are nobody's borrow.
                 let borrow = !owned && (lends || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
                 let n = self.name(name, ty, owned, *line);
-                self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
-                self.body.names[n as usize].not_owned = reason;
+                self.body.names[n.index()].borrow = borrow && self.body.names[n.index()].heap;
+                self.body.names[n.index()].not_owned = reason;
                 self.record_fields(n, value);
                 // `let t = s` on a `read` parameter makes `t` a second name
                 // for it, with its words and its must-use take exception.
                 if let Rhs::Val(Val::Name(m)) = &rhs {
-                    if self.body.names[n as usize].borrow {
-                        self.body.names[n as usize].borrow_kind =
-                            self.body.names[*m as usize].borrow_kind.clone();
-                        self.body.names[n as usize].must_use_param =
-                            self.body.names[*m as usize].must_use_param;
+                    if self.body.names[n.index()].borrow {
+                        self.body.names[n.index()].borrow_kind =
+                            self.body.names[m.index()].borrow_kind.clone();
+                        self.body.names[n.index()].must_use_param =
+                            self.body.names[m.index()].must_use_param;
                     }
                 }
                 self.bind(n, rhs, out);
@@ -2729,7 +2728,7 @@ impl<'a> Builder<'a> {
                     return Ok(());
                 }
                 let to = match self.lookup(name) {
-                    Some(n) => Some(self.body.names[n as usize].ty.clone()),
+                    Some(n) => Some(self.body.names[n.index()].ty.clone()),
                     None => self.named_place(name, *line).ok().map(|(_, t)| t),
                 };
                 if let (Some(to), Some(vty)) = (&to, node_ty(self.own, value.id())) {
@@ -2745,7 +2744,7 @@ impl<'a> Builder<'a> {
                     None => None,
                 };
                 let grown = match (n, &check) {
-                    (Some(n), None) if self.region == 0 && self.body.names[n as usize].grows => {
+                    (Some(n), None) if self.region == 0 && self.body.names[n.index()].grows => {
                         crate::append::self_append_spine(name, value).map(|parts| (n, parts))
                     }
                     // Module state grows through a read of it, which the row
@@ -2767,7 +2766,7 @@ impl<'a> Builder<'a> {
                                 let Val::Name(g) = self.global_read(root, name, *line, out)? else {
                                     return gap("a module-state read that names no value", *line);
                                 };
-                                self.body.names[g as usize].grows = true;
+                                self.body.names[g.index()].grows = true;
                                 Some((g, parts))
                             }
                             None => None,
@@ -2784,7 +2783,7 @@ impl<'a> Builder<'a> {
                 self.rebinding = false;
                 let v = v?;
                 let ty = match n {
-                    Some(n) => self.body.names[n as usize].ty.clone(),
+                    Some(n) => self.body.names[n.index()].ty.clone(),
                     None => self.ty_of(value)?,
                 };
                 // The rule for a store to a name or module state: the plan
@@ -2811,11 +2810,11 @@ impl<'a> Builder<'a> {
                         // projection of `d`. A `mut` slot is released by its
                         // final value, so a slot ever assigned somebody
                         // else's place is not this frame's to release.
-                        if self.borrows(&v) && self.body.names[n as usize].releases {
-                            self.body.names[n as usize].releases = false;
-                            self.body.names[n as usize].borrow = true;
+                        if self.borrows(&v) && self.body.names[n.index()].releases {
+                            self.body.names[n.index()].releases = false;
+                            self.body.names[n.index()].borrow = true;
                         }
-                        (Place::Name(n), self.body.names[n as usize].releases)
+                        (Place::Name(n), self.body.names[n.index()].releases)
                     }
                 };
                 // The hand-back comes before the place's obligation: a name
@@ -3022,7 +3021,7 @@ impl<'a> Builder<'a> {
                             // loop still walks).
                             owner = Some(n);
                             let t = self.borrow_name(iter, ity.clone(), *line);
-                            self.body.names[t as usize].walked = Some(Walk::For);
+                            self.body.names[t.index()].walked = Some(Walk::For);
                             out.push(St::Let(t, Rhs::Read(Place::Name(n))));
                             t
                         }
@@ -3035,7 +3034,7 @@ impl<'a> Builder<'a> {
                         // stays held and the judgment sees it.
                         self.pending_receiver = None;
                         let t = self.borrow_name(iter, ity.clone(), *line);
-                        self.body.names[t as usize].walked = Some(Walk::For);
+                        self.body.names[t.index()].walked = Some(Walk::For);
                         out.push(St::Let(t, Rhs::Read(place)));
                         t
                     }
@@ -3059,7 +3058,7 @@ impl<'a> Builder<'a> {
                 // Whatever spelling brought the container here, the loop took
                 // it, and a refusal about the take names the loop.
                 if *consuming {
-                    self.body.names[it as usize].for_consume = true;
+                    self.body.names[it.index()].for_consume = true;
                 }
                 let streaming = matches!(
                     vyrn_frontend::types::resolve(&ity, self.proto.types()),
@@ -3136,7 +3135,7 @@ impl<'a> Builder<'a> {
                 // `for r in ns` only borrows; a lender's result is somebody
                 // else's buffer.
                 let ekey = body.id();
-                let ic = &self.body.names[owner.unwrap_or(it) as usize];
+                let ic = &self.body.names[owner.unwrap_or(it).index()];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 // A projection yields a place in the container, never its own
                 // element.
@@ -3172,11 +3171,11 @@ impl<'a> Builder<'a> {
                 // variable as a loop variable, as the checker does. A projected
                 // element is refused as the place it is: `consume` cannot hand
                 // it over.
-                if !*consuming && !projected && self.body.names[x as usize].borrow {
+                if !*consuming && !projected && self.body.names[x.index()].borrow {
                     let of = vyrn_frontend::ast::place_path(iter)
                         .map(|(r, _)| r)
                         .unwrap_or_default();
-                    self.body.names[x as usize].loop_var = Some(of);
+                    self.body.names[x.index()].loop_var = Some(of);
                 }
                 // The variable has no node of its own; the body that binds it
                 // keys it.
@@ -3296,7 +3295,7 @@ impl<'a> Builder<'a> {
     /// Marks `n`, bound by a `let` of `name`, as a String accumulator where
     /// the whitelist admits the name.
     fn grows(&mut self, n: Name, name: &str) {
-        let info = &mut self.body.names[n as usize];
+        let info = &mut self.body.names[n.index()];
         info.grows = self.appends.contains(name)
             && vyrn_frontend::types::resolve(&info.ty, self.proto.types()) == Type::Str;
     }
@@ -3385,10 +3384,9 @@ impl<'a> Builder<'a> {
             return frees;
         };
         for b in binds {
-            let src = self.body.names[*b as usize].source.clone();
+            let src = self.body.names[b.index()].source.clone();
             if let Some((_, holes)) = rows.iter().find(|(n, _)| *n == src) {
-                self.body.names[*b as usize].holes =
-                    holes.iter().map(|h| format!(".{h}")).collect();
+                self.body.names[b.index()].holes = holes.iter().map(|h| format!(".{h}")).collect();
                 out.push(St::Drop(*b, Site::None, 0, None));
                 frees.push(*b);
             }
@@ -3400,7 +3398,7 @@ impl<'a> Builder<'a> {
     /// holds, or a parameter, which carries the obligation into the callee
     /// ([`NameInfo::must_use_param`]).
     fn stream_owed(&self, it: Name) -> bool {
-        let info = &self.body.names[it as usize];
+        let info = &self.body.names[it.index()];
         info.releases || info.must_use_param
     }
 
@@ -3472,7 +3470,7 @@ impl<'a> Builder<'a> {
                 return gap_d("an edge release of a name out of scope", name, 0);
             };
             let mut place = Place::Name(n);
-            let mut ty = self.body.names[n as usize].ty.clone();
+            let mut ty = self.body.names[n.index()].ty.clone();
             let mut sub = false;
             for f in parts {
                 ty = self.field_ty(&ty, f, 0)?;
@@ -3481,9 +3479,9 @@ impl<'a> Builder<'a> {
             }
             let at = Site::Edge(join, edge);
             if sub {
-                let t = self.temp(ty, self.body.names[n as usize].line);
+                let t = self.temp(ty, self.body.names[n.index()].line);
                 // Spelled as the sub-place, so a reader gets the row's name.
-                self.body.names[t as usize].source = name.clone();
+                self.body.names[t.index()].source = name.clone();
                 out.push(St::Let(t, Rhs::Take(place)));
                 out.push(St::Drop(t, at, 0, None));
             } else {
@@ -3786,7 +3784,7 @@ impl<'a> Builder<'a> {
             return;
         };
         let mutable = match self.lookup(name) {
-            Some(n) => self.body.names[n as usize].mutable,
+            Some(n) => self.body.names[n.index()].mutable,
             None => self
                 .program
                 .globals
@@ -3814,7 +3812,7 @@ impl<'a> Builder<'a> {
     /// declared type.
     fn named_place(&self, name: &str, line: usize) -> Result<(Place, Type), Gap> {
         if let Some(n) = self.lookup(name) {
-            return Ok((Place::Name(n), self.body.names[n as usize].ty.clone()));
+            return Ok((Place::Name(n), self.body.names[n.index()].ty.clone()));
         }
         match self.program.globals.iter().find(|g| &g.name == name) {
             Some(g) => match g.ty.clone().or_else(|| node_ty(self.own, g.init.id())) {
@@ -3847,7 +3845,7 @@ impl<'a> Builder<'a> {
         for r in read {
             let (ty, path, from, heap) = match &r {
                 Root::N(n) => {
-                    let info = &self.body.names[*n as usize];
+                    let info = &self.body.names[n.index()];
                     if bound.contains(n) {
                         continue;
                     }
@@ -3873,8 +3871,8 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let h = self.name("@borrow", ty, false, line);
-            self.body.names[h as usize].walked = Some(Walk::While);
-            self.body.names[h as usize].path = Some(path);
+            self.body.names[h.index()].walked = Some(Walk::While);
+            self.body.names[h.index()].path = Some(path);
             out.push(St::Let(h, Rhs::Read(from)));
             header_reads(l, Some((&r, h)), &mut Vec::new());
         }
@@ -3948,7 +3946,7 @@ impl<'a> Builder<'a> {
 
     /// `i = i + 1`, for the counter of a `for` over an index.
     fn step(&mut self, i: Name, out: &mut Vec<St>) {
-        let line = self.body.names[i as usize].line;
+        let line = self.body.names[i.index()].line;
         let t = self.temp(Type::Int, line);
         out.push(St::Let(
             t,
@@ -4113,7 +4111,7 @@ impl<'a> Builder<'a> {
                 if !self.seed.contains(&construct) {
                     return Ok((Val::Name(n), false));
                 }
-                let t = self.temp(self.body.names[n as usize].ty.clone(), e.line());
+                let t = self.temp(self.body.names[n.index()].ty.clone(), e.line());
                 out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                 self.keyed(t, construct);
                 Ok((Val::Name(t), true))
@@ -4128,7 +4126,7 @@ impl<'a> Builder<'a> {
                         }
                         return Ok((v, false));
                     };
-                    let t = self.temp(self.body.names[n as usize].ty.clone(), *line);
+                    let t = self.temp(self.body.names[n.index()].ty.clone(), *line);
                     out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                     self.keyed(t, construct);
                     Ok((Val::Name(t), self.taken_by(t, construct)))
@@ -4162,7 +4160,7 @@ impl<'a> Builder<'a> {
     /// Too wide an answer is a refusal, never a double free: the take is
     /// stated in the core, so the kernel refuses a later read.
     fn takes_scrutinee(&self, n: Name, lines: Option<(usize, usize)>) -> bool {
-        let info = &self.body.names[n as usize];
+        let info = &self.body.names[n.index()];
         lines.is_some() && info.releases && info.heap && !info.borrow && !self.reading.contains(&n)
     }
 
@@ -4171,7 +4169,7 @@ impl<'a> Builder<'a> {
     /// did not, the binders borrowed and the value is released whole. Records
     /// the candidate; only a site [`last_owner`] seeded takes.
     fn taken_by(&mut self, t: Name, construct: NodeId) -> bool {
-        if !self.body.names[t as usize].releases {
+        if !self.body.names[t.index()].releases {
             return false;
         }
         self.body.cands.push((construct, t, Cand::Switch));
@@ -4317,29 +4315,29 @@ impl<'a> Builder<'a> {
             self.keyed(n, key);
             if !owned {
                 if let Some(m) = from {
-                    if let Some(k) = self.body.names[m as usize].borrow_kind.clone() {
-                        self.body.names[n as usize].borrow_kind = Some(k);
-                        self.body.names[n as usize].must_use_param =
-                            self.body.names[m as usize].must_use_param;
+                    if let Some(k) = self.body.names[m.index()].borrow_kind.clone() {
+                        self.body.names[n.index()].borrow_kind = Some(k);
+                        self.body.names[n.index()].must_use_param =
+                            self.body.names[m.index()].must_use_param;
                     }
                     // A scrutinee that is a place read has no kind to pass
                     // on, so the binder is `Place` (`return match d.tag {
                     // Word(s) => s, .. }`). An owned scrutinee's payloads are
                     // the frame's to give.
-                    if self.body.names[m as usize].borrow
-                        && self.body.names[n as usize].borrow_kind.is_none()
+                    if self.body.names[m.index()].borrow
+                        && self.body.names[n.index()].borrow_kind.is_none()
                     {
-                        self.body.names[n as usize].borrow_kind = Some(BorrowKind::Place);
+                        self.body.names[n.index()].borrow_kind = Some(BorrowKind::Place);
                     }
                     // A binder of a layout or a heap value reads the scrutinee
                     // for the arm's extent ([`Arm::reads`]), so the kernel
                     // refuses a write to it meanwhile.
-                    if layout || self.body.names[n as usize].borrow {
+                    if layout || self.body.names[n.index()].borrow {
                         // The walk skips a payload hole on its live tag, and
                         // only a declared `release` cannot skip one
                         // ([`vyrn_frontend::declared::skippable`]).
                         let at = format!("{variant}.{i}");
-                        self.body.names[n as usize].payload = Some(
+                        self.body.names[n.index()].payload = Some(
                             if vyrn_frontend::declared::skippable(
                                 &self.own.proto,
                                 sty,
@@ -4397,7 +4395,7 @@ impl<'a> Builder<'a> {
         if let (Val::Name(t), Some((callee, ix))) = (&v, at) {
             let t = *t;
             if self.arg_released(e, t, callee, ix) {
-                self.body.names[t as usize].arg_drop = Some(e.id());
+                self.body.names[t.index()].arg_drop = Some(e.id());
             }
         }
         Ok(v)
@@ -4493,7 +4491,7 @@ impl<'a> Builder<'a> {
         // A forced `lazy` field read is a call returning a fresh owned value.
         // This pass binds a borrow for it because the read names
         // a place, but the caller still frees the value.
-        let info = &self.body.names[t as usize];
+        let info = &self.body.names[t.index()];
         let forced = self.forces_a_thunk(e);
         if !info.releases && !forced {
             return false;
@@ -4568,8 +4566,7 @@ impl<'a> Builder<'a> {
             return false;
         };
         let decls = self.proto.types();
-        let Type::Fn(ps, r) =
-            vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, &decls)
+        let Type::Fn(ps, r) = vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, &decls)
         else {
             return false;
         };
@@ -4607,9 +4604,9 @@ impl<'a> Builder<'a> {
         let place = self.place(e, out)?;
         let thunk = Type::Fn(Vec::new(), Box::new(inner.clone()));
         let n = self.name("@thunk", thunk, false, e.line());
-        let callee = format!("@thunk{n}");
-        self.body.names[n as usize].source = callee.clone();
-        self.body.names[n as usize].path = reader_path(e);
+        let callee = format!("@thunk{}", n.0);
+        self.body.names[n.index()].source = callee.clone();
+        self.body.names[n.index()].path = reader_path(e);
         out.push(St::Let(n, Rhs::Read(place)));
         self.release_receiver(e, out, true);
         Ok(Rhs::Call {
@@ -4650,7 +4647,7 @@ impl<'a> Builder<'a> {
             _ if owns => {
                 let v = self.val(e, out)?;
                 if let Val::Name(t) = v {
-                    if self.body.names[t as usize].releases && !self.after.contains(&t) {
+                    if self.body.names[t.index()].releases && !self.after.contains(&t) {
                         self.after.push(t);
                     }
                 }
@@ -4680,11 +4677,11 @@ impl<'a> Builder<'a> {
         if borrowed && took {
             if self.own.placed.producers.contains(&producer) {
                 if !self.after.contains(&r) {
-                    self.body.names[r as usize].arg_drop = Some(producer);
+                    self.body.names[r.index()].arg_drop = Some(producer);
                     self.after.push(r);
                 }
             } else if self.drain > 0 {
-                self.body.names[r as usize].producer = Some(producer);
+                self.body.names[r.index()].producer = Some(producer);
             }
             return;
         }
@@ -4693,7 +4690,7 @@ impl<'a> Builder<'a> {
         // as an argument temporary's.
         if let (false, Expr::Call { name, args, .. }) = (took, e) {
             if self.arg_released(&args[0], r, name, 0) {
-                self.body.names[r as usize].arg_drop = Some(producer);
+                self.body.names[r.index()].arg_drop = Some(producer);
             }
         }
         // A heap value taken out leaves a hole the release walks around. An
@@ -4704,8 +4701,8 @@ impl<'a> Builder<'a> {
             (true, Expr::Field { field, .. }) => vec![format!(".{field}")],
             (true, _) => return,
         };
-        self.body.names[r as usize].holes = holes;
-        self.body.names[r as usize].receiver_malloc = malloc;
+        self.body.names[r.index()].holes = holes;
+        self.body.names[r.index()].receiver_malloc = malloc;
         out.push(St::Drop(r, Site::None, 0, None));
     }
 
@@ -4717,7 +4714,7 @@ impl<'a> Builder<'a> {
             name: t, fields, ..
         } = value
         {
-            self.body.names[n as usize].fields = fields
+            self.body.names[n.index()].fields = fields
                 .iter()
                 .map(|(f, _)| format!("the field `{t}.{f}`"))
                 .collect();
@@ -4762,8 +4759,8 @@ impl<'a> Builder<'a> {
                     let refusal = stored_slot(None, f, &ty, &decls, *line);
                     self.body.mistyped.extend(refusal);
                     let t = self.name("@closure", ty, false, *line);
-                    self.body.names[t as usize].borrow = false;
-                    self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+                    self.body.names[t.index()].borrow = false;
+                    self.body.names[t.index()].not_owned = Some(NotOwned::Static);
                     let made = Ctor::Closure(Target::Fn(name.clone()));
                     out.push(St::Let(t, Rhs::Make(made, Vec::new())));
                     Ok(Val::Name(t))
@@ -4841,8 +4838,8 @@ impl<'a> Builder<'a> {
     ) -> Result<Val, Gap> {
         let rhs = self.call(name, &[], line, Some(ty.clone()), out)?;
         let t = self.name("@nullary", ty, false, line);
-        self.body.names[t as usize].borrow = false;
-        self.body.names[t as usize].not_owned = Some(NotOwned::Static);
+        self.body.names[t.index()].borrow = false;
+        self.body.names[t.index()].not_owned = Some(NotOwned::Static);
         out.push(St::Let(t, rhs));
         Ok(Val::Name(t))
     }
@@ -4858,7 +4855,7 @@ impl<'a> Builder<'a> {
         let t = self.name("@lambda", ty.clone(), self.owns(&ty), e.line());
         // Taken from the cell, so a nested or sibling lambda asks its own
         // position ([`NameInfo::closure_reads`]).
-        self.body.names[t as usize].closure_reads = self.closure_reads(e, &caps);
+        self.body.names[t.index()].closure_reads = self.closure_reads(e, &caps);
         let key = self.lambda_frame(e, &caps)?;
         out.push(St::Let(t, Rhs::Prim(Op::Closure(key), caps, Some(ty))));
         Ok(Val::Name(t))
@@ -4955,11 +4952,11 @@ impl<'a> Builder<'a> {
             let Val::Name(n) = c else {
                 continue;
             };
-            let info = &outer.names[*n as usize];
+            let info = &outer.names[n.index()];
             let (source, ty) = (info.source.clone(), info.ty.clone());
             let m = self.name(&source, ty, false, *line);
             // A capture is the enclosing frame's; the kernel refuses a take.
-            self.body.names[m as usize].borrow_kind = Some(BorrowKind::Capture);
+            self.body.names[m.index()].borrow_kind = Some(BorrowKind::Capture);
             self.scope.push((source, m));
             self.body.params.push(m);
         }
@@ -5036,7 +5033,7 @@ impl<'a> Builder<'a> {
                     Val::Name(n) => Some(*n),
                     Val::Lit(_) => None,
                 })
-                .filter(|n| reads_place(&vars, &self.body.names[*n as usize].source))
+                .filter(|n| reads_place(&vars, &self.body.names[n.index()].source))
                 .collect(),
         )
     }
@@ -5095,7 +5092,7 @@ impl<'a> Builder<'a> {
         let Some(n) = self.lookup(&root) else {
             return Ok(());
         };
-        let info = &self.body.names[n as usize];
+        let info = &self.body.names[n.index()];
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow && !info.must_use_param => {
@@ -5118,7 +5115,7 @@ impl<'a> Builder<'a> {
     /// outside name from a payload binder minted inside the arm.
     fn alias_out(&self, v: &Val, mark: usize) -> Option<String> {
         let Val::Name(m) = v else { return None };
-        let m = *m as usize;
+        let m = m.index();
         // Only an owning name can be freed twice. A loop variable is minted
         // above the loop mark, so each turn's element is its own.
         (m < mark
@@ -5151,7 +5148,7 @@ impl<'a> Builder<'a> {
                 // A hole the walk cannot skip is not stated: a declared
                 // `release` cannot be told to leave a field alone, so it would
                 // free the field twice (`refusals/r22_drop_with_a_hole.vyrn`).
-                let bty = self.body.names[n as usize].ty.clone();
+                let bty = self.body.names[n.index()].ty.clone();
                 let rel = path.trim_start_matches('.').to_string();
                 if !rel.is_empty()
                     && vyrn_frontend::declared::skippable(
@@ -5160,7 +5157,7 @@ impl<'a> Builder<'a> {
                         std::slice::from_ref(&rel),
                     )
                 {
-                    let hs = &mut self.body.names[n as usize].holes;
+                    let hs = &mut self.body.names[n.index()].holes;
                     if !hs.contains(&path) {
                         hs.push(path);
                         hs.sort();
@@ -5390,7 +5387,7 @@ impl<'a> Builder<'a> {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
-                    self.body.names[r as usize].receiver = Some(e.id());
+                    self.body.names[r.index()].receiver = Some(e.id());
                 }
                 if self.owns(&fty) {
                     // `let sels = parse(q).sels`: the binding takes the field
@@ -5754,7 +5751,7 @@ impl<'a> Builder<'a> {
                 // `?` itself, the value by its operand.
                 let fb = self.bind_pattern(
                     &Pattern::Failure(Binder {
-                        id: Id(tid.0),
+                        id: Id(tid),
                         ..Binder::synthetic("@err")
                     }),
                     &ity,
@@ -5799,7 +5796,7 @@ impl<'a> Builder<'a> {
                 let mark = self.scope.len();
                 let ob = self.bind_pattern(
                     &Pattern::Success(Binder {
-                        id: Id(expr.id().0),
+                        id: Id(expr.id()),
                         ..Binder::synthetic("@ok")
                     }),
                     &ity,
@@ -5874,7 +5871,7 @@ impl<'a> Builder<'a> {
         tid: NodeId,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
-        let line = self.body.names[res as usize].line;
+        let line = self.body.names[res.index()].line;
         let Some(key) = vyrn_frontend::types::type_key(&ity) else {
             return gap("a `?` on a type with no impl key", line);
         };
@@ -5914,7 +5911,7 @@ impl<'a> Builder<'a> {
             line,
         });
         let mut ok = Vec::new();
-        let t = self.temp(self.body.names[res as usize].ty.clone(), line);
+        let t = self.temp(self.body.names[res.index()].ty.clone(), line);
         ok.push(St::Let(
             t,
             Rhs::Call {
@@ -5923,12 +5920,12 @@ impl<'a> Builder<'a> {
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
                 kind: Callee::Fn,
-                ret: Some(self.body.names[res as usize].ty.clone()),
+                ret: Some(self.body.names[res.index()].ty.clone()),
                 targets: Vec::new(),
             },
         ));
         if let Val::Name(n) = sv {
-            if owns && self.body.names[n as usize].releases {
+            if owns && self.body.names[n.index()].releases {
                 ok.push(St::Drop(n, Site::None, 0, None));
             }
         }
@@ -6008,7 +6005,7 @@ impl<'a> Builder<'a> {
                 let v = self.val(e, out)?;
                 match v {
                     Val::Name(t) => {
-                        if self.body.names[t as usize].releases {
+                        if self.body.names[t.index()].releases {
                             // [`NameInfo::receiver_malloc`]: a callee's block.
                             let malloc = matches!(
                                 e,
@@ -6090,7 +6087,7 @@ impl<'a> Builder<'a> {
         // declares, and `h(req)` is a call through the value.
         let bound = self.lookup(name).filter(|n| {
             matches!(
-                vyrn_frontend::types::resolve(&self.body.names[*n as usize].ty, decls),
+                vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, decls),
                 Type::Fn(..)
             )
         });
@@ -6294,7 +6291,7 @@ impl<'a> Builder<'a> {
                 // checks it again.
                 let t = self.checked_temp(&to, a, line, out)?;
                 if self.arg_released(a, t, name, k) {
-                    self.body.names[t as usize].arg_drop = Some(a.id());
+                    self.body.names[t.index()].arg_drop = Some(a.id());
                 }
                 Val::Name(t)
             } else if *cap == Capability::Consume {
@@ -6318,7 +6315,7 @@ impl<'a> Builder<'a> {
                 // Queue the drop `read_arg`'s key stands for. The key also
                 // stands on a borrow (a forced `lazy` field); only a name
                 // this frame releases is dropped.
-                let info = &self.body.names[t as usize];
+                let info = &self.body.names[t.index()];
                 if info.releases && info.arg_drop.is_some() && !self.after.contains(&t) {
                     temps_to_drop.push(t);
                 }
@@ -6437,7 +6434,7 @@ impl<'a> Builder<'a> {
                             Val::Lit(_) => None,
                         })
                         .map(|n| {
-                            let info = &self.body.names[n as usize];
+                            let info = &self.body.names[n.index()];
                             (info.source.clone(), info.ty.clone())
                         })
                         .collect();
@@ -6447,7 +6444,7 @@ impl<'a> Builder<'a> {
                 Expr::Var { name: v, .. } => match self.lookup(v) {
                     Some(n)
                         if self.body.params.contains(&n)
-                            && matches!(self.body.names[n as usize].ty, Type::Fn(..)) =>
+                            && matches!(self.body.names[n.index()].ty, Type::Fn(..)) =>
                     {
                         Target::Param(n)
                     }
@@ -6679,7 +6676,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     let values: Vec<Name> = (bound.iter())
         .filter_map(|(n, t)| match t {
             Target::Value(source) => {
-                out.names[*n as usize].source = source.clone();
+                out.names[n.index()].source = source.clone();
                 Some(*n)
             }
             _ => None,
@@ -6692,11 +6689,11 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
         };
         let names = (cs.iter())
             .map(|(source, ty)| {
-                let mut info = out.names[*n as usize].clone();
+                let mut info = out.names[n.index()].clone();
                 info.source = source.clone();
                 info.ty = ty.clone();
                 out.names.push(info);
-                (out.names.len() - 1) as Name
+                Name((out.names.len() - 1) as u32)
             })
             .collect();
         caps.push((*n, names));
@@ -6707,7 +6704,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
     let gone = |n: &Name| !values.contains(n);
     for (n, t) in bound
         .iter()
-        .filter(|(n, _)| gone(n) && reads[*n as usize] > 0)
+        .filter(|(n, _)| gone(n) && reads[n.index()] > 0)
     {
         let parts = (caps.iter().find(|(c, _)| c == n))
             .map(|(_, ns)| ns.iter().map(|c| Val::Name(*c)).collect())
@@ -6716,12 +6713,11 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
         // the lambda that captures it holds a copy, so it is released after.
         let release = !Vec::is_empty(&parts);
         if release {
-            let info = &mut out.names[*n as usize];
+            let info = &mut out.names[n.index()];
             (info.releases, info.heap, info.borrow, info.borrow_kind) = (true, true, false, None);
         }
         let made = St::Let(*n, Rhs::Make(Ctor::Closure(t.clone()), parts));
-        if reads[*n as usize] > 1
-            || !make_before_read(&mut out.stmts, reads.len(), *n, made, release)
+        if reads[n.index()] > 1 || !make_before_read(&mut out.stmts, reads.len(), *n, made, release)
         {
             return None;
         }
@@ -6747,19 +6743,19 @@ fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: 
         let mut inner = 0;
         for b in &nested {
             count_reads(b, &mut reads);
-            inner += std::mem::take(&mut reads[n as usize]);
+            inner += std::mem::take(&mut reads[n.index()]);
         }
         if inner > 0 {
             return nested
                 .into_iter()
                 .find(|b| {
                     count_reads(b, &mut reads);
-                    std::mem::take(&mut reads[n as usize]) > 0
+                    std::mem::take(&mut reads[n.index()]) > 0
                 })
                 .is_some_and(|b| make_before_read(b, names, n, made, release));
         }
         count_reads(std::slice::from_ref(&ss[i]), &mut reads);
-        if reads[n as usize] > 0 {
+        if reads[n.index()] > 0 {
             if release {
                 if !matches!(ss[i], St::Let(_, Rhs::Prim(Op::Closure(_), ..))) {
                     return false;
@@ -6838,7 +6834,7 @@ pub fn runs<'a>(s: &St, names: &'a [NameInfo]) -> &'a [String] {
         } => *n,
         _ => return &[],
     };
-    &names[n as usize].runs
+    &names[n.index()].runs
 }
 
 /// Each name a `let` of `ss` binds, at the row of `ss` its extent ends at.
@@ -6862,7 +6858,7 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
     }
     let mut end: HashMap<Name, Option<usize>> = seen
         .iter()
-        .map(|(&n, &(i, k))| (n, (k == occurs[n as usize]).then_some(i)))
+        .map(|(&n, &(i, k))| (n, (k == occurs[n.index()]).then_some(i)))
         .collect();
     for s in ss.iter().rev() {
         if let St::Let(n, Rhs::Read(p)) = s {
@@ -7025,14 +7021,14 @@ fn fold_facts(body: &Body, proto: &Owned, out: &mut Facts) {
             St::Drop(_, _, line, _) if *line > 0 => {}
             St::Drop(n, at, _, holes) => match at {
                 Site::Node(at) => {
-                    if body.names[*n as usize].for_consume {
+                    if body.names[n.index()].for_consume {
                         out.loop_gives_back.insert(*at);
                     } else {
                         out.discarded.insert(*at);
                     }
                 }
                 Site::Edge(join, edge) => {
-                    let name = body.names[*n as usize].source.clone();
+                    let name = body.names[n.index()].source.clone();
                     let holes = plan_holes(body.drop_holes(*n, holes));
                     let rows = out.edges.entry(*join).or_default();
                     // One row per name and edge: a generic instantiated twice
@@ -7060,7 +7056,7 @@ fn fold_facts(body: &Body, proto: &Owned, out: &mut Facts) {
                         let rows: Vec<(String, Vec<String>, Option<DropKind>)> = frees
                             .iter()
                             .map(|b| {
-                                let info = &body.names[*b as usize];
+                                let info = &body.names[b.index()];
                                 (
                                     info.source.clone(),
                                     plan_holes(&info.holes),
@@ -7140,7 +7136,7 @@ fn fold_frame(program: &Program, body: &Body, own: &Ownership, out: &mut Facts) 
         })
         .collect();
     for (i, info) in body.names.iter().enumerate() {
-        if !released.contains(&(i as Name)) {
+        if !released.contains(&Name(i as u32)) {
             continue;
         }
         if let Some(node) = info.receiver {
@@ -7262,6 +7258,11 @@ fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
 /// The typed judgment's refusals, drained.
 pub fn typed_diagnostics() -> Vec<Diagnostic> {
     TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
+}
+
+/// Whether the typed judgment holds a refusal not yet drained.
+pub fn typed_refused() -> bool {
+    TYPED.with(|t| !t.borrow().0.is_empty())
 }
 
 /// The kernel's refusals as `movecheck`-stage diagnostics, deduplicated, for
@@ -7603,7 +7604,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // emitted).
     debug_assert!(
         vyrn_frontend::movecheck::in_comptime()
-            || TYPED.with(|t| !t.borrow().0.is_empty())
+            || typed_refused()
             || crate::lint(&lowered).is_empty(),
         "the lowered form failed its own lint:
   {}",
@@ -7885,7 +7886,7 @@ fn report(
             (None, None) => match (
                 own.proto.release_kind(&info.ty),
                 exits
-                    .get(&(i as Name))
+                    .get(&Name(i as u32))
                     .cloned()
                     .or_else(|| released[i].as_deref().map(plan_holes)),
             ) {
@@ -7990,18 +7991,18 @@ fn place_frames(
                     .is_none();
                 if fresh {
                     if trace {
-                        eprintln!("placer: {} store at {} releases", body.name, m.site.0);
+                        eprintln!("placer: {} store at {:?} releases", body.name, m.site);
                     }
                     touched.insert(owner.to_string());
                 }
                 continue;
             }
-            let info = &body.names[m.name as usize];
+            let info = &body.names[m.name.index()];
             let kind = own.proto.release_kind(&info.ty);
             if trace {
                 eprintln!(
-                    "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
-                    body.name, info.source, info.line, m.kind, m.exit, m.site.0, kind, m.holes
+                    "placer: {} `{}` (line {}) {:?} at {:?} site {:?} kind {:?} holes {:?}",
+                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
                 );
             }
             // A receiver a consumer borrowed out of ([`NameInfo::producer`]):

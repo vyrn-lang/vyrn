@@ -105,7 +105,7 @@ enum Kind {
 
 impl Walk<'_> {
     fn kind(&self, n: Name) -> Kind {
-        match vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, self.decls) {
+        match vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, self.decls) {
             Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str => Kind::Seq,
             t => match vyrn_frontend::validate::width(&t) {
                 Some((bits, signed)) => Kind::Int(bits, signed),
@@ -126,7 +126,7 @@ impl Walk<'_> {
 
     /// What `n`'s type says about it, unless a definition says more.
     fn range(&self, st: &mut State, n: Name) {
-        if !self.relevant[n as usize]
+        if !self.relevant[n.index()]
             || st.defs.contains_key(&Term::Val(n))
             || st.defs.contains_key(&Term::Len(n))
         {
@@ -145,7 +145,7 @@ impl Walk<'_> {
             }
             Kind::Int(64, false) => st.assume(&Lin::of(Term::Val(n))),
             Kind::Seq => {
-                let ty = vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, self.decls);
+                let ty = vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, self.decls);
                 if let Type::ArrayN(_, len) = ty {
                     st.assume_eq(&Lin::of(Term::Len(n)), &Lin::k(len as i64));
                 }
@@ -218,7 +218,7 @@ impl Walk<'_> {
                 if let Place::Name(n) = place {
                     let n = *n;
                     st.kill(n);
-                    if self.relevant[n as usize] {
+                    if self.relevant[n.index()] {
                         self.assign(&mut st, n, value);
                         self.range(&mut st, n);
                     }
@@ -337,7 +337,7 @@ impl Walk<'_> {
 
     fn bind(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
         st.kill(n);
-        if !self.relevant[n as usize] {
+        if !self.relevant[n.index()] {
             return self.effects(st, rhs);
         }
         match rhs {
@@ -926,7 +926,7 @@ fn mark(ss: &[St], rel: &mut [bool]) {
                     .into_iter()
                     .chain(vs.into_iter().filter_map(val))
                 {
-                    rel[n as usize] = true;
+                    rel[n.index()] = true;
                 }
             }
             St::Let(n, rhs) => {
@@ -950,9 +950,9 @@ fn mark(ss: &[St], rel: &mut [bool]) {
                     }
                     _ => vec![],
                 };
-                if rel[*n as usize] || from.iter().any(|m| rel[*m as usize]) {
-                    rel[*n as usize] = true;
-                    from.iter().for_each(|m| rel[*m as usize] = true);
+                if rel[n.index()] || from.iter().any(|m| rel[m.index()]) {
+                    rel[n.index()] = true;
+                    from.iter().for_each(|m| rel[m.index()] = true);
                 }
             }
             St::Store {
@@ -961,9 +961,9 @@ fn mark(ss: &[St], rel: &mut [bool]) {
                 ..
             } => {
                 if let Some(m) = val(value) {
-                    if rel[*n as usize] || rel[m as usize] {
-                        rel[*n as usize] = true;
-                        rel[m as usize] = true;
+                    if rel[n.index()] || rel[m.index()] {
+                        rel[n.index()] = true;
+                        rel[m.index()] = true;
                     }
                 }
             }

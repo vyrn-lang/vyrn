@@ -47,18 +47,19 @@ use vyrn_frontend::{
 
 use templates::VyxCursor;
 
-/// Analyze `text` with the ownership judgments, linking imports when the
-/// document has a filesystem path; an untitled buffer is analyzed alone.
-/// `overlays` maps every open buffer's path to its live text, read in place of
+/// Analyze `text` through the pipeline `vyrn check` runs, with the project
+/// the document's path lies in; an untitled buffer loads as
+/// [`analyze_judged`] says. `overlays` maps every open buffer's path to its live text, read in place of
 /// the file.
 fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Analysis {
     let (opts, resolver, path, manifest_error) = match load_context(uri, overlays) {
         Some(ctx) => ctx,
-        None => return analyze_judged(text, None, &vyrn_lower::JUDGE),
+        None => return analyze_judged(text, None, Some(&*engine()), &vyrn_lower::JUDGE),
     };
     let mut analysis = analyze_judged(
         text,
-        Some((&path, &opts, &resolver, Some(&*engine()))),
+        Some((&path, &opts, &resolver)),
+        Some(&*engine()),
         &vyrn_lower::JUDGE,
     );
     // A manifest that does not parse would drop the import map and audience
@@ -1436,7 +1437,8 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
     let synth_path = synth_path_for(&owner_path);
     let analysis = analyze_judged(
         &gen_source,
-        Some((&synth_path, &opts, &resolver, Some(&*engine()))),
+        Some((&synth_path, &opts, &resolver)),
+        Some(&*engine()),
         &vyrn_lower::JUDGE,
     );
     let tokens = vyrn_frontend::semantic_tokens(&analysis);
