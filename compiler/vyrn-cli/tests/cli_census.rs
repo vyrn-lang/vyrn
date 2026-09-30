@@ -305,7 +305,7 @@ fn per_command() -> Vec<(&'static str, usize, usize)> {
 #[test]
 fn the_per_command_census_matches_its_pin() {
     let want = vec![
-        ("why", 655, 19),
+        ("why", 656, 19),
         ("bench", 594, 17),
         ("serve, dev", 461, 7),
         ("doc", 370, 13),
