@@ -63,16 +63,16 @@ pub struct Facts {
 pub fn facts(program: &Program) -> Facts {
     let decl = declarations(program);
     let lets = Lets::over(program, &decl);
-    let caps = crate::declared::arg_caps(program);
-    let mut sig_groups: HashMap<String, (usize, Vec<String>)> = HashMap::new();
-    for f in &program.functions {
+    let caps = crate::declared::ArgCaps::new(program);
+    let mut sig_groups: HashMap<String, (usize, Vec<FnId>)> = HashMap::new();
+    for (i, f) in program.functions.iter().enumerate() {
         let ps: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
         let key = fn_sig_key(&ps, &f.ret, decl.decls());
         sig_groups
             .entry(key)
             .or_insert_with(|| (ps.len(), Vec::new()))
             .1
-            .push(f.name.clone());
+            .push(FnId::nth(i));
     }
     let mut fnval_clear: HashSet<String> = HashSet::new();
     for (key, (arity, members)) in &sig_groups {
@@ -80,11 +80,8 @@ pub fn facts(program: &Program) -> Facts {
             continue;
         }
         let all_clear = !members.is_empty()
-            && members.iter().all(|m| {
-                // A key carries no position, so a member must read every one.
-                caps.get(m)
-                    .is_some_and(|cs| cs.iter().all(|c| *c == Capability::Read))
-            });
+            // A key carries no position, so a member must read every one.
+            && members.iter().all(|m| caps.reads_all(*m));
         if all_clear {
             fnval_clear.insert(key.clone());
         }

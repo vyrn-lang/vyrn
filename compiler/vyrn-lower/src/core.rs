@@ -17,7 +17,7 @@ use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
     NodeId, Pattern, Program, Stmt, Type, TypeDecl, UnOp,
 };
-use vyrn_frontend::declared::Owned;
+use vyrn_frontend::declared::{CapsOf, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -443,7 +443,7 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
             // waits on the specialization.
             if !matches!(
                 kind,
-                Callee::Fn | Callee::Ctor | Callee::Named | Callee::Proven
+                Callee::Fn(_) | Callee::Bound | Callee::Ctor | Callee::Named | Callee::Proven
             ) && builtin_row(callee).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
@@ -3905,11 +3905,8 @@ impl<'a> Builder<'a> {
                 Some((_, size, _)) => {
                     let solved = self.impl_args(&size, ity);
                     Rhs::Call {
-                        kind: if solved.is_some() {
-                            Callee::Fn
-                        } else {
-                            Callee::Method
-                        },
+                        kind: (self.fn_id(&size).filter(|_| solved.is_some()))
+                            .map_or(Callee::Method, Callee::Fn),
                         callee: size,
                         args: vec![(Arg::Val(Val::Name(it)), Capability::Read)],
                         write_back: false,
@@ -3995,6 +3992,13 @@ impl<'a> Builder<'a> {
         (g.type_params.iter())
             .map(|p| Some((p.clone(), subst.get(p)?.clone())))
             .collect()
+    }
+
+    /// The id of the function the program declares under `name`.
+    fn fn_id(&self, name: &str) -> Option<FnId> {
+        (self.program.functions.iter())
+            .position(|f| f.name == name)
+            .map(FnId::nth)
     }
 
     fn is_map(&self, ty: &Type) -> bool {
@@ -4359,21 +4363,22 @@ impl<'a> Builder<'a> {
         callee: &str,
         ix: usize,
     ) -> Result<Val, Gap> {
-        self.read_at(e, out, Some((callee, ix)))
+        let of = self.own.arg_caps.named(callee);
+        self.read_at(e, out, Some((callee, of, ix)))
     }
 
     fn read_at(
         &mut self,
         e: &'a Expr,
         out: &mut Vec<St>,
-        at: Option<(&str, usize)>,
+        at: Option<(&str, CapsOf, usize)>,
     ) -> Result<Val, Gap> {
         let v = self.read_val_inner(e, out)?;
         // The argument-drop key, here rather than in `call`, which sees
         // neither an operator nor a `lazy` field read.
-        if let (Val::Name(t), Some((callee, ix))) = (&v, at) {
+        if let (Val::Name(t), Some((callee, of, ix))) = (&v, at) {
             let t = *t;
-            if self.arg_released(e, t, callee, ix) {
+            if self.arg_released(e, t, callee, of, ix) {
                 self.body.names[t.index()].arg_drop = Some(e.id());
             }
         }
@@ -4460,7 +4465,7 @@ impl<'a> Builder<'a> {
     /// ([`NameInfo::releases`], or a forced `lazy` field), and
     /// [`vyrn_frontend::movecheck::arg_verdict`] decides what the callee does
     /// with it.
-    fn arg_released(&self, e: &'a Expr, t: Name, callee: &str, ix: usize) -> bool {
+    fn arg_released(&self, e: &'a Expr, t: Name, callee: &str, of: CapsOf, ix: usize) -> bool {
         use vyrn_frontend::movecheck as mc;
         // A named value is nobody's temporary: `f(s)` hands over what `s`
         // owns, and the binding keeps the row.
@@ -4521,7 +4526,7 @@ impl<'a> Builder<'a> {
             view_copies,
             constructs: matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
                 || self.is_variant(callee),
-            cap: vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix),
+            cap: self.own.arg_caps.at(of, ix),
         };
         if mc::arg_verdict(&s) == mc::ArgVerdict::Released {
             return true;
@@ -4663,7 +4668,7 @@ impl<'a> Builder<'a> {
         // An element's receiver is `@at`'s argument, and its release is keyed
         // as an argument temporary's.
         if let (false, Expr::Call { name, args, .. }) = (took, e) {
-            if self.arg_released(&args[0], r, name, 0) {
+            if self.arg_released(&args[0], r, name, self.own.arg_caps.named(name), 0) {
                 self.body.names[r.index()].arg_drop = Some(producer);
             }
         }
@@ -5486,7 +5491,7 @@ impl<'a> Builder<'a> {
                 self.body.mistyped.extend(at);
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {
-                    kind: Callee::Fn,
+                    kind: Callee::Fn(_),
                     solved,
                     targets,
                     ..
@@ -5856,6 +5861,11 @@ impl<'a> Builder<'a> {
             vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, m)
         };
         let success = method("success");
+        let (Some(is_success), Some(success_id)) =
+            (self.fn_id(&method("isSuccess")), self.fn_id(&success))
+        else {
+            return gap("a `?` on a type with no `Fallible` impl", line);
+        };
         // The impl's `isSuccess` chooses the arm. Both impl calls are declared
         // functions under the dispatched name and read their argument.
         let held = self.temp(Type::Bool, line);
@@ -5868,7 +5878,7 @@ impl<'a> Builder<'a> {
                 callee: method("isSuccess"),
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
-                kind: Callee::Fn,
+                kind: Callee::Fn(is_success),
                 ret: Some(Type::Bool),
                 targets: Vec::new(),
             },
@@ -5896,7 +5906,7 @@ impl<'a> Builder<'a> {
                 callee: success,
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
-                kind: Callee::Fn,
+                kind: Callee::Fn(success_id),
                 ret: Some(self.body.names[res.index()].ty.clone()),
                 targets: Vec::new(),
             },
@@ -6072,8 +6082,9 @@ impl<'a> Builder<'a> {
             // A lambda captures by read and takes by read.
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
-        } else if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
-            kind = Callee::Fn;
+        } else if let Some(id) = self.fn_id(name) {
+            kind = Callee::Fn(id);
+            let f = &self.program.functions[id.index()];
             f.params.iter().map(|p| p.capability).collect()
         } else if prelude::signature(name).is_some() {
             kind = Callee::Builtin;
@@ -6160,6 +6171,13 @@ impl<'a> Builder<'a> {
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
         }
+        // The capability row an argument's release reads, keyed by the callee
+        // before dispatch.
+        let of = match kind {
+            Callee::Fn(id) => CapsOf::Fn(id),
+            Callee::Value(_) => CapsOf::None,
+            _ => self.own.arg_caps.named(name),
+        };
         let length = prelude::builtin(name).map(|b| b.length);
         if let (Some(prelude::Length::ShrinksByOneIfNotEmpty), Some(recv)) = (length, args.first())
         {
@@ -6211,17 +6229,13 @@ impl<'a> Builder<'a> {
             self.drain += 1;
         }
         let bound = match kind {
-            Callee::Fn => self.targets_of(name, args),
+            Callee::Fn(_) => self.targets_of(name, args),
             _ => Vec::new(),
         };
         let param_tys: Vec<Type> = match kind {
-            Callee::Fn => self
-                .program
-                .functions
-                .iter()
-                .find(|f| f.name == name)
-                .map(|f| f.params.iter().map(|p| p.ty.clone()).collect())
-                .unwrap_or_default(),
+            Callee::Fn(id) => (self.program.functions[id.index()].params.iter())
+                .map(|p| p.ty.clone())
+                .collect(),
             _ => Vec::new(),
         };
         let mut targets = Vec::new();
@@ -6249,10 +6263,8 @@ impl<'a> Builder<'a> {
             // (`declared::arg_cap`); an unanswered position may, the safe
             // direction. A lambda deeper in the argument gets `None` and
             // escapes: a literal retains what it is given.
-            self.call_keeps = matches!(a, Expr::Lambda { .. }).then(|| {
-                vyrn_frontend::declared::arg_cap(&self.own.arg_caps, name, k)
-                    .is_none_or(|c| c == Capability::Consume)
-            });
+            self.call_keeps = matches!(a, Expr::Lambda { .. })
+                .then(|| (self.own.arg_caps.at(of, k)).is_none_or(|c| c == Capability::Consume));
             let global = matches!(a, Expr::Var { name, .. }
                 if self.lookup(name).is_none()
                     && self.program.globals.iter().any(|g| &g.name == name));
@@ -6267,7 +6279,7 @@ impl<'a> Builder<'a> {
                 // A proven crossing is the constructor row, so no reader
                 // checks it again.
                 let t = self.checked_temp(&to, a, line, out)?;
-                if self.arg_released(a, t, name, k) {
+                if self.arg_released(a, t, name, of, k) {
                     self.body.names[t.index()].arg_drop = Some(a.id());
                 }
                 Val::Name(t)
@@ -6285,7 +6297,7 @@ impl<'a> Builder<'a> {
                     self.val(a, out)?
                 }
             } else {
-                self.read_arg(a, out, name, k)?
+                self.read_at(a, out, Some((name, of, k)))?
             };
             self.call_keeps = None;
             if let Val::Name(t) = v {
@@ -6331,10 +6343,11 @@ impl<'a> Builder<'a> {
             (Callee::Reserved, Some(r)) if name == "@copy" => self.copied(r),
             _ => None,
         };
-        let (callee, kind, solved) = match dispatched {
-            Some((f, solved)) => (f, Callee::Fn, solved),
-            None => (name.to_string(), kind, Vec::new()),
-        };
+        let (callee, kind, solved) =
+            match dispatched.and_then(|(f, s)| Some((self.fn_id(&f)?, f, s))) {
+                Some((id, f, solved)) => (f, Callee::Fn(id), solved),
+                None => (name.to_string(), kind, Vec::new()),
+            };
         Ok(Rhs::Call {
             callee,
             args: vs,
@@ -6596,7 +6609,7 @@ pub fn lambda_line(name: &str) -> Option<usize> {
 
 /// The instance of `body` whose `fn`-typed parameters are bound:
 /// each parameter in `bound` leaves the parameter list, a call through it is
-/// [`Callee::Fn`] to its target, and a call that passes it on names that
+/// [`Callee::Bound`] to its target, and a call that passes it on names that
 /// target. A lambda target's captures take the parameter's place; a call
 /// through it passes them first, and a call passing it on takes them after
 /// its own arguments (`direct::ho_args`). A bound parameter read once as a
@@ -6721,11 +6734,11 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
         if let Some(v) = kind.value() {
             match bound.iter().find(|(n, _)| *n == v) {
                 Some((_, Target::Fn(f))) => {
-                    *kind = Callee::Fn;
+                    *kind = Callee::Bound;
                     *callee = f.clone();
                 }
                 Some((_, Target::Lambda(key, ..))) => {
-                    *kind = Callee::Fn;
+                    *kind = Callee::Bound;
                     *callee = key.clone();
                     let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
                     let lead = names.into_iter().flatten();

@@ -60,6 +60,13 @@ impl FnId {
     }
 }
 
+/// Names one protocol member: `Program::protocols[protocol].methods[member]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MethodId {
+    pub protocol: u32,
+    pub member: u32,
+}
+
 /// A node's slot for its [`NodeId`]; [`NodeId::NONE`] until numbered. Any two
 /// slots compare equal, so two trees compare by structure alone. `{:?}`
 /// prints every slot alike, so a fingerprint over a tree's debug text ignores
