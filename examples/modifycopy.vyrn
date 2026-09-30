@@ -1,0 +1,13 @@
+/// `x.copy()` makes a fresh value, so it may share a call with `x` passed as
+/// `modify`: the fix the exclusivity refusal suggests.
+fn append(a: modify Array<Int64>, b: Array<Int64>) {
+    a.push(b.length)
+}
+
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = [1, 2, 3]
+    append(xs, xs.copy())
+    append(xs, xs.copy())
+    print("\{xs.length} \{xs[3]} \{xs[4]}")
+    return 0
+}

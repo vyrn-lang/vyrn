@@ -2500,6 +2500,12 @@ pub fn mentions(e: &Expr, name: &str) -> bool {
         }
         Expr::Consume { place, .. } => mentions(place, name),
         Expr::Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
+        // `x.copy()` makes a fresh value: its receiver is read, never aliased.
+        Expr::Call { name: n, args, .. }
+            if n == "@copy" && args.first().is_some_and(|a| place_path(a).is_some()) =>
+        {
+            false
+        }
         Expr::Call { args, .. }
         | Expr::TryConstruct { args, .. }
         | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| mentions(a, name)),

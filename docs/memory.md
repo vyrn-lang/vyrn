@@ -75,7 +75,8 @@ to a `consume` parameter. Because a borrow never escapes its call, it needs no
 lifetime annotation.
 
 A `modify` argument is exclusive: the same value may not be passed as `modify`
-and read again in the same call. The caller sees the callee's writes after
+and read again in the same call. A `.copy()` of it is a fresh value, not a read
+of it: `f(x, x.copy())` is accepted. The caller sees the callee's writes after
 the call returns. A `consume` argument is exclusive too: no other argument of
 the same call may name it or a place overlapping it, because the callee could
 free the one and then read the other. The receiver of a rebuilding builtin
