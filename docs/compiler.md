@@ -383,8 +383,8 @@ file moves both numbers. The pins are in `tests/pins/`:
 | `checker_census.rs` | `checker.rs` by section, and its rules (`checker-census.tsv`, `checker-rules.tsv`) |
 | `emitter_census.rs` | `direct.rs` by section, and what each class reads (`emitter-census.tsv`, `emitter-reads.tsv`) |
 | `frontend_census.rs` | `loader.rs`, `symbols.rs`, `project.rs`, `movecheck.rs` (`frontend-census.tsv`) |
-| `parser_census.rs` | `parser.rs` and `lexer.rs` |
-| `cli_census.rs` | the CLI crate, by kind and by command |
+| `parser_census.rs` | `parser.rs` and `lexer.rs` (`parser-census.tsv`) |
+| `cli_census.rs` | the CLI crate, by kind and by command (`cli-census.tsv`, `cli-commands.tsv`) |
 | `forms.rs` | every statement, expression and pattern form, declaration and keyword, priced in compiler lines (`forms.tsv`, `keywords.tsv`, `contextual.tsv`, `declarations.tsv`) |
 | `surface.rs` | every `ast::Type` constructor and its cost (`surface.tsv`) |
 
