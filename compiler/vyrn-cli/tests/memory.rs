@@ -2614,3 +2614,27 @@ fn main() -> Int64 {
 "#;
     assert_eq!(audited_run("part", src), (Some(0), "azbc\n".to_string()));
 }
+
+// A statement's value is released where the statement ends, whatever made it:
+// a builtin, an operator, a constructor, a literal, a call, a name, a take.
+#[test]
+fn a_statement_releases_its_value() {
+    let src = r#"type R = { s: String }
+
+fn mk() -> String { return "a".copy() }
+
+fn main() -> Int64 {
+    let s = "a".copy()
+    let t = "b".copy()
+    "c".copy()
+    s + "d"
+    Some(mk())
+    R { s: mk() }
+    mk()
+    s
+    consume t
+    return 0
+}
+"#;
+    assert_eq!(audited_run("discard", src), (Some(0), String::new()));
+}

@@ -3271,25 +3271,12 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Whether a statement-position call's unbound result is this frame's to
-    /// release right after the call. The caller has checked that the type
-    /// owns heap. Excluded: a lending call, a variant constructor, a `panic`,
-    /// and an `@`-spelled desugar, which the reading site frees,
-    /// except a removal (`@pop`, `@swapRemove`), whose result nothing reads.
+    /// Whether a statement's unbound value is this frame's to release right
+    /// after the statement. The caller has checked that the type owns heap.
+    /// Excluded: a lending call, and a `panic`, which never returns.
     fn discards(&self, e: &Expr) -> bool {
-        let Expr::Call { name, .. } = e else {
-            return false;
-        };
-        !vyrn_frontend::ast::is_panic(name)
-            && (!name.starts_with('@') || prelude::removes(name))
+        !matches!(e, Expr::Call { name, .. } if vyrn_frontend::ast::is_panic(name))
             && !self.lends(e)
-            && !self.constructs(name)
-    }
-
-    /// Whether `name` constructs a sum value: a user enum's variant, or one of
-    /// the five the language declares (`declared::Declared`'s seed).
-    fn constructs(&self, name: &str) -> bool {
-        matches!(name, "Some" | "Ok" | "Err" | "Success" | "Failure") || self.is_variant(name)
     }
 
     /// Marks `n`, bound by a `let` of `name`, as a String accumulator where
