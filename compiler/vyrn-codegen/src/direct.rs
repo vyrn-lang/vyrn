@@ -10377,6 +10377,15 @@ impl<'p> Fn_<'_, 'p> {
                     self.emit_validation(b, &decl, *line)?;
                     b.ins(&Instruction::Drop);
                 }
+                // A discarded layout read: its address, for the checks on the way.
+                St::Do {
+                    rhs: rhs @ Rhs::Read(p),
+                    line,
+                    ..
+                } if !self.core_rhs_readable(body, rhs) => {
+                    self.core_addr(m, b, body, w, p, *line)?;
+                    b.ins(&Instruction::Drop);
+                }
                 St::Do { rhs, line, .. } => {
                     let got = self.core_rhs_ty(body, rhs, *line)?;
                     self.core_rhs(m, b, body, w, rhs, &got, *line)?;
@@ -10563,6 +10572,9 @@ impl<'p> Fn_<'_, 'p> {
                     },
                 },
             },
+            Rhs::Read(p) => self
+                .core_place_ty(body, p)
+                .ok_or_else(|| gap("a discarded read the walk does not type", line)),
             _ => unsupported("a discarded value the row does not type", line),
         }
     }
@@ -12954,9 +12966,13 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 Some(v) => self.core_val_readable(body, v),
             },
-            // A discarded value drops at the type the row produces, which only a call row
-            // states; any other `St::Do` would fail in [`Fn_::core_rhs_ty`]. A discarded
-            // layout is a slot of the row's own, given back at the row's end.
+            // A discarded read drops its place's value, or a layout's address.
+            St::Do {
+                rhs: Rhs::Read(p), ..
+            } => self.core_place_ty(body, p).is_some(),
+            // Any other discarded value drops at the type its call row states
+            // ([`Fn_::core_rhs_ty`]). A discarded layout is a slot of the row's own, given
+            // back at the row's end.
             St::Do { rhs, line, .. } => {
                 self.core_checks_made(body, rhs).is_some()
                     || (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))

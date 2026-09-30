@@ -2580,3 +2580,37 @@ fn main() -> Int64 {
         (Some(0), "4\n3\n3\n4\n".to_string())
     );
 }
+
+// A part read as a statement takes nothing: the part stays in its place, and
+// an unnamed receiver is released whole. A take there leaks the part, and a
+// hole under an element makes the container's release skip that field in
+// every element.
+#[test]
+fn a_part_read_as_a_statement_takes_nothing() {
+    let src = r#"type In = { s: String }
+type R = { s: String, n: In }
+
+fn mk() -> R { return R { s: "a".copy(), n: In { s: "b".copy() } } }
+fn mks() -> Array<R> { return [mk(), mk()] }
+
+fn main() -> Int64 {
+    let r = mk()
+    let mut xs = [mk(), mk(), mk()]
+    let ss = ["c".copy(), "d".copy()]
+    r.s
+    r.n.s
+    xs[0].s
+    xs[1].n
+    ss[0]
+    mk().s
+    mks()[1].n.s
+    for i in [1, 2] {
+        xs[2].s
+    }
+    xs[0].s = "z".copy()
+    print(r.s + xs[0].s + xs[1].n.s + ss[0])
+    return 0
+}
+"#;
+    assert_eq!(audited_run("part", src), (Some(0), "azbc\n".to_string()));
+}

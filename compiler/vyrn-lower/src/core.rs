@@ -3217,6 +3217,19 @@ impl<'a> Builder<'a> {
                 if vyrn_frontend::loader::audit_hook(name)
                     && !vyrn_frontend::loader::audit_build() => {}
             Stmt::Expr(e, _) if self.optional_if_let(e, sid, out)? => {}
+            // A part read as a statement takes nothing: the part stays in its
+            // place, and an unnamed receiver is released whole.
+            Stmt::Expr(e, _) if reads_a_part(e) && self.deferred_of(e).is_none() => {
+                let rhs = Rhs::Read(self.place(e, out)?);
+                out.push(St::Do {
+                    rhs,
+                    line: e.line(),
+                    site: sid,
+                });
+                if let Some((r, _, malloc)) = self.pending_receiver.take() {
+                    self.drop_receiver(r, malloc, Vec::new(), out);
+                }
+            }
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
@@ -4683,6 +4696,11 @@ impl<'a> Builder<'a> {
             (true, Expr::Field { field, .. }) => vec![format!(".{field}")],
             (true, _) => return,
         };
+        self.drop_receiver(r, malloc, holes, out);
+    }
+
+    /// Releases the unnamed receiver `r` of a part read, around `holes`.
+    fn drop_receiver(&mut self, r: Name, malloc: bool, holes: Vec<String>, out: &mut Vec<St>) {
         self.body.names[r.index()].holes = holes;
         self.body.names[r.index()].receiver_malloc = malloc;
         out.push(St::Drop(r, Site::None, 0, None));
