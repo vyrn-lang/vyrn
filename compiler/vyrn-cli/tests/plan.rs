@@ -14,12 +14,16 @@ use vyrn_lower::analyze;
 
 /// Parses, then analyses with the core's placer.
 fn analyze_src(src: &str) -> (Ownership, Program) {
+    let (w, p) = analyze_world(src);
+    (w.ownership.clone(), p)
+}
+
+fn analyze_world(src: &str) -> (std::sync::Arc<vyrn_lower::World>, Program) {
     let (p, _memo) = vyrn_frontend::project::Memo::load(|| {
         vyrn_frontend::parser::parse(vyrn_frontend::lexer::lex(src).unwrap())
     })
     .unwrap();
-    let o = analyze(&p);
-    (o, p)
+    (analyze(&p), p)
 }
 
 /// The kind each binding of `which` is released with, by binding key. A
@@ -354,12 +358,12 @@ fn a_fresh_key_snapshot_is_released() {
 #[test]
 fn a_consuming_loop_gives_its_container_back_at_the_loop() {
     let src = "fn make() -> Array<String> { let mut o: Array<String> = [];                o.push(\"a\"); return o; }                fn main() -> Int64 { let xs = make(); let mut n = 0;                for x in consume xs { n = n + Int64(x.byteLength); } return n; }";
-    let (o, _) = analyze_src(src);
+    let (w, _) = analyze_world(src);
     assert!(
-        placed(&o, "main").is_empty(),
+        placed(&w.ownership, "main").is_empty(),
         "the `let` is moved into the loop, so no exit row names it"
     );
-    let facts = vyrn_lower::core::facts().expect("the placer folded the core's answers");
+    let facts = (w.facts.as_ref()).expect("the placer folded the core's answers");
     assert_eq!(
         facts.loop_gives_back.len(),
         1,

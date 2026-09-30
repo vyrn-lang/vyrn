@@ -1101,7 +1101,8 @@ fn why_memory(file: &str) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let own = vyrn_lower::analyze(&program);
+    let world = vyrn_lower::analyze(&program);
+    let own = &world.ownership;
 
     println!("{path}");
     println!("  memory: every binding, whether it is reclaimed, and the reason when it is not");
@@ -3996,7 +3997,7 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
     use vyrn_frontend::ast::Expr;
     // The renames leave `own::ident` unchanged, so the next guard would adopt
     // the load's judgment of the program before them.
-    vyrn_frontend::own::forget_loaded();
+    vyrn_lower::forget_loaded();
     let has_main = program
         .functions
         .iter()
@@ -5356,7 +5357,14 @@ fn bodies_wasm(
     let compiled = if generation {
         vyrn_genwasm::prepare(&mut prog)
             .ok_or_else(|| "a `test` block calls a generator this route cannot compile".to_string())
-            .and_then(|()| vyrn_codegen::direct::compile_gen_host(&prog))
+            .and_then(|()| {
+                vyrn_codegen::direct::compile_gen_host(&prog).map_err(|e| match e {
+                    vyrn_frontend::gen::GenError::Failed(e) => e,
+                    vyrn_frontend::gen::GenError::Refused(ds) => {
+                        ds.iter().map(|d| d.render()).collect()
+                    }
+                })
+            })
     } else {
         vyrn_codegen::direct::compile(&prog, memo)
     };

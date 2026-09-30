@@ -40,7 +40,8 @@ fn core_body(src: &str, which: &str) -> vyrn_frontend::core::Body {
         Memo::load(|| vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver))
             .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let lowered = vyrn_lower::lower(&program);
-    let own = vyrn_lower::analyze(&program);
+    let world = vyrn_lower::analyze(&program);
+    let own = &world.ownership;
     let inst = lowered
         .instances
         .iter()
@@ -80,7 +81,7 @@ fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
     let analyzed = |src: &str| {
         let program = vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver)
             .unwrap_or_else(|d| panic!("{}", d[0].render()));
-        let own = vyrn_lower::analyze(&program);
+        let own = vyrn_lower::analyze(&program).ownership.clone();
         (program, own)
     };
     let main_of = |program: &Program, own: &vyrn_frontend::own::Ownership| {
@@ -309,8 +310,9 @@ fn run() {
         };
         programs += 1;
         let lowered = vyrn_lower::lower(&program);
-        let own = vyrn_lower::analyze(&program);
-        let facts = vyrn_lower::core::facts().expect("the placer fills the core's facts");
+        let world = vyrn_lower::analyze(&program);
+        let own = &world.ownership;
+        let facts = (world.facts.as_ref()).expect("the placer fills the core's facts");
 
         for core_says in facts.arms.values() {
             *counted.entry("arm_frees").or_default() += 1;

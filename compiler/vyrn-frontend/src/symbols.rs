@@ -5,6 +5,8 @@
 //! index and the identifier tokens; the LSP serves hover, go-to-definition and
 //! completion from that [`Analysis`].
 
+use std::collections::HashMap;
+
 use crate::ast::{
     self, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Stmt, Type,
     TypeDecl,
@@ -132,7 +134,7 @@ pub struct Analysis {
     pub symbol_maps: Vec<crate::symbolmap::MappedSymbol>,
     /// What the ownership analysis decided about every `let` in this document:
     /// reclaimed, or why not. The answer `vyrn why --memory` prints, at the
-    /// cursor. Read from [`Judged::ownership`], never re-derived, so it cannot
+    /// cursor. Read from [`Judged::memory`], never re-derived, so it cannot
     /// disagree with the walk that decided. Empty when the checks did not run
     /// or no [`Judge`] was given.
     pub memory: Vec<MemoryNote>,
@@ -235,8 +237,9 @@ pub struct Judged {
     pub diagnostics: Vec<Diagnostic>,
     /// The root module's bindings, typed.
     pub binders: Vec<LocalBinding>,
-    /// The placed analysis, for a program the kernel judged.
-    pub ownership: Option<crate::own::Ownership>,
+    /// Per function, the placer's memory rows ([`crate::own::Ownership::memory`]);
+    /// empty for a program the kernel did not judge.
+    pub memory: HashMap<String, Vec<crate::own::MemoryRow>>,
 }
 
 /// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
@@ -384,14 +387,14 @@ fn analyze_inner(
     };
     // The check returns the diagnostics and every binding it made in the root
     // module, typed, so an unannotated `let x = 5` hovers as `let x: Int64`.
-    let mut ownership = None;
+    let mut memory = HashMap::new();
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
             let (checked_diags, binders) = match judge {
                 Some(judge) => {
                     let judged = (judge.check)(prog, pending);
-                    ownership = judged.ownership;
+                    memory = judged.memory;
                     (judged.diagnostics, judged.binders)
                 }
                 None => checker::check_accum_recording(prog),
@@ -555,8 +558,8 @@ fn analyze_inner(
     let errored =
         |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
     let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
-    let memory = match (&checked, &ownership) {
-        (Some(prog), Some(own)) if clean => memory_notes(prog, own),
+    let memory = match &checked {
+        Some(prog) if clean => memory_notes(prog, &memory),
         _ => Vec::new(),
     };
 
@@ -586,14 +589,17 @@ fn analyze_inner(
 /// Every `let` in the root module, with what the ownership analysis decided.
 /// A function with no `module` tag belongs to this document, the filter
 /// `vyrn why --memory` uses.
-fn memory_notes(program: &crate::ast::Program, own: &crate::own::Ownership) -> Vec<MemoryNote> {
+fn memory_notes(
+    program: &crate::ast::Program,
+    memory: &HashMap<String, Vec<crate::own::MemoryRow>>,
+) -> Vec<MemoryNote> {
     let mut out = Vec::new();
     for f in program
         .functions
         .iter()
         .filter(|f| f.module.is_none() && !f.is_extern)
     {
-        let Some(notes) = own.memory.get(&f.name) else {
+        let Some(notes) = memory.get(&f.name) else {
             continue;
         };
         for n in notes {
