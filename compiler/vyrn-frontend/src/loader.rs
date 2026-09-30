@@ -6,7 +6,6 @@
 //! import (importing an enum or protocol brings its variants or methods), a
 //! `logging` block outside the root, and two impls of one `(protocol, type)`.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ast::*;
@@ -3620,7 +3619,11 @@ fn clash_diagnostics(
 /// since a value local never shadows a type. The scope starts with the
 /// function's params.
 fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {
-    let mut v = RefNames { out: Vec::new() };
+    let mut v = RefNames {
+        out: Vec::new(),
+        ns: &HashSet::new(),
+        amb: None,
+    };
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
     body_block(&f.body, &mut locals, &mut v);
     v.out
@@ -3633,11 +3636,18 @@ fn is_sum_arm(name: &str) -> bool {
 }
 
 /// The reference collector at each site of [`body_scope_descent`].
-struct RefNames {
+struct RefNames<'a> {
     out: Vec<(String, usize)>,
+    /// The module's namespace bindings, so method sugar `ns.f(x)` is recorded
+    /// qualified and a flat call of the same spelling bare.
+    ns: &'a HashSet<String>,
+    /// Each argument-bearing call callee with its occurrence count, for
+    /// [`program_ref_kinds`]. `f(x)` may be method sugar for `x.f()`, so it
+    /// alone cannot prove a flat use of `f`.
+    amb: Option<&'a mut HashMap<String, usize>>,
 }
 
-impl BodyVisit<'_> for RefNames {
+impl BodyVisit<'_> for RefNames<'_> {
     fn stmt(&mut self, s: &Stmt, _locals: &HashSet<String>) {
         // A `let x: T` annotation is a reference: a value local never shadows a
         // type.
@@ -3666,7 +3676,7 @@ impl BodyVisit<'_> for RefNames {
             } => {
                 let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                    sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
+                    sugar = !locals.contains(recv) && self.ns.contains(recv);
                 }
                 if sugar {
                     if let Some(Expr::Var { name: recv, .. }) = args.first() {
@@ -3678,12 +3688,8 @@ impl BodyVisit<'_> for RefNames {
                     // `program_ref_kinds`, count it, so a name seen only here is
                     // told apart from one also used as a variable, a type or a
                     // zero-argument call, none of which can be method dispatch.
-                    if !args.is_empty() {
-                        SCOPE_AMB.with(|a| {
-                            if let Some(amb) = a.borrow_mut().as_mut() {
-                                *amb.entry(name.clone()).or_default() += 1;
-                            }
-                        });
+                    if let Some(amb) = self.amb.as_mut().filter(|_| !args.is_empty()) {
+                        *amb.entry(name.clone()).or_default() += 1;
                     }
                 }
             }
@@ -3973,19 +3979,6 @@ fn rewrite_module_refs(
 // declarations, for the check that an aliased import's original is not
 // used directly. Bodies are scanned scope-aware, so a local does not count as a
 // reference; type positions always count.
-// `//` and not `///`: a doc comment on `thread_local!` documents nothing and
-// rustc warns.
-thread_local! {
-    /// The namespace bindings of the module `program_ref_names` is walking, so
-    /// the walk tells method sugar (`ns.f(x)`, recorded qualified) from a flat
-    /// call of the same spelling (recorded bare).
-    static SCOPE_NS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    /// While [`program_ref_kinds`] walks: each argument-bearing call callee with
-    /// its occurrence count. `f(x)` may be method sugar for `x.f()`, so it alone
-    /// cannot prove a flat use of `f`. `None` while other walkers run.
-    static SCOPE_AMB: RefCell<Option<HashMap<String, usize>>> = const { RefCell::new(None) };
-}
-
 fn program_ref_names(p: &Program) -> HashSet<String> {
     program_ref_kinds(p, false).0
 }
@@ -3996,31 +3989,29 @@ fn program_ref_names(p: &Program) -> HashSet<String> {
 fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, HashSet<String>) {
     let mut out: HashSet<String> = HashSet::new();
     let mut totals: HashMap<String, usize> = HashMap::new();
-    // The walker reads this module's namespaces through `SCOPE_NS`.
-    SCOPE_NS.with(|s| {
-        *s.borrow_mut() = p
-            .imports
-            .iter()
-            .filter_map(|i| i.namespace.clone())
-            .collect()
-    });
-    SCOPE_AMB.with(|s| {
-        *s.borrow_mut() = split_ambiguous.then(HashMap::new);
-    });
-    fn add_scoped_block<I: Iterator<Item = String>>(
-        b: &Block,
-        params: I,
-        out: &mut HashSet<String>,
-        totals: &mut HashMap<String, usize>,
-    ) {
-        let mut locals: HashSet<String> = params.collect();
-        let mut v = RefNames { out: Vec::new() };
-        body_block(b, &mut locals, &mut v);
-        for (n, _) in v.out {
-            *totals.entry(n.clone()).or_default() += 1;
-            out.insert(n);
-        }
-    }
+    let ns: HashSet<String> = p
+        .imports
+        .iter()
+        .filter_map(|i| i.namespace.clone())
+        .collect();
+    let mut amb: HashMap<String, usize> = HashMap::new();
+    let mut add_scoped_block =
+        |b: &Block,
+         params: &mut dyn Iterator<Item = String>,
+         out: &mut HashSet<String>,
+         totals: &mut HashMap<String, usize>| {
+            let mut locals: HashSet<String> = params.collect();
+            let mut v = RefNames {
+                out: Vec::new(),
+                ns: &ns,
+                amb: split_ambiguous.then_some(&mut amb),
+            };
+            body_block(b, &mut locals, &mut v);
+            for (n, _) in v.out {
+                *totals.entry(n.clone()).or_default() += 1;
+                out.insert(n);
+            }
+        };
     let add_type = |t: &Type, out: &mut HashSet<String>, totals: &mut HashMap<String, usize>| {
         for n in type_names(t) {
             *totals.entry(n.clone()).or_default() += 1;
@@ -4034,7 +4025,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
         add_type(&f.ret, &mut out, &mut totals);
         add_scoped_block(
             &f.body,
-            f.params.iter().map(|p| p.name.clone()),
+            &mut f.params.iter().map(|p| p.name.clone()),
             &mut out,
             &mut totals,
         );
@@ -4050,7 +4041,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
             add_type(&m.ret, &mut out, &mut totals);
             add_scoped_block(
                 &m.body,
-                m.params.iter().map(|p| p.name.clone()),
+                &mut m.params.iter().map(|p| p.name.clone()),
                 &mut out,
                 &mut totals,
             );
@@ -4064,7 +4055,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
             add_type(&pl.ret, &mut out, &mut totals);
             add_scoped_block(
                 &pl.body,
-                pl.params.iter().map(|p| p.name.clone()),
+                &mut pl.params.iter().map(|p| p.name.clone()),
                 &mut out,
                 &mut totals,
             );
@@ -4079,14 +4070,11 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
         }
     }
     for t in &p.tests {
-        add_scoped_block(&t.body, std::iter::empty(), &mut out, &mut totals);
+        add_scoped_block(&t.body, &mut std::iter::empty(), &mut out, &mut totals);
     }
     for b in &p.benches {
-        add_scoped_block(&b.body, std::iter::empty(), &mut out, &mut totals);
+        add_scoped_block(&b.body, &mut std::iter::empty(), &mut out, &mut totals);
     }
-    // Clear the thread-locals the walker read.
-    SCOPE_NS.with(|s| s.borrow_mut().clear());
-    let amb = SCOPE_AMB.with(|s| s.borrow_mut().take().unwrap_or_default());
     // Ambiguity-only names stay in `out`: the hidden-original check
     // must still fire for a name that is not a protocol method. The one caller
     // with the method surface applies the narrower skip itself.
