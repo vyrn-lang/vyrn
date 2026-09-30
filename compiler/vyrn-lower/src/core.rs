@@ -7391,12 +7391,15 @@ pub fn augment(program: &Program, w: &mut World) {
         .map(|(j, s)| s.is_none().then_some(*j))
         .collect();
     let shared: &Ownership = own;
+    // Typing expanded every projection site a first build reads.
+    let sealed = program.expansions.seal();
     let firsts = vyrn_frontend::par::in_parallel(
         &unserved,
         |j| j.map_or(0, |j| j.weight()),
         NameMemo::default,
         |names, j| j.map(|j| j.build(program, shared, names)),
     );
+    drop(sealed);
     // In job order, so the gap tally comes out as on one thread.
     let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
     for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {

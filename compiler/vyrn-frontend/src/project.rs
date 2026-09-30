@@ -116,7 +116,8 @@ pub fn lookup_impl_by_key<'a>(
 /// A tree's ids and temporary names derive from its site. It is numbered in
 /// the site's [`NodeId::expansion_unit`], after the trees made there before
 /// it. One thread types a unit's body, in the body's order, so the ids do not
-/// depend on the thread count. An unshared table ([`Expansions::default`],
+/// depend on the thread count. The placer's parallel builds only read trees:
+/// they run under [`Expansions::seal`]. An unshared table ([`Expansions::default`],
 /// the editor's) keeps no tree: each ask builds one, [`Expansions::schema`]
 /// answers none, and the lowering inlines no site.
 #[derive(Default)]
@@ -139,6 +140,14 @@ impl Expansions {
         self.shared
     }
 
+    /// Forbids making a tree until the guard drops, for a section that builds
+    /// bodies on many threads: there a tree's ids would depend on the thread
+    /// order, so a site typing did not expand panics instead.
+    pub fn seal(&self) -> Sealed<'_> {
+        let was = std::mem::replace(&mut self.write().sealed, true);
+        Sealed { table: self, was }
+    }
+
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Tables> {
         self.tables
             .read()
@@ -149,6 +158,18 @@ impl Expansions {
         self.tables
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Unseals what [`Expansions::seal`] sealed when it drops.
+pub struct Sealed<'a> {
+    table: &'a Expansions,
+    was: bool,
+}
+
+impl Drop for Sealed<'_> {
+    fn drop(&mut self) {
+        self.table.write().sealed = self.was;
     }
 }
 
@@ -194,18 +215,31 @@ struct Tables {
     schemas: HashMap<NodeId, (String, &'static Expr)>,
     /// How many nodes each expansion unit holds.
     used: HashMap<u32, u32>,
+    /// Whether [`Expansions::seal`] holds the table: no tree may be made.
+    sealed: bool,
 }
 
 impl Tables {
-    /// Builds a tree anchored at `anchor` and numbers it after the unit's
-    /// earlier trees. `build` gets the tag that names the tree's temporaries,
-    /// unique in the unit because it names the tree's first node.
+    /// Builds a tree anchored at `anchor`, on `line`, and numbers it after
+    /// the unit's earlier trees. `build` gets the tag that names the tree's
+    /// temporaries, unique in the unit because it names the tree's first node.
+    ///
+    /// # Panics
+    ///
+    /// While the table is sealed ([`Expansions::seal`]): two threads that
+    /// expand sites of one unit then number them in the order they run.
     fn expand<T>(
         &mut self,
         anchor: NodeId,
+        line: usize,
         build: impl FnOnce(&str) -> Result<T, String>,
         number: impl FnOnce(&mut T, &mut Numbering),
     ) -> Result<&'static T, String> {
+        assert!(
+            !self.sealed,
+            "line {line}: the projection site at node {anchor:?} was first expanded while \
+             bodies build on many threads; typing must expand every site the lowering reads"
+        );
         let unit = anchor.expansion_unit();
         let used = self.used.get(&unit).copied().unwrap_or(0);
         let mut built = build(&format!("{}_{}", unit & !NodeId::EXPANDED, used + 1))?;
@@ -242,7 +276,7 @@ fn memo<T>(
     if let Some(tree) = hit(&t).filter(|_| ex.shared) {
         return Ok(tree);
     }
-    let tree = t.expand(key.0, build, number)?;
+    let tree = t.expand(key.0, key.1, build, number)?;
     if ex.shared {
         get_mut(&mut t).insert(
             key,
@@ -356,6 +390,7 @@ impl Expansions {
         let e = t
             .expand(
                 key,
+                call.line(),
                 |_| Ok(crate::types::schema_struct_lit(decl)),
                 |lit, n| n.expr(lit),
             )
@@ -414,6 +449,7 @@ impl Expansions {
         let mut t = self.write();
         let blk = t.expand(
             index.id(),
+            line,
             |_| {
                 Ok(Block {
                     id: Id::NEW,
@@ -1050,6 +1086,48 @@ mod tests {
         assert_eq!(p.impls[0].places.len(), 1);
         assert_eq!(p.impls[0].methods.len(), 0);
         assert!(!p.functions.iter().any(|f| f.name.contains("__at")));
+    }
+
+    /// A ring with a user `at`, and the site `r[0]` on line 1.
+    fn ring_site(ex: &Expansions) -> Result<Option<&'static Projection>, String> {
+        let p = parse(
+            "type Ring = { data: Array<Int64> }
+             impl Index for Ring {
+                 fn at(read self, i: Int64) -> read Int64 { return self.data[i] }
+             }
+             fn main() { print(1) }
+",
+        );
+        let recv = Expr::Var {
+            id: Id::NEW,
+            name: "r".into(),
+            line: 1,
+        };
+        let ring = Type::Named("Ring".into());
+        ex.site(
+            &p.impls,
+            Some(&ring),
+            "at",
+            &recv,
+            &[Expr::Int(0, Id::NEW)],
+            1,
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "was first expanded while bodies build on many threads")]
+    fn a_sealed_table_makes_no_tree() {
+        let ex = Expansions::shared();
+        let _sealed = ex.seal();
+        let _ = ring_site(&ex);
+    }
+
+    #[test]
+    fn a_sealed_table_answers_a_site_typing_expanded() {
+        let ex = Expansions::shared();
+        let typed = ring_site(&ex).unwrap().unwrap();
+        let _sealed = ex.seal();
+        assert!(std::ptr::eq(ring_site(&ex).unwrap().unwrap(), typed));
     }
 
     #[test]
