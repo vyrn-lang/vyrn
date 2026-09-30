@@ -7251,15 +7251,32 @@ fn typed(
 
 /// The record type with a `where` rule that `path`, taken from a value of type
 /// `ty`, passes through before its last place ([`crate::typed::StoreRules`]).
+/// A store into an element of an array field passes through: it keeps the
+/// field's length, and the rule reads the field through its length alone.
 fn ruled_within(own: &Owned, ty: &Type, path: &[&Place]) -> Option<String> {
     let decls = own.types();
     let mut at = ty.clone();
-    for step in path {
+    for (k, step) in path.iter().enumerate() {
         if let Type::Named(n) = &at {
-            if decls.get(n).is_some_and(|d| d.predicate.is_some())
-                && vyrn_frontend::types::record_fields(&at, decls).is_some()
+            let pred = decls.get(n).and_then(|d| d.predicate.as_ref());
+            if let (Some(pred), Some(fields)) =
+                (pred, vyrn_frontend::types::record_fields(&at, decls))
             {
-                return Some(n.clone());
+                let elem_of_length_only = match (step, path.get(k + 1)) {
+                    (Place::Field(_, f), Some(Place::Elem(..))) => {
+                        fields.iter().any(|x| {
+                            &x.name == f
+                                && matches!(
+                                    vyrn_frontend::types::resolve(&x.ty, decls),
+                                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
+                                )
+                        }) && !vyrn_frontend::consteval::whole_reads(pred).contains(f)
+                    }
+                    _ => false,
+                };
+                if !elem_of_length_only {
+                    return Some(n.clone());
+                }
             }
         }
         at = match (step, vyrn_frontend::types::resolve(&at, decls)) {

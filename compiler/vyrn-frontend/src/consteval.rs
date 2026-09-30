@@ -173,3 +173,34 @@ pub fn contains_call(expr: &Expr) -> bool {
     body_expr(expr, &std::collections::HashSet::new(), &mut v);
     v.0
 }
+
+/// Records each name a predicate reads other than through its length.
+struct Whole(std::collections::HashSet<String>);
+
+impl BodyVisit<'_> for Whole {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        match e {
+            Expr::Field { expr, field, .. }
+                if matches!(&**expr, Expr::Var { .. })
+                    && (field == "length" || field == "byteLength") =>
+            {
+                false
+            }
+            Expr::Var { name, .. } => {
+                self.0.insert(name.clone());
+                true
+            }
+            _ => true,
+        }
+    }
+}
+
+/// The names `expr` reads other than as `name.length` or `name.byteLength`.
+/// A store into an element of an array field outside them keeps the rule.
+pub fn whole_reads(expr: &Expr) -> std::collections::HashSet<String> {
+    let mut v = Whole(std::collections::HashSet::new());
+    body_expr(expr, &std::collections::HashSet::new(), &mut v);
+    v.0
+}

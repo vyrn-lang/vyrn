@@ -114,6 +114,51 @@ impl Walk<'_> {
         }
     }
 
+    /// The length of `p`: an array or String name, or such a field of a record
+    /// name, named by its class under the record's `where` rule
+    /// ([`Term::Col`]).
+    fn length(&self, p: &Place) -> Option<Term> {
+        let seq = |t: &Type| {
+            matches!(
+                vyrn_frontend::types::resolve(t, self.decls),
+                Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
+            )
+        };
+        match p {
+            Place::Name(b) if matches!(self.kind(*b), Kind::Seq) => Some(Term::Len(*b)),
+            Place::Field(r, f) => {
+                let Place::Name(r) = &**r else { return None };
+                let ty = &self.body.names[r.index()].ty;
+                let fields = vyrn_frontend::types::record_fields(ty, self.decls)?;
+                let at = |g: &str| fields.iter().position(|x| x.name == g && seq(&x.ty));
+                let mut class = BTreeSet::from([at(f)?]);
+                let pairs = match ty {
+                    Type::Named(n) => self.decls.get(n).and_then(|d| d.predicate.as_ref()),
+                    _ => None,
+                }
+                .map(vyrn_frontend::types::predicate_equal_lengths)
+                .unwrap_or_default();
+                // Each round adds a field or stops.
+                loop {
+                    let before = class.len();
+                    for (a, b) in &pairs {
+                        if let (Some(a), Some(b)) = (at(a), at(b)) {
+                            if class.contains(&a) || class.contains(&b) {
+                                class.extend([a, b]);
+                            }
+                        }
+                    }
+                    if class.len() == before {
+                        break;
+                    }
+                }
+                let least = *class.first().expect("holds the field itself");
+                Some(Term::Col(*r, u32::try_from(least).ok()?))
+            }
+            _ => None,
+        }
+    }
+
     fn is_int64(&self, n: Name) -> bool {
         matches!(self.kind(n), Kind::Int(64, true))
     }
@@ -215,12 +260,13 @@ impl Walk<'_> {
                 st
             }
             St::Store { place, value, .. } => {
-                if let Place::Name(n) = place {
-                    let n = *n;
+                if let Some(n) = resized_by_store(place) {
                     st.kill(n);
+                }
+                if let Place::Name(n) = place {
                     if self.relevant[n.index()] {
-                        self.assign(&mut st, n, value);
-                        self.range(&mut st, n);
+                        self.assign(&mut st, *n, value);
+                        self.range(&mut st, *n);
                     }
                 }
                 st
@@ -304,10 +350,7 @@ impl Walk<'_> {
     /// What must be `>= 0` for the check to pass, as far as linear facts can
     /// say; `None` when they cannot say it all.
     fn goals(&self, g: &Guard) -> Option<Vec<Lin>> {
-        let len = |p: &Place| match p {
-            Place::Name(b) if matches!(self.kind(*b), Kind::Seq) => Some(Lin::of(Term::Len(*b))),
-            _ => None,
-        };
+        let len = |p: &Place| self.length(p).map(Lin::of);
         Some(match g {
             Guard::Index(p, i) => {
                 let i = self.lin(i)?;
@@ -348,10 +391,8 @@ impl Walk<'_> {
             Rhs::Read(Place::Field(b, f)) | Rhs::Take(Place::Field(b, f))
                 if f == "length" || f == "byteLength" =>
             {
-                if let Place::Name(b) = &**b {
-                    if matches!(self.kind(*b), Kind::Seq) {
-                        st.define(Term::Val(n), &Lin::of(Term::Len(*b)));
-                    }
+                if let Some(t) = self.length(b) {
+                    st.define(Term::Val(n), &Lin::of(t));
                 }
             }
             Rhs::Make(Ctor::Array, parts) => {
@@ -675,7 +716,7 @@ impl Walk<'_> {
                 || s == 0
                 || writes_of(body, k) != 1
                 || !matches!(self.kind(k), Kind::Int(..))
-                || k0.terms.iter().any(|(t, _)| written.contains(&name_of(*t)))
+                || k0.terms.iter().any(|(t, _)| written.contains(&t.name()))
                 || !self.in_range(k, &k0, entry)
                 || !self.in_range(k, &end, entry)
             {
@@ -706,7 +747,7 @@ impl Walk<'_> {
     fn settle(&mut self, entry: &State, body: &mut [St]) -> State {
         let mut written = BTreeSet::new();
         writes(body, &mut written);
-        let mut indexed = BTreeSet::new();
+        let mut indexed = Vec::new();
         seqs(body, &mut indexed);
         let mut head = entry.clone();
         for n in &written {
@@ -719,13 +760,13 @@ impl Walk<'_> {
         // counter shapes an index needs.
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
         for f in &entry.facts {
-            if f.terms.iter().any(|(t, _)| written.contains(&name_of(*t))) {
+            if f.terms.iter().any(|(t, _)| written.contains(&t.name())) {
                 cands.insert(f.clone());
             }
         }
         for (t, v) in &entry.defs {
-            let mentions = written.contains(&name_of(*t))
-                || v.terms.iter().any(|(x, _)| written.contains(&name_of(*x)));
+            let mentions = written.contains(&t.name())
+                || v.terms.iter().any(|(x, _)| written.contains(&x.name()));
             if mentions {
                 cands.extend(Lin::of(*t).sub(v));
                 cands.extend(v.sub(&Lin::of(*t)));
@@ -742,7 +783,9 @@ impl Walk<'_> {
             let v = Lin::of(Term::Val(*m));
             cands.insert(v.clone());
             for (b, _) in indexed.iter().filter(|(_, i)| i == m) {
-                let len = Lin::of(Term::Len(*b));
+                let Some(len) = self.length(b).map(Lin::of) else {
+                    continue;
+                };
                 cands.extend(len.sub(&v));
                 cands.extend(len.sub(&v).and_then(|l| l.plus(-1)));
             }
@@ -832,9 +875,17 @@ fn provable(g: &Guard) -> bool {
     !matches!(g, Guard::Range(..))
 }
 
-fn name_of(t: Term) -> Name {
-    match t {
-        Term::Val(n) | Term::Len(n) => n,
+/// The name whose lengths a store into `p` may change: the name itself, or
+/// the record whose field it replaces. A store into an element keeps every
+/// length.
+fn resized_by_store(p: &Place) -> Option<Name> {
+    match p {
+        Place::Name(n) => Some(*n),
+        Place::Field(r, _) => match &**r {
+            Place::Name(r) => Some(*r),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -871,12 +922,7 @@ fn writes(ss: &[St], out: &mut BTreeSet<Name>) {
                     }
                 }
             }
-            St::Store {
-                place: Place::Name(n),
-                ..
-            } => {
-                out.insert(*n);
-            }
+            St::Store { place, .. } => out.extend(resized_by_store(place)),
             St::If { then, els, .. } => {
                 writes(then, out);
                 writes(els, out);
@@ -999,15 +1045,13 @@ fn stores(ss: &[St], out: &mut BTreeSet<Name>) {
     }
 }
 
-/// Every array or String name a check row indexes by a name, with that name.
-fn seqs(ss: &[St], out: &mut BTreeSet<(Name, Name)>) {
+/// Every place a check row indexes by a name, with that name.
+fn seqs(ss: &[St], out: &mut Vec<(Place, Name)>) {
     for s in ss {
         match s {
             St::Check(c) => {
-                if let Guard::Index(Place::Name(b), Val::Name(i))
-                | Guard::Span(Place::Name(b), Val::Name(i), _) = &c.guard
-                {
-                    out.insert((*b, *i));
+                if let Guard::Index(b, Val::Name(i)) | Guard::Span(b, Val::Name(i), _) = &c.guard {
+                    out.push((b.clone(), *i));
                 }
             }
             St::If { then, els, .. } => {

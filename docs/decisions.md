@@ -192,6 +192,7 @@ pull request.
 - Every runtime check is its own core row, stated once before the row it guards; one runtime check is one row. The emitter runs no check without a row, and a row no construct runs is an error.
 - A change that proves checks is licensed by the check oracle (`VYRN_CHECKS`, `scripts/check-elision.sh`): no proved row fails a run, and the elided, kept and oracle builds print the same.
 - A check row is proved only with a certificate that a checker sharing no code with the search accepts. Until builtin rows state length effects (#12), every `modify` or `consume` argument forgets its name.
+- The prover reads a record's `where` rule: `a.length == b.length` makes one length term of both fields. The rule holds wherever the record is, because every boundary checks it and the only store into the record in place is into an element of an array field the rule reads through its length.
 - Every limit is one constant, derived where it is used, and a test checks the derivations.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
@@ -217,7 +218,7 @@ pull request.
 - The playground runs a generator in the page: `vyrn-genwasm` without `host` builds the module and the `TypeArg` atoms, and `play-wasm.js` runs it. The page serves no read, no module reflection and no code quote, so only a `derive` generator runs there.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
-- No column layout (one array per field of a record) in std or the language. On 10^6 64-byte records it reads one field 2.0x to 2.9x faster and updates one from another 3.0x to 3.5x faster on both engines, but nbody runs 43% to 59% slower: the prover proves no index into one column from another column's length. `derive` cannot write the container, because its call answers `String`; `examples/lib/gen_columns.vyrn` is an import-target generator that does. Reopen it with a program that pays.
+- A column layout (one array per field of a record) is `std/columns`, an import-target generator over `moduleInterface`, not a language feature. Its container's `where` rule states that every column has the first one's length, so a loop bounded by one column indexes all of them unchecked. `derive` cannot write it, because its call answers `String` and renames the types it writes. A push rebuilds the container, because a push on one column breaks the rule until the last column grows.
 - Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.
 - A generator reports a diagnostic by writing `//@diag <severity> <anchor> <message>` into its output, so the report survives the cache. Two severities; an unknown word is a warning.
 - The compiler knows no lint rule names, codes, registry or suppression syntax.

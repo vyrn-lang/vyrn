@@ -16,18 +16,22 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use vyrn_frontend::core::Name;
 
-/// A value the facts speak about: an integer name, or the length of an array
-/// or String name (bytes for a String).
+/// A value the facts speak about: an integer name, the length of an array or
+/// String name (bytes for a String), or the length of a record name's array or
+/// String field. A `Col` names its field by the least index among the fields
+/// the record's `where` rule states of equal length, so one term is the
+/// length of each of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Term {
     Val(Name),
     Len(Name),
+    Col(Name, u32),
 }
 
 impl Term {
-    fn name(self) -> Name {
+    pub fn name(self) -> Name {
         match self {
-            Term::Val(n) | Term::Len(n) => n,
+            Term::Val(n) | Term::Len(n) | Term::Col(n, _) => n,
         }
     }
 }
@@ -236,11 +240,17 @@ impl State {
         self.facts.contains(u) || axioms(u.terms.iter().map(|(t, _)| *t)).contains(u)
     }
 
-    /// Forgets everything about `n` and its length. A definition `d = s*x +
+    /// Forgets everything about `n` and its lengths. A definition `d = s*x +
     /// rest` with `s` one or minus one first restates every fact about `x`
     /// through `d`, so nothing known is lost to an exact rename.
     pub fn kill(&mut self, n: Name) {
-        for t in [Term::Val(n), Term::Len(n)] {
+        let cols: BTreeSet<Term> = self
+            .defs
+            .values()
+            .flat_map(|v| v.terms.iter().map(|(t, _)| *t))
+            .filter(|t| matches!(t, Term::Col(m, _) if *m == n))
+            .collect();
+        for t in [Term::Val(n), Term::Len(n)].into_iter().chain(cols) {
             self.defs.remove(&t);
             self.restate(t);
         }
@@ -440,7 +450,7 @@ impl Prover<'_> {
 fn axioms(terms: impl Iterator<Item = Term>) -> Vec<Lin> {
     let mut out = Vec::new();
     for t in terms {
-        if let Term::Len(_) = t {
+        if let Term::Len(_) | Term::Col(..) = t {
             out.push(Lin::of(t));
             out.push(Lin {
                 terms: vec![(t, -1)],
