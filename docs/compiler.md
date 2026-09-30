@@ -156,7 +156,9 @@ the working directory, and hands the linked program and the load's pending
 floor decision to the `Judge` it is given (`vyrn_lower::JUDGE`: the steps
 above). Around it the editor keeps what only it needs: the parser's recovery,
 so a partial program is still indexed; the per-body judgment memo; the
-diagnostics' columns; and the memory rows the `Judge` copies off the World. `symbols::analyze` and `analyze_linked` run the checker alone. Each
+per-body recheck (`checker::recheck`), which types a body again only when
+its text or one of its reads' answers changed; the lowering's walk of each
+body the recheck holds, which the placer's worklist reuses; the diagnostics' columns; and the memory rows the `Judge` copies off the World. `symbols::analyze` and `analyze_linked` run the checker alone. Each
 returns diagnostics with columns, the symbol index and the tokens. `vyrn-lsp`
 serves hover, definition, completion, references and rename from that
 `Analysis`, and holds no rule of its own.

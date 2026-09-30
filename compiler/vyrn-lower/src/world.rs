@@ -304,13 +304,9 @@ impl World {
         self.fns.id(name)
     }
 
-    /// The row of `id`.
-    ///
-    /// # Panics
-    ///
-    /// If `id` is not this World's.
-    pub fn fn_row(&self, id: FnId) -> &FnRow {
-        &self.fns.rows[id.index()]
+    /// The function table's rows, the row of `id` at [`FnId::index`].
+    pub fn fn_rows(&self) -> &[FnRow] {
+        &self.fns.rows
     }
 
     /// The core's body for the function emitted under `name` ([`World::fn_id`]).
@@ -436,7 +432,11 @@ impl World {
             "a caller entry has no call edge"
         );
         for (name, id) in &self.fns.ids {
-            assert_eq!(&self.fn_row(*id).name, name, "a name's id is another row");
+            assert_eq!(
+                &self.fn_rows()[id.index()].name,
+                name,
+                "a name's id is another row"
+            );
         }
         for (id, s) in &self.bodies {
             if let Some(s) = s {
@@ -447,7 +447,7 @@ impl World {
                 );
                 assert_eq!(
                     s.body.name,
-                    self.fn_row(*id).name,
+                    self.fn_rows()[id.index()].name,
                     "a core body is served under another name"
                 );
             }

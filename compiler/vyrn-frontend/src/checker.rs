@@ -16,6 +16,9 @@ use crate::types::walk_type;
 use crate::types::Decls;
 use crate::types::FALLIBLE;
 
+pub mod recheck;
+use recheck::Text;
+
 /// A checker error on a whole line (column 0): most AST nodes carry no column.
 /// `cerr!(line, Rule, hole = expr, ..)` fills each hole with `expr`'s
 /// `Display`; a bare `hole` reads the binding of that name.
@@ -1067,7 +1070,8 @@ fn check_accum_inner(
         gen_fns: &gen_fns,
         record_reads: recording && READS.with(|r| r.get()),
     };
-    let checker = Checker::new(&cx, recording);
+    let mut checker = Checker::new(&cx, recording);
+    checker.recheck = (cx.record_reads).then(|| recheck::Session::open(program, &caps_by_sig));
 
     // 2b. Module state, in declaration order. A failed global still binds, as
     //     `Err`, so bodies that read it do not cascade "unknown variable".
@@ -1127,9 +1131,16 @@ fn check_accum_inner(
     //    diagnostics and record in source order, as one thread would.
     let typing = crate::prof::phase("check: bodies");
     let bodies: Vec<(u32, &Function)> = (0..).zip(&program.functions).skip(bodies_from).collect();
+    let replayed: Vec<Option<Typed>> = (bodies.iter())
+        .map(|&(i, f)| checker.replayed(SourceBody::Fn(i), Text::Fn(f)))
+        .collect();
+    let fresh: Vec<(u32, &Function)> = (bodies.iter().zip(&replayed))
+        .filter(|(_, r)| r.is_none())
+        .map(|(b, _)| *b)
+        .collect();
     let globals = checker.globals.borrow().clone();
     let typed = crate::par::in_parallel(
-        &bodies,
+        &fresh,
         |(_, f)| weight(f),
         || {
             let c = Checker::new(&cx, recording);
@@ -1140,10 +1151,17 @@ fn check_accum_inner(
     );
     // One allocation for the types the bodies add, not one per doubling.
     if let Some(r) = &checker.record {
-        let n = (typed.iter().filter_map(|t| t.record.as_ref())).map(|p| p.node_types.len());
+        let all = typed.iter().chain(replayed.iter().flatten());
+        let n = (all.filter_map(|t| t.record.as_ref())).map(|p| p.node_types.len());
         r.borrow_mut().node_types.reserve(n.sum());
     }
-    for ((_, f), t) in bodies.iter().zip(typed) {
+    let mut typed = typed.into_iter();
+    for (&(i, f), r) in bodies.iter().zip(replayed) {
+        let t = r.unwrap_or_else(|| {
+            let mut t = typed.next().expect("one typed body per body not replayed");
+            checker.store(SourceBody::Fn(i), Text::Fn(f), &mut t);
+            t
+        });
         if !t.diags.is_empty() {
             refused.insert(f.name.clone());
             in_bodies += t.diags.len();
@@ -1204,6 +1222,7 @@ fn check_accum_inner(
 }
 
 /// What typing one body added to its checker, for [`Checker::absorb`].
+#[derive(Clone, Default)]
 struct Typed {
     diags: Vec<Diagnostic>,
     record: Option<Recorded>,
@@ -1236,76 +1255,76 @@ fn weight(f: &Function) -> usize {
 /// a place, because a value would be a hidden copy. The place is
 /// rooted in `self` or a parameter, which the access site owns.
 fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    for (i, (imp, f)) in (0..).zip(crate::project::all(program)) {
-        checker.reading(SourceBody::Place(i));
-        let mut push = |d: Diagnostic| out.push(d.in_file(f.module.clone()));
-        if crate::project::is_optional(f) {
-            check_optional_place(checker, f, &mut push);
-            continue;
-        }
-        let yields = count_yields(&f.body);
-        if yields != 1
-            || !matches!(
-                f.body.stmts.last(),
-                Some(Stmt::Return { value: Some(_), .. })
-            )
-        {
-            push(cerr_at!(
-                f.line,
-                f.name_span(),
-                ProjectionOneReturn,
-                name = f.name
-            ));
-            continue;
-        }
-        let Some(Stmt::Return { value: Some(y), .. }) = f.body.stmts.last() else {
-            unreachable!("checked just above")
-        };
-        if crate::project::has_try(&f.body) {
-            push(cerr_at!(
-                f.line,
-                f.name_span(),
-                ProjectionUsesTry,
-                name = f.name
-            ));
-            continue;
-        }
-        // A `modify` result rooted at a parameter that is not `modify` is the
-        // argument's value at the site, with nowhere to write.
-        let modifies =
-            f.params.first().map(|p| p.capability) == Some(crate::ast::Capability::Modify);
-        let read_root = modifies
-            && crate::project::place_root(y).is_some_and(|r| {
-                f.params
-                    .iter()
-                    .any(|p| p.name == r && p.capability != crate::ast::Capability::Modify)
-            });
-        if !crate::project::is_place(y) || read_root {
-            push(cerr_at!(
-                f.line,
-                f.name_span(),
-                ProjectionReturnsValue,
-                name = f.name
-            ));
-            continue;
-        }
-        // A read projection's roots are transitive: a prologue `let` that
-        // borrows from an accepted root is one. A modify projection
-        // takes no prologue roots: a write through a copied handle can land
-        // in the copy.
-        let prologue = match modifies {
-            true => &f.body.stmts[..0],
-            false => &f.body.stmts[..f.body.stmts.len() - 1],
-        };
-        rooted_where_the_site_owns(f, y, prologue.iter(), &mut push);
-        let r = checker.function(f);
-        if let Err(s) = r {
-            push(s);
-        }
-        for s in checker.errors.borrow_mut().drain(..) {
-            push(s);
-        }
-        let _ = imp;
+    for (i, (_, f)) in (0..).zip(crate::project::all(program)) {
+        checker.body(SourceBody::Place(i), Text::Fn(f), out, |out| {
+            let mut push = |d: Diagnostic| out.push(d.in_file(f.module.clone()));
+            if crate::project::is_optional(f) {
+                check_optional_place(checker, f, &mut push);
+                return;
+            }
+            let yields = count_yields(&f.body);
+            if yields != 1
+                || !matches!(
+                    f.body.stmts.last(),
+                    Some(Stmt::Return { value: Some(_), .. })
+                )
+            {
+                push(cerr_at!(
+                    f.line,
+                    f.name_span(),
+                    ProjectionOneReturn,
+                    name = f.name
+                ));
+                return;
+            }
+            let Some(Stmt::Return { value: Some(y), .. }) = f.body.stmts.last() else {
+                unreachable!("checked just above")
+            };
+            if crate::project::has_try(&f.body) {
+                push(cerr_at!(
+                    f.line,
+                    f.name_span(),
+                    ProjectionUsesTry,
+                    name = f.name
+                ));
+                return;
+            }
+            // A `modify` result rooted at a parameter that is not `modify` is the
+            // argument's value at the site, with nowhere to write.
+            let modifies =
+                f.params.first().map(|p| p.capability) == Some(crate::ast::Capability::Modify);
+            let read_root = modifies
+                && crate::project::place_root(y).is_some_and(|r| {
+                    f.params
+                        .iter()
+                        .any(|p| p.name == r && p.capability != crate::ast::Capability::Modify)
+                });
+            if !crate::project::is_place(y) || read_root {
+                push(cerr_at!(
+                    f.line,
+                    f.name_span(),
+                    ProjectionReturnsValue,
+                    name = f.name
+                ));
+                return;
+            }
+            // A read projection's roots are transitive: a prologue `let` that
+            // borrows from an accepted root is one. A modify projection
+            // takes no prologue roots: a write through a copied handle can land
+            // in the copy.
+            let prologue = match modifies {
+                true => &f.body.stmts[..0],
+                false => &f.body.stmts[..f.body.stmts.len() - 1],
+            };
+            rooted_where_the_site_owns(f, y, prologue.iter(), &mut push);
+            let r = checker.function(f);
+            if let Err(s) = r {
+                push(s);
+            }
+            for s in checker.errors.borrow_mut().drain(..) {
+                push(s);
+            }
+        });
     }
 }
 
@@ -1502,35 +1521,36 @@ fn check_named_blocks(
     }
     *host.borrow_mut() = true;
     for (i, t) in blocks.iter().enumerate() {
-        checker.reading(body(i as u32));
-        // The head is synthetic but the body is the real node, so what the
-        // checker records lands on the nodes `own` and the lowering walk.
-        let synthetic = Function {
-            name: format!("{noun}@{i}"),
-            exported: false,
-            module: t.module.clone(),
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params: Vec::new(),
-            ret: Type::Unit,
-            body: Block {
-                id: Id::NEW,
-                stmts: Vec::new(),
-            },
-            line: t.line,
-            col: 0,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        };
-        if let Err(s) = checker.function_body(&synthetic, &t.body) {
-            out.push(s.in_file(t.module.clone()));
-        }
-        for s in checker.errors.borrow_mut().drain(..) {
-            out.push(s.in_file(t.module.clone()));
-        }
+        checker.body(body(i as u32), Text::Block(t), out, |out| {
+            // The head is synthetic but the body is the real node, so what the
+            // checker records lands on the nodes `own` and the lowering walk.
+            let synthetic = Function {
+                name: format!("{noun}@{i}"),
+                exported: false,
+                module: t.module.clone(),
+                doc: None,
+                type_params: Vec::new(),
+                type_bounds: Default::default(),
+                params: Vec::new(),
+                ret: Type::Unit,
+                body: Block {
+                    id: Id::NEW,
+                    stmts: Vec::new(),
+                },
+                line: t.line,
+                col: 0,
+                is_extern: false,
+                is_export_extern: false,
+                is_gen: false,
+                is_mut: false,
+            };
+            if let Err(s) = checker.function_body(&synthetic, &t.body) {
+                out.push(s.in_file(t.module.clone()));
+            }
+            for s in checker.errors.borrow_mut().drain(..) {
+                out.push(s.in_file(t.module.clone()));
+            }
+        });
     }
     *host.borrow_mut() = false;
 }
@@ -1587,6 +1607,10 @@ pub struct Recorded {
     /// variant ([`Checker::read`]). A body the check typed again repeats its
     /// rows.
     pub reads: Vec<(SourceBody, Key)>,
+    /// Each body a [`recheck`] entry holds, replayed or stored by this check,
+    /// with the entry's serial. A serial names one record of one body, so a
+    /// reader keyed by it may reuse what it derived from that record.
+    pub entries: Vec<(SourceBody, u64)>,
 }
 
 impl Recorded {
@@ -1604,6 +1628,7 @@ impl Recorded {
         self.stored.arg_sources.extend(tail.stored.arg_sources);
         self.stored.calls.extend(tail.stored.calls);
         self.reads.extend(tail.reads);
+        self.entries.extend(tail.entries);
     }
 }
 
@@ -1843,6 +1868,9 @@ struct Checker<'a> {
     /// The declaration of the call [`Checker::check_declared_call`] just typed
     /// `Err`, for the same wrapper.
     pending_call: RefCell<Option<CallDecl>>,
+    /// The per-body reuse, on the loading thread's checker when the host
+    /// rechecks per function ([`record_reads`]).
+    recheck: Option<recheck::Session<'a>>,
 }
 
 impl<'a> std::ops::Deref for Checker<'a> {
@@ -1975,6 +2003,7 @@ impl<'a> Checker<'a> {
             reads: Default::default(),
             pending_subst: Default::default(),
             pending_call: Default::default(),
+            recheck: None,
         }
     }
 
@@ -3061,10 +3090,15 @@ impl<'a> Checker<'a> {
         })();
         let mut diags: Vec<Diagnostic> = r.err().into_iter().collect();
         diags.append(&mut self.errors.borrow_mut());
+        let diags = (diags.into_iter()).map(|d| d.in_file(f.module.clone()));
+        self.taken(diags.collect())
+    }
+
+    /// Takes what this checker accumulated, as one body's [`Typed`] with
+    /// `diags`, and leaves the accumulations empty.
+    fn taken(&self, diags: Vec<Diagnostic>) -> Typed {
         Typed {
-            diags: (diags.into_iter())
-                .map(|d| d.in_file(f.module.clone()))
-                .collect(),
+            diags,
             record: self.record.as_ref().map(|r| r.take()),
             reads: self.reads.take(),
             binders: self.binder_types.take(),
@@ -3075,6 +3109,19 @@ impl<'a> Checker<'a> {
             },
             derive: self.derive_sites.take(),
         }
+    }
+
+    /// Puts back accumulations [`Checker::taken`] took, over empty ones.
+    fn put(&self, t: Typed) {
+        if let (Some(r), Some(part)) = (&self.record, t.record) {
+            *r.borrow_mut() = part;
+        }
+        *self.reads.borrow_mut() = t.reads;
+        *self.binder_types.borrow_mut() = t.binders;
+        *self.stored_sources.borrow_mut() = t.stored.sources;
+        *self.arg_sources.borrow_mut() = t.stored.arg_sources;
+        *self.stored_calls.borrow_mut() = t.stored.calls;
+        *self.derive_sites.borrow_mut() = t.derive;
     }
 
     /// Adds one body's [`Typed`] to this checker's accumulations, as typing
@@ -5338,7 +5385,7 @@ impl<'a> Checker<'a> {
                 _ => return Err(cerr!(line, DeriveArity)),
             };
             let arg = Type::Named("TypeArg".to_string());
-            if !self.gen_fns.contains(g) || self.sig(g) != Some(&(vec![arg], Type::Str)) {
+            if self.sig(g) != Some(&(vec![arg], Type::Str)) || !self.gen_fns.contains(g) {
                 return Err(cerr!(line, DeriveUnknownGen, g));
             }
             let at = self.expr(&args[1], scope, None, fn_ret)?;

@@ -7501,8 +7501,19 @@ pub fn augment(program: &Program, w: &mut World) {
     let own = &mut w.ownership;
     let mut r = Refused::default();
     let _p = vyrn_frontend::prof::phase("placer");
+    // The judgment memo, when the host armed one (`movecheck::Judgments`): a
+    // body whose key is unchanged is served its refusals, neither built nor
+    // judged, unless the effect judgment answers its frames otherwise. An
+    // armed host reads only refusals, not the facts or rows, so its lowering
+    // may leave out the facts of a body it has walked ([`crate::walked`]).
+    let js = vyrn_frontend::prof::phase("placer: judgments");
+    let memo = vyrn_frontend::movecheck::Judgments::open(program, &own.fnval_clear);
+    drop(js);
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
-    let lowered = crate::lower_with(program, own);
+    let lowered = match memo {
+        Some(_) => crate::lower_reusing(program, own),
+        None => crate::lower_with(program, own),
+    };
     drop(lw);
     w.fns = Fns::lowered(&lowered);
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
@@ -7514,13 +7525,6 @@ pub fn augment(program: &Program, w: &mut World) {
     // those need a rebuild.
     let mut built: Vec<Option<Body>> = Vec::with_capacity(lowered.instances.len());
     let mut touched: std::collections::HashSet<FnId> = Default::default();
-    // The judgment memo, when the host armed one (`movecheck::Judgments`): a
-    // body whose key is unchanged is served its refusals, neither built nor
-    // judged, unless the effect judgment answers its frames otherwise. An
-    // armed host reads only refusals, not the facts or rows.
-    let js = vyrn_frontend::prof::phase("placer: judgments");
-    let memo = vyrn_frontend::movecheck::Judgments::open(program, &own.fnval_clear);
-    drop(js);
     own.accumulators = crate::append::global_append_candidates(program);
     let mut names = NameMemo::default();
     // Every body is built before any is placed: the kernel asks the effect
@@ -8037,7 +8041,8 @@ impl Job<'_, '_> {
         match self {
             Job::Inst(inst) => {
                 let _p = vyrn_frontend::prof::phase("placer: core::build");
-                build_twice(program, inst, own, fns, names)
+                let inst = crate::walked(program, &own.record, inst);
+                build_twice(program, &inst, own, fns, names)
             }
             Job::Outside(ob) => {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");

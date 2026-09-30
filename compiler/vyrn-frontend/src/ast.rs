@@ -43,6 +43,17 @@ impl NodeId {
     pub fn expansion_unit(self) -> u32 {
         Self::EXPANDED | self.unit
     }
+
+    /// The unit the node was numbered in ([`Numbering::unit`]).
+    pub fn unit(self) -> u32 {
+        self.unit
+    }
+
+    /// The same node of its body numbered as unit `unit`. A body's local
+    /// numbering depends on its text alone.
+    pub fn in_unit(self, unit: u32) -> NodeId {
+        NodeId { unit, ..self }
+    }
 }
 
 /// Names one function for the tables keyed by function: an index into
@@ -221,8 +232,10 @@ pub struct Program {
     /// What the program is compiled as, beyond an ordinary build.
     pub host: Host,
     /// `module key -> content hash` for every module the loader parsed into
-    /// this program. The kernel's judgment memo keys a body on it
-    /// ([`crate::movecheck::Judgments`]). Empty for a program no load linked.
+    /// this program but the root, whose declarations name no module. The
+    /// kernel's judgment memo and the checker's per-body reuse key a body on
+    /// it ([`crate::movecheck::Judgments`]). Empty for a program no load
+    /// linked.
     /// Ordered, because a generator program's `Debug` text keys its compiled
     /// module (`vyrn_genwasm`).
     pub module_hashes: std::collections::BTreeMap<String, String>,

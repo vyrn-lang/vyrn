@@ -112,11 +112,13 @@ fn probe(path: &str, runs: usize) {
         .collect();
     ms.sort_by(|a, b| a.total_cmp(b));
     let _ = vyrn_frontend::prof::phase_table();
+    let _ = vyrn_frontend::checker::recheck::tally();
     analyze(&edit(&src, runs + 3));
+    let (checked, replayed) = vyrn_frontend::checker::recheck::tally();
     eprint!("{}", vyrn_frontend::prof::phase_table());
     let a = analyze(&src);
     println!(
-        "best {:.1} ms  median {:.1} ms  {} diagnostics, {} memory notes  {path}",
+        "best {:.1} ms  median {:.1} ms  {} diagnostics, {} memory notes, {checked} bodies checked, {replayed} replayed  {path}",
         ms[0],
         ms[ms.len() / 2],
         a.diagnostics.len(),
