@@ -7,7 +7,6 @@
 //! node produces, so the typed judgment never counts a store as unjudged.
 
 use vyrn_frontend::loader::DiskResolver;
-use vyrn_frontend::project::Memo;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,24 +20,23 @@ fn repo_root() -> PathBuf {
     d
 }
 
-fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
+fn load(path: &std::path::Path) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let root = path.to_string_lossy().replace('\\', "/");
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
     // Without the engine, an example that imports through a generator fails to
     // load, and the census counts a smaller corpus.
-    Memo::load(|| {
-        vyrn_lower::load(
-            &src,
-            &root,
-            &opts,
-            &DiskResolver,
-            Some(&*vyrn_genwasm::engine()),
-        )
-    })
+    vyrn_lower::load(
+        &src,
+        &root,
+        &opts,
+        &DiskResolver,
+        Some(&*vyrn_genwasm::engine()),
+    )
     .map_err(|d| {
         d.first()
             .map(|d| d.render())
@@ -47,9 +45,17 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
 }
 
 fn core_body(src: &str, which: &str) -> vyrn_frontend::core::Body {
-    let (program, _memo) =
-        Memo::load(|| vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver, None))
-            .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
+    let program = vyrn_lower::load(
+        src,
+        "core.vyrn",
+        &vyrn_frontend::loader::LoadOptions {
+            expansions: vyrn_frontend::project::Expansions::shared(),
+            ..Default::default()
+        },
+        &DiskResolver,
+        None,
+    )
+    .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let lowered = vyrn_lower::lower(&program);
     let world = vyrn_lower::analyze(&program);
     let own = &world.ownership;
@@ -313,7 +319,7 @@ fn run() {
     let mut ops: BTreeMap<String, usize> = BTreeMap::new();
     let mut programs = 0usize;
     for path in corpus() {
-        let Ok((program, _memo)) = load(&path) else {
+        let Ok(program) = load(&path) else {
             continue;
         };
         programs += 1;

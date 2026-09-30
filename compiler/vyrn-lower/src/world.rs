@@ -391,7 +391,7 @@ pub fn analyze(program: &Program) -> Arc<World> {
 /// The load's World, when it was made for `program` in a compile scope.
 fn adopt(program: &Program) -> Option<Arc<World>> {
     (LOADED.with(|l| l.borrow_mut().take()))
-        .filter(|_| vyrn_frontend::project::memo_open())
+        .filter(|_| program.expansions.is_shared())
         .filter(|(id, _)| *id == own::ident(program))
         .map(|(_, w)| w)
 }
@@ -399,7 +399,7 @@ fn adopt(program: &Program) -> Option<Arc<World>> {
 /// Hands the load's World and checker record to the [`own::Memo`] the command
 /// opens next ([`own::hand_on`]).
 pub fn hand_on(program: &Program, world: &Arc<World>) {
-    if !vyrn_frontend::project::memo_open() {
+    if !program.expansions.is_shared() {
         return;
     }
     own::hand_on(program);

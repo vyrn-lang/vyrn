@@ -23,7 +23,7 @@ pub fn is_panic(name: &str) -> bool {
 /// other, and no numbered node is [`NodeId::NONE`]. An id survives a clone and
 /// a move of the tree. It is a storage index, never an order, so it has no
 /// `Ord`. A projection expansion is not in the program: [`crate::project`]
-/// makes each one a unit from [`NodeId::EXPANDED`] up.
+/// numbers it in its site's [`NodeId::expansion_unit`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct NodeId {
     unit: u32,
@@ -36,6 +36,13 @@ impl NodeId {
 
     /// The first unit of the expansion range, above every program's own units.
     pub const EXPANDED: u32 = 1 << 31;
+
+    /// The unit the expansions anchored at this node are numbered in: its own
+    /// unit's image in the expansion range. An expansion's node maps to its
+    /// own unit, so a nested site shares its outer site's unit.
+    pub fn expansion_unit(self) -> u32 {
+        Self::EXPANDED | self.unit
+    }
 }
 
 /// Names one function for the tables keyed by function: an index into
@@ -141,6 +148,9 @@ pub struct Program {
     /// Ordered, because a generator program's `Debug` text keys its compiled
     /// module (`vyrn_genwasm`).
     pub module_hashes: std::collections::BTreeMap<String, String>,
+    /// The projection expansions every pass over this program reads. The
+    /// loader stamps the load's; a parsed program has an unshared one.
+    pub expansions: std::sync::Arc<crate::project::Expansions>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only
@@ -1515,7 +1525,17 @@ pub struct Numbering(NodeId);
 impl Numbering {
     /// Starts unit `unit`, whose first node gets index 1.
     pub fn unit(unit: u32) -> Numbering {
-        Numbering(NodeId { unit, local: 0 })
+        Numbering::resume(unit, 0)
+    }
+
+    /// Continues unit `unit` after its first `used` nodes.
+    pub fn resume(unit: u32, used: u32) -> Numbering {
+        Numbering(NodeId { unit, local: used })
+    }
+
+    /// How many nodes the unit holds so far.
+    pub fn used(&self) -> u32 {
+        self.0.local
     }
 
     fn next(&mut self, slot: &mut Id) {

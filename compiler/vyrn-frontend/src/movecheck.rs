@@ -109,6 +109,7 @@ crate::body_scope_descent!(LetsVisit, lets_block, lets_stmt, lets_expr);
 /// projection is read as the expansion, the nodes the lowering walks.
 struct Lets<'a> {
     decl: &'a Declared,
+    expansions: &'a crate::project::Expansions,
     /// Lambda nodes an argument position already gave a signature.
     typed: HashSet<NodeId>,
     /// Index and value nodes a projection store's expansion stands in for.
@@ -132,7 +133,7 @@ impl<'a> LetsVisit<'a> for Lets<'_> {
         else {
             return;
         };
-        let Some(blk) = crate::project::stored(name, index, value) else {
+        let Some(blk) = self.expansions.stored(name, index, value) else {
             return;
         };
         self.skipped.insert(index.id());
@@ -179,6 +180,7 @@ impl<'a> Lets<'a> {
     fn over(program: &'a Program, decl: &'a Declared) -> Lets<'a> {
         let mut v = Lets {
             decl,
+            expansions: &program.expansions,
             typed: HashSet::new(),
             skipped: HashSet::new(),
             arities: HashSet::new(),

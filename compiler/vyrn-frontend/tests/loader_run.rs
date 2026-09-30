@@ -152,6 +152,14 @@ mod tests {
         }
     }
 
+    /// [`opts`] with shared expansions, as a compile loads.
+    pub(super) fn shared_opts() -> LoadOptions {
+        LoadOptions {
+            expansions: vyrn_frontend::project::Expansions::shared(),
+            ..opts()
+        }
+    }
+
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
         let files: Vec<(&str, &str)> = files
             .iter()
@@ -159,9 +167,13 @@ mod tests {
             .chain(RT_FILES.iter().copied())
             .collect();
         let files = &files[..];
-        let (mut program, memo) = vyrn_frontend::project::Memo::load(|| {
-            load(root, "main.vyrn", &opts(), &map(files), Some(&*engine()))
-        })
+        let mut program = load(
+            root,
+            "main.vyrn",
+            &shared_opts(),
+            &map(files),
+            Some(&*engine()),
+        )
         .map_err(|ds| {
             ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
                 "
@@ -174,7 +186,7 @@ mod tests {
         if let Some(d) = diags.first() {
             return Err(d.render());
         }
-        run_compiled(&program, &memo)
+        run_compiled(&program)
     }
 
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
@@ -1022,7 +1034,7 @@ mod tests {
 
 #[cfg(test)]
 mod remote_tests {
-    use super::tests::{map, opts};
+    use super::tests::{map, opts, shared_opts};
     use super::*;
 
     fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
@@ -1043,17 +1055,15 @@ mod remote_tests {
         let lib = "export fn pad(n: Int64) -> Int64 { return n + 1 }";
         let root = "import { pad } from \"github:acme/strings@v1/src/pad\" \
                     fn main() -> Int64 { return pad(41) }";
-        let (program, memo) = vyrn_frontend::project::Memo::load(|| {
-            load(
-                root,
-                "main.vyrn",
-                &opts(),
-                &map(&[("github:acme/strings@v1/src/pad.vyrn", lib)]),
-                None,
-            )
-        })
+        let program = load(
+            root,
+            "main.vyrn",
+            &shared_opts(),
+            &map(&[("github:acme/strings@v1/src/pad.vyrn", lib)]),
+            None,
+        )
         .unwrap();
-        assert_eq!(run_compiled(&program, &memo).unwrap(), 42);
+        assert_eq!(run_compiled(&program).unwrap(), 42);
     }
 
     #[test]
@@ -1062,20 +1072,18 @@ mod remote_tests {
         let b = "export fn b() -> Int64 { return 7 }";
         let root = "import { a } from \"github:acme/x@abc/src/a\" \
                     fn main() -> Int64 { return a() }";
-        let (program, memo) = vyrn_frontend::project::Memo::load(|| {
-            load(
-                root,
-                "main.vyrn",
-                &opts(),
-                &map(&[
-                    ("github:acme/x@abc/src/a.vyrn", a),
-                    ("github:acme/x@abc/src/b.vyrn", b),
-                ]),
-                None,
-            )
-        })
+        let program = load(
+            root,
+            "main.vyrn",
+            &shared_opts(),
+            &map(&[
+                ("github:acme/x@abc/src/a.vyrn", a),
+                ("github:acme/x@abc/src/b.vyrn", b),
+            ]),
+            None,
+        )
         .unwrap();
-        assert_eq!(run_compiled(&program, &memo).unwrap(), 7);
+        assert_eq!(run_compiled(&program).unwrap(), 7);
     }
 
     #[test]
@@ -1118,7 +1126,7 @@ mod remote_tests {
 
 #[cfg(test)]
 mod gen_tests {
-    use super::tests::opts;
+    use super::tests::{opts, shared_opts};
     use super::*;
     use std::cell::RefCell;
 
@@ -1182,15 +1190,13 @@ mod gen_tests {
     }
 
     fn run_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
-        let (program, memo) = vyrn_frontend::project::Memo::load(|| {
-            load(root, "main.vyrn", &opts(), r, Some(&*engine()))
-        })
-        .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
+        let program = load(root, "main.vyrn", &shared_opts(), r, Some(&*engine()))
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         let diags = vyrn_frontend::checker::check_accum(&program);
         if let Some(d) = diags.first() {
             return Err(d.render());
         }
-        run_compiled(&program, &memo)
+        run_compiled(&program)
     }
 
     fn map(entries: &[(&str, &str)]) -> MapResolver {

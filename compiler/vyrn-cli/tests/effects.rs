@@ -11,7 +11,6 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use vyrn_frontend::project::Memo;
 
 use vyrn_frontend::ast::{Program, Type};
 use vyrn_frontend::audience::{self, Audience};
@@ -32,23 +31,22 @@ fn slash(p: &Path) -> String {
 
 /// Loads a root under its project's `artifacts` map, as `vyrn check` does, so the floor
 /// decides on a declared entry the same way.
-fn load(path: &Path, project: Option<&Path>) -> Result<(Program, Memo), String> {
+fn load(path: &Path, project: Option<&Path>) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(slash(&repo_root().join("std"))),
         artifacts: project.and_then(manifest).and_then(|m| m.artifacts),
+        expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
     // A floor refusal names the carrier in the note.
-    Memo::load(|| {
-        vyrn_lower::load(
-            &src,
-            &slash(path),
-            &opts,
-            &DiskResolver,
-            Some(&*vyrn_genwasm::engine()),
-        )
-    })
+    vyrn_lower::load(
+        &src,
+        &slash(path),
+        &opts,
+        &DiskResolver,
+        Some(&*vyrn_genwasm::engine()),
+    )
     .map_err(|d| {
         d.first()
             .map(|d| match &d.note {
@@ -242,7 +240,7 @@ fn run_corpus() {
     let mut refused = 0usize;
     let mut programs = 0usize;
     for (path, project) in &roots {
-        let (program, _memo) = match load(path, project.as_deref()) {
+        let program = match load(path, project.as_deref()) {
             Ok(p) => p,
             Err(e) => {
                 // A project entry must load, unless its artifact's floor refusal

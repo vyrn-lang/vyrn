@@ -1763,7 +1763,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Option<Place>, Gap> {
-        if !vyrn_frontend::project::memo_open() {
+        if !self.program.expansions.is_shared() {
             return Ok(None);
         }
         let Ok(rty) = self.ty_of(recv) else {
@@ -1777,7 +1777,7 @@ impl<'a> Builder<'a> {
         if vyrn_frontend::project::is_optional(f) {
             return Ok(None);
         }
-        let p = match vyrn_frontend::project::site(
+        let p = match self.program.expansions.site(
             &self.program.impls,
             Some(&rty),
             method,
@@ -1819,7 +1819,7 @@ impl<'a> Builder<'a> {
         let Some((pattern, scrutinee, then_block, else_block)) = e.as_if_let() else {
             return Ok(false);
         };
-        if !vyrn_frontend::project::memo_open() {
+        if !self.program.expansions.is_shared() {
             return Ok(false);
         }
         let line = e.line();
@@ -1838,7 +1838,7 @@ impl<'a> Builder<'a> {
         if !vyrn_frontend::project::is_optional(f) {
             return Ok(false);
         }
-        let p = match vyrn_frontend::project::optional_site(
+        let p = match self.program.expansions.optional_site(
             &self.program.impls,
             Some(&rty),
             name,
@@ -2544,7 +2544,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Option<(Place, &'a Expr)>, Gap> {
-        let Some(blk) = vyrn_frontend::project::stored(name, index, value) else {
+        let Some(blk) = self.program.expansions.stored(name, index, value) else {
             return Ok(None);
         };
         let Some(k) = vyrn_frontend::project::store_node(blk)
@@ -3938,10 +3938,14 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Place, Gap> {
-        if !vyrn_frontend::project::memo_open() {
+        if !self.program.expansions.is_shared() {
             return Ok(Place::Elem(Box::new(Place::Name(it)), Val::Name(i)));
         }
-        let p = match vyrn_frontend::project::for_element(&self.program.impls, ity, iter, line) {
+        let p = match self
+            .program
+            .expansions
+            .for_element(&self.program.impls, ity, iter, line)
+        {
             Ok(Some(p)) => p,
             Ok(None) => return gap("a `for` over a container with no `nth`", line),
             Err(e) => return gap_d("a projection this site cannot inline", &e, line),
@@ -5555,7 +5559,7 @@ impl<'a> Builder<'a> {
                 }
                 // `schemaOf<T>()` is the `Schema` literal it stands for, whose
                 // nodes the checker typed (`project::schema_at`).
-                if let Some(lit) = vyrn_frontend::project::schema_at(e) {
+                if let Some(lit) = self.program.expansions.schema_at(e) {
                     return self.rhs(lit, out);
                 }
                 let id = e.id();
@@ -7391,23 +7395,17 @@ pub fn augment(program: &Program, w: &mut World) {
         &unserved,
         |j| j.map_or(0, |j| j.weight()),
         NameMemo::default,
-        |names, j| {
-            let top = j.map(|j| j.build(program, shared, names));
-            (top, vyrn_frontend::project::missed())
-        },
+        |names, j| j.map(|j| j.build(program, shared, names)),
     );
-    // In job order, so the gap tally and every node id a projection site
-    // makes come out as on one thread.
+    // In job order, so the gap tally comes out as on one thread.
     let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
-    for (((j, key), served), (first, missed)) in jobs.iter().zip(keys).zip(served).zip(firsts) {
+    for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {
         if let Some(rs) = served {
             made.push(Made::Served(rs));
             continue;
         }
-        let top = match first {
-            Some(top) if !missed => top,
-            _ => j.build(program, own, &mut names),
-        };
+        // `unserved` holds every job `served` does not, so `first` is `Some`.
+        let top = first.unwrap_or_else(|| j.build(program, own, &mut names));
         j.tally(&top);
         made.push(Made::Built(key, top));
     }
@@ -7836,9 +7834,8 @@ fn threads() -> usize {
 /// [`threads`] threads. Workers take items from one counter, heaviest first
 /// by `weight`, so the longest body does not start last; `VYRN_SHUFFLE=<seed>`
 /// permutes that order, for the test that holds every output independent of
-/// it. Each worker reads the calling thread's inputs
-/// ([`vyrn_frontend::project::Lent`]), creates no node id, and keeps one `S`
-/// from `fresh` across its items. A panic in a worker panics the caller.
+/// it. Each worker keeps one `S` from `fresh` across its items. A panic in a
+/// worker panics the caller.
 fn in_parallel<T: Sync, S, R: Send>(
     items: &[T],
     weight: impl Fn(&T) -> usize,
@@ -7860,11 +7857,9 @@ fn in_parallel<T: Sync, S, R: Send>(
             order.swap(i, (x % (i as u64 + 1)) as usize);
         }
     }
-    let lent = vyrn_frontend::project::lend();
     let next = std::sync::atomic::AtomicUsize::new(0);
     // Measure: `next` only grows, and a worker stops once it passes `order`.
     let worker = || {
-        let _lent = lent.enter();
         let mut state = fresh();
         let mut done = Vec::new();
         while let Some(&i) = order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {

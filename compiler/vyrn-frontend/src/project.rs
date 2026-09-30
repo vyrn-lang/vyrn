@@ -1,11 +1,10 @@
 //! Place projections: a `place` member yields a place inside its
 //! receiver and is inlined at the access site, so the borrow never leaves the
-//! caller's frame. [`site`] expands `a[i]` (a call to [`AT`]) and
-//! [`store_index`] expands `a[i] = v`; a builtin container keeps its own nodes
-//! and lowers to [`ELEM`], the unspellable addressing primitive. While a
-//! [`Memo`] is open each site is expanded once and leaked, because the
-//! checker, the ownership passes and the lowering key side tables by node, and
-//! each expansion is numbered anew.
+//! caller's frame. [`Expansions::site`] expands `a[i]` (a call to [`AT`]) and
+//! [`Expansions::store_index`] expands `a[i] = v`; a builtin container keeps
+//! its own nodes and lowers to [`ELEM`], the unspellable addressing primitive.
+//! A shared [`Expansions`] expands each site once, because the checker, the
+//! ownership passes and the lowering key side tables by node.
 
 use crate::ast::{
     Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt, Type,
@@ -108,316 +107,144 @@ pub fn lookup_impl_by_key<'a>(
     None
 }
 
-/// Returns the expansion an access site lowers through. `None` means the site
-/// keeps its own nodes: no user projection answers, and the seeded expansion
-/// would be the identity. `Some` is built once per site while
-/// a [`Memo`] is open, so every pass sees the same node ids.
-pub fn site(
-    impls: &[ImplBlock],
-    recv: Option<&Type>,
-    method: &str,
-    recv_expr: &Expr,
-    args: &[Expr],
-    line: usize,
-) -> Result<Option<&'static Projection>, String> {
-    let Some(t) = recv.filter(|t| !is_builtin_container(t)) else {
-        return Ok(None);
-    };
-    let Some(key) = crate::types::type_key(t) else {
-        return Ok(None);
-    };
-    let Some(f) = lookup_by_key(impls, &key, method) else {
-        return Ok(None);
-    };
-    memo(
-        (recv_expr.id(), line, key, method.to_string()),
-        recv_expr,
-        args,
-        || inline(f, recv_expr, args, line),
-    )
-    .map(Some)
+/// The projection expansions of one compile: one tree per access site, which
+/// the checker, the ownership passes, the lowering and the emitter all walk.
+/// Every program a load links shares one: [`crate::loader::LoadOptions`]
+/// carries it and the loader stamps it on each [`Program`]. Trees are leaked,
+/// because passes key side tables by their node ids.
+///
+/// A tree's ids and temporary names derive from its site. It is numbered in
+/// the site's [`NodeId::expansion_unit`], after the trees made there before
+/// it. One thread types a unit's body, in the body's order, so the ids do not
+/// depend on the thread count. An unshared table ([`Expansions::default`],
+/// the editor's) keeps no tree: each ask builds one, [`Expansions::schema`]
+/// answers none, and the lowering inlines no site.
+#[derive(Default)]
+pub struct Expansions {
+    shared: bool,
+    tables: std::sync::RwLock<Tables>,
 }
 
-/// [`site`] for an optional projection. `Ok(None)` also covers a
-/// plain member, which the caller's own paths handle.
-pub fn optional_site(
-    impls: &[ImplBlock],
-    recv: Option<&Type>,
-    method: &str,
-    recv_expr: &Expr,
-    args: &[Expr],
-    line: usize,
-) -> Result<Option<&'static OptionalProjection>, String> {
-    let Some(t) = recv.filter(|t| !is_builtin_container(t)) else {
-        return Ok(None);
-    };
-    let Some(key) = crate::types::type_key(t) else {
-        return Ok(None);
-    };
-    let Some(f) = lookup_by_key(impls, &key, method) else {
-        return Ok(None);
-    };
-    if !is_optional(f) {
-        return Ok(None);
+impl Expansions {
+    /// A table that keeps every tree for the later asks, as a compile needs.
+    pub fn shared() -> std::sync::Arc<Expansions> {
+        std::sync::Arc::new(Expansions {
+            shared: true,
+            tables: Default::default(),
+        })
     }
-    let hit = read(|m| {
-        let e = m
-            .optional
-            .get(&(recv_expr.id(), line, key.clone(), method.to_string()))?;
-        (e.recv == *recv_expr && e.args == args).then_some(e.tree)
-    });
-    if let Some(t) = hit {
-        return Ok(Some(t));
+
+    /// Whether this table keeps its trees ([`Expansions::shared`]).
+    pub fn is_shared(&self) -> bool {
+        self.shared
     }
-    if frozen_miss() {
-        return Err(LENT_MISS.to_string());
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Tables> {
+        self.tables
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    let mut built = optional_inline(f, recv_expr, args, line)?;
-    numbered(|n| {
-        built.prologue.iter_mut().for_each(|s| n.stmt(s));
-        n.expr(&mut built.miss);
-        built.hit.iter_mut().for_each(|s| n.stmt(s));
-        n.expr(&mut built.place);
-    });
-    let tree: &'static OptionalProjection = Box::leak(Box::new(built));
-    insert(|m| {
-        m.optional.insert(
-            (recv_expr.id(), line, key, method.to_string()),
-            OptExpansion {
-                recv: recv_expr.clone(),
-                args: args.to_vec(),
-                tree,
-            },
-        );
-    });
-    Ok(Some(tree))
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Tables> {
+        self.tables
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
-/// [`Expansion`] for the optional kind.
-#[derive(Clone)]
-struct OptExpansion {
-    recv: Expr,
-    args: Vec<Expr>,
-    tree: &'static OptionalProjection,
+/// Every program's table answers alike: a program's `Debug` text keys the
+/// generator engine's artifacts, and its equality compares source.
+impl std::fmt::Debug for Expansions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Expansions")
+    }
 }
 
-/// An access site: receiver node, line, receiver type key, member name. The
-/// line is needed because the memo spans a load, which checks whole generator
-/// programs, whose ids repeat the root's, so two equal sites can differ only in
-/// their line.
+impl PartialEq for Expansions {
+    fn eq(&self, _: &Expansions) -> bool {
+        true
+    }
+}
+
+/// An access site: its anchor node, line, receiver type key, member name. The
+/// line is needed because the table spans a load, which checks whole
+/// generator programs, whose ids repeat the root's, so two equal sites can
+/// differ only in their line.
 type Key = (NodeId, usize, String, String);
 
 /// One expansion and the site inputs it was built from. A hit compares the
 /// inputs, because a generator program's node would otherwise answer with
 /// another site's expansion.
-#[derive(Clone)]
-struct Expansion {
+struct Expansion<T: 'static> {
     recv: Expr,
     args: Vec<Expr>,
-    tree: &'static Projection,
+    tree: &'static T,
 }
 
-/// Every expansion one [`Memo`] holds. Shared, so a thread that builds
-/// bodies reads the loading thread's ([`Lent`]). An insert copies it only
-/// while a lent copy is alive, and none is: a lent memo expands nothing.
-#[derive(Default, Clone)]
-struct Memos {
-    sites: HashMap<Key, Expansion>,
-    optional: HashMap<Key, OptExpansion>,
+#[derive(Default)]
+struct Tables {
+    sites: HashMap<Key, Expansion<Projection>>,
+    optional: HashMap<Key, Expansion<OptionalProjection>>,
     /// Store expansions, keyed by the index node: `a[i] = v` has no receiver
-    /// node, only the temporary [`store_index`] synthesizes.
+    /// node, only the temporary [`Expansions::store_index`] synthesizes.
     #[allow(clippy::type_complexity)]
     stores: HashMap<NodeId, (String, Expr, Expr, &'static Block)>,
     /// The `Schema` literal each `schemaOf<T>()` node stands for, keyed by
-    /// the call node, with the target's name. See [`schema`].
+    /// the call node, with the target's name. See [`Expansions::schema`].
     schemas: HashMap<NodeId, (String, &'static Expr)>,
+    /// How many nodes each expansion unit holds.
+    used: HashMap<u32, u32>,
 }
 
-thread_local! {
-    /// The open [`Memo`]'s expansions; `None` outside one.
-    static MEMOS: std::cell::RefCell<Option<std::sync::Arc<Memos>>> =
-        const { std::cell::RefCell::new(None) };
-    /// Whether this thread reads a lent memo ([`Lent::enter`]).
-    static FROZEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Whether a site missed the lent memo ([`missed`]).
-    static MISSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// The error a site answers where the lent memo has no expansion for it.
-const LENT_MISS: &str = "a projection site the lent memo has not expanded";
-
-fn read<T>(f: impl FnOnce(&Memos) -> Option<T>) -> Option<T> {
-    MEMOS.with(|m| f(m.borrow().as_deref()?))
-}
-
-fn insert(f: impl FnOnce(&mut Memos)) {
-    MEMOS.with(|m| {
-        if let Some(m) = m.borrow_mut().as_mut() {
-            f(std::sync::Arc::make_mut(m));
-        }
-    });
-}
-
-/// Whether this thread reads a lent memo, which expands nothing. A miss is
-/// recorded for [`missed`] instead, so node ids are made on the loading
-/// thread alone, in its order.
-fn frozen_miss() -> bool {
-    let frozen = FROZEN.with(|f| f.get());
-    if frozen {
-        MISSED.with(|m| m.set(true));
-    }
-    frozen
-}
-
-/// This thread's input to building a body of the program it loaded: the
-/// open [`Memo`]. Another thread reads it through [`Lent::enter`].
-pub struct Lent {
-    memos: Option<std::sync::Arc<Memos>>,
-    frozen: bool,
-}
-
-pub fn lend() -> Lent {
-    Lent {
-        memos: MEMOS.with(|m| m.borrow().clone()),
-        frozen: true,
+impl Tables {
+    /// Builds a tree anchored at `anchor` and numbers it after the unit's
+    /// earlier trees. `build` gets the tag that names the tree's temporaries,
+    /// unique in the unit because it names the tree's first node.
+    fn expand<T>(
+        &mut self,
+        anchor: NodeId,
+        build: impl FnOnce(&str) -> Result<T, String>,
+        number: impl FnOnce(&mut T, &mut Numbering),
+    ) -> Result<&'static T, String> {
+        let unit = anchor.expansion_unit();
+        let used = self.used.get(&unit).copied().unwrap_or(0);
+        let mut built = build(&format!("{}_{}", unit & !NodeId::EXPANDED, used + 1))?;
+        let mut n = Numbering::resume(unit, used);
+        number(&mut built, &mut n);
+        self.used.insert(unit, n.used());
+        Ok(Box::leak(Box::new(built)))
     }
 }
 
-impl Lent {
-    /// Makes this thread read `self` until the guard drops. A site the memo
-    /// has not expanded expands nothing under it: the site answers an error
-    /// and [`missed`] says so, and the caller builds that body again on the
-    /// loading thread.
-    pub fn enter(&self) -> Entered {
-        Entered(Some(swap(Lent {
-            memos: self.memos.clone(),
-            frozen: true,
-        })))
-    }
-}
-
-/// Installs `lent` on this thread and returns what it replaced.
-fn swap(lent: Lent) -> Lent {
-    let was = Lent {
-        memos: MEMOS.with(|m| m.replace(lent.memos)),
-        frozen: FROZEN.with(|f| f.replace(lent.frozen)),
-    };
-    MISSED.with(|m| m.set(false));
-    was
-}
-
-/// Restores what [`Lent::enter`] replaced when it drops.
-pub struct Entered(Option<Lent>);
-
-impl Drop for Entered {
-    fn drop(&mut self) {
-        if let Some(was) = self.0.take() {
-            swap(was);
-        }
-    }
-}
-
-/// Whether a site missed the lent memo since the last call; clears it.
-pub fn missed() -> bool {
-    MISSED.with(|m| m.replace(false))
-}
-
-thread_local! {
-    /// The unit [`numbered`] gives next.
-    static EXPANDED: std::cell::Cell<u32> = const { std::cell::Cell::new(NodeId::EXPANDED) };
-}
-
-/// Numbers an expansion's nodes as a unit of its own above every program's
-/// units, so a substituted argument is a node apart from the one it copies.
-fn numbered(f: impl FnOnce(&mut Numbering)) {
-    EXPANDED.with(|c| {
-        f(&mut Numbering::unit(c.get()));
-        c.set(c.get() + 1);
-    });
-}
-
-/// Shares every expansion built while it is alive, so the checker, the
-/// lowering and the emitter walk the same nodes; `direct::compile` takes it as
-/// proof (#547). The LSP opens none: it re-checks per keystroke. Expansions are
-/// leaked on purpose, because passes key side tables by their node ids and a
-/// rebuilt expansion is numbered anew; the cost is one tree per
-/// user-projection site.
-pub struct Memo(());
-
-impl Memo {
-    /// Runs `load` under a new memo and returns what it loaded with the
-    /// memo, which must outlive every compile of it.
-    pub fn load<P, E>(load: impl FnOnce() -> Result<P, E>) -> Result<(P, Self), E> {
-        MEMOS.with(|m| *m.borrow_mut() = Some(Default::default()));
-        let memo = Memo(());
-        Ok((load()?, memo))
-    }
-}
-
-impl Drop for Memo {
-    fn drop(&mut self) {
-        MEMOS.with(|m| *m.borrow_mut() = None);
-    }
-}
-
-/// Returns the `Schema` literal `schemaOf<T>()` at `call` stands for,
-/// expanded once while a [`Memo`] is open so the checker types the nodes the
-/// lowering walks. `None` outside a memo.
-pub fn schema(call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
-    let key = call.id();
-    let hit = read(|m| {
-        let found = m.schemas.get(&key).filter(|(n, _)| *n == decl.name);
-        Some(found.map(|(_, e)| *e))
-    })?;
-    if hit.is_some() {
-        return hit;
-    }
-    let mut lit = crate::types::schema_struct_lit(decl);
-    numbered(|n| n.expr(&mut lit));
-    let e: &'static Expr = Box::leak(Box::new(lit));
-    insert(|m| {
-        m.schemas.insert(key, (decl.name.clone(), e));
-    });
-    Some(e)
-}
-
-/// Returns the literal [`schema`] expanded for `call`.
-pub fn schema_at(call: &Expr) -> Option<&'static Expr> {
-    let key = call.id();
-    read(|m| m.schemas.get(&key).map(|(_, e)| *e))
-}
-
-/// Whether a [`Memo`] is open. A projection store is expanded only then;
-/// without one (the LSP) it would leak a tree per keystroke.
-pub fn memo_open() -> bool {
-    MEMOS.with(|m| m.borrow().is_some())
-}
-
-/// Returns the shared expansion for `key`, or `build`'s, leaked.
-fn memo(
+/// Answers `key` from its table (`get`, `get_mut`) if the site's inputs
+/// match, else builds it through [`Tables::expand`] and keeps it when `ex` is
+/// shared.
+#[allow(clippy::too_many_arguments)]
+fn memo<T>(
+    ex: &Expansions,
+    get: fn(&Tables) -> &HashMap<Key, Expansion<T>>,
+    get_mut: fn(&mut Tables) -> &mut HashMap<Key, Expansion<T>>,
     key: Key,
     recv: &Expr,
     args: &[Expr],
-    build: impl FnOnce() -> Result<Projection, String>,
-) -> Result<&'static Projection, String> {
-    let hit = read(|m| {
-        let e = m.sites.get(&key)?;
+    build: impl FnOnce(&str) -> Result<T, String>,
+    number: impl FnOnce(&mut T, &mut Numbering),
+) -> Result<&'static T, String> {
+    let hit = |t: &Tables| {
+        let e = get(t).get(&key)?;
         (e.recv == *recv && e.args == args).then_some(e.tree)
-    });
-    if let Some(t) = hit {
-        return Ok(t);
+    };
+    // A read lock first: after the checker, every ask is a hit.
+    if let Some(tree) = hit(&ex.read()).filter(|_| ex.shared) {
+        return Ok(tree);
     }
-    if frozen_miss() {
-        return Err(LENT_MISS.to_string());
+    let mut t = ex.write();
+    if let Some(tree) = hit(&t).filter(|_| ex.shared) {
+        return Ok(tree);
     }
-    let mut built = build()?;
-    numbered(|n| {
-        built.prologue.iter_mut().for_each(|s| n.stmt(s));
-        n.expr(&mut built.place);
-    });
-    let tree: &'static Projection = Box::leak(Box::new(built));
-    insert(|m| {
-        m.sites.insert(
+    let tree = t.expand(key.0, build, number)?;
+    if ex.shared {
+        get_mut(&mut t).insert(
             key,
             Expansion {
                 recv: recv.clone(),
@@ -425,79 +252,245 @@ fn memo(
                 tree,
             },
         );
-    });
+    }
     Ok(tree)
 }
 
-/// Returns the statements `a[i] = v` lowers as through a user `place atSet`:
-/// the prologue, then the group [`crate::parser::store_stmts`] builds. `None`
-/// is the seeded row, which the caller's element path writes.
-pub fn store_index(
-    impls: &[ImplBlock],
-    name: &str,
-    index: &Expr,
-    value: &Expr,
-    aty: &Type,
-) -> Result<Option<&'static Block>, String> {
-    if let Some(b) = stored(name, index, value) {
-        return Ok(Some(b));
+impl Expansions {
+    /// Returns the expansion an access site lowers through. `None` means the
+    /// site keeps its own nodes: no user projection answers, and the seeded
+    /// expansion would be the identity.
+    pub fn site(
+        &self,
+        impls: &[ImplBlock],
+        recv: Option<&Type>,
+        method: &str,
+        recv_expr: &Expr,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<&'static Projection>, String> {
+        self.site_at(recv_expr.id(), impls, recv, method, recv_expr, args, line)
     }
-    let line = index.line();
-    let recv = Expr::Var {
-        id: Id::NEW,
-        name: name.to_string(),
-        line,
-    };
-    let Some(p) = site(
-        impls,
-        Some(aty),
-        "atSet",
-        &recv,
-        std::slice::from_ref(index),
-        line,
-    )?
-    else {
-        return Ok(None);
-    };
-    let Some(store) = crate::parser::store_stmts(&p.place, value, line) else {
-        return Err(format!(
-            "line {line}: `{name}[..] = v` goes through an `atSet` projection whose \
-              result has no address — a call result or a temporary. A projection \
-              returns a place: a binding, a field of one, or an element of one"
-        ));
-    };
-    let mut out = p.prologue.clone();
-    out.extend(store);
-    let mut built = Block {
-        id: Id::NEW,
-        stmts: out,
-    };
-    numbered(|n| n.block(&mut built));
-    let blk: &'static Block = Box::leak(Box::new(built));
-    insert(|m| {
-        m.stores.insert(
+
+    /// [`Expansions::site`] anchored at `anchor`, for a receiver the caller
+    /// synthesized.
+    #[allow(clippy::too_many_arguments)]
+    fn site_at(
+        &self,
+        anchor: NodeId,
+        impls: &[ImplBlock],
+        recv: Option<&Type>,
+        method: &str,
+        recv_expr: &Expr,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<&'static Projection>, String> {
+        let Some((key, f)) = member(impls, recv, method) else {
+            return Ok(None);
+        };
+        memo(
+            self,
+            |t| &t.sites,
+            |t| &mut t.sites,
+            (anchor, line, key, method.to_string()),
+            recv_expr,
+            args,
+            |tag| inline(f, recv_expr, args, line, tag),
+            |built, n| {
+                built.prologue.iter_mut().for_each(|s| n.stmt(s));
+                n.expr(&mut built.place);
+            },
+        )
+        .map(Some)
+    }
+
+    /// [`Expansions::site`] for an optional projection. `Ok(None)` also
+    /// covers a plain member, which the caller's own paths handle.
+    pub fn optional_site(
+        &self,
+        impls: &[ImplBlock],
+        recv: Option<&Type>,
+        method: &str,
+        recv_expr: &Expr,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<&'static OptionalProjection>, String> {
+        let Some((key, f)) = member(impls, recv, method).filter(|(_, f)| is_optional(f)) else {
+            return Ok(None);
+        };
+        memo(
+            self,
+            |t| &t.optional,
+            |t| &mut t.optional,
+            (recv_expr.id(), line, key, method.to_string()),
+            recv_expr,
+            args,
+            |tag| optional_inline(f, recv_expr, args, line, tag),
+            |built, n| {
+                built.prologue.iter_mut().for_each(|s| n.stmt(s));
+                n.expr(&mut built.miss);
+                built.hit.iter_mut().for_each(|s| n.stmt(s));
+                n.expr(&mut built.place);
+            },
+        )
+        .map(Some)
+    }
+
+    /// Returns the `Schema` literal `schemaOf<T>()` at `call` stands for,
+    /// expanded once, so the checker types the nodes the lowering walks.
+    /// `None` in an unshared table.
+    pub fn schema(&self, call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
+        if !self.shared {
+            return None;
+        }
+        let key = call.id();
+        let found =
+            |t: &Tables| (t.schemas.get(&key).filter(|(n, _)| *n == decl.name)).map(|(_, e)| *e);
+        if let Some(e) = found(&self.read()) {
+            return Some(e);
+        }
+        let mut t = self.write();
+        if let Some(e) = found(&t) {
+            return Some(e);
+        }
+        let e = t
+            .expand(
+                key,
+                |_| Ok(crate::types::schema_struct_lit(decl)),
+                |lit, n| n.expr(lit),
+            )
+            .ok()?;
+        t.schemas.insert(key, (decl.name.clone(), e));
+        Some(e)
+    }
+
+    /// Returns the literal [`Expansions::schema`] expanded for `call`.
+    pub fn schema_at(&self, call: &Expr) -> Option<&'static Expr> {
+        self.read().schemas.get(&call.id()).map(|(_, e)| *e)
+    }
+
+    /// Returns the statements `a[i] = v` lowers as through a user `place
+    /// atSet`: the prologue, then the group [`crate::parser::store_stmts`]
+    /// builds. `None` is the seeded row, which the caller's element path
+    /// writes.
+    pub fn store_index(
+        &self,
+        impls: &[ImplBlock],
+        name: &str,
+        index: &Expr,
+        value: &Expr,
+        aty: &Type,
+    ) -> Result<Option<&'static Block>, String> {
+        if let Some(b) = self.stored(name, index, value) {
+            return Ok(Some(b));
+        }
+        let line = index.line();
+        let recv = Expr::Var {
+            id: Id::NEW,
+            name: name.to_string(),
+            line,
+        };
+        let Some(p) = self.site_at(
             index.id(),
-            (name.to_string(), index.clone(), value.clone(), blk),
-        );
-    });
-    Ok(Some(blk))
+            impls,
+            Some(aty),
+            "atSet",
+            &recv,
+            std::slice::from_ref(index),
+            line,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(store) = crate::parser::store_stmts(&p.place, value, line) else {
+            return Err(format!(
+                "line {line}: `{name}[..] = v` goes through an `atSet` projection whose \
+                  result has no address — a call result or a temporary. A projection \
+                  returns a place: a binding, a field of one, or an element of one"
+            ));
+        };
+        let mut out = p.prologue.clone();
+        out.extend(store);
+        let mut t = self.write();
+        let blk = t.expand(
+            index.id(),
+            |_| {
+                Ok(Block {
+                    id: Id::NEW,
+                    stmts: out,
+                })
+            },
+            |b, n| n.block(b),
+        )?;
+        if self.shared {
+            t.stores.insert(
+                index.id(),
+                (name.to_string(), index.clone(), value.clone(), blk),
+            );
+        }
+        Ok(Some(blk))
+    }
+
+    /// Returns the store expansion the checker built, for a reader that has
+    /// the statement but not the receiver's type (the lowering, `movecheck`).
+    /// A hit must match the whole site, as a [`Expansions::site`] hit does.
+    pub fn stored(&self, name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> {
+        let t = self.read();
+        let (n, i, v, blk) = t.stores.get(&index.id())?;
+        (n == name && i == index && v == value).then_some(*blk)
+    }
+
+    /// Returns the element read of `for x in iter` over a user container: its
+    /// `place nth` at [`FOR_RECV`] and [`FOR_INDEX`], expanded once per loop
+    /// like [`Expansions::site`]. The loop is the index walk every container
+    /// takes; only this read is the container's own.
+    pub fn for_element(
+        &self,
+        impls: &[ImplBlock],
+        ty: &Type,
+        iter: &Expr,
+        line: usize,
+    ) -> Result<Option<&'static Projection>, String> {
+        let var = |name: &str| Expr::Var {
+            id: Id(iter.id()),
+            name: name.to_string(),
+            line,
+        };
+        let nth = crate::types::ITERATE_NTH;
+        self.site(
+            impls,
+            Some(ty),
+            nth,
+            &var(FOR_RECV),
+            &[var(FOR_INDEX)],
+            line,
+        )
+    }
 }
 
-/// Returns the store expansion the checker built, for a reader that has the
-/// statement but not the receiver's type (the lowering, `movecheck`). A hit
-/// must match the whole site, as in [`memo`].
-pub fn stored(name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> {
-    read(|m| {
-        let (n, i, v, blk) = m.stores.get(&index.id())?;
-        (n == name && i == index && v == value).then_some(*blk)
-    })
+/// The receiver's type key and its user projection named `method`; `None`
+/// for a builtin container, which indexes through the seeded row.
+fn member<'a>(
+    impls: &'a [ImplBlock],
+    recv: Option<&Type>,
+    method: &str,
+) -> Option<(String, &'a Function)> {
+    let key = crate::types::type_key(recv.filter(|t| !is_builtin_container(t))?)?;
+    let f = lookup_by_key(impls, &key, method)?;
+    Some((key, f))
 }
 
 /// Inlines `f` at an access site. An argument used exactly once is substituted
 /// in place; any other binds a temporary first, so its side effects happen
 /// exactly once.
-pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<Projection, String> {
-    let (mut prologue, body) = substituted(f, recv, args, line)?;
+pub fn inline(
+    f: &Function,
+    recv: &Expr,
+    args: &[Expr],
+    line: usize,
+    tag: &str,
+) -> Result<Projection, String> {
+    let (mut prologue, body) = substituted(f, recv, args, line, tag)?;
     let mut stmts = body;
     let Some(Stmt::Return {
         value: Some(place), ..
@@ -522,6 +515,7 @@ fn substituted(
     recv: &Expr,
     args: &[Expr],
     line: usize,
+    tag: &str,
 ) -> Result<(Vec<Stmt>, Vec<Stmt>), String> {
     if args.len() + 1 != f.params.len() {
         return Err(format!(
@@ -532,14 +526,9 @@ fn substituted(
         ));
     }
     let mut body = f.body.clone();
-    // One number per inline: the prologue lands in the caller's block, so
+    // One tag per inline: the prologue lands in the caller's block, so
     // `s[j] = s[k]` would otherwise bind one name twice and read the wrong
     // element.
-    let tag = {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static N: AtomicUsize = AtomicUsize::new(0);
-        N.fetch_add(1, Ordering::Relaxed)
-    };
     // A `let n` inside a projection must not capture a caller's `n`, or be
     // captured by it.
     let mut rename: HashMap<String, String> = HashMap::new();
@@ -624,8 +613,9 @@ pub fn optional_inline(
     recv: &Expr,
     args: &[Expr],
     line: usize,
+    tag: &str,
 ) -> Result<OptionalProjection, String> {
-    let (mut prologue, mut stmts) = substituted(f, recv, args, line)?;
+    let (mut prologue, mut stmts) = substituted(f, recv, args, line, tag)?;
     let bad = || {
         format!(
             "line {line}: optional projection `{}` must end with \
@@ -697,36 +687,10 @@ pub fn store_node(blk: &Block) -> Option<&Stmt> {
 pub const FOR_RECV: &str = "@i.c";
 pub const FOR_INDEX: &str = "@i.i";
 
-/// Returns the element read of `for x in iter` over a user container: its
-/// `place nth` at [`FOR_RECV`] and [`FOR_INDEX`], expanded once per loop like
-/// [`site`]. The loop is the index walk every container takes; only this read
-/// is the container's own.
-pub fn for_element(
-    impls: &[ImplBlock],
-    ty: &Type,
-    iter: &Expr,
-    line: usize,
-) -> Result<Option<&'static Projection>, String> {
-    let var = |name: &str| Expr::Var {
-        id: Id(iter.id()),
-        name: name.to_string(),
-        line,
-    };
-    let nth = crate::types::ITERATE_NTH;
-    site(
-        impls,
-        Some(ty),
-        nth,
-        &var(FOR_RECV),
-        &[var(FOR_INDEX)],
-        line,
-    )
-}
-
 /// Maps every binding a projection body introduces to an unspellable name.
 /// Lambda parameters and pattern binders count: [`subst_block`] walks through
 /// lambdas, so an unrenamed `|i| i + 1` would have its `i` substituted.
-fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>) {
+fn collect_bindings(b: &mut Block, tag: &str, out: &mut HashMap<String, String>) {
     for s in &mut b.stmts {
         match s {
             Stmt::Let { name, .. } => {
@@ -773,7 +737,7 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
     });
 }
 
-fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
+fn collect_lambda(e: &mut Expr, tag: &str, out: &mut HashMap<String, String>) {
     let Expr::Lambda { params, body, .. } = e else {
         return;
     };
@@ -1089,42 +1053,6 @@ mod tests {
     }
 
     #[test]
-    fn a_lent_memo_expands_nothing_and_says_so() {
-        let p = parse(
-            "type Ring = { data: Array<Int64> }
-             impl Index for Ring {
-                 fn at(read self, i: Int64) -> read Int64 { return self.data[i] }
-             }
-             fn main() { print(1) }
-",
-        );
-        let ring = Type::Named("Ring".into());
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: "r".into(),
-            line: 1,
-        };
-        let at = || {
-            site(
-                &p.impls,
-                Some(&ring),
-                "at",
-                &recv,
-                &[Expr::Int(0, Id::NEW)],
-                1,
-            )
-        };
-        let ((), _memo) = Memo::load(|| Ok::<(), ()>(())).unwrap();
-        let lent = lend();
-        let entered = lent.enter();
-        assert_eq!(at().err().as_deref(), Some(LENT_MISS));
-        assert!(missed());
-        drop(entered);
-        assert!(at().is_ok_and(|t| t.is_some()));
-        assert!(!missed());
-    }
-
-    #[test]
     fn a_single_use_argument_substitutes_in_place() {
         let p = parse(
             "type Ring = { data: Array<Int64> }\n\
@@ -1150,7 +1078,7 @@ mod tests {
             rhs: Box::new(Expr::Int(1, Id::NEW)),
             line: 1,
         };
-        let pr = inline(f, &recv, std::slice::from_ref(&idx), 1).unwrap();
+        let pr = inline(f, &recv, std::slice::from_ref(&idx), 1, "t").unwrap();
         assert!(pr.prologue.is_empty(), "no temp for a single use");
         let Expr::Call { name, args, .. } = &pr.place else {
             panic!("expected the yielded place to stay a call")
@@ -1186,6 +1114,7 @@ mod tests {
                 line: 5,
             }],
             5,
+            "t",
         )
         .unwrap();
         assert!(
@@ -1205,6 +1134,7 @@ mod tests {
             line: 3,
         };
         let args = [Expr::Int(2, Id::NEW)];
+        let ex = Expansions::shared();
         for ty in [
             Type::Array(Box::new(Type::Int)),
             Type::Str,
@@ -1212,14 +1142,14 @@ mod tests {
         ] {
             for method in ["at", "atSet"] {
                 assert!(
-                    site(&[], Some(&ty), method, &recv, &args, 3)
+                    (ex.site(&[], Some(&ty), method, &recv, &args, 3))
                         .unwrap()
                         .is_none(),
                     "{ty} took an expansion at `{method}`"
                 );
             }
         }
-        assert!(site(&[], None, "at", &recv, &args, 3).unwrap().is_none());
+        assert!(ex.site(&[], None, "at", &recv, &args, 3).unwrap().is_none());
     }
 
     #[test]
@@ -1256,6 +1186,7 @@ mod tests {
             },
             &[Expr::Int(3, Id::NEW)],
             1,
+            "t",
         )
         .unwrap();
         assert_eq!(pr.prologue.len(), 1);
@@ -1286,6 +1217,7 @@ mod tests {
             },
             &[Expr::Int(1, Id::NEW)],
             1,
+            "t",
         )
         .unwrap();
         // After renaming, `i` has no use outside the lambda, so the argument

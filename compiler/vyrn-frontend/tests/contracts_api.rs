@@ -26,6 +26,14 @@ fn opts() -> LoadOptions {
     }
 }
 
+/// [`opts`] with shared expansions, as a compile loads.
+fn shared_opts() -> LoadOptions {
+    LoadOptions {
+        expansions: vyrn_frontend::project::Expansions::shared(),
+        ..opts()
+    }
+}
+
 /// `std/ui:Page`, resolved the way the LSP resolves it.
 fn page() -> vyrn_frontend::contracts::ContractView {
     load_contract(
@@ -402,12 +410,9 @@ fn edit_distance_matches_the_vyrn_one() {
     let root = dir.join("m.vyrn");
     write(&root, &body);
     let path = root.to_string_lossy().replace('\\', "/");
-    let (program, memo) = vyrn_frontend::project::Memo::load(|| {
-        vyrn_lower::load(&body, &path, &opts(), &DiskResolver, None)
-    })
-    .unwrap_or_else(|d| panic!("the cross-check program must compile: {d:?}"));
-    let disagreements =
-        common::run_compiled(&program, &memo).expect("the cross-check program must run");
+    let program = vyrn_lower::load(&body, &path, &shared_opts(), &DiskResolver, None)
+        .unwrap_or_else(|d| panic!("the cross-check program must compile: {d:?}"));
+    let disagreements = common::run_compiled(&program).expect("the cross-check program must run");
     assert_eq!(
         disagreements, 0,
         "std/strings:editDistance and contracts::edit_distance disagree on {disagreements} of {} pairs",

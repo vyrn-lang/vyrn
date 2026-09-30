@@ -1063,6 +1063,7 @@ fn check_accum_inner(
         protocol_places: &protocol_places,
         impls: &impls,
         impl_blocks: &program.impls,
+        expansions: &program.expansions,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
         binder_types: RefCell::new(HashMap::new()),
@@ -1739,6 +1740,8 @@ struct Checker<'a> {
     /// Every `impl` block, for resolving a projection, which has no mangled
     /// name, by receiver type.
     impl_blocks: &'a [crate::ast::ImplBlock],
+    /// The program's projection expansions, which the checker makes.
+    expansions: &'a crate::project::Expansions,
     /// Bounds of the function being checked.
     cur_bounds: RefCell<HashMap<String, Vec<String>>>,
     /// Scope depths at each enclosing `region` entry. A binding below the top
@@ -2030,7 +2033,7 @@ impl<'a> Checker<'a> {
         let subst =
             self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
         if self.recording() {
-            if let Ok(Some(p)) = crate::project::optional_site(
+            if let Ok(Some(p)) = self.expansions.optional_site(
                 self.impl_blocks,
                 Some(&recv),
                 name,
@@ -2980,9 +2983,9 @@ impl<'a> Checker<'a> {
     }
 
     /// Types an expansion (an inlined projection) in the caller's scope,
-    /// recording its node types and nothing else. `project` leaks each
-    /// expansion once ([`crate::project::Memo`]), so its node addresses are
-    /// stable keys.
+    /// recording its node types and nothing else. A shared
+    /// [`crate::project::Expansions`] leaks each expansion once, so its node
+    /// addresses are stable keys.
     ///
     /// Diagnostics, scope changes and [`Checker::pending_subst`] stay inside: an
     /// expansion fails only where its source already did, and the wrapper
@@ -3227,7 +3230,8 @@ impl<'a> Checker<'a> {
                 // inlined, with the move-out and move-back around it.
                 if self.recording() {
                     if let Ok(Some(blk)) =
-                        crate::project::store_index(self.impl_blocks, name, index, value, &b.ty)
+                        self.expansions
+                            .store_index(self.impl_blocks, name, index, value, &b.ty)
                     {
                         self.record_desugar(scope, |c, sc| {
                             c.block(blk, ret, sc);
@@ -3319,7 +3323,8 @@ impl<'a> Checker<'a> {
                 // `nth`; record that read.
                 if self.recording() {
                     if let Ok(Some(p)) =
-                        crate::project::for_element(self.impl_blocks, &ity, iter, *line)
+                        self.expansions
+                            .for_element(self.impl_blocks, &ity, iter, *line)
                     {
                         self.record_desugar(scope, |c, sc| {
                             let bind = |ty| Binding { ty, mutable: false };
@@ -3651,7 +3656,7 @@ impl<'a> Checker<'a> {
                     if let Some(lit) = self
                         .types
                         .get(tn)
-                        .and_then(|d| crate::project::schema(expr, d))
+                        .and_then(|d| self.expansions.schema(expr, d))
                     {
                         self.record_desugar(scope, |c, sc| {
                             let _ = c.expr(lit, sc, Some(&t), fn_ret);
@@ -4889,7 +4894,7 @@ impl<'a> Checker<'a> {
                     // Record the nodes the site lowers through: the
                     // projection's body inlined here ([`record_desugar`]).
                     if self.recording() {
-                        if let Ok(Some(p)) = crate::project::site(
+                        if let Ok(Some(p)) = self.expansions.site(
                             self.impl_blocks,
                             Some(&at),
                             "at",
@@ -5481,7 +5486,7 @@ impl<'a> Checker<'a> {
             if let Some(t) = self.place_result(&recv, name, args, scope, fn_ret, line)? {
                 self.refuse_chained_projection(&args[0], scope, line)?;
                 if self.recording() {
-                    if let Ok(Some(p)) = crate::project::site(
+                    if let Ok(Some(p)) = self.expansions.site(
                         self.impl_blocks,
                         Some(&recv),
                         name,

@@ -694,6 +694,7 @@ fn generator_program(program: &Program, g: &str) -> Program {
         // keys the derive memo on this program, so any edit would run the
         // generator again.
         module_hashes: Default::default(),
+        expansions: program.expansions.clone(),
     }
 }
 
@@ -742,7 +743,10 @@ fn run_derive(
         return Err(refused(&diags));
     }
     let resolver = crate::loader::MapResolver(HashMap::new());
-    let opts = crate::loader::LoadOptions::default();
+    let opts = crate::loader::LoadOptions {
+        expansions: gen_program.expansions.clone(),
+        ..Default::default()
+    };
     let src = generate(
         &gen_program,
         g,
