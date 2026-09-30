@@ -234,6 +234,36 @@ pub fn gen_refusal(name: &str) -> Option<String> {
     })
 }
 
+/// What the effect judgment reads of one frame, before any callee is
+/// resolved. `vyrn_lower::effects` walks a frame into one and joins them; the
+/// editor's judgment memo keeps a served body's, since no build of it runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Walked {
+    /// The frame's name, which keys a lambda frame by its line.
+    pub name: String,
+    /// The atoms of the frame's own statements, calls left out.
+    pub own: Effects,
+    /// The globals the frame's own statements store into.
+    pub writes: std::collections::BTreeSet<String>,
+    pub calls: Vec<Call>,
+    /// The frames of the lambdas it builds, as offsets forward in
+    /// `Body::frames` order.
+    pub lambdas: Vec<usize>,
+}
+
+/// One call a frame makes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub callee: String,
+    /// The type of the function value the call runs through; `None` for a
+    /// call by name.
+    pub through: Option<crate::ast::Type>,
+    pub line: usize,
+    /// Whether the call binds an owned result, which is the frame's own
+    /// allocation when the callee is no user body.
+    pub born: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

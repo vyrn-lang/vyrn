@@ -531,7 +531,9 @@ fn run_corpus() {
                 Callee::Unknown
             }
         };
-        let judged = effects::judge(&refs, &mut resolve, &mut through);
+        let walked = effects::walk_frames(&refs);
+        let frames: Vec<&effects::Walked> = walked.iter().collect();
+        let judged = effects::judge(&frames, &mut resolve, &mut through);
         through_calls += judged.through.len();
         empty_calls += judged.empty.len();
         // Two reasons only: no collected source matches the callee's function type,
