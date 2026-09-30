@@ -1418,15 +1418,13 @@ impl<'b> Kernel<'b> {
     /// caller passes `names` in creation order (`bound_here`, `bound_inside`,
     /// [`State::live`], an arm's binders).
     fn scope_end(&mut self, st: &mut State, names: &[Name], end: End) -> Result<(), Refusal> {
-        // A block's exit records no taker; an arm's end keeps the statement's.
-        let exit = matches!(end, End::Exit(..));
-        self.ending.set(exit);
+        self.ending.set(true);
         let mark = self.missing.len();
         let out = (names.iter()).try_for_each(|n| self.name_end(st, *n, end));
         // At a block's exit, newest binding first, the unwind order: inner
         // frames first and parameters last, as an owned `consume` parameter
         // requires.
-        if exit {
+        if matches!(end, End::Exit(..)) {
             self.missing[mark..].reverse();
         }
         self.ending.set(false);
@@ -2401,8 +2399,9 @@ impl<'b> Kernel<'b> {
                         continues: Vec::new(),
                         bound_inside: Vec::new(),
                     });
-                    self.stmts(body, &mut a)?;
+                    let walked = self.stmts(body, &mut a);
                     let mut ctx = self.loops.pop().expect("the walk's own loop");
+                    walked?;
                     let back = (!a.ended).then_some(&a);
                     let mut wider = false;
                     for at in back.into_iter().chain(&ctx.continues) {
@@ -2626,11 +2625,11 @@ impl<'b> Kernel<'b> {
         // A hole a turn made would be taken again next turn. Only a prefix
         // `consume` makes a hole, so the taker is always `consume`.
         let made = ha.iter().find(|h| !hb.contains(h));
-        Err(match (point, made.map(|h| h.replace(".[]", "[..]"))) {
+        Err(match (point, made) {
             (Point::Join, _) => self.say(JOIN_HOLE, self.here, &[("info", &info())]),
             (Point::Back, Some(h)) => {
-                let args = [("s", s), ("h", h.as_str())];
-                self.say(LOOP_HOLE, self.hole_line(a, n, &h), &args)
+                let args = [("s", s), ("h", &h.replace(".[]", "[..]"))];
+                self.say(LOOP_HOLE, self.hole_line(a, n, h), &args)
             }
             (Point::Back, None) => self.say(LOOP_HOLE_AT, self.here, &[("info", &info())]),
         })
