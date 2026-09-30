@@ -96,6 +96,12 @@ the playground serves an embedded `std/`. The loader:
   may import `std/runtime` (`runtime_fence`). The audience (`audience.rs`)
   and the floor (`floor.rs`) fence the rest.
 
+A thread's later loads reuse what one text alone decides: a module's parse and
+the names it references, keyed by its text, and each generator cache entry the
+load read, validated against its inputs again. So an editor keystroke parses
+only the edited text. It still reads every module and generator input, and
+links the whole program again.
+
 `vyrn_lower::check_and_synthesize` then runs, in order, the frontend's
 `check_and_synthesize` (steps 1 and 2) and the judgments in `vyrn-lower`:
 

@@ -82,6 +82,7 @@ pull request.
 - The loader flattens modules into one program; the checker and emitter never see a module. Import cycles are refused, and impl coherence is global.
 - `import * as ns` binds a compile-time name that is not a value, one level deep. No `import * from` wildcard and no re-exports.
 - A private name that collides across modules is renamed by the linker. A collision with a name the module itself imports is an error.
+- A sentence quotes a declaration as its module wrote it, never by the linker's name, through the loader's one rename table (`ast::Spellings`). Where one sentence shows two declarations of one spelling, each declared outside the sentence's module adds the path its module imports it by: `Cfg from "./lib/cfg"`. Hover, completion details and type hints follow the same rule.
 - Importing `Result` or `Option` from `std/result` or `std/option` is legal and changes nothing; ambient use stays legal.
 - A name whose body lives in std is an import, not a global, and a missing import names its module. `print`, `bytes`, `panic` and `parse` stay global.
 - Module state is a top-level `let` in any module, one instance per process and private to its module. `export let` is refused: export accessor functions.
@@ -157,6 +158,7 @@ pull request.
 - One pipeline: the loader, the checker, the lowering to a named core, a kernel that judges the core, and one wasm emitter. Each rule lives in one place instead of once per engine.
 - A host enters the pipeline through `vyrn_lower::{load, load_warned, check_and_synthesize}`. The frontend's `check_and_synthesize` types and synthesizes and judges nothing; a host that calls it alone skips every ownership and floor refusal.
 - The editor runs the pipeline `vyrn check` runs, passed in as `vyrn_lower::JUDGE`. What only the editor needs (recovery, the index, the judgment memo) wraps the pipeline and never replaces a step of it.
+- The judgment memo serves a body's verdict only where every input the verdict read is unchanged: its module's hash, the fingerprint of the declarations its module can read, and the effect judgment's answer for its frames. A cache key that leaves out an input the judgment reads is a defect, not a trade.
 - The core binds every intermediate value and makes every memory access a place. A field read is one load, never a record copy; the copy made wasm 13x slower than native.
 - The kernel re-checks every body on every compile with three judgments: ownership, effects and types.
 - The ownership judgment is one forward solver over the structured core, a join at each merge and a widen to a fixpoint at each loop, and every refusal is a rule row judged at a use, a scope end, a join or a back edge. No rule gets its own walk.
@@ -286,6 +288,7 @@ pull request.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.
 - The LSP is a synchronous pure adapter over the front end. No generator logic is compiled into it.
 - The LSP gets no incremental parsing, salsa, incremental sync or delta tokens. Lexing and parsing are under 1% of a keystroke; latency came from repeated pure work, fixed by memoizing it.
+- A keystroke's load reuses only what one text decides, and links every module again: `link` renames a module's declarations by every module's names, the root's included.
 - Remote imports are pinned by SHA-256 in `vyrn.lock`, content-addressed in `~/.vyrn/cache`, vendorable and buildable offline. Only `vyrn update` changes a pin. No semver registry.
 - A manifest that does not parse is an error, never an empty policy.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.

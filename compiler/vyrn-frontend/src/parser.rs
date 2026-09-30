@@ -3,7 +3,7 @@
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{Hole, Tok, Token};
-use crate::rules::{refuse, Rule};
+use crate::rules::{refuse, rule, Rule};
 use std::collections::HashSet;
 
 /// Whether `name` in a contract member's type is an implicit type parameter:
@@ -977,6 +977,7 @@ impl Parser {
                 module_hashes: std::collections::BTreeMap::new(),
                 units: 0,
                 expansions: Default::default(),
+                spellings: Default::default(),
             },
             errors,
         )
@@ -4064,7 +4065,7 @@ impl Parser {
             if let Some(d) = errs.into_iter().next() {
                 let sl = d.line.saturating_sub(1).max(1); // undo the wrapper's line
                 let detail = d.message;
-                return (Rule::SkeletonDetail { detail }, sl, d.col);
+                return (rule!(SkeletonDetail, detail), sl, d.col);
             }
         }
         (Rule::SkeletonUnparsable {}, 1, 1)

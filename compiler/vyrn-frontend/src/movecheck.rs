@@ -353,7 +353,30 @@ pub struct Refusal {
 }
 
 /// The body's module, that module's content hash, and the instance's spelling.
+///
+/// A body's verdict reads three things. The module's hash covers the body's
+/// text and the module-state accumulators, which only the module's own bodies
+/// decide because module state is private. [`declaration_fingerprint`] covers
+/// the declarations the body's module can read and the fn-value signatures a
+/// lambda in any body clears. The third is the effect judgment's answer for
+/// each frame of the body: which callee may store into which module state.
+/// That answer joins every body of the program, a callback's included, so no
+/// key can hold it.
+/// [`Judgment::state`] records it, and the placer serves the verdict only
+/// where this analysis gives the same answer (`vyrn_lower::core::augment`).
 pub type JudgmentKey = (String, String, String);
+
+/// What the memo keeps of one body.
+#[derive(Debug, Clone)]
+pub struct Judgment {
+    pub verdict: Verdict,
+    /// Its frames as the effect judgment read them. A served body gives the
+    /// judgment these in place of a build.
+    pub frames: Vec<crate::effects::Walked>,
+    /// Per frame, each callee with the module state a call to it may store
+    /// into: the effect judgment's answer that `verdict` read.
+    pub state: Vec<Vec<(String, Vec<String>)>>,
+}
 
 thread_local! {
     /// Set by [`reuse_judgments`].
@@ -364,7 +387,7 @@ thread_local! {
     static JUDGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The declaration fingerprint and the entries valid under it. A new
     /// fingerprint drops the whole map, so nothing needs eviction.
-    static JUDGED: RefCell<(u64, HashMap<JudgmentKey, Verdict>)> =
+    static JUDGED: RefCell<(u64, HashMap<JudgmentKey, Judgment>)> =
         RefCell::new((0, HashMap::new()));
     /// `(judged, reused)` since [`reset_judgment_tally`].
     static TALLY: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
@@ -418,11 +441,11 @@ pub struct Judgments {
 impl Judgments {
     /// Opens the cache for `program`, or returns `None` where nothing is
     /// armed. Drops every entry if the declaration fingerprint moved.
-    pub fn open(program: &Program) -> Option<Judgments> {
+    pub fn open(program: &Program, fnval_clear: &HashSet<String>) -> Option<Judgments> {
         if !reusing_judgments() {
             return None;
         }
-        let fp = declaration_fingerprint(program);
+        let fp = declaration_fingerprint(program, fnval_clear);
         JUDGED.with(|j| {
             let mut j = j.borrow_mut();
             if j.0 != fp {
@@ -443,23 +466,27 @@ impl Judgments {
         Some((m.to_string(), h.clone(), spelling.to_string()))
     }
 
-    /// Returns the verdict recorded for `key`, and tallies the hit or miss.
-    pub fn get(&self, key: &JudgmentKey) -> Option<Verdict> {
-        let hit = JUDGED.with(|j| j.borrow().1.get(key).cloned());
+    /// Takes the entry recorded for `key` out of the memo. The caller puts
+    /// back each entry it serves.
+    pub fn take(&self, key: &JudgmentKey) -> Option<Judgment> {
+        JUDGED.with(|j| j.borrow_mut().1.remove(key))
+    }
+
+    /// Tallies one keyed body, served or judged.
+    pub fn tally(&self, served: bool) {
         TALLY.with(|t| {
             let (judged, reused) = t.get();
-            match hit {
-                Some(_) => t.set((judged, reused + 1)),
-                None => t.set((judged + 1, reused)),
+            match served {
+                true => t.set((judged, reused + 1)),
+                false => t.set((judged + 1, reused)),
             }
         });
-        hit
     }
 
     /// Records what a body earned. The caller writes an entry only for an
     /// inert body, which only it can tell.
-    pub fn put(&self, key: JudgmentKey, verdict: Verdict) {
-        JUDGED.with(|j| j.borrow_mut().1.insert(key, verdict));
+    pub fn put(&self, key: JudgmentKey, judgment: Judgment) {
+        JUDGED.with(|j| j.borrow_mut().1.insert(key, judgment));
     }
 }
 
@@ -472,13 +499,36 @@ pub fn reset_judgment_tally() {
     TALLY.with(|t| t.set((0, 0)));
 }
 
-/// Hashes every declaration the kernel's judgment of a body can read across a
-/// module boundary, and no function body, so an edit inside one body re-judges
-/// no other. It includes each parameter's capability (`read x` to `consume x`
-/// changes what every caller owes), each projection's whole body (it is inlined
-/// into its callers), and each validated type's predicate and module-state
-/// initializer. The parts are sorted first because two sources are hash maps.
-fn declaration_fingerprint(program: &Program) -> u64 {
+/// Hashes every declaration the kernel's judgment of an imported module's body
+/// can read across a module boundary, and no function body, so an edit inside
+/// one body re-judges no other. It includes each parameter's capability (`read
+/// x` to `consume x` changes what every caller owes), each projection's whole
+/// body (it is inlined into its callers), and each validated type's predicate
+/// and module-state initializer. It includes the fn-value signatures the meet
+/// clears ([`Facts::fnval_clear`]), which a lambda in any body decides. The
+/// parts are sorted first because three sources are hash maps.
+///
+/// It leaves out the root's functions and module state, which no imported body
+/// reads: no module imports the root, and the link leaves every declared name
+/// unique. Two kinds of root function stay in, because a module reaches them
+/// without importing them: an `extern` (the link keeps the root's copy of a
+/// shared one), and one under a name every module can spell without declaring
+/// it (a builtin, a protocol member or a projection), which the core resolves
+/// by name alone (`ArgCaps::named`). The root's impl methods stay in through
+/// their `impl` blocks, and its types and protocols stay in: an imported
+/// generic is instantiated at a root type and dispatches to the root's impls.
+fn declaration_fingerprint(program: &Program, fnval_clear: &HashSet<String>) -> u64 {
+    let spelled: HashSet<&str> = (program.protocols.iter())
+        .flat_map(|p| p.methods.iter().map(|m| m.name.as_str()))
+        .chain((program.impls.iter()).flat_map(|i| i.places.iter().map(|p| p.name.as_str())))
+        .collect();
+    let read = |f: &&Function| {
+        f.module.is_some()
+            || f.is_extern
+            || spelled.contains(f.name.as_str())
+            || crate::prelude::builtin(&f.name).is_some()
+            || is_surface_builtin(&f.name)
+    };
     let sig = |f: &Function| {
         let mut bounds: Vec<String> = f
             .type_bounds
@@ -502,14 +552,14 @@ fn declaration_fingerprint(program: &Program) -> u64 {
     };
     let mut parts: Vec<String> =
         Vec::with_capacity(program.functions.len() + program.type_decls.len());
-    parts.extend(program.functions.iter().map(&sig));
+    parts.extend(program.functions.iter().filter(read).map(&sig));
     for t in &program.type_decls {
         parts.push(format!(
             "t{:?}/{}<{:?}>={:?}|{:?}",
             t.module, t.name, t.type_params, t.base, t.predicate
         ));
     }
-    for g in &program.globals {
+    for g in program.globals.iter().filter(|g| g.module.is_some()) {
         parts.push(format!(
             "g{:?}/{}:{:?}|{}|{:?}",
             g.module, g.name, g.ty, g.mutable as u8, g.init
@@ -541,6 +591,7 @@ fn declaration_fingerprint(program: &Program) -> u64 {
             .iter()
             .map(|(m, n)| format!("s{m:?}/{n}")),
     );
+    parts.extend(fnval_clear.iter().map(|k| format!("c{k}")));
     parts.sort_unstable();
     let mut h: u64 = 0xcbf29ce484222325;
     for p in &parts {

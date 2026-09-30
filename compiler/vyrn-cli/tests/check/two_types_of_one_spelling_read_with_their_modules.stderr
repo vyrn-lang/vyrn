@@ -1,0 +1,2 @@
+two_types_of_one_spelling_read_with_their_modules.vyrn:7:0: `c` declared Cfg but initializer is Cfg from "./a_module_exporting_a_type_a_root_also_names.vyrn"
+two_types_of_one_spelling_read_with_their_modules.vyrn:8:0: `use` argument 1 expects Cfg, found Cfg from "./a_module_exporting_a_type_a_root_also_names.vyrn"

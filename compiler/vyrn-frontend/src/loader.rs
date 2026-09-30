@@ -6,7 +6,9 @@
 //! import (importing an enum or protocol brings its variants or methods), a
 //! `logging` block outside the root, and two impls of one `(protocol, type)`.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
@@ -631,6 +633,8 @@ struct Module {
     /// The parsed text's hash ([`Program::module_hashes`]); `None` for a
     /// module synthesized from JSON Schema.
     hash: Option<String>,
+    /// [`program_ref_names`] of `program` as loaded, before `link` renames.
+    refs: Rc<HashSet<String>>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -1156,6 +1160,16 @@ fn load_modules(
         drop(_read);
         crate::prof::read_lines(text.lines().count());
         let is_root = key == root_key;
+        // Non-cryptographic: this key never leaves the process.
+        let hash = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in text.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            format!("{h:x}:{}", text.len())
+        };
+        let parsed = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned());
 
         // Register a generated module's `//@origin` table before it is lexed:
         // the table is a line-scan, so a module that never parses
@@ -1173,7 +1187,14 @@ fn load_modules(
             } else {
                 opts.alias_base.as_str()
             };
-            let ctx = crate::origin::Context::new(&text, dir_of(importer), project);
+            let comments = match &parsed {
+                Some(p) => p
+                    .comment_lines
+                    .get_or_init(|| crate::origin::comment_lines(&text))
+                    .clone(),
+                None => crate::origin::comment_lines(&text),
+            };
+            let ctx = crate::origin::Context::new(comments, dir_of(importer), project);
             w.origins.add_module(key, &text, &ctx);
             // The same line-scan lifts `//@diag` directives into diagnostics at
             // the generator's severity. A page is generated twice and a
@@ -1212,7 +1233,7 @@ fn load_modules(
         if key.ends_with(".json") {
             let decls = crate::schema::synthesize(&text, None, key)
                 .map_err(|e| vec![Diagnostic::error(0, 0, "load", e)])?;
-            w.modules.push(Module {
+            let mut module = Module {
                 key: key.to_string(),
                 program: Program {
                     imports: Vec::new(),
@@ -1231,12 +1252,16 @@ fn load_modules(
                     host: Host::default(),
                     module_hashes: BTreeMap::new(),
                     expansions: Default::default(),
+                    spellings: Default::default(),
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
                 injected: None,
                 hash: None,
-            });
+                refs: Rc::default(),
+            };
+            module.refs = Rc::new(program_ref_names(&module.program));
+            w.modules.push(module);
             w.stack.pop();
             w.states.insert(key.to_string(), true);
             return Ok(());
@@ -1246,31 +1271,23 @@ fn load_modules(
         // attribution below depends on `key`, so it runs after the cache: one
         // text loaded under two keys gives two modules from one parse. Only
         // successes are cached.
-        // Non-cryptographic: this key never leaves the process.
-        let hash = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in text.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            format!("{h:x}:{}", text.len())
-        };
-        let mut program = {
-            if let Some(hit) = {
-                let _p = crate::prof::phase("parse (cache hit)");
-                PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned())
-            } {
-                hit
-            } else {
+        let parsed = match parsed {
+            Some(p) => p,
+            None => {
                 let _p = crate::prof::phase("parse");
                 let tokens = lexer::lex(&text).map_err(|d| vec![in_module(d, key, root_key)])?;
-                let (parsed, errors) = parser::parse_accum(tokens);
+                let (program, errors) = parser::parse_accum(tokens);
                 if !errors.is_empty() {
                     return Err(errors
                         .into_iter()
                         .map(|d| in_module(d, key, root_key))
                         .collect());
                 }
+                let p = Rc::new(Parsed {
+                    refs: Rc::new(program_ref_names(&program)),
+                    program,
+                    comment_lines: OnceCell::new(),
+                });
                 PARSE_CACHE.with(|c| {
                     let mut c = c.borrow_mut();
                     // ponytail: a keystroke leaves the old text's entry behind.
@@ -1278,10 +1295,14 @@ fn load_modules(
                     if c.len() > 512 {
                         c.clear();
                     }
-                    c.insert(hash.clone(), parsed.clone());
+                    c.insert(hash.clone(), p.clone());
                 });
-                parsed
+                p
             }
+        };
+        let mut program = {
+            let _p = crate::prof::phase("parse (clone)");
+            parsed.program.clone()
         };
 
         // Only the root configures logging. A default is indistinguishable from
@@ -1427,6 +1448,7 @@ fn load_modules(
             gen_source,
             injected: None,
             hash: Some(hash),
+            refs: parsed.refs.clone(),
         });
         Ok(())
     }
@@ -1447,12 +1469,9 @@ fn load_modules(
     // links that builtin's module although no import names it. Only on a
     // mention, so a program does not carry every runtime module.
     // `program_ref_names` is the scan `resolve_aliases` uses; module-scope `let`
-    // initializers are outside it, and may not call user code anyway.
-    let mentioned: HashSet<String> = w
-        .modules
-        .iter()
-        .flat_map(|m| program_ref_names(&m.program))
-        .collect();
+    // initializers are outside it, and may not call user code anyway. Only the
+    // modules loaded before this loop mention; an injected one does not.
+    let mentioning = w.modules.len();
     for rt in RT_MODULES {
         let wanted = rt.always
             || rt
@@ -1460,7 +1479,7 @@ fn load_modules(
                 .iter()
                 .copied()
                 .chain(rt.routes().map(|(b, _)| b))
-                .any(|b| mentioned.contains(b));
+                .any(|b| w.modules[..mentioning].iter().any(|m| m.refs.contains(b)));
         // A missing std root is not an error here: whoever needs the runtime
         // refuses at the call.
         let Ok(target) = resolve_spec(rt.spec, &root_key, opts) else {
@@ -1556,16 +1575,36 @@ thread_local! {
     static LOAD_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Re-entrancy depth: generators load modules of their own.
     static LOAD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    /// `path -> (epoch, hash)` for generator-cache validation.
-    static HASH_MEMO: std::cell::RefCell<HashMap<String, (u64, Option<String>)>> =
+    /// Generator-cache validation's inputs by path; see [`current_input_hash`].
+    static HASH_MEMO: std::cell::RefCell<HashMap<String, InputHash>> =
         std::cell::RefCell::new(HashMap::new());
+}
+
+/// One module text's parse, and the facts the loader reads from that text
+/// alone.
+struct Parsed {
+    program: Program,
+    /// [`program_ref_names`] of `program`. No edit `visit` makes to a module
+    /// (attribution, panic sites, the dropped `std/result` import) moves a
+    /// reference name.
+    refs: Rc<HashSet<String>>,
+    /// [`crate::origin::comment_lines`] of the text, once a generated module
+    /// with this text asks.
+    comment_lines: OnceCell<Option<HashSet<usize>>>,
 }
 
 thread_local! {
     /// Parsed modules by content hash; see the memo in `visit`.
-    static PARSE_CACHE: std::cell::RefCell<HashMap<String, Program>> =
+    static PARSE_CACHE: std::cell::RefCell<HashMap<String, Rc<Parsed>>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Generator cache entries as `(inputs, output)`, by lookup key; see
+    /// `run_generator`.
+    static GEN_ENTRIES: std::cell::RefCell<HashMap<String, Rc<CacheEntry>>> =
         std::cell::RefCell::new(HashMap::new());
 }
+
+/// A generator cache entry: its recorded `(input, hash)` pairs and its output.
+type CacheEntry = (Vec<(String, String)>, String);
 
 /// Runs a generator-call import target and returns the generated
 /// module's key, with its source, or `None` when it is already synthesized.
@@ -1668,12 +1707,6 @@ fn run_generator(
         )));
     }
 
-    // The generator's own source, for the cache key. Loading and checking it
-    // waits for a cache miss: it is the most expensive step of a warm keystroke.
-    let gen_source = resolver
-        .read(&gen_mod_key)
-        .map_err(|e| err(rule!(GenModuleReread, module = gen_mod_key, why = e)))?;
-
     // Each constant string path argument is an allowed input root; a path with
     // no extension also admits its `.vyrn` file. A path that names a manifest
     // dependency also admits the key the import map resolves it to,
@@ -1711,28 +1744,46 @@ fn run_generator(
     // the generator's own module, and every recorded input still hashes the
     // same. An input recorded as absent must still be absent.
     if !no_cache {
-        if let Some(cached) = resolver.gen_cache_get(&sources_hash) {
-            if let Some((inputs, output)) = read_cache_entry(&sources_hash, &cached) {
-                // `inputs` comes from the entry and so agrees with itself: an
-                // empty or forged list passes `all`. The call site decides first:
-                // an entry that does not record `gen_mod_key` is not this
-                // generation.
-                let records_generator = inputs.iter().any(|(path, _)| path == &gen_mod_key);
-                if records_generator
-                    && inputs.iter().all(|(path, hash)| {
-                        current_input_hash(resolver, path).unwrap_or_else(|| ABSENT.to_string())
-                            == *hash
-                    })
-                {
-                    return Ok((gen_key, Some(output)));
+        // `inputs` comes from the entry and so agrees with itself: an empty or
+        // forged list passes `all`. The call site decides first: an entry that
+        // does not record `gen_mod_key` is not this generation.
+        let valid = |inputs: &[(String, String)]| {
+            inputs.iter().any(|(path, _)| path == &gen_mod_key)
+                && inputs.iter().all(|(path, hash)| {
+                    current_input_hash(resolver, path).unwrap_or_else(|| ABSENT.to_string())
+                        == *hash
+                })
+        };
+        // The entry this thread last read for the key, then the resolver's. A
+        // remembered entry is validated like a read one, and skips the read and
+        // the tag check, the cost of a warm keystroke's generator import.
+        let remembered = GEN_ENTRIES.with(|m| m.borrow().get(&sources_hash).cloned());
+        let hit = remembered.filter(|e| valid(&e.0)).or_else(|| {
+            let cached = resolver.gen_cache_get(&sources_hash)?;
+            let entry = read_cache_entry(&sources_hash, &cached)?;
+            valid(&entry.0).then(|| Rc::new(entry))
+        });
+        if let Some(entry) = hit {
+            let output = entry.1.clone();
+            GEN_ENTRIES.with(|m| {
+                let mut m = m.borrow_mut();
+                // ponytail: an edited generator input leaves its old entry
+                // behind. Cleared at 512 entries, like the parse cache.
+                if m.len() > 512 {
+                    m.clear();
                 }
-            }
+                m.insert(sources_hash, entry);
+            });
+            return Ok((gen_key, Some(output)));
         }
     }
 
     // Cache miss: load and check the generator as a runnable program. Skipping
     // this on a hit is sound: an entry is written only after a run that passed
     // this check, and an edit to the generator's sources misses.
+    let gen_source = resolver
+        .read(&gen_mod_key)
+        .map_err(|e| err(rule!(GenModuleReread, module = gen_mod_key, why = e)))?;
     let (loaded, _, _, gen_graph, _) =
         load_with_origins(&gen_source, &gen_mod_key, opts, resolver, engine);
     let mut gen_program = loaded?;
@@ -1889,38 +1940,55 @@ fn generator_cache_key(
 /// a directory listing (a `dir/` marker, `resolver.list_kinds`). `None` when it
 /// cannot be read; validation reads that as [`ABSENT`].
 ///
-/// Memoized for one outermost load, because a root that imports several
+/// Read once per outermost load, because a root that imports several
 /// generators validates the same std modules once each, and files do not change
 /// during a load. Only the outermost load bumps the epoch: generators re-enter
-/// the loader, and a nested bump would drop the memo mid-use.
+/// the loader, and a nested bump would drop the memo mid-use. A later load
+/// reads the input again, and hashes it only when its content changed.
 fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<String> {
     let epoch = LOAD_EPOCH.with(|e| e.get());
     if let Some(hit) = HASH_MEMO.with(|m| {
         m.borrow()
             .get(path)
-            .filter(|(e, _)| *e == epoch)
-            .map(|(_, h)| h.clone())
+            .filter(|e| e.epoch == epoch)
+            .map(|e| e.hash.clone())
     }) {
         return hit;
     }
-    let out = current_input_hash_uncached(resolver, path);
+    // A file's text, or a directory's sorted listing, one name per line.
+    let content = match path.strip_suffix('/') {
+        Some(dir) => resolver.list_kinds(dir).ok().map(|mut names| {
+            names.sort();
+            names.join("\n")
+        }),
+        None => resolver.read(path).ok(),
+    };
     HASH_MEMO.with(|m| {
-        m.borrow_mut()
-            .insert(path.to_string(), (epoch, out.clone()));
-    });
-    out
+        let mut m = m.borrow_mut();
+        let hash = match m.get(path).filter(|e| e.content == content) {
+            Some(e) => e.hash.clone(),
+            None => content
+                .as_ref()
+                .map(|c| crate::hash::sha256_hex(c.as_bytes())),
+        };
+        let entry = InputHash {
+            epoch,
+            content,
+            hash: hash.clone(),
+        };
+        m.insert(path.to_string(), entry);
+        hash
+    })
 }
 
-fn current_input_hash_uncached(resolver: &dyn ModuleResolver, path: &str) -> Option<String> {
-    if let Some(dir) = path.strip_suffix('/') {
-        let mut names = resolver.list_kinds(dir).ok()?;
-        names.sort();
-        Some(crate::hash::sha256_hex(names.join("\n").as_bytes()))
-    } else {
-        Some(crate::hash::sha256_hex(
-            resolver.read(path).ok()?.as_bytes(),
-        ))
-    }
+/// A generation input as [`current_input_hash`] last read it.
+struct InputHash {
+    /// The outermost load that read it.
+    epoch: u64,
+    /// The file's text or the directory's listing; `None` when unreadable.
+    content: Option<String>,
+    /// The sha256 of `content`.
+    hash: Option<String>,
 }
 
 /// The recorded hash of an input that was absent when the generator looked. Not
@@ -1961,7 +2029,7 @@ fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &str) -> S
 ///
 /// A superseded format is a silent miss. Anything else that fails, including a
 /// `v3` entry with a bad tag, is a miss with a warning.
-fn read_cache_entry(key: &str, text: &str) -> Option<(Vec<(String, String)>, String)> {
+fn read_cache_entry(key: &str, text: &str) -> Option<CacheEntry> {
     let Some(first_nl) = text.find('\n') else {
         warn_foreign_entry(key);
         return None;
@@ -2233,7 +2301,11 @@ fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>
 ///
 /// Afterwards every import is a bare import of a unique decl name. The LSP
 /// indexes a separate parse of the root, which keeps its aliases.
-fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_key: &str) {
+fn resolve_aliases(
+    modules: &mut [Module],
+    errors: &mut Vec<Diagnostic>,
+    root_key: &str,
+) -> Spellings {
     // Top-level decl names per module.
     let mut module_decls: HashMap<String, HashSet<String>> = HashMap::new();
     // `all_names` only lets `rename_apart` mint a collision-free `__fromN`, and
@@ -2462,10 +2534,13 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             .filter(|n| n.alias.is_none())
             .map(|n| n.original.as_str())
             .collect();
-        let (refs, ambiguous_only) = program_ref_kinds(&m.program, true);
+        // Walked only for a module with an aliased import.
+        let mut kinds = None;
         for imp in &m.program.imports {
             for n in &imp.names {
                 if let Some(_alias) = &n.alias {
+                    let (refs, ambiguous_only) =
+                        kinds.get_or_insert_with(|| program_ref_kinds(&m.program, true));
                     let orig = &n.original;
                     if !mine.contains(orig)
                         && !bare_imported.contains(orig.as_str())
@@ -2601,6 +2676,8 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
+    let spellings = spellings(modules, &foreign_renames, &name_module_count, root_key);
+
     // Pass 3: apply the foreign-decl renames to the definition and its module's
     // references. The module's own namespace bindings keep its `ns.member(..)`
     // sugar out of the plain-name rewrite; pass 5 owns those.
@@ -2685,6 +2762,39 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         };
         nr.resolve_program(&mut m.program);
     }
+    spellings
+}
+
+/// The [`Spellings`] of a load: each declaration of a name two modules
+/// declare, by the name `renames` links it under, and the path of each
+/// import. Read before `renames` is applied. An injected module's reserved
+/// spellings stay out: no source wrote them.
+fn spellings(
+    modules: &[Module],
+    renames: &HashMap<(String, String), String>,
+    name_module_count: &HashMap<String, usize>,
+    root_key: &str,
+) -> Spellings {
+    let mut out = Spellings {
+        root: root_key.to_string(),
+        ..Spellings::default()
+    };
+    for m in modules.iter().filter(|m| m.injected.is_none()) {
+        for d in decls(&m.program).filter(|d| !d.injected) {
+            if name_module_count.get(d.name).is_some_and(|&n| n >= 2) {
+                let linked = resolved_name(renames, &m.key, d.name);
+                out.decls
+                    .insert(linked, (d.name.to_string(), m.key.clone()));
+            }
+        }
+        for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
+            if let ImportSource::Path(p) = &imp.source {
+                let key = (m.key.clone(), target.clone());
+                out.paths.insert(key, p.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Hands every part of a type to a visitor, outermost first: the one descent
@@ -2751,7 +2861,7 @@ type_head_descent!(type_nodes_mut, mut);
 
 /// The same descent, with the hook on a type's head name. `Named` and `App` are
 /// the two constructors that carry one.
-fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
+pub(crate) fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
     type_nodes(ty, &mut |t| {
         if let Type::Named(n) | Type::App(n, _) = t {
             f(n)
@@ -3068,7 +3178,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     let mut errors: Vec<Diagnostic> = Vec::new();
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
-    resolve_aliases(&mut modules, &mut errors, root_key);
+    let spellings = resolve_aliases(&mut modules, &mut errors, root_key);
     drop(alias_span);
     let index_span = crate::prof::phase("link: index");
 
@@ -3461,6 +3571,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.benches.extend(extra_benches);
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
+    program.spellings = std::sync::Arc::new(spellings);
     program.number();
     Ok(program)
 }

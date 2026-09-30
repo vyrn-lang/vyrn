@@ -15,11 +15,12 @@ use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
-    NodeId, Pattern, Program, SourceBody, Stmt, Type, TypeDecl, UnOp,
+    NodeId, Pattern, Program, SourceBody, Speech, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
-use vyrn_frontend::movecheck::Refusal;
+use vyrn_frontend::effects::Walked;
+use vyrn_frontend::movecheck::{Judgment, JudgmentKey, Refusal};
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
 pub use vyrn_frontend::prelude::Spec;
@@ -36,14 +37,6 @@ use vyrn_frontend::core::{
     NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
     Walk,
 };
-
-/// The path a reader wrote for a place read, as the checker quotes it
-/// (`p.name`, `xs[i]`). `None` where the expression names no place.
-fn reader_path(e: &Expr, places: &HashSet<String>) -> Option<String> {
-    vyrn_frontend::ast::place_path(e)
-        .or_else(|| vyrn_frontend::project::element_path(e, places))
-        .map(|(_, p)| p)
-}
 
 /// The path a field read takes out of its unnamed receiver: `.q.s` for
 /// `mk().q.s`. `None` under an element.
@@ -598,7 +591,7 @@ fn build_twice(
 /// range, and at a node the checker typed `Err` whose operands it typed, the
 /// rule the node breaks (an operator, a field, a construction, a variant, a
 /// record literal, or a call's arity, type arguments and arguments).
-fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
+fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, String)> {
     let decls = own.proto.types();
     let recorded = |e: &Expr| facts.types.get(&e.id()).filter(|t| **t != Type::Err);
     let resolved = |e: &Expr| recorded(e).map(|t| vyrn_frontend::types::resolve(t, decls));
@@ -695,7 +688,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
         }
         match e {
             Expr::Unary { op, expr, .. } => {
-                let t = resolved(expr)?;
+                let ([t], []) = sp.say([&resolved(expr)?], []);
                 Some(match op {
                     UnOp::Neg => format!("unary `-` needs a numeric type, found {t}"),
                     UnOp::Not => format!("unary `!` needs Bool, found {t}"),
@@ -703,17 +696,23 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
                 })
             }
             Expr::Field { expr, field, .. } => Some(match resolved(expr)? {
-                Type::Record(_) => format!("type {} has no field `{field}`", recorded(expr)?),
+                Type::Record(_) => {
+                    format!("type {} has no field `{field}`", sp.ty(recorded(expr)?))
+                }
                 Type::Str if field == "length" => "String has no `length`: use `byteLength` for \
                                                    bytes or `charCount()` for Unicode scalars"
                     .to_string(),
-                other => format!("cannot access field `{field}` on non-record type {other}"),
+                other => {
+                    let ([other], []) = sp.say([&other], []);
+                    format!("cannot access field `{field}` on non-record type {other}")
+                }
             }),
             Expr::TryConstruct { name, args, .. } | Expr::Call { name, args, .. }
                 if decls.contains_key(name) =>
             {
                 let base = &decls[name].base;
                 let tries = matches!(e, Expr::TryConstruct { .. });
+                let ([], [name]) = sp.say([], [name]);
                 if tries && !matches!(base, Type::Int | Type::Bool | Type::Str) {
                     return Some(format!(
                         "`{name}?(..)` is only for validated/nominal scalar types"
@@ -726,7 +725,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
                         format!("`{name}` construction takes 1 argument, got {}", args.len())
                     });
                 };
-                let aty = recorded(arg)?;
+                let ([base, aty], []) = sp.say([base, recorded(arg)?], []);
                 Some(format!(
                     "`{name}` is built from {base}, but the argument is {aty}"
                 ))
@@ -737,9 +736,10 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
                 if !decls.contains_key(name) {
                     return Some(format!("unknown type `{name}`"));
                 }
-                let Some(declared) =
-                    vyrn_frontend::types::record_fields(&Type::Named(name.clone()), decls)
-                else {
+                let declared =
+                    vyrn_frontend::types::record_fields(&Type::Named(name.clone()), decls);
+                let ([], [name]) = sp.say([], [name]);
+                let Some(declared) = declared else {
                     return Some(format!("`{name}` is not a record type"));
                 };
                 for (k, (fname, _)) in fields.iter().enumerate() {
@@ -775,7 +775,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
                 ..
             } => {
                 let d = call_decl(own, e.id())?;
-                let shown = &d.shown;
+                let ([], [shown]) = sp.say([], [&d.shown]);
                 // Counts are of what the reader wrote after the dot (#577). A
                 // callee with no parameters has no receiver slot.
                 let dot = usize::from(*dot && !d.params.is_empty());
@@ -810,11 +810,17 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership) -> Vec<(usize, String)> {
                         let aty = recorded(a)?;
                         let fits = matches!(pty, Type::Fn(..))
                             || vyrn_frontend::types::coercible(aty, pty, decls);
-                        (!fits).then(|| match i.checked_sub(dot) {
-                            Some(k) => {
-                                format!("`{shown}` argument {} expects {pty}, found {aty}", k + 1)
+                        (!fits).then(|| {
+                            let ([pty, aty], [shown]) = sp.say([pty, aty], [&d.shown]);
+                            match i.checked_sub(dot) {
+                                Some(k) => format!(
+                                    "`{shown}` argument {} expects {pty}, found {aty}",
+                                    k + 1
+                                ),
+                                None => {
+                                    format!("the receiver of `{shown}` expects {pty}, found {aty}")
+                                }
                             }
-                            None => format!("the receiver of `{shown}` expects {pty}, found {aty}"),
                         })
                     })
             }
@@ -839,6 +845,7 @@ fn unbound(
     own: &Ownership,
     impls: &[vyrn_frontend::ast::ImplBlock],
     outer: &HashMap<String, Vec<String>>,
+    sp: &Speech,
 ) -> Vec<(usize, String)> {
     use vyrn_frontend::prelude::{signature, DECODABLE, HEAPLESS};
     use vyrn_frontend::types::{self, SHOW};
@@ -856,17 +863,22 @@ fn unbound(
         }
     };
     let sentence = |shown: &str, t: &Type, bound: &str| match bound {
-        HEAPLESS => format!(
-            "`{shown}` forgets or overwrites elements without releasing them, and \
-             `{t}` owns heap \u{2014} move the elements one at a time instead"
-        ),
+        HEAPLESS => {
+            let ([t], []) = sp.say([t], []);
+            format!(
+                "`{shown}` forgets or overwrites elements without releasing them, and \
+                 `{t}` owns heap \u{2014} move the elements one at a time instead"
+            )
+        }
         DECODABLE => {
-            let off = vyrn_frontend::codec::decodable(t, decls)
-                .err()
-                .unwrap_or_else(|| t.to_string());
+            // The codec names the offender by its declaration where it has one.
+            let off = match vyrn_frontend::codec::decodable(t, decls) {
+                Err(off) => sp.name(&off),
+                Ok(()) => sp.ty(t).to_string(),
+            };
             format!("`{shown}` cannot decode into `{off}` (not a codable type)")
         }
-        _ => types::needs_show(shown, t).render(),
+        _ => types::needs_show(shown, t).render_in(sp),
     };
     facts
         .exprs
@@ -945,11 +957,12 @@ fn fn_slot(
     types: &HashMap<NodeId, Type>,
     decls: &HashMap<String, TypeDecl>,
     bound: &dyn Fn(&str) -> bool,
+    sp: &Speech,
 ) -> Option<(usize, String)> {
     use vyrn_frontend::types::{resolve, substitute};
     let recorded = |e: &Expr| types.get(&e.id()).filter(|t| **t != Type::Err);
     let f = program.functions.iter().find(|f| f.name == name)?;
-    let callee = prelude::method_surface(name).trim_start_matches('@');
+    let ([], [callee]) = sp.say([], [prelude::method_surface(name).trim_start_matches('@')]);
     let subst: HashMap<String, Type> = solved.iter().cloned().collect();
     let mut slots = f.params.iter().zip(args).enumerate();
     slots.find_map(|(i, (p, arg))| {
@@ -969,6 +982,7 @@ fn fn_slot(
                      expects {want}"
                 ),
                     Misfit::Param(a, b) => {
+                        let ([a, b], []) = sp.say([&a, &b], []);
                         format!("{owner} expects a {a} argument, but `{callee}` will pass it {b}")
                     }
                     Misfit::Returns(..) => return None,
@@ -992,6 +1006,7 @@ fn fn_slot(
                          expects {want}"
                     ),
                     Misfit::Returns(t, r) => {
+                        let ([t, r], []) = sp.say([&t, &r], []);
                         format!("this lambda returns {t}, but `{callee}` expects it to return {r}")
                     }
                     Misfit::Param(..) => return None,
@@ -1013,14 +1028,18 @@ fn fn_slot(
                     ));
                 }
                 let vptys: Vec<Type> = g.params.iter().map(|p| p.ty.clone()).collect();
+                let ([], [vn]) = sp.say([], [vn]);
                 match misfit(vptys.len(), Some(&vptys), None, &slot, decls)? {
                     Misfit::Arity(got, _) => Some(format!(
                         "`{vn}` takes {got} argument(s), but `{callee}` argument {n} expects a \
                          {want}-argument function"
                     )),
-                    Misfit::Param(a, b) => Some(format!(
-                        "`{vn}` expects a {a} argument, but `{callee}` will pass it {b}"
-                    )),
+                    Misfit::Param(a, b) => {
+                        let ([a, b], []) = sp.say([&a, &b], []);
+                        Some(format!(
+                            "`{vn}` expects a {a} argument, but `{callee}` will pass it {b}"
+                        ))
+                    }
                     Misfit::Returns(..) => None,
                 }
             }
@@ -1033,6 +1052,7 @@ fn fn_slot(
                             0 => line,
                             l => l,
                         };
+                        let ([aty], []) = sp.say([aty], []);
                         return Some((
                             at,
                             format!(
@@ -1057,6 +1077,7 @@ fn stored_slot(
     exp: &Type,
     decls: &HashMap<String, TypeDecl>,
     line: usize,
+    sp: &Speech,
 ) -> Option<(usize, String)> {
     let says = match (lambda, f) {
         (Some(got), _) => {
@@ -1064,26 +1085,35 @@ fn stored_slot(
                 return None;
             };
             match misfit(ptys.len(), None, Some(got), exp, decls)? {
-                Misfit::Returns(t, r) => format!(
-                    "this lambda returns {t}, but the expected function type `{exp}` returns {r}"
-                ),
+                Misfit::Returns(t, r) => {
+                    let ([t, exp, r], []) = sp.say([&t, exp, &r], []);
+                    format!(
+                        "this lambda returns {t}, but the expected function type `{exp}` returns {r}"
+                    )
+                }
                 Misfit::Arity(..) | Misfit::Param(..) => return None,
             }
         }
         (None, Some(f)) => {
-            let name = &f.name;
             let vptys: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
             match misfit(vptys.len(), Some(&vptys), Some(&f.ret), exp, decls)? {
-                Misfit::Arity(got, want) => format!(
-                    "`{name}` takes {got} argument(s), but the expected function type `{exp}` \
-                     takes {want}"
-                ),
+                Misfit::Arity(got, want) => {
+                    let ([exp], [name]) = sp.say([exp], [&f.name]);
+                    format!(
+                        "`{name}` takes {got} argument(s), but the expected function type \
+                         `{exp}` takes {want}"
+                    )
+                }
                 Misfit::Param(a, b) => {
+                    let ([exp, a, b], [name]) = sp.say([exp, &a, &b], [&f.name]);
                     format!("`{name}` expects a {a} argument, but `{exp}` will pass it {b}")
                 }
-                Misfit::Returns(t, r) => format!(
-                    "`{name}` returns {t}, but the expected function type `{exp}` returns {r}"
-                ),
+                Misfit::Returns(t, r) => {
+                    let ([exp, t, r], [name]) = sp.say([exp, &t, &r], [&f.name]);
+                    format!(
+                        "`{name}` returns {t}, but the expected function type `{exp}` returns {r}"
+                    )
+                }
             }
         }
         (None, None) => return None,
@@ -1104,8 +1134,15 @@ fn build_seeded(
         inst.facts.produced.clone(),
         inst.facts.solved.clone(),
     );
-    let mistyped = judged(&inst.facts, own);
-    let refused = unbound(&inst.facts, own, &program.impls, &inst.func.type_bounds);
+    let sp = program.spellings.speech(&inst.func.module);
+    let mistyped = judged(&inst.facts, own, &sp);
+    let refused = unbound(
+        &inst.facts,
+        own,
+        &program.impls,
+        &inst.func.type_bounds,
+        &sp,
+    );
     // The plan's own rows, not the instance's copy: the copy predates the
     // rows [`augment`] places. The copy adds only the substituted type a
     // `Deep` walks, and nothing below reads a kind.
@@ -1128,6 +1165,7 @@ fn build_seeded(
             id: fns.instance_id(inst),
             name: inst.spelling(),
             file: inst.func.module.clone(),
+            spellings: program.spellings.clone(),
             export: inst.func.is_export_extern,
             names: Vec::new(),
             params: Vec::new(),
@@ -1200,9 +1238,8 @@ fn build_seeded(
     b.block(&f.body, &mut out)?;
     cut(&mut out);
     b.body.stmts = out;
-    falls_through(&mut b.body, &f.ret, f.line, || {
-        format!("function `{}`", f.name)
-    });
+    let name = b.body.spelled(&f.name).to_string();
+    falls_through(&mut b.body, &f.ret, f.line, || format!("function `{name}`"));
     Ok(b.body)
 }
 
@@ -1490,8 +1527,9 @@ impl<'a> Builder<'a> {
             facts.produced.clone(),
             facts.solved.clone(),
         );
-        let mistyped = judged(facts, own);
-        let refused = unbound(facts, own, &program.impls, &HashMap::new());
+        let sp = program.spellings.speech(&file);
+        let mistyped = judged(facts, own, &sp);
+        let refused = unbound(facts, own, &program.impls, &HashMap::new(), &sp);
         Builder {
             program,
             own,
@@ -1505,6 +1543,7 @@ impl<'a> Builder<'a> {
             body: Body {
                 id: fns.id(&name),
                 name,
+                spellings: program.spellings.clone(),
                 file,
                 export: false,
                 names: Vec::new(),
@@ -1582,11 +1621,30 @@ impl<'a> Builder<'a> {
         Name((self.body.names.len() - 1) as u32)
     }
 
+    /// The path a reader wrote for a place read, as the checker quotes it
+    /// (`p.name`, `xs[i]`), with a renamed global as its module wrote it.
+    /// `None` where the expression names no place.
+    fn reader_path(&self, e: &Expr) -> Option<String> {
+        let (root, path) = vyrn_frontend::ast::place_path(e)
+            .or_else(|| vyrn_frontend::project::element_path(e, &self.own.place_names))?;
+        // `path` starts with `root`.
+        Some(format!("{}{}", self.written(&root), &path[root.len()..]))
+    }
+
+    /// The variable `name` as the reader wrote it: a binding as itself, module
+    /// state as its module wrote it.
+    fn written<'n>(&'n self, name: &'n str) -> &'n str {
+        match self.lookup(name) {
+            Some(_) => name,
+            None => self.body.spelled(name),
+        }
+    }
+
     /// The `@borrow` a read of a place binds, carrying the path the reader
     /// wrote ([`NameInfo::path`]).
     fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
         let n = self.name("@borrow", ty, false, line);
-        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
+        self.body.names[n.index()].path = self.reader_path(e);
         n
     }
 
@@ -2671,6 +2729,7 @@ impl<'a> Builder<'a> {
                     let decls = self.proto.types();
                     let refusal = match annotation {
                         Some(t) if !vyrn_frontend::types::coercible(&vty, t, decls) => {
+                            let ([t, vty], []) = self.body.speech().say([t, &vty], []);
                             Some(format!("`{name}` declared {t} but initializer is {vty}"))
                         }
                         _ if vyrn_frontend::types::resolve(&vty, decls) == Type::Unit => {
@@ -2789,7 +2848,9 @@ impl<'a> Builder<'a> {
                 };
                 if let (Some(to), Some(vty)) = (&to, node_ty(self.own, value.id())) {
                     if !vyrn_frontend::types::coercible(&vty, to, self.proto.types()) {
-                        let refusal = format!("`{name}` is {to} but assigned {vty}");
+                        let ([to, vty], []) = self.body.speech().say([to, &vty], []);
+                        let refusal =
+                            format!("`{}` is {to} but assigned {vty}", self.written(name));
                         self.body.mistyped.push((*line, refusal));
                     }
                 }
@@ -2937,6 +2998,7 @@ impl<'a> Builder<'a> {
                 };
                 if let (Some(vty), Some(ret)) = (vty, &self.ret) {
                     if !vyrn_frontend::types::coercible(&vty, ret, self.proto.types()) {
+                        let ([ret, vty], []) = self.body.speech().say([ret, &vty], []);
                         let refusal = format!("return type mismatch: expected {ret}, found {vty}");
                         self.body.mistyped.push((*line, refusal));
                     }
@@ -3039,6 +3101,7 @@ impl<'a> Builder<'a> {
                 let Some(ety) = elem.or_else(|| self.projected_elem(&ity)) else {
                     let t = vyrn_frontend::types::resolve(&ity, self.proto.types());
                     if t != Type::Err {
+                        let ([t], []) = self.body.speech().say([&t], []);
                         let refusal = format!(
                             "`for` needs an Array, a String, or a type that declares \
                              `impl Iterate` (a `size` method and an `nth` projection, \
@@ -3608,6 +3671,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), Gap> {
         let decls = self.proto.types();
         let fields = vyrn_frontend::types::record_fields(bty, decls);
+        let name = self.written(name);
         let refusal = match bty {
             Type::Err => return Ok(()),
             _ => match fields
@@ -3623,17 +3687,21 @@ impl<'a> Builder<'a> {
                     };
                     let validated = matches!(fty, Type::Named(n)
                         if decls.get(n).is_some_and(|d| d.predicate.is_some()));
-                    let refusal = if validated {
-                        (!vyrn_frontend::types::assignable(&vty, fty, decls)).then(|| {
-                            format!(
-                                "field `{field}` is {fty} (validated); assign an already-constructed `{fty}` value, e.g. `{fty}(..)`"
-                            )
-                        })
-                    } else {
-                        (!vyrn_frontend::types::coercible(&vty, fty, decls))
-                            .then(|| format!("field `{field}` is {fty} but assigned {vty}"))
+                    let fits = match validated {
+                        true => vyrn_frontend::types::assignable(&vty, fty, decls),
+                        false => vyrn_frontend::types::coercible(&vty, fty, decls),
                     };
-                    self.body.mistyped.extend(refusal.map(|r| (line, r)));
+                    if fits {
+                        return Ok(());
+                    }
+                    let ([fty, vty], []) = self.body.speech().say([fty, &vty], []);
+                    let refusal = match validated {
+                        true => format!(
+                            "field `{field}` is {fty} (validated); assign an already-constructed `{fty}` value, e.g. `{fty}(..)`"
+                        ),
+                        false => format!("field `{field}` is {fty} but assigned {vty}"),
+                    };
+                    self.body.mistyped.push((line, refusal));
                     return Ok(());
                 }
             },
@@ -3656,6 +3724,7 @@ impl<'a> Builder<'a> {
         let decls = self.proto.types();
         let coercible = |a: &Type, b: &Type| vyrn_frontend::types::coercible(a, b, decls);
         let (ity, vty) = (node_ty(self.own, index.id()), node_ty(self.own, value.id()));
+        let (sp, name) = (self.body.speech(), self.written(name));
         let refusal = match vyrn_frontend::types::resolve(bty, decls) {
             Type::Err => None,
             Type::Map(key, val) => {
@@ -3666,13 +3735,17 @@ impl<'a> Builder<'a> {
                         if k != Type::Err
                             && !coercible(&k, &vyrn_frontend::types::resolve(&key, decls)) =>
                     {
+                        let ([key, k], []) = sp.say([&key, &k], []);
                         Some(format!(
                             "`{name}` is keyed by {key}, but the key here is {k}"
                         ))
                     }
-                    (_, Some(v)) if !coercible(&v, &val) => Some(format!(
-                        "`{name}` holds values of type {val} but the stored value is {v}"
-                    )),
+                    (_, Some(v)) if !coercible(&v, &val) => {
+                        let ([val, v], []) = sp.say([&val, &v], []);
+                        Some(format!(
+                            "`{name}` holds values of type {val} but the stored value is {v}"
+                        ))
+                    }
                     _ => None,
                 }
             }
@@ -3688,6 +3761,7 @@ impl<'a> Builder<'a> {
                                 self.under_impl(&f.ret, bty),
                             ),
                             None => {
+                                let ([other], []) = sp.say([&other], []);
                                 let refusal = format!(
                                 "`{name}[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` projection (`fn atSet(modify self, ..) -> modify T`), found {other}"
                             );
@@ -3702,10 +3776,15 @@ impl<'a> Builder<'a> {
                 });
                 match (i, vty) {
                     (Some(i), _) if key == Type::Int => {
+                        let ([i], []) = sp.say([&i], []);
                         Some(format!("array index must be an Int64, found {i}"))
                     }
-                    (Some(i), _) => Some(format!("`{name}[..] = ..` is keyed by {key}, found {i}")),
+                    (Some(i), _) => {
+                        let ([key, i], []) = sp.say([&key, &i], []);
+                        Some(format!("`{name}[..] = ..` is keyed by {key}, found {i}"))
+                    }
                     (None, Some(v)) if !coercible(&v, &elem) => {
+                        let ([elem, v], []) = sp.say([&elem, &v], []);
                         Some(format!("`{name}` holds {elem} but the stored value is {v}"))
                     }
                     _ => None,
@@ -3811,6 +3890,7 @@ impl<'a> Builder<'a> {
         let t = self.ty_of(cond)?;
         let bool = vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Bool;
         if !bool && t != Type::Err {
+            let ([t], []) = self.body.speech().say([&t], []);
             let refusal = format!("`{word}` condition must be Bool, found {t}");
             self.body.mistyped.push((line, refusal));
         }
@@ -3860,7 +3940,7 @@ impl<'a> Builder<'a> {
             Type::ArrayN(..) => format!(
                 "`{op}` is not available on a fixed-size array (it cannot shrink); use a growable `Array<T>`"
             ),
-            other => format!("`{op}` needs an `Array<T>`, found {other}"),
+            other => format!("`{op}` needs an `Array<T>`, found {}", self.body.speech().ty(&other)),
         };
         self.body.mistyped.push((line, refusal));
     }
@@ -3936,7 +4016,7 @@ impl<'a> Builder<'a> {
                 Root::G(g) => match self.named_place(g, line) {
                     Ok((Place::Global(_), ty)) => {
                         let heap = self.proto.owns_heap(&ty);
-                        (ty, g.clone(), heap)
+                        (ty, self.body.spelled(g).to_string(), heap)
                     }
                     _ => continue,
                 },
@@ -4710,7 +4790,7 @@ impl<'a> Builder<'a> {
         let n = self.name("@thunk", thunk, false, e.line());
         let callee = format!("@thunk{}", n.0);
         self.body.names[n.index()].source = callee.clone();
-        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
+        self.body.names[n.index()].path = self.reader_path(e);
         out.push(St::Let(n, Rhs::Read(place)));
         self.release_receiver(e, out, true);
         Ok(Rhs::Call {
@@ -4826,10 +4906,9 @@ impl<'a> Builder<'a> {
             name: t, fields, ..
         } = value
         {
-            self.body.names[n.index()].fields = fields
-                .iter()
-                .map(|(f, _)| format!("the field `{t}.{f}`"))
-                .collect();
+            let t = self.body.spelled(t);
+            let fields = fields.iter().map(|(f, _)| format!("the field `{t}.{f}`"));
+            self.body.names[n.index()].fields = fields.collect();
         }
     }
 
@@ -4868,7 +4947,7 @@ impl<'a> Builder<'a> {
                     let ty = self.types[&e.id()].clone();
                     let f = self.program.functions.iter().find(|f| &f.name == name);
                     let decls = self.proto.types();
-                    let refusal = stored_slot(None, f, &ty, &decls, *line);
+                    let refusal = stored_slot(None, f, &ty, &decls, *line, &self.body.speech());
                     self.body.mistyped.extend(refusal);
                     let t = self.name("@closure", ty, false, *line);
                     self.body.names[t.index()].borrow = false;
@@ -5001,8 +5080,9 @@ impl<'a> Builder<'a> {
                     // call's parameter; this covers every other slot.
                     if let LambdaBody::Expr(x) = body {
                         let got = self.ty_of(x).ok().filter(|g| *g != Type::Err);
+                        let sp = self.body.speech();
                         let refusal =
-                            got.and_then(|g| stored_slot(Some(&g), None, &t, &decls, *line));
+                            got.and_then(|g| stored_slot(Some(&g), None, &t, &decls, *line, &sp));
                         self.body.mistyped.extend(refusal);
                     }
                     (ptys, Some(*r))
@@ -5030,6 +5110,7 @@ impl<'a> Builder<'a> {
             return gap("a lambda with the wrong arity for its type", *line);
         }
         let file = self.body.file.clone();
+        let spellings = self.body.spellings.clone();
         let export = self.body.export;
         let outer = std::mem::replace(
             &mut self.body,
@@ -5037,6 +5118,7 @@ impl<'a> Builder<'a> {
                 id: None,
                 name: String::new(),
                 file,
+                spellings,
                 export,
                 names: Vec::new(),
                 params: Vec::new(),
@@ -5629,6 +5711,7 @@ impl<'a> Builder<'a> {
                     &self.types,
                     &decls,
                     &bound,
+                    &self.body.speech(),
                 );
                 self.body.mistyped.extend(at);
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
@@ -7433,23 +7516,24 @@ pub fn augment(program: &Program, w: &mut World) {
     let mut touched: std::collections::HashSet<FnId> = Default::default();
     // The judgment memo, when the host armed one (`movecheck::Judgments`): a
     // body whose key is unchanged is served its refusals, neither built nor
-    // judged. An armed host reads only refusals, not the facts or rows.
+    // judged, unless the effect judgment answers its frames otherwise. An
+    // armed host reads only refusals, not the facts or rows.
     let js = vyrn_frontend::prof::phase("placer: judgments");
-    let memo = vyrn_frontend::movecheck::Judgments::open(program);
+    let memo = vyrn_frontend::movecheck::Judgments::open(program, &own.fnval_clear);
     drop(js);
     own.accumulators = crate::append::global_append_candidates(program);
     let mut names = NameMemo::default();
     // Every body is built before any is placed: the kernel asks the effect
     // judgment, which joins every body, whether a callee writes module state.
-    // A call into a served body is judged as pure. `test` and `bench` bodies
-    // are judged like any other.
+    // A served body gives the judgment its frames as last judged. `test` and
+    // `bench` bodies are judged like any other.
     let jobs: Vec<Job> = (lowered.instances.iter().map(Job::Inst))
         .chain(lowered.bodies.iter().map(Job::Outside))
         .collect();
     let keys: Vec<_> = (jobs.iter())
         .map(|j| memo.as_ref().and_then(|m| j.key(m)))
         .collect();
-    let served: Vec<Option<Vec<Refusal>>> = (keys.iter())
+    let served: Vec<Option<(JudgmentKey, Judgment)>> = (keys.iter())
         .map(|k| serve(memo.as_ref(), k.as_ref()))
         .collect();
     let unserved: Vec<Option<Job>> = (jobs.iter().zip(&served))
@@ -7469,8 +7553,8 @@ pub fn augment(program: &Program, w: &mut World) {
     // out as on one thread.
     let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
     for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {
-        if let Some(rs) = served {
-            made.push(Made::Served(rs));
+        if let Some((key, judgment)) = served {
+            made.push(Made::Served(key, judgment));
             continue;
         }
         // `unserved` holds every job `served` does not, so `first` is `Some`.
@@ -7491,21 +7575,79 @@ pub fn augment(program: &Program, w: &mut World) {
         }
     }
     let ej = vyrn_frontend::prof::phase("placer: effects");
-    let tops: Vec<(&str, &Body)> = (jobs.iter().zip(&made))
-        .filter_map(|(j, m)| match m {
-            Made::Built(_, Ok(b)) => Some((j.owner(), b)),
+    let (tops, built_at): (Vec<(&str, &Body)>, Vec<usize>) = (jobs.iter().zip(&made).enumerate())
+        .filter_map(|(i, (j, m))| match m {
+            Made::Built(_, Ok(b)) => Some(((j.owner(), b), i)),
             _ => None,
         })
-        .collect();
-    let state = crate::effects::judge_built(
+        .unzip();
+    // A body that did not build gives the judgment nothing, served or not.
+    let (late, late_at): (Vec<(&str, &[Walked])>, Vec<usize>) =
+        (jobs.iter().zip(&made).enumerate())
+            .filter_map(|(i, (j, m))| match m {
+                Made::Served(_, s) if !s.frames.is_empty() => Some(((j.owner(), &s.frames[..]), i)),
+                _ => None,
+            })
+            .unzip();
+    let (mut state, read, answers) = crate::effects::judge_built(
         program,
         &lowered,
         own,
         &mut w.fns,
         &tops,
-        |judged, refs, _| judged.state_table(refs),
+        &late,
+        |judged, refs, top, served_at| {
+            let rows = |at: usize, n: usize| -> Vec<Vec<(String, Vec<String>)>> {
+                (at..at + n).map(|i| judged.state_callees(i)).collect()
+            };
+            // What the memo keeps of each body built with a key.
+            let read: Vec<Option<Kept>> = (top.iter().zip(&tops).zip(&built_at))
+                .map(|((t, (_, b)), i)| {
+                    let Made::Built(Some(_), _) = &made[*i] else {
+                        return None;
+                    };
+                    let n = b.frames().len();
+                    let frames = judged.frames[*t..*t + n].iter().map(|f| (*f).clone());
+                    Some((frames.collect(), rows(*t, n)))
+                })
+                .collect();
+            let answers: Vec<_> = (served_at.iter().zip(&late))
+                .map(|(at, (_, frames))| rows(*at, frames.len()))
+                .collect();
+            (judged.state_table(refs), read, answers)
+        },
     );
-    drop(tops);
+    drop((tops, late));
+    let mut kept: Vec<Option<Kept>> = (0..jobs.len()).map(|_| None).collect();
+    for (i, r) in built_at.into_iter().zip(read) {
+        kept[i] = r;
+    }
+    // A served verdict read the answer the judgment gave its frames then. A
+    // body that gets another answer now is built and judged again, before
+    // `own` holds the answer, as on its first build.
+    for (i, rows) in late_at.into_iter().zip(answers) {
+        let Made::Served(key, s) = &made[i] else {
+            continue;
+        };
+        if s.state == rows {
+            continue;
+        }
+        let (key, frames) = (key.clone(), s.frames.clone());
+        let j = &jobs[i];
+        let mut top = j.build(program, own, &w.fns, &mut names);
+        j.tally(&top);
+        if let Ok(b) = &mut top {
+            w.fns.number(b);
+            crate::world::add_callees(b, &by_name, calls.entry(j.id()).or_default());
+            for (f, r) in b.frames().iter().zip(&rows) {
+                if let (Some(id), false) = (f.id, r.is_empty()) {
+                    state.insert(id, r.clone());
+                }
+            }
+        }
+        kept[i] = Some((frames, rows));
+        made[i] = Made::Built(Some(key), top);
+    }
     own.state_callees = state;
     drop(ej);
     // A hoist asked `kernel::writes` before the effect judgment was held. A
@@ -7540,25 +7682,33 @@ pub fn augment(program: &Program, w: &mut World) {
         },
     );
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    for ((j, m), placed) in jobs.iter().zip(made).zip(placed) {
+    for (((j, m), placed), kept) in jobs.iter().zip(made).zip(placed).zip(kept) {
         let into = match j {
             Job::Inst(_) => &mut built,
             Job::Outside(_) => &mut outside,
         };
         let (key, made) = match m {
-            Made::Served(rs) => {
-                r.kernel.extend(rs);
+            Made::Served(key, judgment) => {
+                r.kernel.extend(judgment.verdict.iter().cloned());
+                if let Some(memo) = &memo {
+                    memo.tally(true);
+                    memo.put(key, judgment);
+                }
                 into.push(None);
                 continue;
             }
             Made::Built(key, made) => (key, made),
         };
+        if let (Some(memo), Some(_)) = (&memo, &key) {
+            memo.tally(false);
+        }
+        let kept = kept.unwrap_or_default();
         let refused_before = r.kernel.len();
         let top = match made {
             Ok(b) => b,
             Err(g) => {
                 refuse_gap(g, j.module(), j.owner(), &mut r);
-                remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+                remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
                 into.push(None);
                 continue;
             }
@@ -7581,7 +7731,7 @@ pub fn augment(program: &Program, w: &mut World) {
         );
         let refused = typed(program, own, &mut r, &top, j.module(), j.as_written());
         let key = key.filter(|_| !refused);
-        remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+        remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
         into.push(Some(top));
     }
     // Every generic function is built once more with its parameters as
@@ -7861,10 +8011,7 @@ impl Job<'_, '_> {
     /// The judgment memo's key. A `test` or `bench` body is keyed with its
     /// line too: the `test@<i>` index is global, so a test added to an
     /// earlier module renumbers every later one.
-    fn key(
-        &self,
-        memo: &vyrn_frontend::movecheck::Judgments,
-    ) -> Option<vyrn_frontend::movecheck::JudgmentKey> {
+    fn key(&self, memo: &vyrn_frontend::movecheck::Judgments) -> Option<JudgmentKey> {
         match self {
             Job::Inst(inst) => memo.key(inst.func.module.as_deref(), &inst.spelling()),
             Job::Outside(ob) => memo.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)),
@@ -7909,34 +8056,46 @@ impl Job<'_, '_> {
 
 /// One body `augment` built, or served out of the memo.
 enum Made {
-    /// The refusals the memo recorded for it.
-    Served(Vec<Refusal>),
-    Built(
-        Option<vyrn_frontend::movecheck::JudgmentKey>,
-        Result<Body, Gap>,
-    ),
+    /// The memo's entry for it, taken out until `augment` puts it back.
+    Served(JudgmentKey, Judgment),
+    Built(Option<JudgmentKey>, Result<Body, Gap>),
 }
 
-/// One body's refusals out of the judgment memo. `Some` means the body is
-/// neither built nor judged.
+/// What the memo keeps of a built body besides its refusals: its frames as
+/// the effect judgment read them, and the judgment's answer for each.
+type Kept = (Vec<Walked>, Vec<Vec<(String, Vec<String>)>>);
+
+/// One body's entry out of the judgment memo, with its key. `Some` means the
+/// body is neither built nor judged, unless the effect judgment answers its
+/// frames otherwise than when it was recorded.
 fn serve(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
-    key: Option<&vyrn_frontend::movecheck::JudgmentKey>,
-) -> Option<Vec<Refusal>> {
-    memo?.get(key?)
+    key: Option<&JudgmentKey>,
+) -> Option<(JudgmentKey, Judgment)> {
+    let key = key?;
+    Some((key.clone(), memo?.take(key)?))
 }
 
 /// Records one body's refusals, `refused`, for every body with a key. Serving skips placement too, which a host that
 /// armed the memo does not read ([`movecheck::reuse_judgments`]).
 fn remember(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
-    key: Option<vyrn_frontend::movecheck::JudgmentKey>,
+    key: Option<JudgmentKey>,
+    (frames, state): Kept,
     refused: &[Refusal],
 ) {
     let (Some(memo), Some(key)) = (memo, key) else {
         return;
     };
-    memo.put(key, refused.to_vec());
+    let verdict = refused.to_vec();
+    memo.put(
+        key,
+        Judgment {
+            verdict,
+            frames,
+            state,
+        },
+    );
 }
 
 /// The memory report for one frame, read by `vyrn why --memory` and the
@@ -7972,6 +8131,7 @@ fn report(
     // Taken out and put back at the end, so `own` (whose type table holds
     // every declaration) is not copied per frame, which is per keystroke.
     let mut rows = std::mem::take(own.memory.entry(owner).or_default());
+    let sp = body.speech();
     for (i, info) in body.names.iter().enumerate() {
         if !info.bound_by_let {
             continue;
@@ -7997,12 +8157,15 @@ fn report(
         };
         let row = match (&info.not_owned, took) {
             (Some(NotOwned::NoRelease { heap: false }), _) => leaked(
-                format!("NOT reclaimed — the type {} owns no heap", info.ty),
+                format!("NOT reclaimed — the type {} owns no heap", sp.ty(&info.ty)),
                 "the type owns no heap",
                 false,
             ),
             (Some(NotOwned::NoRelease { heap: true }), _) => leaked(
-                format!("NOT reclaimed — nothing releases the type {} yet", info.ty),
+                format!(
+                    "NOT reclaimed — nothing releases the type {} yet",
+                    sp.ty(&info.ty)
+                ),
                 "the type has no release rule",
                 true,
             ),
@@ -8023,7 +8186,7 @@ fn report(
             (Some(NotOwned::MustUse(l)), Some(t)) if t.builtin => MemoryRow {
                 name,
                 line,
-                text: discharged(l),
+                text: discharged(l, &sp),
                 last_use: None,
                 moved_into: None,
                 bucket: Bucket::Discharged,
@@ -8056,7 +8219,7 @@ fn report(
             (Some(NotOwned::MustUse(l)), None) => MemoryRow {
                 name,
                 line,
-                text: discharged(l),
+                text: discharged(l, &sp),
                 last_use: None,
                 moved_into: None,
                 bucket: Bucket::Discharged,
@@ -8071,7 +8234,7 @@ fn report(
                 (Some(kind), Some(holes)) => MemoryRow {
                     name,
                     line,
-                    text: reclaimed(&kind, &holes),
+                    text: reclaimed(&kind, &holes, &sp),
                     last_use: None,
                     moved_into: None,
                     bucket: Bucket::Reclaimed,
@@ -8092,9 +8255,9 @@ fn report(
 
 /// The "reclaimed at block exit" sentence, with the places a `consume` took
 /// out of the value, which the release walks around.
-fn reclaimed(kind: &DropKind, holes: &[String]) -> String {
+fn reclaimed(kind: &DropKind, holes: &[String], sp: &Speech) -> String {
     if holes.is_empty() {
-        return format!("reclaimed at block exit — {}", kind.words());
+        return format!("reclaimed at block exit — {}", kind.words(sp));
     }
     let places = holes
         .iter()
@@ -8103,20 +8266,21 @@ fn reclaimed(kind: &DropKind, holes: &[String]) -> String {
         .join(", ");
     format!(
         "reclaimed at block exit — {}, except {places}, which a `consume` took",
-        kind.words()
+        kind.words(sp)
     )
 }
 
 /// The must-use sentence: what the program wrote to discharge the value, and
 /// which lowering frees it.
-fn discharged(l: &Linear) -> String {
+fn discharged(l: &Linear, sp: &Speech) -> String {
     match l {
         Linear::Stream => "discharged, not leaked — a stream is consumed, forwarded or closed \
              on every path, and that lowering frees it"
             .to_string(),
         Linear::Declared(by) => format!(
-            "discharged, not leaked — `{by}` declares `impl MustUse`, so it is handed on or \
-             dropped on every path"
+            "discharged, not leaked — `{}` declares `impl MustUse`, so it is handed on or \
+             dropped on every path",
+            sp.name(by)
         ),
     }
 }

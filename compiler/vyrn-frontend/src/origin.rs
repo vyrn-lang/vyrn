@@ -30,11 +30,16 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
-    pub fn new(source: &str, importer_dir: &'a str, project: &'a str) -> Self {
+    /// The context of a text whose [`comment_lines`] are `comment_lines`.
+    pub fn new(
+        comment_lines: Option<HashSet<usize>>,
+        importer_dir: &'a str,
+        project: &'a str,
+    ) -> Self {
         Context {
             importer_dir,
             project,
-            comment_lines: comment_lines(source),
+            comment_lines,
         }
     }
 
@@ -422,7 +427,7 @@ mod tests {
 
     /// A context with no project bound, as an in-memory load has.
     fn ctx<'a>(source: &str, importer_dir: &'a str) -> Context<'a> {
-        Context::new(source, importer_dir, "")
+        Context::new(comment_lines(source), importer_dir, "")
     }
 
     fn resolved(importer_dir: &str, path: &str) -> Result<String, String> {
@@ -681,7 +686,7 @@ fn x() {}
             "n:/proj/app/routes/index.vyx"
         );
 
-        let c = Context::new("", "n:/proj/app", "n:/proj");
+        let c = Context::new(comment_lines(""), "n:/proj/app", "n:/proj");
         assert!(resolve_origin_path(&c, "../../other/x.vyx").is_err());
         assert_eq!(
             resolve_origin_path(&c, "../shared/x.vyx").unwrap(),
@@ -724,7 +729,7 @@ fn x() {}
     #[test]
     fn a_climb_spelled_with_backslashes_is_the_same_climb() {
         assert!(resolved("n:/proj/app", r"..\..\..\..\outside.vyx").is_err());
-        let c = Context::new("", "n:/proj/app", "n:/proj");
+        let c = Context::new(comment_lines(""), "n:/proj/app", "n:/proj");
         assert!(resolve_origin_path(&c, r"..\..\outside.vyx").is_err());
         assert_eq!(
             resolve_origin_path(&c, r"..\shared\x.vyx").unwrap(),

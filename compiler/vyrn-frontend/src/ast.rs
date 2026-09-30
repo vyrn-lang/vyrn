@@ -242,6 +242,8 @@ pub struct Program {
     /// The projection expansions every pass over this program reads. The
     /// loader stamps the load's; a parsed program has an unshared one.
     pub expansions: std::sync::Arc<crate::project::Expansions>,
+    /// How a sentence spells a declaration the loader renamed apart.
+    pub spellings: std::sync::Arc<Spellings>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only
@@ -1035,10 +1037,25 @@ impl Type {
 }
 
 impl std::fmt::Display for Type {
-    /// Writes the type as Vyrn source spells it. Diagnostics use this, never the
-    /// `Debug` form.
+    /// Writes the type as Vyrn source spells it, by linked names. A sentence
+    /// writes it through [`Speech::ty`] instead.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        Said(self, None).fmt(f)
+    }
+}
+
+/// A type written for a sentence: [`Type`]'s `Display`, with each declared
+/// name spelled by the [`Speech`] when there is one.
+pub struct Said<'a>(&'a Type, Option<&'a Speech<'a>>);
+
+impl<'a> std::fmt::Display for Said<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let say = |t: &'a Type| Said(t, self.1);
+        let name = |n: &str| match self.1 {
+            Some(s) => s.name(n),
+            None => n.to_string(),
+        };
+        match self.0 {
             Type::Int => write!(f, "Int64"),
             Type::IntN { bits, signed } => {
                 write!(f, "{}Int{bits}", if *signed { "" } else { "U" })
@@ -1053,27 +1070,28 @@ impl std::fmt::Display for Type {
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
-            Type::Named(n) | Type::Param(n) => write!(f, "{n}"),
+            Type::Named(n) => write!(f, "{}", name(n)),
+            Type::Param(n) => write!(f, "{n}"),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, fld) in fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}: {}", fld.name, fld.ty)?;
+                    write!(f, "{}: {}", fld.name, say(&fld.ty))?;
                 }
                 write!(f, " }}")
             }
-            Type::Omit(b, keys) => write!(f, "Omit<{b}, {}>", keys.join(", ")),
-            Type::Pick(b, keys) => write!(f, "Pick<{b}, {}>", keys.join(", ")),
-            Type::Merge(a, b) => write!(f, "Merge<{a}, {b}>"),
-            Type::Partial(b) => write!(f, "Partial<{b}>"),
+            Type::Omit(b, keys) => write!(f, "Omit<{}, {}>", say(b), keys.join(", ")),
+            Type::Pick(b, keys) => write!(f, "Pick<{}, {}>", say(b), keys.join(", ")),
+            Type::Merge(a, b) => write!(f, "Merge<{}, {}>", say(a), say(b)),
+            Type::Partial(b) => write!(f, "Partial<{}>", say(b)),
             // `resolve` turns `Option<T>` and `Result<T, E>` into variant lists;
             // a diagnostic still names them as the user wrote them.
             Type::Enum(vs) => match vs.as_slice() {
                 [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
                     match s.payload.first() {
-                        Some(t) => write!(f, "Option<{t}>"),
+                        Some(t) => write!(f, "Option<{}>", say(t)),
                         None => write!(f, "enum {{ None | Some }}"),
                     }
                 }
@@ -1083,7 +1101,7 @@ impl std::fmt::Display for Type {
                         && e.payload.len() == 1
                         && o.payload.len() == 1 =>
                 {
-                    write!(f, "Result<{}, {}>", o.payload[0], e.payload[0])
+                    write!(f, "Result<{}, {}>", say(&o.payload[0]), say(&e.payload[0]))
                 }
                 _ => {
                     let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
@@ -1091,28 +1109,128 @@ impl std::fmt::Display for Type {
                 }
             },
             Type::App(n, args) => {
-                let rendered: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-                write!(f, "{n}<{}>", rendered.join(", "))
+                let rendered: Vec<String> = args.iter().map(|a| say(a).to_string()).collect();
+                write!(f, "{}<{}>", name(n), rendered.join(", "))
             }
-            Type::Array(t) => write!(f, "Array<{t}>"),
-            Type::ArrayN(t, n) => write!(f, "Array<{t}, {n}>"),
-            Type::SmallArray(t, n) => write!(f, "SmallArray<{t}, {n}>"),
+            Type::Array(t) => write!(f, "Array<{}>", say(t)),
+            Type::ArrayN(t, n) => write!(f, "Array<{}, {n}>", say(t)),
+            Type::SmallArray(t, n) => write!(f, "SmallArray<{}, {n}>", say(t)),
             Type::ConstInt(n) => write!(f, "{n}"),
-            Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
-            Type::Stream(t) => write!(f, "Stream<{t}>"),
+            Type::Map(k, v) => write!(f, "Map<{}, {}>", say(k), say(v)),
+            Type::Stream(t) => write!(f, "Stream<{}>", say(t)),
             Type::Logger => write!(f, "Logger"),
             Type::Fn(params, ret) => {
-                let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+                let ps: Vec<String> = params.iter().map(|p| say(p).to_string()).collect();
                 write!(f, "fn({})", ps.join(", "))?;
                 if **ret != Type::Unit {
-                    write!(f, " -> {ret}")?;
+                    write!(f, " -> {}", say(ret))?;
                 }
                 Ok(())
             }
-            Type::Lazy(inner) => write!(f, "lazy {inner}"),
+            Type::Lazy(inner) => write!(f, "lazy {}", say(inner)),
             Type::Never => write!(f, "Never"),
             Type::Err => write!(f, "<type error>"),
         }
+    }
+}
+
+/// Every declaration whose name two modules declare, keyed by its linked
+/// name: the name its module wrote, and that module.
+/// The loader fills it where it renames apart (`log` becomes `log__from1`).
+/// A sentence reads it through a [`Speech`], so a refusal never names a
+/// linked name.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Spellings {
+    /// Linked name -> (written name, module key).
+    pub decls: std::collections::BTreeMap<String, (String, String)>,
+    /// The path each module wrote to import another, keyed
+    /// `(importer, imported)` by module key.
+    pub paths: std::collections::BTreeMap<(String, String), String>,
+    /// The root module's key, which a diagnostic's `None` file means.
+    pub root: String,
+}
+
+impl Spellings {
+    /// How a sentence in module `from` spells a declaration.
+    pub fn speech<'a>(&'a self, from: &'a Option<String>) -> Speech<'a> {
+        Speech {
+            table: self,
+            from,
+            qualified: Vec::new(),
+        }
+    }
+
+    /// The name the declaration `linked` was written as.
+    pub fn written<'a>(&'a self, linked: &'a str) -> &'a str {
+        self.decls.get(linked).map_or(linked, |(w, _)| w)
+    }
+
+    /// The linked name of a renamed declaration that `text` shows as a word:
+    /// a sentence that names one bypassed its [`Speech`].
+    pub fn linked_in(&self, text: &str) -> Option<&str> {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let renamed = self.decls.iter().filter(|(l, (w, _))| *l != w);
+        renamed.map(|(l, _)| l.as_str()).find(|l| {
+            (text.match_indices(l))
+                .any(|(i, _)| !text[..i].ends_with(word) && !text[i + l.len()..].starts_with(word))
+        })
+    }
+}
+
+/// How one sentence spells declarations. A declaration reads as its module
+/// wrote it. Where the sentence shows two declarations of one spelling, each
+/// one declared outside the sentence's module adds the path the sentence's
+/// module imports it by (`Cfg from "./lib/cfg"`), else its module key.
+pub struct Speech<'a> {
+    table: &'a Spellings,
+    from: &'a Option<String>,
+    qualified: Vec<String>,
+}
+
+impl<'a> Speech<'a> {
+    /// The speech for one sentence that shows `types` and the declarations
+    /// `names`.
+    pub fn sentence(&self, types: &[&Type], names: &[&str]) -> Speech<'a> {
+        let mut shown: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        for t in types {
+            crate::loader::type_heads(t, &mut |n| shown.push(n.clone()));
+        }
+        shown.sort();
+        shown.dedup();
+        let table = self.table;
+        let qualified = (shown.iter())
+            .filter(|n| (shown.iter()).any(|m| m != *n && table.written(m) == table.written(n)))
+            .cloned()
+            .collect();
+        Speech { qualified, ..*self }
+    }
+
+    /// The declaration `linked` as this sentence spells it.
+    pub fn name(&self, linked: &str) -> String {
+        let written = self.table.written(linked);
+        let from = self.from.as_ref().unwrap_or(&self.table.root);
+        match self.table.decls.get(linked) {
+            Some((_, m)) if m != from && self.qualified.iter().any(|q| q == linked) => {
+                let path = self.table.paths.get(&(from.clone(), m.clone()));
+                format!("{written} from \"{}\"", path.unwrap_or(m))
+            }
+            _ => written.to_string(),
+        }
+    }
+
+    /// `ty` as this sentence spells it.
+    pub fn ty<'b>(&'b self, ty: &'b Type) -> Said<'b> {
+        Said(ty, Some(self))
+    }
+
+    /// The `types` and the declarations `names` of one sentence, spelled.
+    pub fn say<const T: usize, const N: usize>(
+        &self,
+        types: [&Type; T],
+        names: [&str; N],
+    ) -> ([String; T], [String; N]) {
+        let s = self.sentence(&types, &names);
+        (types.map(|t| s.ty(t).to_string()), names.map(|n| s.name(n)))
     }
 }
 

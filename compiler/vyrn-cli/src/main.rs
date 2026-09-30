@@ -1125,21 +1125,25 @@ fn why_memory(file: &str) -> ExitCode {
         if f.module.is_some() || f.is_extern {
             continue;
         }
+        let mut tys: Vec<&vyrn_frontend::ast::Type> = f.params.iter().map(|p| &p.ty).collect();
+        tys.push(&f.ret);
+        let sp = program.spellings.speech(&None).sentence(&tys, &[&f.name]);
         let params: Vec<String> = f
             .params
             .iter()
-            .map(|p| format!("{}: {}", p.name, p.ty))
+            .map(|p| format!("{}: {}", p.name, sp.ty(&p.ty)))
             .collect();
         println!();
-        println!("  fn {}({}) -> {}", f.name, params.join(", "), f.ret);
+        let (name, ret) = (sp.name(&f.name), sp.ty(&f.ret));
+        println!("  fn {name}({}) -> {ret}", params.join(", "));
         // A return is owned, so the return type is the whole
         // answer.
         match own.proto.release_kind(&f.ret) {
             Some(ref kind) => println!(
                 "    transfers: yes — the caller owns the result, and releases it by {}",
-                kind.words()
+                kind.words(&sp)
             ),
-            None => println!("    transfers: no — the return type {} owns no heap", f.ret),
+            None => println!("    transfers: no — the return type {ret} owns no heap"),
         }
         let notes = match own.memory.get(&vyrn_frontend::ast::FnId::nth(i)) {
             Some(n) if !n.is_empty() => n,

@@ -1,0 +1,13 @@
+// Every declaration here shares its name with one in a root that imports this
+// module, so the loader renames them apart.
+type Cfg = { n: Int64 }
+type Txn = { label: String }
+fn take(a: consume Array<Int64>) { print(a.length) }
+fn helper(n: Int64) -> Int64 { return n }
+fn grow(xs: modify Array<Int64>) { xs.push(1) }
+export fn run() -> Int64 {
+    take([1])
+    let mut ys: Array<Int64> = []
+    grow(ys)
+    return helper(Cfg { n: 1 }.n)
+}
