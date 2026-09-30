@@ -1,2 +1,4 @@
-rejects_a_consumed_field_and_its_record_in_one_call.vyrn:12:0: `x.name` is consumed by `crf(..)`, and `x` is passed to the same call, so the callee could read what it frees
-  fix: `x.name.copy()` for the `consume` parameter
+rejects_a_consumed_field_and_its_record_in_one_call.vyrn:12:0: `x.name` was taken out of `x` here
+line 12: ... and `x` is used as a whole here, with the hole still in it
+  fix: `x.name.copy()` on line 12 if `x` is still needed whole
+  fix: write `x.name` back before this line

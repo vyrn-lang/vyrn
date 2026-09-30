@@ -1759,9 +1759,27 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
-    /// A read of a name: it must be held, and an alias's place unwritten.
+    /// A read of a name: it must be held, whole, and an alias's place
+    /// unwritten.
     fn read(&self, st: &State, v: &Val) -> Result<(), Refusal> {
-        self.read_at(st, v, "")
+        self.read_at(st, v, "")?;
+        match v {
+            Val::Name(n) => self.whole(st, *n),
+            Val::Lit(_) => Ok(()),
+        }
+    }
+
+    /// Refuses a use of `n` as a whole while a `consume` hole is open in it.
+    fn whole(&self, st: &State, n: Name) -> Result<(), Refusal> {
+        match st.holes.iter().find(|(h, _)| *h == n) {
+            Some((_, path)) => {
+                let l = self.hole_line(st, n, path);
+                let line = l.to_string();
+                let args = [("s", self.src(n)), ("path", path), ("l", &line)];
+                Err(self.say(WHOLE_WITH_HOLE, l, &args))
+            }
+            None => Ok(()),
+        }
     }
 
     /// [`Kernel::read`], with the path read for the wording.
@@ -1904,12 +1922,7 @@ impl<'b> Kernel<'b> {
                 if self.used_up(st, *n) {
                     return Err(self.used_after(st, *n, "used", ""));
                 }
-                if let Some((_, path)) = st.holes.iter().find(|(h, _)| h == n) {
-                    let l = self.hole_line(st, *n, path);
-                    let line = l.to_string();
-                    let args = [("s", self.src(*n)), ("path", path), ("l", &line)];
-                    return Err(self.say(WHOLE_WITH_HOLE, l, &args));
-                }
+                self.whole(st, *n)?;
                 if self.moves(*n, consume) {
                     self.gone(st, *n);
                 }
@@ -2015,7 +2028,9 @@ impl<'b> Kernel<'b> {
         let Some((n, path)) = root_of(p) else {
             return Ok(());
         };
-        self.read(st, &Val::Name(n))?;
+        // Not `read`: the root may have a hole open, and this store is what
+        // fills it (`p.xs = @push(consume p.xs, v)`).
+        self.read_at(st, &Val::Name(n), "")?;
         if !self.owned(n) {
             return Ok(());
         }

@@ -358,6 +358,13 @@ fn census() -> Vec<Row> {
             "`?` leaves `c` with its `where` rule unchecked",
             Kernel::Elsewhere,
         ),
+        row(
+            "r48_read_whole_with_a_hole.vyrn",
+            "a name with a hole may not be read whole",
+            "`p.name` was taken out of `p` here\nline 10: ... and `p` is used as a whole here, \
+             with the hole still in it",
+            Kernel::Its,
+        ),
     ]
 }
 

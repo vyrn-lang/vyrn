@@ -1,0 +1,12 @@
+// A `read` argument reads the whole value, so it may not have a hole either.
+type Person = { name: String, age: Int64 }
+
+fn show(p: Person) -> Int64 { return p.name.byteLength }
+
+fn main() -> Int64 {
+    let p = Person { name: "a" + "b", age: 1 }
+    let n = consume p.name
+    drop n
+    print(show(p))
+    return 0
+}
