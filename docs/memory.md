@@ -78,6 +78,13 @@ A `modify` argument is exclusive: the same value may not be passed as `modify`
 and read again in the same call. The caller sees the callee's writes after
 the call returns.
 
+A `consume` record parameter that the function returns on every path, changed
+only field by field, is the result. The function works in the caller's
+storage and writes no separate result, so `b = advance(b, dt)` copies no
+record. A call such as `let c = advance(b, dt)` moves `b` into `c` once. A
+function that returns anything else on one path copies its argument in and
+its result out. Output, traps and releases are the same either way.
+
 A receiver follows the same rule: `read self`, `modify self`, `consume self`.
 
 A prefix `consume` at an argument takes a field out of a value the caller

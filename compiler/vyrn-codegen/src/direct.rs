@@ -392,7 +392,7 @@ fn compile_inner(
     // emitted (recursion, forward references). The encoder hands out the index and the body is
     // filled whenever it exists, so emission order does not decide numbering.
     for f in user.iter() {
-        let s = cx.signature(f)?;
+        let s = cx.signature(f, &f.name)?;
         let (wp, wr) = cx.wasm_sig(&s, f.line)?;
         let index = match vyrn_rt.take(&f.name, &wp, &wr, f.line)? {
             Some(reserved) => reserved,
@@ -857,6 +857,11 @@ struct Sig {
     modify: Vec<bool>,
     ret: Repr,
     ret_ty: Type,
+    /// The `consume` parameter the result is left in
+    /// ([`vyrn_lower::core::returned_param`]): the callee takes its storage from the caller and
+    /// writes no separate result, so the call has no out-pointer and the caller moves the
+    /// argument into the call's destination first.
+    in_place: Option<usize>,
 }
 
 /// Identifies a body discovered during emission, so a second site reuses its function index.
@@ -1167,7 +1172,7 @@ impl<'a> Cx<'a> {
         if let Some(p) = self.mono.borrow().insts.iter().find(|p| p.key == key) {
             return Ok(p.sig.clone());
         }
-        let s = self.signature(&f)?;
+        let s = self.signature(&f, &core_key)?;
         let (wp, wr) = self.wasm_sig(&s, f.line)?;
         let sig = Sig {
             index: m.reserve_func(&wp, &wr),
@@ -1325,8 +1330,9 @@ impl<'a> Cx<'a> {
     }
 
     /// The signature a call site sees. `index` is filled in by the caller, which
-    /// is the only thing that knows where in the module this lands.
-    fn signature(&self, f: &Function) -> Result<Sig, String> {
+    /// is the only thing that knows where in the module this lands. The core body under `key`
+    /// decides [`Sig::in_place`].
+    fn signature(&self, f: &Function, key: &str) -> Result<Sig, String> {
         if !f.type_params.is_empty() {
             return unsupported(&format!("generic function `{}`", f.name), f.line);
         }
@@ -1335,6 +1341,18 @@ impl<'a> Cx<'a> {
             // caller. A `modify` one crosses as an address, but the callee copies its value.
             self.repr(&p.ty, f.line)?;
         }
+        let ret = self.repr(&f.ret, f.line)?;
+        // The host calls an `export extern fn` with an out-pointer.
+        let in_place = (self.world.body_of(key))
+            .filter(|_| ret.agg().is_some() && !f.is_export_extern)
+            .and_then(|body| {
+                let n = vyrn_lower::core::returned_param(body)?;
+                f.params.iter().position(|p| {
+                    p.name == body.names[n.index()].source
+                        && p.capability == Capability::Consume
+                        && p.ty == f.ret
+                })
+            });
         Ok(Sig {
             index: 0,
             params: f.params.iter().map(|p| p.ty.clone()).collect(),
@@ -1343,17 +1361,18 @@ impl<'a> Cx<'a> {
                 .iter()
                 .map(|p| p.capability == Capability::Modify)
                 .collect(),
-            ret: self.repr(&f.ret, f.line)?,
+            ret,
             ret_ty: f.ret.clone(),
+            in_place,
         })
     }
 
     /// The wasm signature of a Vyrn function: an aggregate return becomes a
-    /// hidden leading pointer the callee writes through, and every aggregate
-    /// parameter is its address.
+    /// hidden leading pointer the callee writes through, unless it is left in a parameter, and
+    /// every aggregate parameter is its address.
     fn wasm_sig(&self, sig: &Sig, line: usize) -> Result<(Vec<ValType>, Vec<ValType>), String> {
         let mut params = Vec::new();
-        if sig.ret.agg().is_some() {
+        if sig.ret.agg().is_some() && sig.in_place.is_none() {
             params.push(ValType::I32);
         }
         for (i, p) in sig.params.iter().enumerate() {
@@ -1584,6 +1603,15 @@ impl Dest {
                     b.ins(&Instruction::I32Add);
                 }
             }
+        }
+    }
+
+    /// Whether the binding's place `p` is this destination.
+    fn holds(self, p: Place) -> bool {
+        match (self, p) {
+            (Dest::Slot(a), Place::Slot(b)) => a == b,
+            (Dest::Addr(l, 0), Place::Local(k)) => l == k,
+            _ => false,
         }
     }
 
@@ -1868,8 +1896,10 @@ fn lower_body(
     };
     let sig = sig.clone();
     let (params, results) = cx.wasm_sig(&sig, f.line)?;
-    let dest = sig.ret.agg().map(|_| 0u32);
-    let shift = dest.map_or(0, |_| 1);
+    // An aggregate result goes out through the hidden leading pointer, or stays in the
+    // parameter [`Sig::in_place`] names.
+    let shift = u32::from(sig.ret.agg().is_some() && sig.in_place.is_none());
+    let dest = sig.ret.agg().map(|_| sig.in_place.map_or(0, |k| k as u32));
     // A lifted lambda's rows are the enclosing function's (see `f_shell`).
     let owner = f
         .name
@@ -1916,10 +1946,11 @@ fn lower_body(
         cx_fn.core_enter(&core);
     }
 
-    // An aggregate parameter arrives as the caller's address. Under [`Cx::args_in_place`] a
-    // `read` or `modify` one is used there. Otherwise the prologue copies it into a slot of its
-    // own, and a `modify` parameter is copy-in/copy-out: copied in here and back out at the
-    // epilogue, so the caller sees no write before the call returns.
+    // An aggregate parameter arrives as the caller's address. The one [`Sig::in_place`] names is
+    // used there, and under [`Cx::args_in_place`] so is a `read` or `modify` one. Otherwise the
+    // prologue copies it into a slot of its own, and a `modify` parameter is copy-in/copy-out:
+    // copied in here and back out at the epilogue, so the caller sees no write before the call
+    // returns.
     let mut copy_out: Vec<(u32, Place, Repr, Instruction<'static>)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
@@ -1927,7 +1958,7 @@ fn lower_body(
         let ty = p.ty.clone();
         let r = cx.repr(&p.ty, f.line)?;
         let in_place = matches!(r, Repr::Agg(_)) && p.capability != Capability::Consume;
-        let place = if in_place && cx.args_in_place {
+        let place = if sig.in_place == Some(i) || in_place && cx.args_in_place {
             Place::Local(local)
         } else if p.capability == Capability::Modify {
             let place = match &r {
@@ -4669,7 +4700,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Pushes the out-pointer for an aggregate result before the arguments; `None` for a
     /// non-aggregate. It is the consumer's storage when that holds this type, else a new slot.
-    /// Pair with [`Fn_::out_ptr_back`] after the call.
+    /// A result left in a parameter ([`Sig::in_place`]) pushes nothing here: [`Fn_::moved_in`]
+    /// passes the destination as that argument. Pair with [`Fn_::out_ptr_back`] after the call.
     fn out_ptr(
         &mut self,
         b: &mut Frame,
@@ -4681,8 +4713,35 @@ impl<'p> Fn_<'_, 'p> {
             Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&sig.ret_ty) => (d, true),
             _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
         };
-        d.addr(b, 0);
+        if sig.in_place.is_none() {
+            d.addr(b, 0);
+        }
         Some((d, used))
+    }
+
+    /// Passes argument `i` of a call to `sig` through `push`. The argument a result is left in
+    /// ([`Sig::in_place`]) is moved into the destination `dest` first and passed as it, unless
+    /// `home` says it is already there.
+    fn moved_in(
+        &mut self,
+        b: &mut Frame,
+        sig: &Sig,
+        dest: Option<(Dest, bool)>,
+        i: usize,
+        home: bool,
+        push: impl FnOnce(&mut Self, &mut Frame) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (Some((d, _)), Some(l)) = (dest.filter(|_| sig.in_place == Some(i)), sig.ret.agg())
+        else {
+            return push(self, b);
+        };
+        if !home {
+            d.addr(b, 0);
+            push(self, b)?;
+            b.copy(l.size);
+        }
+        d.addr(b, 0);
+        Ok(())
     }
 
     /// Pushes the out-pointer again as the result and sets `dest_used` if it was the
@@ -4749,7 +4808,10 @@ impl<'p> Fn_<'_, 'p> {
         let dest = self.out_ptr(b, sig, hint);
         let mut spilled = Vec::new();
         for (i, p) in sig.params.iter().take(argc).enumerate() {
-            spilled.extend(operand(self, m, b, i, p)?);
+            self.moved_in(b, sig, dest, i, false, |s, b| {
+                spilled.extend(operand(s, m, b, i, p)?);
+                Ok(())
+            })?;
         }
         b.ins(&Instruction::Call(sig.index));
         reload(b, &spilled);
@@ -5116,6 +5178,7 @@ impl<'p> Fn_<'_, 'p> {
             params,
             ret: self.cx.repr(ret, line)?,
             ret_ty: (**ret).clone(),
+            in_place: None,
         };
         let (wp, wr) = self.cx.wasm_sig(&s, line)?;
         let sig = Sig {
@@ -9993,10 +10056,13 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let part = self.core_part_dest(b, body, w, ss, i, line)?;
                     mark = b.mark();
+                    let back = self.core_back(body, w, ss, i);
                     let (dest, place) = if lands {
                         (Some(Dest::Addr(self.core_out(line)?, 0)), None)
                     } else if part.is_some() {
                         (part, None)
+                    } else if let Some((d, p)) = back {
+                        (Some(d), Some(p))
                     } else if body.names[n.index()].source.starts_with('@') {
                         (None, None)
                     } else {
@@ -10186,6 +10252,14 @@ impl<'p> Fn_<'_, 'p> {
                     let mut parts = Parts::Core(body, &kv, w);
                     self.map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, *releases, *line)?;
                 }
+                // `x = @t` after a call that ran in `x`'s storage ([`Fn_::core_back`]).
+                St::Store {
+                    place: vyrn_frontend::core::Place::Name(x),
+                    value: Val::Name(t),
+                    releases: false,
+                    ..
+                } if (self.core_place(w, body, *x))
+                    .is_some_and(|p| Some(p.0) == self.core_place(w, body, *t).map(|q| q.0)) => {}
                 // A place with an address, for `x = v`, `r.f = v` and `a[i] = v`: the address,
                 // the old value kept aside where the row releases it, the value landed, the old
                 // value freed. A layout lands as a byte copy. A module-state String has its
@@ -10338,10 +10412,14 @@ impl<'p> Fn_<'_, 'p> {
                     match (value, self.ret.agg().map(|l| l.size)) {
                         // The caller's storage, which the `let` before this
                         // row built into or which the value is copied into:
-                        // [`Fn_::ret_value`]'s two cases.
+                        // [`Fn_::ret_value`]'s two cases. A value in the
+                        // parameter it is left in ([`Sig::in_place`]) is there.
                         (Some(Val::Name(n)), Some(size)) => {
-                            if w.landed.take() != Some(*n) {
-                                Dest::Addr(self.core_out(*line)?, 0).addr(b, 0);
+                            let out = self.core_out(*line)?;
+                            let home = self.core_place(w, body, *n).map(|(p, _)| p)
+                                == Some(Place::Local(out));
+                            if w.landed.take() != Some(*n) && !home {
+                                Dest::Addr(out, 0).addr(b, 0);
                                 self.core_addr_of(b, w, body, *n, *line)?;
                                 agg_landed(b, size, false);
                             }
@@ -11075,22 +11153,32 @@ impl<'p> Fn_<'_, 'p> {
         };
         let dest = self.out_ptr(b, &sig, hint);
         let mut spilled = Vec::new();
-        for ((a, c), p) in args.iter().zip(&sig.params) {
-            match (a, c) {
-                (Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Modify)
-                    if !matches!(self.cx.repr(p, line)?, Repr::Agg(_)) =>
-                {
-                    let Some((Place::Local(l), ty)) = self.core_place(w, body, *n) else {
-                        return unsupported("a `modify` argument with no local", line);
-                    };
-                    spilled.push(self.spill(b, l, &ty, line)?);
+        for (i, ((a, c), p)) in args.iter().zip(&sig.params).enumerate() {
+            // `x = f(x)` passes `x`'s own storage as the destination ([`Fn_::core_back`]).
+            let home = match (a, dest) {
+                (Arg::Val(Val::Name(x)), Some((d, _))) => {
+                    (self.core_place(w, body, *x)).is_some_and(|(pl, _)| d.holds(pl))
                 }
-                (Arg::Val(v), _) => self.core_val(m, b, body, w, v, p, line)?,
-                (Arg::Place(pl), _) => {
-                    let (_, off) = self.core_addr(m, b, body, w, pl, line)?;
-                    self.core_step(b, off);
+                _ => false,
+            };
+            self.moved_in(b, &sig, dest, i, home, |s, b| {
+                match (a, c) {
+                    (Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Modify)
+                        if !matches!(s.cx.repr(p, line)?, Repr::Agg(_)) =>
+                    {
+                        let Some((Place::Local(l), ty)) = s.core_place(w, body, *n) else {
+                            return unsupported("a `modify` argument with no local", line);
+                        };
+                        spilled.push(s.spill(b, l, &ty, line)?);
+                    }
+                    (Arg::Val(v), _) => s.core_val(m, b, body, w, v, p, line)?,
+                    (Arg::Place(pl), _) => {
+                        let (_, off) = s.core_addr(m, b, body, w, pl, line)?;
+                        s.core_step(b, off);
+                    }
                 }
-            }
+                Ok(())
+            })?;
         }
         b.ins(&Instruction::Call(sig.index));
         reload(b, &spilled);
@@ -12166,6 +12254,76 @@ impl<'p> Fn_<'_, 'p> {
         Ok(Some(d))
     }
 
+    /// The storage of `x` where row `i` is `@t = f(.., x, ..)`, the next is `x = @t`, and `f`
+    /// leaves its result in the parameter `x` goes to ([`Sig::in_place`]). The call then runs in
+    /// `x`'s own storage and the store moves nothing. Every other argument is a scalar or a
+    /// layout in frame bytes apart from `x`'s, so none reads that storage while the callee
+    /// writes it: `x = g(x, x)` runs in a copy.
+    fn core_back(
+        &self,
+        body: &vyrn_frontend::core::Body,
+        w: &Walked,
+        ss: &[St],
+        i: usize,
+    ) -> Option<(Dest, Place)> {
+        let St::Let(
+            t,
+            Rhs::Call {
+                callee,
+                kind,
+                solved,
+                targets,
+                args,
+                ..
+            },
+        ) = &ss[i]
+        else {
+            return None;
+        };
+        let Some(St::Store {
+            place: vyrn_frontend::core::Place::Name(x),
+            value: Val::Name(v),
+            releases: false,
+            ..
+        }) = ss.get(i + 1)
+        else {
+            return None;
+        };
+        let temp = body.names[t.index()].source.starts_with('@') && w.reads[t.index()] == 1;
+        if v != t || !temp || !targets.is_empty() {
+            return None;
+        }
+        let k = self
+            .core_sig(body, callee, *kind, solved, targets)?
+            .in_place?;
+        let (Arg::Val(Val::Name(a)), Capability::Consume) = args.get(k)? else {
+            return None;
+        };
+        let (place, ty) = self.core_place(w, body, *x)?;
+        // The frame bytes a slot name holds, which no other held slot overlaps.
+        let span = |p: Place, t: &Type| match p {
+            Place::Slot(off) => (self.cx.layout(t, 0).ok()).map(|l| off..off + l.size),
+            _ => None,
+        };
+        let apart = |y: &Name| {
+            let (py, ty_y) = self.core_place(w, body, *y)?;
+            let (sx, sy) = (span(place, &ty)?, span(py, &ty_y)?);
+            Some(sx.end <= sy.start || sy.end <= sx.start)
+        };
+        let others = args.iter().enumerate().all(|(j, (arg, _))| match arg {
+            _ if j == k => true,
+            Arg::Val(v) if !self.core_layout_name(body, v) => true,
+            Arg::Val(Val::Name(y)) => apart(y) == Some(true),
+            _ => false,
+        });
+        let d = match place {
+            Place::Slot(off) => Dest::Slot(off),
+            Place::Local(l) => Dest::Addr(l, 0),
+            Place::Static(_) => return None,
+        };
+        (a == x && others).then_some((d, place))
+    }
+
     /// The local holding the caller's out-pointer.
     fn core_out(&self, line: usize) -> Result<u32, String> {
         self.dest
@@ -12316,10 +12474,10 @@ impl<'p> Fn_<'_, 'p> {
             return self.value_sig(&t);
         }
         if !targets.is_empty() {
-            let (f, _, subst, bound) = self.core_ho(callee, kind, solved, targets)?;
-            return self
-                .cx
-                .signature(&ho_shell(self.cx, f, &subst, &bound).0)
+            let (f, targs, subst, bound) = self.core_ho(callee, kind, solved, targets)?;
+            let key = vyrn_lower::spell(&f.name, &targs);
+            return (self.cx)
+                .signature(&ho_shell(self.cx, f, &subst, &bound).0, &key)
                 .ok();
         }
         // A routed builtin is a call to the function its row names.
@@ -12333,7 +12491,10 @@ impl<'p> Fn_<'_, 'p> {
         // A `modify` parameter crosses as the address of the caller's binding
         // ([`Fn_::core_args_readable`]); an aggregate result, through [`Fn_::out_ptr`].
         match self.core_instance(callee, kind, solved) {
-            Some((f, _, subst)) => self.cx.signature(&instance_shell(f, &subst)).ok(),
+            Some((f, targs, subst)) => {
+                let key = vyrn_lower::spell(&f.name, &targs);
+                self.cx.signature(&instance_shell(f, &subst), &key).ok()
+            }
             None => (self.cx.sigs.get(callee).cloned()).or_else(|| self.cx.lambda_sig(callee)),
         }
     }
@@ -12424,6 +12585,7 @@ impl<'p> Fn_<'_, 'p> {
                 params,
                 ret: self.cx.repr(ret, 0).ok()?,
                 ret_ty: (**ret).clone(),
+                in_place: None,
             },
             ncaps: 1,
         })
@@ -12457,6 +12619,7 @@ impl<'p> Fn_<'_, 'p> {
             params: ps.clone(),
             ret: self.cx.repr(r, 0).ok()?,
             ret_ty: (**r).clone(),
+            in_place: None,
         })
     }
 
