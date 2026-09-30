@@ -11,7 +11,7 @@ use crate::ast::{
     Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt, Type,
     TypeDecl,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The element-place primitive `@slot(container, index)`: the only indexing
 /// the backends know by name. Unspellable.
@@ -938,32 +938,22 @@ pub fn all(p: &Program) -> impl Iterator<Item = (&ImplBlock, &Function)> {
         .flat_map(|i| i.places.iter().map(move |f| (i, f)))
 }
 
-thread_local! {
-    /// The user projection names of the program under check, set
-    /// by [`note_place_names`]. A name is an element read like `@at` at every
-    /// site, whatever the receiver: that only widens a borrow verdict.
-    static PLACE_NAMES: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-}
-
-/// Whether `name` is a user projection's name.
-pub(crate) fn named_projection(name: &str) -> bool {
-    PLACE_NAMES.with(|s| s.borrow().contains(name))
-}
-
-/// `@at`, or a user projection's own name: an element read either way.
-pub(crate) fn projection_call(name: &str) -> bool {
-    name == AT || named_projection(name)
+/// `@at`, or one of `places`, the program's user projection names
+/// ([`crate::own::Ownership::place_names`]): an element read either way. A
+/// name is an element read at every site, whatever the receiver: that only
+/// widens a borrow verdict.
+pub fn projection_call(name: &str, places: &HashSet<String>) -> bool {
+    name == AT || places.contains(name)
 }
 
 /// Returns the place an element read looks into, as `(root name, quoted
 /// path)`: `xs[i].key` is `("xs", "xs[i].key")`. [`crate::ast::place_path`]
 /// answers `None` for these, because `xs[i]` is a call to `@at`.
-pub fn element_path(e: &Expr) -> Option<(String, String)> {
+pub fn element_path(e: &Expr, places: &HashSet<String>) -> Option<(String, String)> {
     match e {
-        Expr::Call { name, args, .. } if projection_call(name) => {
+        Expr::Call { name, args, .. } if projection_call(name, places) => {
             let a = args.first()?;
-            let (root, path) = crate::ast::place_path(a).or_else(|| element_path(a))?;
+            let (root, path) = crate::ast::place_path(a).or_else(|| element_path(a, places))?;
             // Quoted as the reader wrote it: `xs[i]`, or `xs.name(..)`.
             if name == AT {
                 Some((root, format!("{path}[{}]", index_text(args.get(1)))))
@@ -973,7 +963,7 @@ pub fn element_path(e: &Expr) -> Option<(String, String)> {
         }
         // A field of an element, `fs[0].key`, which `place_path` cannot reach.
         Expr::Field { expr, field, .. } => {
-            let (root, path) = element_path(expr)?;
+            let (root, path) = element_path(expr, places)?;
             Some((root, format!("{path}.{field}")))
         }
         _ => None,
@@ -990,16 +980,9 @@ fn index_text(e: Option<&Expr>) -> String {
     }
 }
 
-/// Records `program`'s projection names. Call it per analysis, so the language
-/// server answers for the program in hand.
-pub fn note_place_names(program: &Program) {
-    PLACE_NAMES.with(|s| {
-        *s.borrow_mut() = program
-            .impls
-            .iter()
-            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
-            .collect();
-    });
+/// Returns `program`'s user projection names.
+pub fn place_names(program: &Program) -> HashSet<String> {
+    all(program).map(|(_, f)| f.name.clone()).collect()
 }
 
 #[cfg(test)]

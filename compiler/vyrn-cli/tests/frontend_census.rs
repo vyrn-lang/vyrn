@@ -153,7 +153,7 @@ fn project_sections() -> Vec<Section> {
         sec("fn count_uses", Job),
         sec("fn walk_block", Shared),
         sec("fn is_place", Shared),
-        sec("fn named_projection", Job),
+        sec("fn projection_call", Job),
         sec("mod tests", Tests),
     ]
 }

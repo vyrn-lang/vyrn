@@ -11,7 +11,7 @@
 //! that is a leak. A construct this pass does not lower returns a [`Gap`], and
 //! the instance counts as unlowered.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, Function, Id, LambdaBody, MatchArm, NodeId,
@@ -39,9 +39,9 @@ use vyrn_frontend::core::{
 
 /// The path a reader wrote for a place read, as the checker quotes it
 /// (`p.name`, `xs[i]`). `None` where the expression names no place.
-fn reader_path(e: &Expr) -> Option<String> {
+fn reader_path(e: &Expr, places: &HashSet<String>) -> Option<String> {
     vyrn_frontend::ast::place_path(e)
-        .or_else(|| vyrn_frontend::project::element_path(e))
+        .or_else(|| vyrn_frontend::project::element_path(e, places))
         .map(|(_, p)| p)
 }
 
@@ -118,11 +118,16 @@ fn reads_a_part(e: &Expr) -> bool {
 /// wording for `for x in consume xs` over a prefix `consume`
 /// (`movecheck::TakeForm`). Both rules are syntactic, so they hold for
 /// heapless types too.
-fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
+fn take_names_a_place(
+    e: &Expr,
+    places: &HashSet<String>,
+    line: usize,
+    by_loop: bool,
+) -> Result<(), Gap> {
     if vyrn_frontend::ast::place_path(e).is_some() {
         return Ok(());
     }
-    if let Some((root, path)) = vyrn_frontend::project::element_path(e) {
+    if let Some((root, path)) = vyrn_frontend::project::element_path(e, places) {
         let rule = [ELEMENT_TAKEN, SWAP_REMOVE].join("|");
         return refuse(say(&rule, &[("path", &path), ("root", &root)]), line);
     }
@@ -1520,7 +1525,7 @@ impl<'a> Builder<'a> {
     /// wrote ([`NameInfo::path`]).
     fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
         let n = self.name("@borrow", ty, false, line);
-        self.body.names[n.index()].path = reader_path(e);
+        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
         n
     }
 
@@ -2981,7 +2986,7 @@ impl<'a> Builder<'a> {
                     return gap("a `for` over what no loop walks", *line);
                 };
                 if *consuming {
-                    take_names_a_place(iter, *line, true)?;
+                    take_names_a_place(iter, &self.own.place_names, *line, true)?;
                 }
                 // `owner` is the name the element rule below asks about: the
                 // named container where the loop borrows it.
@@ -4067,7 +4072,7 @@ impl<'a> Builder<'a> {
     fn made_scrutinee(&self, e: &'a Expr) -> bool {
         use vyrn_frontend::ast::place_path;
         use vyrn_frontend::project::element_path;
-        place_path(e).is_none() && element_path(e).is_none()
+        place_path(e).is_none() && element_path(e, &self.own.place_names).is_none()
     }
 
     /// The scrutinee of a `match`, `if let` or `?`: the value it switches on,
@@ -4416,7 +4421,7 @@ impl<'a> Builder<'a> {
         match e {
             // A call that forwards none of its arguments builds its result
             // afresh (`xs[j].copy()`), whatever it reads.
-            Expr::Call { name, .. } if !mc::call_may_forward(name) => true,
+            Expr::Call { name, .. } if !mc::call_may_forward(name, &self.own.place_names) => true,
             Expr::Call { name, args, .. } => args.iter().all(|a| {
                 let is_root_read = match a {
                     Expr::Var { name: v, .. } => v == root,
@@ -4425,7 +4430,7 @@ impl<'a> Builder<'a> {
                 if !is_root_read {
                     return self.read_only_mentions(a, root, out);
                 }
-                if !mc::call_may_forward(name) {
+                if !mc::call_may_forward(name, &self.own.place_names) {
                     true
                 } else if self.declares(name)
                     && !name.starts_with('@')
@@ -4515,7 +4520,8 @@ impl<'a> Builder<'a> {
         };
         // A view LENDS, unless the element it hands out is a heap-free copy.
         let decls = self.proto.types();
-        let view_copies = mc::lends_result(callee)
+        let views = mc::lends_result(callee, &self.own.place_names);
+        let view_copies = views
             && matches!(
                 vyrn_frontend::types::resolve(&ty, &decls),
                 Type::Array(ref et)
@@ -4527,6 +4533,7 @@ impl<'a> Builder<'a> {
             callee: callee.to_string(),
             ix,
             producer,
+            views,
             view_copies,
             constructs: matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
                 || self.is_variant(callee),
@@ -4589,7 +4596,7 @@ impl<'a> Builder<'a> {
         let n = self.name("@thunk", thunk, false, e.line());
         let callee = format!("@thunk{}", n.0);
         self.body.names[n.index()].source = callee.clone();
-        self.body.names[n.index()].path = reader_path(e);
+        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
         out.push(St::Let(n, Rhs::Read(place)));
         self.release_receiver(e, out, true);
         Ok(Rhs::Call {
@@ -5044,7 +5051,7 @@ impl<'a> Builder<'a> {
     /// The `consume p` prefix. Its refusals are about the keyword,
     /// which the kernel does not see, so they are stated here.
     fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
-        take_names_a_place(e, line, false)?;
+        take_names_a_place(e, &self.own.place_names, line, false)?;
         self.consume_names_a_borrow(e, line)?;
         if self.in_module_state(e) {
             return self.read_val(e, out);
