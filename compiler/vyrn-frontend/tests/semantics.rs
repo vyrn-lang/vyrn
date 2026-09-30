@@ -44,6 +44,10 @@ const STD: &[(&str, &str)] = &[
     ("std/http.vyrn", include_str!("../../../std/http.vyrn")),
     ("std/i18n.vyrn", include_str!("../../../std/i18n.vyrn")),
     ("std/icons.vyrn", include_str!("../../../std/icons.vyrn")),
+    (
+        "std/imports.vyrn",
+        include_str!("../../../std/imports.vyrn"),
+    ),
     ("std/json.vyrn", include_str!("../../../std/json.vyrn")),
     ("std/json5.vyrn", include_str!("../../../std/json5.vyrn")),
     (
