@@ -707,11 +707,7 @@ fn lex_byte_literal(
                     _ => return Err(err(Rule::ByteHexDigits {})),
                 }
             }
-            other => {
-                return Err(err(Rule::UnknownByteEscape {
-                    other: other.to_string(),
-                }))
-            }
+            other => return Err(err(crate::rules::rule!(UnknownByteEscape, other))),
         }
     } else {
         let ch = chars[i];

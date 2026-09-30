@@ -772,17 +772,17 @@ impl<'b> Kernel<'b> {
     /// broke it: [`NEVER_DISPOSED`], or with `twice` [`DISPOSED_TWICE`].
     fn obligation(&self, n: Name, twice: bool) -> Refusal {
         let i = &self.body.names[n.index()];
-        let ty = i.ty.to_string();
+        let (note, by) = match &i.linear {
+            Some(Linear::Declared(by)) if *by == i.ty.to_string() => (OWED_DECLARED, by.as_str()),
+            Some(Linear::Declared(by)) => (OWED_HELD, by.as_str()),
+            _ => (OWED_STREAM, ""),
+        };
+        let ([ty], [by]) = self.body.speech().say([&i.ty], [by]);
         let a = match ty.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) {
             true => "an",
             false => "a",
         };
-        let (note, by) = match &i.linear {
-            Some(Linear::Declared(by)) if *by == ty => (OWED_DECLARED, by.as_str()),
-            Some(Linear::Declared(by)) => (OWED_HELD, by.as_str()),
-            _ => (OWED_STREAM, ""),
-        };
-        let args = [("s", i.source.as_str()), ("a", a), ("ty", &ty), ("by", by)];
+        let args = [("s", i.source.as_str()), ("a", a), ("ty", &ty), ("by", &by)];
         let rule = if twice {
             DISPOSED_TWICE
         } else {
@@ -886,7 +886,7 @@ impl<'b> Kernel<'b> {
                     Some(Alias { via: Some(m), .. }) => self.src(*m),
                     _ => b,
                 };
-                let args = [("b", b), ("ty", ty.as_str()), ("m", m)];
+                let args = [("b", b), ("ty", self.body.spelled(ty)), ("m", m)];
                 return Err(self.say(SEALED_PAYLOAD, self.here, &args));
             }
             Some(Payload::Hole(p)) => p,
@@ -2102,12 +2102,13 @@ impl<'b> Kernel<'b> {
             },
             // An impl method is named by its protocol member, so an instance
             // and the generic body word one refusal alike.
-            Rhs::Call { callee, .. } => format!(
-                "`{}(..)`",
-                vyrn_frontend::types::impl_method_member(callee)
-                    .unwrap_or(callee)
-                    .trim_start_matches('@')
-            ),
+            Rhs::Call { callee, .. } => {
+                let member = vyrn_frontend::types::impl_method_member(callee).unwrap_or(callee);
+                format!(
+                    "`{}(..)`",
+                    self.body.spelled(member.trim_start_matches('@'))
+                )
+            }
             Rhs::Take(_) => "`consume`".to_string(),
             Rhs::Make(..) => "a literal".to_string(),
             Rhs::Read(_) | Rhs::Prim(..) => String::new(),

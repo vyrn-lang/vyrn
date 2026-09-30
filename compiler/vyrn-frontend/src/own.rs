@@ -71,15 +71,15 @@ pub enum DropKind {
 
 impl DropKind {
     /// Returns how this kind reclaims, in the words `vyrn why --memory` and the
-    /// LSP hover both print.
-    pub fn words(&self) -> String {
+    /// LSP hover both print, as `sp` spells a type.
+    pub fn words(&self, sp: &crate::ast::Speech) -> String {
         match self {
             DropKind::FreeStr => "freeing the String buffer".into(),
             DropKind::FreeArr => "freeing the array buffer".into(),
             DropKind::FreeSmallArr => "freeing the spilled buffer, if it spilled".into(),
             DropKind::FreeMap => "freeing both map buffers".into(),
             DropKind::CloseStream => "closing the stream".into(),
-            DropKind::Deep(ty) => format!("releasing what the {ty} holds"),
+            DropKind::Deep(ty) => format!("releasing what the {} holds", sp.ty(ty)),
             DropKind::Release(f, _) => format!("calling `{f}`"),
         }
     }

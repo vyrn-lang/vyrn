@@ -1,0 +1,3 @@
+// A root that imports this module by namespace also declares a `Cfg`.
+export type Cfg = { m: String }
+export fn make() -> Cfg { return Cfg { m: "a" } }
