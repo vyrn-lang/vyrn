@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use vyrn_frontend::ast::{Expr, Id, ImportDecl, ImportSource};
+use vyrn_frontend::ast::{Expr, ImportDecl, ImportSource};
 
 use crate::contracts::vyx_script;
 use lsp_types::{Position, PrepareRenameResponse, Range, TextEdit, Url, WorkspaceEdit};
@@ -612,6 +612,7 @@ fn candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vyrn_frontend::ast::Id;
 
     #[test]
     fn a_generated_name_keeps_its_prefix_and_swaps_the_declaration_it_stands_for() {

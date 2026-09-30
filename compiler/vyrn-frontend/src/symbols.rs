@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    self, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Stmt, Type,
-    TypeDecl,
+    self, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Speech,
+    Spellings, Stmt, Type, TypeDecl,
 };
 use crate::checker;
 use crate::diagnostics::Diagnostic;
@@ -138,6 +138,9 @@ pub struct Analysis {
     /// disagree with the walk that decided. Empty when the checks did not run
     /// or no [`Judge`] was given.
     pub memory: Vec<MemoryNote>,
+    /// How hover, completion and type hints spell a declaration the loader
+    /// renamed apart. Empty for a document no load linked.
+    pub spellings: std::sync::Arc<Spellings>,
 }
 
 /// One binding's memory answer, positioned for the editor: a
@@ -434,9 +437,13 @@ fn analyze_inner(
         _ => OriginIndex::default(),
     };
 
+    let spellings = checked
+        .as_ref()
+        .map(|p| p.spellings.clone())
+        .unwrap_or_default();
     let decl_lines = decl_lines(&program);
     let fn_lines = fn_lines(&program);
-    let mut symbols = index_symbols(&program, &tok_info, &decl_lines);
+    let mut symbols = index_symbols(&program, &tok_info, &decl_lines, &spellings);
     // Declarations the root imports, indexed from the linked program with their
     // file, so hover and go-to-definition reach the imported module.
     if let Some(linked) = &checked {
@@ -462,7 +469,7 @@ fn analyze_inner(
                 Completion {
                     label: m.name.clone(),
                     kind: SymbolKind::Method,
-                    detail: function_detail(m),
+                    detail: function_detail(m, &spellings),
                     doc,
                 },
             ));
@@ -476,7 +483,7 @@ fn analyze_inner(
                 Completion {
                     label: m.name.clone(),
                     kind: SymbolKind::Method,
-                    detail: method_sig_detail(m),
+                    detail: method_sig_detail(m, &spellings),
                     doc: m.doc.clone(),
                 },
             ));
@@ -506,7 +513,11 @@ fn analyze_inner(
                     Completion {
                         label: f.name.clone(),
                         kind: SymbolKind::Field,
-                        detail: field_detail(f, &member_src.type_decls),
+                        detail: field_detail(
+                            f,
+                            &member_src.type_decls,
+                            &signature_speech(&spellings, &[&f.ty], &[]),
+                        ),
                         doc: None,
                     },
                 ));
@@ -591,6 +602,7 @@ fn analyze_inner(
         origins,
         remapped,
         symbol_maps: origin_index.all,
+        spellings,
     }
 }
 
@@ -649,6 +661,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         remapped: Vec::new(),
         symbol_maps: Vec::new(),
         memory: Vec::new(),
+        spellings: Default::default(),
     }
 }
 
@@ -1074,7 +1087,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
                 out.push(Completion {
                     label: f.name.clone(),
                     kind: SymbolKind::Field,
-                    detail: format!("{}: {}", f.name, type_to_string(&f.ty)),
+                    detail: format!("{}: {}", f.name, type_to_string(&f.ty, &analysis.spellings)),
                     doc: None,
                 });
             }
@@ -1473,7 +1486,12 @@ fn name_col_on_line(tok_info: &[TokenInfo], name: &str, line: usize) -> (usize, 
         .unwrap_or((0, 0))
 }
 
-fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]) -> Vec<Symbol> {
+fn index_symbols(
+    program: &ast::Program,
+    tok_info: &[TokenInfo],
+    lines: &[usize],
+    sp: &Spellings,
+) -> Vec<Symbol> {
     let mut out = Vec::new();
 
     for f in &program.functions {
@@ -1484,7 +1502,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             line: f.line,
             col,
             end_col,
-            detail: function_detail(f),
+            detail: function_detail(f, sp),
             doc: f.doc.clone(),
             file: None,
         });
@@ -1499,7 +1517,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             line: g.line,
             col,
             end_col,
-            detail: global_detail(g),
+            detail: global_detail(g, sp),
             doc: g.doc.clone(),
             file: None,
         });
@@ -1514,7 +1532,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                 line: m.line,
                 col,
                 end_col,
-                detail: function_detail(m),
+                detail: function_detail(m, sp),
                 doc: m
                     .doc
                     .clone()
@@ -1532,7 +1550,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             line: p.line,
             col,
             end_col,
-            detail: protocol_detail(p),
+            detail: protocol_detail(p, sp),
             doc: p.doc.clone(),
             file: None,
         });
@@ -1544,7 +1562,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                 line: m.line,
                 col,
                 end_col,
-                detail: method_sig_detail(m),
+                detail: method_sig_detail(m, sp),
                 doc: m.doc.clone(),
                 file: None,
             });
@@ -1564,7 +1582,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             line: t.line,
             col,
             end_col,
-            detail: type_decl_detail(t, &program.type_decls),
+            detail: type_decl_detail(t, &program.type_decls, sp),
             doc: t.doc.clone(),
             file: None,
         });
@@ -1590,7 +1608,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                     line: vline,
                     col,
                     end_col,
-                    detail: variant_detail(&t.name, v),
+                    detail: variant_detail(&t.name, v, sp),
                     doc: None,
                     file: None,
                 });
@@ -1641,6 +1659,7 @@ fn index_imported_symbols(
     linked: &ast::Program,
     origins: &OriginIndex,
 ) -> Vec<Symbol> {
+    let sp = &*linked.spellings;
     // Each imported original name mapped to the local name the root uses (the
     // alias, or the original). A symbol is keyed by the local name, to
     // line up with the root's tokens, and an alias notes its original in hover.
@@ -1671,7 +1690,7 @@ fn index_imported_symbols(
                     line: f.line,
                     col: 0,
                     end_col: 0,
-                    detail: alias_note(local, &f.name, function_detail(f)),
+                    detail: alias_note(local, &f.name, function_detail(f, sp)),
                     doc: f.doc.clone(),
                     file: Some(file.clone()),
                 });
@@ -1688,7 +1707,7 @@ fn index_imported_symbols(
                     line: p.line,
                     col: 0,
                     end_col: 0,
-                    detail: alias_note(local, &p.name, protocol_detail(p)),
+                    detail: alias_note(local, &p.name, protocol_detail(p, sp)),
                     doc: p.doc.clone(),
                     file: Some(file.clone()),
                 });
@@ -1699,7 +1718,7 @@ fn index_imported_symbols(
                         line: m.line,
                         col: 0,
                         end_col: 0,
-                        detail: method_sig_detail(m),
+                        detail: method_sig_detail(m, sp),
                         doc: m.doc.clone(),
                         file: Some(file.clone()),
                     });
@@ -1722,7 +1741,7 @@ fn index_imported_symbols(
                     line: t.line,
                     col: 0,
                     end_col: 0,
-                    detail: alias_note(local, &t.name, type_decl_detail(t, &linked.type_decls)),
+                    detail: alias_note(local, &t.name, type_decl_detail(t, &linked.type_decls, sp)),
                     doc: t.doc.clone(),
                     file: Some(file.clone()),
                 });
@@ -1734,7 +1753,7 @@ fn index_imported_symbols(
                             line: t.line,
                             col: 0,
                             end_col: 0,
-                            detail: variant_detail(&t.name, v),
+                            detail: variant_detail(&t.name, v, sp),
                             doc: None,
                             file: Some(file.clone()),
                         });
@@ -1851,7 +1870,7 @@ fn namespace_members(
                 line: f.line,
                 col: 0,
                 end_col: 0,
-                detail: function_detail(f),
+                detail: function_detail(f, &Spellings::default()),
                 doc: f.doc.clone(),
                 file: file(target),
             });
@@ -1865,7 +1884,7 @@ fn namespace_members(
                 line: p.line,
                 col: 0,
                 end_col: 0,
-                detail: protocol_detail(p),
+                detail: protocol_detail(p, &Spellings::default()),
                 doc: p.doc.clone(),
                 file: file(target),
             });
@@ -1881,7 +1900,7 @@ fn namespace_members(
             line: t.line,
             col: 0,
             end_col: 0,
-            detail: type_decl_detail(t, &program.type_decls),
+            detail: type_decl_detail(t, &program.type_decls, &Spellings::default()),
             doc: t.doc.clone(),
             file: file(target),
         });
@@ -1893,7 +1912,7 @@ fn namespace_members(
                     line: t.line,
                     col: 0,
                     end_col: 0,
-                    detail: variant_detail(&t.name, v),
+                    detail: variant_detail(&t.name, v, &Spellings::default()),
                     doc: None,
                     file: file(target),
                 });
@@ -2069,10 +2088,10 @@ fn structural_name(ty: &Type) -> Option<&str> {
 fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
     let hover = match b.ty.as_ref().and_then(structural_name) {
         Some(n) => match type_structure(analysis, n) {
-            Some(s) => format!("{}\n\n{}", local_detail(b), s),
-            None => local_detail(b),
+            Some(s) => format!("{}\n\n{}", local_detail(b, &analysis.spellings), s),
+            None => local_detail(b, &analysis.spellings),
         },
-        None => local_detail(b),
+        None => local_detail(b, &analysis.spellings),
     };
     // Bindings of one shape can have opposite memory outcomes, and the source
     // does not say which. Matched on the declaration line, so it is this binding.
@@ -2099,26 +2118,38 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
     }
 }
 
+/// How hover spells one signature: declarations as their module wrote them,
+/// with the module's import path where the signature shows two of one
+/// spelling. `types` and `names` are what the signature shows.
+fn signature_speech<'a>(sp: &'a Spellings, types: &[&Type], names: &[&str]) -> Speech<'a> {
+    static ROOT: Option<String> = None;
+    sp.speech(&ROOT).sentence(types, names)
+}
+
 /// Hover text for a local binding: `name: Type` for a param, `let [mut] name:
 /// Type` for a let, `for name: Type` for a loop variable; no type when none is
 /// known.
-fn local_detail(b: &LocalBinding) -> String {
+fn local_detail(b: &LocalBinding, sp: &Spellings) -> String {
+    let ty = |t: &Type| type_to_string(t, sp);
     match b.kind {
-        LocalKind::Param => format!("{}: {}", b.name, type_to_string(b.ty.as_ref().unwrap())),
+        LocalKind::Param => format!("{}: {}", b.name, ty(b.ty.as_ref().unwrap())),
         LocalKind::Let { mutable } => match (&b.ty, mutable) {
-            (Some(ty), true) => format!("let mut {}: {}", b.name, type_to_string(ty)),
-            (Some(ty), false) => format!("let {}: {}", b.name, type_to_string(ty)),
+            (Some(t), true) => format!("let mut {}: {}", b.name, ty(t)),
+            (Some(t), false) => format!("let {}: {}", b.name, ty(t)),
             (None, true) => format!("let mut {}", b.name),
             (None, false) => format!("let {}", b.name),
         },
         LocalKind::ForVar => match &b.ty {
-            Some(ty) => format!("for {}: {}", b.name, type_to_string(ty)),
+            Some(t) => format!("for {}: {}", b.name, ty(t)),
             None => format!("for {}", b.name),
         },
     }
 }
 
-fn function_detail(f: &Function) -> String {
+fn function_detail(f: &Function, sp: &Spellings) -> String {
+    let mut types: Vec<&Type> = f.params.iter().map(|p| &p.ty).collect();
+    types.push(&f.ret);
+    let say = signature_speech(sp, &types, &[&f.name]);
     // A capability shows where it was written: before the type of a parameter
     // (`iss: modify Array<Issue>`), before `self` for a receiver
     // (`modify self: Tally`). It is the call's whole contract. The receiver
@@ -2133,7 +2164,7 @@ fn function_detail(f: &Function) -> String {
                 Capability::Modify => "modify ",
                 Capability::Consume => "consume ",
             };
-            let ty = type_to_string(&p.ty);
+            let ty = spell(&say, &p.ty);
             if i == 0 && p.name == "self" {
                 format!("{word}self: {ty}")
             } else {
@@ -2162,22 +2193,29 @@ fn function_detail(f: &Function) -> String {
     format!(
         "{} {}{}({}) -> {}",
         kw,
-        f.name,
+        say.name(&f.name),
         tp,
         params,
-        type_to_string(&f.ret)
+        spell(&say, &f.ret)
     )
 }
 
 /// Hover text for a module-state binding, such as
 /// `let mut hits: Int64`. The type is the annotation, else inferred from a
 /// literal initializer, else omitted.
-fn global_detail(g: &GlobalDecl) -> String {
+fn global_detail(g: &GlobalDecl, sp: &Spellings) -> String {
     let kw = if g.mutable { "let mut" } else { "let" };
     let ty = g.ty.clone().or_else(|| infer_literal_type(&g.init));
     match ty {
-        Some(t) => format!("{} {}: {}", kw, g.name, type_to_string(&t)),
-        None => format!("{} {}", kw, g.name),
+        Some(t) => {
+            let say = signature_speech(sp, &[&t], &[&g.name]);
+            format!("{} {}: {}", kw, say.name(&g.name), spell(&say, &t))
+        }
+        None => format!(
+            "{} {}",
+            kw,
+            signature_speech(sp, &[], &[&g.name]).name(&g.name)
+        ),
     }
 }
 
@@ -2214,9 +2252,10 @@ fn signature_doc(protocols: &[ProtocolDecl], protocol: &str, method: &str) -> Op
         .and_then(|m| m.doc.clone())
 }
 
-fn method_sig_detail(m: &MethodSig) -> String {
-    // The parser keeps only parameter types; `self` is prepended. Capabilities
-    // show, because they are the call's whole discipline.
+/// The signature of a protocol method as `say` spells it. The parser keeps
+/// only parameter types; `self` is prepended. Capabilities show, because they
+/// are the call's whole discipline.
+fn method_sig(m: &MethodSig, say: &Speech) -> String {
     let cap = |c: Capability, t: String| match c {
         Capability::Read => t,
         Capability::Modify => format!("modify {t}"),
@@ -2226,34 +2265,39 @@ fn method_sig_detail(m: &MethodSig) -> String {
     ps.extend(m.params.iter().enumerate().map(|(i, t)| {
         cap(
             m.param_caps.get(i).copied().unwrap_or(Capability::Read),
-            type_to_string(t),
+            spell(say, t),
         )
     }));
-    format!(
-        "fn {}({}) -> {}",
-        m.name,
-        ps.join(", "),
-        type_to_string(&m.ret)
-    )
+    format!("fn {}({}) -> {}", m.name, ps.join(", "), spell(say, &m.ret))
 }
 
-fn protocol_detail(p: &ProtocolDecl) -> String {
-    let ms = p
-        .methods
-        .iter()
-        .map(method_sig_detail)
+fn method_types(m: &MethodSig) -> impl Iterator<Item = &Type> {
+    m.params.iter().chain([&m.ret])
+}
+
+fn method_sig_detail(m: &MethodSig, sp: &Spellings) -> String {
+    let types: Vec<&Type> = method_types(m).collect();
+    method_sig(m, &signature_speech(sp, &types, &[]))
+}
+
+fn protocol_detail(p: &ProtocolDecl, sp: &Spellings) -> String {
+    let types: Vec<&Type> = p.methods.iter().flat_map(method_types).collect();
+    let say = signature_speech(sp, &types, &[&p.name]);
+    let ms = (p.methods.iter())
+        .map(|m| method_sig(m, &say))
         .collect::<Vec<_>>()
         .join("; ");
+    let name = say.name(&p.name);
     if ms.is_empty() {
-        format!("protocol {}", p.name)
+        format!("protocol {name}")
     } else {
-        format!("protocol {} {{ {} }}", p.name, ms)
+        format!("protocol {name} {{ {ms} }}")
     }
 }
 
 /// Renders one record field as the user wrote it: a synthetic inline-refinement
 /// field type (`User.age`) expands back to `age: Int64 where value >= 18`.
-fn field_detail(f: &ast::Field, all: &[TypeDecl]) -> String {
+fn field_detail(f: &ast::Field, all: &[TypeDecl], say: &Speech) -> String {
     if let Type::Named(n) = &f.ty {
         if n.contains('.') {
             if let Some(d) = all.iter().find(|d| d.name == *n) {
@@ -2261,88 +2305,84 @@ fn field_detail(f: &ast::Field, all: &[TypeDecl]) -> String {
                     return format!(
                         "{}: {} where {}",
                         f.name,
-                        type_to_string(&d.base),
+                        spell(say, &d.base),
                         crate::checker::pred_summary(pred)
                     );
                 }
             }
         }
     }
-    format!("{}: {}", f.name, type_to_string(&f.ty))
+    format!("{}: {}", f.name, spell(say, &f.ty))
 }
 
-fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
+fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl], sp: &Spellings) -> String {
+    let say = signature_speech(sp, &[&t.base], &[&t.name]);
+    let name = say.name(&t.name);
     match &t.base {
         // A declared variant list. An alias of a built-in sum spells itself
         // `Option<T>` or `Result<T, E>`, as the module wrote it.
         Type::Enum(vs) if !crate::types::is_sum_alias(&t.base) => {
-            let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
-            format!("type {} = {}", t.name, arms)
+            let arms = (vs.iter())
+                .map(|v| variant_arm(v, &say))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("type {name} = {arms}")
         }
         Type::Record(fields) => {
             let fs = fields
                 .iter()
-                .map(|f| field_detail(f, all))
+                .map(|f| field_detail(f, all, &say))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("type {} = {{ {} }}", t.name, fs)
+            format!("type {name} = {{ {fs} }}")
         }
         _ => {
-            let s = type_to_string(&t.base);
+            let s = spell(&say, &t.base);
             if t.predicate.is_some() {
-                format!("type {} = {} (validated)", t.name, s)
+                format!("type {name} = {s} (validated)")
             } else {
-                format!("type {} = {}", t.name, s)
+                format!("type {name} = {s}")
             }
         }
     }
 }
 
-fn variant_arm(v: &EnumVariant) -> String {
+fn variant_arm(v: &EnumVariant, say: &Speech) -> String {
     if v.payload.is_empty() {
         v.name.clone()
     } else {
-        format!(
-            "{}({})",
-            v.name,
-            v.payload
-                .iter()
-                .map(type_to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        let payload: Vec<String> = v.payload.iter().map(|t| spell(say, t)).collect();
+        format!("{}({})", v.name, payload.join(", "))
     }
 }
 
-fn variant_detail(enum_name: &str, v: &EnumVariant) -> String {
-    if v.payload.is_empty() {
-        format!("variant of {}: {}", enum_name, v.name)
-    } else {
-        format!(
-            "variant of {}: {}({})",
-            enum_name,
-            v.name,
-            v.payload
-                .iter()
-                .map(type_to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
+fn variant_detail(enum_name: &str, v: &EnumVariant, sp: &Spellings) -> String {
+    let types: Vec<&Type> = v.payload.iter().collect();
+    let say = signature_speech(sp, &types, &[enum_name]);
+    format!(
+        "variant of {}: {}",
+        say.name(enum_name),
+        variant_arm(v, &say)
+    )
 }
 
-/// The user-facing spelling of a type, as hover writes it. Public because the
-/// LSP's inlay type hints render the same string, so a hint and a hover agree.
-pub fn type_to_string(ty: &Type) -> String {
-    // The AST's `Display` spells every type but an enum, which renders its
-    // variant arms.
+/// `ty` as `say` spells it. The AST's `Display` spells every type but an
+/// enum, which renders its variant arms.
+fn spell(say: &Speech, ty: &Type) -> String {
     match ty {
         Type::Enum(vs) if !crate::types::is_sum_alias(ty) => {
-            let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
-            format!("{{ {} }}", arms)
+            let arms = vs.iter().map(|v| variant_arm(v, say)).collect::<Vec<_>>();
+            format!("{{ {} }}", arms.join(" | "))
         }
-        other => other.to_string(),
+        other => say.ty(other).to_string(),
     }
+}
+
+/// The user-facing spelling of a type, as hover writes it: each declaration as
+/// its module wrote it (`sp`). Public because the LSP's inlay type hints render
+/// the same string, so a hint and a hover agree.
+pub fn type_to_string(ty: &Type, sp: &Spellings) -> String {
+    spell(&signature_speech(sp, &[ty], &[]), ty)
 }
 
 /// One exported declaration to document: its signature line, as hover
@@ -2435,7 +2475,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
                 name: f.name.clone(),
                 kind: SymbolKind::Function,
                 line: f.line,
-                signature: function_detail(f),
+                signature: function_detail(f, &Spellings::default()),
                 doc: f.doc.clone(),
                 members: Vec::new(),
             });
@@ -2447,12 +2487,16 @@ pub fn module_doc(source: &str) -> ModuleDoc {
                 name: p.name.clone(),
                 kind: SymbolKind::Type,
                 line: p.line,
-                signature: protocol_detail(p),
+                signature: protocol_detail(p, &Spellings::default()),
                 doc: p.doc.clone(),
                 members: p
                     .methods
                     .iter()
-                    .filter_map(|m| m.doc.clone().map(|d| (method_sig_detail(m), d)))
+                    .filter_map(|m| {
+                        m.doc
+                            .clone()
+                            .map(|d| (method_sig_detail(m, &Spellings::default()), d))
+                    })
                     .collect(),
             });
         }
@@ -2466,7 +2510,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
             name: t.name.clone(),
             kind: SymbolKind::Type,
             line: t.line,
-            signature: type_decl_detail(t, &program.type_decls),
+            signature: type_decl_detail(t, &program.type_decls, &Spellings::default()),
             doc: t.doc.clone(),
             members: Vec::new(),
         });

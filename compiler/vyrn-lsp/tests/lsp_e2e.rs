@@ -4805,3 +4805,125 @@ fn the_editor_makes_the_floor_decision() {
         )]
     );
 }
+
+/// The loader renames a type two modules declare (`Cfg` becomes `Cfg__from0`).
+/// Hover, type hints and completion details name it as its module wrote it.
+#[test]
+fn hover_and_hints_name_a_renamed_type_as_its_module_wrote_it() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_names_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("cfg.vyrn"),
+        "export type Cfg = { m: String }\n\
+         export type Wrap = { inner: Cfg }\n\
+         export fn make() -> Cfg { return Cfg { m: \"a\" } }\n\
+         export fn read(c: Cfg) -> Int64 { return 1 }\n\
+         export fn wrap() -> Wrap { return Wrap { inner: make() } }\n",
+    )
+    .unwrap();
+    let root = "import { make, read, wrap, Wrap } from \"./cfg.vyrn\"\n\
+                type Cfg = { n: Int64 }\n\
+                fn main() -> Int64 {\n    let c = make()\n    let d = read(c)\n    let mine = Cfg { n: 1 }\n    let w = wrap()\n    let z = w.inner\n    print(d)\n    return mine.n\n}\n";
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, root).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", root);
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "{notif}");
+
+    let make = hover_value(&mut client, &uri, 3, 13).expect("hover on make");
+    let read = hover_value(&mut client, &uri, 4, 13).expect("hover on read");
+    let c = hover_value(&mut client, &uri, 3, 8).expect("hover on c");
+    let wrap = hover_value(&mut client, &uri, 0, 28).expect("hover on the imported type");
+    let field = hover_value(&mut client, &uri, 7, 16).expect("hover on the field");
+    let hints: Vec<String> = type_hints(&mut client, &uri)
+        .into_iter()
+        .map(|(_, _, l)| l)
+        .collect();
+    let details = completion_details(&mut client, &uri, 7, 14);
+    let shown = hints.iter().chain([&make, &read, &c, &wrap, &field]);
+    for text in shown.chain(details.iter().map(|(_, d)| d)) {
+        assert!(!text.contains("__from"), "a linked name shows: {text}");
+    }
+    assert!(make.contains("fn make() -> Cfg"), "hover: {make}");
+    assert!(read.contains("fn read(c: Cfg) -> Int64"), "hover: {read}");
+    assert!(c.contains("let c: Cfg"), "hover: {c}");
+    assert!(wrap.contains("type Wrap = { inner: Cfg }"), "hover: {wrap}");
+    assert!(field.contains("inner: Cfg"), "hover: {field}");
+    assert_eq!(
+        hints.iter().filter(|h| *h == ": Cfg").count(),
+        2,
+        "{hints:?}"
+    );
+    assert!(
+        details.contains(&("inner".to_string(), "inner: Cfg".to_string())),
+        "completion: {details:?}"
+    );
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `(label, detail)` of every completion item at the position.
+fn completion_details(
+    client: &mut LspClient,
+    uri: &str,
+    line: u32,
+    ch: u32,
+) -> Vec<(String, String)> {
+    let id = serde_json::json!(format!("cd{line}_{ch}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/completion",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
+    }));
+    let resp = client.read_response(&id);
+    let items = resp["result"].as_array().cloned().unwrap_or_default();
+    items
+        .iter()
+        .map(|i| {
+            let s = |k: &str| i[k].as_str().unwrap_or_default().to_string();
+            (s("label"), s("detail"))
+        })
+        .collect()
+}
+
+/// A hover that shows two declarations of one spelling names each with the
+/// module it comes from, as a refusal does.
+#[test]
+fn hover_tells_two_types_of_one_spelling_apart() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_pair_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("b.vyrn"), "export type Cfg = { m: String }\n").unwrap();
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "import { Cfg as Remote } from \"./b.vyrn\"\n\
+         export type Cfg = { n: Int64 }\n\
+         export fn pair(a: Cfg, b: Remote) -> Int64 { return a.n }\n",
+    )
+    .unwrap();
+    let root = "import { pair } from \"./lib.vyrn\"\nfn main() -> Int64 { return 0 }\n";
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, root).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", root);
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "{notif}");
+
+    let pair = hover_value(&mut client, &uri, 0, 10).expect("hover on pair");
+    assert!(!pair.contains("__from"), "a linked name shows: {pair}");
+    assert!(
+        pair.contains("fn pair(a: Cfg from \"./lib.vyrn\", b: Cfg from \""),
+        "hover: {pair}"
+    );
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
