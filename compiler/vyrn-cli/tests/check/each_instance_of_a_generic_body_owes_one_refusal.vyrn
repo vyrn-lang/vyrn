@@ -1,0 +1,12 @@
+// Two instances abandon the same parameter; the reader is told once.
+fn f<T>(s: Stream<T>) -> Int64 {
+    return 0
+}
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    let b: Array<String> = ["x"]
+    print(f(fromArray(a)))
+    print(f(fromArray(b)))
+    return 0
+}

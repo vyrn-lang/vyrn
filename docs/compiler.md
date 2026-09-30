@@ -129,12 +129,13 @@ the playground serves an embedded `std/`. The loader:
 For a program that does not type-check, `lower_typed` still builds every
 function the type errors do not reach and adds the typed judgment's refusals,
 so one run reports both kinds. A generator's own program gets steps 1 and 2.
-Its engine (`vyrn_lower::gen_engine`) runs the must-use judgment before the
-run. The typed judgment runs in the engine's compile
-(`direct::compile_gen_host`), which refuses the program the judgment refused
-before it emits, so the program is refused whether or not it would run. A
-refused compile yields no module, so no cache holds one, and a warm cache
-reports the same refusals. The kernel does not judge it.
+The judgments run in its engine's compile (`direct::compile_gen_host`), which
+refuses the program the typed judgment refused, or else the program with a
+kernel must-use row, before it emits. The engine (`vyrn_lower::gen_engine`)
+refuses a program the run declines with its must-use rows, so the program is
+refused whether or not the engine serves it. The kernel's other refusals are
+not printed. A refused compile yields no module, so no cache holds one, and a
+warm cache reports the same refusals.
 
 The editor runs the same pipeline. `symbols::analyze_judged` loads the
 document as `vyrn_lower::load` does, an untitled buffer as `untitled.vyrn` in

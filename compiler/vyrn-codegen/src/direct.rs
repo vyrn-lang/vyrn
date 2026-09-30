@@ -246,10 +246,15 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
     // `i64` handle only here. Cleared after, so a later `compile` on this thread is unaffected.
     crate::set_gen_host(true);
     let world = vyrn_lower::analyze(program);
-    let r = if world.typed_diagnostics().is_empty() {
-        compile_inner(program, world).map_err(GenError::Failed)
-    } else {
-        Err(GenError::Refused(world.typed_diagnostics().to_vec()))
+    // The typed judgment's refusals, else the must-use rows: the kernel's
+    // other refusals of a generator's program are not the reader's.
+    let refused = match world.typed_diagnostics() {
+        [] => world.owed_diagnostics(),
+        typed => typed.to_vec(),
+    };
+    let r = match refused.is_empty() {
+        true => compile_inner(program, world).map_err(GenError::Failed),
+        false => Err(GenError::Refused(refused)),
     };
     crate::set_gen_host(false);
     r

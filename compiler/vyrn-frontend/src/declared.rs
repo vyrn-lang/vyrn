@@ -30,8 +30,8 @@ pub struct Owned {
 }
 
 /// What a binding of a type needs from its release: whether it owns heap,
-/// whether it is linear, and its [`Owned::declared_releases`].
-pub type NameFacts = (bool, bool, Vec<String>);
+/// the row that makes it linear, and its [`Owned::declared_releases`].
+pub type NameFacts = (bool, Option<crate::own::Linear>, Vec<String>);
 
 impl Owned {
     pub fn new(program: &Program) -> Self {
@@ -145,7 +145,7 @@ impl Owned {
         }
         let f = (
             self.owns_heap(ty),
-            self.linear_kind(ty).is_some(),
+            self.linear_kind(ty),
             self.declared_releases(ty),
         );
         memo().insert(ty.clone(), f.clone());

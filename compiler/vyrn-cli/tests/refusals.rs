@@ -244,14 +244,14 @@ fn census() -> Vec<Row> {
         row(
             "r30_stream_never_disposed.vyrn",
             "a must-use obligation is discharged on every path",
-            "`s` is a `Stream` and is never disposed",
-            Kernel::Elsewhere,
+            "`s` is a `Stream<Int64>` and is never disposed",
+            Kernel::Its,
         ),
         row(
             "r31_stream_disposed_twice.vyrn",
             "a must-use obligation is discharged exactly once",
-            "`s` is a `Stream` and is disposed more than once",
-            Kernel::Elsewhere,
+            "`s` is a `Stream<Int64>` and is disposed more than once",
+            Kernel::Its,
         ),
         row(
             "r32_region_store_escapes.vyrn",

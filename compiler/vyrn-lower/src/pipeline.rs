@@ -133,12 +133,7 @@ fn check(
 /// lines, and still one mistake.
 pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) {
     let mut diags = Vec::new();
-    let owed = typed::obligation::judge(program);
-    let mustuse: HashSet<(Option<String>, String)> = owed
-        .iter()
-        .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
-        .collect();
-    diags.extend(owed);
+    let walked = typed::obligation::judge(program);
     // The placer judges a core body for every instance, and the World is
     // handed on: a command's next `own::Memo` adopts it. Only this analysis
     // may reuse a judgment (`movecheck::reuse_judgments`).
@@ -150,11 +145,38 @@ pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) 
         movecheck::in_source_order(&mut typed);
         return (typed, world);
     }
+    let (owed, kernel): (Vec<_>, Vec<_>) =
+        (world.refusal_diagnostics().into_iter()).partition(|d| crate::rules::owed(&d.message));
+    let row = |d: &Diagnostic| {
+        let s = subject(&d.message).map(str::to_string);
+        (
+            d.file.clone(),
+            d.line,
+            s,
+            d.message.ends_with("never disposed"),
+        )
+    };
+    for d in walked.iter().filter(|_| crate::core::refuses()) {
+        assert!(
+            owed.iter().any(|k| row(k) == row(d)),
+            "the kernel lacks the walk's `{}` at line {}; it said {:?}",
+            d.message,
+            d.line,
+            owed.iter()
+                .map(|k| (k.line, &k.message))
+                .collect::<Vec<_>>()
+        );
+    }
+    let mustuse: HashSet<(Option<String>, String)> = owed
+        .iter()
+        .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
+        .collect();
+    diags.extend(owed);
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
         lines.insert((d.file.clone(), d.line));
     }
-    diags.extend(world.refusal_diagnostics().into_iter().filter(|d| {
+    diags.extend(kernel.into_iter().filter(|d| {
         !lines.contains(&(d.file.clone(), d.line))
             && !subject(&d.message)
                 .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
@@ -176,10 +198,11 @@ fn subject(message: &str) -> Option<&str> {
 
 /// Wraps `run`, an engine that compiles and runs a generator, into the engine
 /// a host passes to [`load`], which judges the generator's own program
-/// under [`movecheck::comptime`]. The must-use judgment refuses before `run`.
-/// The typed judgment runs inside `run`'s compile, which refuses the program
-/// it refused (`direct::compile_gen_host`). The kernel does not judge a generator's
-/// program: nothing prints its refusals.
+/// under [`movecheck::comptime`]. The judgments run inside `run`'s compile
+/// (`direct::compile_gen_host`), which refuses the program the typed judgment
+/// refused, or else the program with a must-use row. A program `run` declines
+/// is refused with its must-use rows here, so it is refused whatever serves
+/// it. The kernel's other refusals of a generator's program are not printed.
 pub fn gen_engine(
     run: impl Fn(&ast::Program, &str, &[ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, GenError>>
         + Send
@@ -188,15 +211,10 @@ pub fn gen_engine(
 ) -> Box<GenEngine> {
     Box::new(move |program, name, args, inputs| {
         movecheck::comptime(|| {
-            let mut owed = {
-                let _held = checker::Held::open(program);
-                typed::obligation::judge(program)
-            };
-            if !owed.is_empty() {
-                movecheck::in_source_order(&mut owed);
-                return Some(Err(GenError::Refused(owed)));
-            }
-            run(program, name, args, inputs)
+            run(program, name, args, inputs).or_else(|| {
+                let owed = crate::analyze(program).owed_diagnostics();
+                (!owed.is_empty()).then_some(Err(GenError::Refused(owed)))
+            })
         })
     })
 }

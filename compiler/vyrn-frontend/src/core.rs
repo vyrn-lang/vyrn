@@ -106,11 +106,11 @@ pub struct NameInfo {
     /// The loop that walks this borrow, if one does. A `modify` argument over
     /// the container ends it whatever the container holds (`vyrn_lower::kernel`).
     pub walked: Option<Walk>,
-    /// Whether the type is linear: a `Stream`, a `Task`, or `impl MustUse`.
-    /// Its disposing builtin (`close`, `@join`, `boxStream`)
-    /// takes no move, so a use after it is worded as a `consume` parameter's,
-    /// not as a move into a sink.
-    pub linear: bool,
+    /// The row that makes the type linear (a `Stream`, `impl MustUse`, or a
+    /// container of one), or `None`. Its disposing builtin (`close`, `@join`,
+    /// `boxStream`) takes no move, so a use after it is worded as a `consume`
+    /// parameter's, not as a move into a sink.
+    pub linear: Option<crate::own::Linear>,
     /// Whether a `let` the reader wrote bound this name, which makes it a
     /// binding the memory report is about.
     pub bound_by_let: bool,
@@ -949,6 +949,15 @@ pub enum Cand {
 }
 
 impl Body {
+    /// The must-use row a linear value bound by a `let` or a parameter owes:
+    /// the reader disposes of it exactly once on every path. A receiver owes
+    /// none, since `fn release(self)` is the disposal.
+    pub fn owes(&self, n: Name) -> Option<&crate::own::Linear> {
+        let i = &self.names[n.index()];
+        let bound = i.bound_by_let || (i.source != "self" && self.params.contains(&n));
+        i.linear.as_ref().filter(|_| bound)
+    }
+
     /// This body and every lambda body under it, outermost first.
     pub fn frames(&self) -> Vec<&Body> {
         let mut out = vec![self];

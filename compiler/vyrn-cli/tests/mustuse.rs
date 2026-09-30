@@ -71,7 +71,10 @@ fn a_stepped_producer_carries_the_same_obligation() {
         "{STEP} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) return 0 }}"
     ))
     .unwrap_err();
-    assert!(e.contains("`s` is a `Stream` and is never disposed"), "{e}");
+    assert!(
+        e.contains("`s` is a `Stream<Int64>` and is never disposed"),
+        "{e}"
+    );
     assert!(run(&format!(
         "{STEP} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) close(s) return 0 }}"
     ))

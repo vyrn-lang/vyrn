@@ -51,7 +51,7 @@ use vyrn_frontend::core::{
 };
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
-use vyrn_frontend::own::Exit;
+use vyrn_frontend::own::{Exit, Linear};
 
 use crate::rules::{self, *};
 
@@ -666,7 +666,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
     for p in &body.params {
         let i = &body.names[p.index()];
         // Ownership, not release: a `consume` record of `Int64`s is owned.
-        if i.releases || !i.borrow {
+        if i.releases || !i.borrow || k.body.owes(*p).is_some() {
             st.set_own(*p, Own::Held);
         }
     }
@@ -710,7 +710,35 @@ impl<'b> Kernel<'b> {
     /// moves; one that owes none moves only into a `consume` parameter and is
     /// copied elsewhere.
     fn moves(&self, n: Name, consume: bool) -> bool {
-        consume || !self.owned(n) || self.releases(n)
+        consume || !self.owned(n) || self.releases(n) || self.body.owes(n).is_some()
+    }
+
+    /// The must-use refusal of `n`, said at its binding, whichever path
+    /// broke it: [`NEVER_DISPOSED`], or with `twice` [`DISPOSED_TWICE`].
+    fn obligation(&self, n: Name, twice: bool) -> Refusal {
+        let i = &self.body.names[n.index()];
+        let ty = i.ty.to_string();
+        let a = match ty.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) {
+            true => "an",
+            false => "a",
+        };
+        let (note, by) = match &i.linear {
+            Some(Linear::Declared(by)) if *by == ty => (OWED_DECLARED, by.as_str()),
+            Some(Linear::Declared(by)) => (OWED_HELD, by.as_str()),
+            _ => (OWED_STREAM, ""),
+        };
+        let args = [("s", i.source.as_str()), ("a", a), ("ty", &ty), ("by", by)];
+        let rule = if twice {
+            DISPOSED_TWICE
+        } else {
+            NEVER_DISPOSED
+        };
+        let d = Diagnostic::error(i.line, 0, "movecheck", rules::say(rule, &args))
+            .with_note(rules::say(note, &args));
+        Refusal {
+            diagnostic: d.in_file(self.body.file.clone()),
+            body: self.body.name.clone(),
+        }
     }
 
     /// Marks `n` consumed and keeps its taker for the wording.
@@ -1369,6 +1397,9 @@ impl<'b> Kernel<'b> {
     /// moved here", at the move, for any other taker, naming the storage that
     /// moved, as `movecheck::check_read` does; and "after it was released".
     fn used_after(&self, st: &State, n: Name, what: &str, path: &str) -> Refusal {
+        if self.body.owes(n).is_some() {
+            return self.obligation(n, true);
+        }
         let s = self.src(n);
         let read = format!("{s}{}", path.replace(".[]", "[..]"));
         // A written `drop` is worded as a `consume` parameter, but the note is
@@ -1395,7 +1426,9 @@ impl<'b> Kernel<'b> {
             // value is worded as `consume` even under a builtin (`close(s)`)
             // ([`NameInfo::linear`]).
             Some((_, by, t))
-                if *t == Taker::Declared || by == "`drop`" || self.body.names[n.index()].linear =>
+                if *t == Taker::Declared
+                    || by == "`drop`"
+                    || self.body.names[n.index()].linear.is_some() =>
             {
                 self.say(CONSUMED, self.here, &args)
             }
@@ -1441,6 +1474,12 @@ impl<'b> Kernel<'b> {
             self.gone(st, n);
         }
         if st.own(n) != Own::Held {
+            return Ok(());
+        }
+        // No row repairs a must-use value left held: the reader disposes of it.
+        if self.body.owes(n).is_some() {
+            self.refusals.push(self.obligation(n, false));
+            self.unbind(st, n);
             return Ok(());
         }
         // A heapless name leaves its scope with no row placed.
@@ -2477,13 +2516,29 @@ impl<'b> Kernel<'b> {
     /// a name another holds, the holding edges release it into the plan's
     /// edge table. In judging mode `join` refuses the disagreement.
     fn equalize(&mut self, edges: &mut [State], site: NodeId) {
-        if self.mode != Mode::Place || site == NodeId::NONE {
+        if self.mode != Mode::Place {
             return;
         }
         let live: Vec<usize> = (0..edges.len()).filter(|i| !edges[*i].ended).collect();
         let names: BTreeSet<Name> = (live.iter())
             .flat_map(|i| edges[*i].held.keys().copied())
             .collect();
+        // A must-use value disposed of on one edge only is refused, not
+        // repaired, and the holding edges let it go.
+        for n in &names {
+            let gone = live.iter().any(|i| edges[*i].own(*n) == Own::Gone);
+            if gone && self.body.owes(*n).is_some() {
+                self.refusals.push(self.obligation(*n, false));
+                for i in &live {
+                    if edges[*i].own(*n) != Own::Gone {
+                        self.unbind(&mut edges[*i], *n);
+                    }
+                }
+            }
+        }
+        if site == NodeId::NONE {
+            return;
+        }
         for n in names {
             // A heapless name needs no edge row; `join` reconciles it.
             if !self.releases(n) {
@@ -2596,6 +2651,9 @@ impl<'b> Kernel<'b> {
             _ => None,
         };
         let s = self.src(n);
+        if took.is_some() && self.body.owes(n).is_some() {
+            return Err(self.obligation(n, false));
+        }
         if let Some(g) = took {
             return Err(match (g.taker.get(&n), point) {
                 (Some((l, by, _)), _) if !by.is_empty() => {

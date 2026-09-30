@@ -3190,8 +3190,11 @@ impl<'a> Builder<'a> {
                 if streaming {
                     self.stream_loops.pop();
                     // Pulled to its end or left by a `break`, the stream is
-                    // closed here by its last owner, the loop.
-                    if self.stream_owed(it) && self.taken_by_loop(it, sid) {
+                    // closed here by its last owner, the loop. A binding's
+                    // stream is always disposed of here, so a later use is a
+                    // second disposal ([`Body::owes`]).
+                    let owed = self.body.owes(it).is_some();
+                    if self.stream_owed(it) && (owed || self.taken_by_loop(it, sid)) {
                         out.push(St::Drop(it, Site::None, 0, None));
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {

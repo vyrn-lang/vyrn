@@ -100,6 +100,36 @@ pub const LOOP_HOLE: &str = "`{s}{h}` is consumed by `consume` inside a loop, so
 pub const LOOP_HOLE_AT: &str =
     "{info} has a `consume` hole at a loop's back edge it did not have at entry";
 
+/// A linear binding a path leaves held, or disposes of inside a loop or on
+/// one branch only; said once, at the binding.
+pub const NEVER_DISPOSED: &str = "`{s}` is {a} `{ty}` and is never disposed";
+/// A linear binding used after its disposal, at the binding.
+pub const DISPOSED_TWICE: &str = "`{s}` is {a} `{ty}` and is disposed more than once";
+/// The note under either must-use row, by the row that obliges the type. A
+/// stream's release is pushed by its own lowering, so `drop` on one reclaims
+/// nothing; a declared type has no `close` and is not iterable unless it says
+/// so.
+pub const OWED_STREAM: &str = "a stream must be consumed with `for … in`, forwarded by returning \
+                               it, or released with `close({s})` — on every path";
+pub const OWED_DECLARED: &str = "`{ty}` declares `impl MustUse`, so a value of it must be handed \
+                                 on by name — passed to a call, forwarded by returning it, or \
+                                 released with `drop {s}` — on every path";
+/// A container: the reader wrote `Array<Txn>` and the row is `Txn`'s.
+pub const OWED_HELD: &str = "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the \
+                             container must be handed on by name — passed to a call, forwarded \
+                             by returning it, or released with `drop {s}`, which releases each \
+                             element — on every path";
+
+/// Whether `message` is a must-use row's. A binding earns one per mistake
+/// however many instances and paths reach it.
+pub fn owed(message: &str) -> bool {
+    [NEVER_DISPOSED, DISPOSED_TWICE].iter().any(|r| {
+        r.rsplit('`')
+            .next()
+            .is_some_and(|tail| message.ends_with(tail))
+    })
+}
+
 /// An exit, as [`HELD_AT_EXIT`] names it.
 pub fn exit_words(e: Exit) -> &'static str {
     match e {
