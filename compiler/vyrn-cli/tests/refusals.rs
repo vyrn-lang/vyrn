@@ -332,6 +332,13 @@ fn census() -> Vec<Row> {
              type reads every argument",
             Kernel::Elsewhere,
         ),
+        row(
+            "r44_consume_and_read_in_one_call.vyrn",
+            "a `consume` argument may not overlap another argument of the same call",
+            "`x` is consumed by `g(..)`, and `x` is passed to the same call, so the callee could \
+             read what it frees",
+            Kernel::Its,
+        ),
     ]
 }
 

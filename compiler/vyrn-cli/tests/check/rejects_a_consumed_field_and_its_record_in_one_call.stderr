@@ -1,0 +1,2 @@
+rejects_a_consumed_field_and_its_record_in_one_call.vyrn:12:0: `x.name` is consumed by `crf(..)`, and `x` is passed to the same call, so the callee could read what it frees
+  fix: `x.name.copy()` for the `consume` parameter

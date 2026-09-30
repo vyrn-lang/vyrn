@@ -1,0 +1,14 @@
+// `crf` frees what `consume x.name` hands it and then reads `b.name`, which
+// is the same string: the record is passed with the hole still in it.
+type Cell = { name: String, v: Float64 }
+
+fn crf(a: consume String, b: Cell) -> Int64 {
+    drop a
+    return b.name.byteLength
+}
+
+fn main() -> Int64 {
+    let x = Cell { name: 1234567.toString(), v: 1.0 }
+    print(crf(consume x.name, x))
+    return 0
+}

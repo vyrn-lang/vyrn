@@ -76,7 +76,10 @@ lifetime annotation.
 
 A `modify` argument is exclusive: the same value may not be passed as `modify`
 and read again in the same call. The caller sees the callee's writes after
-the call returns.
+the call returns. A `consume` argument is exclusive too: no other argument of
+the same call may name it or a place overlapping it, because the callee could
+free the one and then read the other. The receiver of a rebuilding builtin
+(`xs.append(xs)`) is put back, not consumed.
 
 A receiver follows the same rule: `read self`, `modify self`, `consume self`.
 
@@ -238,6 +241,7 @@ one owner is not enough:
 | A borrow that escapes: stored, returned, captured, consumed | `` `ys` may not be returned `` |
 | A write to a place while an alias reads out of it | `` `t.xs[..]` is written here while `before` still reads out of it `` |
 | A `modify` argument read again in the same call | `` `a` is passed to `bump` as `modify` and read again in the same call `` |
+| A `consume` argument passed again in the same call | `` `x` is consumed by `g(..)`, and `x` is passed to the same call `` |
 | A whole use of a value with a hole | `` `p.name` was taken out of `p` here `` |
 | A must-use value never disposed, or disposed twice | `` `s` is a `Stream<Int64>` and is never disposed `` |
 | A region value that escapes the region | ``cannot store a heap value into `kept`, which outlives the enclosing `region` `` |
