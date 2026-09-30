@@ -220,6 +220,13 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "may not be handed to a `consume` parameter: ",
         "m7-hole, a declared release reads every payload",
     ),
+    // A rule the checker never had: a call that consumes a value may not also
+    // pass it, or a part of it, to another parameter. `refusals.rs`'s `r44`
+    // pins it.
+    (
+        "is passed to the same call, so the callee could read what it frees",
+        "CONSUMED_AND_PASSED, one call consumes a value and reads it",
+    ),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {

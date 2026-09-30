@@ -450,3 +450,98 @@ fn an_argument_handed_back_is_still_consumed() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A heapless `x` consumed beside a read of its own part. The part is copied before `step`
+/// writes `x`'s storage, so each `r.y` is the value before the call.
+const PART: &str = "type P = { x: Float64, y: Float64, z: Float64, w: Float64 }\n\
+    type Q = { p: P, n: Int64 }\n\
+    type In = { p: P, q: Q, ps: Array<P, 2>, k: Float64 }\n\
+    fn step(a: consume In, r: P) -> In {\n\
+    let o = P { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }\n\
+    let mut d = a\n\
+    d.p = o\n\
+    d.q = Q { p: o, n: 0 }\n\
+    d.ps = [o, o]\n\
+    d.k = d.k + r.y\n\
+    return d\n\
+    }\n\
+    fn fresh(a: consume In, r: P) -> In {\n\
+    return In { p: r, q: a.q, ps: a.ps, k: a.k + r.y }\n\
+    }\n\
+    fn main() -> Int64 {\n\
+    let v = P { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }\n\
+    let u = P { x: 5.0, y: 6.0, z: 7.0, w: 8.0 }\n\
+    let mut x = In { p: v, q: Q { p: u, n: 1 }, ps: [u, v], k: 0.0 }\n\
+    x = step(x, x.p)\n\
+    print(x.k)\n\
+    x = In { p: v, q: Q { p: u, n: 1 }, ps: [u, v], k: x.k }\n\
+    x = step(x, x.q.p)\n\
+    print(x.k)\n\
+    x = In { p: v, q: Q { p: u, n: 1 }, ps: [u, v], k: x.k }\n\
+    x = step(x, x.ps[0])\n\
+    print(x.k)\n\
+    x = In { p: v, q: Q { p: u, n: 1 }, ps: [u, v], k: x.k }\n\
+    let y = fresh(x, x.ps[1])\n\
+    print(y.k)\n\
+    return 0\n\
+    }\n";
+
+/// A field, a nested field and an element of an array field, into a callee that hands
+/// back its parameter and into one that returns a fresh record.
+#[test]
+fn a_part_read_beside_its_consumed_record_is_the_value_before_the_call() {
+    let dir = scratch("handed");
+    let file = dir.join("part.vyrn");
+    std::fs::write(&file, PART).unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(&file)
+        .env("VYRN_LEAK_CHECK", "1")
+        .output()
+        .expect("vyrn run");
+    assert_eq!(
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+        ),
+        (
+            Some(0),
+            "2.000000\n8.000000\n14.000000\n16.000000\n".to_string()
+        ),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A record that owns heap is not copied: its part beside it is refused.
+#[test]
+fn a_part_read_beside_its_consumed_heap_record_is_refused() {
+    let dir = scratch("handed");
+    let file = dir.join("heap.vyrn");
+    std::fs::write(
+        &file,
+        "type C = { a: Float64, tag: String }\n\
+         type In = { c: C, k: Float64 }\n\
+         fn step(a: consume In, r: C) -> In {\n\
+         let mut d = a\n\
+         d.k = r.a\n\
+         return d\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         let mut x = In { c: C { a: 2.0, tag: \"t\" }, k: 1.0 }\n\
+         x = step(x, x.c)\n\
+         print(x.k)\n\
+         return 0\n\
+         }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("check").arg(&file).output().expect("vyrn check");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(
+            "`x` is consumed by `step(..)`, and `x.c` is passed to the same call, so the callee \
+             could read what it frees"
+        ),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
