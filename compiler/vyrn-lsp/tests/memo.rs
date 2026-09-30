@@ -28,7 +28,7 @@ fn analyze(root: &Path) -> String {
         Some(&*vyrn_genwasm::engine()),
         &vyrn_lower::JUDGE,
     );
-    format!("{:#?}\n{:#?}", a.diagnostics, a.memory)
+    format!("{:#?}\n{:#?}\n{:#?}", a.diagnostics, a.remapped, a.memory)
 }
 
 /// Runs `f` on a thread with the server's stack and an armed memo of its own.
@@ -44,11 +44,15 @@ fn server<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         .expect("the analysis panicked")
 }
 
+/// The refusal the effect witnesses turn on.
+const STATE: &str = "is written here while `g` still reads out of it";
+
 /// Writes each step's files into `dir`, then analyzes `main.vyrn` in one
 /// server that saw every earlier step and in a fresh one. Returns the first
 /// step whose two answers differ, with both, or a sentence if no step's fresh
-/// answer holds the refusal every witness here turns on.
-fn drift(dir: &Path, steps: &[&[(&str, &str)]]) -> Option<String> {
+/// answer holds `turns`, the text the witness turns on.
+fn drift(dir: &Path, turns: &str, steps: &[&[(&str, &str)]]) -> Option<String> {
+    let turns = turns.to_string();
     let dir = dir.to_path_buf();
     let steps: Vec<Vec<(String, String)>> = (steps.iter())
         .map(|s| {
@@ -59,7 +63,7 @@ fn drift(dir: &Path, steps: &[&[(&str, &str)]]) -> Option<String> {
         .collect();
     server(move || {
         let root = dir.join("main.vyrn");
-        let mut refused = false;
+        let mut turned = false;
         for (i, step) in steps.iter().enumerate() {
             for (file, text) in step {
                 std::fs::write(dir.join(file), text).expect("write");
@@ -67,14 +71,14 @@ fn drift(dir: &Path, steps: &[&[(&str, &str)]]) -> Option<String> {
             let editor = analyze(&root);
             let r = root.clone();
             let fresh = server(move || analyze(&r));
-            refused |= fresh.contains("is written here while `g` still reads out of it");
+            turned |= fresh.contains(&turns);
             if editor != fresh {
                 return Some(format!(
                     "step {i}\n-- editor:\n{editor}\n-- fresh:\n{fresh}"
                 ));
             }
         }
-        (!refused).then(|| "no step refuses, so the witness shows nothing".to_string())
+        (!turned).then(|| format!("no step holds `{turns}`, so the witness shows nothing"))
     })
 }
 
@@ -97,6 +101,7 @@ fn a_root_keystroke_keeps_a_served_callees_state_writes() {
     let edited = format!("{ROOT_STATE}// k\n");
     let got = drift(
         &dir,
+        STATE,
         &[
             &[("b.vyrn", CALLS_F), ("main.vyrn", ROOT_STATE)],
             &[("main.vyrn", &edited)],
@@ -113,6 +118,7 @@ fn an_imported_body_edit_moves_the_roots_verdict() {
     let dir = scratch("callee");
     let got = drift(
         &dir,
+        STATE,
         &[
             &[("b.vyrn", IGNORES_F), ("main.vyrn", ROOT_STATE)],
             &[("b.vyrn", CALLS_F)],
@@ -139,6 +145,7 @@ fn an_imported_body_edit_moves_another_imported_verdict() {
     let dir = scratch("between");
     let got = drift(
         &dir,
+        STATE,
         &[
             &[
                 ("b.vyrn", IGNORES_F),
@@ -158,10 +165,15 @@ const A_CALLS_BACK: &str = "let mut g: Array<Int64> = [1, 2, 3]\n\
     fn use(f: fn() -> Int64, xs: Array<Int64>) -> Int64 {\n  let n = f()\n  return xs[0] + n\n}\n\
     export fn run(f: fn() -> Int64) -> Int64 {\n  return use(f, g)\n}\n";
 
-fn root_pokes(body: &str) -> String {
+/// A root whose `poke` returns `body`, beside an `aux` over `aux`, a type no
+/// body of `a` reads. The lambda keeps every one-parameter signature out of
+/// `Facts::fnval_clear`, so `aux`'s type moves no fingerprint part `a` reads.
+fn root_pokes(body: &str, aux: &str) -> String {
     format!(
         "import {{ bump, run }} from \"./a\"\nfn poke() -> Int64 {{\n  return {body}\n}}\n\
-         fn main() -> Int64 {{\n  print(run(poke))\n  return 0\n}}\n"
+         fn aux(x: {aux}) -> {aux} {{\n  return x\n}}\n\
+         fn main() -> Int64 {{\n  let id: fn(Int64) -> Int64 = x -> x\n  \
+         print(run(poke) + id(0))\n  return 0\n}}\n"
     )
 }
 
@@ -171,13 +183,67 @@ fn root_pokes(body: &str) -> String {
 #[test]
 fn a_root_edit_moves_an_imported_verdict() {
     let dir = scratch("callback");
-    let (pure, writes) = (root_pokes("0"), root_pokes("bump()"));
+    let (pure, writes) = (root_pokes("0", "Int64"), root_pokes("bump()", "Int64"));
     let got = drift(
         &dir,
+        STATE,
         &[
             &[("a.vyrn", A_CALLS_BACK), ("main.vyrn", &pure)],
             &[("main.vyrn", &writes)],
             &[("main.vyrn", &pure)],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}
+
+/// A root signature edit leaves `a`'s bodies served, and one of them still
+/// reads what the root's `poke` stores into.
+#[test]
+fn a_root_signature_edit_keeps_what_a_served_body_reads() {
+    let dir = scratch("rootsig");
+    let (pure, writes) = (root_pokes("0", "Int64"), root_pokes("bump()", "Int32"));
+    let got = drift(
+        &dir,
+        STATE,
+        &[
+            &[("a.vyrn", A_CALLS_BACK), ("main.vyrn", &pure)],
+            &[("main.vyrn", &writes)],
+            &[("main.vyrn", &pure)],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}
+
+const IGNORES: &str = "export fn ignore<T>(x: consume T) -> Int64 {\n  return 0\n}\n";
+
+fn txn(must: bool) -> String {
+    let imp = if must {
+        "impl MustUse for Txn {}\n"
+    } else {
+        "\n"
+    };
+    format!(
+        "import {{ ignore }} from \"./b\"\n\
+         type Txn = {{ id: Int64 }}\n{imp}\
+         fn main() -> Int64 {{\n  print(ignore(Txn {{ id: 1 }}))\n  return 0\n}}\n"
+    )
+}
+
+/// An imported generic's instance at a root type reads the root's impls:
+/// `ignore<Txn>` owes `Txn` its disposal only while the root declares `impl
+/// MustUse for Txn`. The imported body does not move.
+#[test]
+fn a_root_impl_moves_an_imported_instances_verdict() {
+    let dir = scratch("rootimpl");
+    let got = drift(
+        &dir,
+        "is never disposed",
+        &[
+            &[("b.vyrn", IGNORES), ("main.vyrn", &txn(false))],
+            &[("main.vyrn", &txn(true))],
+            &[("main.vyrn", &txn(false))],
         ],
     );
     let _ = std::fs::remove_dir_all(&dir);

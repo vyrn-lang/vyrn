@@ -336,6 +336,46 @@ fn one_edit_re_judges_one_body() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A root signature edit re-judges no imported body: no module imports the root, so
+/// the fingerprint an imported body is keyed under leaves the root's functions out.
+#[test]
+fn a_root_signature_edit_re_judges_no_imported_body() {
+    vyrn_frontend::movecheck::reuse_judgments();
+    let dir = std::env::temp_dir().join(format!("vyrn-judgsig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
+    write(
+        "b.vyrn",
+        "export fn bTwo(x: Int64) -> Int64 { return x + 2 }\n",
+    );
+    let root = |ty: &str| {
+        write(
+            "main.vyrn",
+            &format!(
+                "import {{ bTwo }} from \"./b\"\nfn aux(x: {ty}) -> {ty} {{ return x }}\n\
+                 fn main() -> Int64 {{ return bTwo(2) }}\n"
+            ),
+        )
+    };
+    let run = || {
+        vyrn_frontend::movecheck::reset_judgment_tally();
+        load(&dir.join("main.vyrn")).expect("the program loads");
+        vyrn_frontend::movecheck::judgment_tally()
+    };
+    root("Int64");
+    let (cold, _) = run();
+    assert!(cold > 0, "the first run judges every body it can key");
+    root("Int32");
+    let (judged, served) = run();
+    assert_eq!(
+        (judged, served),
+        (0, cold),
+        "a root signature edit serves every imported body"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Serving a body skips its placement as well as its judgment; that is sound because
 /// placed rows have no reader in a host that armed the memo
 /// ([`vyrn_frontend::movecheck::reuse_judgments`]). The string interpolation injects
