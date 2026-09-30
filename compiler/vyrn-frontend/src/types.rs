@@ -365,6 +365,32 @@ pub fn predicate_length_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
     (None, None)
 }
 
+/// The pairs of names a predicate conjunction states equal lengths of:
+/// `a.length == b.length`, either side `byteLength`.
+pub fn predicate_equal_lengths(pred: &Expr) -> Vec<(String, String)> {
+    let Expr::Binary { op, lhs, rhs, .. } = pred else {
+        return Vec::new();
+    };
+    let length_of = |e: &Expr| match e {
+        Expr::Field { expr, field, .. } if field == "length" || field == "byteLength" => {
+            match &**expr {
+                Expr::Var { name, .. } => Some(name.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match op {
+        BinOp::And => {
+            let mut out = predicate_equal_lengths(lhs);
+            out.extend(predicate_equal_lengths(rhs));
+            out
+        }
+        BinOp::Eq => length_of(lhs).zip(length_of(rhs)).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The first `value =~ "..."` pattern in a predicate conjunction, unanchored.
 pub fn predicate_pattern(pred: &Expr) -> Option<String> {
     if let Expr::Binary { op, lhs, rhs, .. } = pred {
