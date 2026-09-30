@@ -4497,9 +4497,9 @@ impl<'a> Builder<'a> {
         } else {
             info.ty.clone()
         };
-        let Some(kind) = self.proto.release_kind(&ty) else {
+        if self.proto.release_kind(&ty).is_none() {
             return false;
-        };
+        }
         // The producer as `arg_verdict` partitions it: a call's name, `None`
         // for the allocating operator, else a name no user function can have.
         let producer = match e {
@@ -4522,20 +4522,15 @@ impl<'a> Builder<'a> {
                     | Type::Stream(ref et) if !self.proto.owns_heap(et)
             );
         let s = mc::ArgTemp {
-            id: e.id(),
             callee: callee.to_string(),
             ix,
-            line: e.line(),
-            module: self.body.file.clone(),
             producer,
-            kind,
-            verdict: mc::ArgVerdict::Unknown,
             view_copies,
+            constructs: matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
+                || self.is_variant(callee),
+            cap: vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix),
         };
-        let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
-            || self.is_variant(callee);
-        let cap = vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix);
-        if mc::arg_verdict(&s, constructs, cap) == mc::ArgVerdict::Released {
+        if mc::arg_verdict(&s) == mc::ArgVerdict::Released {
             return true;
         }
         // A call through a fn value has no capability row; the answer is the
