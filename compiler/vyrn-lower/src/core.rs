@@ -3886,41 +3886,69 @@ impl<'a> Builder<'a> {
 
     /// Binds, once before the loop, the header of every heap container the
     /// loop `l` indexes and no row of it rebuilds ([`crate::kernel::writes`]),
-    /// and points the loop's element and length reads at it. The header is a
-    /// borrow the loop walks, so the kernel keeps its alias. A heapless
-    /// container is a value, read in place each turn. For module state, a
-    /// call that stores into it counts as a write.
+    /// and points the loop's element and length reads at it. The container is
+    /// a name, module state, or a field of one. The header is a borrow the
+    /// loop walks, so the kernel keeps its alias. A heapless container is a
+    /// value, read in place each turn. For module state, a call that stores
+    /// into it counts as a write.
     fn hoist_headers(&mut self, l: &mut [St], line: usize, out: &mut Vec<St>) {
-        let mut read = Vec::new();
-        header_reads(l, None, &mut read);
-        read.sort_unstable_by(|a, b| match (a, b) {
-            (Root::N(x), Root::N(y)) => x.cmp(y),
-            (Root::G(x), Root::G(y)) => x.cmp(y),
-            (Root::N(_), Root::G(_)) => std::cmp::Ordering::Less,
-            (Root::G(_), Root::N(_)) => std::cmp::Ordering::Greater,
+        let mut places = Vec::new();
+        header_reads(l, None, &mut places);
+        // A header an inner loop hoisted is hoisted again here, and the inner
+        // borrow reads the outer one's parts.
+        l.iter().flat_map(St::rows).for_each(|(s, _)| match s {
+            St::Let(h, Rhs::Read(p))
+                if self.body.names[h.index()].walked == Some(Walk::While) && fixed(p) =>
+            {
+                places.push(p.clone())
+            }
+            _ => {}
         });
-        read.dedup();
+        let mut read: Vec<(Root, String, Place)> = (places.into_iter())
+            .map(|p| {
+                let (r, fields) = crate::kernel::root(&p);
+                (r, fields, p)
+            })
+            .collect();
+        read.sort_unstable_by(|(a, pa, _), (b, pb, _)| {
+            let by_root = match (a, b) {
+                (Root::N(x), Root::N(y)) => x.cmp(y),
+                (Root::G(x), Root::G(y)) => x.cmp(y),
+                (Root::N(_), Root::G(_)) => std::cmp::Ordering::Less,
+                (Root::G(_), Root::N(_)) => std::cmp::Ordering::Greater,
+            };
+            by_root.then_with(|| pa.cmp(pb))
+        });
+        read.dedup_by(|a, b| a.2 == b.2);
         let mut bound = Vec::new();
         l.iter().for_each(|s| names_bound(s, &mut bound));
         let decls = self.proto.types();
-        for r in read {
-            let (ty, path, from, heap) = match &r {
+        'read: for (r, fields, from) in read {
+            let (mut ty, mut path, mut heap) = match &r {
                 Root::N(n) => {
                     let info = &self.body.names[n.index()];
                     if bound.contains(n) {
                         continue;
                     }
                     let path = info.path.clone().unwrap_or_else(|| info.source.clone());
-                    (info.ty.clone(), path, Place::Name(*n), info.heap)
+                    (info.ty.clone(), path, info.heap)
                 }
                 Root::G(g) => match self.named_place(g, line) {
-                    Ok((from @ Place::Global(_), ty)) => {
+                    Ok((Place::Global(_), ty)) => {
                         let heap = self.proto.owns_heap(&ty);
-                        (ty, g.clone(), from, heap)
+                        (ty, g.clone(), heap)
                     }
                     _ => continue,
                 },
             };
+            for f in fields.split('.').skip(1) {
+                let Ok(t) = self.field_ty(&ty, f, line) else {
+                    continue 'read;
+                };
+                heap = self.proto.owns_heap(&t);
+                path = format!("{path}.{f}");
+                ty = t;
+            }
             let indexed = matches!(
                 vyrn_frontend::types::resolve(&ty, &decls),
                 Type::Array(_) | Type::SmallArray(..) | Type::Str
@@ -3929,7 +3957,8 @@ impl<'a> Builder<'a> {
                 || !heap
                 || crate::kernel::writes(
                     l,
-                    r.clone(),
+                    r,
+                    &fields,
                     &self.body.names,
                     self.body.id,
                     &self.own.state_callees,
@@ -3940,8 +3969,8 @@ impl<'a> Builder<'a> {
             let h = self.name("@borrow", ty, false, line);
             self.body.names[h.index()].walked = Some(Walk::While);
             self.body.names[h.index()].path = Some(path);
+            header_reads(l, Some((&from, h)), &mut Vec::new());
             out.push(St::Let(h, Rhs::Read(from)));
-            header_reads(l, Some((&r, h)), &mut Vec::new());
         }
     }
 
@@ -6941,32 +6970,25 @@ pub fn extent_ends(ss: &[St], occurs: &[u32]) -> Vec<Vec<Name>> {
     out
 }
 
-/// The names and the module state whose header a read in `ss` walks: an
-/// element read, or a length read, straight off one. With `rebase`, each
-/// such read of the first reads the name instead. A store and a take keep
-/// their place, so a store into an element writes the container and not its
-/// header.
-fn header_reads(ss: &mut [St], rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
-    fn place(p: &mut Place, rebase: Option<(&Root, Name)>, out: &mut Vec<Root>) {
+/// The headers a read in `ss` walks: an element read, or a length read,
+/// straight off a name, module state, or a chain of fields of one. With
+/// `rebase`, each such read of the first reads the name instead. A store and
+/// a take keep their place, so a store into an element writes the container
+/// and not its header.
+fn header_reads(ss: &mut [St], rebase: Option<(&Place, Name)>, out: &mut Vec<Place>) {
+    fn place(p: &mut Place, rebase: Option<(&Place, Name)>, out: &mut Vec<Place>) {
         let header = match p {
             Place::Elem(b, _) => Some(b),
             Place::Field(b, f) if f == "length" || f == "byteLength" => Some(b),
             _ => None,
         };
-        if let Some(b) = header {
-            let r = match &**b {
-                Place::Name(n) => Some(Root::N(*n)),
-                Place::Global(g) => Some(Root::G(g.clone())),
-                _ => None,
-            };
-            if let Some(r) = r {
-                match rebase {
-                    Some((from, to)) if *from == r => **b = Place::Name(to),
-                    Some(_) => {}
-                    None => out.push(r),
-                }
-                return;
+        if let Some(b) = header.filter(|b| fixed(b)) {
+            match rebase {
+                Some((from, to)) if **b == *from => **b = Place::Name(to),
+                Some(_) => {}
+                None => out.push((**b).clone()),
             }
+            return;
         }
         match p {
             Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => place(b, rebase, out),
@@ -6982,6 +7004,16 @@ fn header_reads(ss: &mut [St], rebase: Option<(&Root, Name)>, out: &mut Vec<Root
             place(p, rebase, out);
         }
     });
+}
+
+/// Whether `p` is a name, module state, or a chain of fields of one: a place
+/// no element index moves.
+fn fixed(p: &Place) -> bool {
+    match p {
+        Place::Name(_) | Place::Global(_) => true,
+        Place::Field(b, _) => fixed(b),
+        Place::Elem(..) | Place::Key(..) => false,
+    }
 }
 
 /// Every name `s` binds, at any depth: a `let` and a switch arm's binders.

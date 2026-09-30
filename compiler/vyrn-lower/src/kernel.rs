@@ -238,7 +238,9 @@ pub fn root_of(p: &Place) -> Option<(Name, String)> {
     }
 }
 
-fn root(p: &Place) -> (Root, String) {
+/// The root of a place and the path under it, spelled `.f` per field and
+/// `.[]` per element or key.
+pub fn root(p: &Place) -> (Root, String) {
     match p {
         Place::Name(n) => (Root::N(*n), String::new()),
         Place::Global(g) => (Root::G(g.clone()), String::new()),
@@ -341,9 +343,11 @@ fn release_state(runs: &[String], frame: Option<FnId>, state: &StateCallees) -> 
     gs
 }
 
-/// Whether a row of `ss` writes `on` where the judgment would end a borrow
-/// of it ([`writes_of`]), or a closure captures it. The builder asks this to
-/// hoist a header.
+/// Whether a row of `ss` writes the place at `path` under `on` where the
+/// judgment would end a borrow of it ([`writes_of`]), or a closure captures
+/// it. The builder asks this to hoist a header. A write through `on` itself
+/// counts only where it overlaps `path`; a write through another alias counts
+/// wherever it lands.
 ///
 /// A name `ss` binds by a read of `on`, or by a switch over one, counts as
 /// `on`, and so may a borrow of a place bound outside `ss`. A store into an
@@ -356,23 +360,25 @@ fn release_state(runs: &[String], frame: Option<FnId>, state: &StateCallees) -> 
 pub fn writes(
     ss: &[St],
     on: Root,
+    path: &str,
     names: &[NameInfo],
     frame: Option<FnId>,
     state: &StateCallees,
 ) -> bool {
-    walk_writes(ss, on, names, frame, state, false)
+    walk_writes(ss, on, path, names, frame, state, false)
 }
 
 /// Whether a row of `ss` hands `on`, or a name that may alias it, to a
 /// `modify` parameter, or a closure captures an alias: [`writes`] counting
 /// only `modify` write points. The judgment ends every borrow of `on` there.
 pub fn modifies(ss: &[St], on: Root, names: &[NameInfo]) -> bool {
-    walk_writes(ss, on, names, None, &StateCallees::new(), true)
+    walk_writes(ss, on, "", names, None, &StateCallees::new(), true)
 }
 
 fn walk_writes(
     ss: &[St],
     on: Root,
+    path: &str,
     names: &[NameInfo],
     frame: Option<FnId>,
     state: &StateCallees,
@@ -387,6 +393,7 @@ fn walk_writes(
     };
     let mut w = Writes {
         on,
+        path,
         frame,
         state,
         alias,
@@ -401,6 +408,8 @@ fn walk_writes(
 
 struct Writes<'a> {
     on: Root,
+    /// The place under `on` asked about; empty for the whole of it.
+    path: &'a str,
     frame: Option<FnId>,
     state: &'a StateCallees,
     /// `on` where it is a name, and every borrow bound so far by a read of
@@ -433,6 +442,20 @@ impl Writes<'_> {
             })
     }
 
+    /// Whether a write at `path` under `r` may land on the place asked about:
+    /// through `on` itself, where the paths overlap, or through a name that
+    /// may alias it. A store into an element moves no header ([`in_element`]).
+    fn hits(&self, r: &Root, path: &str, store: bool) -> bool {
+        if *r == self.on {
+            return overlaps(self.path, path)
+                && !(store && path.strip_prefix(self.path).is_some_and(in_element));
+        }
+        self.under(r)
+            && !(store
+                && (matches!(r, Root::N(k) if self.elem.contains(k))
+                    || (self.aliased(r) && in_element(path))))
+    }
+
     fn list(&mut self, ss: &[St]) -> bool {
         let depth = self.depth;
         ss.iter().enumerate().any(|(i, s)| {
@@ -451,15 +474,19 @@ impl Writes<'_> {
             .into_iter()
             .any(|w| match w {
                 Write::Modify(Arg::Val(v)) => matches!(v, Val::Name(k) if self.under(&Root::N(*k))),
-                Write::Modify(Arg::Place(p)) => self.under(&root(p).0),
+                Write::Modify(Arg::Place(p)) => {
+                    let (r, path) = root(p);
+                    self.hits(&r, &path, false)
+                }
                 _ if self.modify => false,
                 Write::Store(p) => {
                     let (r, path) = root(p);
-                    self.under(&r)
-                        && !(matches!(r, Root::N(k) if self.elem.contains(&k))
-                            || (self.aliased(&r) && in_element(&path)))
+                    self.hits(&r, &path, true)
                 }
-                Write::Take(p) => self.under(&root(p).0),
+                Write::Take(p) => {
+                    let (r, path) = root(p);
+                    self.hits(&r, &path, false)
+                }
                 Write::Hand(v, _) => matches!((v, &self.on), (Val::Name(k), Root::N(n)) if k == n),
                 Write::Release(k) => self.alias.contains(&k),
                 Write::State(gs) => match &self.on {

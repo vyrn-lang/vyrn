@@ -395,6 +395,12 @@ impl Walk<'_> {
                     st.define(Term::Val(n), &Lin::of(t));
                 }
             }
+            // A header a loop walks has its field's length.
+            Rhs::Read(p @ Place::Field(..)) if self.body.names[n.index()].walked.is_some() => {
+                if let Some(t) = self.length(p) {
+                    st.define(Term::Len(n), &Lin::of(t));
+                }
+            }
             Rhs::Make(Ctor::Array, parts) => {
                 st.define(Term::Len(n), &Lin::k(parts.len() as i64));
             }
@@ -946,14 +952,14 @@ fn relevant(body: &Body, ss: &[St]) -> Vec<bool> {
     let mut rel = vec![false; body.names.len()];
     loop {
         let before = rel.iter().filter(|r| **r).count();
-        mark(ss, &mut rel);
+        mark(body, ss, &mut rel);
         if rel.iter().filter(|r| **r).count() == before {
             return rel;
         }
     }
 }
 
-fn mark(ss: &[St], rel: &mut [bool]) {
+fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
     let val = |v: &Val| match v {
         Val::Name(n) => Some(*n),
         Val::Lit(_) => None,
@@ -982,6 +988,9 @@ fn mark(ss: &[St], rel: &mut [bool]) {
                         Place::Name(m) => vec![*m],
                         Place::Field(b, f) if f == "length" || f == "byteLength" => {
                             place_root(b).into_iter().collect()
+                        }
+                        Place::Field(..) if body.names[n.index()].walked.is_some() => {
+                            place_root(p).into_iter().collect()
                         }
                         _ => vec![],
                     },
@@ -1014,11 +1023,11 @@ fn mark(ss: &[St], rel: &mut [bool]) {
                 }
             }
             St::If { then, els, .. } => {
-                mark(then, rel);
-                mark(els, rel);
+                mark(body, then, rel);
+                mark(body, els, rel);
             }
-            St::Loop { body, .. } | St::Block { body, .. } => mark(body, rel),
-            St::Switch { arms, .. } => arms.iter().for_each(|a| mark(&a.body, rel)),
+            St::Loop { body: l, .. } | St::Block { body: l, .. } => mark(body, l, rel),
+            St::Switch { arms, .. } => arms.iter().for_each(|a| mark(body, &a.body, rel)),
             _ => {}
         }
     }
