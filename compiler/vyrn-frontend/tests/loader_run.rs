@@ -189,6 +189,29 @@ mod tests {
         run_compiled(&program)
     }
 
+    /// A test body is typed under its own module's shadow set: the root's own
+    /// `raw` is its function there too, not the generation-only builtin, though
+    /// the linked program's last function is another module's.
+    #[test]
+    fn a_test_body_calls_its_own_modules_raw() {
+        let root = "fn raw(s: String) -> String { return \"raw:\" + s }
+                    fn main() -> Int64 { print(raw(\"main\")) return 0 }
+                    test \"own raw\" { assertEq(raw(\"t\"), \"raw:t\") }
+";
+        let program = load(root, "main.vyrn", &opts(), &map(&[]), None).expect("the root loads");
+        let last = program
+            .functions
+            .last()
+            .expect("a linked program has functions");
+        assert!(
+            last.module.is_some(),
+            "the last function must be another module's"
+        );
+        let diags = vyrn_frontend::checker::check_accum(&program);
+        let text: Vec<String> = diags.iter().map(|d| d.render()).collect();
+        assert!(text.is_empty(), "{text:?}");
+    }
+
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
         match load(root, "main.vyrn", &opts(), &map(files), Some(&*engine())) {
             Ok(_) => panic!("expected a load error"),

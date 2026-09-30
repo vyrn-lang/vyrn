@@ -1149,11 +1149,6 @@ fn check_accum_inner(
         out.extend(checker.absorb(t));
     }
     drop(typing);
-    // Step 6 types each body under the module of the last function step 5
-    // typed, as one thread did: `function_body` does not set `here`.
-    if let Some(f) = bodies.last() {
-        *checker.here.borrow_mut() = f.module.clone();
-    }
 
     // 6. Projection, test and bench bodies. A test or bench is a Unit body
     //    under an unspellable name (`test@<index>`), absent from `sigs`, so no
@@ -2971,7 +2966,6 @@ impl<'a> Checker<'a> {
         // Signature validation runs outside `function()` and must accept a
         // `Code` type in a `gen fn` signature.
         *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
-        *self.here.borrow_mut() = f.module.clone();
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
                 // A function value cannot cross the host boundary, nor a
@@ -3060,6 +3054,7 @@ impl<'a> Checker<'a> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
         *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
+        *self.here.borrow_mut() = f.module.clone();
         self.in_root.set(f.module.is_none());
         self.errors.borrow_mut().clear();
         // A local shadows a global of the same name.
