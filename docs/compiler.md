@@ -57,15 +57,14 @@ The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
 front end cannot call the lowering. A host enters through `vyrn-lower`
 (`load`, `check_and_synthesize`, `analyze`), which calls the front end and
 then its own judgments. The editor passes the pipeline after the load into
-`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). The one slot
-left is the generation engine (`gen::set_gen_engine`). `vyrn_genwasm::install`
-installs the wasmtime engine; the playground installs its own, which runs the
-module in the page. Both wrap their run in `vyrn_lower::gen_engine`, which
-judges the generator's own program first. Every process that compiles
-installs an engine before it loads a module: the CLI's `real_main`, the
-language server's `main`, the playground's `load`. A process with no engine
-fails every `derive` and generator import. `tests/hosts.rs` holds each host to
-this, and names the hosts without an engine with the reason.
+`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). A host passes the
+generation engine the same way, beside the resolver of each load and check.
+`vyrn_genwasm::engine` is the wasmtime engine; the playground builds its own,
+which runs the module in the page. Both wrap their run in
+`vyrn_lower::gen_engine`, which judges the generator's own program first. The
+engine rides in `gen::GenInputs`, so a generator's own loads and `derive`
+sites run on it too. A load with no engine fails every `derive` and generator
+import.
 
 ## The front end
 
@@ -84,7 +83,7 @@ the playground serves an embedded `std/`. The loader:
 
 - resolves every `import` transitively, from disk, `std/`, the lock and cache
   (`manifest.rs`), or a generator call;
-- runs each generator call (`run_generator`) through the installed engine,
+- runs each generator call (`run_generator`) through the load's engine,
   caches its output under its recorded inputs, and maps generated lines back
   to their origin (`origin.rs`);
 - links the modules (`link`), so no later pass sees a module boundary, and

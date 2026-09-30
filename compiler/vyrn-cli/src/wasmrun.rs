@@ -1230,10 +1230,10 @@ fn main() -> Int64 {
             ..Default::default()
         };
         let (mut program, memo) = vyrn_frontend::project::Memo::load(|| {
-            vyrn_lower::load(PROBE, "probe.vyrn", &opts, &files)
+            vyrn_lower::load(PROBE, "probe.vyrn", &opts, &files, None)
         })
         .expect("the probe loads");
-        let diags = vyrn_lower::check_and_synthesize(&mut program);
+        let diags = vyrn_lower::check_and_synthesize(&mut program, None);
         assert!(diags.is_empty(), "the probe checks: {diags:?}");
         vyrn_codegen::direct::compile(&program, &memo).expect("the probe compiles")
     }

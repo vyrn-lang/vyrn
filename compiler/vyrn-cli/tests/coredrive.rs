@@ -30,11 +30,13 @@ fn load_src(src: &str, root: &str) -> Result<(Program, Memo), String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    Memo::load(|| vyrn_lower::load(src, root, &opts, &Fs)).map_err(|d| {
-        d.first()
-            .map(|d| d.render())
-            .unwrap_or_else(|| "load failed".into())
-    })
+    Memo::load(|| vyrn_lower::load(src, root, &opts, &Fs, Some(&*vyrn_genwasm::engine()))).map_err(
+        |d| {
+            d.first()
+                .map(|d| d.render())
+                .unwrap_or_else(|| "load failed".into())
+        },
+    )
 }
 
 fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
@@ -183,7 +185,6 @@ fn every_body_is_taken_from_the_core() {
 }
 
 fn run() {
-    vyrn_genwasm::install();
     let mut classes = [0usize; CLASSES.len()];
     // Per class, the bodies that name only the scalar types `scalar` admits.
     let mut scalars = [0usize; CLASSES.len()];

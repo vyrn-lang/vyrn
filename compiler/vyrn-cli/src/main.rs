@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use vyrn_frontend::project::Memo;
+use vyrn_genwasm::engine;
 
 use vyrn_codegen::toolchain::find_clang;
 
@@ -194,7 +195,6 @@ fn main() -> ExitCode {
 }
 
 fn real_main() -> ExitCode {
-    vyrn_genwasm::install();
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
     if is_offline {
@@ -431,7 +431,7 @@ fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
     let root_key = normalize_slashes(path);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let result = vyrn_frontend::loader::generated_modules(source, &root_key, &opts, &resolver);
+    let result = loader::generated_modules(source, &root_key, &opts, &resolver, Some(&*engine()));
     // Pins are saved even when the run fails. A pin the disk refused fails the
     // command: a fetched remote must land in vyrn.lock.
     if let Err(code) = save_lock(&resolver) {
@@ -473,7 +473,7 @@ fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
     }
 }
 
-use vyrn_frontend::loader::DiskResolver;
+use vyrn_frontend::loader::{self, DiskResolver};
 
 use vyrn_frontend::manifest::{
     dos_to_slash, find as find_manifest, real_path, std_root, web_root, Manifest,
@@ -781,7 +781,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     };
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let result = vyrn_frontend::loader::generated_modules(&source, &root_key, &opts, &resolver);
+    let result = loader::generated_modules(&source, &root_key, &opts, &resolver, Some(&*engine()));
     // Pins survive a failed run; a pin the disk refuses fails the command.
     if let Err(code) = save_lock(&resolver) {
         return code;
@@ -824,7 +824,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     }
     // The hand-written channel. A failure is reported and survived: the derived
     // rows above are still true.
-    match Memo::load(|| vyrn_lower::load(&source, &root_key, &opts, &resolver))
+    match Memo::load(|| vyrn_lower::load(&source, &root_key, &opts, &resolver, Some(&*engine())))
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
         .and_then(|(p, dsg)| {
             let _memo = shared_desugars(&p);
@@ -1321,11 +1321,12 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (graph, root_key) = match vyrn_frontend::loader::capability_graph(
+    let (graph, root_key) = match loader::capability_graph(
         &source,
         &artifact.entry,
         &opts,
         &DiskResolver,
+        Some(&*engine()),
     ) {
         Ok(g) => g,
         Err(diags) => {
@@ -1764,7 +1765,7 @@ fn deps(name: Option<&str>) -> ExitCode {
             }
         };
         let opts = load_options(root_key);
-        match vyrn_frontend::loader::module_graph(&source, root_key, &opts, &DiskResolver) {
+        match loader::module_graph(&source, root_key, &opts, &DiskResolver, Some(&*engine())) {
             Ok(graph) => {
                 for (module, imports) in graph {
                     println!("{module}");
@@ -2013,7 +2014,7 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
     let root_key = normalize_slashes(&main);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    match vyrn_frontend::loader::module_graph(&source, &root_key, &opts, &resolver) {
+    match loader::module_graph(&source, &root_key, &opts, &resolver, Some(&*engine())) {
         Ok(graph) => {
             let mut seen = std::collections::HashSet::new();
             let mut out = Vec::new();
@@ -2195,7 +2196,7 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
         });
 
     let result =
-        vyrn_frontend::loader::module_graph_with_sources(&source, &root_key, &opts, &resolver);
+        loader::module_graph_with_sources(&source, &root_key, &opts, &resolver, Some(&*engine()));
     // Pins survive a failed run; a pin the disk refuses fails the command.
     save_lock(&resolver)?;
     let graph = match result {
@@ -2572,7 +2573,7 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
 fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
     let opts = load_options(root_key);
     let resolver = make_resolver(root_key);
-    match vyrn_lower::load_warned(text, root_key, &opts, &resolver).0 {
+    match vyrn_lower::load_warned(text, root_key, &opts, &resolver, Some(&*engine())).0 {
         Ok(_) => Vec::new(),
         Err(d) => d,
     }
@@ -2688,7 +2689,8 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
     let root_key = normalize_slashes(path);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let (result, warnings) = vyrn_lower::load_warned(source, &root_key, &opts, &resolver);
+    let (result, warnings) =
+        vyrn_lower::load_warned(source, &root_key, &opts, &resolver, Some(&*engine()));
     // Pins are saved even when a later stage fails.
     save_lock(&resolver)?;
     match result {
@@ -6111,7 +6113,6 @@ fn handle(req: Request) -> Response {
         let source = format!("{SRC}\n{SERVE_SHIM}");
         std::fs::write(&file, &source).unwrap();
         let key = file.to_string_lossy().replace('\\', "/");
-        vyrn_genwasm::install();
         let (mut program, dsg) = loaded(&key, &source).expect("the doors load and check");
         serve_rewrite(&mut program);
         let bytes = vyrn_codegen::direct::compile(&program, &dsg).expect("the doors compile");

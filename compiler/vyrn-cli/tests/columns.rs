@@ -30,7 +30,7 @@ fn programs() -> Vec<PathBuf> {
 
 /// The first diagnostic the editor gives for `src`.
 fn first(src: &str) -> Option<vyrn_frontend::diagnostics::Diagnostic> {
-    vyrn_frontend::analyze_judged(src, None, &vyrn_lower::JUDGE)
+    vyrn_frontend::analyze_judged(src, None, None, &vyrn_lower::JUDGE)
         .diagnostics
         .into_iter()
         .next()

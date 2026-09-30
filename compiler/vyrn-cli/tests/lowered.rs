@@ -36,7 +36,16 @@ fn load(path: &std::path::Path) -> Result<(Program, Memo), String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    Memo::load(|| vyrn_lower::load(&src, &root, &opts, &DiskResolver)).map_err(|d| {
+    Memo::load(|| {
+        vyrn_lower::load(
+            &src,
+            &root,
+            &opts,
+            &DiskResolver,
+            Some(&*vyrn_genwasm::engine()),
+        )
+    })
+    .map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())
@@ -349,7 +358,6 @@ fn every_backend_type_equals_the_recorded_one() {
 fn gate() {
     // Without this every generator example fails to link and the gate silently
     // measures a smaller corpus.
-    vyrn_genwasm::install();
     let mut t = Tally::default();
     // The residue by engine and expression kind. Reported, never asserted: the
     // raw count is not reproducible (see [`Tally::synthesized`]).

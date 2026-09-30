@@ -204,7 +204,7 @@ pub struct Completion {
 /// skipped after any parse error, so `diagnostics` then holds parse errors
 /// only. [`analyze_judged`] runs the pipeline `vyrn check` runs instead.
 pub fn analyze(source: &str) -> Analysis {
-    analyze_inner(source, None, None)
+    analyze_inner(source, None, None, None)
 }
 
 /// Like [`analyze`], but resolves the document's imports through the module
@@ -218,8 +218,9 @@ pub fn analyze_linked(
     root_path: &str,
     opts: &crate::loader::LoadOptions,
     resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Analysis {
-    analyze_inner(source, Some((root_path, opts, resolver)), None)
+    analyze_inner(source, Some((root_path, opts, resolver)), engine, None)
 }
 
 /// The pipeline `vyrn check` runs over a loaded program. It lives in
@@ -228,8 +229,20 @@ pub fn analyze_linked(
 pub struct Judge {
     /// Checks and synthesizes the program, judges ownership, and makes the
     /// floor decision the load deferred.
-    pub check: fn(&mut crate::ast::Program, Option<crate::floor::Pending>) -> Judged,
+    pub check: fn(
+        &mut crate::ast::Program,
+        Option<&crate::gen::GenEngine>,
+        Option<crate::floor::Pending>,
+    ) -> Judged,
 }
+
+/// What [`analyze_linked`] links with: the root path, the load options and
+/// the resolver.
+pub type Linker<'a> = (
+    &'a str,
+    &'a crate::loader::LoadOptions,
+    &'a dyn crate::loader::ModuleResolver,
+);
 
 /// What [`Judge::check`] returns.
 pub struct Judged {
@@ -245,14 +258,12 @@ pub struct Judged {
 /// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
 /// `judge`'s diagnostics, and its memory rows on hover. With no `linker`, the
 /// source loads as `untitled.vyrn` in the working directory, with the default
-/// std root, as `vyrn check` would load that file.
+/// std root, as `vyrn check` would load that file. `engine` runs its
+/// generators.
 pub fn analyze_judged(
     source: &str,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
+    linker: Option<Linker<'_>>,
+    engine: Option<&crate::gen::GenEngine>,
     judge: &Judge,
 ) -> Analysis {
     let opts = crate::loader::LoadOptions {
@@ -260,7 +271,7 @@ pub fn analyze_judged(
         ..Default::default()
     };
     let linker = linker.unwrap_or(("untitled.vyrn", &opts, &crate::loader::DiskResolver));
-    analyze_inner(source, Some(linker), Some(judge))
+    analyze_inner(source, Some(linker), engine, Some(judge))
 }
 
 /// Rewrites a foreign-file diagnostic so it shows in the root document without
@@ -277,11 +288,8 @@ fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
 
 fn analyze_inner(
     source: &str,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
+    linker: Option<Linker<'_>>,
+    engine: Option<&crate::gen::GenEngine>,
     judge: Option<&Judge>,
 ) -> Analysis {
     let tokens = match lexer::lex(source) {
@@ -350,7 +358,7 @@ fn analyze_inner(
         match &linker {
             Some((root_path, opts, resolver)) => {
                 let (loaded, o, load_warnings, g, p) =
-                    crate::loader::load_with_origins(source, root_path, opts, *resolver);
+                    crate::loader::load_with_origins(source, root_path, opts, *resolver, engine);
                 pending = p;
                 graph = g;
                 // The origin maps come back even from a failed load,
@@ -393,7 +401,7 @@ fn analyze_inner(
             let cs = crate::prof::phase("check: the analysis's own");
             let (checked_diags, binders) = match judge {
                 Some(judge) => {
-                    let judged = (judge.check)(prog, pending);
+                    let judged = (judge.check)(prog, engine, pending);
                     memory = judged.memory;
                     (judged.diagnostics, judged.binders)
                 }
@@ -1765,11 +1773,7 @@ fn index_imported_symbols(
 fn index_namespaces(
     graph: &crate::loader::ModuleGraph,
     root: &ast::Program,
-    linker: Option<(
-        &str,
-        &crate::loader::LoadOptions,
-        &dyn crate::loader::ModuleResolver,
-    )>,
+    linker: Option<Linker<'_>>,
     origins: &OriginIndex,
 ) -> Vec<NamespaceInfo> {
     let Some((root_path, opts, resolver)) = linker else {
@@ -3244,7 +3248,7 @@ mod tests {
         let resolver = MapResolver(files);
         let root = "import { getUser as fetchUser } from \"./api\"\n\
                     fn main() -> Int64 { return fetchUser(1) }";
-        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
         assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
         let sym = a
             .symbols
@@ -3286,7 +3290,7 @@ mod tests {
         let resolver = MapResolver(files);
         let root = "import * as api from \"./api\"\n\
                     fn main() -> Int64 { let u = api.getUser(1) return u.id }";
-        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
         assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
 
         // The namespace binding and its members are recorded.

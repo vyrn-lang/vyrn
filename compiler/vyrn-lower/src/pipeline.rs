@@ -13,14 +13,16 @@ use crate::typed;
 
 /// Loads a multi-module program: parses `root_source`, resolves every
 /// `import` transitively through `resolver`, links one [`ast::Program`], and
-/// checks it.
+/// checks it. `engine` runs every generator import and `derive` site; with
+/// `None`, each one fails.
 pub fn load(
     root_source: &str,
     root_path: &str,
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
+    engine: Option<&GenEngine>,
 ) -> Result<ast::Program, Vec<Diagnostic>> {
-    load_warned(root_source, root_path, opts, resolver).0
+    load_warned(root_source, root_path, opts, resolver, engine).0
 }
 
 /// Like [`load`], and also returns the load's warnings. A warning never changes
@@ -30,17 +32,18 @@ pub fn load_warned(
     root_path: &str,
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
+    engine: Option<&GenEngine>,
 ) -> (Result<ast::Program, Vec<Diagnostic>>, loader::Warnings) {
     let load_span = prof::phase("load (total)");
     let (loaded, origins, warnings, _graph, pending) =
-        loader::load_with_origins(root_source, root_path, opts, resolver);
+        loader::load_with_origins(root_source, root_path, opts, resolver, engine);
     drop(load_span);
     // The loader has already remapped its own diagnostics.
     let mut program = match loaded {
         Ok(p) => p,
         Err(diags) => return (Err(diags), warnings),
     };
-    let mut diags = check(&mut program, pending).diagnostics;
+    let mut diags = check(&mut program, engine, pending).diagnostics;
     if diags.is_empty() {
         (Ok(program), warnings)
     } else {
@@ -58,16 +61,24 @@ pub fn load_warned(
 }
 
 /// Type-checks `program` and synthesizes what its builtins need into it
-/// ([`vyrn_frontend::check_and_synthesize`]), then judges ownership and the
-/// floor. Returns every diagnostic found.
-pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
-    check(program, None).diagnostics
+/// ([`vyrn_frontend::check_and_synthesize`]) with `engine`, then judges
+/// ownership and the floor. Returns every diagnostic found.
+pub fn check_and_synthesize(
+    program: &mut ast::Program,
+    engine: Option<&GenEngine>,
+) -> Vec<Diagnostic> {
+    check(program, engine, None).diagnostics
 }
 
 /// [`check_and_synthesize`] with the floor decision the load returned, if any.
 /// The editor runs it as [`JUDGE`].
-fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> symbols::Judged {
-    let (mut diags, refused, binders, record) = vyrn_frontend::check_and_synthesize(program);
+fn check(
+    program: &mut ast::Program,
+    engine: Option<&GenEngine>,
+    pending: Option<floor::Pending>,
+) -> symbols::Judged {
+    let (mut diags, refused, binders, record) =
+        vyrn_frontend::check_and_synthesize(program, engine);
     // One type record for the readers below: the check's own. The synthesis is
     // over, so no node moves under its keys, and the guard closes before the
     // caller can extend the program again.
@@ -164,7 +175,7 @@ fn subject(message: &str) -> Option<&str> {
 }
 
 /// Wraps `run`, an engine that compiles and runs a generator, into the engine
-/// `gen::set_gen_engine` installs, which judges the generator's own program
+/// a host passes to [`load`], which judges the generator's own program
 /// under [`movecheck::comptime`]. The must-use judgment refuses before `run`.
 /// The typed judgment runs inside `run`'s compile, which refuses the program
 /// it refused (`direct::compile_gen_host`). The kernel does not judge a generator's

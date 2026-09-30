@@ -13866,7 +13866,7 @@ mod tests {
             std_root: Some("std".into()),
             ..Default::default()
         };
-        Memo::load(|| vyrn_lower::load(src, "main.vyrn", &opts, &files))
+        Memo::load(|| vyrn_lower::load(src, "main.vyrn", &opts, &files, None))
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))
     }
 
