@@ -216,7 +216,7 @@ type User = {
 
 ### Function types
 
-`fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state.
+`fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state. A function value reads every argument, so a function with a `consume` or `modify` parameter is not a value of any `fn` type.
 
 ```vyrn
 type Transform = fn(Int64) -> Int64
@@ -299,7 +299,7 @@ fn redeem(t: consume Ticket) -> Int64 {
 
 - A method receiver takes the same words: `read self` (a bare `self`), `modify self`, `consume self`.
 - Using a consumed value is refused, naming the line that took it.
-- A `modify` argument read again in the same call is refused, because the callee has exclusive access.
+- A `modify` argument read again in the same call is refused, because the callee has exclusive access. So is a `consume` argument passed again, whole or in part, because the callee could free it before it reads the other argument.
 - The words are erased before the program runs.
 
 `consume place` in an expression moves a value out of a binding or a field chain; the place is dead afterwards. `drop x` releases a value and ends the binding. `region { .. }` frees every allocation made inside it at its closing brace; storing a heap value made inside into a binding that outlives the region is refused. [memory.md](memory.md) states when the compiler releases each value.

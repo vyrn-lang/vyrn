@@ -325,6 +325,20 @@ fn census() -> Vec<Row> {
             "`f` was moved here into a literal\nline 7: ... and `f` is used again here",
             Kernel::Its,
         ),
+        row(
+            "r43_function_value_of_a_consume_parameter.vyrn",
+            "a function value reads every argument, so its target takes each by `read`",
+            "`grow` cannot be used as a function value: it takes `c` by `consume`, and a `fn` \
+             type reads every argument",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r44_consume_and_read_in_one_call.vyrn",
+            "a `consume` argument may not overlap another argument of the same call",
+            "`x` is consumed by `g(..)`, and `x` is passed to the same call, so the callee could \
+             read what it frees",
+            Kernel::Its,
+        ),
     ]
 }
 

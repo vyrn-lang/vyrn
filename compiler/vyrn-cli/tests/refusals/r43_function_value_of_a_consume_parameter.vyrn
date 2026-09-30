@@ -1,0 +1,16 @@
+// A `fn` type reads every argument, so a function that takes one by
+// `consume` is no value of it: a call through the value would leave the
+// argument with the caller, and both sides would free it.
+type Cell = { name: String, v: Float64 }
+
+fn grow(c: consume Cell, by: Float64) -> Cell {
+    return Cell { name: consume c.name, v: c.v + by }
+}
+
+fn main() -> Int64 {
+    let e = Cell { name: 1234567.toString(), v: 1.0 }
+    let g: fn(Cell, Float64) -> Cell = grow
+    let f = g(e, 5.0)
+    print(f.v)
+    return 0
+}

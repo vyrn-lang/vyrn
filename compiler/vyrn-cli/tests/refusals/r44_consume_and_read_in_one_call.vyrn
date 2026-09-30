@@ -1,0 +1,16 @@
+// `g` frees `a.name` and then reads `b.name`. Both name `x`, so the call
+// would read what it freed: a consumed argument is passed once.
+type Cell = { name: String, v: Float64 }
+
+fn g(a: consume Cell, b: Cell) -> Cell {
+    let n = consume a.name
+    drop n
+    return Cell { name: b.name.copy(), v: b.v }
+}
+
+fn main() -> Int64 {
+    let mut x = Cell { name: 1234567.toString(), v: 1.0 }
+    x = g(x, x)
+    print(x.name)
+    return 0
+}

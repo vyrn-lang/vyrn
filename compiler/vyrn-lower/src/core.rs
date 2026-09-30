@@ -6346,7 +6346,8 @@ impl<'a> Builder<'a> {
             )
         });
         let mut caps: Vec<Capability> = if let Some(n) = bound {
-            // A lambda captures by read and takes by read.
+            // A function value reads every argument: the checker refuses a
+            // target that takes one otherwise (`Checker::reads_every_param`).
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
         } else if let Some(id) = self.fn_id(name) {

@@ -63,6 +63,10 @@ pub const RELEASED: &str = "`{s}` is {what} here after it was released";
 pub const ALIAS_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
                           {here}: ... and `{s}` is {what} again here|`{src}.copy()` on line \
                           {at}, so `{s}` is a value of its own";
+/// A `consume` argument and a place overlapping it, handed to one call.
+pub const CONSUMED_AND_PASSED: &str = "`{s}` is consumed by {by}, and `{o}` is passed to the \
+                                       same call, so the callee could read what it \
+                                       frees|`{s}.copy()` for the `consume` parameter";
 /// An argument that reads a global the callee stores into.
 pub const STATE_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
                           {here}: ... and `{s}` is {what} again here";
