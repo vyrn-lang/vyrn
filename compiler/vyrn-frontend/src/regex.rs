@@ -1035,24 +1035,26 @@ impl Dfa {
 
 /// Compiles a pattern to a DFA, or returns a readable error.
 ///
-/// Memoized, errors included: the checker asks for the same DFA at every value
-/// boundary, and rebuilding one table measured 96% of checker time. A clone is
-/// a ~1 MB memcpy against a ~25 ms rebuild.
+/// Memoized, errors included, once per process: the checker asks for the same
+/// DFA at every value boundary, on every thread that types bodies, and
+/// rebuilding one table measured 96% of checker time. A clone is a ~1 MB
+/// memcpy against a ~25 ms rebuild. A thread that asks while another builds
+/// the pattern waits for that build.
 pub fn compile(pattern: &str) -> Result<Dfa, String> {
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+    type Slot = Arc<OnceLock<Result<Dfa, String>>>;
     // ponytail: unbounded, but keyed by patterns in the compiled source. Add an
     // LRU if a long-lived process compiles unbounded distinct patterns.
-    thread_local! {
-        static MEMO: std::cell::RefCell<std::collections::HashMap<String, Result<Dfa, String>>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
-    }
-    MEMO.with(|m| {
-        if let Some(hit) = m.borrow().get(pattern) {
-            return hit.clone();
+    static MEMO: Mutex<std::collections::BTreeMap<String, Slot>> =
+        Mutex::new(std::collections::BTreeMap::new());
+    let slot = {
+        let mut memo = MEMO.lock().unwrap_or_else(PoisonError::into_inner);
+        match memo.get(pattern) {
+            Some(slot) => slot.clone(),
+            None => memo.entry(pattern.to_string()).or_default().clone(),
         }
-        let out = compile_uncached(pattern);
-        m.borrow_mut().insert(pattern.to_string(), out.clone());
-        out
-    })
+    };
+    slot.get_or_init(|| compile_uncached(pattern)).clone()
 }
 
 /// Ceiling on interned DFA states. `EXPANSION_BUDGET` bounds the NFA, but
