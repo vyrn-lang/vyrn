@@ -8032,8 +8032,14 @@ fn place_frames(
             if info.receiver.is_some() {
                 continue;
             }
+            // An owed release of a temporary has no row to key: the builder
+            // states it (`Builder::discards`, `Builder::drop_receiver`,
+            // `Builder::drop_since`), so one found here is a defect.
             let Some(binding) = info.binding else {
-                continue;
+                panic!(
+                    "placer: `{}` (line {}) in `{}` owes a release at {:?} and has no binding",
+                    info.source, info.line, body.name, m.exit
+                );
             };
             // A row the plan already placed here takes the kernel's hole set,
             // which is per path where the plan's is per binding.
