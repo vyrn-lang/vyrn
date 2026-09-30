@@ -1418,15 +1418,13 @@ impl<'b> Kernel<'b> {
     /// caller passes `names` in creation order (`bound_here`, `bound_inside`,
     /// [`State::live`], an arm's binders).
     fn scope_end(&mut self, st: &mut State, names: &[Name], end: End) -> Result<(), Refusal> {
-        // A block's exit records no taker; an arm's end keeps the statement's.
-        let exit = matches!(end, End::Exit(..));
-        self.ending.set(exit);
+        self.ending.set(true);
         let mark = self.missing.len();
         let out = (names.iter()).try_for_each(|n| self.name_end(st, *n, end));
         // At a block's exit, newest binding first, the unwind order: inner
         // frames first and parameters last, as an owned `consume` parameter
         // requires.
-        if exit {
+        if matches!(end, End::Exit(..)) {
             self.missing[mark..].reverse();
         }
         self.ending.set(false);
