@@ -2652,3 +2652,43 @@ fn a_key_read_releases_its_key() {
 "#;
     assert_eq!(audited_run("key", src), (Some(0), "v\n".to_string()));
 }
+
+// A map read as a statement reads nothing out of the map: the receiver's
+// checks run, an unnamed receiver and a key temporary are released.
+#[test]
+fn a_key_read_as_a_statement_takes_nothing() {
+    let src = r#"type R = { m: Map<String, String> }
+
+fn mk() -> Map<String, String> { return ["k": "w".copy()] }
+
+fn main() -> Int64 {
+    let m: Map<String, String> = ["k": "v".copy()]
+    let n: Map<String, Int64> = ["k": 1]
+    let xs: Array<Map<String, String>> = [["k": "x".copy()]]
+    let r = R { m: ["k": "y".copy()] }
+    m["k"]
+    n["k"]
+    mk()["k"]
+    xs[0]["k"]
+    r.m["k"]
+    m["k".copy()]
+    print(m["k"] ?? "none")
+    return 0
+}
+"#;
+    assert_eq!(audited_run("keystmt", src), (Some(0), "v\n".to_string()));
+}
+
+// A discarded key read keeps its receiver's index check.
+#[test]
+fn a_key_read_as_a_statement_checks_its_receiver() {
+    let src = r#"fn main() -> Int64 {
+    let xs: Array<Map<String, String>> = [["k": "x".copy()]]
+    xs[1]["k"]
+    return 0
+}
+"#;
+    let (code, text) = audited_run("keytrap", src);
+    assert_eq!(code, Some(1));
+    assert!(text.contains("array index 1 out of bounds"), "{text}");
+}

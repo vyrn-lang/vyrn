@@ -10383,7 +10383,7 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     ..
                 } if !self.core_rhs_readable(body, rhs) => {
-                    self.core_addr(m, b, body, w, p, *line)?;
+                    self.core_addr(m, b, body, w, core_discarded(p), *line)?;
                     b.ins(&Instruction::Drop);
                 }
                 St::Do { rhs, line, .. } => {
@@ -12969,7 +12969,7 @@ impl<'p> Fn_<'_, 'p> {
             // A discarded read drops its place's value, or a layout's address.
             St::Do {
                 rhs: Rhs::Read(p), ..
-            } => self.core_place_ty(body, p).is_some(),
+            } => self.core_place_ty(body, core_discarded(p)).is_some(),
             // Any other discarded value drops at the type its call row states
             // ([`Fn_::core_rhs_ty`]). A discarded layout is a slot of the row's own, given
             // back at the row's end.
@@ -13579,6 +13579,15 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(Name, &'r Rhs)>) {
 fn each_list(ss: &[St], f: &mut dyn FnMut(&[St])) {
     f(ss);
     ss.iter().flat_map(St::lists).for_each(|l| each_list(l, f));
+}
+
+/// The place a discarded read of `p` emits: a key read emits its map's, because a
+/// lookup cannot trap and nothing reads its `Option`.
+fn core_discarded(p: &vyrn_frontend::core::Place) -> &vyrn_frontend::core::Place {
+    match p {
+        vyrn_frontend::core::Place::Key(map, _) => map,
+        p => p,
+    }
 }
 
 /// The parts of the header `base` names, when it is a borrow a loop walks.
