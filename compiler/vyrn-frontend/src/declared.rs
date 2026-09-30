@@ -24,14 +24,16 @@ pub struct Owned {
     types: HashMap<String, TypeDecl>,
     /// Whether a type parameter answers as a String does ([`Owned::as_written`]).
     params_own: bool,
-    /// [`Owned::name_facts`] by type, filled on first ask. A clone shares it,
-    /// because a clone answers the same; [`Owned::as_written`] starts its own.
-    name_facts: std::sync::Arc<std::sync::Mutex<HashMap<Type, NameFacts>>>,
 }
 
 /// What a binding of a type needs from its release: whether it owns heap,
 /// whether it is linear, and its [`Owned::declared_releases`].
 pub type NameFacts = (bool, bool, Vec<String>);
+
+/// [`Owned::name_facts`] of one program's tables by type, indexed by
+/// `params_own`. The caller owns it, so each thread that builds bodies keeps
+/// its own.
+pub type NameMemo = [HashMap<Type, NameFacts>; 2];
 
 impl Owned {
     pub fn new(program: &Program) -> Self {
@@ -63,7 +65,6 @@ impl Owned {
                 .collect(),
             types: crate::types::decl_map(program),
             params_own: false,
-            name_facts: Default::default(),
         }
     }
 
@@ -73,7 +74,6 @@ impl Owned {
     pub fn as_written(&self) -> Self {
         Owned {
             params_own: true,
-            name_facts: Default::default(),
             ..self.clone()
         }
     }
@@ -137,10 +137,11 @@ impl Owned {
     }
 
     /// [`Owned::owns_heap`], [`Owned::linear_kind`] and
-    /// [`Owned::declared_releases`] of `ty`, each walk made once per type.
-    pub fn name_facts(&self, ty: &Type) -> NameFacts {
-        let memo = || (self.name_facts.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(f) = memo().get(ty) {
+    /// [`Owned::declared_releases`] of `ty`, each walk made once per type and
+    /// `memo`. `memo` serves this program's tables only.
+    pub fn name_facts(&self, ty: &Type, memo: &mut NameMemo) -> NameFacts {
+        let memo = &mut memo[usize::from(self.params_own)];
+        if let Some(f) = memo.get(ty) {
             return f.clone();
         }
         let f = (
@@ -148,7 +149,7 @@ impl Owned {
             self.linear_kind(ty).is_some(),
             self.declared_releases(ty),
         );
-        memo().insert(ty.clone(), f.clone());
+        memo.insert(ty.clone(), f.clone());
         f
     }
 

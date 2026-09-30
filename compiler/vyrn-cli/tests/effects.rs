@@ -323,6 +323,7 @@ fn run_corpus() {
             match vyrn_lower::core::build_outside(
                 &program,
                 &own,
+                &mut Default::default(),
                 &ob.name,
                 ob.module.clone(),
                 ob.block,

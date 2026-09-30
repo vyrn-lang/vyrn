@@ -158,7 +158,20 @@ pub struct Ownership {
     /// The checker's record this program is lowered against, which the
     /// core's builds and the emitters read a node's type off.
     pub record: std::sync::Arc<crate::checker::Recorded>,
+    /// What the placer's effect judgment found each body's callees store
+    /// into. Empty outside `vyrn_lower::core::augment` and before its
+    /// judgment.
+    pub state_callees: StateCallees,
+    /// The module-state `String` accumulators of the program the placer
+    /// places (`vyrn_lower::append::global_append_candidates`). Empty outside
+    /// `augment`.
+    pub accumulators: std::collections::BTreeSet<String>,
 }
+
+/// Per body name, each callee that may store into module state, with the
+/// globals it may store into. The kernel ends a borrow of one of them at the
+/// call.
+pub type StateCallees = HashMap<String, Vec<(String, Vec<String>)>>;
 
 /// One edge release: the name, the edge, and the holes the release walks
 /// around, spelled relative to the name (`Elem.1`).
@@ -297,6 +310,8 @@ pub fn analyze(program: &Program) -> Ownership {
         arg_caps: crate::declared::arg_caps(program),
         placed: Placed::default(),
         record: crate::checker::recorded(program),
+        state_callees: HashMap::new(),
+        accumulators: Default::default(),
     }
 }
 

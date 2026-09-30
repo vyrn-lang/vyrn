@@ -51,7 +51,7 @@ use vyrn_frontend::core::{
 };
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
-use vyrn_frontend::own::Exit;
+use vyrn_frontend::own::{Exit, StateCallees};
 
 use crate::rules::{self, *};
 
@@ -281,7 +281,12 @@ pub fn in_element(rel: &str) -> bool {
 /// Every write point of the row `s` in judgment order, without the rows of a
 /// list inside `s`. The state walk and [`writes`] share it so they agree.
 /// `body` is the body's name in the effect judgment.
-fn writes_of<'s>(s: &'s St, names: &[NameInfo], body: &str) -> Vec<Write<'s>> {
+fn writes_of<'s>(
+    s: &'s St,
+    names: &[NameInfo],
+    body: &str,
+    state: &StateCallees,
+) -> Vec<Write<'s>> {
     let mut w = match s {
         // A second name for a borrow reads it; nothing is handed on.
         St::Let(n, Rhs::Val(Val::Name(m)))
@@ -298,7 +303,7 @@ fn writes_of<'s>(s: &'s St, names: &[NameInfo], body: &str) -> Vec<Write<'s>> {
             } => {
                 let consumed = args.iter().filter(|(_, c)| *c == Capability::Consume);
                 let modified = args.iter().filter(|(_, c)| *c == Capability::Modify);
-                let state = crate::effects::writes_state(body, callee);
+                let state = crate::effects::writes_state(state, body, callee);
                 (consumed.filter_map(|(a, _)| Some(Write::Hand(a.val()?, kind.declared()))))
                     .chain(modified.map(|(a, _)| Write::Modify(a)))
                     .chain((!state.is_empty()).then_some(Write::State(state)))
@@ -318,22 +323,22 @@ fn writes_of<'s>(s: &'s St, names: &[NameInfo], body: &str) -> Vec<Write<'s>> {
         St::Switch { on, consuming, .. } if *consuming => vec![Write::Hand(on, false)],
         _ => vec![],
     };
-    let state = release_state(crate::core::runs(s, names), body);
-    if !state.is_empty() {
-        w.push(Write::State(state));
+    let gs = release_state(crate::core::runs(s, names), body, state);
+    if !gs.is_empty() {
+        w.push(Write::State(gs));
     }
     w
 }
 
 /// The globals the declared releases `runs` may store into, by the effect
 /// judgment of the body named `body`.
-fn release_state(runs: &[String], body: &str) -> Vec<String> {
-    let mut state: Vec<String> = (runs.iter())
-        .flat_map(|r| crate::effects::writes_state(body, r))
+fn release_state(runs: &[String], body: &str, state: &StateCallees) -> Vec<String> {
+    let mut gs: Vec<String> = (runs.iter())
+        .flat_map(|r| crate::effects::writes_state(state, body, r))
         .collect();
-    state.sort();
-    state.dedup();
-    state
+    gs.sort();
+    gs.dedup();
+    gs
 }
 
 /// Whether a row of `ss` writes `on` where the judgment would end a borrow
@@ -345,21 +350,28 @@ fn release_state(runs: &[String], body: &str) -> Vec<String> {
 /// element of `on` does not count ([`in_element`]), nor does a release or
 /// `return` followed only by exits. A call that stores into module state
 /// counts for any name, since a name does not record the global it reads;
-/// for a global, only a call that stores into it. Before `augment` holds
-/// the effect judgment no call counts, and `augment` rebuilds every body
-/// where that could differ.
-pub fn writes(ss: &[St], on: Root, names: &[NameInfo], body: &str) -> bool {
-    walk_writes(ss, on, names, body, false)
+/// for a global, only a call that `state` says stores into it. Before
+/// `augment` holds the effect judgment `state` is empty, and `augment`
+/// rebuilds every body where that could differ.
+pub fn writes(ss: &[St], on: Root, names: &[NameInfo], body: &str, state: &StateCallees) -> bool {
+    walk_writes(ss, on, names, body, state, false)
 }
 
 /// Whether a row of `ss` hands `on`, or a name that may alias it, to a
 /// `modify` parameter, or a closure captures an alias: [`writes`] counting
 /// only `modify` write points. The judgment ends every borrow of `on` there.
 pub fn modifies(ss: &[St], on: Root, names: &[NameInfo], body: &str) -> bool {
-    walk_writes(ss, on, names, body, true)
+    walk_writes(ss, on, names, body, &StateCallees::new(), true)
 }
 
-fn walk_writes(ss: &[St], on: Root, names: &[NameInfo], body: &str, modify: bool) -> bool {
+fn walk_writes(
+    ss: &[St],
+    on: Root,
+    names: &[NameInfo],
+    body: &str,
+    state: &StateCallees,
+    modify: bool,
+) -> bool {
     let mut inside = Vec::new();
     ss.iter()
         .for_each(|s| crate::core::names_bound(s, &mut inside));
@@ -370,6 +382,7 @@ fn walk_writes(ss: &[St], on: Root, names: &[NameInfo], body: &str, modify: bool
     let mut w = Writes {
         on,
         body,
+        state,
         alias,
         elem: Vec::new(),
         inside,
@@ -383,6 +396,7 @@ fn walk_writes(ss: &[St], on: Root, names: &[NameInfo], body: &str, modify: bool
 struct Writes<'a> {
     on: Root,
     body: &'a str,
+    state: &'a StateCallees,
     /// `on` where it is a name, and every borrow bound so far by a read of
     /// `on` or of one of these.
     alias: Vec<Name>,
@@ -427,7 +441,7 @@ impl Writes<'_> {
     }
 
     fn st(&mut self, s: &St) -> bool {
-        let hit = writes_of(s, self.names, self.body)
+        let hit = writes_of(s, self.names, self.body, self.state)
             .into_iter()
             .any(|w| match w {
                 Write::Modify(Arg::Val(v)) => matches!(v, Val::Name(k) if self.under(&Root::N(*k))),
@@ -508,6 +522,7 @@ impl Writes<'_> {
 
 struct Kernel<'b> {
     body: &'b Body,
+    state: &'b StateCallees,
     mode: Mode,
     missing: Vec<Missing>,
     /// Every refusal this body earns, in walk order, so the driver can merge
@@ -612,8 +627,8 @@ struct LoopCtx {
     bound_inside: Vec<Name>,
 }
 
-pub fn check(body: &Body) -> Result<(), Refusal> {
-    run(body, Mode::Judge, false)
+pub fn check(body: &Body, state: &StateCallees) -> Result<(), Refusal> {
+    run(body, state, Mode::Judge, false)
         .map(|_| ())
         .map_err(|mut rs| rs.remove(0))
 }
@@ -628,21 +643,28 @@ pub struct Placement {
 
 /// The releases the plan owes this body and did not place. `Err` holds every
 /// refusal no placement repairs (a double free, a use after release).
-pub fn placement(body: &Body) -> Result<Placement, Vec<Refusal>> {
-    match run(body, Mode::Place, false) {
+/// `state` is the effect judgment's [`crate::effects::writes_state`] table.
+pub fn placement(body: &Body, state: &StateCallees) -> Result<Placement, Vec<Refusal>> {
+    match run(body, state, Mode::Place, false) {
         Ok(m) => Ok(m),
         // Refused: walk it again, stepping over each refused statement, so
         // the body states every mistake it has and not only the first.
-        Err(one) => Err(match run(body, Mode::Place, true) {
+        Err(one) => Err(match run(body, state, Mode::Place, true) {
             Ok(_) => one,
             Err(all) => all,
         }),
     }
 }
 
-fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>> {
+fn run(
+    body: &Body,
+    state: &StateCallees,
+    mode: Mode,
+    recover: bool,
+) -> Result<Placement, Vec<Refusal>> {
     let mut k = Kernel {
         body,
+        state,
         mode,
         missing: Vec::new(),
         refusals: Vec::new(),
@@ -1016,7 +1038,7 @@ impl<'b> Kernel<'b> {
     /// is written there ([`writes_of`] for a row already in the body).
     fn owe(&mut self, st: &mut State, m: Missing) {
         let runs = &self.body.names[m.name.index()].runs;
-        let gs = release_state(runs, &self.body.name);
+        let gs = release_state(runs, &self.body.name, self.state);
         self.end(st, Write::State(gs));
         self.missing.push(m);
     }
@@ -1053,7 +1075,7 @@ impl<'b> Kernel<'b> {
     }
 
     fn ends(&self, st: &mut State, s: &St) {
-        for w in writes_of(s, &self.body.names, &self.body.name) {
+        for w in writes_of(s, &self.body.names, &self.body.name, self.state) {
             self.end(st, w);
         }
     }
@@ -1892,7 +1914,7 @@ impl<'b> Kernel<'b> {
                         }
                     }
                 }
-                let gs = crate::effects::writes_state(&self.body.name, callee);
+                let gs = crate::effects::writes_state(self.state, &self.body.name, callee);
                 if !gs.is_empty() {
                     self.state_args(st, args, &gs)?;
                 }

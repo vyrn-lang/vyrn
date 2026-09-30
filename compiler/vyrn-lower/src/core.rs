@@ -17,7 +17,7 @@ use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, Function, Id, LambdaBody, MatchArm, NodeId,
     Pattern, Program, Stmt, Type, TypeDecl, UnOp,
 };
-use vyrn_frontend::declared::Owned;
+use vyrn_frontend::declared::{NameMemo, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -539,24 +539,39 @@ fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
 /// Builds the core of one instance. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
-    let out = build_twice(program, inst, own);
+    build_in(program, inst, own, &mut NameMemo::default())
+}
+
+/// [`build`] with the caller's memo of `own`'s name facts.
+pub(crate) fn build_in(
+    program: &Program,
+    inst: &Instance<'_>,
+    own: &Ownership,
+    names: &mut NameMemo,
+) -> Result<Body, Gap> {
+    let out = build_twice(program, inst, own, names);
     if gap_tally_at().is_some() {
         tally_gaps(inst, &out);
     }
     out
 }
 
-fn build_twice(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
+fn build_twice(
+    program: &Program,
+    inst: &Instance<'_>,
+    own: &Ownership,
+    names: &mut NameMemo,
+) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
     let b1 = vyrn_frontend::prof::phase("placer: build: first");
-    let first = build_seeded(program, inst, own, &none)?;
+    let first = build_seeded(program, inst, own, names, &none)?;
     drop(b1);
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
     let _b2 = vyrn_frontend::prof::phase("placer: build: seeded");
-    build_seeded(program, inst, own, &seed)
+    build_seeded(program, inst, own, names, &seed)
 }
 
 /// The refusals the typed judgment states over the checker's answers at the
@@ -1061,6 +1076,7 @@ fn build_seeded(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
+    names: &mut NameMemo,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     let (types, produced, solved) = (
@@ -1082,6 +1098,7 @@ fn build_seeded(
         program,
         own,
         proto: &own.proto,
+        names,
         types,
         produced,
         solved,
@@ -1177,9 +1194,11 @@ pub fn build_module_state<'a>(
     facts: &NodeTypes<'a>,
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
+    let mut names = NameMemo::default();
     let mut b = Builder::bare(
         program,
         own,
+        &mut names,
         facts,
         &seed,
         String::new(),
@@ -1218,24 +1237,26 @@ pub fn build_module_state<'a>(
 pub fn build_outside<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    names: &mut NameMemo,
     name: &str,
     file: Option<String>,
     block: &Block,
     facts: &NodeTypes<'a>,
 ) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
-    let first = build_outside_seeded(program, own, name, file.clone(), block, facts, &none)?;
+    let first = build_outside_seeded(program, own, names, name, file.clone(), block, facts, &none)?;
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
-    build_outside_seeded(program, own, name, file, block, facts, &seed)
+    build_outside_seeded(program, own, names, name, file, block, facts, &seed)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_outside_seeded<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    names: &mut NameMemo,
     name: &str,
     file: Option<String>,
     block: &Block,
@@ -1249,7 +1270,16 @@ fn build_outside_seeded<'a>(
     for r in steps {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    let mut b = Builder::bare(program, own, facts, seed, name.to_string(), file, placed);
+    let mut b = Builder::bare(
+        program,
+        own,
+        names,
+        facts,
+        seed,
+        name.to_string(),
+        file,
+        placed,
+    );
     // The checker types a `test` or `bench` body as a function returning Unit.
     b.ret = Some(Type::Unit);
     b.appends = crate::append::append_candidates(block);
@@ -1279,6 +1309,7 @@ struct Unreached {
 pub fn build_root<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    names: &mut NameMemo,
     facts: &NodeTypes<'a>,
     file: Option<String>,
     binds: Option<&[(String, Type)]>,
@@ -1301,6 +1332,7 @@ pub fn build_root<'a>(
     let mut b = Builder::bare(
         program,
         own,
+        names,
         &facts,
         &seed,
         String::new(),
@@ -1329,6 +1361,7 @@ struct Builder<'a> {
     program: &'a Program,
     own: &'a Ownership,
     proto: &'a Owned,
+    names: &'a mut NameMemo,
     types: HashMap<NodeId, Type>,
     /// The producer type of every typed expression, before the destination's
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
@@ -1413,9 +1446,11 @@ struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     /// A builder for a body that is no instance: no substitution.
+    #[allow(clippy::too_many_arguments)]
     fn bare(
         program: &'a Program,
         own: &'a Ownership,
+        names: &'a mut NameMemo,
         facts: &NodeTypes<'a>,
         seed: &'a std::collections::HashSet<NodeId>,
         name: String,
@@ -1433,6 +1468,7 @@ impl<'a> Builder<'a> {
             program,
             own,
             proto: &own.proto,
+            names,
             types,
             produced,
             solved,
@@ -1482,7 +1518,7 @@ impl<'a> Builder<'a> {
     }
 
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
-        let (heap, linear, runs) = self.proto.name_facts(&ty);
+        let (heap, linear, runs) = self.proto.name_facts(&ty, self.names);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
@@ -2738,7 +2774,7 @@ impl<'a> Builder<'a> {
                     // names as its receiver.
                     (None, None)
                         if self.region == 0
-                            && crate::append::global_grows(name)
+                            && self.own.accumulators.contains(name)
                             && vyrn_frontend::types::resolve(
                                 &self.ty_of(value)?,
                                 self.proto.types(),
@@ -3853,7 +3889,13 @@ impl<'a> Builder<'a> {
             );
             if !indexed
                 || !heap
-                || crate::kernel::writes(l, r.clone(), &self.body.names, &self.body.name)
+                || crate::kernel::writes(
+                    l,
+                    r.clone(),
+                    &self.body.names,
+                    &self.body.name,
+                    &self.own.state_callees,
+                )
             {
                 continue;
             }
@@ -7252,7 +7294,8 @@ pub fn augment(program: &Program, w: &mut World) {
     let js = vyrn_frontend::prof::phase("placer: judgments");
     let memo = vyrn_frontend::movecheck::Judgments::open(program);
     drop(js);
-    let _held = crate::append::Held::new(program);
+    own.accumulators = crate::append::global_append_candidates(program);
+    let mut names = NameMemo::default();
     // Every body is built before any is placed: the kernel asks the effect
     // judgment, which joins every body, whether a callee writes module state.
     // A call into a served body is judged as pure.
@@ -7266,7 +7309,7 @@ pub fn augment(program: &Program, w: &mut World) {
             continue;
         }
         let bs = vyrn_frontend::prof::phase("placer: core::build");
-        let top = build(program, inst, own);
+        let top = build_in(program, inst, own, &mut names);
         drop(bs);
         made.push(Made::Built(key, top));
     }
@@ -7286,6 +7329,7 @@ pub fn augment(program: &Program, w: &mut World) {
         let top = build_outside(
             program,
             own,
+            &mut names,
             &ob.name,
             ob.module.clone(),
             ob.block,
@@ -7306,10 +7350,11 @@ pub fn augment(program: &Program, w: &mut World) {
             tops.push((ob.name.as_str(), b));
         }
     }
-    crate::effects::judge_built(program, &lowered, own, &tops, |judged, refs, _| {
-        crate::effects::set_state_callees(Some((judged, refs)));
+    let state = crate::effects::judge_built(program, &lowered, own, &tops, |judged, refs, _| {
+        judged.state_table(refs)
     });
     drop(tops);
+    own.state_callees = state;
     drop(ej);
     // A hoist asked `kernel::writes` before the effect judgment was held. A
     // frame that hoisted a header and calls a function that stores module
@@ -7317,12 +7362,12 @@ pub fn augment(program: &Program, w: &mut World) {
     let unjudged = |m: &Made| {
         matches!(m, Made::Built(_, Ok(b)) if b.frames().iter().any(|f| {
             f.names.iter().any(|i| i.walked == Some(Walk::While))
-                && crate::effects::stores_state(&f.name)
+                && own.state_callees.contains_key(&f.name)
         }))
     };
     for (inst, m) in lowered.instances.iter().zip(made.iter_mut()) {
         if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
-            *top = build(program, inst, own);
+            *top = build_in(program, inst, own, &mut names);
         }
     }
     for (ob, m) in lowered.bodies.iter().zip(made_outside.iter_mut()) {
@@ -7330,6 +7375,7 @@ pub fn augment(program: &Program, w: &mut World) {
             *top = build_outside(
                 program,
                 own,
+                &mut names,
                 &ob.name,
                 ob.module.clone(),
                 ob.block,
@@ -7432,11 +7478,11 @@ pub fn augment(program: &Program, w: &mut World) {
         ..own.clone()
     };
     for inst in crate::as_written(program, own) {
-        match build(program, &inst, &written) {
+        match build_in(program, &inst, &written, &mut names) {
             Ok(top) => {
                 typed(program, own, &mut r, &top, &inst.func.module, true);
                 for body in top.frames() {
-                    if let Err(rs) = crate::kernel::placement(body) {
+                    if let Err(rs) = crate::kernel::placement(body, &own.state_callees) {
                         r.kernel.extend(rs);
                     }
                 }
@@ -7454,7 +7500,7 @@ pub fn augment(program: &Program, w: &mut World) {
             facts: p.facts.clone(),
             releases: Vec::new(),
         };
-        match build(program, &inst, own) {
+        match build_in(program, &inst, own, &mut names) {
             Ok(top) => {
                 typed(program, own, &mut r, &top, &p.func.module, true);
             }
@@ -7473,6 +7519,7 @@ pub fn augment(program: &Program, w: &mut World) {
         match build_root(
             program,
             own,
+            &mut names,
             &lowered.globals,
             g.module.clone(),
             None,
@@ -7498,6 +7545,7 @@ pub fn augment(program: &Program, w: &mut World) {
         match build_root(
             program,
             own,
+            &mut names,
             &lowered.predicates,
             d.module.clone(),
             Some(&binds),
@@ -7546,7 +7594,8 @@ pub fn augment(program: &Program, w: &mut World) {
     // the memo runs no emitter, and served bodies would leave the facts
     // partial, so it stops here.
     if memo.is_some() {
-        crate::effects::set_state_callees(None);
+        own.state_callees.clear();
+        own.accumulators.clear();
         (w.refusals, w.typed) = (r.kernel, r.typed);
         return;
     }
@@ -7566,7 +7615,7 @@ pub fn augment(program: &Program, w: &mut World) {
             // rest fold the body that pass already built.
             let fresh = if touched.contains(&inst.func.name) {
                 let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
-                build(program, inst, own).ok()
+                build_in(program, inst, own, &mut names).ok()
             } else {
                 None
             };
@@ -7584,6 +7633,7 @@ pub fn augment(program: &Program, w: &mut World) {
                 build_outside(
                     program,
                     own,
+                    &mut names,
                     &ob.name,
                     ob.module.clone(),
                     ob.block,
@@ -7617,7 +7667,7 @@ pub fn augment(program: &Program, w: &mut World) {
             if !had.insert(inst.spelling()) {
                 continue;
             }
-            if let Ok(top) = build(program, inst, own) {
+            if let Ok(top) = build_in(program, inst, own, &mut names) {
                 let mut rows = Added::new();
                 place_frames(
                     &top,
@@ -7636,7 +7686,7 @@ pub fn augment(program: &Program, w: &mut World) {
             if !folds {
                 continue;
             }
-            let Ok(top) = build(program, inst, own) else {
+            let Ok(top) = build_in(program, inst, own, &mut names) else {
                 continue;
             };
             for body in top.frames() {
@@ -7647,7 +7697,8 @@ pub fn augment(program: &Program, w: &mut World) {
     }
     w.facts = folds.then_some(facts);
     (w.refusals, w.typed) = (r.kernel, r.typed);
-    crate::effects::set_state_callees(None);
+    own.state_callees.clear();
+    own.accumulators.clear();
 }
 
 /// One body `augment` built, or served out of the memo.
@@ -7881,7 +7932,7 @@ fn place_frames(
 ) {
     for body in top.frames() {
         let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
-        let placed = crate::kernel::placement(body);
+        let placed = crate::kernel::placement(body, &own.state_callees);
         drop(ks);
         let crate::kernel::Placement {
             missing,

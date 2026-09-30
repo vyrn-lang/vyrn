@@ -135,7 +135,7 @@ fn run_corpus() {
                 }
                 Ok(top) => {
                     for body in top.frames() {
-                        match vyrn_lower::kernel::check(body) {
+                        match vyrn_lower::kernel::check(body, &Default::default()) {
                             Ok(()) => accepted += 1,
                             Err(r) => refused.push(format!(
                                 "{file}: <module state> {}: line {}: {}",
@@ -153,6 +153,7 @@ fn run_corpus() {
             match vyrn_lower::core::build_outside(
                 &program,
                 &own,
+                &mut Default::default(),
                 &ob.name,
                 ob.module.clone(),
                 ob.block,
@@ -173,7 +174,7 @@ fn run_corpus() {
                 }
                 Ok(top) => {
                     for body in top.frames() {
-                        match vyrn_lower::kernel::check(body) {
+                        match vyrn_lower::kernel::check(body, &Default::default()) {
                             Ok(()) => accepted += 1,
                             Err(r) => refused.push(format!(
                                 "{file}: {}: line {}: {}",
@@ -210,7 +211,7 @@ fn run_corpus() {
                 }
                 Ok(top) => {
                     for body in top.frames() {
-                        match vyrn_lower::kernel::check(body) {
+                        match vyrn_lower::kernel::check(body, &Default::default()) {
                             Ok(()) => accepted += 1,
                             Err(r) => {
                                 let tag = format!("{file}:{}", body.name);
