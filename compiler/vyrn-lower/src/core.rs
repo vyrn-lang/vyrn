@@ -19,7 +19,8 @@ use vyrn_frontend::ast::{
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
-use vyrn_frontend::movecheck::Refusal;
+use vyrn_frontend::effects::Walked;
+use vyrn_frontend::movecheck::{Judgment, JudgmentKey, Refusal};
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
 pub use vyrn_frontend::prelude::Spec;
@@ -7433,23 +7434,24 @@ pub fn augment(program: &Program, w: &mut World) {
     let mut touched: std::collections::HashSet<FnId> = Default::default();
     // The judgment memo, when the host armed one (`movecheck::Judgments`): a
     // body whose key is unchanged is served its refusals, neither built nor
-    // judged. An armed host reads only refusals, not the facts or rows.
+    // judged, unless the effect judgment answers its frames otherwise. An
+    // armed host reads only refusals, not the facts or rows.
     let js = vyrn_frontend::prof::phase("placer: judgments");
-    let memo = vyrn_frontend::movecheck::Judgments::open(program);
+    let memo = vyrn_frontend::movecheck::Judgments::open(program, &own.fnval_clear);
     drop(js);
     own.accumulators = crate::append::global_append_candidates(program);
     let mut names = NameMemo::default();
     // Every body is built before any is placed: the kernel asks the effect
     // judgment, which joins every body, whether a callee writes module state.
-    // A call into a served body is judged as pure. `test` and `bench` bodies
-    // are judged like any other.
+    // A served body gives the judgment its frames as last judged. `test` and
+    // `bench` bodies are judged like any other.
     let jobs: Vec<Job> = (lowered.instances.iter().map(Job::Inst))
         .chain(lowered.bodies.iter().map(Job::Outside))
         .collect();
     let keys: Vec<_> = (jobs.iter())
         .map(|j| memo.as_ref().and_then(|m| j.key(m)))
         .collect();
-    let served: Vec<Option<Vec<Refusal>>> = (keys.iter())
+    let served: Vec<Option<(JudgmentKey, Judgment)>> = (keys.iter())
         .map(|k| serve(memo.as_ref(), k.as_ref()))
         .collect();
     let unserved: Vec<Option<Job>> = (jobs.iter().zip(&served))
@@ -7469,8 +7471,8 @@ pub fn augment(program: &Program, w: &mut World) {
     // out as on one thread.
     let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
     for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {
-        if let Some(rs) = served {
-            made.push(Made::Served(rs));
+        if let Some((key, judgment)) = served {
+            made.push(Made::Served(key, judgment));
             continue;
         }
         // `unserved` holds every job `served` does not, so `first` is `Some`.
@@ -7491,21 +7493,79 @@ pub fn augment(program: &Program, w: &mut World) {
         }
     }
     let ej = vyrn_frontend::prof::phase("placer: effects");
-    let tops: Vec<(&str, &Body)> = (jobs.iter().zip(&made))
-        .filter_map(|(j, m)| match m {
-            Made::Built(_, Ok(b)) => Some((j.owner(), b)),
+    let (tops, built_at): (Vec<(&str, &Body)>, Vec<usize>) = (jobs.iter().zip(&made).enumerate())
+        .filter_map(|(i, (j, m))| match m {
+            Made::Built(_, Ok(b)) => Some(((j.owner(), b), i)),
             _ => None,
         })
-        .collect();
-    let state = crate::effects::judge_built(
+        .unzip();
+    // A body that did not build gives the judgment nothing, served or not.
+    let (late, late_at): (Vec<(&str, &[Walked])>, Vec<usize>) =
+        (jobs.iter().zip(&made).enumerate())
+            .filter_map(|(i, (j, m))| match m {
+                Made::Served(_, s) if !s.frames.is_empty() => Some(((j.owner(), &s.frames[..]), i)),
+                _ => None,
+            })
+            .unzip();
+    let (mut state, read, answers) = crate::effects::judge_built(
         program,
         &lowered,
         own,
         &mut w.fns,
         &tops,
-        |judged, refs, _| judged.state_table(refs),
+        &late,
+        |judged, refs, top, served_at| {
+            let rows = |at: usize, n: usize| -> Vec<Vec<(String, Vec<String>)>> {
+                (at..at + n).map(|i| judged.state_callees(i)).collect()
+            };
+            // What the memo keeps of each body built with a key.
+            let read: Vec<Option<Kept>> = (top.iter().zip(&tops).zip(&built_at))
+                .map(|((t, (_, b)), i)| {
+                    let Made::Built(Some(_), _) = &made[*i] else {
+                        return None;
+                    };
+                    let n = b.frames().len();
+                    let frames = judged.frames[*t..*t + n].iter().map(|f| (*f).clone());
+                    Some((frames.collect(), rows(*t, n)))
+                })
+                .collect();
+            let answers: Vec<_> = (served_at.iter().zip(&late))
+                .map(|(at, (_, frames))| rows(*at, frames.len()))
+                .collect();
+            (judged.state_table(refs), read, answers)
+        },
     );
-    drop(tops);
+    drop((tops, late));
+    let mut kept: Vec<Option<Kept>> = (0..jobs.len()).map(|_| None).collect();
+    for (i, r) in built_at.into_iter().zip(read) {
+        kept[i] = r;
+    }
+    // A served verdict read the answer the judgment gave its frames then. A
+    // body that gets another answer now is built and judged again, before
+    // `own` holds the answer, as on its first build.
+    for (i, rows) in late_at.into_iter().zip(answers) {
+        let Made::Served(key, s) = &made[i] else {
+            continue;
+        };
+        if s.state == rows {
+            continue;
+        }
+        let (key, frames) = (key.clone(), s.frames.clone());
+        let j = &jobs[i];
+        let mut top = j.build(program, own, &w.fns, &mut names);
+        j.tally(&top);
+        if let Ok(b) = &mut top {
+            w.fns.number(b);
+            crate::world::add_callees(b, &by_name, calls.entry(j.id()).or_default());
+            for (f, r) in b.frames().iter().zip(&rows) {
+                if let (Some(id), false) = (f.id, r.is_empty()) {
+                    state.insert(id, r.clone());
+                }
+            }
+        }
+        kept[i] = Some((frames, rows));
+        made[i] = Made::Built(Some(key), top);
+    }
     own.state_callees = state;
     drop(ej);
     // A hoist asked `kernel::writes` before the effect judgment was held. A
@@ -7540,25 +7600,33 @@ pub fn augment(program: &Program, w: &mut World) {
         },
     );
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    for ((j, m), placed) in jobs.iter().zip(made).zip(placed) {
+    for (((j, m), placed), kept) in jobs.iter().zip(made).zip(placed).zip(kept) {
         let into = match j {
             Job::Inst(_) => &mut built,
             Job::Outside(_) => &mut outside,
         };
         let (key, made) = match m {
-            Made::Served(rs) => {
-                r.kernel.extend(rs);
+            Made::Served(key, judgment) => {
+                r.kernel.extend(judgment.verdict.iter().cloned());
+                if let Some(memo) = &memo {
+                    memo.tally(true);
+                    memo.put(key, judgment);
+                }
                 into.push(None);
                 continue;
             }
             Made::Built(key, made) => (key, made),
         };
+        if let (Some(memo), Some(_)) = (&memo, &key) {
+            memo.tally(false);
+        }
+        let kept = kept.unwrap_or_default();
         let refused_before = r.kernel.len();
         let top = match made {
             Ok(b) => b,
             Err(g) => {
                 refuse_gap(g, j.module(), j.owner(), &mut r);
-                remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+                remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
                 into.push(None);
                 continue;
             }
@@ -7581,7 +7649,7 @@ pub fn augment(program: &Program, w: &mut World) {
         );
         let refused = typed(program, own, &mut r, &top, j.module(), j.as_written());
         let key = key.filter(|_| !refused);
-        remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+        remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
         into.push(Some(top));
     }
     // Every generic function is built once more with its parameters as
@@ -7861,10 +7929,7 @@ impl Job<'_, '_> {
     /// The judgment memo's key. A `test` or `bench` body is keyed with its
     /// line too: the `test@<i>` index is global, so a test added to an
     /// earlier module renumbers every later one.
-    fn key(
-        &self,
-        memo: &vyrn_frontend::movecheck::Judgments,
-    ) -> Option<vyrn_frontend::movecheck::JudgmentKey> {
+    fn key(&self, memo: &vyrn_frontend::movecheck::Judgments) -> Option<JudgmentKey> {
         match self {
             Job::Inst(inst) => memo.key(inst.func.module.as_deref(), &inst.spelling()),
             Job::Outside(ob) => memo.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)),
@@ -7909,34 +7974,46 @@ impl Job<'_, '_> {
 
 /// One body `augment` built, or served out of the memo.
 enum Made {
-    /// The refusals the memo recorded for it.
-    Served(Vec<Refusal>),
-    Built(
-        Option<vyrn_frontend::movecheck::JudgmentKey>,
-        Result<Body, Gap>,
-    ),
+    /// The memo's entry for it, taken out until `augment` puts it back.
+    Served(JudgmentKey, Judgment),
+    Built(Option<JudgmentKey>, Result<Body, Gap>),
 }
 
-/// One body's refusals out of the judgment memo. `Some` means the body is
-/// neither built nor judged.
+/// What the memo keeps of a built body besides its refusals: its frames as
+/// the effect judgment read them, and the judgment's answer for each.
+type Kept = (Vec<Walked>, Vec<Vec<(String, Vec<String>)>>);
+
+/// One body's entry out of the judgment memo, with its key. `Some` means the
+/// body is neither built nor judged, unless the effect judgment answers its
+/// frames otherwise than when it was recorded.
 fn serve(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
-    key: Option<&vyrn_frontend::movecheck::JudgmentKey>,
-) -> Option<Vec<Refusal>> {
-    memo?.get(key?)
+    key: Option<&JudgmentKey>,
+) -> Option<(JudgmentKey, Judgment)> {
+    let key = key?;
+    Some((key.clone(), memo?.take(key)?))
 }
 
 /// Records one body's refusals, `refused`, for every body with a key. Serving skips placement too, which a host that
 /// armed the memo does not read ([`movecheck::reuse_judgments`]).
 fn remember(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
-    key: Option<vyrn_frontend::movecheck::JudgmentKey>,
+    key: Option<JudgmentKey>,
+    (frames, state): Kept,
     refused: &[Refusal],
 ) {
     let (Some(memo), Some(key)) = (memo, key) else {
         return;
     };
-    memo.put(key, refused.to_vec());
+    let verdict = refused.to_vec();
+    memo.put(
+        key,
+        Judgment {
+            verdict,
+            frames,
+            state,
+        },
+    );
 }
 
 /// The memory report for one frame, read by `vyrn why --memory` and the

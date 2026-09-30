@@ -19,7 +19,7 @@ use vyrn_frontend::core::{rows, Arg, Body, Name, Place, Rhs, St};
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
 pub use vyrn_frontend::effects::{
-    atom, atoms, gen_allows, gen_refusal, Effect, Effects, GEN_ATOM_OVERRIDES,
+    atom, atoms, gen_allows, gen_refusal, Call, Effect, Effects, Walked, GEN_ATOM_OVERRIDES,
 };
 
 /// The callee names with no effect of their own and no body to judge: a
@@ -74,7 +74,7 @@ pub enum Callee {
 
 /// The judgment's answer for a set of bodies.
 #[derive(Debug, Default)]
-pub struct Judged {
+pub struct Judged<'a> {
     /// Per body, in the order given.
     pub effects: Vec<Effects>,
     /// `(body index, callee name, call line)` for every call nobody could
@@ -85,25 +85,30 @@ pub struct Judged {
     /// `(body index, callee name)` for every call through a function value
     /// that `through` answered with bodies.
     pub through: Vec<(usize, String)>,
-    calls: Vec<Vec<(String, Callee)>>,
+    /// Per body, what the judgment read of it.
+    pub frames: &'a [&'a Walked],
+    /// Per body, each call's index into `callees`.
+    resolved: Vec<Vec<usize>>,
+    /// Every callee the calls resolved to, once.
+    callees: Vec<Callee>,
     /// Per body, the globals it or a callee stores into, joined in the same
     /// fixpoint.
     writes: Vec<std::collections::BTreeSet<String>>,
 }
 
-impl Judged {
+impl Judged<'_> {
     /// Each callee name of body `i` with the globals a call to it may store
     /// into; a callee that stores into none is left out.
     pub fn state_callees(&self, i: usize) -> Vec<(String, Vec<String>)> {
         let mut out: Vec<(String, Vec<String>)> = Vec::new();
-        for (n, c) in &self.calls[i] {
-            let Callee::Bodies(idx) = c else {
+        for (c, k) in self.frames[i].calls.iter().zip(&self.resolved[i]) {
+            let Callee::Bodies(idx) = &self.callees[*k] else {
                 continue;
             };
             let gs: std::collections::BTreeSet<&String> =
                 idx.iter().flat_map(|j| &self.writes[*j]).collect();
-            if !gs.is_empty() && !out.iter().any(|(m, _)| m == n) {
-                out.push((n.clone(), gs.into_iter().cloned().collect()));
+            if !gs.is_empty() && !out.iter().any(|(m, _)| *m == c.callee) {
+                out.push((c.callee.clone(), gs.into_iter().cloned().collect()));
             }
         }
         out
@@ -130,67 +135,116 @@ pub fn writes_state(state: &StateCallees, frame: Option<FnId>, callee: &str) -> 
         .unwrap_or_default()
 }
 
-/// Returns the effect set of every body in `bodies`, to a fixpoint. `resolve`
-/// says what a callee name is; `through` says what a function type may hold,
-/// for a call through a local. A body's lambdas are joined only when their
-/// frames are in `bodies`.
-pub fn judge(
-    bodies: &[&Body],
-    resolve: &mut dyn FnMut(&str) -> Callee,
-    through: &mut dyn FnMut(&Type) -> Callee,
-) -> Judged {
+/// Every frame of `top`, walked, in [`Body::frames`] order.
+pub fn walk(top: &Body) -> Vec<Walked> {
+    walk_frames(&top.frames())
+}
+
+/// Walks every frame of `bodies`. A body's lambdas are joined only when their
+/// frames are in `bodies`, and each comes after the frame that builds it, as
+/// [`Body::frames`] lists them.
+pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
     let index: HashMap<*const Body, usize> = bodies
         .iter()
         .enumerate()
         .map(|(i, b)| (*b as *const Body, i))
         .collect();
-    let mut own: Vec<Effects> = Vec::with_capacity(bodies.len());
-    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(bodies.len());
-    let mut unknown = Vec::new();
-    let mut empty = Vec::new();
-    let mut via = Vec::new();
-    let mut calls = Vec::with_capacity(bodies.len());
-    let mut writes: Vec<std::collections::BTreeSet<String>> = Vec::with_capacity(bodies.len());
-    let mut memo: HashMap<String, Callee> = HashMap::new();
-    let mut memo_ty: HashMap<String, Callee> = HashMap::new();
+    let mut out = Vec::with_capacity(bodies.len());
     for (i, b) in bodies.iter().enumerate() {
         let mut w = Walk {
             body: b,
-            own: Effects::PURE,
-            edges: Vec::new(),
-            unknown: Vec::new(),
-            empty: Vec::new(),
-            via: Vec::new(),
-            calls: Vec::new(),
-            writes: Default::default(),
-            resolve,
-            through,
-            memo: &mut memo,
-            memo_ty: &mut memo_ty,
+            out: Walked {
+                name: b.name.clone(),
+                own: Effects::PURE,
+                writes: Default::default(),
+                calls: Vec::new(),
+                lambdas: Vec::new(),
+            },
         };
         rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
         for info in b.names.iter().filter(|i| !i.borrow) {
             for r in &info.runs {
-                w.call(r, None, info.line);
+                w.call(r, None, info.line, false);
             }
         }
-        own.push(w.own);
-        let mut e = w.edges;
-        // The body that builds a lambda value can run its frame.
-        e.extend(
-            b.lambdas
-                .iter()
-                .filter_map(|l| index.get(&(l as *const Body))),
-        );
-        e.sort_unstable();
-        e.dedup();
-        edges.push(e);
-        unknown.extend(w.unknown.into_iter().map(|(n, l)| (i, n, l)));
-        empty.extend(w.empty.into_iter().map(|(n, l)| (i, n, l)));
-        via.extend(w.via.into_iter().map(|n| (i, n)));
-        calls.push(w.calls);
-        writes.push(w.writes);
+        let mut walked = w.out;
+        walked.lambdas = (b.lambdas.iter())
+            .filter_map(|l| index.get(&(l as *const Body)))
+            .map(|j| {
+                j.checked_sub(i)
+                    .expect("a lambda frame comes after the frame that builds it")
+            })
+            .collect();
+        out.push(walked);
     }
+    out
+}
+
+/// Returns the effect set of every frame in `frames`, to a fixpoint.
+/// `resolve` says what a callee name is; `through` says what a function type
+/// may hold, for a call through a local.
+pub fn judge<'a>(
+    frames: &'a [&'a Walked],
+    resolve: &mut dyn FnMut(&str) -> Callee,
+    through: &mut dyn FnMut(&Type) -> Callee,
+) -> Judged<'a> {
+    let mut own: Vec<Effects> = Vec::with_capacity(frames.len());
+    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(frames.len());
+    let mut unknown = Vec::new();
+    let mut empty = Vec::new();
+    let mut via = Vec::new();
+    let mut resolved = Vec::with_capacity(frames.len());
+    let mut callees: Vec<Callee> = Vec::new();
+    let mut named: HashMap<&str, usize> = HashMap::new();
+    let mut typed: HashMap<String, usize> = HashMap::new();
+    for (i, f) in frames.iter().enumerate() {
+        let mut e = f.own;
+        let mut to: Vec<usize> = Vec::new();
+        let mut ids = Vec::with_capacity(f.calls.len());
+        for c in &f.calls {
+            // A call through a value reaches what the value's type may hold;
+            // any other callee is resolved by name.
+            let k = match &c.through {
+                None => *named.entry(c.callee.as_str()).or_insert_with(|| {
+                    callees.push(resolve(&c.callee));
+                    callees.len() - 1
+                }),
+                Some(ty) => {
+                    let k = *typed.entry(ty.to_string()).or_insert_with(|| {
+                        callees.push(through(ty));
+                        callees.len() - 1
+                    });
+                    if matches!(callees[k], Callee::Bodies(_)) {
+                        via.push((i, c.callee.clone()));
+                    }
+                    k
+                }
+            };
+            let callee = &callees[k];
+            match callee {
+                Callee::Atom(a) => e = e.join(*a),
+                Callee::Bodies(idx) => to.extend(idx.iter().copied()),
+                Callee::Pure => {}
+                Callee::Empty => empty.push((i, c.callee.clone(), c.line)),
+                Callee::Unknown => unknown.push((i, c.callee.clone(), c.line)),
+            }
+            // An owned result of a call that is no user body is an
+            // allocation; a user callee's own set answers for it.
+            if c.born && !matches!(callee, Callee::Bodies(_)) {
+                e = e.with(Effect::Alloc);
+            }
+            ids.push(k);
+        }
+        // The body that builds a lambda value can run its frame.
+        to.extend(f.lambdas.iter().map(|d| i + d));
+        to.sort_unstable();
+        to.dedup();
+        own.push(e);
+        edges.push(to);
+        resolved.push(ids);
+    }
+    let writes: Vec<std::collections::BTreeSet<String>> =
+        frames.iter().map(|f| f.writes.clone()).collect();
     // Effect sets and the program's globals are finite, so the joins end.
     let solved = crate::fixpoint::solve(
         own.into_iter().zip(writes).collect(),
@@ -216,7 +270,9 @@ pub fn judge(
         unknown,
         empty,
         through: via,
-        calls,
+        frames,
+        resolved,
+        callees,
         writes,
     }
 }
@@ -229,48 +285,33 @@ fn global_root(p: &Place) -> Option<&String> {
     }
 }
 
+/// One frame's walk, which resolves no callee.
 struct Walk<'a> {
     body: &'a Body,
-    own: Effects,
-    edges: Vec<usize>,
-    unknown: Vec<(String, usize)>,
-    empty: Vec<(String, usize)>,
-    /// The callees `through` answered with bodies.
-    via: Vec<String>,
-    calls: Vec<(String, Callee)>,
-    writes: std::collections::BTreeSet<String>,
-    resolve: &'a mut dyn FnMut(&str) -> Callee,
-    through: &'a mut dyn FnMut(&Type) -> Callee,
-    memo: &'a mut HashMap<String, Callee>,
-    memo_ty: &'a mut HashMap<String, Callee>,
+    out: Walked,
 }
 
 impl Walk<'_> {
     fn stmt(&mut self, s: &St) {
         match s {
             St::Let(n, rhs) => {
-                let atom_call = self.rhs(rhs, self.body.names[n.index()].line);
+                let info = &self.body.names[n.index()];
+                let (line, releases) = (info.line, info.releases);
+                self.rhs(rhs, line, releases);
                 if let Rhs::Read(p) | Rhs::Take(p) = rhs {
                     self.place(p);
                 }
-                // An owned name born of a primitive, a literal or a builtin
-                // is an allocation; a user callee's own set answers for it.
-                let born = match rhs {
-                    Rhs::Prim(..) | Rhs::Make(..) => true,
-                    Rhs::Call { .. } => atom_call,
-                    Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) => false,
-                };
-                if born && self.body.names[n.index()].releases {
-                    self.own = self.own.with(Effect::Alloc);
+                // An owned name born of a primitive or a literal is an
+                // allocation; one born of a call is judged at the call.
+                if matches!(rhs, Rhs::Prim(..) | Rhs::Make(..)) && releases {
+                    self.out.own = self.out.own.with(Effect::Alloc);
                 }
             }
-            St::Do { rhs, line, .. } => {
-                self.rhs(rhs, *line);
-            }
-            St::Trap | St::Check(_) => self.own = self.own.with(Effect::Trap),
+            St::Do { rhs, line, .. } => self.rhs(rhs, *line, false),
+            St::Trap | St::Check(_) => self.out.own = self.out.own.with(Effect::Trap),
             St::Store { place, .. } => {
                 if let Some(g) = global_root(place) {
-                    self.writes.insert(g.clone());
+                    self.out.writes.insert(g.clone());
                 }
                 self.place(place)
             }
@@ -290,86 +331,40 @@ impl Walk<'_> {
     /// frame's own and has no effect.
     fn place(&mut self, p: &Place) {
         match p {
-            Place::Global(_) => self.own = self.own.with(Effect::ModuleState),
+            Place::Global(_) => self.out.own = self.out.own.with(Effect::ModuleState),
             Place::Name(_) => {}
             Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => self.place(b),
         }
     }
 
-    /// Who a call reaches. A call through a value (`value`) reaches what the
-    /// value's type may hold; any other callee is resolved by name.
-    fn callee(&mut self, callee: &str, value: Option<Name>) -> Callee {
-        let Some(n) = value else {
-            return match self.memo.get(callee) {
-                Some(c) => c.clone(),
-                None => {
-                    let c = (self.resolve)(callee);
-                    self.memo.insert(callee.to_string(), c.clone());
-                    c
-                }
-            };
-        };
-        let ty = &self.body.names[n.index()].ty;
-        let key = ty.to_string();
-        let c = match self.memo_ty.get(&key) {
-            Some(c) => c.clone(),
-            None => {
-                let c = (self.through)(ty);
-                self.memo_ty.insert(key, c.clone());
-                c
-            }
-        };
-        if matches!(c, Callee::Bodies(_)) {
-            self.via.push(callee.to_string());
-        }
-        c
-    }
-
-    /// Whether `r` is a call that is not a user body: the caller's own
-    /// allocation when the result is owned.
-    fn rhs(&mut self, r: &Rhs, line: usize) -> bool {
+    /// Records `r` when it is a call; `born` when it binds an owned result.
+    fn rhs(&mut self, r: &Rhs, line: usize, born: bool) {
         let Rhs::Call {
             callee, kind, args, ..
         } = r
         else {
-            return false;
+            return;
         };
         // A place argument is a move-out window's place; the call writes it.
         for (a, _) in args {
             if let Arg::Place(p) = a {
                 if let Some(g) = global_root(p) {
-                    self.writes.insert(g.clone());
+                    self.out.writes.insert(g.clone());
                 }
                 self.place(p);
             }
         }
-        self.call(callee, kind.value(), line)
+        self.call(callee, kind.value(), line, born);
     }
 
-    /// Joins a call to `callee` (through `value` when it is a function value);
-    /// true when the callee is not a user body.
-    fn call(&mut self, callee: &str, value: Option<Name>, line: usize) -> bool {
-        let c = self.callee(callee, value);
-        self.calls.push((callee.to_string(), c.clone()));
-        match c {
-            Callee::Atom(e) => {
-                self.own = self.own.join(e);
-                true
-            }
-            Callee::Bodies(idx) => {
-                self.edges.extend(idx.iter().copied());
-                false
-            }
-            Callee::Pure => true,
-            Callee::Empty => {
-                self.empty.push((callee.to_string(), line));
-                true
-            }
-            Callee::Unknown => {
-                self.unknown.push((callee.to_string(), line));
-                true
-            }
-        }
+    /// Records a call to `callee`, through `value` when it is a function value.
+    fn call(&mut self, callee: &str, value: Option<Name>, line: usize, born: bool) {
+        self.out.calls.push(Call {
+            callee: callee.to_string(),
+            through: value.map(|n| self.body.names[n.index()].ty.clone()),
+            line,
+            born,
+        });
     }
 }
 
@@ -469,22 +464,26 @@ fn with_judgment<R>(
         own,
         &mut fns,
         &tops,
-        |judged, refs, top| then(judged, refs, &insts, top),
+        &[],
+        |judged, refs, top, _| then(judged, refs, &insts, top),
     )
 }
 
 /// The judgment over bodies the caller built: `tops` holds each body with
-/// the name a call spells it by. The projection bodies are built here, each
-/// frame numbered in `fns` ([`crate::Fns::number`]), and `then` is given
-/// every frame in the order judged and `top[i]`, the frame index of
-/// `tops[i]`'s own body.
+/// the name a call spells it by, and `served` each body the judgment memo
+/// served, by its frames as last judged. The projection bodies are built here,
+/// each frame numbered in `fns` ([`crate::Fns::number`]), and `then` is given
+/// every frame built in the order judged, `top[i]`, the frame index of
+/// `tops[i]`'s own body, and `served_at[i]`, that of `served[i]`'s. Every
+/// served frame comes after the last frame built.
 pub(crate) fn judge_built<R>(
     program: &vyrn_frontend::ast::Program,
     lowered: &crate::Lowered<'_>,
     own: &vyrn_frontend::own::Ownership,
     fns: &mut crate::Fns,
     tops: &[(&str, &Body)],
-    then: impl FnOnce(&Judged, &[&Body], &[usize]) -> R,
+    served: &[(&str, &[Walked])],
+    then: impl FnOnce(&Judged, &[&Body], &[usize], &[usize]) -> R,
 ) -> R {
     // An `impl` projection has no instance but is a call by its own name in
     // the core, so it is judged too.
@@ -570,6 +569,20 @@ pub(crate) fn judge_built<R>(
     for (i, (name, _)) in tops.iter().enumerate() {
         by_name.entry(name).or_default().push(top[i]);
     }
+    let built = walk_frames(&refs);
+    let mut frames: Vec<&Walked> = built.iter().collect();
+    let mut served_at: Vec<usize> = Vec::with_capacity(served.len());
+    for (name, walked) in served {
+        let at = frames.len();
+        served_at.push(at);
+        by_name.entry(name).or_default().push(at);
+        for (k, f) in walked.iter().enumerate().skip(1) {
+            if let Some(line) = crate::core::lambda_line(&f.name) {
+                (lambda_frames.entry((name, line)).or_default()).push(at + k);
+            }
+        }
+        frames.extend(walked.iter());
+    }
     let mut impl_methods: HashMap<&str, Vec<usize>> = HashMap::new();
     for im in &program.impls {
         for m in im.methods.iter().chain(im.places.iter()) {
@@ -644,6 +657,6 @@ pub(crate) fn judge_built<R>(
             Callee::Bodies(idx)
         }
     };
-    let judged = judge(&refs, &mut resolve, &mut through);
-    then(&judged, &refs, &top)
+    let judged = judge(&frames, &mut resolve, &mut through);
+    then(&judged, &refs, &top, &served_at)
 }

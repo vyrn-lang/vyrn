@@ -157,6 +157,7 @@ pull request.
 - One pipeline: the loader, the checker, the lowering to a named core, a kernel that judges the core, and one wasm emitter. Each rule lives in one place instead of once per engine.
 - A host enters the pipeline through `vyrn_lower::{load, load_warned, check_and_synthesize}`. The frontend's `check_and_synthesize` types and synthesizes and judges nothing; a host that calls it alone skips every ownership and floor refusal.
 - The editor runs the pipeline `vyrn check` runs, passed in as `vyrn_lower::JUDGE`. What only the editor needs (recovery, the index, the judgment memo) wraps the pipeline and never replaces a step of it.
+- The judgment memo serves a body's verdict only where every input the verdict read is unchanged: its module's hash, the declaration fingerprint, and the effect judgment's answer for its frames. A cache key that leaves out an input the judgment reads is a defect, not a trade.
 - The core binds every intermediate value and makes every memory access a place. A field read is one load, never a record copy; the copy made wasm 13x slower than native.
 - The kernel re-checks every body on every compile with three judgments: ownership, effects and types.
 - The ownership judgment is one forward solver over the structured core, a join at each merge and a widen to a fixpoint at each loop, and every refusal is a rule row judged at a use, a scope end, a join or a back edge. No rule gets its own walk.
