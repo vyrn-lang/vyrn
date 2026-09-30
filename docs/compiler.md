@@ -214,8 +214,7 @@ The kernel knows no surface syntax. It judges core bodies.
   type's constructor, a name already of that type, or a literal the checker
   proved. `typed::judge` walks each store into a validated place and judges
   its producer. `vyrn_frontend::validate` says which types carry a rule; a
-  sized integer is judged by width and signedness. `typed::obligation` is
-  the must-use rule for `Stream` and `impl MustUse` types.
+  sized integer is judged by width and signedness.
 
 `movecheck.rs` states no rule. It orders refusals by source
 (`movecheck::in_source_order`), marks a generator's own program

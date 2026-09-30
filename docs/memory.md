@@ -238,7 +238,7 @@ one owner is not enough:
 | A write to a place while an alias reads out of it | `` `t.xs[..]` is written here while `before` still reads out of it `` |
 | A `modify` argument read again in the same call | `` `a` is passed to `bump` as `modify` and read again in the same call `` |
 | A whole use of a value with a hole | `` `p.name` was taken out of `p` here `` |
-| A must-use value never disposed, or disposed twice | `` `s` is a `Stream` and is never disposed `` |
+| A must-use value never disposed, or disposed twice | `` `s` is a `Stream<Int64>` and is never disposed `` |
 | A region value that escapes the region | ``cannot store a heap value into `kept`, which outlives the enclosing `region` `` |
 | A take of module state | `` module state `names` may not be passed to a `consume` parameter `` |
 
@@ -285,13 +285,12 @@ Each rule has one home. The names below are the entry points.
   `St::Drop`. `core::augment` is the placer.
 - `vyrn-lower/src/kernel.rs`: the linear judgment. `kernel::check` refuses a
   body; `kernel::placement` reports the releases it is missing.
-- `vyrn-lower/src/typed.rs`: the typed judgment, and `typed::obligation`, the
-  must-use rule.
+- `vyrn-lower/src/typed.rs`: the typed judgment.
 - `vyrn-lower/src/rules.rs`: the words of every refusal the kernel, the
   typed judgment and the builder state, one row each; `rules::say` fills one.
-- `vyrn-lower/src/pipeline.rs`: the driver. `vyrn_lower::refusals` merges
-  the must-use judgment's, the kernel's and the typed judgment's refusals into
-  one list in source order. It states no rule itself.
+- `vyrn-lower/src/pipeline.rs`: the driver. `vyrn_lower::refusals` returns
+  the typed judgment's refusals, or else the kernel's, as one list in source
+  order. It states no rule itself.
 - `vyrn-codegen/src/direct.rs`: the emitter reads each `St::Drop` and each
   placed `Release` row and emits a call. It places nothing.
 

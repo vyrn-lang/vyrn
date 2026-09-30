@@ -9,8 +9,6 @@ use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::gen::{GenEngine, GenError, GenInputs, GenOutput};
 use vyrn_frontend::{ast, checker, floor, loader, movecheck, prof, symbols, types};
 
-use crate::typed;
-
 /// Loads a multi-module program: parses `root_source`, resolves every
 /// `import` transitively through `resolver`, links one [`ast::Program`], and
 /// checks it. `engine` runs every generator import and `derive` site; with
@@ -122,78 +120,22 @@ fn check(
     }
 }
 
-/// Returns every ownership refusal a program earns, the must-use judgment's
-/// and the kernel's, as one list in source order, and the World the kernel
-/// judged. The caller guarantees the program type-checks.
-///
-/// A kernel refusal is dropped at a line the must-use judgment already
-/// refused, so one mistake is not said twice. It is also dropped when its
-/// subject is a binding the must-use judgment names anywhere in the file: a
-/// `Stream` closed twice is a must-use refusal and a use after a take at two
-/// lines, and still one mistake.
+/// Returns every ownership refusal a program earns, the kernel's, as one
+/// list in source order, and the World the kernel judged. The caller
+/// guarantees the program type-checks.
 pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) {
-    let mut diags = Vec::new();
-    let walked = typed::obligation::judge(program);
     // The placer judges a core body for every instance, and the World is
     // handed on: a command's next `own::Memo` adopts it. Only this analysis
     // may reuse a judgment (`movecheck::reuse_judgments`).
     let world = movecheck::judging(|| crate::analyze(program));
     crate::hand_on(program, &world);
     // A program the typed judgment refuses gets those refusals alone.
-    if !world.typed_diagnostics().is_empty() {
-        let mut typed = world.typed_diagnostics().to_vec();
-        movecheck::in_source_order(&mut typed);
-        return (typed, world);
-    }
-    let (owed, kernel): (Vec<_>, Vec<_>) =
-        (world.refusal_diagnostics().into_iter()).partition(|d| crate::rules::owed(&d.message));
-    let row = |d: &Diagnostic| {
-        let s = subject(&d.message).map(str::to_string);
-        (
-            d.file.clone(),
-            d.line,
-            s,
-            d.message.ends_with("never disposed"),
-        )
+    let mut diags = match world.typed_diagnostics() {
+        [] => world.refusal_diagnostics(),
+        typed => typed.to_vec(),
     };
-    for d in walked.iter().filter(|_| crate::core::refuses()) {
-        assert!(
-            owed.iter().any(|k| row(k) == row(d)),
-            "the kernel lacks the walk's `{}` at line {}; it said {:?}",
-            d.message,
-            d.line,
-            owed.iter()
-                .map(|k| (k.line, &k.message))
-                .collect::<Vec<_>>()
-        );
-    }
-    let mustuse: HashSet<(Option<String>, String)> = owed
-        .iter()
-        .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
-        .collect();
-    diags.extend(owed);
-    let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
-    for d in &diags {
-        lines.insert((d.file.clone(), d.line));
-    }
-    diags.extend(kernel.into_iter().filter(|d| {
-        !lines.contains(&(d.file.clone(), d.line))
-            && !subject(&d.message)
-                .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
-    }));
     movecheck::in_source_order(&mut diags);
     (diags, world)
-}
-
-/// Returns the binding a refusal is about: the root of the first path its
-/// message quotes in backticks. Both passes write the subject first, so no
-/// field has to be filled at every refusal site. A message that quotes nothing
-/// has no subject and is never suppressed.
-fn subject(message: &str) -> Option<&str> {
-    let rest = message.split_once('`')?.1;
-    let path = rest.split_once('`')?.0;
-    let root = ast::root_of(path);
-    (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
 }
 
 /// Wraps `run`, an engine that compiles and runs a generator, into the engine
