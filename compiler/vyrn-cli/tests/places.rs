@@ -525,3 +525,132 @@ fn a_field_read_through_a_dead_slots_handle_traps_in_at() {
         "{err}"
     );
 }
+
+/// A record with two columns, a module-state copy, and the writers the
+/// witnesses below call inside a loop that reads `c.x`.
+const COLUMNS: &str = "type C = { x: Array<Int64>, y: Array<Int64> }\n\
+    let mut g = C { x: [1], y: [0] }\n\
+    fn grown(c: consume C, v: Int64) -> C {\n\
+    let mut x = consume c.x\n\
+    x.push(v)\n\
+    let y = consume c.y\n\
+    return C { x: x, y: y }\n\
+    }\n\
+    fn widen(c: modify C) {\n\
+    c.x.push(9)\n\
+    }\n\
+    fn bump() {\n\
+    g.x.push(1)\n\
+    }\n";
+
+/// What `vyrn run` prints for `COLUMNS` and `body`, whose `f` is printed.
+fn columns_run(body: &str) -> String {
+    let dir = scratch("places-columns");
+    let file = dir.join("c.vyrn");
+    let main = "fn main() -> Int64 {\nprint(f().toString())\nreturn 0\n}\n";
+    std::fs::write(&file, format!("{COLUMNS}{body}{main}")).unwrap();
+    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    norm(&out.stdout)
+}
+
+/// A loop hoists a column's header only while nothing in it moves the
+/// header. Each witness below grows `c.x` in the loop, so a header read once
+/// before it would stop the loop after the first turn.
+#[test]
+fn a_loop_that_rebuilds_the_record_reads_the_new_column() {
+    let body = "fn f() -> Int64 {\n\
+        let mut c = C { x: [1], y: [0] }\n\
+        let mut i = 0\n\
+        while i < c.x.length && i < 50 {\n\
+        c = grown(c, c.x[i] + 1)\n\
+        i = i + 1\n\
+        }\n\
+        return i + c.x[c.x.length - 1]\n\
+        }\n";
+    assert_eq!(columns_run(body), "101\n");
+}
+
+#[test]
+fn a_loop_that_stores_the_column_reads_the_new_column() {
+    let body = "fn f() -> Int64 {\n\
+        let mut c = C { x: [1], y: [0] }\n\
+        let mut s = 0\n\
+        let mut i = 0\n\
+        while i < c.x.length {\n\
+        s = s + c.x[i]\n\
+        if i == 0 {\n\
+        c.x = [5, 6, 7, 8]\n\
+        }\n\
+        i = i + 1\n\
+        }\n\
+        return s\n\
+        }\n";
+    assert_eq!(columns_run(body), "22\n");
+}
+
+#[test]
+fn a_loop_that_hands_the_record_to_modify_reads_the_new_column() {
+    let body = "fn f() -> Int64 {\n\
+        let mut c = C { x: [1], y: [0] }\n\
+        let mut s = 0\n\
+        let mut i = 0\n\
+        while i < c.x.length && i < 20 {\n\
+        s = s + c.x[i]\n\
+        widen(c)\n\
+        i = i + 1\n\
+        }\n\
+        return s\n\
+        }\n";
+    assert_eq!(columns_run(body), "172\n");
+}
+
+#[test]
+fn a_loop_that_calls_a_writer_of_module_state_reads_the_new_column() {
+    let body = "fn f() -> Int64 {\n\
+        let mut s = 0\n\
+        let mut i = 0\n\
+        while i < g.x.length && i < 20 {\n\
+        s = s + g.x[i]\n\
+        bump()\n\
+        i = i + 1\n\
+        }\n\
+        return s\n\
+        }\n";
+    assert_eq!(columns_run(body), "20\n");
+}
+
+/// An element store moves no header, so a loop of them reads each column's
+/// header once, before the loop, and an inner loop reuses the outer loop's.
+#[test]
+fn a_loop_of_element_stores_reads_each_column_header_once() {
+    let dir = scratch("places-columns");
+    let file = dir.join("c.vyrn");
+    let body = "fn f(c: modify C) {\n\
+        let mut i = 0\n\
+        while i < c.x.length {\n\
+        let mut j = 0\n\
+        while j < c.y.length {\n\
+        c.x[i] = c.x[i] + c.y[j]\n\
+        j = j + 1\n\
+        }\n\
+        i = i + 1\n\
+        }\n\
+        }\n\
+        fn main() -> Int64 {\n\
+        let mut c = C { x: [1, 2], y: [10, 20] }\n\
+        f(c)\n\
+        print(c.x[0] + c.x[1])\n\
+        return 0\n\
+        }\n";
+    std::fs::write(&file, format!("{COLUMNS}{body}")).unwrap();
+    let out = vyrn().arg("emit-lowered").arg(&file).output().unwrap();
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let low = norm(&out.stdout);
+    let f = &low[low.find("fn f(").unwrap()..low.find("fn grown(").unwrap()];
+    let before = &f[..f.find("loop").unwrap()];
+    assert!(before.contains("let @borrow = read c.x\n"), "{f}");
+    assert!(before.contains("let @borrow = read c.y\n"), "{f}");
+    let run = vyrn().arg("run").arg(&file).output().unwrap();
+    assert_eq!(norm(&run.stdout), "63\n");
+}

@@ -9369,7 +9369,10 @@ struct Walked {
     /// A heap array's element buffer, taken at the first of its parts whose
     /// own row writes it.
     bufs: Vec<Option<u32>>,
-    over: Vec<(Name, Name)>,
+    /// The headers the loops open around the row walk, and the borrow each
+    /// is walked through ([`vyrn_frontend::core::Walk::While`]): a store into
+    /// an element of one reads the borrow's parts.
+    over: Vec<(vyrn_frontend::core::Place, Name)>,
     /// The place a stream's pull wrote its element to, by the pull's name,
     /// until the read at that name binds it ([`Spec::Pulls`]).
     pulled: Vec<Option<(Place, Type)>>,
@@ -9877,6 +9880,11 @@ impl<'p> Fn_<'_, 'p> {
                 // the loop reads the parts. The kernel ends the borrow at any write under the
                 // container, so the parts cannot go stale.
                 St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
+                    // An outer loop walks this header too, and nothing in it moves the header.
+                    if let Some(walk) = core_header(w, p) {
+                        w.walks[n.index()] = Some(walk);
+                        continue;
+                    }
                     let info = &body.names[n.index()];
                     let (line, ty) = (info.line, info.ty.clone());
                     if let Repr::Agg(_) = self.cx.repr(&ty, line)? {
@@ -10226,11 +10234,11 @@ impl<'p> Fn_<'_, 'p> {
                     let over = w.over.len();
                     for p in ss[..i].iter().rev() {
                         match p {
-                            St::Let(h, Rhs::Read(vyrn_frontend::core::Place::Name(r)))
+                            St::Let(h, Rhs::Read(r))
                                 if body.names[h.index()].walked
                                     == Some(vyrn_frontend::core::Walk::While) =>
                             {
-                                w.over.push((*r, *h))
+                                w.over.push((r.clone(), *h))
                             }
                             _ => break,
                         }
@@ -13567,13 +13575,13 @@ fn each_list(ss: &[St], f: &mut dyn FnMut(&[St])) {
 
 /// The parts of the header `base` names, when it is a borrow a loop walks.
 fn core_header(w: &Walked, base: &vyrn_frontend::core::Place) -> Option<Walk> {
-    match base {
-        vyrn_frontend::core::Place::Name(n) => w.walks.get(n.index())?.clone().or_else(|| {
-            let (_, h) = w.over.iter().rev().find(|(r, _)| r == n)?;
-            w.walks[h.index()].clone()
-        }),
-        _ => None,
+    if let vyrn_frontend::core::Place::Name(n) = base {
+        if let Some(Some(walk)) = w.walks.get(n.index()) {
+            return Some(walk.clone());
+        }
     }
+    let (_, h) = w.over.iter().rev().find(|(r, _)| r == base)?;
+    w.walks[h.index()].clone()
 }
 
 /// The names a statement writes, with the capability: a store's root with `None`, and a
