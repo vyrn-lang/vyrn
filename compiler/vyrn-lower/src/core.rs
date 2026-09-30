@@ -14,10 +14,10 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
-    ArmBody, BinOp, Binder, Block, Capability, Expr, Function, Id, LambdaBody, MatchArm, NodeId,
-    Pattern, Program, Stmt, Type, TypeDecl, UnOp,
+    ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
+    NodeId, Pattern, Program, Stmt, Type, TypeDecl, UnOp,
 };
-use vyrn_frontend::declared::Owned;
+use vyrn_frontend::declared::{CapsOf, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -29,8 +29,8 @@ use crate::kernel::{MissingKind, Root};
 use crate::rules::{
     say, CONSUMED_BORROW, CONSUME_TAKES_NOTHING, ELEMENT_TAKEN, LOOP_TAKES_NOTHING, SWAP_REMOVE,
 };
-use crate::world::Stated;
-use crate::{Instance, NodeTypes, World};
+use crate::world::{Fns, Stated};
+use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Ctor, Facts, Lit, Name,
     NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
@@ -443,7 +443,7 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
             // waits on the specialization.
             if !matches!(
                 kind,
-                Callee::Fn | Callee::Ctor | Callee::Named | Callee::Proven
+                Callee::Fn(_) | Callee::Bound | Callee::Ctor | Callee::Named | Callee::Proven
             ) && builtin_row(callee).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
@@ -1075,7 +1075,7 @@ fn build_seeded(
     // `Deep` walks, and nothing below reads a kind.
     let no_steps: Vec<Release> = Vec::new();
     let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
-    for r in own.releases.get(&inst.func.name).unwrap_or(&no_steps) {
+    for r in own.releases.get(&inst.func_id).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
     let mut b = Builder {
@@ -1212,44 +1212,36 @@ pub fn build_module_state<'a>(
     Ok(b.body)
 }
 
-/// The body of a `test` or a `bench`: a block with no
-/// parameters, keyed in the release plan by the synthetic `test@<i>` or
-/// `bench@<i>` name.
+/// The body of a `test` or a `bench`: a block with no parameters.
 pub fn build_outside<'a>(
     program: &'a Program,
     own: &'a Ownership,
-    name: &str,
-    file: Option<String>,
-    block: &Block,
-    facts: &NodeTypes<'a>,
+    ob: &OutsideBody<'a>,
 ) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
-    let first = build_outside_seeded(program, own, name, file.clone(), block, facts, &none)?;
+    let first = build_outside_seeded(program, own, ob, &none)?;
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
-    build_outside_seeded(program, own, name, file, block, facts, &seed)
+    build_outside_seeded(program, own, ob, &seed)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_outside_seeded<'a>(
     program: &'a Program,
     own: &'a Ownership,
-    name: &str,
-    file: Option<String>,
-    block: &Block,
-    facts: &NodeTypes<'a>,
+    ob: &OutsideBody<'a>,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     // No substitution: the body has no type parameters.
     let no_steps: Vec<Release> = Vec::new();
-    let steps = own.releases.get(name).unwrap_or(&no_steps);
+    let steps = own.releases.get(&ob.id).unwrap_or(&no_steps);
     let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
     for r in steps {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    let mut b = Builder::bare(program, own, facts, seed, name.to_string(), file, placed);
+    let (block, file) = (ob.block, ob.module.clone());
+    let mut b = Builder::bare(program, own, &ob.facts, seed, ob.name.clone(), file, placed);
     // The checker types a `test` or `bench` body as a function returning Unit.
     b.ret = Some(Type::Unit);
     b.appends = crate::append::append_candidates(block);
@@ -3913,11 +3905,8 @@ impl<'a> Builder<'a> {
                 Some((_, size, _)) => {
                     let solved = self.impl_args(&size, ity);
                     Rhs::Call {
-                        kind: if solved.is_some() {
-                            Callee::Fn
-                        } else {
-                            Callee::Method
-                        },
+                        kind: (self.fn_id(&size).filter(|_| solved.is_some()))
+                            .map_or(Callee::Method, Callee::Fn),
                         callee: size,
                         args: vec![(Arg::Val(Val::Name(it)), Capability::Read)],
                         write_back: false,
@@ -4003,6 +3992,13 @@ impl<'a> Builder<'a> {
         (g.type_params.iter())
             .map(|p| Some((p.clone(), subst.get(p)?.clone())))
             .collect()
+    }
+
+    /// The id of the function the program declares under `name`.
+    fn fn_id(&self, name: &str) -> Option<FnId> {
+        (self.program.functions.iter())
+            .position(|f| f.name == name)
+            .map(FnId::nth)
     }
 
     fn is_map(&self, ty: &Type) -> bool {
@@ -4367,21 +4363,22 @@ impl<'a> Builder<'a> {
         callee: &str,
         ix: usize,
     ) -> Result<Val, Gap> {
-        self.read_at(e, out, Some((callee, ix)))
+        let of = self.own.arg_caps.named(callee);
+        self.read_at(e, out, Some((callee, of, ix)))
     }
 
     fn read_at(
         &mut self,
         e: &'a Expr,
         out: &mut Vec<St>,
-        at: Option<(&str, usize)>,
+        at: Option<(&str, CapsOf, usize)>,
     ) -> Result<Val, Gap> {
         let v = self.read_val_inner(e, out)?;
         // The argument-drop key, here rather than in `call`, which sees
         // neither an operator nor a `lazy` field read.
-        if let (Val::Name(t), Some((callee, ix))) = (&v, at) {
+        if let (Val::Name(t), Some((callee, of, ix))) = (&v, at) {
             let t = *t;
-            if self.arg_released(e, t, callee, ix) {
+            if self.arg_released(e, t, callee, of, ix) {
                 self.body.names[t.index()].arg_drop = Some(e.id());
             }
         }
@@ -4468,7 +4465,7 @@ impl<'a> Builder<'a> {
     /// ([`NameInfo::releases`], or a forced `lazy` field), and
     /// [`vyrn_frontend::movecheck::arg_verdict`] decides what the callee does
     /// with it.
-    fn arg_released(&self, e: &'a Expr, t: Name, callee: &str, ix: usize) -> bool {
+    fn arg_released(&self, e: &'a Expr, t: Name, callee: &str, of: CapsOf, ix: usize) -> bool {
         use vyrn_frontend::movecheck as mc;
         // A named value is nobody's temporary: `f(s)` hands over what `s`
         // owns, and the binding keeps the row.
@@ -4529,7 +4526,7 @@ impl<'a> Builder<'a> {
             view_copies,
             constructs: matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
                 || self.is_variant(callee),
-            cap: vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix),
+            cap: self.own.arg_caps.at(of, ix),
         };
         if mc::arg_verdict(&s) == mc::ArgVerdict::Released {
             return true;
@@ -4671,7 +4668,7 @@ impl<'a> Builder<'a> {
         // An element's receiver is `@at`'s argument, and its release is keyed
         // as an argument temporary's.
         if let (false, Expr::Call { name, args, .. }) = (took, e) {
-            if self.arg_released(&args[0], r, name, 0) {
+            if self.arg_released(&args[0], r, name, self.own.arg_caps.named(name), 0) {
                 self.body.names[r.index()].arg_drop = Some(producer);
             }
         }
@@ -4846,7 +4843,7 @@ impl<'a> Builder<'a> {
     /// Builds the lambda's own frame, judged like a function's, and answers
     /// its key. Captures are borrowed inputs and parameters are `read`.
     /// The plan keys its bindings' rows by the lambda's nodes
-    /// under the enclosing function's name. An expression body is a `return`
+    /// under the enclosing function's id. An expression body is a `return`
     /// at no site, so a name still held there is refused, not placed.
     fn lambda_frame(&mut self, e: &'a Expr, caps: &[Val]) -> Result<String, Gap> {
         let Expr::Lambda {
@@ -5494,7 +5491,7 @@ impl<'a> Builder<'a> {
                 self.body.mistyped.extend(at);
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {
-                    kind: Callee::Fn,
+                    kind: Callee::Fn(_),
                     solved,
                     targets,
                     ..
@@ -5864,6 +5861,11 @@ impl<'a> Builder<'a> {
             vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, m)
         };
         let success = method("success");
+        let (Some(is_success), Some(success_id)) =
+            (self.fn_id(&method("isSuccess")), self.fn_id(&success))
+        else {
+            return gap("a `?` on a type with no `Fallible` impl", line);
+        };
         // The impl's `isSuccess` chooses the arm. Both impl calls are declared
         // functions under the dispatched name and read their argument.
         let held = self.temp(Type::Bool, line);
@@ -5876,7 +5878,7 @@ impl<'a> Builder<'a> {
                 callee: method("isSuccess"),
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
-                kind: Callee::Fn,
+                kind: Callee::Fn(is_success),
                 ret: Some(Type::Bool),
                 targets: Vec::new(),
             },
@@ -5904,7 +5906,7 @@ impl<'a> Builder<'a> {
                 callee: success,
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
-                kind: Callee::Fn,
+                kind: Callee::Fn(success_id),
                 ret: Some(self.body.names[res.index()].ty.clone()),
                 targets: Vec::new(),
             },
@@ -6080,8 +6082,9 @@ impl<'a> Builder<'a> {
             // A lambda captures by read and takes by read.
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
-        } else if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
-            kind = Callee::Fn;
+        } else if let Some(id) = self.fn_id(name) {
+            kind = Callee::Fn(id);
+            let f = &self.program.functions[id.index()];
             f.params.iter().map(|p| p.capability).collect()
         } else if prelude::signature(name).is_some() {
             kind = Callee::Builtin;
@@ -6168,6 +6171,13 @@ impl<'a> Builder<'a> {
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
         }
+        // The capability row an argument's release reads, keyed by the callee
+        // before dispatch.
+        let of = match kind {
+            Callee::Fn(id) => CapsOf::Fn(id),
+            Callee::Value(_) => CapsOf::None,
+            _ => self.own.arg_caps.named(name),
+        };
         let length = prelude::builtin(name).map(|b| b.length);
         if let (Some(prelude::Length::ShrinksByOneIfNotEmpty), Some(recv)) = (length, args.first())
         {
@@ -6219,17 +6229,13 @@ impl<'a> Builder<'a> {
             self.drain += 1;
         }
         let bound = match kind {
-            Callee::Fn => self.targets_of(name, args),
+            Callee::Fn(_) => self.targets_of(name, args),
             _ => Vec::new(),
         };
         let param_tys: Vec<Type> = match kind {
-            Callee::Fn => self
-                .program
-                .functions
-                .iter()
-                .find(|f| f.name == name)
-                .map(|f| f.params.iter().map(|p| p.ty.clone()).collect())
-                .unwrap_or_default(),
+            Callee::Fn(id) => (self.program.functions[id.index()].params.iter())
+                .map(|p| p.ty.clone())
+                .collect(),
             _ => Vec::new(),
         };
         let mut targets = Vec::new();
@@ -6257,10 +6263,8 @@ impl<'a> Builder<'a> {
             // (`declared::arg_cap`); an unanswered position may, the safe
             // direction. A lambda deeper in the argument gets `None` and
             // escapes: a literal retains what it is given.
-            self.call_keeps = matches!(a, Expr::Lambda { .. }).then(|| {
-                vyrn_frontend::declared::arg_cap(&self.own.arg_caps, name, k)
-                    .is_none_or(|c| c == Capability::Consume)
-            });
+            self.call_keeps = matches!(a, Expr::Lambda { .. })
+                .then(|| (self.own.arg_caps.at(of, k)).is_none_or(|c| c == Capability::Consume));
             let global = matches!(a, Expr::Var { name, .. }
                 if self.lookup(name).is_none()
                     && self.program.globals.iter().any(|g| &g.name == name));
@@ -6275,7 +6279,7 @@ impl<'a> Builder<'a> {
                 // A proven crossing is the constructor row, so no reader
                 // checks it again.
                 let t = self.checked_temp(&to, a, line, out)?;
-                if self.arg_released(a, t, name, k) {
+                if self.arg_released(a, t, name, of, k) {
                     self.body.names[t.index()].arg_drop = Some(a.id());
                 }
                 Val::Name(t)
@@ -6293,7 +6297,7 @@ impl<'a> Builder<'a> {
                     self.val(a, out)?
                 }
             } else {
-                self.read_arg(a, out, name, k)?
+                self.read_at(a, out, Some((name, of, k)))?
             };
             self.call_keeps = None;
             if let Val::Name(t) = v {
@@ -6339,10 +6343,11 @@ impl<'a> Builder<'a> {
             (Callee::Reserved, Some(r)) if name == "@copy" => self.copied(r),
             _ => None,
         };
-        let (callee, kind, solved) = match dispatched {
-            Some((f, solved)) => (f, Callee::Fn, solved),
-            None => (name.to_string(), kind, Vec::new()),
-        };
+        let (callee, kind, solved) =
+            match dispatched.and_then(|(f, s)| Some((self.fn_id(&f)?, f, s))) {
+                Some((id, f, solved)) => (f, Callee::Fn(id), solved),
+                None => (name.to_string(), kind, Vec::new()),
+            };
         Ok(Rhs::Call {
             callee,
             args: vs,
@@ -6604,7 +6609,7 @@ pub fn lambda_line(name: &str) -> Option<usize> {
 
 /// The instance of `body` whose `fn`-typed parameters are bound:
 /// each parameter in `bound` leaves the parameter list, a call through it is
-/// [`Callee::Fn`] to its target, and a call that passes it on names that
+/// [`Callee::Bound`] to its target, and a call that passes it on names that
 /// target. A lambda target's captures take the parameter's place; a call
 /// through it passes them first, and a call passing it on takes them after
 /// its own arguments (`direct::ho_args`). A bound parameter read once as a
@@ -6729,11 +6734,11 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
         if let Some(v) = kind.value() {
             match bound.iter().find(|(n, _)| *n == v) {
                 Some((_, Target::Fn(f))) => {
-                    *kind = Callee::Fn;
+                    *kind = Callee::Bound;
                     *callee = f.clone();
                 }
                 Some((_, Target::Lambda(key, ..))) => {
-                    *kind = Callee::Fn;
+                    *kind = Callee::Bound;
                     *callee = key.clone();
                     let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
                     let lead = names.into_iter().flatten();
@@ -7058,13 +7063,14 @@ fn fold_frame(
     body: &Body,
     own: &Ownership,
     out: &mut Facts,
-    bodies: &mut HashMap<String, Option<Stated>>,
+    fns: &mut Fns,
+    bodies: &mut HashMap<FnId, Option<Stated>>,
 ) {
     let proto = &own.proto;
     // Filled at the same site as the fold, so a body the fold does not see is
     // one no emitter may walk either.
     bodies
-        .entry(body.name.clone())
+        .entry(fns.add(&body.name, None))
         .and_modify(|had| *had = None)
         .or_insert_with(|| {
             Some(Stated {
@@ -7237,6 +7243,10 @@ pub fn augment(program: &Program, w: &mut World) {
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
     drop(lw);
+    w.fns = Fns::source(&lowered.source);
+    for inst in &lowered.instances {
+        w.fns.instance(inst);
+    }
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
@@ -7245,7 +7255,7 @@ pub fn augment(program: &Program, w: &mut World) {
     // pass wrote a row for. A row's node belongs to one function, so only
     // those need a rebuild.
     let mut built: Vec<Option<Body>> = Vec::with_capacity(lowered.instances.len());
-    let mut touched: std::collections::HashSet<String> = Default::default();
+    let mut touched: std::collections::HashSet<FnId> = Default::default();
     // The judgment memo, when the host armed one (`movecheck::Judgments`): a
     // body whose key is unchanged is served its refusals, neither built nor
     // judged. An armed host reads only refusals, not the facts or rows.
@@ -7283,17 +7293,20 @@ pub fn augment(program: &Program, w: &mut World) {
             made_outside.push(Made::Served(rs));
             continue;
         }
-        let top = build_outside(
-            program,
-            own,
-            &ob.name,
-            ob.module.clone(),
-            ob.block,
-            &ob.facts,
-        );
-        made_outside.push(Made::Built(key, top));
+        made_outside.push(Made::Built(key, build_outside(program, own, ob)));
     }
     drop(os);
+    // The call relation, from the first build of every body; the writes
+    // below add the bodies built for the judgment alone.
+    let by_name = crate::by_name(program);
+    let mut calls: HashMap<FnId, Vec<FnId>> = HashMap::new();
+    let ids = (lowered.instances.iter().map(|i| i.func_id).zip(&made))
+        .chain(lowered.bodies.iter().map(|b| b.id).zip(&made_outside));
+    for (f, m) in ids {
+        if let Made::Built(_, Ok(top)) = m {
+            crate::world::add_callees(top, &by_name, calls.entry(f).or_default());
+        }
+    }
     let ej = vyrn_frontend::prof::phase("placer: effects");
     let mut tops: Vec<(&str, &Body)> = Vec::new();
     for (inst, m) in lowered.instances.iter().zip(&made) {
@@ -7327,14 +7340,7 @@ pub fn augment(program: &Program, w: &mut World) {
     }
     for (ob, m) in lowered.bodies.iter().zip(made_outside.iter_mut()) {
         if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
-            *top = build_outside(
-                program,
-                own,
-                &ob.name,
-                ob.module.clone(),
-                ob.block,
-                &ob.facts,
-            );
+            *top = build_outside(program, own, ob);
         }
     }
     for (inst, m) in lowered.instances.iter().zip(made) {
@@ -7360,10 +7366,10 @@ pub fn augment(program: &Program, w: &mut World) {
                 eprintln!("{}", top.render());
             }
             // A lambda's rows are keyed by its own nodes under the enclosing
-            // function's name, where the emitters read them.
+            // function's id, where the emitters read them.
             place_frames(
                 top,
-                &inst.func.name,
+                inst.func_id,
                 own,
                 &mut added,
                 &mut touched,
@@ -7405,7 +7411,7 @@ pub fn augment(program: &Program, w: &mut World) {
                 }
                 place_frames(
                     &top,
-                    &ob.name,
+                    ob.id,
                     own,
                     &mut added,
                     &mut touched,
@@ -7449,6 +7455,7 @@ pub fn augment(program: &Program, w: &mut World) {
     for p in &lowered.places {
         let inst = crate::Instance {
             func: p.func,
+            func_id: p.id,
             type_args: Vec::new(),
             subst: Default::default(),
             facts: p.facts.clone(),
@@ -7456,6 +7463,7 @@ pub fn augment(program: &Program, w: &mut World) {
         };
         match build(program, &inst, own) {
             Ok(top) => {
+                crate::world::add_callees(&top, &by_name, calls.entry(p.id).or_default());
                 typed(program, own, &mut r, &top, &p.func.module, true);
             }
             Err(g) => {
@@ -7479,6 +7487,8 @@ pub fn augment(program: &Program, w: &mut World) {
             &g.init,
         ) {
             Ok(top) => {
+                let state = w.fns.add("", None);
+                crate::world::add_callees(&top, &by_name, calls.entry(state).or_default());
                 typed(program, own, &mut r, &top, &g.module, true);
             }
             Err(e) => {
@@ -7530,15 +7540,10 @@ pub fn augment(program: &Program, w: &mut World) {
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]) only once the row is in the
     // plan, so such a program is lowered again below.
-    let by_name: HashMap<&str, &vyrn_frontend::ast::Function> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.as_str(), f))
-        .collect();
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
     let mut dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     for (f, rows) in added {
-        touched.insert(f.clone());
+        touched.insert(f);
         own.releases.entry(f).or_default().extend(rows);
     }
     // A second build for the emitters, after every row the placer added: the
@@ -7546,6 +7551,7 @@ pub fn augment(program: &Program, w: &mut World) {
     // the memo runs no emitter, and served bodies would leave the facts
     // partial, so it stops here.
     if memo.is_some() {
+        w.calls.replace(calls);
         crate::effects::set_state_callees(None);
         (w.refusals, w.typed) = (r.kernel, r.typed);
         return;
@@ -7558,13 +7564,13 @@ pub fn augment(program: &Program, w: &mut World) {
     if folds {
         if let Ok(top) = build_module_state(program, own, &lowered.globals) {
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
         for (i, inst) in lowered.instances.iter().enumerate() {
             // Rebuilt only where the pass above wrote a row for this function; the
             // rest fold the body that pass already built.
-            let fresh = if touched.contains(&inst.func.name) {
+            let fresh = if touched.contains(&inst.func_id) {
                 let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
                 build(program, inst, own).ok()
             } else {
@@ -7574,22 +7580,14 @@ pub fn augment(program: &Program, w: &mut World) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
         // The same for `test` and `bench` bodies, whose nodes an emitter looks up
         // too.
         for (i, ob) in lowered.bodies.iter().enumerate() {
-            let fresh = if touched.contains(&ob.name) {
-                build_outside(
-                    program,
-                    own,
-                    &ob.name,
-                    ob.module.clone(),
-                    ob.block,
-                    &ob.facts,
-                )
-                .ok()
+            let fresh = if touched.contains(&ob.id) {
+                build_outside(program, own, ob).ok()
             } else {
                 None
             };
@@ -7597,7 +7595,7 @@ pub fn augment(program: &Program, w: &mut World) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
     }
@@ -7617,11 +7615,13 @@ pub fn augment(program: &Program, w: &mut World) {
             if !had.insert(inst.spelling()) {
                 continue;
             }
+            w.fns.instance(inst);
             if let Ok(top) = build(program, inst, own) {
+                crate::world::add_callees(&top, &by_name, calls.entry(inst.func_id).or_default());
                 let mut rows = Added::new();
                 place_frames(
                     &top,
-                    &inst.func.name,
+                    inst.func_id,
                     own,
                     &mut rows,
                     &mut touched,
@@ -7640,11 +7640,12 @@ pub fn augment(program: &Program, w: &mut World) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     }
+    w.calls.replace(calls);
     w.facts = folds.then_some(facts);
     (w.refusals, w.typed) = (r.kernel, r.typed);
     crate::effects::set_state_callees(None);
@@ -7689,7 +7690,7 @@ fn remember(
 /// took it and where the release stands.
 fn report(
     body: &Body,
-    owner: &str,
+    owner: FnId,
     missing: &[crate::kernel::Missing],
     took: &[Option<crate::kernel::Took>],
     released: &[Option<Vec<String>>],
@@ -7714,7 +7715,7 @@ fn report(
     }
     // Taken out and put back at the end, so `own` (whose type table holds
     // every declaration) is not copied per frame, which is per keystroke.
-    let mut rows = std::mem::take(own.memory.entry(owner.to_string()).or_default());
+    let mut rows = std::mem::take(own.memory.entry(owner).or_default());
     for (i, info) in body.names.iter().enumerate() {
         if !info.bound_by_let {
             continue;
@@ -7830,7 +7831,7 @@ fn report(
         rows.push(row);
     }
     rows.sort_by_key(|r| r.line);
-    own.memory.insert(owner.to_string(), rows);
+    own.memory.insert(owner, rows);
 }
 
 /// The "reclaimed at block exit" sentence, with the places a `consume` took
@@ -7864,18 +7865,19 @@ fn discharged(l: &Linear) -> String {
     }
 }
 
-/// The rows `augment` places, by owner, each owner's in placement order.
-type Added = std::collections::BTreeMap<String, Vec<Release>>;
+/// The rows `augment` places, by owner, each owner's in placement order. No
+/// reader depends on the order of owners.
+type Added = HashMap<FnId, Vec<Release>>;
 
 /// Places what one built body owes, frame by frame. `owner` keys the plan's
-/// tables: the function's name, or the synthetic `test@<i>` / `bench@<i>`.
-/// A lambda frame is keyed by its enclosing body's name.
+/// tables: the function, or the `test` or `bench` body. A lambda frame is
+/// keyed by its enclosing body.
 fn place_frames(
     top: &Body,
-    owner: &str,
+    owner: FnId,
     own: &mut Ownership,
     added: &mut Added,
-    touched: &mut std::collections::HashSet<String>,
+    touched: &mut std::collections::HashSet<FnId>,
     refusals: &mut Vec<Refusal>,
     trace: bool,
 ) {
@@ -7915,7 +7917,7 @@ fn place_frames(
                     if trace {
                         eprintln!("placer: {} store at {:?} releases", body.name, m.site);
                     }
-                    touched.insert(owner.to_string());
+                    touched.insert(owner);
                 }
                 continue;
             }
@@ -7932,7 +7934,7 @@ fn place_frames(
             if let Some(producer) = info.producer {
                 let fresh = own.placed.producers.insert(producer);
                 if fresh {
-                    touched.insert(owner.to_string());
+                    touched.insert(owner);
                 }
                 continue;
             }
@@ -7964,7 +7966,7 @@ fn place_frames(
                     let rows = own.placed.edges.entry(m.site).or_default();
                     if !rows.iter().any(|(n, e, _)| *n == info.source && *e == edge) {
                         rows.push((info.source.clone(), edge, holes));
-                        touched.insert(owner.to_string());
+                        touched.insert(owner);
                     }
                     continue;
                 }
@@ -7975,7 +7977,7 @@ fn place_frames(
                     let rows = own.placed.edges.entry(m.site).or_default();
                     if !rows.iter().any(|(n, e, _)| *n == name && *e == edge) {
                         rows.push((name, edge, Vec::new()));
-                        touched.insert(owner.to_string());
+                        touched.insert(owner);
                     }
                     continue;
                 }
@@ -7985,7 +7987,7 @@ fn place_frames(
                     let rows = own.placed.arms.entry((m.site, arm)).or_default();
                     if !rows.iter().any(|(n, _)| *n == info.source) {
                         rows.push((info.source.clone(), holes));
-                        touched.insert(owner.to_string());
+                        touched.insert(owner);
                     }
                     continue;
                 }
@@ -8002,21 +8004,21 @@ fn place_frames(
             };
             // A row the plan already placed here takes the kernel's hole set,
             // which is per path where the plan's is per binding.
-            if let Some(r) = own.releases.get_mut(owner).and_then(|rows| {
+            if let Some(r) = own.releases.get_mut(&owner).and_then(|rows| {
                 rows.iter_mut()
                     .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
             }) {
                 if trace {
                     eprintln!(
                         "placer: rewrite {} `{}` {:?} -> {:?}",
-                        owner, info.source, m.exit, holes
+                        body.name, info.source, m.exit, holes
                     );
                 }
                 r.holes = Some(holes);
-                touched.insert(owner.to_string());
+                touched.insert(owner);
                 continue;
             }
-            let added = added.entry(owner.to_string()).or_default();
+            let added = added.entry(owner).or_default();
             if added
                 .iter()
                 .any(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)

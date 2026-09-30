@@ -1884,8 +1884,8 @@ fn lower_body(
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         // The release order, decided in `own::place_body`.
-        placed: (cx.world.ownership.releases)
-            .get(&owner)
+        placed: (cx.world.fn_id(&owner))
+            .and_then(|id| cx.world.ownership.releases.get(&id))
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
         region_depth: 0,
@@ -9611,7 +9611,7 @@ impl<'p> Fn_<'_, 'p> {
             };
             if let Rhs::Call {
                 targets,
-                kind: Callee::Fn,
+                kind: Callee::Fn(_) | Callee::Bound,
                 ..
             } = rhs
             {
@@ -10554,7 +10554,7 @@ impl<'p> Fn_<'_, 'p> {
                     Some(t) => Ok(t),
                     None => match self.core_sig(body, callee, *kind, solved, targets) {
                         Some(s) => Ok(s.ret_ty),
-                        None if *kind == Callee::Fn && self.is_extern(callee) => Ok(self
+                        None if kind.direct() && self.is_extern(callee) => Ok(self
                             .cx
                             .externs
                             .get(callee)
@@ -10949,7 +10949,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             return Ok(Type::Named(decl.name));
         }
-        if kind == Callee::Fn && self.is_extern(callee) {
+        if kind.direct() && self.is_extern(callee) {
             let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
                 s.core_val(m, b, body, w, &args[i].0, p, line)
             };
@@ -12286,10 +12286,10 @@ impl<'p> Fn_<'_, 'p> {
         }
         // A routed builtin is a call to the function its row names.
         let (callee, kind) = match core_builtin(callee, kind) {
-            Some(Spec::Routes(f)) => (*f, Callee::Fn),
+            Some(Spec::Routes(f)) => (*f, Callee::Bound),
             _ => (callee, kind),
         };
-        if kind != Callee::Fn {
+        if !kind.direct() {
             return None;
         }
         // A `modify` parameter crosses as the address of the caller's binding
@@ -12308,7 +12308,7 @@ impl<'p> Fn_<'_, 'p> {
         kind: Callee,
         solved: &[(String, Type)],
     ) -> Option<(&'p Function, Vec<Type>, HashMap<String, Type>)> {
-        let f = (self.cx.generics.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
+        let f = (self.cx.generics.get(callee).copied()).filter(|_| kind.direct())?;
         let (targs, subst) = solved_instance(f, solved)?;
         Some((f, targs, subst))
     }
@@ -12329,7 +12329,7 @@ impl<'p> Fn_<'_, 'p> {
         HashMap<String, Type>,
         Vec<FnTarget>,
     )> {
-        let f = (self.cx.higher_order.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
+        let f = (self.cx.higher_order.get(callee).copied()).filter(|_| kind.direct())?;
         let (targs, subst) = solved_instance(f, solved)?;
         let fns: Vec<&Type> = (f.params.iter())
             .map(|p| &p.ty)
@@ -13097,7 +13097,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_user_callee(&self, callee: &str, kind: Callee) -> bool {
         matches!(core_builtin(callee, kind), None | Some(Spec::Routes(_)))
             && self.core_named(callee, kind).is_none()
-            && !(kind == Callee::Fn && self.is_extern(callee))
+            && !(kind.direct() && self.is_extern(callee))
             && !callee.starts_with(vyrn_frontend::loader::MEM_PREFIX)
     }
 
@@ -13387,8 +13387,8 @@ impl<'p> Fn_<'_, 'p> {
                     || self.core_args_readable(body, args)
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (self.core_builtin_readable(body, callee, *kind, args)
-                            || (*kind == Callee::Fn && self.is_extern(callee))
-                            || (*kind == Callee::Fn && self.cx.skipped.contains(callee))
+                            || (kind.direct() && self.is_extern(callee))
+                            || (kind.direct() && self.cx.skipped.contains(callee))
                             || self.core_named(callee, *kind).is_some()
                             || self.core_mem_ty(callee, args.len()).is_some()
                             || self

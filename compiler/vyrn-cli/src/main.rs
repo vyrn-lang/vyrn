@@ -1118,11 +1118,10 @@ fn why_memory(file: &str) -> ExitCode {
 
     // Only the file asked about. A linked program carries every import's
     // functions, and they are another file's answer.
-    for f in program
-        .functions
-        .iter()
-        .filter(|f| f.module.is_none() && !f.is_extern)
-    {
+    for (i, f) in program.functions.iter().enumerate() {
+        if f.module.is_some() || f.is_extern {
+            continue;
+        }
         let params: Vec<String> = f
             .params
             .iter()
@@ -1139,7 +1138,7 @@ fn why_memory(file: &str) -> ExitCode {
             ),
             None => println!("    transfers: no — the return type {} owns no heap", f.ret),
         }
-        let notes = match own.memory.get(&f.name) {
+        let notes = match own.memory.get(&vyrn_frontend::ast::FnId::nth(i)) {
             Some(n) if !n.is_empty() => n,
             _ => {
                 println!("    (no bindings)");

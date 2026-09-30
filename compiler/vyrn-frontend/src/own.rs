@@ -138,19 +138,18 @@ pub enum Bucket {
 pub struct Ownership {
     /// Per function, every `let` in source order and its fate, written by the
     /// placer. Empty without a placer and for a body the core does not lower.
-    pub memory: HashMap<String, Vec<MemoryRow>>,
+    pub memory: HashMap<FnId, Vec<MemoryRow>>,
     /// The table this analysis decided with, so an explicit `drop x` asks the
     /// same question as the automatic path.
     pub proto: Owned,
     /// Per function, every release step in run order, grouped by
     /// [`Release::site`].
-    pub releases: HashMap<String, Vec<Release>>,
+    pub releases: HashMap<FnId, Vec<Release>>,
     /// See [`crate::movecheck::Facts::fnval_clear`]. The core asks it at a call
     /// through a fn value, where no capability row answers.
     pub fnval_clear: std::collections::HashSet<String>,
-    /// See [`crate::declared::arg_caps`]. It reads only declarations, so one
-    /// table serves every body.
-    pub arg_caps: HashMap<String, Vec<Capability>>,
+    /// See [`crate::declared::ArgCaps`].
+    pub arg_caps: crate::declared::ArgCaps,
     /// What the kernel decided over the placer's first build of each body,
     /// which every later build of this program writes down. Empty without a
     /// placer.
@@ -294,7 +293,7 @@ pub fn analyze(program: &Program) -> Ownership {
         // Only the placer writes release rows.
         releases: HashMap::new(),
         fnval_clear: facts.fnval_clear.clone(),
-        arg_caps: crate::declared::arg_caps(program),
+        arg_caps: crate::declared::ArgCaps::new(program),
         placed: Placed::default(),
         record: crate::checker::recorded(program),
     }
