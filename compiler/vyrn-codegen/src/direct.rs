@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use vyrn_frontend::ast::*;
-use vyrn_frontend::core::check::{Check, Guard, Verdict};
+use vyrn_frontend::core::check::{Check, Guard, Raises, Verdict};
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
 use vyrn_frontend::core::{
@@ -5988,6 +5988,57 @@ impl<'p> Fn_<'_, 'p> {
         Some(c)
     }
 
+    /// The `where` check of record name `n` of type `decl`: its constructor
+    /// when the check is kept; nothing when a pass proved it, and under the
+    /// oracle the predicate over the record's fields, whose failure fails the
+    /// run.
+    #[allow(clippy::too_many_arguments)]
+    fn core_rule_check(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_frontend::core::Body,
+        w: &mut Walked,
+        decl: &TypeDecl,
+        n: Name,
+        line: usize,
+    ) -> Result<(), String> {
+        let row = core_check(w, line, |g| matches!(g, Guard::Rule(m) if *m == n))?;
+        let Some(row) = self.row(b, row) else {
+            return Ok(());
+        };
+        if row.verdict == Verdict::Kept {
+            let ty = Type::Named(decl.name.clone());
+            self.core_val(m, b, body, w, &Val::Name(n), &ty, line)?;
+            self.emit_validation(b, decl, line)?;
+            b.ins(&Instruction::Drop);
+            return Ok(());
+        }
+        let pred = vyrn_frontend::ctor::pred_name(&decl.name);
+        let Some(index) = self.cx.sigs.get(&pred).map(|s| s.index) else {
+            return unsupported(&format!("the predicate `{pred}` outside the link"), line);
+        };
+        // Each field as a `read` argument: a layout crosses as its address.
+        for (f, ty, _) in vyrn_frontend::types::predicate_binds(decl) {
+            let at =
+                vyrn_frontend::core::Place::Field(Box::new(vyrn_frontend::core::Place::Name(n)), f);
+            if let Repr::Agg(_) = self.cx.repr(&ty, line)? {
+                let (_, off) = self.core_addr(m, b, body, w, &at, line)?;
+                self.core_step(b, off);
+            } else {
+                self.core_read(m, b, body, w, &at, line)?;
+            }
+        }
+        b.ins(&Instruction::Call(index));
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.check_trap(b, &row, None);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        Ok(())
+    }
+
     /// The failing branch of `row`'s check: its trap, or under the oracle the failure of a
     /// proved row.
     fn check_trap(&mut self, b: &mut Frame, row: &Check, val: Option<u32>) {
@@ -5997,7 +6048,14 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Const(o.ids.borrow()[&key]));
                 b.ins(&Instruction::Call(o.fail));
             }
-            _ => self.trap_row(b, row.rule, val),
+            _ => match row.rule {
+                Raises::Row(rule) => self.trap_row(b, rule, val),
+                // A kept `where` check traps inside its type's constructor
+                // ([`Fn_::core_rule_check`]).
+                Raises::Where => {
+                    b.ins(&Instruction::Unreachable);
+                }
+            },
         }
     }
 
@@ -10470,17 +10528,7 @@ impl<'p> Fn_<'_, 'p> {
                 // is dropped, or the enclosing block's type will not check.
                 St::Do { rhs, line, .. } if self.core_checks_made(body, rhs).is_some() => {
                     let (decl, n) = self.core_checks_made(body, rhs).expect("the guard's");
-                    self.core_val(
-                        m,
-                        b,
-                        body,
-                        w,
-                        &Val::Name(n),
-                        &Type::Named(decl.name.clone()),
-                        *line,
-                    )?;
-                    self.emit_validation(b, &decl, *line)?;
-                    b.ins(&Instruction::Drop);
+                    self.core_rule_check(m, b, body, w, &decl, n, *line)?;
                 }
                 // A discarded layout read: its address, for the checks on the way.
                 St::Do {
@@ -10955,7 +11003,13 @@ impl<'p> Fn_<'_, 'p> {
                                 line,
                             ));
                         }
-                        self.row(b, c).map(|c| c.rule)
+                        match self.row(b, c).map(|c| c.rule) {
+                            Some(Raises::Row(rule)) => Some(rule),
+                            Some(Raises::Where) => {
+                                return Err(gap("a `bytes` range check with no trap row", line))
+                            }
+                            None => None,
+                        }
                     }
                     _ => None,
                 };
@@ -12436,17 +12490,8 @@ impl<'p> Fn_<'_, 'p> {
         body: &vyrn_frontend::core::Body,
         rhs: &Rhs,
     ) -> Option<(TypeDecl, Name)> {
-        let Rhs::Call {
-            callee,
-            args,
-            kind: Callee::Named,
-            ..
-        } = rhs
-        else {
-            return None;
-        };
-        let [(Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Read)] = args.as_slice()
-        else {
+        let n = rhs.checks_rule(&body.names)?;
+        let Rhs::Call { callee, .. } = rhs else {
             return None;
         };
         let decl = self
@@ -12454,9 +12499,7 @@ impl<'p> Fn_<'_, 'p> {
             .types
             .get(callee)
             .filter(|d| d.predicate.is_some())?;
-        (matches!(self.cx.repr(&decl.base, 0), Ok(Repr::Agg(_)))
-            && body.names[n.index()].ty == Type::Named(callee.clone()))
-        .then(|| (decl.clone(), *n))
+        matches!(self.cx.repr(&decl.base, 0), Ok(Repr::Agg(_))).then(|| (decl.clone(), n))
     }
 
     /// The signature this walk calls a [`Callee::Fn`] through; `None` for a callee whose

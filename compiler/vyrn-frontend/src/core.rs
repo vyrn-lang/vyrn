@@ -1114,6 +1114,7 @@ impl Body {
                 format!("({}, {}) != (min{bits}, -1)", self.val(n), self.val(d))
             }
             G::Shift(k, bits) => format!("{} in 0..{bits}", self.val(k)),
+            G::Rule(n) => format!("{} holds its rule", self.spell(*n)),
         };
         let at = c.site;
         let word = match c.verdict {

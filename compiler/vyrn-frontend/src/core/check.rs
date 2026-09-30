@@ -1,16 +1,36 @@
 //! The runtime checks a row can carry ([`super::St::Check`]).
 
-use super::{Place, Val};
+use super::{Name, Place, Val};
 use crate::trap::Rule;
 
 /// One runtime check: the trap it raises, what it compares, where, and
 /// whether the emitter runs it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Check {
-    pub rule: Rule,
+    pub rule: Raises,
     pub guard: Guard,
     pub site: Site,
     pub verdict: Verdict,
+}
+
+/// What a failed check raises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Raises {
+    /// A row of the trap table.
+    Row(Rule),
+    /// The `where` failure of the checked record's type, which its
+    /// constructor raises ([`crate::trap::validation`]).
+    Where,
+}
+
+impl Raises {
+    /// The census name, for a diagnostic and the records.
+    pub fn census(self) -> &'static str {
+        match self {
+            Raises::Row(r) => r.census(),
+            Raises::Where => "where",
+        }
+    }
 }
 
 /// What a pass decided about a check. `vyrn_lower::check::state` states every row
@@ -43,6 +63,9 @@ pub enum Guard {
     NoOverflow(Val, Val, u8),
     /// `0 <= k < bits`: a shift amount.
     Shift(Val, u8),
+    /// The record name satisfies its type's `where` rule: the row after the
+    /// check calls the type's constructor on it.
+    Rule(Name),
 }
 
 /// Where a check stands in the source: the line of the row it guards and the
