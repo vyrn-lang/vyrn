@@ -7856,8 +7856,16 @@ fn in_parallel<T: Sync, S, R: Send>(
         worker()
     } else {
         std::thread::scope(|s| {
+            // A worker recurses as deep as the calling thread, so it gets the
+            // CLI's deep stack, not the platform default (a debug build
+            // overflowed on `limits.rs`'s wide frames).
             let workers: Vec<_> = (0..n)
-                .map(|_| s.spawn(|| (worker(), vyrn_frontend::prof::take_phases())))
+                .map(|_| {
+                    std::thread::Builder::new()
+                        .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
+                        .spawn_scoped(s, || (worker(), vyrn_frontend::prof::take_phases()))
+                        .expect("spawn a placement worker")
+                })
                 .collect();
             let mut done = Vec::with_capacity(items.len());
             for w in workers {
