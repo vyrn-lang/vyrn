@@ -1185,6 +1185,7 @@ fn build_seeded(
         scrutinee: None,
         after: Vec::new(),
         after_of_rhs: Vec::new(),
+        held: Vec::new(),
         owed: None,
         stream_loops: Vec::new(),
         walks: Vec::new(),
@@ -1451,6 +1452,11 @@ struct Builder<'a> {
     after: Vec<Name>,
     /// What `rhs` left for the binding that follows it.
     after_of_rhs: Vec<Name>,
+    /// The owning temporaries evaluated for a consumer that has not run yet,
+    /// which a `?` in a later operand releases on its failure exit
+    /// ([`Builder::leave_try`]). An `rhs` and a join arm truncate it to its
+    /// length at entry; a statement and a lambda frame start it empty.
+    held: Vec<Name>,
     /// The check `rhs` owes a record literal of a validated type, with its
     /// line: [`Builder::bind`] states it after the literal's row.
     owed: Option<(String, usize)>,
@@ -1564,6 +1570,7 @@ impl<'a> Builder<'a> {
             scrutinee: None,
             after: Vec::new(),
             after_of_rhs: Vec::new(),
+            held: Vec::new(),
             owed: None,
             stream_loops: Vec::new(),
             walks: Vec::new(),
@@ -2315,8 +2322,10 @@ impl<'a> Builder<'a> {
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
+                let held = self.held.len();
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
+                    self.held.truncate(held);
                     let mut body = Vec::new();
                     let mark = self.scope.len();
                     let binds = self.bind_pattern(
@@ -2375,7 +2384,9 @@ impl<'a> Builder<'a> {
         if self.return_through(e, sid, line, out)? {
             return Ok(());
         }
+        let held = self.held.len();
         let v = self.val(e, out)?;
+        self.held.truncate(held);
         self.return_exit(Some(v), sid, line, out)
     }
 
@@ -2708,7 +2719,10 @@ impl<'a> Builder<'a> {
     }
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
-        self.stmt_rows(s, out)?;
+        let held = std::mem::take(&mut self.held);
+        let r = self.stmt_rows(s, out);
+        self.held = held;
+        r?;
         match self.owed.take() {
             Some((to, line)) => gap_d("a check of a validated record no binding took", &to, line),
             None => Ok(()),
@@ -5011,6 +5025,7 @@ impl<'a> Builder<'a> {
                 };
                 self.record_fields(t, e);
                 self.bind(t, rhs, out);
+                self.hold(t);
                 if reads_a_part(e) {
                     self.release_receiver(e, out, false);
                 }
@@ -5142,6 +5157,7 @@ impl<'a> Builder<'a> {
             std::mem::replace(&mut self.drain, 0),
             std::mem::take(&mut self.stream_loops),
             std::mem::take(&mut self.walks),
+            std::mem::take(&mut self.held),
         );
         let outer_ret = std::mem::replace(&mut self.ret, ret);
         for c in caps {
@@ -5188,6 +5204,7 @@ impl<'a> Builder<'a> {
             self.drain,
             self.stream_loops,
             self.walks,
+            self.held,
         ) = saved;
         self.ret = outer_ret;
         r?;
@@ -5366,6 +5383,7 @@ impl<'a> Builder<'a> {
         }
         let t = self.temp(ty, e.line());
         out.push(St::Let(t, Rhs::Take(place)));
+        self.hold(t);
         Ok(Val::Name(t))
     }
 
@@ -5470,7 +5488,9 @@ impl<'a> Builder<'a> {
     /// nested read cannot drop what an outer one is about to read.
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         let outer = std::mem::take(&mut self.after);
+        let held = self.held.len();
         let r = self.rhs_inner(e, out);
+        self.held.truncate(held);
         let mine = std::mem::replace(&mut self.after, outer);
         self.after_of_rhs = mine;
         r
@@ -5482,6 +5502,26 @@ impl<'a> Builder<'a> {
         for t in self.after.split_off(mark) {
             out.push(St::Drop(t, Site::None, 0, None));
         }
+    }
+
+    /// Holds the temporary `t` until its consumer runs, where it owns heap.
+    fn hold(&mut self, t: Name) {
+        if self.body.names[t.index()].releases {
+            self.held.push(t);
+        }
+    }
+
+    /// The rows a `?`'s failure exit runs before its return: the enclosing
+    /// loops, the held temporaries, then the plan's releases. A keyed
+    /// temporary (a scrutinee) is the plan's.
+    fn leave_try(&mut self, tid: NodeId, out: &mut Vec<St>) -> Result<(), Gap> {
+        self.leave_loops(out);
+        for &t in &self.held {
+            if self.body.names[t.index()].binding.is_none() {
+                out.push(St::Drop(t, Site::None, 0, None));
+            }
+        }
+        self.drops_at(Exit::Try, tid, out)
     }
 
     /// `a && b` as `if a { b } else { false }`, and `a || b` as
@@ -5816,6 +5856,7 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
+                let held = self.held.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
                 let mut aliased = self.alias_out(&tv, mark);
@@ -5831,6 +5872,7 @@ impl<'a> Builder<'a> {
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
+                self.held.truncate(held);
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
@@ -5875,9 +5917,11 @@ impl<'a> Builder<'a> {
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
                 let outer = self.body.names.len();
+                let held = self.held.len();
                 let mut core_arms = Vec::new();
                 let mut yields = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
+                    self.held.truncate(held);
                     let mut body = Vec::new();
                     let mark = self.scope.len();
                     let binds = self.bind_pattern(
@@ -5967,8 +6011,7 @@ impl<'a> Builder<'a> {
                     borrow_root(&sv, owns),
                     &mut fail,
                 )?;
-                self.leave_loops(&mut fail);
-                self.drops_at(Exit::Try, tid, &mut fail)?;
+                self.leave_try(tid, &mut fail)?;
                 // An `Option` fails with `None` of the frame's result; a
                 // `Result` with its error binder taken into `Err`.
                 let value = match (fb.first(), self.ret.clone()) {
@@ -6114,8 +6157,7 @@ impl<'a> Builder<'a> {
             Rhs::Prim(Op::Un(UnOp::Not), vec![Val::Name(held)], Some(Type::Bool)),
         ));
         let mut fail = Vec::new();
-        self.leave_loops(&mut fail);
-        self.drops_at(Exit::Try, tid, &mut fail)?;
+        self.leave_try(tid, &mut fail)?;
         fail.push(St::Return {
             value: Some(sv.clone()),
             site: tid,
@@ -8478,7 +8520,8 @@ fn place_frames(
             }
             // An owed release of a temporary has no row to key: the builder
             // states it (`Builder::discards`, `Builder::drop_receiver`,
-            // `Builder::drop_since`), so one found here is a defect.
+            // `Builder::drop_since`, `Builder::leave_try`), so one found here
+            // is a defect.
             let Some(binding) = info.binding else {
                 panic!(
                     "placer: `{}` (line {}) in `{}` owes a release at {:?} and has no binding",
