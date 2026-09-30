@@ -13,6 +13,7 @@ use crate::diagnostics::Diagnostic;
 use crate::rules::Rule;
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
+use crate::types::Decls;
 use crate::types::FALLIBLE;
 
 /// A checker error on a whole line (column 0): most AST nodes carry no column.
@@ -558,8 +559,8 @@ fn check_accum_inner(
     let mut in_bodies = 0usize;
 
     // 1. Collect and validate type declarations.
-    let mut types: HashMap<String, TypeDecl> = HashMap::new();
-    for t in &program.type_decls {
+    let mut types: HashMap<String, (DeclId, TypeDecl)> = HashMap::new();
+    for (i, t) in program.type_decls.iter().enumerate() {
         if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
             out.push(cerr!(t.line, RedefinesBuiltinType, name = t.name).in_file(t.module.clone()));
             continue;
@@ -568,14 +569,15 @@ fn check_accum_inner(
             out.push(cerr!(t.line, TypeDefinedTwice, name = t.name).in_file(t.module.clone()));
             continue;
         }
-        types.insert(t.name.clone(), t.clone());
+        types.insert(t.name.clone(), (DeclId::nth(DeclKind::Type, i), t.clone()));
     }
 
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
+    let mut ids = (0..).map(|i| DeclId::nth(DeclKind::Variant, i));
     for t in &program.type_decls {
         if let Some(vs) = crate::types::declared_variants(&t.base) {
-            for v in vs {
+            for (v, id) in vs.iter().zip(&mut ids) {
                 if RESERVED.contains(&v.name.as_str()) {
                     out.push(cerr!(t.line, ReservedName, name = v.name));
                     continue;
@@ -584,7 +586,7 @@ fn check_accum_inner(
                     out.push(cerr!(t.line, EnumVariantDefinedTwice, name = v.name));
                     continue;
                 }
-                if let Some(ty) = types.get(&v.name) {
+                if let Some((_, ty)) = types.get(&v.name) {
                     // Type and variant names share one namespace across the
                     // linked program, so the other declaration may be in std.
                     let from = ty
@@ -606,6 +608,7 @@ fn check_accum_inner(
                 variants.insert(
                     v.name.clone(),
                     VariantInfo {
+                        id,
                         enum_name: t.name.clone(),
                         payload: v.payload.clone(),
                     },
@@ -957,7 +960,7 @@ fn check_accum_inner(
             // The two built-in sums, under either spelling.
             _ if crate::types::is_sum_alias(&imp.ty) => true,
             Type::Named(n) | Type::App(n, _) => matches!(
-                types.get(n).map(|d| &d.base),
+                types.get(n).map(|(_, d)| &d.base),
                 Some(Type::Enum(_) | Type::Record(_))
             ),
             _ => false,
@@ -989,7 +992,7 @@ fn check_accum_inner(
                 let named_scalar = match &imp.ty {
                     Type::Named(n) | Type::App(n, _) => types
                         .get(n)
-                        .map(|d| &d.base)
+                        .map(|(_, d)| &d.base)
                         .filter(|b| !matches!(b, Type::Enum(_) | Type::Record(_))),
                     _ => None,
                 };
@@ -1601,8 +1604,9 @@ pub struct Recorded {
     /// What a check that records nothing returns as [`stored_fn_effects`].
     pub stored: StoredFnEffects,
     /// Each source body's name lookups, each key once per body, in the order
-    /// read ([`Checker::resolve_fn`], [`Checker::resolve_global`]). A body
-    /// the check typed again repeats its rows.
+    /// read: a function, module state, a type declaration and an enum
+    /// variant ([`Checker::read`]). A body the check typed again repeats its
+    /// rows.
     pub reads: Vec<(SourceBody, Key)>,
 }
 
@@ -1651,6 +1655,15 @@ thread_local! {
     /// ([`crate::own::Memo::open`]).
     static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HELD: RefCell<Option<(usize, HeldRecord)>> = const { RefCell::new(None) };
+    /// Set by [`record_reads`].
+    static READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arms the read rows ([`Recorded::reads`]) of this thread's recording
+/// checks. A host that rechecks per function (the editor) arms it; `vyrn
+/// check` does not, and a row costs a push per name lookup.
+pub fn record_reads() {
+    READS.with(|r| r.set(true));
 }
 
 /// A record with the [`Host`] it was made under. The host changes what a
@@ -1755,7 +1768,9 @@ struct Checker<'a> {
     /// Parameter capabilities by the Debug text of a stored function value's
     /// `Type::Fn`, which carries none.
     caps_by_sig: &'a HashMap<String, Vec<Capability>>,
-    types: &'a HashMap<String, TypeDecl>,
+    /// The type declarations by name with their ids, which the checker reads
+    /// as [`crate::types::Decls`], recording each lookup.
+    types: &'a HashMap<String, (DeclId, TypeDecl)>,
     contracts: &'a HashMap<String, ContractDecl>,
     variants: &'a HashMap<String, VariantInfo>,
     /// Function name to (type parameter to bounds).
@@ -1863,6 +1878,7 @@ struct DeclaredCall<'a> {
 }
 
 struct VariantInfo {
+    id: DeclId,
     enum_name: String,
     payload: Vec<Type>,
 }
@@ -1926,6 +1942,13 @@ enum Reach {
     Parts,
 }
 
+impl Decls for Checker<'_> {
+    fn decl(&self, name: &str) -> Option<&TypeDecl> {
+        let types = self.types;
+        self.read(name, types.get(name).map(|(d, t)| (*d, t)))
+    }
+}
+
 impl<'a> Checker<'a> {
     fn recording(&self) -> bool {
         self.record.is_some()
@@ -1944,7 +1967,7 @@ impl<'a> Checker<'a> {
 
     /// The representation type: a named type decays to its base.
     fn base(&self, ty: &Type) -> Type {
-        crate::types::resolve(ty, self.types)
+        crate::types::resolve(ty, self)
     }
 
     /// Refuses a user `Map` key that is not heapless all the way down:
@@ -2213,8 +2236,7 @@ impl<'a> Checker<'a> {
     }
 
     fn enum_type_params(&self, enum_name: &str) -> Vec<String> {
-        self.types
-            .get(enum_name)
+        self.decl(enum_name)
             .map(|d| d.type_params.clone())
             .unwrap_or_default()
     }
@@ -2226,7 +2248,7 @@ impl<'a> Checker<'a> {
     fn reaches(&self, ty: &Type, at: &dyn Fn(&Type) -> Reach) -> bool {
         fn go(
             ty: &Type,
-            types: &HashMap<String, TypeDecl>,
+            types: &dyn Decls,
             at: &dyn Fn(&Type) -> Reach,
             seen: &mut Vec<String>,
         ) -> bool {
@@ -2258,7 +2280,7 @@ impl<'a> Checker<'a> {
                     };
                     args.iter().any(|a| go(a, types, at, seen))
                         || (!seen.iter().any(|s| s == n)
-                            && types.get(n).is_some_and(|d| {
+                            && types.decl(n).is_some_and(|d| {
                                 seen.push(n.clone());
                                 let r = go(&d.base, types, at, seen);
                                 seen.pop();
@@ -2268,7 +2290,7 @@ impl<'a> Checker<'a> {
                 _ => false,
             }
         }
-        go(ty, self.types, at, &mut Vec::new())
+        go(ty, self, at, &mut Vec::new())
     }
 
     /// Whether `ty` contains a `Stream<T>` anywhere, through named types and
@@ -2298,7 +2320,7 @@ impl<'a> Checker<'a> {
     }
 
     fn assignable(&self, from: &Type, to: &Type) -> bool {
-        crate::types::assignable(from, to, self.types)
+        crate::types::assignable(from, to, self)
     }
 
     /// Whether `ty` mentions an open type parameter: one that is not the
@@ -2337,7 +2359,7 @@ impl<'a> Checker<'a> {
     }
 
     fn coercible(&self, from: &Type, to: &Type) -> bool {
-        crate::types::coercible(from, to, self.types)
+        crate::types::coercible(from, to, self)
     }
 
     /// Refuses a constant, or a record literal of constants, that fails the
@@ -2345,7 +2367,7 @@ impl<'a> Checker<'a> {
     /// runtime check.
     fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {
         let decl = match to {
-            Type::Named(n) => match self.types.get(n) {
+            Type::Named(n) => match self.decl(n) {
                 Some(d) if d.predicate.is_some() => d,
                 _ => return Ok(()),
             },
@@ -2382,11 +2404,11 @@ impl<'a> Checker<'a> {
         line: usize,
     ) -> Result<(), Diagnostic> {
         let resolve = |e: &Expr| self.expr(e, scope, None, fn_ret).ok();
-        match crate::finite::prove_string_flow(expr, to, self.types, &resolve) {
+        match crate::finite::prove_string_flow(expr, to, self, &resolve) {
             crate::finite::Proof::Witness(witness) => {
                 // A witness implies a named predicated target.
                 let decl = match to {
-                    Type::Named(n) => self.types.get(n).unwrap(),
+                    Type::Named(n) => self.decl(n).unwrap(),
                     _ => unreachable!("witness implies a named target"),
                 };
                 let pred = decl.predicate.as_ref().unwrap();
@@ -2420,13 +2442,13 @@ impl<'a> Checker<'a> {
         match ty {
             // `Code` and `Token` are builtin and generation-only, so no backend
             // sees them. A user declaration of the name wins.
-            Type::Named(n) if n == "Code" && !self.types.contains_key("Code") => {
+            Type::Named(n) if n == "Code" && self.decl("Code").is_none() => {
                 if !*self.in_gen.borrow() {
                     return Err(cerr!(line, GenOnlyType, name = "Code"));
                 }
                 return Ok(());
             }
-            Type::Named(n) if n == "Token" && !self.types.contains_key("Token") => {
+            Type::Named(n) if n == "Token" && self.decl("Token").is_none() => {
                 if !*self.in_gen.borrow() {
                     return Err(cerr!(line, GenOnlyType, name = "Token"));
                 }
@@ -2434,10 +2456,10 @@ impl<'a> Checker<'a> {
             }
             // `Self` parses as an ordinary name and is not a type. Refused here,
             // so the diagnostic lands on the protocol, not on each impl.
-            Type::Named(n) if n == "Self" && !self.types.contains_key("Self") => {
+            Type::Named(n) if n == "Self" && self.decl("Self").is_none() => {
                 return Err(cerr!(line, SelfNotType))
             }
-            Type::Named(n) => match self.types.get(n) {
+            Type::Named(n) => match self.decl(n) {
                 None => return Err(cerr!(line, UnknownType, n)),
                 Some(d) if !d.type_params.is_empty() => {
                     return Err(cerr!(line, GenericNeedsArgs, n))
@@ -2450,10 +2472,7 @@ impl<'a> Checker<'a> {
                 if args.iter().any(|a| matches!(a, Type::ConstInt(_))) {
                     return Err(cerr!(line, TypeTakesNoInteger, name));
                 }
-                let d = self
-                    .types
-                    .get(name)
-                    .ok_or_else(|| cerr!(line, UnknownType, n = name))?;
+                let d = (self.decl(name)).ok_or_else(|| cerr!(line, UnknownType, n = name))?;
                 if d.type_params.len() != args.len() {
                     return Err(cerr!(
                         line,
@@ -2474,7 +2493,7 @@ impl<'a> Checker<'a> {
             }
             Type::Omit(base, keys) | Type::Pick(base, keys) => {
                 self.ensure_type_exists(base, line)?;
-                let fields = crate::types::record_fields(base, self.types)
+                let fields = crate::types::record_fields(base, self)
                     .ok_or_else(|| cerr!(line, TransformerBaseNotRecord))?;
                 for k in keys {
                     if !fields.iter().any(|f| &f.name == k) {
@@ -2485,15 +2504,15 @@ impl<'a> Checker<'a> {
             Type::Merge(a, b) => {
                 self.ensure_type_exists(a, line)?;
                 self.ensure_type_exists(b, line)?;
-                if crate::types::record_fields(a, self.types).is_none()
-                    || crate::types::record_fields(b, self.types).is_none()
+                if crate::types::record_fields(a, self).is_none()
+                    || crate::types::record_fields(b, self).is_none()
                 {
                     return Err(cerr!(line, MergeNeedsRecords));
                 }
             }
             Type::Partial(base) => {
                 self.ensure_type_exists(base, line)?;
-                if crate::types::record_fields(base, self.types).is_none() {
+                if crate::types::record_fields(base, self).is_none() {
                     return Err(cerr!(line, PartialNeedsRecord));
                 }
             }
@@ -2521,7 +2540,7 @@ impl<'a> Checker<'a> {
             Type::Map(key, val) => {
                 self.ensure_type_exists(key, line)?;
                 self.ensure_type_exists(val, line)?;
-                match crate::types::resolve(key, self.types) {
+                match crate::types::resolve(key, self) {
                     Type::Str | Type::Int => {}
                     shape @ (Type::Float | Type::Float32 | Type::Record(_) | Type::Enum(_)) => {
                         self.check_key_shape(key, &shape, line)?;
@@ -2705,7 +2724,7 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(t.line, RecordWhere));
             }
             self.ensure_type_exists(&t.base, t.line)?;
-            if crate::types::record_fields(&t.base, self.types).is_none() {
+            if crate::types::record_fields(&t.base, self).is_none() {
                 return Err(cerr!(t.line, NotRecord, name = t.name));
             }
             return Ok(());
@@ -3180,8 +3199,8 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
-                let ruled = matches!(&b.ty, Type::Named(n) if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
-                let Some(fty) = crate::types::record_fields(&b.ty, self.types)
+                let ruled = matches!(&b.ty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
+                let Some(fty) = crate::types::record_fields(&b.ty, self)
                     .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
                     .map(|f| f.ty)
                 else {
@@ -3193,7 +3212,7 @@ impl<'a> Checker<'a> {
                 }
                 // A predicated field takes only a value of its own type.
                 let validated = matches!(&fty, Type::Named(n)
-                    if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
+                    if self.decl(n).is_some_and(|d| d.predicate.is_some()));
                 if !(if validated {
                     self.assignable(&vty, &fty)
                 } else {
@@ -3551,7 +3570,7 @@ impl<'a> Checker<'a> {
                         _ => Err(cerr!(line, InferNone)),
                     };
                 }
-                if let Some(info) = self.variants.get(name) {
+                if let Some(info) = self.resolve_variant(name) {
                     if !info.payload.is_empty() {
                         return self.judged();
                     }
@@ -3688,11 +3707,7 @@ impl<'a> Checker<'a> {
                 if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
                     (name.as_str(), type_args.as_slice(), self.recording())
                 {
-                    if let Some(lit) = self
-                        .types
-                        .get(tn)
-                        .and_then(|d| crate::project::schema(expr, d))
-                    {
+                    if let Some(lit) = self.decl(tn).and_then(|d| crate::project::schema(expr, d)) {
                         self.record_desugar(scope, |c, sc| {
                             let _ = c.expr(lit, sc, Some(&t), fn_ret);
                         });
@@ -3751,7 +3766,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::TryConstruct { name, args, .. } => {
-                let base = match self.types.get(name) {
+                let base = match self.decl(name) {
                     Some(d) if matches!(d.base, Type::Int | Type::Bool | Type::Str) => {
                         d.base.clone()
                     }
@@ -3886,14 +3901,14 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let decl = self.types.get(name);
+        let decl = self.decl(name);
         // `Token` has no declaration; `types::record_fields` states its
         // fields. A synthesized decoder builds one in generation code
         // (`vyrn_genwasm`'s `Decoders::materialize`).
         if decl.is_none() && !(name == "Token" && *self.in_gen.borrow()) {
             return self.judged();
         }
-        let Some(rfields) = crate::types::record_fields(&Type::Named(name.to_string()), self.types)
+        let Some(rfields) = crate::types::record_fields(&Type::Named(name.to_string()), self)
         else {
             return self.judged();
         };
@@ -4064,9 +4079,9 @@ impl<'a> Checker<'a> {
         };
         // A transparent sum alias matches as its underlying shape.
         let sty = match &raw_sty {
-            Type::Named(n) => match self.types.get(n) {
+            Type::Named(n) => match self.decl(n) {
                 Some(d) if d.predicate.is_none() && crate::types::is_sum_alias(&d.base) => {
-                    crate::types::resolve(&raw_sty, self.types)
+                    crate::types::resolve(&raw_sty, self)
                 }
                 _ => raw_sty.clone(),
             },
@@ -5086,7 +5101,7 @@ impl<'a> Checker<'a> {
             }
             // A structural copy of a self-referring type never bottoms out (the
             // backends overflowed the stack), so it needs an `impl Copy`.
-            if let Some(name) = crate::declared::self_referring(&t, &self.types) {
+            if let Some(name) = crate::declared::self_referring(&t, self) {
                 return Err(cerr!(line, CopyRecursive, name));
             }
             return Ok(t);
@@ -5152,7 +5167,7 @@ impl<'a> Checker<'a> {
         if written.is_empty() && matches!(name, "schemaOf" | "jsonSchema" | "fromJson") {
             // Name the spelling; the row's arity refusal would not.
             let was = match args.first() {
-                Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => tn.clone(),
+                Some(Expr::Var { name: tn, .. }) if self.decl(tn).is_some() => tn.clone(),
                 _ => "Type".to_string(),
             };
             return Err(cerr!(
@@ -5190,7 +5205,7 @@ impl<'a> Checker<'a> {
             if matches!(at, Type::Err) {
                 return Ok(Type::Str);
             }
-            if let Err(off) = crate::codec::encodable(&at, self.types) {
+            if let Err(off) = crate::codec::encodable(&at, self) {
                 return Err(cerr!(line, ToJsonUncodable, off));
             }
             self.derive_sites.borrow_mut().push(crate::gen::Site {
@@ -5217,7 +5232,7 @@ impl<'a> Checker<'a> {
             if matches!(at, Type::Err) {
                 return Ok(Type::Str);
             }
-            if let Err(off) = crate::codec::encodable(&at, self.types) {
+            if let Err(off) = crate::codec::encodable(&at, self) {
                 return Err(cerr!(line, DeriveUncodable, g, off));
             }
             self.derive_sites.borrow_mut().push(crate::gen::Site {
@@ -5295,7 +5310,7 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, TakesOne, name, got = args.len()));
             }
             // Resolved, so an alias of `Result<T, E>` informs the payload.
-            let expected_res = expected.map(|e| crate::types::resolve(e, self.types));
+            let expected_res = expected.map(|e| crate::types::resolve(e, self));
             let res_pair = expected_res
                 .as_ref()
                 .and_then(crate::types::result_payloads)
@@ -5322,7 +5337,7 @@ impl<'a> Checker<'a> {
             return Ok(Type::result(t, e));
         }
 
-        if let Some(info) = self.variants.get(name) {
+        if let Some(info) = self.resolve_variant(name) {
             let payload = info.payload.clone();
             if payload.is_empty() {
                 return Err(cerr!(line, VariantNoArgs, name));
@@ -5364,7 +5379,7 @@ impl<'a> Checker<'a> {
         }
 
         // Only a validated type constructs; an alias has no constructor.
-        if let Some(decl) = self.types.get(name).filter(|d| d.predicate.is_some()) {
+        if let Some(decl) = self.decl(name).filter(|d| d.predicate.is_some()) {
             return self.check_construction(decl, args, line, scope, fn_ret);
         }
 
@@ -6414,7 +6429,7 @@ impl<'a> Checker<'a> {
             },
             // Collections bind `T` from the element type; an alias resolves
             // first.
-            Type::Array(inner) => match crate::types::resolve(aty, self.types) {
+            Type::Array(inner) => match crate::types::resolve(aty, self) {
                 Type::Array(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
@@ -6422,19 +6437,19 @@ impl<'a> Checker<'a> {
                 Type::ArrayN(a, m) if m == n => self.unify(inner, a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
-            Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
+            Type::Stream(inner) => match crate::types::resolve(aty, self) {
                 Type::Stream(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             // `N` must match: integer arguments do not infer.
-            Type::SmallArray(inner, n) => match crate::types::resolve(aty, self.types) {
+            Type::SmallArray(inner, n) => match crate::types::resolve(aty, self) {
                 Type::SmallArray(a, m) if m == *n => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             // A generic function type binds through the value's signature. Two
             // concrete function types keep the assignability rule below.
             Type::Fn(pps, pr) if type_mentions_param(pty) => {
-                match crate::types::resolve(aty, self.types) {
+                match crate::types::resolve(aty, self) {
                     Type::Fn(aps, ar) if aps.len() == pps.len() => {
                         for (p, a) in pps.iter().zip(&aps) {
                             self.unify(p, a, subst, line)?;
@@ -6449,13 +6464,13 @@ impl<'a> Checker<'a> {
             Type::Lazy(_)
                 if type_mentions_param(pty)
                     && matches!(
-                        crate::types::resolve(aty, self.types),
+                        crate::types::resolve(aty, self),
                         Type::Fn(ps, _) if ps.is_empty()
                     ) =>
             {
-                self.unify(&crate::types::resolve(pty, self.types), aty, subst, line)
+                self.unify(&crate::types::resolve(pty, self), aty, subst, line)
             }
-            Type::Map(pk, pv) => match crate::types::resolve(aty, self.types) {
+            Type::Map(pk, pv) => match crate::types::resolve(aty, self) {
                 Type::Map(ak, av) => {
                     self.unify(pk, &ak, subst, line)?;
                     self.unify(pv, &av, subst, line)
@@ -6524,9 +6539,10 @@ impl<'a> Checker<'a> {
     }
 
     /// Makes `body` the reader of every lookup until the next call, when the
-    /// check records.
+    /// check records and the host armed [`record_reads`].
     fn reading(&self, body: SourceBody) {
-        self.reader.set(self.record.is_some().then_some(body));
+        let reads = self.record.is_some() && READS.with(|r| r.get());
+        self.reader.set(reads.then_some(body));
     }
 
     /// Records that the body being checked read `hit` under `name`, or
@@ -6551,6 +6567,12 @@ impl<'a> Checker<'a> {
     fn resolve_fn(&self, name: &str) -> Option<DeclId> {
         let hit = self.fn_decls.get(name).map(|d| (*d, *d));
         self.read(name, hit)
+    }
+
+    /// The enum variant named `name`.
+    fn resolve_variant(&self, name: &str) -> Option<&'a VariantInfo> {
+        let variants = self.variants;
+        self.read(name, variants.get(name).map(|v| (v.id, v)))
     }
 
     /// The module state named `name`, once its initializer is checked.

@@ -12,7 +12,7 @@
 //! accumulate as `Issue`s instead of trapping.
 
 use crate::ast::*;
-use std::collections::HashMap;
+use crate::types::Decls;
 
 /// Escapes a string into a JSON string body, without the quotes: `\" \\ \n
 /// \t \r`, `\u00XX` for other control characters, everything else verbatim.
@@ -75,7 +75,7 @@ pub enum Wire {
 /// Returns the wire form of `ty`, or `Err` with the resolved type that has
 /// none. `decode` picks the direction: a fixed array and a `lazy` field are
 /// encode-only.
-pub fn wire(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> Result<Wire, Type> {
+pub fn wire(ty: &Type, types: &dyn Decls, decode: bool) -> Result<Wire, Type> {
     // `Validation<T>` has no wire form. It is refused by name, before
     // resolution, so the diagnostic says `Validation`.
     if is_validation(ty) {
@@ -164,13 +164,13 @@ fn resolving_head(ty: &Type) -> bool {
 
 /// Checks that `toJson` may encode `ty`, or names the first non-codable type.
 /// A fixed `Array<T, N>` encodes as an ordinary array.
-pub fn encodable(ty: &Type, types: &HashMap<String, TypeDecl>) -> Result<(), String> {
+pub fn encodable(ty: &Type, types: &dyn Decls) -> Result<(), String> {
     codable(ty, types, false, &mut Vec::new())
 }
 
 /// Checks that `ty` may be a `fromJson` target, or names the first
 /// non-codable type. A fixed `Array<T, N>` cannot be decoded.
-pub fn decodable(ty: &Type, types: &HashMap<String, TypeDecl>) -> Result<(), String> {
+pub fn decodable(ty: &Type, types: &dyn Decls) -> Result<(), String> {
     codable(ty, types, true, &mut Vec::new())
 }
 
@@ -180,7 +180,7 @@ pub fn decodable(ty: &Type, types: &HashMap<String, TypeDecl>) -> Result<(), Str
 /// its variant.
 fn codable(
     ty: &Type,
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     decode: bool,
     seen: &mut Vec<String>,
 ) -> Result<(), String> {
@@ -195,7 +195,7 @@ fn codable(
         if seen.iter().any(|s| s == n) {
             return Ok(()); // break the cycle
         }
-        let Some(d) = types.get(n) else {
+        let Some(d) = types.decl(n) else {
             return Err(n.clone());
         };
         seen.push(n.clone());
@@ -232,7 +232,7 @@ fn codable(
 fn codable_wire(
     ty: &Type,
     display: &str,
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     decode: bool,
     seen: &mut Vec<String>,
 ) -> Result<(), String> {
@@ -273,7 +273,7 @@ fn is_validation(ty: &Type) -> bool {
 /// variant and payload type.
 fn enum_codable(
     vs: &[EnumVariant],
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     decode: bool,
     seen: &mut Vec<String>,
 ) -> Result<(), String> {
@@ -294,6 +294,7 @@ fn enum_payload_offender(p: &Type, variant: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// One inhabitant of every variant of [`Type`], kept complete by
     /// [`Type::VARIANTS`] and [`Type::variant_name`].

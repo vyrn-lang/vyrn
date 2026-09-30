@@ -488,7 +488,7 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
 /// Renders the JSON Schema (draft 2020-12) document `jsonSchema<T>()` folds
 /// to. A record is an `object` whose `required` list holds its non-`Option`
 /// fields; a `where` predicate contributes its bounds.
-pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
+pub fn json_schema_string(decl: &TypeDecl, types: &dyn Decls) -> String {
     let dialect = "\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"";
     let mut cx = SchemaCx {
         types,
@@ -521,7 +521,7 @@ pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) ->
 }
 
 struct SchemaCx<'a> {
-    types: &'a HashMap<String, TypeDecl>,
+    types: &'a dyn Decls,
     /// A back-edge to the root renders `{"$ref":"#"}`.
     root: &'a str,
     /// Every non-root named type in first-encounter order, with its schema.
@@ -542,12 +542,12 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
             }
             let types = cx.types;
             if n.contains('.') {
-                return match types.get(n) {
+                return match types.decl(n) {
                     Some(d) => named_schema(d, cx),
                     None => "{}".to_string(),
                 };
             }
-            match types.get(n) {
+            match types.decl(n) {
                 Some(d) => {
                     if !cx.defs.iter().any(|(dn, _)| dn == n) {
                         let i = cx.defs.len();
@@ -1036,7 +1036,7 @@ pub const MONO_SIZE_LIMIT: usize = 65_536;
 /// `budget`; the walk stops there. A name that recurs at the same
 /// [`type_depth`] (`Node` in `Node`) counts as a leaf; `P<X>` in `P<P<X>>` does
 /// not.
-pub fn expanded_size(ty: &Type, types: &HashMap<String, TypeDecl>, budget: usize) -> Option<usize> {
+pub fn expanded_size(ty: &Type, types: &dyn Decls, budget: usize) -> Option<usize> {
     let mut n = 0usize;
     let mut seen: Vec<(String, usize)> = Vec::new();
     if size_go(ty, types, budget, &mut n, 0, &mut seen) {
@@ -1048,7 +1048,7 @@ pub fn expanded_size(ty: &Type, types: &HashMap<String, TypeDecl>, budget: usize
 
 fn size_go(
     ty: &Type,
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     budget: usize,
     n: &mut usize,
     depth: usize,
@@ -1175,6 +1175,25 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     }
 }
 
+/// The type declarations a helper reads by name. A map reads and records
+/// nothing; the checker records each lookup as a read of the body it checks
+/// ([`crate::ast::Key`]).
+pub trait Decls {
+    fn decl(&self, name: &str) -> Option<&TypeDecl>;
+}
+
+impl Decls for HashMap<String, TypeDecl> {
+    fn decl(&self, name: &str) -> Option<&TypeDecl> {
+        self.get(name)
+    }
+}
+
+impl<T: Decls + ?Sized> Decls for &T {
+    fn decl(&self, name: &str) -> Option<&TypeDecl> {
+        (**self).decl(name)
+    }
+}
+
 /// A program's type declarations by name, cloned. A pass that has an
 /// [`crate::declared::Owned`] should use its copy.
 pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
@@ -1188,7 +1207,7 @@ pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
 /// Whether a value of type `from` can be used where `to` is expected, without
 /// validation. A validated type decays to its base (an `Age` is an `Int64`);
 /// the reverse needs [`coercible`].
-pub fn assignable(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+pub fn assignable(from: &Type, to: &Type, types: &dyn Decls) -> bool {
     assignable_d(from, to, 0, types)
 }
 
@@ -1197,7 +1216,7 @@ const MAX_ASSIGNABLE_DEPTH: usize = 64;
 /// [`assignable`] with its descent depth. Comparing two recursive records
 /// (`NodeA`, `NodeB`) field by field never ends, so past the cap the answer is
 /// "not assignable": a type error instead of a stack overflow.
-fn assignable_d(from: &Type, to: &Type, depth: usize, types: &HashMap<String, TypeDecl>) -> bool {
+fn assignable_d(from: &Type, to: &Type, depth: usize, types: &dyn Decls) -> bool {
     if depth > MAX_ASSIGNABLE_DEPTH {
         return false;
     }
@@ -1241,14 +1260,14 @@ fn assignable_d(from: &Type, to: &Type, depth: usize, types: &HashMap<String, Ty
             )
     };
     if let Type::Named(n) = to {
-        if let Some(d) = types.get(n) {
+        if let Some(d) = types.decl(n) {
             if d.predicate.is_none() && transparent(&d.base) {
                 return assignable_d(from, &d.base, depth + 1, types);
             }
         }
     }
     if let Type::Named(n) = from {
-        if let Some(d) = types.get(n) {
+        if let Some(d) = types.decl(n) {
             if d.predicate.is_none() && transparent(&d.base) {
                 return assignable_d(&d.base, to, depth + 1, types);
             }
@@ -1279,7 +1298,7 @@ fn assignable_d(from: &Type, to: &Type, depth: usize, types: &HashMap<String, Ty
     }
     // A predicated named type admits only itself.
     if let Type::Named(n) = to {
-        if let Some(d) = types.get(n) {
+        if let Some(d) = types.decl(n) {
             if d.predicate.is_some() {
                 return matches!(from, Type::Named(m) if m == n);
             }
@@ -1300,12 +1319,12 @@ fn assignable_d(from: &Type, to: &Type, depth: usize, types: &HashMap<String, Ty
 /// value of a predicated type's base, which the boundary then validates
 /// (`Checker::prove_coercion` at compile time, else a runtime trap). Top level
 /// only: a payload inside `Option`, `Result` or `Array` does not coerce.
-pub fn coercible(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+pub fn coercible(from: &Type, to: &Type, types: &dyn Decls) -> bool {
     if assignable(from, to, types) {
         return true;
     }
     if let Type::Named(n) = to {
-        if let Some(d) = types.get(n) {
+        if let Some(d) = types.decl(n) {
             if d.predicate.is_some() {
                 return assignable(from, &d.base, types);
             }
@@ -1317,14 +1336,14 @@ pub fn coercible(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> b
 /// Reduces `ty` to its structural form: a named type to its base, an
 /// application to its substituted base, a transformer to a `Record`, and
 /// `lazy T` to `fn() -> T`. An unknown name is `Unit`.
-pub fn resolve(ty: &Type, types: &HashMap<String, TypeDecl>) -> Type {
+pub fn resolve(ty: &Type, types: &dyn Decls) -> Type {
     resolve_d(ty, types, 0)
 }
 
 /// How many `i64` slots a payload of type `t` rides in inside a sum: two for a stored `fn`, a `lazy` and a record of two words,
 /// one for anything else, boxed if wider. Structural rather than asking the
 /// LLVM shape, which would loop on `type R = { a: Int64, b: Option<R> }`.
-pub fn payload_words(ty: &Type, types: &HashMap<String, TypeDecl>) -> usize {
+pub fn payload_words(ty: &Type, types: &dyn Decls) -> usize {
     let word = |t: &Type| matches!(resolve(t, types), Type::Int | Type::IntN { bits: 64, .. });
     match resolve(ty, types) {
         Type::Fn(..) | Type::Lazy(_) => 2,
@@ -1336,7 +1355,7 @@ pub fn payload_words(ty: &Type, types: &HashMap<String, TypeDecl>) -> usize {
 /// Whether a sum payload of type `t` travels boxed, so the sum owns a heap
 /// block per live payload. `Code` answers boxed although the emitter puts it
 /// in the word: a release row that frees nothing.
-pub fn payload_boxed(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+pub fn payload_boxed(ty: &Type, types: &dyn Decls) -> bool {
     if payload_words(ty, types) == 2 {
         return false;
     }
@@ -1353,24 +1372,24 @@ pub fn payload_boxed(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
 }
 
 /// The fields of `ty` if it resolves to a record.
-pub fn record_fields(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<Vec<Field>> {
+pub fn record_fields(ty: &Type, types: &dyn Decls) -> Option<Vec<Field>> {
     match resolve(ty, types) {
         Type::Record(f) => Some(f),
         _ => None,
     }
 }
 
-fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type {
+fn resolve_d(ty: &Type, types: &dyn Decls, depth: usize) -> Type {
     if depth > MAX_DEPTH {
         return Type::Unit;
     }
     match ty {
         // The builtin opaque `Code` resolves to itself; a user `type Code` wins.
-        Type::Named(n) if n == "Code" && !types.contains_key("Code") => {
+        Type::Named(n) if n == "Code" && types.decl("Code").is_none() => {
             Type::Named("Code".to_string())
         }
         // The builtin record `lex()` returns; a user `type Token` wins.
-        Type::Named(n) if n == "Token" && !types.contains_key("Token") => Type::Record(vec![
+        Type::Named(n) if n == "Token" && types.decl("Token").is_none() => Type::Record(vec![
             Field {
                 name: "kind".to_string(),
                 ty: Type::Str,
@@ -1388,11 +1407,11 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
                 ty: Type::Int,
             },
         ]),
-        Type::Named(n) => match types.get(n) {
+        Type::Named(n) => match types.decl(n) {
             Some(d) => resolve_d(&d.base, types, depth + 1),
             None => Type::Unit,
         },
-        Type::App(name, args) => match types.get(name) {
+        Type::App(name, args) => match types.decl(name) {
             Some(d) if d.type_params.len() == args.len() => {
                 let s: HashMap<String, Type> = d
                     .type_params
@@ -1504,7 +1523,7 @@ pub fn forced(ty: &Type) -> Type {
     deferred(ty).cloned().unwrap_or_else(|| ty.clone())
 }
 
-fn fields_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Option<Vec<Field>> {
+fn fields_d(ty: &Type, types: &dyn Decls, depth: usize) -> Option<Vec<Field>> {
     match resolve_d(ty, types, depth + 1) {
         Type::Record(f) => Some(f),
         _ => None,
