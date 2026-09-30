@@ -1,0 +1,14 @@
+fn feed() -> Stream<Int64> {
+    let xs: Array<Int64> = [1, 2]
+    return fromArray(xs)
+}
+
+gen fn g(t: TypeArg) -> String {
+    let s = feed()
+    return "fn f(x: Int64) -> String { return \"a\" }"
+}
+
+fn main() -> Int64 {
+    print(derive(g, 1))
+    return 0
+}

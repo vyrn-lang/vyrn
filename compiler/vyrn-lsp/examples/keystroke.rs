@@ -45,7 +45,6 @@ impl ModuleResolver for Resolver {
 
 fn main() {
     vyrn_genwasm::install();
-    vyrn_lower::install();
     let runs: usize = std::env::var("VYRN_RUNS")
         .ok()
         .and_then(|s| s.parse().ok())

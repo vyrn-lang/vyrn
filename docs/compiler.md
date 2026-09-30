@@ -57,20 +57,15 @@ The dependency edge from `vyrn-lower` down to `vyrn-frontend` is one way. The
 front end cannot call the lowering. A host enters through `vyrn-lower`
 (`load`, `check_and_synthesize`, `analyze`), which calls the front end and
 then its own judgments. The editor passes the pipeline after the load into
-`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). Where the front
-end still needs a judgment, it declares a slot and the lowering fills it:
-`vyrn_lower::install` installs the must-use judgment
-(`own::install_must_use`) and the typed judgment's drain
-(`own::install_typed`) for a generator's own check and run.
-`vyrn_genwasm::install` installs the generation engine
-(`gen::set_gen_engine`); the playground installs its own, which runs the
-module in the page. Every process that compiles calls both first: the CLI's
-`install`, the language server's `main`, the playground's `load`, and any
-test that asserts a refusal. A process that skips `vyrn_lower::install` gets
-no must-use or typed refusal for a generator's own program. A process with no
-engine fails every `derive` and generator import.
-`tests/hosts.rs` holds each host to both, and names the hosts without an
-engine with the reason.
+`symbols::analyze_judged` as a value (`vyrn_lower::JUDGE`). The one slot
+left is the generation engine (`gen::set_gen_engine`). `vyrn_genwasm::install`
+installs the wasmtime engine; the playground installs its own, which runs the
+module in the page. Both wrap their run in `vyrn_lower::gen_engine`, which
+judges the generator's own program first. Every process that compiles
+installs an engine before it loads a module: the CLI's `real_main`, the
+language server's `main`, the playground's `load`. A process with no engine
+fails every `derive` and generator import. `tests/hosts.rs` holds each host to
+this, and names the hosts without an engine with the reason.
 
 ## The front end
 
@@ -130,8 +125,10 @@ the playground serves an embedded `std/`. The loader:
 
 For a program that does not type-check, `lower_typed` still builds every
 function the type errors do not reach and adds the typed judgment's refusals,
-so one run reports both kinds. A generator's own program gets steps 1, 2 and
-4 and the must-use judgment alone (`lib::check_generator`).
+so one run reports both kinds. A generator's own program gets steps 1 and 2.
+Its engine (`vyrn_lower::gen_engine`) runs the must-use judgment before the
+run. The typed judgment runs in the engine's compile, and its refusals replace
+the error of a run that failed. The kernel does not judge it.
 
 The editor runs the same pipeline. `symbols::analyze_judged` loads the
 document as `vyrn_lower::load` does, an untitled buffer as `untitled.vyrn` in
@@ -214,9 +211,9 @@ The kernel knows no surface syntax. It judges core bodies.
   sized integer is judged by width and signedness. `typed::obligation` is
   the must-use rule for `Stream` and `impl MustUse` types.
 
-`movecheck.rs` states no rule. It merges the judgments' refusals, keeps a
-generator's own program out of the list (`movecheck::comptime`), and
-memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
+`movecheck.rs` states no rule. It orders refusals by source
+(`movecheck::in_source_order`), marks a generator's own program
+(`movecheck::comptime`), and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
 keystroke re-judges only the bodies whose key changed.
 
 ## The emitter

@@ -207,10 +207,6 @@ fn main() {
     // compiled generator is cached for the session.
     vyrn_genwasm::install();
 
-    // The same call `vyrn` makes at start-up: without the effect judgment the
-    // floor refuses programs `vyrn check` accepts.
-    vyrn_lower::install();
-
     let (connection, io_threads) = Connection::stdio();
     dbg_log(&format!(
         "=== vyrn-lsp start pid={} cwd={:?} ===",

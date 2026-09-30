@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 
+use vyrn_frontend::consteval::ConstVal;
 use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::gen::{GenEngine, GenError, GenInputs, GenOutput};
 use vyrn_frontend::{ast, checker, floor, loader, movecheck, own, prof, symbols, types};
 
 use crate::{core, typed};
@@ -79,7 +81,7 @@ fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> symbols
         let _p = prof::phase("movecheck");
         let (found, placed) = refusals(program);
         diags.extend(found);
-        ownership = placed;
+        ownership = Some(placed);
     } else if let Some(refused) = refused {
         let _p = prof::phase("lower typed");
         // Each typed refusal stands before the first of the checker's in its
@@ -110,15 +112,14 @@ fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> symbols
 
 /// Returns every ownership refusal a program earns, the must-use judgment's
 /// and the kernel's, as one list in source order, and the placed analysis the
-/// kernel judged, which a generator's program does not get. The caller
-/// guarantees the program type-checks.
+/// kernel judged. The caller guarantees the program type-checks.
 ///
 /// A kernel refusal is dropped at a line the must-use judgment already
 /// refused, so one mistake is not said twice. It is also dropped when its
 /// subject is a binding the must-use judgment names anywhere in the file: a
 /// `Stream` closed twice is a must-use refusal and a use after a take at two
 /// lines, and still one mistake.
-pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Option<own::Ownership>) {
+pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, own::Ownership) {
     let mut diags = Vec::new();
     let owed = typed::obligation::judge(program);
     let mustuse: HashSet<(Option<String>, String)> = owed
@@ -126,12 +127,6 @@ pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Option<own::Ownersh
         .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
         .collect();
     diags.extend(owed);
-    // A generator's program skips the kernel: nothing prints its refusals, and
-    // judging them costs the editor on every keystroke that re-runs one.
-    if movecheck::in_comptime() {
-        movecheck::in_source_order(&mut diags);
-        return (diags, None);
-    }
     // The placer judges a core body for every instance, and the analysis is
     // handed on: a command's next `own::Memo` adopts it. Only this analysis
     // may reuse a judgment (`movecheck::reuse_judgments`). The kernel's list is
@@ -146,7 +141,7 @@ pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Option<own::Ownersh
     if !typed.is_empty() {
         let _ = core::refusal_diagnostics();
         movecheck::in_source_order(&mut typed);
-        return (typed, Some(ownership));
+        return (typed, ownership);
     }
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
@@ -158,7 +153,7 @@ pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Option<own::Ownersh
                 .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
     }));
     movecheck::in_source_order(&mut diags);
-    (diags, Some(ownership))
+    (diags, ownership)
 }
 
 /// Returns the binding a refusal is about: the root of the first path its
@@ -170,6 +165,43 @@ fn subject(message: &str) -> Option<&str> {
     let path = rest.split_once('`')?.0;
     let root = ast::root_of(path);
     (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
+}
+
+/// Wraps `run`, an engine that compiles and runs a generator, into the engine
+/// `gen::set_gen_engine` installs, which judges the generator's own program
+/// under [`movecheck::comptime`]. The must-use judgment refuses before `run`.
+/// The typed judgment runs inside `run`'s compile; its refusals replace the
+/// error of a run that failed. The kernel does not judge a generator's
+/// program: nothing prints its refusals.
+pub fn gen_engine(
+    run: impl Fn(&ast::Program, &str, &[ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, String>>
+        + Send
+        + Sync
+        + 'static,
+) -> Box<GenEngine> {
+    Box::new(move |program, name, args, inputs| {
+        movecheck::comptime(|| {
+            let mut owed = {
+                let _held = checker::Held::open(program);
+                typed::obligation::judge(program)
+            };
+            if !owed.is_empty() {
+                movecheck::in_source_order(&mut owed);
+                return Some(Err(GenError::Refused(owed)));
+            }
+            let _ = core::typed_diagnostics();
+            let out = run(program, name, args, inputs);
+            let typed = match out {
+                Some(Ok(_)) => Vec::new(),
+                _ => core::typed_diagnostics(),
+            };
+            if typed.is_empty() {
+                out.map(|r| r.map_err(GenError::Failed))
+            } else {
+                Some(Err(GenError::Refused(typed)))
+            }
+        })
+    })
 }
 
 /// The pipeline the editor runs after its load: [`check_and_synthesize`] with
@@ -185,11 +217,6 @@ pub const JUDGE: symbols::Judge = symbols::Judge { check };
 /// whose type has no key, is not built. The kernel's refusals are dropped,
 /// because typing comes before the judgments.
 fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diagnostic> {
-    // A generator's own program is judged by the checker alone, as in
-    // [`refusals`].
-    if movecheck::in_comptime() {
-        return Vec::new();
-    }
     // A method of a refused impl is reached by name, or by a call the checker
     // dispatched on its receiver's type key. A receiver typed by a type
     // parameter may dispatch to any key.

@@ -1,58 +1,16 @@
-//! Which hosts install the lowering's judgments, and which install none.
-//!
-//! `vyrn_lower::install()` puts the effect judgment into the floor
-//! (`floor::install_judge`), and the must-use judgment and the typed judgment's
-//! drain into a generator's own check and run. A process that does not call it
-//! runs a different compiler: the floor refuses every carrier it scans, reached
-//! or not, and a generator's program gets no must-use refusal. This census finds
-//! a host by what it calls, so a host that forgets the line fails here.
+//! Which hosts install a generation engine, and which install none.
 //!
 //! Every `.rs` file under `compiler/`, with its comment lines dropped, is a host
 //! if it names a compile entry (`direct::compile`, `direct::compile_gen_host`,
-//! `direct::wat`) or `vyrn_genwasm::install()` (it assembles an engine of its
-//! own, so it must assemble the whole one). [`HOSTS`] pins every host and its
-//! core.
+//! `direct::wat`) or `vyrn_genwasm::install()`. A host with no engine fails
+//! every `derive` and generator import, so [`NO_ENGINE`] names each one with
+//! the reason. This census finds a host by what it calls, so a host that
+//! forgets the line fails here.
 //!
 //! A file that reaches a backend only through `common::run_compiled` is not a
-//! host: the helper is, and it installs. A per-file marker cannot tell apart
-//! several run paths in one file that install on only some of them; one helper
-//! that installs removes the case.
+//! host: the helper is.
 
 use std::path::{Path, PathBuf};
-
-/// Whether a host installs the lowering's judgments before it compiles.
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Core {
-    Installed,
-    /// The host installs none, with the reason.
-    None_(&'static str),
-}
-use Core::{Installed, None_};
-
-const HOSTS: &[(&str, Core)] = &[
-    ("compiler/vyrn-cli/src/main.rs", Installed),
-    ("compiler/vyrn-cli/src/wasmrun.rs", Installed),
-    ("compiler/vyrn-cli/tests/coredrive.rs", Installed),
-    ("compiler/vyrn-cli/tests/coretables.rs", Installed),
-    ("compiler/vyrn-cli/tests/effects.rs", Installed),
-    ("compiler/vyrn-cli/tests/kernel.rs", Installed),
-    ("compiler/vyrn-cli/tests/lowered.rs", Installed),
-    ("compiler/vyrn-cli/tests/reproducible.rs", Installed),
-    ("compiler/vyrn-cli/tests/typed.rs", Installed),
-    ("compiler/vyrn-frontend/tests/common/mod.rs", Installed),
-    ("compiler/vyrn-frontend/tests/loader_run.rs", Installed),
-    ("compiler/vyrn-frontend/tests/semantics.rs", Installed),
-    (
-        "compiler/vyrn-genwasm/src/lib.rs",
-        None_(
-            "the generation engine, not a host: it compiles a generator inside \
-             the process that installed it, and that process is a host of its own",
-        ),
-    ),
-    ("compiler/vyrn-lsp/examples/keystroke.rs", Installed),
-    ("compiler/vyrn-lsp/src/main.rs", Installed),
-    ("compiler/vyrn-play/src/lib.rs", Installed),
-];
 
 const COMPILES: &[&str] = &[
     "direct::compile(",
@@ -61,8 +19,6 @@ const COMPILES: &[&str] = &[
 ];
 
 const GENERATES: &str = "vyrn_genwasm::install()";
-
-const INSTALL: &str = "vyrn_lower::install()";
 
 /// What fills `vyrn_frontend::gen`'s engine slot: the wasmtime engine, or a
 /// host's own (the playground's, a test's).
@@ -85,39 +41,10 @@ const NO_ENGINE: &[(&str, &str)] = &[
 const SELF: &str = "compiler/vyrn-cli/tests/hosts.rs";
 
 #[test]
-fn the_only_thing_that_compiles_without_a_core_is_not_a_process() {
-    let without: Vec<&str> = HOSTS
-        .iter()
-        .filter_map(|(p, c)| matches!(c, None_(_)).then_some(*p))
-        .collect();
-    assert_eq!(
-        without,
-        ["compiler/vyrn-genwasm/src/lib.rs"],
-        "a host compiles with no judgment installed. Its floor refuses what \
-         the effect judgment clears, so it is a second compiler with a second \
-         rule"
-    );
-}
-
-#[test]
-fn the_host_table_is_what_the_sources_say() {
-    let found: Vec<(String, bool)> = hosts().into_iter().map(|(p, c, _)| (p, c)).collect();
-    let pinned: Vec<(String, bool)> = HOSTS
-        .iter()
-        .map(|(p, c)| ((*p).to_string(), *c == Installed))
-        .collect();
-    assert_eq!(
-        found, pinned,
-        "the hosts moved: a file that compiles or runs a generator was added, \
-         removed, or changed side"
-    );
-}
-
-#[test]
 fn every_host_but_the_listed_ones_installs_a_generation_engine() {
     let without: Vec<String> = hosts()
         .into_iter()
-        .filter_map(|(p, _, engine)| (!engine).then_some(p))
+        .filter_map(|(p, engine)| (!engine).then_some(p))
         .collect();
     let pinned: Vec<&str> = NO_ENGINE.iter().map(|(p, _)| *p).collect();
     assert_eq!(
@@ -126,9 +53,9 @@ fn every_host_but_the_listed_ones_installs_a_generation_engine() {
     );
 }
 
-/// Every host under `compiler/`, in path order, with whether it installs the
-/// lowering and whether it installs a generation engine.
-fn hosts() -> Vec<(String, bool, bool)> {
+/// Every host under `compiler/`, in path order, with whether it installs a
+/// generation engine.
+fn hosts() -> Vec<(String, bool)> {
     let root = repo_root();
     let mut out = Vec::new();
     walk(&root.join("compiler"), &mut |p| {
@@ -153,7 +80,7 @@ fn hosts() -> Vec<(String, bool, bool)> {
             return;
         }
         let engine = ENGINES.iter().any(|e| body.contains(e));
-        out.push((rel, body.contains(INSTALL), engine));
+        out.push((rel, engine));
     });
     out.sort();
     out

@@ -183,24 +183,3 @@ pub fn check_and_synthesize(
     drop(synth_span);
     (diags, refused, binders, record)
 }
-
-/// Checks a generator's own program: [`check_and_synthesize`] and the must-use
-/// judgment. `vyrn_lower::refusals` judges nothing else under
-/// [`movecheck::comptime`]. The floor does not judge it: a generator's load is
-/// nested, so it refuses inside the load.
-pub(crate) fn check_generator(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
-    movecheck::comptime(|| {
-        let (mut diags, _, _, record) = check_and_synthesize(program);
-        let _held = checker::Held::open(program);
-        if let Some(record) = record {
-            checker::hold(program, std::rc::Rc::new(record));
-        }
-        if diags.is_empty() {
-            let _p = prof::phase("movecheck");
-            let mut owed = own::must_use_refusals(program);
-            movecheck::in_source_order(&mut owed);
-            diags.extend(owed);
-        }
-        diags
-    })
-}
