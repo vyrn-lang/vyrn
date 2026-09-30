@@ -165,6 +165,7 @@ pull request.
 - Each relation has one writer, which sets both directions and deletes in a batch. No hooks and no second storage shape for one relation.
 - A recheck pulls: each result records what it read (a signature, a summary, a name lookup in a scope, misses included), and a cache that records no reads is off in incremental mode.
 - Function bodies check in parallel in callee-first waves. Workers create no ids; a serial merge does. Output is byte-identical on one thread, many threads and a shuffled order.
+- A worker reads the loading thread's thread-local inputs only through `project::Lent`. A projection site its lent memo lacks expands nothing, and the body is built again on the loading thread, in body order.
 - The World has no query engine, runtime scheduler, archetype storage or on-disk snapshot. Each pass is a function over the tables it borrows.
 - A rule stays in the checker when no other pass refuses the program on the same line. A moved rule keeps its surviving home's sentence.
 - The generation fence stays in the checker, because it is the only judgment that runs before a generator executes.

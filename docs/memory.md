@@ -299,7 +299,9 @@ Each rule has one home. The names below are the entry points.
 
 `core::augment` runs inside `vyrn_lower::analyze`. It builds the core of every
 instance, `test` and `bench` body, then asks `kernel::placement` of each
-frame. The kernel walks the body in placement mode. Where an owned name is
+frame. Both steps read other functions only through summaries, so each runs
+over the bodies on every thread (`core::in_parallel`), and the rows land in
+body order. The kernel walks the body in placement mode. Where an owned name is
 still held at an exit and no release stands there, it records a `Missing` row
 (`MissingKind` says whether at an exit, on a join edge, at an arm's end or at
 a store), treats the name as released and goes on. `augment` turns each row

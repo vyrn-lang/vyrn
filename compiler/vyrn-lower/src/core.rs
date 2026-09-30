@@ -7298,58 +7298,52 @@ pub fn augment(program: &Program, w: &mut World) {
     let mut names = NameMemo::default();
     // Every body is built before any is placed: the kernel asks the effect
     // judgment, which joins every body, whether a callee writes module state.
-    // A call into a served body is judged as pure.
-    let mut made: Vec<Made> = Vec::with_capacity(lowered.instances.len());
-    for inst in &lowered.instances {
-        let key = memo
-            .as_ref()
-            .and_then(|m| m.key(inst.func.module.as_deref(), &inst.spelling()));
-        if let Some(rs) = serve(memo.as_ref(), key.as_ref()) {
+    // A call into a served body is judged as pure. `test` and `bench` bodies
+    // are judged like any other.
+    let jobs: Vec<Job> = (lowered.instances.iter().map(Job::Inst))
+        .chain(lowered.bodies.iter().map(Job::Outside))
+        .collect();
+    let keys: Vec<_> = (jobs.iter())
+        .map(|j| memo.as_ref().and_then(|m| j.key(m)))
+        .collect();
+    let served: Vec<Option<Vec<Refusal>>> = (keys.iter())
+        .map(|k| serve(memo.as_ref(), k.as_ref()))
+        .collect();
+    let unserved: Vec<Option<Job>> = (jobs.iter().zip(&served))
+        .map(|(j, s)| s.is_none().then_some(*j))
+        .collect();
+    let shared: &Ownership = own;
+    let firsts = in_parallel(
+        &unserved,
+        |j| j.map_or(0, |j| j.weight()),
+        NameMemo::default,
+        |names, j| {
+            let top = j.map(|j| j.build(program, shared, names));
+            (top, vyrn_frontend::project::missed())
+        },
+    );
+    // In job order, so the gap tally and every node id a projection site
+    // makes come out as on one thread.
+    let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
+    for (((j, key), served), (first, missed)) in jobs.iter().zip(keys).zip(served).zip(firsts) {
+        if let Some(rs) = served {
             made.push(Made::Served(rs));
             continue;
         }
-        let bs = vyrn_frontend::prof::phase("placer: core::build");
-        let top = build_in(program, inst, own, &mut names);
-        drop(bs);
+        let top = match first {
+            Some(top) if !missed => top,
+            _ => j.build(program, own, &mut names),
+        };
+        j.tally(&top);
         made.push(Made::Built(key, top));
     }
-    // `test` and `bench` bodies are judged like any other.
-    let os = vyrn_frontend::prof::phase("placer: build_outside");
-    let mut made_outside: Vec<Made> = Vec::with_capacity(lowered.bodies.len());
-    for ob in &lowered.bodies {
-        // Keyed with the line too: the `test@<i>` index is global, so a test
-        // added to an earlier module renumbers every later one.
-        let key = memo
-            .as_ref()
-            .and_then(|m| m.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)));
-        if let Some(rs) = serve(memo.as_ref(), key.as_ref()) {
-            made_outside.push(Made::Served(rs));
-            continue;
-        }
-        let top = build_outside(
-            program,
-            own,
-            &mut names,
-            &ob.name,
-            ob.module.clone(),
-            ob.block,
-            &ob.facts,
-        );
-        made_outside.push(Made::Built(key, top));
-    }
-    drop(os);
     let ej = vyrn_frontend::prof::phase("placer: effects");
-    let mut tops: Vec<(&str, &Body)> = Vec::new();
-    for (inst, m) in lowered.instances.iter().zip(&made) {
-        if let Made::Built(_, Ok(b)) = m {
-            tops.push((inst.func.name.as_str(), b));
-        }
-    }
-    for (ob, m) in lowered.bodies.iter().zip(&made_outside) {
-        if let Made::Built(_, Ok(b)) = m {
-            tops.push((ob.name.as_str(), b));
-        }
-    }
+    let tops: Vec<(&str, &Body)> = (jobs.iter().zip(&made))
+        .filter_map(|(j, m)| match m {
+            Made::Built(_, Ok(b)) => Some((j.owner(), b)),
+            _ => None,
+        })
+        .collect();
     let state = crate::effects::judge_built(program, &lowered, own, &tops, |judged, refs, _| {
         judged.state_table(refs)
     });
@@ -7359,116 +7353,78 @@ pub fn augment(program: &Program, w: &mut World) {
     // A hoist asked `kernel::writes` before the effect judgment was held. A
     // frame that hoisted a header and calls a function that stores module
     // state may get a different answer, so it is built again.
-    let unjudged = |m: &Made| {
-        matches!(m, Made::Built(_, Ok(b)) if b.frames().iter().any(|f| {
-            f.names.iter().any(|i| i.walked == Some(Walk::While))
-                && own.state_callees.contains_key(&f.name)
-        }))
-    };
-    for (inst, m) in lowered.instances.iter().zip(made.iter_mut()) {
-        if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
-            *top = build_in(program, inst, own, &mut names);
+    for (j, m) in jobs.iter().zip(made.iter_mut()) {
+        let Made::Built(_, top) = m else { continue };
+        let unjudged = top.as_ref().is_ok_and(|b| {
+            b.frames().iter().any(|f| {
+                f.names.iter().any(|i| i.walked == Some(Walk::While))
+                    && own.state_callees.contains_key(&f.name)
+            })
+        });
+        if unjudged {
+            *top = j.build(program, own, &mut names);
+            j.tally(top);
         }
     }
-    for (ob, m) in lowered.bodies.iter().zip(made_outside.iter_mut()) {
-        if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
-            *top = build_outside(
-                program,
-                own,
-                &mut names,
-                &ob.name,
-                ob.module.clone(),
-                ob.block,
-                &ob.facts,
-            );
-        }
-    }
-    for (inst, m) in lowered.instances.iter().zip(made) {
+    // The kernel's walk reads the body and the judgment alone, so it runs on
+    // any thread; its rows land below, in job order.
+    let shared: &Ownership = own;
+    let placed = in_parallel(
+        &made,
+        |m| match m {
+            Made::Built(_, Ok(b)) => b.frames().iter().map(|f| f.stmts.len()).sum(),
+            _ => 0,
+        },
+        || (),
+        |(), m| match m {
+            Made::Built(_, Ok(b)) => placements(b, &shared.state_callees),
+            _ => Vec::new(),
+        },
+    );
+    let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
+    for ((j, m), placed) in jobs.iter().zip(made).zip(placed) {
+        let into = match j {
+            Job::Inst(_) => &mut built,
+            Job::Outside(_) => &mut outside,
+        };
         let (key, made) = match m {
             Made::Served(rs) => {
                 r.kernel.extend(rs);
-                built.push(None);
+                into.push(None);
                 continue;
             }
             Made::Built(key, made) => (key, made),
         };
         let refused_before = r.kernel.len();
         let top = match made {
-            Ok(b) => Some(b),
+            Ok(b) => b,
             Err(g) => {
-                refuse_gap(g, &inst.func.module, &inst.func.name, &mut r);
-                None
-            }
-        };
-        if let Some(top) = &top {
-            // `VYRN_KERNEL_TRACE=<fn>` prints that body's core, lambdas included.
-            if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && top.name.contains(&v)) {
-                eprintln!("{}", top.render());
-            }
-            // A lambda's rows are keyed by its own nodes under the enclosing
-            // function's name, where the emitters read them.
-            place_frames(
-                top,
-                &inst.func.name,
-                own,
-                &mut added,
-                &mut touched,
-                &mut r.kernel,
-                trace,
-            );
-        }
-        let refused = top.as_ref().is_some_and(|t| {
-            typed(
-                program,
-                own,
-                &mut r,
-                t,
-                &inst.func.module,
-                inst.subst.is_empty(),
-            )
-        });
-        let key = key.filter(|_| !refused);
-        remember(memo.as_ref(), key, &r.kernel[refused_before..]);
-        built.push(top);
-    }
-    let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    for (ob, m) in lowered.bodies.iter().zip(made_outside) {
-        let (mut key, made) = match m {
-            Made::Served(rs) => {
-                r.kernel.extend(rs);
-                outside.push(None);
+                refuse_gap(g, j.module(), j.owner(), &mut r);
+                remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+                into.push(None);
                 continue;
             }
-            Made::Built(key, made) => (key, made),
         };
-        let refused_before = r.kernel.len();
-        match made {
-            Ok(top) => {
-                if std::env::var("VYRN_KERNEL_TRACE")
-                    .is_ok_and(|v| v != "1" && ob.name.contains(&v))
-                {
-                    eprintln!("{}", top.render());
-                }
-                place_frames(
-                    &top,
-                    &ob.name,
-                    own,
-                    &mut added,
-                    &mut touched,
-                    &mut r.kernel,
-                    trace,
-                );
-                if typed(program, own, &mut r, &top, &ob.module, true) {
-                    key = None;
-                }
-                outside.push(Some(top));
-            }
-            Err(g) => {
-                refuse_gap(g, &ob.module, &ob.name, &mut r);
-                outside.push(None);
-            }
+        // `VYRN_KERNEL_TRACE=<fn>` prints that body's core, lambdas included.
+        if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && top.name.contains(&v)) {
+            eprintln!("{}", top.render());
         }
+        // A lambda's rows are keyed by its own nodes under the enclosing
+        // function's name, where the emitters read them.
+        place_frames(
+            &top,
+            placed,
+            j.owner(),
+            own,
+            &mut added,
+            &mut touched,
+            &mut r.kernel,
+            trace,
+        );
+        let refused = typed(program, own, &mut r, &top, j.module(), j.as_written());
+        let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+        into.push(Some(top));
     }
     // Every generic function is built once more with its parameters as
     // written, the way the checker typed it, for the judgment alone. It
@@ -7669,8 +7625,10 @@ pub fn augment(program: &Program, w: &mut World) {
             }
             if let Ok(top) = build_in(program, inst, own, &mut names) {
                 let mut rows = Added::new();
+                let frames = placements(&top, &own.state_callees);
                 place_frames(
                     &top,
+                    frames,
                     &inst.func.name,
                     own,
                     &mut rows,
@@ -7699,6 +7657,164 @@ pub fn augment(program: &Program, w: &mut World) {
     (w.refusals, w.typed) = (r.kernel, r.typed);
     own.state_callees.clear();
     own.accumulators.clear();
+}
+
+/// One body `augment` builds: an instance, or a `test` or `bench` body.
+#[derive(Clone, Copy)]
+enum Job<'l, 'p> {
+    Inst(&'l Instance<'p>),
+    Outside(&'l crate::OutsideBody<'p>),
+}
+
+impl Job<'_, '_> {
+    /// The name the plan's tables and the effect judgment key the body by.
+    fn owner(&self) -> &str {
+        match self {
+            Job::Inst(inst) => &inst.func.name,
+            Job::Outside(ob) => &ob.name,
+        }
+    }
+
+    fn module(&self) -> &Option<String> {
+        match self {
+            Job::Inst(inst) => &inst.func.module,
+            Job::Outside(ob) => &ob.module,
+        }
+    }
+
+    /// Whether the typed judgment reads the body as written: every body but
+    /// a generic instance.
+    fn as_written(&self) -> bool {
+        match self {
+            Job::Inst(inst) => inst.subst.is_empty(),
+            Job::Outside(_) => true,
+        }
+    }
+
+    /// The judgment memo's key. A `test` or `bench` body is keyed with its
+    /// line too: the `test@<i>` index is global, so a test added to an
+    /// earlier module renumbers every later one.
+    fn key(
+        &self,
+        memo: &vyrn_frontend::movecheck::Judgments,
+    ) -> Option<vyrn_frontend::movecheck::JudgmentKey> {
+        match self {
+            Job::Inst(inst) => memo.key(inst.func.module.as_deref(), &inst.spelling()),
+            Job::Outside(ob) => memo.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)),
+        }
+    }
+
+    /// The expressions the body holds, the measure [`in_parallel`] orders by.
+    fn weight(&self) -> usize {
+        match self {
+            Job::Inst(inst) => inst.facts.exprs.len(),
+            Job::Outside(ob) => ob.facts.exprs.len(),
+        }
+    }
+
+    fn build(&self, program: &Program, own: &Ownership, names: &mut NameMemo) -> Result<Body, Gap> {
+        match self {
+            Job::Inst(inst) => {
+                let _p = vyrn_frontend::prof::phase("placer: core::build");
+                build_twice(program, inst, own, names)
+            }
+            Job::Outside(ob) => {
+                let _p = vyrn_frontend::prof::phase("placer: build_outside");
+                build_outside(
+                    program,
+                    own,
+                    names,
+                    &ob.name,
+                    ob.module.clone(),
+                    ob.block,
+                    &ob.facts,
+                )
+            }
+        }
+    }
+
+    /// Appends an instance's build to the gap tally, as [`build_in`] does.
+    fn tally(&self, out: &Result<Body, Gap>) {
+        if let (Job::Inst(inst), Some(_)) = (self, gap_tally_at()) {
+            tally_gaps(inst, out);
+        }
+    }
+}
+
+/// How many threads build and place bodies: `VYRN_THREADS`, else the
+/// machine's available parallelism. One works on the calling thread, as a
+/// target without threads (wasm32) does, and keeps `VYRN_KERNEL_TRACE` in
+/// body order.
+fn threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        (std::env::var("VYRN_THREADS").ok())
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+    })
+}
+
+/// Returns `work` of each of `items`, in `items`' order, run on up to
+/// [`threads`] threads. Workers take items from one counter, heaviest first
+/// by `weight`, so the longest body does not start last; `VYRN_SHUFFLE=<seed>`
+/// permutes that order, for the test that holds every output independent of
+/// it. Each worker reads the calling thread's inputs
+/// ([`vyrn_frontend::project::Lent`]), creates no node id, and keeps one `S`
+/// from `fresh` across its items. A panic in a worker panics the caller.
+fn in_parallel<T: Sync, S, R: Send>(
+    items: &[T],
+    weight: impl Fn(&T) -> usize,
+    fresh: impl Fn() -> S + Sync,
+    work: impl Fn(&mut S, &T) -> R + Sync,
+) -> Vec<R> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(weight(&items[i])));
+    if let Some(seed) = std::env::var("VYRN_SHUFFLE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        // xorshift64, from a state that is never zero.
+        let mut x = seed | 1;
+        for i in (1..order.len()).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            order.swap(i, (x % (i as u64 + 1)) as usize);
+        }
+    }
+    let lent = vyrn_frontend::project::lend();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    // Measure: `next` only grows, and a worker stops once it passes `order`.
+    let worker = || {
+        let _lent = lent.enter();
+        let mut state = fresh();
+        let mut done = Vec::new();
+        while let Some(&i) = order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+            done.push((i, work(&mut state, &items[i])));
+        }
+        done
+    };
+    let n = threads().min(items.len());
+    let mut done = if n <= 1 {
+        worker()
+    } else {
+        std::thread::scope(|s| {
+            let workers: Vec<_> = (0..n)
+                .map(|_| s.spawn(|| (worker(), vyrn_frontend::prof::take_phases())))
+                .collect();
+            let mut done = Vec::with_capacity(items.len());
+            for w in workers {
+                let (d, phases) = w.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+                vyrn_frontend::prof::absorb(phases);
+                done.extend(d);
+            }
+            done
+        })
+    };
+    // Each index was taken once, so the sorted list is one result per item.
+    done.sort_unstable_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
 }
 
 /// One body `augment` built, or served out of the memo.
@@ -7918,11 +8034,26 @@ fn discharged(l: &Linear) -> String {
 /// The rows `augment` places, by owner, each owner's in placement order.
 type Added = std::collections::BTreeMap<String, Vec<Release>>;
 
-/// Places what one built body owes, frame by frame. `owner` keys the plan's
-/// tables: the function's name, or the synthetic `test@<i>` / `bench@<i>`.
-/// A lambda frame is keyed by its enclosing body's name.
+/// The kernel's placement of each frame of `top`, in frame order.
+fn placements(
+    top: &Body,
+    state: &vyrn_frontend::own::StateCallees,
+) -> Vec<Result<crate::kernel::Placement, Vec<Refusal>>> {
+    let run = |body: &Body| {
+        let _k = vyrn_frontend::prof::phase("placer: kernel::placement");
+        crate::kernel::placement(body, state)
+    };
+    top.frames().into_iter().map(run).collect()
+}
+
+/// Places what one built body owes, frame by frame, from `placed`, its
+/// [`placements`]. `owner` keys the plan's tables: the function's name, or
+/// the synthetic `test@<i>` / `bench@<i>`. A lambda frame is keyed by its
+/// enclosing body's name.
+#[allow(clippy::too_many_arguments)]
 fn place_frames(
     top: &Body,
+    placed: Vec<Result<crate::kernel::Placement, Vec<Refusal>>>,
     owner: &str,
     own: &mut Ownership,
     added: &mut Added,
@@ -7930,10 +8061,7 @@ fn place_frames(
     refusals: &mut Vec<Refusal>,
     trace: bool,
 ) {
-    for body in top.frames() {
-        let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
-        let placed = crate::kernel::placement(body, &own.state_callees);
-        drop(ks);
+    for (body, placed) in top.frames().into_iter().zip(placed) {
         let crate::kernel::Placement {
             missing,
             took,

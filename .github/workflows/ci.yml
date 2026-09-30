@@ -542,6 +542,9 @@ jobs:
       - name: No program a test writes is refused by the kernel alone
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test testsweep -- --ignored --nocapture
+      - name: The placer's output on one thread, many and a shuffled order
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test parallel -- --ignored --nocapture
 
   route:
     name: the native route (wasm2c == wasm)
