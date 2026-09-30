@@ -53,6 +53,8 @@ use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::Exit;
 
+use crate::rules::{self, *};
+
 /// A release the plan owes and did not place: `name` is still held where the
 /// exit at `site` runs, or on one edge of the join at `site`, or at the end
 /// of arm `arm` of the switch at `site`.
@@ -209,78 +211,6 @@ fn overlaps(a: &str, b: &str) -> bool {
 /// unlike [`overlaps`]: skipping `.line.text` still walks the rest of `.line`.
 fn covers(r: &str, h: &str) -> bool {
     r == h || h.strip_prefix(r).is_some_and(|x| x.starts_with('.'))
-}
-
-// A refusal the flow rules state: its sentence, then each way out after a
-// `|`, with `{key}` holes the rule's site fills ([`Kernel::say`]). The rules
-// are judged at a use (shape A), where a scope ends (B), where edges join (C)
-// and at a loop's back edge (D); the site decides that one holds.
-
-/// A use after a declared `consume`, a `drop`, or a linear value's take.
-const CONSUMED: &str = "`{read}` is {what} here but was already consumed by {by} on line {l}{note}";
-/// A use after any other take, at the take.
-const MOVED: &str = "`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} again \
-                     here|`{s}.copy()` if both sides need a value";
-/// A use after a placed release.
-const RELEASED: &str = "`{s}` is {what} here after it was released";
-/// A read of an alias whose place was written, at the write.
-const ALIAS_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
-                          {here}: ... and `{s}` is {what} again here|`{src}.copy()` on line \
-                          {at}, so `{s}` is a value of its own";
-/// An argument that reads a global the callee stores into.
-const STATE_READ: &str = "`{place}` is written here while `{s}` still reads out of it\nline \
-                          {here}: ... and `{s}` is {what} again here";
-const WHOLE_WITH_HOLE: &str = "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and \
-                               `{s}` is used as a whole here, with the hole still in \
-                               it|`{s}{path}.copy()` on line {l} if `{s}` is still needed \
-                               whole|write `{s}{path}` back before this line";
-const READ_IN_HOLE: &str = "`{s}{h}` was moved here into `consume`\nline {here}: ... and \
-                            `{s}{h}` is used again here|`{s}{h}.copy()` if both sides need a \
-                            value";
-const STORE_UNDER_HOLE: &str = "`{s}{h}` was moved here into `consume`\nline {here}: ... and \
-                                `{s}{path}` is written here, under the hole";
-/// A payload binder handed on out of a type that declares `release`.
-const SEALED_PAYLOAD: &str = "`{b}` may not be handed to a `consume` parameter: `{ty}` declares \
-                              `release`, which reads it; consume `{m}` or copy `{b}`";
-/// A written `drop` of a name with a hole.
-const DROP_WITH_HOLE: &str = "`{s}` may not be dropped — `{s}{h}` was taken out of it on line \
-                              {l}, and `drop` releases the whole binding|write `{s}{h}` back \
-                              before the `drop`, so the binding is whole again|delete the \
-                              `drop` — the parts still here are released when the block exits";
-const RELEASED_WITH_HOLE: &str =
-    "{info} is released whole although a `consume` took `{h}` out of it";
-const RELEASED_AROUND: &str = "{info} is released around `{h}` on a path that did not take it";
-const OVERWRITTEN: &str =
-    "{info} is overwritten while still held — the old value is never released";
-const RELEASED_BEFORE_STORE: &str = "{info} is released before a store although it holds nothing";
-const HELD_AT_EXIT: &str = "{info} is still held at {exit} — no release is placed for it";
-const HELD_AT_ARM_END: &str =
-    "{info} is still held where its arm ends — no release is placed for it";
-const JOIN_MOVED: &str = "`{s}` was moved here into {by} on one path and not on the other, and \
-                          nothing releases it where the paths join";
-const JOIN_RELEASED: &str =
-    "`{s}` is released on one path and still held on another where the paths join";
-const JOIN_HOLE: &str = "{info} has a `consume` hole on one edge of a join and not on another";
-const LOOP_MOVED: &str =
-    "`{s}` is consumed by {by} inside a loop, so it would be used again on the next iteration";
-const LOOP_RELEASED: &str =
-    "`{s}` is released inside a loop, so it would be used again on the next iteration";
-const LOOP_BOUND: &str = "{info} is bound inside a loop that would use it again on the next turn";
-const LOOP_HOLE: &str = "`{s}{h}` is consumed by `consume` inside a loop, so it would be used \
-                         again on the next iteration|`{s}{h}.copy()` if both sides need a value";
-const LOOP_HOLE_AT: &str =
-    "{info} has a `consume` hole at a loop's back edge it did not have at entry";
-
-/// An exit, as [`HELD_AT_EXIT`] names it.
-fn exit_words(e: Exit) -> &'static str {
-    match e {
-        Exit::Block => "the end of its scope",
-        Exit::Return => "a `return`",
-        Exit::Try => "a `?`",
-        Exit::Break => "a `break`",
-        Exit::Continue => "a `continue`",
-        Exit::Scrutinee => "a scrutinee",
-    }
 }
 
 /// What an alias reads out of: a name of this body, or module state.
@@ -1328,9 +1258,7 @@ impl<'b> Kernel<'b> {
             format!("{} — {what}", self.may_not(s))
         };
         let fixes = if by == "a `return`" && self.body.export {
-            vec![format!(
-                "`{s}.copy()` — an `export extern fn` owns its result"
-            )]
+            vec![rules::say(COPY_FOR_JS, &[("s", s)])]
         } else {
             self.place_fixes(st, n)
         };
@@ -1372,10 +1300,7 @@ impl<'b> Kernel<'b> {
         if self.takes.get() == Taker::Declared && path.contains('[') {
             return vec![
                 format!("`{path}.copy()` — the callee owns its copy"),
-                format!(
-                    "`{root}.swapRemove(..)` returns the element and leaves the container \
-                     one shorter"
-                ),
+                rules::say(SWAP_REMOVE, &[("root", root)]),
             ];
         }
         let takeable = root != path && self.root_owns(st, n);
@@ -1431,31 +1356,12 @@ impl<'b> Kernel<'b> {
     }
 
     /// Refuses the rule `r` at `line`, its holes filled from `args` and
-    /// `{here}`, the line of the statement being judged. A hole `args` lacks
-    /// is a defect in the rule's site, so it panics.
+    /// `{here}`, the line of the statement being judged ([`rules::say`]).
     fn say(&self, r: &str, line: usize, args: &[(&str, &str)]) -> Refusal {
         let here = self.here.to_string();
         let args = [args, &[("here", here.as_str())]].concat();
-        let fill = |t: &str| {
-            let (mut out, mut rest) = (String::new(), t);
-            while let Some((head, tail)) = rest.split_once('{') {
-                let (key, after) = tail.split_once('}').expect("a rule's hole is closed");
-                let v = (args.iter().find(|(k, _)| *k == key))
-                    .unwrap_or_else(|| panic!("kernel: the rule's hole `{key}` is not filled"));
-                out.push_str(head);
-                out.push_str(v.1);
-                rest = after;
-            }
-            out + rest
-        };
-        let mut parts = r.split('|');
-        let sentence = fill(parts.next().unwrap_or_default());
-        self.refuse_at::<()>(line, menu(sentence, parts.map(fill)))
+        self.refuse_at::<()>(line, rules::say(r, &args))
             .unwrap_err()
-    }
-
-    fn refuse<T>(&self, msg: String) -> Result<T, Refusal> {
-        self.refuse_at(self.here, msg)
     }
 
     fn refuse_at<T>(&self, line: usize, msg: String) -> Result<T, Refusal> {
@@ -1629,10 +1535,8 @@ impl<'b> Kernel<'b> {
                 self.by = by;
                 return Err(r);
             }
-            return self.refuse(format!(
-                "{} is released although the body does not own it",
-                self.info(n)
-            ));
+            let info = self.info(n);
+            return Err(self.say(RELEASED_UNOWNED, self.here, &[("info", &info)]));
         }
         // A heapless release frees nothing; the plan places such a row where
         // its edge table wants one, and the ownership state still ends.
@@ -1727,16 +1631,8 @@ impl<'b> Kernel<'b> {
                     Vec::new(),
                 ),
             };
-            return self.refuse_at(
-                line,
-                menu(
-                    format!(
-                        "`{s}` may not be captured by a closure that outlives this call \
-                         — it is {what}"
-                    ),
-                    fixes,
-                ),
-            );
+            let msg = rules::say(ESCAPING_CAPTURE, &[("s", s), ("what", &what)]);
+            return self.refuse_at(line, menu(msg, fixes));
         }
         Ok(())
     }
@@ -1745,49 +1641,35 @@ impl<'b> Kernel<'b> {
     /// one, or a capture: another frame owns it.
     /// None has a place, so the alias table does not see them.
     fn param_take(&self, n: Name, b: &BorrowKind) -> Refusal {
-        let (s, by) = (self.src(n), &self.by);
-        let what = b.what(s);
-        let msg = if by == "a `return`" && matches!(b, BorrowKind::Capture) {
-            format!(
-                "`{s}` may not be returned from a closure — it is a captured \
-                 binding, and the closure's result is its caller's"
-            )
-        } else if by == "a `return`" && self.body.export {
-            // The JS caller releases what it is handed.
-            format!(
-                "`{s}` may not be returned from an exported function — it is {what}, \
-                 and the JS caller releases what it is handed"
-            )
-        } else if by == "a `return`" {
-            format!("`{s}` may not be returned — it is {what}, and a return is owned")
-        } else {
-            format!("{} — it is {what}", self.may_not(s))
+        let (s, capture) = (self.src(n), matches!(b, BorrowKind::Capture));
+        let (ret, export) = (self.by == "a `return`", self.body.export);
+        let rule = match () {
+            _ if ret && capture => RETURNED_CAPTURE,
+            _ if ret && export => RETURNED_TO_JS,
+            _ if ret => RETURNED_BORROW,
+            _ => TAKEN_BORROW,
         };
         // The ways out, as `movecheck::Borrow::fixes` and `fixes_here` name
-        // them. An `export extern fn` signature refuses `consume`, so only a
+        // them. The value a constructor makes owns what it is given: only the
+        // copy. An `export extern fn` signature refuses `consume`, so only a
         // copy is left.
-        let capture = matches!(b, BorrowKind::Capture);
-        // The value a constructor makes owns what it is given: only the copy.
-        let fixes = if self.takes.get() == Taker::Constructs && !capture {
-            vec![format!("`{s}.copy()` if the value should own it")]
-        } else if by == "a `return`" && capture {
-            vec![format!("`{s}.copy()` if the caller needs its own value")]
-        } else if capture {
-            Vec::new()
-        } else if self.body.export && by == "a `return`" {
-            vec![format!(
-                "`{s}.copy()` — an `export extern fn` owns its result"
-            )]
-        } else if self.body.export {
-            vec![format!(
-                "`{s}.copy()` — an `export extern fn` may not take ownership of a String its \
-                 JS caller releases"
-            )]
-        } else {
-            b.fixes(s)
+        let (fix, more) = match () {
+            _ if self.takes.get() == Taker::Constructs && !capture => (Some(COPY_TO_OWN), vec![]),
+            _ if ret && capture => (Some(COPY_FOR_CALLER), vec![]),
+            _ if capture => (None, vec![]),
+            _ if export && ret => (Some(COPY_FOR_JS), vec![]),
+            _ if export => (Some(COPY_FROM_JS), vec![]),
+            _ => (None, b.fixes(s)),
         };
-        self.refuse_at::<()>(self.here, menu(msg, fixes))
-            .unwrap_err()
+        let rule = fix.map_or(rule.to_string(), |f| format!("{rule}|{f}"));
+        let (what, may_not) = (b.what(s), self.may_not(s));
+        let args = [
+            ("s", s),
+            ("what", what.as_str()),
+            ("may_not", may_not.as_str()),
+        ];
+        let msg = menu(rules::say(&rule, &args), more);
+        self.refuse_at::<()>(self.here, msg).unwrap_err()
     }
 
     /// The kind of borrow `n` is, where a take of it is refused by that kind
@@ -2395,10 +2277,9 @@ impl<'b> Kernel<'b> {
                             self.take(st, k)?;
                         }
                         if *old == Old::Unreleased {
-                            return self.refuse(format!(
-                                "a store into a place that owns heap releases nothing (line {})",
-                                self.line_of(value)
-                            ));
+                            let l = self.line_of(value).to_string();
+                            let args = [("l", l.as_str())];
+                            return Err(self.say(STORE_RELEASES_NOTHING, self.here, &args));
                         }
                         // The kernel tracks whole names, so the rule is over
                         // the root: module state and a `modify` parameter

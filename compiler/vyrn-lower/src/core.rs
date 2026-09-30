@@ -26,6 +26,9 @@ pub use vyrn_frontend::prelude::Spec;
 use vyrn_frontend::project::is_place_read;
 
 use crate::kernel::{MissingKind, Root};
+use crate::rules::{
+    say, CONSUMED_BORROW, CONSUME_TAKES_NOTHING, ELEMENT_TAKEN, LOOP_TAKES_NOTHING, SWAP_REMOVE,
+};
 use crate::{Instance, NodeTypes};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Ctor, Facts, Lit, Name,
@@ -119,31 +122,14 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
         return Ok(());
     }
     if let Some((root, path)) = vyrn_frontend::project::element_path(e) {
-        return refuse(
-            menu(
-                format!("`{path}` may not be taken — an element is not a place a take reaches"),
-                [format!(
-                    "`{root}.swapRemove(..)` returns the element and leaves the container one \
-                     shorter"
-                )],
-            ),
-            line,
-        );
+        let rule = [ELEMENT_TAKEN, SWAP_REMOVE].join("|");
+        return refuse(say(&rule, &[("path", &path), ("root", &root)]), line);
     }
-    let (says, drop_it) = if by_loop {
-        (
-            "`consume` here has nothing to take — the loop already owns a container that is \
-             not a binding",
-            "drop the `consume`: the elements are already owned",
-        )
-    } else {
-        (
-            "`consume` here has nothing to take — the value is already owned, so there is no \
-             place to leave a hole in",
-            "drop the `consume`: the value is already owned",
-        )
+    let rule = match by_loop {
+        true => LOOP_TAKES_NOTHING,
+        false => CONSUME_TAKES_NOTHING,
     };
-    refuse(menu(says.to_string(), [drop_it]), line)
+    refuse(say(rule, &[]), line)
 }
 
 /// The scrutinee a binder borrows: its name, where the construct does not
@@ -5096,7 +5082,10 @@ impl<'a> Builder<'a> {
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow && !info.must_use_param => {
-                let msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
+                let msg = say(
+                    CONSUMED_BORROW,
+                    &[("root", &root), ("what", &k.what(&root))],
+                );
                 refuse(menu(msg, k.fixes(&path)), line)
             }
             _ => Ok(()),
