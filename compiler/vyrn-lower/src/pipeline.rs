@@ -39,7 +39,7 @@ pub fn load_warned(
         Ok(p) => p,
         Err(diags) => return (Err(diags), warnings),
     };
-    let mut diags = check(&mut program, pending);
+    let mut diags = check(&mut program, pending).diagnostics;
     if diags.is_empty() {
         (Ok(program), warnings)
     } else {
@@ -60,21 +60,28 @@ pub fn load_warned(
 /// ([`vyrn_frontend::check_and_synthesize`]), then judges ownership and the
 /// floor. Returns every diagnostic found.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<Diagnostic> {
-    check(program, None)
+    check(program, None).diagnostics
 }
 
 /// [`check_and_synthesize`] with the floor decision the load returned, if any.
-fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> Vec<Diagnostic> {
-    let (mut diags, refused) = vyrn_frontend::check_and_synthesize(program);
-    // One type record for the readers below. The synthesis is over, so no node
-    // moves under its keys, and the guard closes before the caller can extend
-    // the program again.
+/// The editor runs it as [`JUDGE`].
+fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> symbols::Judged {
+    let (mut diags, refused, binders, record) = vyrn_frontend::check_and_synthesize(program);
+    // One type record for the readers below: the check's own. The synthesis is
+    // over, so no node moves under its keys, and the guard closes before the
+    // caller can extend the program again.
     let _held = checker::Held::open(program);
+    if let Some(record) = record {
+        checker::hold(program, std::rc::Rc::new(record));
+    }
     // The checker's ownership refusals and the kernel's form one list, in
     // source order. The core builds bodies only for a program that type-checks.
+    let mut ownership = None;
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
-        diags.extend(refusals(program));
+        let (found, placed) = refusals(program);
+        diags.extend(found);
+        ownership = Some(placed);
     } else if let Some(refused) = refused {
         let _p = prof::phase("lower typed");
         // Each typed refusal stands before the first of the checker's in its
@@ -96,19 +103,23 @@ fn check(program: &mut ast::Program, pending: Option<floor::Pending>) -> Vec<Dia
             diags.extend(floor::decide(p, Some(&crate::effects::reaches(program))));
         }
     }
-    diags
+    symbols::Judged {
+        diagnostics: diags,
+        binders,
+        ownership,
+    }
 }
 
 /// Returns every ownership refusal a program earns, the must-use judgment's
-/// and the kernel's, as one list in source order. `vyrn check` and the editor
-/// both call it. The caller guarantees the program type-checks.
+/// and the kernel's, as one list in source order, and the placed analysis the
+/// kernel judged. The caller guarantees the program type-checks.
 ///
 /// A kernel refusal is dropped at a line the must-use judgment already
 /// refused, so one mistake is not said twice. It is also dropped when its
 /// subject is a binding the must-use judgment names anywhere in the file: a
 /// `Stream` closed twice is a must-use refusal and a use after a take at two
 /// lines, and still one mistake.
-pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
+pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, own::Ownership) {
     let mut diags = Vec::new();
     let owed = typed::obligation::judge(program);
     let mustuse: HashSet<(Option<String>, String)> = owed
@@ -130,7 +141,7 @@ pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
     if !typed.is_empty() {
         let _ = core::refusal_diagnostics();
         movecheck::in_source_order(&mut typed);
-        return typed;
+        return (typed, ownership);
     }
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
@@ -142,7 +153,7 @@ pub fn refusals(program: &ast::Program) -> Vec<Diagnostic> {
                 .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
     }));
     movecheck::in_source_order(&mut diags);
-    diags
+    (diags, ownership)
 }
 
 /// Returns the binding a refusal is about: the root of the first path its
@@ -190,12 +201,9 @@ pub fn gen_engine(
     })
 }
 
-/// The ownership judgments the editor shows: [`refusals`] among the
-/// diagnostics, and the placed analysis's memory rows on hover.
-pub const JUDGE: symbols::Judge = symbols::Judge {
-    refusals,
-    ownership: crate::analyze,
-};
+/// The pipeline the editor runs after its load: [`check_and_synthesize`] with
+/// the load's floor decision.
+pub const JUDGE: symbols::Judge = symbols::Judge { check };
 
 /// Builds the core of every body the checker typed in a refused program, and
 /// returns the typed judgment's refusals of those bodies.

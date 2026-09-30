@@ -722,7 +722,7 @@ fn run_derive(
             .map(|d| format!("generator `{g}` does not check: {}", d.render()))
             .collect()
     };
-    let (diags, _) = crate::check_and_synthesize(&mut gen_program);
+    let (diags, _, _, _) = crate::check_and_synthesize(&mut gen_program);
     if !diags.is_empty() {
         return Err(refused(&diags));
     }
