@@ -207,6 +207,7 @@ type User = {
 - `Port(n)` constructs. A constant that satisfies the rule is proven at compile time and costs nothing; a constant that breaks it is refused; a runtime value that breaks it traps.
 - `Port?(n)` answers `Option<Port>`: `None` when the rule fails. Use it for input the program does not control.
 - Every boundary checks the rule without a call: a `let` annotation, an assignment, an argument, a return, a record field, an array element and a map insert.
+- A field of a record with a trailing `where` is not assigned in place, because the rule could break mid-update; rebuild the record. An element of an array field the rule reads only as `.length` is assigned in place: `c.xs[i] = v` keeps every length.
 - A validated value decays to its base type, so a `Port` is usable as an `Int64`.
 - An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a record with one field.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
