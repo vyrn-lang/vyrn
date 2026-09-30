@@ -498,7 +498,7 @@ thread_local! {
     /// Each generator run's parsed output, keyed by the generator, its program
     /// and its `TypeArg`, so the editor's re-check of an unchanged program does
     /// not run the generator again.
-    static DERIVED: std::cell::RefCell<HashMap<String, Derived>> =
+    static DERIVED: std::cell::RefCell<HashMap<[u64; 2], Derived>> =
         std::cell::RefCell::new(HashMap::new());
     /// The generators running, outermost first. A generator's own program may
     /// call `derive` (a `std/ui` generator reaches `toJson`), but not reach
@@ -559,8 +559,15 @@ pub fn derive(
             )));
         }
         let gen_program = generator_program(program, g);
-        let fingerprint = crate::hash::sha256_hex(canonical(&gen_program).as_bytes());
-        let key = crate::hash::sha256_hex(format!("{g}\u{0}{fingerprint}\u{0}{arg:?}").as_bytes());
+        let text = canonical(&gen_program);
+        // 128 bits of SipHash, because a hit needs no SHA-256 of the program's
+        // text: only the engine's cache across processes reads that digest.
+        let key = [0u8, 1].map(|salt| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (salt, g, &text, format!("{arg:?}")).hash(&mut h);
+            h.finish()
+        });
         let cached = DERIVED.with(|d| d.borrow().get(&key).cloned());
         let (fns, decls) = match cached {
             Some(d) => d,
@@ -571,6 +578,7 @@ pub fn derive(
                     )));
                 }
                 DERIVING.with(|d| d.borrow_mut().push(g.to_string()));
+                let fingerprint = crate::hash::sha256_hex(text.as_bytes());
                 let written = run_derive(gen_program, g, arg, fingerprint, engine);
                 DERIVING.with(|d| d.borrow_mut().pop());
                 let written = written.map_err(unplaced)?;
