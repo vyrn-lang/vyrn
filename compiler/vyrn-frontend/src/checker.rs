@@ -452,12 +452,13 @@ pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
 
 use crate::types::INT32;
 
-/// Returns the diagnostics, every `derive` site, and the refused set: the
-/// functions and module state the diagnostics all belong to, so every other
-/// body is typed. The set is `None` when a refusal stands anywhere else.
-pub fn check_accum_with_sites(program: &Program) -> Appended {
-    let (out, _, _, derived, refused) = check_accum_full(program);
-    (out, derived, refused)
+/// Returns the diagnostics, every `derive` site, the refused set, the root's
+/// bindings and the record. The refused set holds the functions and module
+/// state the diagnostics all belong to, so every other body is typed; it is
+/// `None` when a refusal stands anywhere else.
+pub fn check_accum_with_sites(program: &Program) -> (Appended, Vec<LocalBinding>, Recorded) {
+    let (out, binders, _, derived, refused, made) = check_accum_inner(program, true, 0);
+    ((out, derived, refused), binders, made.unwrap_or_default())
 }
 
 fn check_accum_full(
@@ -475,14 +476,15 @@ fn check_accum_full(
 
 /// Checks `program`, whose functions before `at` passed a check alone, typing
 /// only the bodies from `at` on. Returns the diagnostics, the `derive` sites of
-/// those bodies, and the refused set, as a whole check would.
+/// those bodies, and the refused set, as a whole check would, and the record of
+/// those bodies, which [`Recorded::extend`] adds to the earlier check's.
 ///
 /// A body is typed against the declarations alone, so an earlier body keeps
 /// its verdict unless the appended functions change a table it reads by
 /// something other than their names. `None` names the case where a whole
 /// check must run instead: an appended signature makes a stored function
 /// value's parameter `consume`.
-pub fn check_appended(program: &Program, at: usize) -> Option<Appended> {
+pub fn check_appended(program: &Program, at: usize) -> Option<(Appended, Recorded)> {
     let before = caps_by_sig(&program.functions[..at]);
     let widened = caps_by_sig(&program.functions)
         .into_iter()
@@ -490,8 +492,8 @@ pub fn check_appended(program: &Program, at: usize) -> Option<Appended> {
     if widened {
         return None;
     }
-    let (out, _, _, derived, typed, _) = check_accum_inner(program, false, at);
-    Some((out, derived, typed))
+    let (out, _, _, derived, typed, made) = check_accum_inner(program, true, at);
+    Some(((out, derived, typed), made.unwrap_or_default()))
 }
 
 pub type Appended = (
@@ -1615,6 +1617,23 @@ pub struct Recorded {
     pub stored: StoredFnEffects,
 }
 
+impl Recorded {
+    /// Adds the record of the bodies a synthesis appended ([`check_appended`]).
+    /// The earlier bodies' entries stand, because a body is typed against the
+    /// declarations alone. The tail's module-state initializers were typed
+    /// again, so its stored sources repeat theirs; every reader treats the
+    /// sources as a set.
+    pub fn extend(&mut self, tail: Recorded) {
+        self.node_types.extend(tail.node_types);
+        self.joins.extend(tail.joins);
+        self.node_substs.extend(tail.node_substs);
+        self.calls.extend(tail.calls);
+        self.stored.sources.extend(tail.stored.sources);
+        self.stored.arg_sources.extend(tail.stored.arg_sources);
+        self.stored.calls.extend(tail.stored.calls);
+    }
+}
+
 /// One pass that returns the diagnostics, the root's bindings and the record.
 fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
     let (diags, binders, _, _, _, made) = check_accum_inner(program, true, 0);
@@ -1690,7 +1709,9 @@ impl Drop for Held {
     }
 }
 
-fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
+/// Holds `made`, a record of `program` made under the host flags in force,
+/// where the slot is open for it.
+pub fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
     adopt(program, (gen_host(), test_host(), made));
 }
 
