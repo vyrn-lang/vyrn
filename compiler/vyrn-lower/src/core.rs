@@ -7260,6 +7260,11 @@ pub fn typed_diagnostics() -> Vec<Diagnostic> {
     TYPED.with(|t| std::mem::take(&mut *t.borrow_mut()).0)
 }
 
+/// Whether the typed judgment holds a refusal not yet drained.
+pub fn typed_refused() -> bool {
+    TYPED.with(|t| !t.borrow().0.is_empty())
+}
+
 /// The kernel's refusals as `movecheck`-stage diagnostics, deduplicated, for
 /// the one list a file's refusals come out in ([`crate::refusals`]); the
 /// caller orders the list.
@@ -7599,7 +7604,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // emitted).
     debug_assert!(
         vyrn_frontend::movecheck::in_comptime()
-            || TYPED.with(|t| !t.borrow().0.is_empty())
+            || typed_refused()
             || crate::lint(&lowered).is_empty(),
         "the lowered form failed its own lint:
   {}",

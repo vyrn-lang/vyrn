@@ -1795,7 +1795,15 @@ fn run_generator(
         },
     )
     .map_err(|e| match e {
-        crate::gen::GenError::Refused(ds) => ds,
+        // The generator's module is the root of its own load, so a refusal
+        // there carries no file; in this load it names the module.
+        crate::gen::GenError::Refused(ds) => ds
+            .into_iter()
+            .map(|d| match d.file {
+                Some(_) => d,
+                None => in_module(d, &gen_mod_key, root_key),
+            })
+            .collect(),
         crate::gen::GenError::Failed(trap) => err(rule!(GenFailed, name, args = arg_repr, trap)),
     })?;
     bump_gen_runs();

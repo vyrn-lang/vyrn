@@ -126,7 +126,9 @@ function the type errors do not reach and adds the typed judgment's refusals,
 so one run reports both kinds. A generator's own program gets steps 1 and 2.
 Its engine (`vyrn_lower::gen_engine`) runs the must-use judgment before the
 run. The typed judgment runs in the engine's compile, and its refusals replace
-the error of a run that failed. The kernel does not judge it.
+the run's output or error: a refused generator program is refused even when it
+runs. The wasm engine caches no compile the typed judgment refused, so a warm
+cache reports the same refusals. The kernel does not judge it.
 
 The editor runs a shorter pipeline. `symbols::analyze_judged` loads the
 document's imports as `vyrn_lower::load` does (an untitled buffer is checked
