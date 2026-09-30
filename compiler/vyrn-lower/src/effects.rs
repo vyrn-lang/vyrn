@@ -467,11 +467,12 @@ fn with_judgment<R>(
     then: impl FnOnce(&Judged, &[&Body], &[&crate::Instance], &[usize]) -> R,
 ) -> R {
     let lowered = crate::lower(program);
-    let own = crate::analyze(program);
+    let world = crate::analyze(program);
+    let own = &world.ownership;
     let mut bodies = Vec::new();
     let mut insts = Vec::new();
     for inst in &lowered.instances {
-        if let Ok(b) = crate::core::build(program, inst, &own) {
+        if let Ok(b) = crate::core::build(program, inst, own) {
             bodies.push(b);
             insts.push(inst);
         }

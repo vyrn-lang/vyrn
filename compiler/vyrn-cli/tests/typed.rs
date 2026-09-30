@@ -41,8 +41,16 @@ fn load(path: &Path, project: Option<&Path>) -> Result<(Program, Memo), String> 
         artifacts: project.and_then(manifest).and_then(|m| m.artifacts),
         ..Default::default()
     };
-    Memo::load(|| vyrn_lower::load(&src, &slash(path), &opts, &DiskResolver))
-        .map_err(|d| d.first().map(|d| d.render()).unwrap_or_default())
+    Memo::load(|| {
+        vyrn_lower::load(
+            &src,
+            &slash(path),
+            &opts,
+            &DiskResolver,
+            Some(&*vyrn_genwasm::engine()),
+        )
+    })
+    .map_err(|d| d.first().map(|d| d.render()).unwrap_or_default())
 }
 
 /// Every root to judge: the corpus `tests/effects.rs` judges.
@@ -125,7 +133,8 @@ fn step_ty(
 /// included. The caller holds the projection memo open.
 fn bodies_of(program: &Program) -> Vec<vyrn_frontend::core::Body> {
     let lowered = vyrn_lower::lower(program);
-    let own = vyrn_lower::analyze(program);
+    let world = vyrn_lower::analyze(program);
+    let own = &world.ownership;
     let mut bodies = Vec::new();
     for inst in &lowered.instances {
         if let Ok(b) = vyrn_lower::core::build(program, inst, &own) {
@@ -237,7 +246,6 @@ fn run_corpus() {
     // Generation is the driver's engine; without it an example that imports
     // through a generator fails to load and the gate silently measures a
     // smaller corpus.
-    vyrn_genwasm::install();
     let dump = std::env::var("VYRN_TYPED_DUMP").ok();
     // The LAST colon: a Windows path carries one after its drive letter.
     let dump_target = dump.as_deref().and_then(|d| d.rsplit_once(':'));

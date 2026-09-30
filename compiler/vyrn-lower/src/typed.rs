@@ -16,6 +16,11 @@ use vyrn_frontend::ast::{NodeId, Type};
 use vyrn_frontend::ast::Capability;
 use vyrn_frontend::core::{rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Val};
 
+use crate::rules::{
+    say, ASSIGN_NOT_MUT, DROP_MODULE_STATE, DROP_NOT_HEAP, DROP_TYPE_PARAM, DROP_UNBOUND,
+    FIELD_NOT_MUT, OUTSIDE_LOOP, REMOVE_NOT_MUT, STORE_NOT_MUT, STORE_RULED,
+};
+
 /// A step from one type into the type a place holds, for the caller that
 /// resolves a place's type. `Global` has no base.
 #[derive(Debug, Clone, Copy)]
@@ -826,23 +831,15 @@ pub fn stores(
             if site.is_some_and(|k| !seen.insert(k)) {
                 return;
             }
-            if let Some(n) = ruled {
-                out.push((
-                    line,
-                    format!(
-                        "cannot mutate a field of `{n}` in place (its `where` invariant could be \
-                         broken mid-update); rebuild it: `{name} = {n} {{ .. }}`"
-                    ),
-                ));
-                return;
-            }
-            let what = match (step, removal) {
-                (None, Some(op)) => format!("cannot `{}` from", &op[1..]),
-                (None, None) => "cannot assign to".into(),
-                (Some(Place::Field(..)), _) if !elem => "cannot mutate a field of".into(),
-                (Some(_), _) => "cannot store into".into(),
+            let rule = match (ruled.is_some(), step, removal) {
+                (true, ..) => STORE_RULED,
+                (_, None, Some(_)) => REMOVE_NOT_MUT,
+                (_, None, None) => ASSIGN_NOT_MUT,
+                (_, Some(Place::Field(..)), _) if !elem => FIELD_NOT_MUT,
+                (_, Some(_), _) => STORE_NOT_MUT,
             };
-            out.push((line, format!("{what} `{name}` (declared without `mut`)")));
+            let (n, op) = (ruled.unwrap_or_default(), removal.map_or("", |op| &op[1..]));
+            out.push((line, say(rule, &[("n", &n), ("name", name), ("op", op)])));
         });
     }
     out
@@ -917,7 +914,7 @@ pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<(
                 _ => continue,
             };
             if seen.insert(*site) {
-                out.push((*line, format!("`{what}` outside a loop")));
+                out.push((*line, say(OUTSIDE_LOOP, &[("what", what)])));
             }
         }
     }
@@ -956,17 +953,11 @@ pub fn drops(
     let mut out = Vec::new();
     for f in body.frames() {
         for (name, line) in &f.unbound_drops {
-            out.push((
-                *line,
-                if program.globals.iter().any(|g| &g.name == name) {
-                    format!(
-                        "cannot `drop` module state `{name}` \u{2014} it lives for the whole \
-                     module and is reclaimed at process exit"
-                    )
-                } else {
-                    format!("`drop` of unbound variable `{name}`")
-                },
-            ));
+            let rule = match program.globals.iter().any(|g| &g.name == name) {
+                true => DROP_MODULE_STATE,
+                false => DROP_UNBOUND,
+            };
+            out.push((*line, say(rule, &[("name", name)])));
         }
         let written = rows(&f.stmts).filter_map(|(s, _)| match s {
             St::Drop(n, _, line, _) if *line > 0 => Some((*n, *line)),
@@ -990,25 +981,12 @@ pub fn drops(
             if owned || heap || t == Type::Err {
                 continue;
             }
-            let name = &info.source;
-            out.push((
-                line,
-                if matches!(t, Type::Param(_)) {
-                    format!(
-                        "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this \
-                     body cannot know whether the rule below holds for the instance \u{2014} a \
-                     plain record would be released here where `drop` on it directly is \
-                     refused. Release the value where its concrete type is known, or \
-                     `consume` the heap field and `drop` that"
-                    )
-                } else {
-                    format!(
-                        "`drop` needs a heap value (a String, an Array, a Map, a Ref, \
-                     or an Option/Result carrying one, or a type declaring `impl Owned`), but \
-                     `{name}` is {t}"
-                    )
-                },
-            ));
+            let rule = match t {
+                Type::Param(_) => DROP_TYPE_PARAM,
+                _ => DROP_NOT_HEAP,
+            };
+            let t = t.to_string();
+            out.push((line, say(rule, &[("name", &info.source), ("t", &t)])));
         }
     }
     out

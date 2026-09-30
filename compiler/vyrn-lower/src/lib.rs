@@ -15,17 +15,14 @@ pub mod facts;
 mod fixpoint;
 pub mod kernel;
 mod pipeline;
+pub mod rules;
 pub mod typed;
+mod world;
 
 pub use pipeline::{check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE};
 
-/// Analyses ownership across `program` and places the releases the plan did
-/// not place ([`core::augment`]), so every consumer reads the same rows.
-/// Served from the open `own::Memo` when it holds one for `program`.
-pub fn analyze(program: &Program) -> vyrn_frontend::own::Ownership {
-    vyrn_frontend::own::analyze(program, core::augment)
-}
-pub use core::{refuses as kernel_refuses, take_refusals};
+pub use core::refuses as kernel_refuses;
+pub use world::{analyze, forget_loaded, hand_on, World};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -115,7 +112,7 @@ pub struct Instance<'a> {
 }
 
 /// The name an instance of `name` at `type_args` is built and emitted under:
-/// `name` alone, or `map<Int64, String>`. It is the key of [`core::body_of`].
+/// `name` alone, or `map<Int64, String>`. It is the key of [`World::body_of`].
 pub fn spell(name: &str, type_args: &[Type]) -> String {
     if type_args.is_empty() {
         return name.to_string();
@@ -206,7 +203,7 @@ pub struct Lowered<'a> {
     /// followed into the worklist: a projection is inlined at its site.
     pub places: Vec<PlaceBody<'a>>,
     /// The checker's record every [`NodeTypes`] here was read off.
-    pub recorded: std::rc::Rc<checker::Recorded>,
+    pub recorded: std::sync::Arc<checker::Recorded>,
 }
 
 #[derive(Debug, Clone)]
@@ -248,13 +245,14 @@ impl<'a> Lowered<'a> {
 /// gap that stopped it. Root-module only, `vyrn why --memory`'s rule: a linked
 /// program's imports are another file's answer.
 pub fn render(program: &Program, source: &str) -> String {
-    let own = analyze(program);
-    let lowered = lower_with(program, &own);
+    let world = analyze(program);
+    let own = &world.ownership;
+    let lowered = lower_with(program, own);
     let mut out = format!("; vyrn lowered {VERSION} -- {source}\n");
     for inst in lowered.root() {
         out.push('\n');
-        match core::build(program, inst, &own) {
-            Ok(body) => out.push_str(&core::checked(program, &own, &body).render()),
+        match core::build(program, inst, own) {
+            Ok(body) => out.push_str(&core::checked(program, own, &body).render()),
             Err(g) => out.push_str(&format!(
                 "; {}: not lowered at line {}: {} {}\n",
                 inst.spelling(),
@@ -274,9 +272,9 @@ pub fn render(program: &Program, source: &str) -> String {
 pub fn lower(program: &Program) -> Lowered<'_> {
     let _p = vyrn_frontend::prof::phase("lower");
     let own_span = vyrn_frontend::prof::phase("lower: own::analyze");
-    let ownership = analyze(program);
+    let world = analyze(program);
     drop(own_span);
-    lower_with(program, &ownership)
+    lower_with(program, &world.ownership)
 }
 
 /// The lowered form against an ownership analysis already made, for the
@@ -285,11 +283,7 @@ pub fn lower_with<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
-    let rec_span = vyrn_frontend::prof::phase("lower: checker::record");
-    // The analysis's own check where it made one; the program is not checked
-    // twice.
-    let recorded = checker::recorded(program);
-    drop(rec_span);
+    let recorded = ownership.record.clone();
     let build_span = vyrn_frontend::prof::phase("lower: build");
     let mut lowered = build(program, &recorded, ownership);
     drop(build_span);
@@ -647,7 +641,7 @@ fn has_of<'e>(e: &'e Expr, kid: impl Fn(&'e Expr) -> Option<Type>) -> Option<Typ
 
 fn build<'a>(
     program: &'a Program,
-    recorded: &std::rc::Rc<checker::Recorded>,
+    recorded: &std::sync::Arc<checker::Recorded>,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
     let no_steps: Vec<Release> = Vec::new();
@@ -1090,7 +1084,7 @@ mod tests {
         let mut p = vyrn_frontend::check(src).expect("the fixture checks");
         // The type check alone: the kernel refuses `id`'s return of a `read`
         // parameter, and these tests are about the lowering.
-        let (diags, _, _, _) = vyrn_frontend::check_and_synthesize(&mut p);
+        let (diags, _, _, _) = vyrn_frontend::check_and_synthesize(&mut p, None);
         assert!(diags.is_empty(), "{diags:?}");
         p
     }

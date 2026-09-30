@@ -287,6 +287,8 @@ Each rule has one home. The names below are the entry points.
   body; `kernel::placement` reports the releases it is missing.
 - `vyrn-lower/src/typed.rs`: the typed judgment, and `typed::obligation`, the
   must-use rule.
+- `vyrn-lower/src/rules.rs`: the words of every refusal the kernel, the
+  typed judgment and the builder state, one row each; `rules::say` fills one.
 - `vyrn-lower/src/pipeline.rs`: the driver. `vyrn_lower::refusals` merges
   the must-use judgment's, the kernel's and the typed judgment's refusals into
   one list in source order. It states no rule itself.

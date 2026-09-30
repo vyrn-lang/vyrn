@@ -26,8 +26,9 @@ use vyrn_frontend::core::check::{Check, Guard, Verdict};
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
 use vyrn_frontend::core::{
-    Arg, Arm, Callee, Ctor, Facts, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
+    Arg, Arm, Callee, Ctor, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
 };
+use vyrn_frontend::gen::GenError;
 use vyrn_frontend::own::DropKind;
 /// Shared with `vyrn-lower` and the other engines, so exits compare without a translation.
 use vyrn_frontend::own::Exit as ExitKind;
@@ -185,7 +186,7 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
 /// `schemaOf` has no row in the core.
 pub fn compile(program: &Program, _memo: &Memo) -> Result<Vec<u8>, String> {
     crate::set_gen_host(false);
-    compile_inner(program)
+    compile_inner(program, vyrn_lower::analyze(program))
 }
 
 /// Returns the module [`compile`] emits, as WAT (`vyrn emit-wat`), so a test can pin its shape.
@@ -235,16 +236,29 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
 ///
 /// Takes no [`Memo`]: a generator runs inside a load, the LSP opens none on purpose, and the
 /// generation engine declines a refusal to the interpreter.
-pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
+///
+/// # Errors
+///
+/// [`GenError::Refused`] when the typed judgment refused the program, whether or not it would
+/// run, so no engine caches a module for it; [`GenError::Failed`] when a body has no lowering.
+pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
     // Thread-local because `llt_of` reads it, and `llt_of` has other callers: a `Code` is an
     // `i64` handle only here. Cleared after, so a later `compile` on this thread is unaffected.
     crate::set_gen_host(true);
-    let r = compile_inner(program);
+    let world = vyrn_lower::analyze(program);
+    let r = if world.typed_diagnostics().is_empty() {
+        compile_inner(program, world).map_err(GenError::Failed)
+    } else {
+        Err(GenError::Refused(world.typed_diagnostics().to_vec()))
+    };
     crate::set_gen_host(false);
     r
 }
 
-fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
+fn compile_inner(
+    program: &Program,
+    world: std::sync::Arc<vyrn_lower::World>,
+) -> Result<Vec<u8>, String> {
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -330,9 +344,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         user.push(f);
     }
 
-    let ownership = vyrn_lower::analyze(program);
-    let recorded =
-        (ownership.record.clone()).unwrap_or_else(|| vyrn_frontend::checker::recorded(program));
     // The leak instrument; a generator host never carries it.
     let audited = vyrn_frontend::loader::audit_build();
     let mut cx = Cx {
@@ -359,12 +370,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         args_in_place: false,
         gappend: HashMap::new(),
         externs,
-        // The core's answers, folded once by the placer inside `vyrn_lower::analyze` above.
-        facts: vyrn_lower::core::facts(),
-        recorded,
-        releases: ownership.releases,
-        // Flattened across functions: the key is the `let`'s node address, unique in the program.
-        owned: ownership.proto,
+        world,
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
         // Reserved only for a file sink, so a console-sink module reserves nothing.
@@ -891,7 +897,7 @@ struct Pending<'a> {
     subst: HashMap<String, Type>,
     /// The target each `fn`-typed parameter is bound to, by name.
     binds: HashMap<String, FnBinding>,
-    /// The name the core built this body under ([`vyrn_lower::core::body_of`]).
+    /// The name the core built this body under ([`vyrn_lower::World::body_of`]).
     core_key: String,
 }
 
@@ -1041,15 +1047,10 @@ struct Cx<'a> {
     skipped: std::collections::HashSet<String>,
     /// The `std/mem` declarations by primitive name: each states the types [`mem_ins`] lowers.
     mem: HashMap<&'a str, &'a Function>,
-    /// Per function: every release step placed, at the exit that runs it, in run order.
-    releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
-    /// The core's statement of the releases this emitter emits, and their only source.
-    facts: Option<Facts>,
-    /// The checker's record of this program; [`Fn_::peek`] reads an expression's type off it.
-    recorded: std::rc::Rc<vyrn_frontend::checker::Recorded>,
-    /// The `Owned` table `own` decided with, so a declared `release` needs no second
-    /// list.
-    owned: vyrn_frontend::declared::Owned,
+    /// The program's analysis: the release steps placed per function, the `Owned` table they
+    /// were decided with, the checker's record ([`Fn_::peek`] reads an expression's type off it),
+    /// and the core's bodies and facts, the only source of the releases this emitter emits.
+    world: std::sync::Arc<vyrn_lower::World>,
     /// The log threshold, as an ordinal. Compile-time, so a disabled log site emits no write.
     log_level: usize,
     /// Where a log line goes. Compile-time-known, so the write names its
@@ -1068,7 +1069,8 @@ impl<'a> Cx<'a> {
     /// Whether the container's release at this `for` walks the buffer alone, as the core states
     /// ([`Facts::loop_buffer_only`]).
     fn loop_buffer_only(&self, node: NodeId) -> bool {
-        self.facts
+        self.world
+            .facts
             .as_ref()
             .is_some_and(|f| f.loop_buffer_only.contains(&node))
     }
@@ -1774,9 +1776,9 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
 fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
-    let from_core = vyrn_lower::core::body_of("").filter(|core| {
+    let from_core = cx.world.body_of("").filter(|core| {
         f.core_enter(core);
-        f.core = Some(std::rc::Rc::new(core.clone()));
+        f.core = Some(std::rc::Rc::new((*core).clone()));
         f.core_walkable(core, None)
     });
     match &from_core {
@@ -1882,8 +1884,7 @@ fn lower_body(
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         // The release order, decided in `own::place_body`.
-        placed: cx
-            .releases
+        placed: (cx.world.ownership.releases)
             .get(&owner)
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
@@ -2065,7 +2066,7 @@ fn lower_body(
 }
 
 /// What a `fn` parameter bound to `b` calls, as the core names it. `None` for a lambda key
-/// [`vyrn_lower::core::body_of`] names no body for.
+/// [`vyrn_lower::World::body_of`] names no body for.
 fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
     if let Some(f) = cx.named(&b.target) {
         return Some(Target::Fn(f));
@@ -2077,7 +2078,7 @@ fn core_target_of(cx: &Cx<'_>, b: &FnBinding) -> Option<Target> {
         };
     }
     let key = cx.lambda_key(b.target.sig.index)?;
-    vyrn_lower::core::body_of(&key)?;
+    cx.world.body_of(&key)?;
     let (tys, params) = b.target.sig.params.split_at_checked(b.target.ncaps)?;
     let slot = Type::Fn(params.to_vec(), Box::new(b.target.sig.ret_ty.clone()));
     let caps: Vec<_> = (b.cap_srcs.iter().cloned())
@@ -2120,16 +2121,16 @@ fn core_body(
     binds: &HashMap<String, FnBinding>,
     cx: &Cx<'_>,
 ) -> Option<vyrn_frontend::core::Body> {
-    let body = vyrn_lower::core::body_of(key)?;
+    let body = cx.world.body_of(key)?;
     let bound: Option<Vec<(Name, Target)>> = (body.params.iter())
         .filter_map(|&n| Some((n, binds.get(&body.names[n.index()].source)?)))
         .map(|(n, b)| Some((n, core_target_of(cx, b)?)))
         .collect();
     let body = match bound {
         Some(bound) if !binds.is_empty() && bound.len() == binds.len() => {
-            vyrn_lower::core::specialize(&body, &bound).unwrap_or(body)
+            vyrn_lower::core::specialize(body, &bound).unwrap_or_else(|| body.clone())
         }
-        _ => body,
+        _ => body.clone(),
     };
     let sources = body.params.iter().map(|&n| &body.names[n.index()].source);
     (body.params.len() == f.params.len() && sources.eq(f.params.iter().map(|p| &p.name)))
@@ -2625,7 +2626,10 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether `own` gives `ty` an element-walking release rather than a buffer-only one.
     fn deep_row(&self, ty: &Type) -> bool {
-        matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_)))
+        matches!(
+            self.cx.world.ownership.proto.release_kind(ty),
+            Some(DropKind::Deep(_))
+        )
     }
 
     /// The address of a `SmallArray`'s live slots: the inline block while `cap == N`, the
@@ -2669,7 +2673,7 @@ impl<'p> Fn_<'_, 'p> {
     /// A declared row is keyed by name, so it is asked of `ty`; every other row is asked of the
     /// resolved type, because a generic body's `Param` element always answers `Deep`.
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
-        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
+        if let Some(DropKind::Release(f, _)) = self.cx.world.ownership.proto.release_kind(ty) {
             return Ok(Some(Rel::Call(f, ty.clone())));
         }
         let t = self.cx.resolve(ty);
@@ -2677,7 +2681,7 @@ impl<'p> Fn_<'_, 'p> {
             let l = self.cx.layout(&t, line)?;
             Ok(Rel::Buffers(which.iter().map(|i| l.fields[*i]).collect()))
         };
-        Ok(match self.cx.owned.release_kind(&t) {
+        Ok(match self.cx.world.ownership.proto.release_kind(&t) {
             Some(DropKind::Release(f, _)) => Some(Rel::Call(f, t.clone())),
             Some(DropKind::FreeStr) => Some(Rel::Str),
             Some(DropKind::FreeArr) => Some(bufs(&[0])?),
@@ -2728,7 +2732,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         // A declared release runs instead of a field walk, which would skip its order and
         // side effects.
-        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
+        if let Some(DropKind::Release(f, _)) = self.cx.world.ownership.proto.release_kind(ty) {
             self.rel_holes.clear();
             // `emit_rel`'s `Rel::Call` arm also frees the payload boxes.
             return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
@@ -2966,7 +2970,7 @@ impl<'p> Fn_<'_, 'p> {
     /// stream, whose consumer ends it. A declared `release` runs too (record `m7-box`).
     fn replaced_releases(&self, ty: &Type) -> bool {
         !matches!(
-            self.cx.owned.release_kind(ty),
+            self.cx.world.ownership.proto.release_kind(ty),
             None | Some(DropKind::CloseStream)
         )
     }
@@ -3801,7 +3805,15 @@ impl<'p> Fn_<'_, 'p> {
     /// The checker's type for `e`, read by node. [`Fn_::peek_inner`] answers for the AST this
     /// backend builds itself.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        let t = match self.cx.recorded.node_types.get(&e.id()).cloned() {
+        let t = match self
+            .cx
+            .world
+            .ownership
+            .record
+            .node_types
+            .get(&e.id())
+            .cloned()
+        {
             Some(t) => self.cx.sub(&t),
             None => self.peek_inner(e, line)?,
         };
@@ -5533,7 +5545,7 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
         // A buffer owns the array data it was handed, and the elements its
         // cursor has not reached: a pull hands each element to its puller.
-        if self.cx.owned.release_kind(elem).is_some() {
+        if self.cx.world.ownership.proto.release_kind(elem).is_some() {
             let stride = self.stride(elem, line)?;
             let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
             b.ins(&Instruction::LocalGet(a));
@@ -6615,7 +6627,7 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         let walks = if rel {
-            self.cx.owned.release_kind(elem).is_some()
+            self.cx.world.ownership.proto.release_kind(elem).is_some()
         } else {
             self.owns_heap(elem)
         };
@@ -13854,7 +13866,7 @@ mod tests {
             std_root: Some("std".into()),
             ..Default::default()
         };
-        Memo::load(|| vyrn_lower::load(src, "main.vyrn", &opts, &files))
+        Memo::load(|| vyrn_lower::load(src, "main.vyrn", &opts, &files, None))
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))
     }
 
@@ -13916,8 +13928,7 @@ mod tests {
 
     fn cx() -> Cx<'static> {
         Cx {
-            facts: None,
-            recorded: Default::default(),
+            world: Default::default(),
             types: HashMap::new(),
             lambdas: HashMap::new(),
             layouts: RefCell::default(),
@@ -13929,7 +13940,6 @@ mod tests {
             higher_order: HashMap::new(),
             skipped: std::collections::HashSet::new(),
             mem: HashMap::new(),
-            owned: Default::default(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             fnvals: RefCell::new(Vec::new()),
@@ -13941,7 +13951,6 @@ mod tests {
             args_in_place: false,
             gappend: HashMap::new(),
             externs: HashMap::new(),
-            releases: HashMap::new(),
             // `Program`'s defaults: nothing here logs.
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,

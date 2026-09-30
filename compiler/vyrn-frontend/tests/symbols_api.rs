@@ -493,7 +493,7 @@ fn analyze_linked_resolves_imports() {
             .collect(),
     );
     let opts = vyrn_frontend::loader::LoadOptions::default();
-    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver, None);
     assert!(
         a.diagnostics.is_empty(),
         "linked analyze should be clean: {:?}",
@@ -544,7 +544,7 @@ fn import_collision_errors_but_root_index_survives() {
             .collect(),
     );
     let opts = vyrn_frontend::loader::LoadOptions::default();
-    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver, None);
     assert!(
         !a.diagnostics.is_empty(),
         "the name collision must be reported"
@@ -565,7 +565,7 @@ fn analyze_linked_adopts_foreign_errors() {
             .collect(),
     );
     let opts = vyrn_frontend::loader::LoadOptions::default();
-    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver, None);
     let d = a
         .diagnostics
         .iter()
@@ -579,7 +579,7 @@ fn analyze_linked_missing_module_still_indexes_root() {
     let root = "import { f } from \"./gone\"\n\nfn main() -> Int64 {\n    return 0\n}\n";
     let resolver = vyrn_frontend::loader::MapResolver(Default::default());
     let opts = vyrn_frontend::loader::LoadOptions::default();
-    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver, None);
     assert!(
         !a.diagnostics.is_empty(),
         "unresolvable import must be reported"

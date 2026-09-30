@@ -263,6 +263,9 @@ pub struct GenOutput {
 
 /// Everything a generation run needs from the loader.
 pub struct GenInputs<'a> {
+    /// The engine that runs the generator, and every generator its loads
+    /// reach; `None` fails each run.
+    pub engine: Option<&'a GenEngine>,
     pub resolver: &'a dyn crate::loader::ModuleResolver,
     /// The load options (std root, manifest aliases), so `moduleInterface` can
     /// link the reflected module's imports.
@@ -335,6 +338,7 @@ pub fn gen_scoped_path(
 /// a closure type's defining file misses the generator cache. The wasm
 /// generation engine serves its `moduleInterface` import from here.
 pub fn gen_module_interface_lit(
+    engine: Option<&GenEngine>,
     resolver: &dyn crate::loader::ModuleResolver,
     opts: &crate::loader::LoadOptions,
     importer_dir: &str,
@@ -366,7 +370,7 @@ pub fn gen_module_interface_lit(
     // Link the module so the closure walk sees types declared in its imports.
     // A recording resolver adds every file the link reads to the cache inputs.
     let rec = crate::loader::RecordingResolver::new(resolver);
-    let program = crate::loader::load(&source, &resolved, opts, &rec).map_err(|diags| {
+    let program = crate::loader::load(&source, &resolved, opts, &rec, engine).map_err(|diags| {
         let d = diags.first();
         let where_ = d
             .and_then(|d| d.file.clone())
@@ -424,8 +428,9 @@ pub enum GenError {
 
 /// The generation engine. It judges the generator's type-checked program
 /// with the lowering's judgments, then compiles and runs it. Both need the
-/// lowering and codegen, which only the driver has, so the driver installs the
-/// engine here. `None` means the engine declined the generator.
+/// lowering and codegen, which only the host has, so the host passes the
+/// engine into each load and check. `None` means the engine declined the
+/// generator.
 pub type GenEngine = dyn Fn(
         &Program,
         &str,
@@ -434,8 +439,6 @@ pub type GenEngine = dyn Fn(
     ) -> Option<Result<GenOutput, GenError>>
     + Send
     + Sync;
-
-static GEN_ENGINE: std::sync::OnceLock<Box<GenEngine>> = std::sync::OnceLock::new();
 
 /// Identifies the running compiler build: the crate version, then the
 /// executable's size and mtime. A persisted generator output or artifact is
@@ -462,14 +465,8 @@ pub fn compiler_identity() -> String {
     .clone()
 }
 
-/// Installs the generation engine. The driver calls it once, before any load;
-/// a second call is ignored.
-pub fn set_gen_engine(engine: Box<GenEngine>) {
-    let _ = GEN_ENGINE.set(engine);
-}
-
-/// Runs `fn_name` in `program` as a generation target under the
-/// sandbox in `inputs`, with the compile-time constants `args`. Returns the
+/// Runs `fn_name` in `program` as a generation target on `inputs.engine`,
+/// under the sandbox in `inputs`, with the compile-time constants `args`. Returns the
 /// module source and the recorded reads, or why the run failed. `program`
 /// has passed [`crate::check_and_synthesize`]; the engine judges the rest.
 pub fn generate(
@@ -478,8 +475,8 @@ pub fn generate(
     args: &[crate::consteval::ConstVal],
     inputs: GenInputs<'_>,
 ) -> Result<GenOutput, GenError> {
-    // Without an installed engine no `gen fn` can run, and the error says so.
-    let Some(engine) = GEN_ENGINE.get() else {
+    // Without an engine no `gen fn` can run, and the error says so.
+    let Some(engine) = inputs.engine else {
         return Err(GenError::Failed(format!(
             "cannot run the generator `{fn_name}`: no generation engine is installed"
         )));
@@ -522,8 +519,8 @@ pub struct Site {
     pub entry: crate::ast::Type,
 }
 
-/// Runs the generator of every `derive(g, x)` site on the types the checker
-/// gave `x`, and returns what they wrote.
+/// Runs the generator of every `derive(g, x)` site on `engine`, over the types
+/// the checker gave `x`, and returns what they wrote.
 ///
 /// `sites` are in source order. Each generator runs once per
 /// program, over all of its types as one `TypeArg`: a run per type would write a
@@ -531,7 +528,11 @@ pub struct Site {
 /// functions the generator reaches, checked as a generator's own program is.
 /// The output is not checked here, except each entry's signature against its
 /// site; the caller checks the program it joins.
-pub fn derive(program: &Program, sites: &[Site]) -> Result<Derived, Diagnostic> {
+pub fn derive(
+    program: &Program,
+    sites: &[Site],
+    engine: Option<&GenEngine>,
+) -> Result<Derived, Diagnostic> {
     let unplaced = |e: String| Diagnostic::error(0, 0, "check", e);
     let mut out: Derived = (Vec::new(), Vec::new());
     if sites.is_empty() {
@@ -570,7 +571,7 @@ pub fn derive(program: &Program, sites: &[Site]) -> Result<Derived, Diagnostic> 
                     )));
                 }
                 DERIVING.with(|d| d.borrow_mut().push(g.to_string()));
-                let written = run_derive(gen_program, g, arg, fingerprint);
+                let written = run_derive(gen_program, g, arg, fingerprint, engine);
                 DERIVING.with(|d| d.borrow_mut().pop());
                 let written = written.map_err(unplaced)?;
                 DERIVED.with(|d| d.borrow_mut().insert(key, written.clone()));
@@ -714,6 +715,7 @@ fn run_derive(
     g: &str,
     arg: Expr,
     fingerprint: String,
+    engine: Option<&GenEngine>,
 ) -> Result<Derived, String> {
     // The first refusal alone, for the checker and the engine's judgments alike.
     let refused = |ds: &[Diagnostic]| -> String {
@@ -722,7 +724,7 @@ fn run_derive(
             .map(|d| format!("generator `{g}` does not check: {}", d.render()))
             .collect()
     };
-    let (diags, _, _, _) = crate::check_and_synthesize(&mut gen_program);
+    let (diags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine);
     if !diags.is_empty() {
         return Err(refused(&diags));
     }
@@ -733,6 +735,7 @@ fn run_derive(
         g,
         &[],
         GenInputs {
+            engine,
             resolver: &resolver,
             opts: &opts,
             importer_dir: String::new(),

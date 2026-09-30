@@ -1,5 +1,5 @@
 //! Keystroke-budget probe for the editor path: `analyze_judged` with
-//! `vyrn_lower::JUDGE`, the generation engine installed and the judgment memo
+//! `vyrn_lower::JUDGE`, the wasm generation engine and the judgment memo
 //! armed, as `vyrn-lsp` runs them. `vyrn check` is not a proxy, because it does
 //! different work.
 //!
@@ -44,7 +44,6 @@ impl ModuleResolver for Resolver {
 }
 
 fn main() {
-    vyrn_genwasm::install();
     let runs: usize = std::env::var("VYRN_RUNS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -76,6 +75,7 @@ fn probe(path: &str, runs: usize) {
         ..Default::default()
     };
     let mut resolver = Resolver(None);
+    let engine = vyrn_genwasm::engine();
     let dir = std::path::Path::new(&path).parent().unwrap();
     if let Ok(Some(m)) = vyrn_frontend::manifest::find(dir) {
         opts.aliases = m.dependencies.into_iter().collect();
@@ -85,7 +85,12 @@ fn probe(path: &str, runs: usize) {
         resolver.0 = Some(m.dir);
     }
     let analyze = |text: &str| {
-        vyrn_frontend::analyze_judged(text, Some((&path, &opts, &resolver)), &vyrn_lower::JUDGE)
+        vyrn_frontend::analyze_judged(
+            text,
+            Some((&path, &opts, &resolver)),
+            Some(&*engine),
+            &vyrn_lower::JUDGE,
+        )
     };
     for i in 0..3 {
         analyze(&format!("{src}\n// warm {i}\n"));
