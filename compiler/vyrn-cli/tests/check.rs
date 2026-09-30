@@ -130,7 +130,7 @@ fn a_check_in_one_process_prints_what_a_fresh_process_prints() {
             .trim_start_matches(r"\\?\")
             .replace('\\', "/")
     };
-    let first = path("where_rule_through_atset.vyrn");
+    let first = path("mut_a_field_store.vyrn");
     let second = path("a_derive_entry_must_match_its_call.vyrn");
     let fresh = |root: &str| {
         let out = vyrn()

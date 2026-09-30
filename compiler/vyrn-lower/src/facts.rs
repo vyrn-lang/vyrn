@@ -20,7 +20,8 @@ use vyrn_frontend::core::Name;
 /// String name (bytes for a String), or the length of a record name's array or
 /// String field. A `Col` names its field by the least index among the fields
 /// the record's `where` rule states of equal length, so one term is the
-/// length of each of them.
+/// length of each of them; inside a group of stores into the record's
+/// fields, by the field's own index (`elide::Walk::open`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Term {
     Val(Name),
@@ -71,6 +72,10 @@ impl Lin {
 
     fn mentions_name(&self, n: Name) -> bool {
         self.terms.iter().any(|(t, _)| t.name() == n)
+    }
+
+    fn mentions(&self, t: Term) -> bool {
+        self.coef(t) != 0
     }
 
     pub fn add(&self, o: &Lin) -> Option<Lin> {
@@ -259,6 +264,17 @@ impl State {
         self.defs.retain(|_, v| !v.mentions_name(n));
         self.conds
             .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions_name(n)));
+    }
+
+    /// Forgets everything about the one term `t`, restating what a definition
+    /// through it knows as [`State::kill`] does.
+    pub fn forget(&mut self, t: Term) {
+        self.defs.remove(&t);
+        self.restate(t);
+        self.facts.retain(|f| !f.mentions(t));
+        self.defs.retain(|_, v| !v.mentions(t));
+        self.conds
+            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions(t)));
     }
 
     /// Moves `n`'s length by an unknown amount in `lo..=hi`. A fact with

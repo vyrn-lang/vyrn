@@ -53,9 +53,9 @@ fn fieldImmutable() -> Int64 {
     p.a = 2
     return 0
 }
+let mut spanState = Span { lo: 1, hi: 2 }
 fn fieldWhere() -> Int64 {
-    let mut s = Span { lo: 1, hi: 2 }
-    s.lo = 0
+    spanState.lo = 0
     return 0
 }
 fn fieldNotRecord() -> Int64 {

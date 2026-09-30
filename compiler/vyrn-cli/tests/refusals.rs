@@ -325,6 +325,25 @@ fn census() -> Vec<Row> {
             "`f` was moved here into a literal\nline 7: ... and `f` is used again here",
             Kernel::Its,
         ),
+        row(
+            "r43_a_group_record_read_whole_before_its_check.vyrn",
+            "a group of stores into a `where` record reads the record whole",
+            "`c` is read whole while a store into its field leaves its `where` rule unchecked",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r44_a_call_while_a_callers_group_is_open.vyrn",
+            "a group of stores into a `modify` parameter calls a function",
+            "`next` may read the caller's `c` while a store into its field leaves its `where` \
+             rule unchecked",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r45_an_exit_while_a_callers_group_is_open.vyrn",
+            "a group of stores into a `modify` parameter has an exit",
+            "`?` leaves `c` with its `where` rule unchecked",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

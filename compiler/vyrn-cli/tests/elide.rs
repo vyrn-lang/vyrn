@@ -240,6 +240,27 @@ fn sum(c: modify C) -> Int64 {
     );
 }
 
+/// Inside a group each column has its own length: `a`'s length does not
+/// bound an index into `b`, which has not grown yet.
+#[test]
+fn a_group_proves_no_index_by_another_columns_length() {
+    let src = "type C = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+fn w(c: modify C) -> Int64 {
+    c.a.push(1)
+    c.b.push(if 0 < c.a.length { c.b[0] } else { 0 })
+    return 0
+}
+";
+    assert_eq!(verdicts(src, "w"), ["check array-index"]);
+    let calls = "    let mut c = C { a: [], b: [] }\n    print(w(c).toString())";
+    let (err, _) = oracle(src, calls, "w");
+    assert!(
+        err.contains("array index 0 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 /// Each witness: a function `w` whose checks must all stay, and the call in
 /// `main` that makes one trap with the wording given.
 const WITNESSES: &[(&str, &str, &str)] = &[

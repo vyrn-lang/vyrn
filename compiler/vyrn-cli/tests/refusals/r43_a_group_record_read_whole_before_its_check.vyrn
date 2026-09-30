@@ -1,0 +1,13 @@
+// Between the first store into a field and the rule check, the record breaks its rule, so nothing reads it whole.
+type Cols = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+
+fn total(c: Cols) -> Int64 {
+    return c.a.length + c.b.length
+}
+
+fn main() -> Int64 {
+    let mut c = Cols { a: [], b: [] }
+    c.a.push(1)
+    c.b.push(total(c))
+    return c.a.length
+}

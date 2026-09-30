@@ -1,0 +1,17 @@
+// A `modify` parameter is the caller's record, so no function runs while its rule is unchecked.
+type Cols = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+
+fn next(x: Int64) -> Int64 {
+    return x + 1
+}
+
+fn pushBoth(c: modify Cols, x: Int64) {
+    c.a.push(x)
+    c.b.push(next(x))
+}
+
+fn main() -> Int64 {
+    let mut c = Cols { a: [], b: [] }
+    pushBoth(c, 1)
+    return c.a.length
+}
