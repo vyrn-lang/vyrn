@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
-    NodeId, Pattern, Program, Stmt, Type, TypeDecl, UnOp,
+    NodeId, Pattern, Program, SourceBody, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
@@ -554,18 +554,20 @@ fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
 
 /// Builds the core of one instance. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
+/// Its frames have no row ([`Body::id`]).
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
-    build_in(program, inst, own, &mut NameMemo::default())
+    build_in(program, inst, own, &Fns::default(), &mut Default::default())
 }
 
-/// [`build`] with the caller's memo of `own`'s name facts.
+/// [`build`] with the caller's function table and memo of `own`'s name facts.
 pub(crate) fn build_in(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
+    fns: &Fns,
     names: &mut NameMemo,
 ) -> Result<Body, Gap> {
-    let out = build_twice(program, inst, own, names);
+    let out = build_twice(program, inst, own, fns, names);
     if gap_tally_at().is_some() {
         tally_gaps(inst, &out);
     }
@@ -576,18 +578,19 @@ fn build_twice(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
+    fns: &Fns,
     names: &mut NameMemo,
 ) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
     let b1 = vyrn_frontend::prof::phase("placer: build: first");
-    let first = build_seeded(program, inst, own, names, &none)?;
+    let first = build_seeded(program, inst, own, fns, names, &none)?;
     drop(b1);
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
     let _b2 = vyrn_frontend::prof::phase("placer: build: seeded");
-    build_seeded(program, inst, own, names, &seed)
+    build_seeded(program, inst, own, fns, names, &seed)
 }
 
 /// The refusals the typed judgment states over the checker's answers at the
@@ -1092,6 +1095,7 @@ fn build_seeded(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
+    fns: &Fns,
     names: &mut NameMemo,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
@@ -1113,6 +1117,7 @@ fn build_seeded(
     let mut b = Builder {
         program,
         own,
+        fns,
         proto: &own.proto,
         names,
         types,
@@ -1120,6 +1125,7 @@ fn build_seeded(
         solved,
         placed,
         body: Body {
+            id: fns.instance_id(inst),
             name: inst.spelling(),
             file: inst.func.module.clone(),
             export: inst.func.is_export_extern,
@@ -1208,6 +1214,7 @@ fn build_seeded(
 pub fn build_module_state<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    fns: &'a Fns,
     facts: &NodeTypes<'a>,
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
@@ -1215,6 +1222,7 @@ pub fn build_module_state<'a>(
     let mut b = Builder::bare(
         program,
         own,
+        fns,
         &mut names,
         facts,
         &seed,
@@ -1252,21 +1260,23 @@ pub fn build_module_state<'a>(
 pub fn build_outside<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    fns: &'a Fns,
     names: &mut NameMemo,
     ob: &OutsideBody<'a>,
 ) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
-    let first = build_outside_seeded(program, own, names, ob, &none)?;
+    let first = build_outside_seeded(program, own, fns, names, ob, &none)?;
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
-    build_outside_seeded(program, own, names, ob, &seed)
+    build_outside_seeded(program, own, fns, names, ob, &seed)
 }
 
 fn build_outside_seeded<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    fns: &'a Fns,
     names: &mut NameMemo,
     ob: &OutsideBody<'a>,
     seed: &std::collections::HashSet<NodeId>,
@@ -1282,6 +1292,7 @@ fn build_outside_seeded<'a>(
     let mut b = Builder::bare(
         program,
         own,
+        fns,
         names,
         &ob.facts,
         seed,
@@ -1318,6 +1329,7 @@ struct Unreached {
 pub fn build_root<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    fns: &'a Fns,
     names: &mut NameMemo,
     facts: &NodeTypes<'a>,
     file: Option<String>,
@@ -1341,6 +1353,7 @@ pub fn build_root<'a>(
     let mut b = Builder::bare(
         program,
         own,
+        fns,
         names,
         &facts,
         &seed,
@@ -1369,6 +1382,9 @@ pub fn build_root<'a>(
 struct Builder<'a> {
     program: &'a Program,
     own: &'a Ownership,
+    /// The function table a frame reads its row from ([`Body::id`]). A
+    /// worker only reads it.
+    fns: &'a Fns,
     proto: &'a Owned,
     names: &'a mut NameMemo,
     types: HashMap<NodeId, Type>,
@@ -1461,6 +1477,7 @@ impl<'a> Builder<'a> {
     fn bare(
         program: &'a Program,
         own: &'a Ownership,
+        fns: &'a Fns,
         names: &'a mut NameMemo,
         facts: &NodeTypes<'a>,
         seed: &'a std::collections::HashSet<NodeId>,
@@ -1478,6 +1495,7 @@ impl<'a> Builder<'a> {
         Builder {
             program,
             own,
+            fns,
             proto: &own.proto,
             names,
             types,
@@ -1485,6 +1503,7 @@ impl<'a> Builder<'a> {
             solved,
             placed,
             body: Body {
+                id: fns.id(&name),
                 name,
                 file,
                 export: false,
@@ -3912,7 +3931,7 @@ impl<'a> Builder<'a> {
                     l,
                     r.clone(),
                     &self.body.names,
-                    &self.body.name,
+                    self.body.id,
                     &self.own.state_callees,
                 )
             {
@@ -4986,6 +5005,7 @@ impl<'a> Builder<'a> {
         let outer = std::mem::replace(
             &mut self.body,
             Body {
+                id: None,
                 name: String::new(),
                 file,
                 export,
@@ -5001,6 +5021,7 @@ impl<'a> Builder<'a> {
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
+        self.body.id = self.fns.id(&self.body.name);
         let saved = (
             std::mem::take(&mut self.scope),
             std::mem::take(&mut self.by_binding),
@@ -7149,20 +7170,35 @@ fn stated(program: &Program, own: &Ownership, body: &Body) -> Body {
     out
 }
 
-/// Every frame's answers, added to the table.
-fn fold_frame(
+/// Every frame's answers of `top`, added to the table, each frame numbered
+/// first ([`Fns::number`]).
+fn fold_frames(
     program: &Program,
-    body: &Body,
+    top: &mut Body,
     own: &Ownership,
     out: &mut Facts,
     fns: &mut Fns,
+    bodies: &mut HashMap<FnId, Option<Stated>>,
+) {
+    let ids = fns.number(top);
+    for (body, id) in top.frames().into_iter().zip(ids) {
+        fold_frame(program, body, id, own, out, bodies);
+    }
+}
+
+fn fold_frame(
+    program: &Program,
+    body: &Body,
+    id: FnId,
+    own: &Ownership,
+    out: &mut Facts,
     bodies: &mut HashMap<FnId, Option<Stated>>,
 ) {
     let proto = &own.proto;
     // Filled at the same site as the fold, so a body the fold does not see is
     // one no emitter may walk either.
     bodies
-        .entry(fns.add(&body.name, None))
+        .entry(id)
         .and_modify(|had| *had = None)
         .or_insert_with(|| {
             Some(Stated {
@@ -7353,10 +7389,7 @@ pub fn augment(program: &Program, w: &mut World) {
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
     drop(lw);
-    w.fns = Fns::source(&lowered.source);
-    for inst in &lowered.instances {
-        w.fns.instance(inst);
-    }
+    w.fns = Fns::lowered(&lowered);
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
@@ -7390,17 +7423,18 @@ pub fn augment(program: &Program, w: &mut World) {
     let unserved: Vec<Option<Job>> = (jobs.iter().zip(&served))
         .map(|(j, s)| s.is_none().then_some(*j))
         .collect();
-    let shared: &Ownership = own;
+    let (shared, fns): (&Ownership, &Fns) = (own, &w.fns);
     // Typing expanded every projection site a first build reads.
     let sealed = program.expansions.seal();
     let firsts = vyrn_frontend::par::in_parallel(
         &unserved,
         |j| j.map_or(0, |j| j.weight()),
         NameMemo::default,
-        |names, j| j.map(|j| j.build(program, shared, names)),
+        |names, j| j.map(|j| j.build(program, shared, fns, names)),
     );
     drop(sealed);
-    // In job order, so the gap tally comes out as on one thread.
+    // In job order, so the gap tally and every row a lambda frame takes come
+    // out as on one thread.
     let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
     for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {
         if let Some(rs) = served {
@@ -7408,8 +7442,11 @@ pub fn augment(program: &Program, w: &mut World) {
             continue;
         }
         // `unserved` holds every job `served` does not, so `first` is `Some`.
-        let top = first.unwrap_or_else(|| j.build(program, own, &mut names));
+        let mut top = first.unwrap_or_else(|| j.build(program, own, &w.fns, &mut names));
         j.tally(&top);
+        if let Ok(b) = &mut top {
+            w.fns.number(b);
+        }
         made.push(Made::Built(key, top));
     }
     // The call relation, from the first build of every body, in job order;
@@ -7428,9 +7465,14 @@ pub fn augment(program: &Program, w: &mut World) {
             _ => None,
         })
         .collect();
-    let state = crate::effects::judge_built(program, &lowered, own, &tops, |judged, refs, _| {
-        judged.state_table(refs)
-    });
+    let state = crate::effects::judge_built(
+        program,
+        &lowered,
+        own,
+        &mut w.fns,
+        &tops,
+        |judged, refs, _| judged.state_table(refs),
+    );
     drop(tops);
     own.state_callees = state;
     drop(ej);
@@ -7442,11 +7484,11 @@ pub fn augment(program: &Program, w: &mut World) {
         let unjudged = top.as_ref().is_ok_and(|b| {
             b.frames().iter().any(|f| {
                 f.names.iter().any(|i| i.walked == Some(Walk::While))
-                    && own.state_callees.contains_key(&f.name)
+                    && f.id.is_some_and(|f| own.state_callees.contains_key(&f))
             })
         });
         if unjudged {
-            *top = j.build(program, own, &mut names);
+            *top = j.build(program, own, &w.fns, &mut names);
             j.tally(top);
         }
     }
@@ -7518,7 +7560,7 @@ pub fn augment(program: &Program, w: &mut World) {
         ..own.clone()
     };
     for inst in crate::as_written(program, own) {
-        match build_in(program, &inst, &written, &mut names) {
+        match build_in(program, &inst, &written, &w.fns, &mut names) {
             Ok(top) => {
                 typed(program, own, &mut r, &top, &inst.func.module, true);
                 for body in top.frames() {
@@ -7541,7 +7583,7 @@ pub fn augment(program: &Program, w: &mut World) {
             facts: p.facts.clone(),
             releases: Vec::new(),
         };
-        match build_in(program, &inst, own, &mut names) {
+        match build_in(program, &inst, own, &w.fns, &mut names) {
             Ok(top) => {
                 crate::world::add_callees(&top, &by_name, calls.entry(p.id).or_default());
                 typed(program, own, &mut r, &top, &p.func.module, true);
@@ -7554,13 +7596,14 @@ pub fn augment(program: &Program, w: &mut World) {
     // Each module-state initializer and each `where` predicate, for the
     // judgment alone. An initializer the checker did not type has no core;
     // the checker's refusal is its sentence.
-    for g in &program.globals {
+    for (i, g) in (0..).zip(&program.globals) {
         if node_ty(own, g.init.id()).is_none() {
             continue;
         }
         match build_root(
             program,
             own,
+            &w.fns,
             &mut names,
             &lowered.globals,
             g.module.clone(),
@@ -7568,8 +7611,8 @@ pub fn augment(program: &Program, w: &mut World) {
             &g.init,
         ) {
             Ok(top) => {
-                let state = w.fns.add("", None);
-                crate::world::add_callees(&top, &by_name, calls.entry(state).or_default());
+                let at = program.source_id(SourceBody::Global(i));
+                crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
                 typed(program, own, &mut r, &top, &g.module, true);
             }
             Err(e) => {
@@ -7577,7 +7620,7 @@ pub fn augment(program: &Program, w: &mut World) {
             }
         }
     }
-    for d in &program.type_decls {
+    for (i, d) in (0..).zip(&program.type_decls) {
         let Some(p) = &d.predicate else { continue };
         let binds: Vec<(String, Type)> = match &d.base {
             Type::Record(fields) => fields
@@ -7589,6 +7632,7 @@ pub fn augment(program: &Program, w: &mut World) {
         match build_root(
             program,
             own,
+            &w.fns,
             &mut names,
             &lowered.predicates,
             d.module.clone(),
@@ -7596,6 +7640,8 @@ pub fn augment(program: &Program, w: &mut World) {
             p,
         ) {
             Ok(top) => {
+                let at = program.source_id(SourceBody::TypeDecl(i));
+                crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
                 typed(program, own, &mut r, &top, &d.module, true);
             }
             Err(e) => {
@@ -7645,41 +7691,38 @@ pub fn augment(program: &Program, w: &mut World) {
     // still places its rows.
     let folds = vyrn_frontend::movecheck::emitting();
     if folds {
-        if let Ok(top) = build_module_state(program, own, &lowered.globals) {
-            for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
-            }
-        }
+        let state = build_module_state(program, own, &w.fns, &lowered.globals);
+        let mut tops: Vec<Body> = state.into_iter().collect();
         for (i, inst) in lowered.instances.iter().enumerate() {
             // Rebuilt only where the pass above wrote a row for this function; the
             // rest fold the body that pass already built.
             let fresh = if touched.contains(&inst.func_id) {
                 let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
-                build_in(program, inst, own, &mut names).ok()
+                build_in(program, inst, own, &w.fns, &mut names).ok()
             } else {
                 None
             };
-            let Some(top) = fresh.as_ref().or(built[i].as_ref()) else {
-                continue;
-            };
-            for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
-            }
+            tops.extend(fresh.or(built[i].take()));
         }
         // The same for `test` and `bench` bodies, whose nodes an emitter looks up
         // too.
         for (i, ob) in lowered.bodies.iter().enumerate() {
             let fresh = if touched.contains(&ob.id) {
-                build_outside(program, own, &mut names, ob).ok()
+                build_outside(program, own, &w.fns, &mut names, ob).ok()
             } else {
                 None
             };
-            let Some(top) = fresh.as_ref().or(outside[i].as_ref()) else {
-                continue;
-            };
-            for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
-            }
+            tops.extend(fresh.or(outside[i].take()));
+        }
+        for mut top in tops {
+            fold_frames(
+                program,
+                &mut top,
+                own,
+                &mut facts,
+                &mut w.fns,
+                &mut w.bodies,
+            );
         }
     }
     // A worklist to a fixpoint. Each body is built, placed, and built again,
@@ -7699,7 +7742,8 @@ pub fn augment(program: &Program, w: &mut World) {
                 continue;
             }
             w.fns.instance(inst);
-            if let Ok(top) = build_in(program, inst, own, &mut names) {
+            if let Ok(mut top) = build_in(program, inst, own, &w.fns, &mut names) {
+                w.fns.number(&mut top);
                 crate::world::add_callees(&top, &by_name, calls.entry(inst.func_id).or_default());
                 let mut rows = Added::new();
                 let frames = placements(&top, &own.state_callees);
@@ -7721,12 +7765,17 @@ pub fn augment(program: &Program, w: &mut World) {
             if !folds {
                 continue;
             }
-            let Ok(top) = build_in(program, inst, own, &mut names) else {
+            let Ok(mut top) = build_in(program, inst, own, &w.fns, &mut names) else {
                 continue;
             };
-            for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
-            }
+            fold_frames(
+                program,
+                &mut top,
+                own,
+                &mut facts,
+                &mut w.fns,
+                &mut w.bodies,
+            );
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     }
@@ -7799,15 +7848,21 @@ impl Job<'_, '_> {
         }
     }
 
-    fn build(&self, program: &Program, own: &Ownership, names: &mut NameMemo) -> Result<Body, Gap> {
+    fn build(
+        &self,
+        program: &Program,
+        own: &Ownership,
+        fns: &Fns,
+        names: &mut NameMemo,
+    ) -> Result<Body, Gap> {
         match self {
             Job::Inst(inst) => {
                 let _p = vyrn_frontend::prof::phase("placer: core::build");
-                build_twice(program, inst, own, names)
+                build_twice(program, inst, own, fns, names)
             }
             Job::Outside(ob) => {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");
-                build_outside(program, own, names, ob)
+                build_outside(program, own, fns, names, ob)
             }
         }
     }

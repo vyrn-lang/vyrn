@@ -168,10 +168,10 @@ pub struct Ownership {
     pub accumulators: std::collections::BTreeSet<String>,
 }
 
-/// Per body name, each callee that may store into module state, with the
-/// globals it may store into. The kernel ends a borrow of one of them at the
-/// call.
-pub type StateCallees = HashMap<String, Vec<(String, Vec<String>)>>;
+/// Per frame ([`crate::core::Body::id`]), each callee name that may store
+/// into module state, with the globals it may store into. The kernel ends a
+/// borrow of one of them at the call.
+pub type StateCallees = HashMap<FnId, Vec<(String, Vec<String>)>>;
 
 /// One edge release: the name, the edge, and the holes the release walks
 /// around, spelled relative to the name (`Elem.1`).

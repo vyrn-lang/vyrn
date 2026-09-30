@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::own::{DropKind, Linear};
+use crate::types::Decls;
 
 /// The `Owned` protocol: how a type is released, answered only here. The
 /// built-in rows are seeded, not read from `std/`, because a bare file has no
@@ -316,19 +317,19 @@ impl Owned {
 /// Returns the name of a type `ty` reaches from itself, if any. A structural
 /// walk such as `copy` has no bottom there, so a caller refuses the type by name
 /// instead of overflowing the stack; the type declares its own `Copy`.
-pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<String> {
+pub fn self_referring(ty: &Type, types: &dyn Decls) -> Option<String> {
     self_referring_past(ty, types, &|_| false)
 }
 
 /// [`self_referring`], with the walk stopping at every name `stops` accepts.
 fn self_referring_past(
     ty: &Type,
-    types: &HashMap<String, TypeDecl>,
+    types: &dyn Decls,
     stops: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
     fn go(
         ty: &Type,
-        types: &HashMap<String, TypeDecl>,
+        types: &dyn Decls,
         stops: &dyn Fn(&str) -> bool,
         seen: &mut Vec<String>,
     ) -> Option<String> {
@@ -339,7 +340,7 @@ fn self_referring_past(
             if seen.iter().any(|s| s == n) {
                 return Some(n.clone());
             }
-            if !types.contains_key(n) {
+            if types.decl(n).is_none() {
                 return None;
             }
             seen.push(n.clone());
@@ -367,8 +368,8 @@ fn self_referring_past(
 
 /// Whether a value of `ty` transitively owns heap, so it
 /// moves rather than copies.
-pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
-    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+pub fn owns_heap(ty: &Type, types: &dyn Decls) -> bool {
+    fn go(ty: &Type, types: &dyn Decls, seen: &mut Vec<String>) -> bool {
         // A name that reaches itself owns heap: the recursive field must be
         // boxed. A depth limit here answered `false` for `type Tree` and leaked
         // every tree's boxes; do not bring one back.
@@ -378,7 +379,7 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             }
             // An undeclared name owns nothing. `Code` is such a name: a handle
             // into the generator's piece arena, with nothing guest-side to free.
-            if !types.contains_key(n) {
+            if types.decl(n).is_none() {
                 return false;
             }
             seen.push(n.clone());

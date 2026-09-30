@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use vyrn_frontend::ast::{FnId, Function, Program, Type};
+use vyrn_frontend::ast::{FnId, Function, Key, Program, Type};
 use vyrn_frontend::core::{rows, Body, Callee, Facts, Rhs, St};
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::movecheck::Refusal;
@@ -26,6 +26,9 @@ pub struct World {
     /// The call relation over the function table, which [`Calls::replace`]
     /// writes.
     pub(crate) calls: Calls,
+    /// The read relation over the function table, which [`Reads::replace`]
+    /// writes.
+    pub(crate) reads: Reads,
     /// The core's bodies, which [`World::body_of`] serves. `None` under a
     /// name two bodies share. Empty when `facts` is `None`.
     pub(crate) bodies: HashMap<FnId, Option<Stated>>,
@@ -47,11 +50,12 @@ pub struct FnRow {
 }
 
 /// The function rows in [`FnId`] order: [`crate::Lowered::source`], then
-/// each instance, lambda frame and the module state in the order the placer
-/// meets it. Deterministic, so one program numbers alike on every run; no
-/// output is read in id order.
+/// each instance, then each lambda frame and the module state in the order
+/// the placer's serial merge meets it ([`Fns::number`]). Deterministic, so
+/// one program numbers alike on every run; no output is read in id order.
+/// A worker reads the table and adds no row.
 #[derive(Default)]
-pub(crate) struct Fns {
+pub struct Fns {
     rows: Vec<FnRow>,
     /// The first row under each name. A non-generic instance and its frame
     /// are the function's own row.
@@ -59,32 +63,62 @@ pub(crate) struct Fns {
 }
 
 impl Fns {
-    /// The table of [`crate::Lowered::source`], one row per name even where a
-    /// projection shares a function's name.
-    pub(crate) fn source(names: &[String]) -> Fns {
+    /// The table of `lowered`: a row per [`crate::Lowered::source`] name,
+    /// even where a projection shares a function's name, then a row per
+    /// instance ([`Fns::instance`]).
+    pub(crate) fn lowered(lowered: &crate::Lowered) -> Fns {
         let mut fns = Fns::default();
-        for name in names {
+        for name in &lowered.source {
             fns.push(name.clone(), None);
+        }
+        for inst in &lowered.instances {
+            fns.instance(inst);
         }
         fns
     }
 
-    /// The row named `name`, added with `generic` when there is none.
-    pub(crate) fn add(&mut self, name: &str, generic: Option<(FnId, Vec<Type>)>) -> FnId {
-        match self.ids.get(name) {
-            Some(&id) => id,
-            None => self.push(name.to_string(), generic),
+    /// The first row named `name`.
+    pub(crate) fn id(&self, name: &str) -> Option<FnId> {
+        self.ids.get(name).copied()
+    }
+
+    /// The row named `name`, added when there is none.
+    pub(crate) fn add(&mut self, name: &str) -> FnId {
+        match self.id(name) {
+            Some(id) => id,
+            None => self.push(name.to_string(), None),
+        }
+    }
+
+    /// The row of `inst`, added when there is none.
+    pub(crate) fn instance(&mut self, inst: &crate::Instance) -> FnId {
+        match self.instance_id(inst) {
+            Some(id) => id,
+            None => self.push(
+                inst.spelling(),
+                Some((inst.func_id, inst.type_args.clone())),
+            ),
         }
     }
 
     /// The row of `inst`: its function's own row when it has no type
     /// arguments.
-    pub(crate) fn instance(&mut self, inst: &crate::Instance) -> FnId {
+    pub(crate) fn instance_id(&self, inst: &crate::Instance) -> Option<FnId> {
         if inst.type_args.is_empty() {
-            return inst.func_id;
+            return Some(inst.func_id);
         }
-        let generic = Some((inst.func_id, inst.type_args.clone()));
-        self.add(&inst.spelling(), generic)
+        self.id(&inst.spelling())
+    }
+
+    /// Gives every frame of `top` without a row the row named as the frame
+    /// ([`Fns::add`]), and returns each frame's row in [`Body::frames`]
+    /// order. The serial merge calls it on every body a worker built.
+    pub(crate) fn number(&mut self, top: &mut Body) -> Vec<FnId> {
+        let mut ids = Vec::new();
+        top.each_frame_mut(&mut |b| {
+            ids.push(*b.id.get_or_insert_with(|| self.add(&b.name)));
+        });
+        ids
     }
 
     fn push(&mut self, name: String, generic: Option<(FnId, Vec<Type>)>) -> FnId {
@@ -95,14 +129,14 @@ impl Fns {
     }
 }
 
-/// The call relation between source functions. A caller is the function a
-/// body belongs to: every instance of a generic and every lambda frame count
-/// under the function's own row, the module-state initializers under the
-/// empty name's. A callee is a [`Callee::Fn`] row or a declared release a
-/// name runs. A call through a value, an undispatched method and a
-/// projection resolve to no function, so they are no edge. A `where`
-/// predicate has no row, and a body the judgment memo serves is not built,
-/// so neither has edges.
+/// The call relation between source bodies ([`Program::source_id`]). A
+/// caller is the body a frame belongs to: every instance of a generic and
+/// every lambda frame count under the function's own row, a module-state
+/// initializer and a `where` predicate under their own. A callee is a
+/// [`Callee::Fn`] row or a declared release a name runs. A call through a
+/// value, an undispatched method and a projection resolve to no function, so
+/// they are no edge. A body the judgment memo serves is not built, so it has
+/// no edges.
 #[derive(Default)]
 pub(crate) struct Calls {
     /// By caller: its callees in source order, each once.
@@ -140,6 +174,56 @@ impl Calls {
         }
         for (g, _) in touched.iter().enumerate().filter(|(_, t)| **t) {
             self.callers[g].sort_unstable_by_key(|c| c.index());
+        }
+    }
+}
+
+/// The read relation between source bodies and the name lookups their text
+/// makes ([`vyrn_frontend::checker::Recorded::reads`]): a declaration found,
+/// or a name missed in a scope. A reader is a [`Program::source_id`] row.
+#[derive(Default)]
+pub(crate) struct Reads {
+    /// By reader: its keys in the order read, each once.
+    keys: Vec<Vec<Key>>,
+    /// By key: its readers in id order, each once. A key no function reads
+    /// has no entry.
+    readers: HashMap<Key, Vec<FnId>>,
+}
+
+impl Reads {
+    /// Replaces the keys of every reader in `rows` and the reverse entries
+    /// with them, in one batch. A reader absent from `rows` keeps its keys.
+    /// Each list in `rows` holds a key once.
+    pub(crate) fn replace(&mut self, rows: HashMap<FnId, Vec<Key>>) {
+        let n = (rows.keys().map(|f| f.index() + 1).max().unwrap_or(0)).max(self.keys.len());
+        self.keys.resize_with(n, Vec::new);
+        let mut replaced = vec![false; n];
+        let mut touched: HashSet<Key> = HashSet::new();
+        for f in rows.keys() {
+            replaced[f.index()] = true;
+            touched.extend(std::mem::take(&mut self.keys[f.index()]));
+        }
+        for k in &touched {
+            if let Some(rs) = self.readers.get_mut(k) {
+                rs.retain(|r| !replaced[r.index()]);
+            }
+        }
+        for (f, ks) in rows {
+            for k in &ks {
+                self.readers.entry(k.clone()).or_default().push(f);
+            }
+            touched.extend(ks.iter().cloned());
+            self.keys[f.index()] = ks;
+        }
+        for k in touched {
+            let Some(rs) = self.readers.get_mut(&k) else {
+                continue;
+            };
+            if rs.is_empty() {
+                self.readers.remove(&k);
+            } else {
+                rs.sort_unstable_by_key(|r| r.index());
+            }
         }
     }
 }
@@ -194,11 +278,22 @@ const _: () = {
 };
 
 impl World {
-    pub(crate) fn new(ownership: Ownership) -> World {
-        World {
+    /// The World of `program`'s `ownership`, with the read relation of its
+    /// checker's record.
+    pub(crate) fn new(program: &Program, ownership: Ownership) -> World {
+        let mut rows: HashMap<FnId, Vec<Key>> = HashMap::new();
+        for (body, k) in &ownership.record.reads {
+            let ks = rows.entry(program.source_id(*body)).or_default();
+            if !ks.contains(k) {
+                ks.push(k.clone());
+            }
+        }
+        let mut world = World {
             ownership,
             ..World::default()
-        }
+        };
+        world.reads.replace(rows);
+        world
     }
 
     /// The id of the function emitted under `name`: [`crate::spell`] of the
@@ -206,7 +301,7 @@ impl World {
     /// name for module state), or a function's own name. A reader outside
     /// the World looks a name up once, here.
     pub fn fn_id(&self, name: &str) -> Option<FnId> {
-        self.fns.ids.get(name).copied()
+        self.fns.id(name)
     }
 
     /// The row of `id`.
@@ -241,6 +336,11 @@ impl World {
     /// The functions whose bodies call `f` ([`Calls`]).
     pub fn callers(&self, f: FnId) -> &[FnId] {
         self.calls.callers.get(f.index()).map_or(&[], Vec::as_slice)
+    }
+
+    /// The functions whose text read `key` ([`Reads`]).
+    pub fn readers(&self, key: &Key) -> &[FnId] {
+        self.reads.readers.get(key).map_or(&[], Vec::as_slice)
     }
 
     /// The typed judgment's refusals.
@@ -302,9 +402,20 @@ impl World {
     ///
     /// If a name's id is not its row's, if a body is served under a name
     /// other than its own, if bodies exist without facts, if a refusal is
-    /// not an error, or if the callers do not invert the callees.
+    /// not an error, or if the callers do not invert the callees or the
+    /// readers the reads.
     pub fn check(&self) {
         let rows = self.fns.rows.len();
+        for (f, ks) in self.reads.keys.iter().enumerate() {
+            for k in ks {
+                assert!(f < rows, "a read names no row");
+                let once = self.readers(k).iter().filter(|r| r.index() == f).count();
+                assert_eq!(once, 1, "a key lists its reader other than once");
+            }
+        }
+        let reads = self.reads.keys.iter().map(Vec::len).sum::<usize>();
+        let readers = self.reads.readers.values().map(Vec::len).sum::<usize>();
+        assert_eq!(reads, readers, "a reader entry has no read");
         for (f, cs) in self.calls.callees.iter().enumerate() {
             for g in cs {
                 assert!(f < rows && g.index() < rows, "a call edge names no row");
@@ -329,6 +440,11 @@ impl World {
         }
         for (id, s) in &self.bodies {
             if let Some(s) = s {
+                assert_eq!(
+                    s.body.id,
+                    Some(*id),
+                    "a core body is served under another row"
+                );
                 assert_eq!(
                     s.body.name,
                     self.fn_row(*id).name,
@@ -377,7 +493,7 @@ pub fn analyze(program: &Program) -> Arc<World> {
             return w;
         }
     }
-    let mut world = World::new(own::analyze(program));
+    let mut world = World::new(program, own::analyze(program));
     crate::core::augment(program, &mut world);
     #[cfg(debug_assertions)]
     world.check();

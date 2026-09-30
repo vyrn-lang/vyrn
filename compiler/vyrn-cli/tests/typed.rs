@@ -140,7 +140,12 @@ fn bodies_of(program: &Program) -> Vec<vyrn_frontend::core::Body> {
         }
     }
     if !program.globals.is_empty() {
-        if let Ok(b) = vyrn_lower::core::build_module_state(program, &own, &lowered.globals) {
+        if let Ok(b) = vyrn_lower::core::build_module_state(
+            program,
+            &own,
+            &Default::default(),
+            &lowered.globals,
+        ) {
             bodies.push(b);
         }
     }

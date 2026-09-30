@@ -121,9 +121,13 @@ the playground serves an embedded `std/`. The loader:
    the judgments, then one list of ownership refusals in source order.
    `analyze` returns the World (`vyrn_lower::World`): the `Ownership` with
    the checker's record, the function table, the call relation
-   (`World::callees` and `World::callers`), the core's bodies and facts,
-   and both refusal lists. The plan's rows and the bodies are keyed by
-   `FnId`; a reader turns a name into an id once, with `World::fn_id`. The
+   (`World::callees` and `World::callers`), the read relation
+   (`World::readers`: the declarations and misses each source body's name
+   lookups read, when the host armed `checker::record_reads`), the core's bodies and facts,
+   and both refusal lists. The plan's rows, the bodies and the effect
+   judgment's state rows are keyed by `FnId`; a frame carries its row
+   (`Body::id`), which the placer's serial merge gives a lambda frame. A
+   reader turns a name into an id once, with `World::fn_id`. The
    emitter reads the same World, handed on from the load through
    `own::Memo`.
 4. `floor::decide`: whether each artifact's target provides what its code
