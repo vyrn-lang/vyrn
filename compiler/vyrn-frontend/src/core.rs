@@ -918,6 +918,10 @@ pub struct Body {
     pub id: Option<FnId>,
     /// The module file the function came from; `None` for the root.
     pub file: Option<String>,
+    /// `(linked, spelled)` for each global of this body's module the loader
+    /// renamed apart ([`crate::ast::Program::renamed_globals`]). A refusal
+    /// quotes [`Body::spelled`].
+    pub renamed: Vec<(String, String)>,
     /// `export extern fn`: the JS caller releases every String the call hands
     /// back, so returning a borrow has its own refusal
     /// and `.copy()` is the only way out. A lambda frame carries its holder's
@@ -967,6 +971,12 @@ pub enum Cand {
 }
 
 impl Body {
+    /// The name the reader wrote for the global `linked`.
+    pub fn spelled<'a>(&'a self, linked: &'a str) -> &'a str {
+        let hit = self.renamed.iter().find(|(l, _)| l == linked);
+        hit.map_or(linked, |(_, s)| s.as_str())
+    }
+
     /// The must-use row a linear value bound by a `let` or a parameter owes:
     /// the reader disposes of it exactly once on every path. A receiver owes
     /// none, since `fn release(self)` is the disposal.

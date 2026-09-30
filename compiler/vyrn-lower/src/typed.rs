@@ -390,9 +390,9 @@ pub fn stores(
             let (source, ty) = match at {
                 Place::Name(n) => {
                     let info = &f.names[n.index()];
-                    (&info.source, Some(info.ty.clone()))
+                    (info.source.as_str(), Some(info.ty.clone()))
                 }
-                Place::Global(g) => (g, (rules.global_ty)(g)),
+                Place::Global(g) => (f.spelled(g), (rules.global_ty)(g)),
                 _ => return,
             };
             let ruled = ty.as_ref().and_then(|t| (rules.ruled_within)(t, &path));
@@ -538,7 +538,7 @@ pub fn drops(
                 true => DROP_MODULE_STATE,
                 false => DROP_UNBOUND,
             };
-            out.push((*line, say(rule, &[("name", name)])));
+            out.push((*line, say(rule, &[("name", f.spelled(name))])));
         }
         let written = rows(&f.stmts).filter_map(|(s, _)| match s {
             St::Drop(n, _, line, _) if *line > 0 => Some((*n, *line)),

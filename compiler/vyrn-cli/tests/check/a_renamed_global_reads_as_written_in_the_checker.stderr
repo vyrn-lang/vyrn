@@ -1,0 +1,6 @@
+a_renamed_global_reads_as_written_in_the_checker.vyrn:4:0: initializer of `early` reads `later`, a module-state binding declared later — a global may only read earlier ones
+a_renamed_global_reads_as_written_in_the_checker.vyrn:6:0: cannot bind module state `unit` to a Unit value
+a_renamed_global_reads_as_written_in_the_checker.vyrn:7:0: `typed` declared String but initializer is Int64
+a_renamed_global_reads_as_written_in_the_checker.vyrn:8:0: module state `selfRead` may not read itself in its own initializer
+a_renamed_global_reads_as_written_in_the_checker.vyrn:10:0: cannot assign to `fixed` (declared without `mut`)
+a_renamed_global_reads_as_written_in_the_checker.vyrn:11:0: cannot `drop` module state `later` — it lives for the whole module and is reclaimed at process exit

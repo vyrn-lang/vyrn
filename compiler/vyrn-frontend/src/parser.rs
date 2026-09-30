@@ -2660,6 +2660,7 @@ impl Parser {
             init,
             doc: None,
             module: None,
+            renamed_from: None,
             line,
         })
     }

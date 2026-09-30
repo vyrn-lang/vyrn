@@ -1,0 +1,17 @@
+// A refusal quotes module state as the reader wrote it, though the loader
+// renamed `log` apart from the import's.
+import { addLog } from "./a_module_with_globals_a_root_also_names.vyrn"
+let mut log: Array<Int64> = [1, 2, 3]
+fn reset() { log = [7, 8, 9, 10] }
+fn keep() -> Array<Int64> { return log }
+fn take(a: consume Array<Int64>) { print(a.length) }
+fn swap(a: Array<Int64>) { log = [a.length] }
+fn store(a: Array<Int64>) { log = a }
+fn main() -> Int64 {
+    let t = log
+    reset()
+    print(t[0])
+    take(log)
+    swap(log)
+    return 0
+}

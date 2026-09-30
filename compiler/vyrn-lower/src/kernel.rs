@@ -1006,7 +1006,7 @@ impl<'b> Kernel<'b> {
     fn alias_text(&self, a: &Alias) -> String {
         let root = match &a.root {
             Root::N(m) => self.src(*m).to_string(),
-            Root::G(g) => g.clone(),
+            Root::G(g) => self.body.spelled(g).to_string(),
         };
         format!("{root}{}", a.path.replace(".[]", "[..]"))
     }
@@ -1015,7 +1015,7 @@ impl<'b> Kernel<'b> {
     fn place_text(&self, p: &Place) -> String {
         match p {
             Place::Name(n) => self.src(*n).to_string(),
-            Place::Global(g) => g.clone(),
+            Place::Global(g) => self.body.spelled(g).to_string(),
             Place::Field(b, f) => format!("{}.{f}", self.place_text(b)),
             Place::Elem(b, _) | Place::Key(b, _) => format!("{}[..]", self.place_text(b)),
         }
@@ -1123,7 +1123,8 @@ impl<'b> Kernel<'b> {
                     (Root::N(n), _) => n,
                     (Root::G(g), _) if gs.contains(&g) => {
                         let s = self.place_text(p);
-                        let args = [("place", g.as_str()), ("s", &s), ("what", &what)];
+                        let place = self.body.spelled(&g);
+                        let args = [("place", place), ("s", &s), ("what", &what)];
                         return Err(self.say(STATE_READ, self.here, &args));
                     }
                     (Root::G(_), _) => continue,
@@ -1178,6 +1179,7 @@ impl<'b> Kernel<'b> {
         }) = st.alias.get(&n)
         {
             if path.is_empty() {
+                let g = self.body.spelled(g);
                 let never = "nothing may take ownership of module state \
                              (it lives for the whole module and is never dropped)";
                 let msg = if by == "a `return`" {
@@ -2161,7 +2163,7 @@ impl<'b> Kernel<'b> {
                     Place::Field(_, f) => format!("the field `{f}`"),
                     // An element or key store names its container, as the
                     // checker does.
-                    Place::Global(g) => format!("module state `{g}`"),
+                    Place::Global(g) => format!("module state `{}`", self.body.spelled(g)),
                     p => match root_of(p) {
                         Some((n, _)) if !self.src(n).starts_with('@') => {
                             format!("`{}`", self.src(n))
